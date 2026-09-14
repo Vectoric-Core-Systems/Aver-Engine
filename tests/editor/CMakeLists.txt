@@ -498,6 +498,17 @@ target_include_directories(PtRenderConflictTest PRIVATE ${CMAKE_SOURCE_DIR}/sand
 target_link_libraries(PtRenderConflictTest PRIVATE Aver.Core)
 set_target_properties(PtRenderConflictTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# AverSrChoiceTest -- optimisation-wave-2's U2/3.3 A AverSR "choice" abstraction (sandbox/src/
+# AverSrChoice.hpp): the name<->enum round-trip, the one-time migration off the pre-Auto
+# display.aversr/display.renderScale pair, userLevelFor's -1 sentinel for Auto/Manual, and
+# renderScaleToPersist's Manual-only rule. Same PtRenderConflictTest precedent immediately above
+# (header-only and dependency-free): the migration rule takes plain bools/strings/floats in and
+# returns plain data out, so it is reachable without a window, a device, or an editor.ini on disk.
+add_executable(AverSrChoiceTest src/AverSrChoiceTest.cpp)
+target_include_directories(AverSrChoiceTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(AverSrChoiceTest PRIVATE Aver.Core)
+set_target_properties(AverSrChoiceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # SceneSubmissionTest -- the white-panel investigation's F1 decisions, all of
 # sandbox/src/SceneSubmission.hpp: planEntityDraws' part-split rule (the single copy of
 # SandboxApp.cpp's former 6360-6365 plus 8297-8299), resolveSurfaceLook's authored/dead-handle/

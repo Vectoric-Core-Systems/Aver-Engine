@@ -50,6 +50,8 @@ enum class DisableReason : u8 {
                                  // could filter (VoxiRenderer's NRD-instance create gate)
     RequiresMsaaOne,              // SOFT: NRD needs single-sample targets. Warns; does not grey.
     NotImplemented,               // the engine itself has not built this yet, on any device
+    RequiresRestirGi,             // U1: giRestirVisibility only applies once giMode itself resolves
+                                   // to ReSTIR -- Resolution::giRestirVisibility's own gate
     Count
 };
 
@@ -130,6 +132,8 @@ inline const char* disableReasonText(DisableReason r) {
             return "NRD needs single-sample render targets; it skips itself above 1x MSAA.";
         case DisableReason::NotImplemented:
             return "This engine does not implement it yet, on any device.";
+        case DisableReason::RequiresRestirGi:
+            return "Only applies when Indirect diffuse is ReSTIR.";
         default:
             return "Unavailable.";
     }
@@ -157,6 +161,9 @@ struct FieldResolution {
 struct Resolution {
     Quality globalIllumination, rayTracing, pathTracing;
     FieldResolution giMode, rtRenderMode, refractionMode, denoiser;
+    // U1: gated on giMode's OWN resolution, not on a fresh hardware/tier check -- see resolve()'s own
+    // comment on this field for why effective == requested always, unlike every FieldResolution above.
+    FieldResolution giRestirVisibility;
     DisableReason rtSubControls = DisableReason::None;
     DisableReason ptSubControls = DisableReason::None;
     bool denoiserGBufferWanted = false;
@@ -201,6 +208,21 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
                                   ? DisableReason::RequiresGlobalIllumination
                                   : DisableReason::None);
     r.giMode.effective = (s.giMode != 0 && r.giMode.reason == DisableReason::None) ? 1u : 0u;
+
+    // ---- giRestirVisibility (U1): only meaningful while ReSTIR GI itself runs ----
+    // Not a fresh hardware/tier check of its own: giMode just above already ran that exact check, and
+    // this field cannot be MORE available than the estimator it modifies. Its reason is giMode's own
+    // reason when giMode has one (the RT/GI prerequisite that also blocks giMode blocks this); otherwise
+    // RequiresRestirGi when the project simply has not turned ReSTIR on (s.giMode == 0), which is not a
+    // prerequisite failure but is still a reason this control should read as inert.
+    r.giRestirVisibility.requested = s.giRestirVisibility > 3u ? 3u : s.giRestirVisibility;
+    r.giRestirVisibility.reason = (r.giMode.reason != DisableReason::None)
+                                       ? r.giMode.reason
+                                       : (s.giMode == 0 ? DisableReason::RequiresRestirGi : DisableReason::None);
+    // effective == requested ALWAYS -- deliberately unlike giMode/rtRenderMode/denoiser above. Clamping to 0 on a
+    // failed prerequisite would read "No ray (over-bright)" while no ReSTIR runs at all; inertness is carried by
+    // `reason` alone. Do not "fix" this to match the file's general rule (the comment at :169).
+    r.giRestirVisibility.effective = r.giRestirVisibility.requested;
 
     // ---- rtRenderMode = 1 (ray-driven primary visibility): RT hardware, RT tier not Off ----
     r.rtRenderMode.requested = s.rtRenderMode;
@@ -299,9 +321,10 @@ inline u32 manifestContradictions(const Settings& effective, const DeviceInfo& d
 // reason refuse() has already told the log about, rather than saying the same device limitation twice
 // from two different call sites (Renderer::refusalLogged(f) is the skip check; see its own comment,
 // Voxi.hpp). Returns false for a reason nothing already logs (RequiresRayTracingEnabled,
-// RequiresGlobalIllumination, NothingToDenoise, RequiresNrd, RequiresMsaaOne, and the synthetic
-// ptSubControls reuse of RequiresPathTracingHardware never reaches here because callers only feed this
-// the four hardware reasons and NotImplemented) -- those get reported fresh by the caller instead.
+// RequiresGlobalIllumination, NothingToDenoise, RequiresNrd, RequiresMsaaOne, RequiresRestirGi, and the
+// synthetic ptSubControls reuse of RequiresPathTracingHardware never reaches here because callers only
+// feed this the four hardware reasons and NotImplemented) -- those get reported fresh by the caller
+// instead.
 inline bool refusalFeatureFor(DisableReason r, Feature& out) {
     switch (r) {
         case DisableReason::RequiresComputeShaders:      out = Feature::GlobalIllumination; return true;

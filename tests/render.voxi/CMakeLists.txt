@@ -80,6 +80,21 @@ target_include_directories(GiDispatchBoundsTest PRIVATE ${CMAKE_SOURCE_DIR}/modu
 target_compile_definitions(GiDispatchBoundsTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(GiDispatchBoundsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GiVisibilityTest -- U1's shared bit definitions and reconstruction arithmetic
+# (aver/voxi/GiVisibility.hpp): the giRestirVisibility mode/half-res-pair packing gAmbientParams.w
+# carries, the tracedPixel phase schedule, and the reconstruction weight giVisReconstruct sums per
+# tap. Same shape as GiDispatchBoundsTest just above: the header depends on nothing but
+# aver/core/Types.hpp by design, so this links Aver.Core alone and reaches the header with an include
+# path rather than a library dependency. AVER_REPO_ROOT, for the same reason GiDispatchBoundsTest
+# needs it: the source-assertion section reads modules/render.voxi/shaders/voxi_restir.hlsli itself
+# to check the AVER_GI_VIS_* literals, the gAverHistoryWrite gate count, and the decode-block text
+# this header's packAmbientW/tracedPixel mirror are still the exact text the wave-2 contract specifies.
+add_executable(GiVisibilityTest src/GiVisibilityTest.cpp)
+target_link_libraries(GiVisibilityTest PRIVATE Aver.Core)
+target_include_directories(GiVisibilityTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+target_compile_definitions(GiVisibilityTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(GiVisibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver that
 # decides what greys and why (RenderSettingsResolver.hpp), and the UE-style Overall Quality scalability
 # preset (Scalability.hpp).

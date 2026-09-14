@@ -117,6 +117,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.giMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.DENOISER")) {
             if (t.size() > 1) out.denoiser = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.RESTIRVISIBILITY")) {
+            if (t.size() > 1) out.restirVisibility = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.REFRACTIONMODE")) {
             if (t.size() > 1) out.refractionMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.REFRACTIONSTRENGTH")) {
@@ -133,6 +135,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.depthPrepass = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.FRAMEBUDGETMS")) {
             if (t.size() > 1) out.frameBudgetMs = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.AVERSR")) {
+            if (t.size() > 1) out.averSr = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.BACKEND")) {
             // Stored verbatim and lowercased; validated where it is USED, not here. A manifest naming
             // a backend this build has no support for is not a broken manifest -- the same file is
@@ -287,7 +291,8 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
         "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
-        "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
+        "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
+        "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
         // IN EMIT ORDER, and these two were missing. A key appended to `owned` above but absent
@@ -295,7 +300,7 @@ bool isOwnedKey(std::string_view line) {
         // grows a duplicate on every save -- and because the owned block splices in at the first
         // owned key while the author's line stays below it, last-write-wins parsing makes the STALE
         // line win. Changing the renderer appeared to work and reverted on reload.
-        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS",
+        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
         "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",
@@ -352,6 +357,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.GICONES", d.giCones);
     appendKey(owned, "RENDER.GIMODE", d.giMode);
     appendKey(owned, "RENDER.DENOISER", d.denoiser);
+    appendKey(owned, "RENDER.RESTIRVISIBILITY", d.restirVisibility);
     appendKey(owned, "RENDER.REFRACTIONMODE", d.refractionMode);
     appendKey(owned, "RENDER.REFRACTIONSTRENGTH", d.refractionStrength);
     appendKey(owned, "RENDER.REFRACTIONEDGEFADE", d.refractionEdgeFade);
@@ -361,6 +367,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.DEPTHPREPASS", d.depthPrepass);
     if (!d.backend.empty()) appendKey(owned, "RENDER.BACKEND", d.backend);
     appendKey(owned, "RENDER.FRAMEBUDGETMS", d.frameBudgetMs);
+    appendKey(owned, "RENDER.AVERSR", d.averSr);
     appendKey(owned, "RENDER.MSAA", d.msaa);
     appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
     appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);

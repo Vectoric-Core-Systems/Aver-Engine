@@ -151,6 +151,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "PhysicsSceneSync.hpp"
 #include "InputOwnership.hpp"
 #include "PtRenderConflict.hpp"
+#include "AverSrChoice.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
@@ -233,6 +234,22 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/sr/AverSrQuality.hpp"
 #include "aver/sr/AverSrSpatial.hpp"
 #include "aver/sr/AverSrFxaa.hpp"
+// optimisation-wave-2, U2/3.2: render.voxi's own ladder constants (QualityLadder.hpp's
+// kAverSrOff/kAverSrQuality/kAverSrBalanced/kAverSrPerformance, pulled in transitively through
+// ProjectRenderApply.hpp above) mirror aver::sr::Quality's numbering ON PURPOSE, so
+// Scalability.hpp's resolveAverSrLevel can hand a plain u32 back to a host that casts it straight to
+// aver::sr::Quality with no translation table of its own -- render.voxi still never includes aver/sr
+// itself (the module-boundary rule Scalability.hpp's own header comment states), so the ONE place
+// that can check the two enums actually agree is a host that includes both, like this one. Caught
+// here, at compile time, rather than as a level that silently renders at the wrong scale.
+static_assert(static_cast<aver::u32>(aver::sr::Quality::Off)         == aver::voxi::ladder::kAverSrOff,
+             "aver::sr::Quality::Off no longer matches aver::voxi::ladder::kAverSrOff");
+static_assert(static_cast<aver::u32>(aver::sr::Quality::Quality)     == aver::voxi::ladder::kAverSrQuality,
+             "aver::sr::Quality::Quality no longer matches aver::voxi::ladder::kAverSrQuality");
+static_assert(static_cast<aver::u32>(aver::sr::Quality::Balanced)    == aver::voxi::ladder::kAverSrBalanced,
+             "aver::sr::Quality::Balanced no longer matches aver::voxi::ladder::kAverSrBalanced");
+static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::voxi::ladder::kAverSrPerformance,
+             "aver::sr::Quality::Performance no longer matches aver::voxi::ladder::kAverSrPerformance");
 #endif
 
 // physics_abi.h was nested inside AVER_MODULE_FRAMEWORK, but every use site below is guarded on
@@ -3987,10 +4004,26 @@ public:
             voxiRenderer_.setGiForceRebuild(editor::consoleGiForceRebuildSlot());
             voxiRenderer_.setGiBoundedDispatch(editor::consoleGiBoundedDispatchSlot());
             voxiRenderer_.setGiFreeAccumulator(editor::consoleGiFreeAccumulatorSlot());
+            // optimisation-wave-2, U1/W6/M5: identical idiom, right beside the toggles it mirrors just
+            // above -- see consoleGiVisPathViewSlot()'s and consoleBlendedGiConeSlot()'s own comments
+            // (EditorConsole.hpp) for why these two are raw slots rather than ordinary dials. Both
+            // setters act only on an actual change, so reasserting them unconditionally every frame
+            // costs nothing when nobody has touched the console since the last frame.
+            voxiRenderer_.setGiVisPathView(editor::consoleGiVisPathViewSlot());
+            voxiRenderer_.setBlendedGiCone(editor::consoleBlendedGiConeSlot());
             // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
             // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
             // than only at attach time.
             voxiRenderer_.setConeTraceEnabled(!giConeTraceOff_);
+#if AVER_MODULE_SR
+            // optimisation-wave-2, U2 (3.3 A): resolves and applies AverSR's level fresh every frame
+            // from the SAME precedence chain the Project Settings upscaling line reads (CLI >
+            // --render-scale > the user's Display choice > the project manifest > the Overall rung's
+            // own ladder default). Auto is not a one-shot decision made at project-open time, because
+            // the rung it follows can change under it (a scalability button, a manifest reload) --
+            // outside beginFrame/endFrame, like every other Voxi reassert in this block.
+            updateAverSrAuto(e);
+#endif
             const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                                  sky_.sunDirection[2]}.getSafeNormal();
             if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
@@ -7938,13 +7971,32 @@ public:
     // Settings::giMode at draw time -- so, unlike --rd-ablate, it does not have to be handed over
     // before init() below; it only has to reach setSettings() before the frame that reads it.
     void setGiMode(int n) { giModeOverride_ = n; }                             // --gi-mode N
+    // --restir-visibility none|reconstructed|half|full: same "does not have to be handed over before
+    // init(), only before the frame that reads it" reasoning as setGiMode just above -- both estimator
+    // and visibility mode are read per pixel at draw time, not baked into a pipeline at load.
+    void setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
     void setDenoiser(int n) { denoiserOverride_ = n; }                          // --denoiser 0|1
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
     // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone --
     // the same "a flag exists so a human at the keyboard can override recorded state" rule the
     // render-settings override block spells out at length.
-    void setAverSrQuality(aver::sr::Quality q) { averSrQuality_ = q; averSrFromCli_ = true; }
+    // averSrCliLevel_ pins the level for updateAverSrAuto's resolveAverSrLevel call every frame, so a
+    // project opened (or reloaded) after startup can never re-derive AverSR's level out from under an
+    // explicit --aversr LEVEL the way it legitimately can for Auto -- "the command line wins" has to
+    // keep winning past the first frame, not just at the moment this setter runs.
+    void setAverSrQuality(aver::sr::Quality q) {
+        averSrQuality_ = q; averSrFromCli_ = true; averSrCliLevel_ = static_cast<int>(q);
+    }
+
+    // --aversr auto: EXPLICIT CLI Auto (plan section 3.3 A) -- distinct from never passing --aversr at
+    // all. Sets averSrFromCli_ so loadEditorPreferences still leaves the stored choice alone (the
+    // command line still wins), but leaves averSrQuality_/averSrCliLevel_ untouched (-1) so
+    // updateAverSrAuto's resolveAverSrLevel call has no pinned CLI level to short-circuit with -- the
+    // project manifest and the ladder's own per-rung default get to decide the level every frame,
+    // exactly as if no --aversr flag had been given, except that a stored user preference on disk is
+    // never consulted for the length of this run.
+    void setAverSrCliAuto() { averSrFromCli_ = true; averSrCliAuto_ = true; }
 
     // Constructs SpatialUpscaler against `dev`'s resource factory if it is not already built.
     // Idempotent -- cheap to call every time the quality combo changes, not just once. See
@@ -8046,6 +8098,136 @@ public:
         dev->setRenderScale(aver::sr::renderScaleFor(q));
         ensureAverSrUpscaler(dev);
         logAverSrActive(dev);
+    }
+
+    // Human text for the "(source)" half of every AverSR surface (the mandatory startup log, the
+    // Display combo's "Auto (<level> from <source>)" preview, and the Project Settings upscaling
+    // line) -- one place so the three descriptions can never drift apart. ForcedOff does not say WHY
+    // here (the --edge-aa upscaler-slot conflict and a tripped crash cookie both read as ForcedOff
+    // through this enum alone); a caller that needs to tell those apart checks
+    // edgeAaEnabled_/averSrCookieTripped_ itself before falling back to this text.
+    const char* averSrSourceText(voxi::AverSrSource source) const {
+        switch (source) {
+            case voxi::AverSrSource::Auto:      return "Auto";
+            case voxi::AverSrSource::Manifest:  return "project default";
+            case voxi::AverSrSource::User:      return "your Display preference";
+            case voxi::AverSrSource::Cli:       return "--aversr";
+            case voxi::AverSrSource::ForcedOff: return "forced Off";
+        }
+        return "?";
+    }
+
+    // The rung whose own ladder default autoAverSrLevel (Scalability.hpp) just resolved through --
+    // computed again here, deliberately, only for display text: autoAverSrLevel already did the real
+    // arithmetic, this only names which rung its answer came from, for the Project Settings upscaling
+    // line's "Auto from <rung>" / "(differs from the <rung> preset's default...)" text (3.3 A: "When
+    // overallFromSettings reads Custom, name the tier Auto used" -- the higher of the GI/RT tiers,
+    // autoAverSrLevel's own Custom branch, mirrored here rather than shared, since that function
+    // returns the LEVEL, not the rung's name).
+    const char* averSrAutoRungName(const voxi::Settings& s, const voxi::DeviceInfo& d) const {
+        const voxi::OverallQuality rung = voxi::overallFromSettings(s, d);
+        if (rung != voxi::OverallQuality::Custom)
+            return voxi::Renderer::qualityName(static_cast<voxi::Quality>(static_cast<u32>(rung)));
+        const u32 giTier = static_cast<u32>(s.globalIllumination);
+        const u32 rtTier = static_cast<u32>(s.rayTracing);
+        return voxi::Renderer::qualityName(static_cast<voxi::Quality>(giTier > rtTier ? giTier : rtTier));
+    }
+
+    // optimisation-wave-2, U2 (3.3 A): resolves AverSR's level fresh every frame from CLI > the user's
+    // own Display choice > the project manifest > the Overall rung's own ladder default
+    // (Scalability.hpp's resolveAverSrLevel), and applies it only on an actual change. Called from
+    // onUpdate, OUTSIDE beginFrame/endFrame -- see the call site's own comment: applyAverSrQuality ends
+    // in setRenderScale, and setRenderScale mid-frame (between beginFrame and endFrame) is exactly the
+    // device-loss class aver-render-scale-device-loss documents.
+    void updateAverSrAuto(Engine& e) {
+        if (!voxiAttached_) return;
+        rhi::IDevice* dev = e.device();
+        voxi::Renderer& vxr = voxi::Renderer::get();
+
+        // A PLAIN --render-scale, WITH NO --aversr, ALREADY OWNS THE SCALE OUTRIGHT: onInit applies it
+        // directly (the same "--render-scale wins" precedent loadEditorPreferences' own guard uses),
+        // and resolving/applying a level here would silently walk it back the instant Auto (or a
+        // Display/manifest pick) disagreed with it. --aversr ITSELF (LEVEL or auto) is NOT caught by
+        // this: averSrFromCli_ routes through cliLevel below instead -- onInit's own "--aversr sets
+        // renderScaleOverride_ too, as a side effect, when it is not already pinned" mutation means
+        // renderScaleOverride_ alone cannot tell the two apart, so averSrFromCli_ is the second half of
+        // the same test the load path's own guard already needs.
+        const bool explicitRenderScaleOnly = renderScaleOverride_ != 1.0f && !averSrFromCli_;
+
+        if (!explicitRenderScaleOnly && averSrChoice_ != editor::AverSrChoice::Manual) {
+            const int cliLevel  = (averSrFromCli_ && !averSrCliAuto_) ? averSrCliLevel_ : -1;
+            const int userLevel = editor::userLevelFor(averSrChoice_);
+            const u32 autoLevel = voxi::autoAverSrLevel(vxr.settings(), vxr.deviceInfo());
+            voxi::AverSrDecision decision =
+                voxi::resolveAverSrLevel(cliLevel, userLevel, averSrProjectDefault_, autoLevel);
+
+            // --edge-aa and AverSR share the one upscaler slot, and applyUpscalerSlot lets edge-AA win
+            // (:7976-7980 region) -- only overrides an AUTO resolution: an explicit CLI/user/manifest
+            // pin is still a deliberate ask this flag should not silently swallow.
+            if (edgeAaEnabled_ && decision.source == voxi::AverSrSource::Auto) {
+                decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
+                if (!edgeAaAverSrWarnLogged_) {
+                    AVER_WARN("[AverSR] --edge-aa occupies the upscaler slot; AverSR Auto is off for "
+                              "this session");
+                    edgeAaAverSrWarnLogged_ = true;
+                }
+            }
+            // A LEVEL THAT JUST TOOK THE DEVICE DOWN IS NEVER SILENTLY RE-ATTEMPTED -- the load path's
+            // own cookie check (loadEditorPreferences) already forced Off and latched this for a level
+            // that did not survive ITS OWN launch; kept forced for the rest of this session, the same
+            // way the load-time latch is never cleared except by a fresh process.
+            if (averSrCookieTripped_) decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
+
+            averSrSource_ = decision.source;
+            const aver::sr::Quality q = static_cast<aver::sr::Quality>(decision.level);
+            if (q != averSrQuality_) {
+                // ARMED BEFORE THE FIRST NON-OFF APPLICATION THIS SESSION (3.3 A): a level Auto
+                // resolves to mid-session can lose the device exactly the way a stored one can at load
+                // -- same cookie, extended to cover it. The existing 30-frame clear (onUpdate, beside
+                // the shader watcher poll) then applies unchanged.
+                if (q != aver::sr::Quality::Off && !averSrArmedNonOffOnce_) {
+                    editor::setPrefBool("display.renderScalePending", true);
+                    editor::flushEditorPrefs();
+                    renderScaleCookieArmed_ = true;
+                    averSrArmedNonOffOnce_ = true;
+                }
+                applyAverSrQuality(dev, q);
+            }
+        } else if (!explicitRenderScaleOnly) {
+            // Manual: the Render Scale slider already owns the render scale directly
+            // (prefsDevice_->setRenderScale) -- nothing here to resolve or apply. Resolving through
+            // userLevelFor's -1 sentinel and applying an unrelated named level would fight the user's
+            // own drag every single frame, so this branch only reports the choice, never touches the
+            // device.
+            averSrSource_ = voxi::AverSrSource::User;
+        }
+        // else: explicitRenderScaleOnly -- averSrSource_/averSrQuality_ left exactly as they are
+        // (Off, untouched by anything AverSR-side); the startup log below still fires and reports that
+        // honestly, since a plain --render-scale run is still a non-native capture worth the same warning.
+
+        // THE MANDATORY STARTUP LOG (C2-10), fired once per process, on every run including --frames --
+        // the only warning an ad-hoc --frames capture that forgot --aversr off gets that it is not
+        // measuring native resolution. Scene size is recomputed from the present size and the live
+        // scale (D3D12Device::computeSceneSize's own round-to-nearest formula) rather than read off a
+        // backend-private field: no rhi::IDevice accessor for it exists, and this line only needs to
+        // report it, not derive anything from it. PRESENT SIZE COMES FROM e.window(), NOT dev -- integrator
+        // fix: rhi::IDevice has no width()/height() of its own (only ISwapchain does); e.window() is the
+        // same accessor GameApp::onInit's own copy of this line already uses.
+        if (!averSrStartupLogged_ && dev) {
+            const f32 scale = dev->renderScale();
+            const u32 pw = e.window() ? e.window()->width()  : 0u;
+            const u32 ph = e.window() ? e.window()->height() : 0u;
+            const u32 sw = pw ? static_cast<u32>(std::lround(static_cast<f32>(pw) * scale)) : 0u;
+            const u32 sh = ph ? static_cast<u32>(std::lround(static_cast<f32>(ph) * scale)) : 0u;
+            if (averSrChoice_ == editor::AverSrChoice::Manual)
+                AVER_INFO("[AverSR] Manual ({:.2f}) ({}): scene {}x{} -> present {}x{}; pass --aversr "
+                          "off for native captures", scale, averSrSourceText(averSrSource_), sw, sh, pw, ph);
+            else
+                AVER_INFO("[AverSR] {} ({}): scene {}x{} -> present {}x{}; pass --aversr off for "
+                          "native captures", aver::sr::qualityName(averSrQuality_),
+                          averSrSourceText(averSrSource_), sw, sh, pw, ph);
+            averSrStartupLogged_ = true;
+        }
     }
 #endif
 
@@ -9733,6 +9915,16 @@ private:
         // default is -1, so an unconditional assignment silently switched the flag back off one
         // frame after it was set -- the controller was wired, reachable and never once ran.
         if (!frameBudgetForced_) frameBudgetMs_ = project_.frameBudgetMs;
+#if AVER_MODULE_SR
+        // optimisation-wave-2, 3.3 A: MIRRORS, NOT A DELTA, for the SAME reason projectBackend_ and
+        // frameBudgetMs_ are up here rather than below the hasRenderSettings() guard -- but unlike
+        // those two (and unlike occlusionCullEnabled_ down in the guarded block, whose -1 means
+        // "unstated, keep whatever was already live"), -1 here is ITSELF the project's real, explicit
+        // default ("follow the Overall preset"), not a sentinel for "nothing to apply". A project with
+        // no RENDER.AVERSR key must reset this back to -1, unconditionally, or a project opened right
+        // after one that pinned a level would silently inherit that teammate's pin.
+        averSrProjectDefault_ = project_.averSr;
+#endif
 
         if (!project_.hasRenderSettings()) return;
         if (!voxiAttached_) { projectRenderPending_ = true; return; }
@@ -9944,6 +10136,12 @@ private:
             // an A/B meant to compare voxel cones against RTXDI ReSTIR would compare ReSTIR to itself
             // and report the two estimators as identical.
             if (giModeOverride_ >= 0) take(giModeOverride_, k.giMode, "--gi-mode");
+            // --restir-visibility HAS a manifest key (RENDER.RESTIRVISIBILITY) and, without this line,
+            // no entry here -- the identical gap the paragraph above just closed for --gi-mode, on
+            // optimisation-wave-2's own U1 flag. Beside --gi-mode rather than in its own block: both
+            // read the RESTIR estimator's own behaviour and a by-hand A/B against a manifest that
+            // already pins one needs the flag to win the same way --gi-mode's does.
+            if (restirVisibilityOverride_ >= 0) take(restirVisibilityOverride_, k.giRestirVisibility, "--restir-visibility");
             // take() on a bool field needs an lvalue of the field's own type, so the flag is staged
             // through a u32 and assigned back -- RENDER.DENOISER must not outrank a human who just
             // typed --denoiser, which is the whole point of this pass.
@@ -10096,6 +10294,13 @@ private:
         project_.lodThresholdPx     = lodErrorThresholdPx_;
         project_.occlusionCull      = occlusionCullEnabled_ ? 1 : 0;
         project_.depthPrepass       = depthPrepassOverride_ ? 1 : 0;
+#if AVER_MODULE_SR
+        // optimisation-wave-2, 3.3 A: NOT a voxi::Settings field (module boundary, Scalability.hpp's
+        // own header comment) so it rides along beside occlusionCull/depthPrepass here rather than
+        // through captureVoxiSettings' shared capture rule just above -- same "editor-side flag, same
+        // manifest key, same -1 means unstated rule" shape those two already are.
+        project_.averSr = averSrProjectDefault_;
+#endif
         // The GI volume's placement, which had no key at all -- so a level whose geometry is not at
         // the origin could never record where its indirect light should be gathered.
         project_.hasGiVolume = true;
@@ -22024,46 +22229,96 @@ private:
         // THE UNDERLYING BUG IS FIXED (setRenderScale now parks and rebuilds at the next beginFrame),
         // but this stays: it costs one bool, and it's the only rescue for an editor.ini written by a
         // build that HAD the bug.
-        if (prefsDevice_ && renderScaleOverride_ == 1.0f) {   // --render-scale on the command line wins
-            const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
-            if (stored == 1.0f) {
-                prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
-            } else if (prefBool("display.renderScalePending", false)) {
-                AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
-                              "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
-                              "was not the cause; the scale itself is the thing that needs fixing.",
-                              stored);
-                setPrefFloat("display.renderScale", 1.0f);
+        // optimisation-wave-2, 3.3 A: THE CHOICE (AverSrChoice.hpp), migrated once off the pre-Auto
+        // display.aversr/display.renderScale pair below if display.aversrChoice has never been
+        // written -- see AverSrChoice.hpp's own top comment for why the migration itself is a pure
+        // function tested in isolation (AverSrChoiceTest.cpp) rather than inlined here.
+        //
+        // --render-scale ON THE COMMAND LINE WINS OUTRIGHT (this whole block is skipped, the same
+        // guard the pre-Auto render-scale restore used); --aversr LEVEL or --aversr auto wins too
+        // (averSrFromCli_) -- loadEditorPreferences leaves BOTH the render scale and the AverSR choice
+        // alone in either case, matching "the command line wins" everywhere else in this file.
+        if (prefsDevice_ && renderScaleOverride_ == 1.0f && !averSrFromCli_) {
+            const std::string storedChoice = prefString("display.aversrChoice", "");
+            averSrChoice_ = editor::migrateAverSrChoice(!storedChoice.empty(), storedChoice,
+                                                        prefFloat("display.aversr", 0.0f),
+                                                        prefFloat("display.renderScale", 1.0f));
+            // ONE-TIME NOTE (3.3 A): only when THIS load is the migration itself, and it landed on
+            // Auto -- a session that already has a display.aversrChoice key on disk (Auto included)
+            // was an explicit choice, not a silent default, and needs no note.
+            averSrMigrationNoteArmed_ =
+                storedChoice.empty() && averSrChoice_ == editor::AverSrChoice::Auto;
+
+            const bool pending = prefBool("display.renderScalePending", false);
+            if (averSrChoice_ == editor::AverSrChoice::Manual) {
+                // A STORED RENDER SCALE IS APPLIED BEHIND A CRASH COOKIE: applying one below 1 can
+                // lose the GPU device, and a persisted setting that kills the device at startup is a
+                // trap with NO WAY OUT FROM INSIDE THE EDITOR -- one evening was lost to exactly that
+                // after the AverSR combo persisted a 0.67 that then bricked every launch.
+                // WHY A COOKIE AND NOT A HANDLER: Engine::frameStep returns as soon as deviceLost() is
+                // true, BEFORE onUpdate(), so there is no "undo it" hook to hang this on -- only what
+                // was already written to disk survives. The flag goes down BEFORE the risky call and
+                // clears thirty frames later once presenting has demonstrably worked.
+                // The scale resets to 1 rather than merely skipped, so the user sees and can change it.
+                // THE UNDERLYING BUG IS FIXED (setRenderScale now parks and rebuilds at the next
+                // beginFrame), but this stays: it costs one bool, and it's the only rescue for an
+                // editor.ini written by a build that HAD the bug. UNCHANGED from before Auto existed
+                // (3.3 A's own "Manual: the existing crash-cookie dance... unchanged" rule) -- this is
+                // the ONLY choice that still restores a raw display.renderScale directly; every named
+                // level below re-derives its own canonical scale through applyAverSrQuality instead.
+                const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
+                if (stored == 1.0f) {
+                    prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
+                } else if (pending) {
+                    AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
+                                  "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
+                                  "was not the cause; the scale itself is the thing that needs fixing.",
+                                  stored);
+                    setPrefFloat("display.renderScale", 1.0f);
+                    setPrefBool("display.renderScalePending", false);
+                    flushEditorPrefs();
+                } else {
+                    setPrefBool("display.renderScalePending", true);
+                    flushEditorPrefs();   // ON DISK BEFORE THE DEVICE IS RISKED -- the whole point
+                    renderScaleCookieArmed_ = true;
+                    prefsDevice_->setRenderScale(stored);
+                }
+            } else if (pending) {
+                // A NAMED LEVEL (or a level Auto resolved to in a PRIOR session) DID NOT SURVIVE ITS
+                // OWN LAUNCH -- the same crash this cookie already protects Manual's raw scale from,
+                // for a level applied through applyAverSrQuality instead of a raw setRenderScale.
+                // Force Off for THIS launch (never re-attempt the level that just crashed) rather than
+                // merely resetting a number, since there is no single "the scale" to reset back to 1
+                // the way Manual's own branch does -- and latch it so the Project Settings/Display
+                // surfaces can say why AverSR reads Off when the stored choice says otherwise.
+                averSrCookieTripped_ = true;
+                AVER_CRITICAL("[AverSR] the last launch did not survive applying {} -- forcing Off "
+                              "for this launch. Choose a level again if that was not the cause.",
+                              editor::averSrChoiceName(averSrChoice_));
                 setPrefBool("display.renderScalePending", false);
                 flushEditorPrefs();
+                applyAverSrQuality(prefsDevice_, aver::sr::Quality::Off);
+            } else if (averSrChoice_ == editor::AverSrChoice::Auto) {
+                // NOTHING HERE: updateAverSrAuto (onUpdate) applies Auto once a project's settings
+                // exist to derive a level from -- this load runs before any project is open, so there
+                // is nothing yet for autoAverSrLevel to read.
             } else {
-                setPrefBool("display.renderScalePending", true);
-                flushEditorPrefs();   // ON DISK BEFORE THE DEVICE IS RISKED -- the whole point
-                renderScaleCookieArmed_ = true;
-                prefsDevice_->setRenderScale(stored);
+                // Off/Quality/Balanced/Performance: applyAverSrQuality re-derives the level's OWN
+                // canonical scale (aver::sr::renderScaleFor) rather than trusting a stored
+                // display.renderScale that may have drifted from it -- restoring the quality is what
+                // should own the scale, the same reasoning the pre-Auto code gave for ordering this
+                // block after the render-scale one.
+                const aver::sr::Quality q =
+                    static_cast<aver::sr::Quality>(editor::userLevelFor(averSrChoice_));
+                if (q != aver::sr::Quality::Off) {
+                    // ARMED BEFORE THE FIRST NON-OFF APPLICATION (3.3 A): a named level can lose the
+                    // device exactly the way a raw Manual scale can -- same cookie, same reason.
+                    setPrefBool("display.renderScalePending", true);
+                    flushEditorPrefs();
+                    renderScaleCookieArmed_ = true;
+                }
+                if (q != averSrQuality_) applyAverSrQuality(prefsDevice_, q);
             }
-        }
-
-        // THE UPSCALER'S QUALITY, restored last so it owns the render scale.
-        //
-        // AFTER the render-scale block above on purpose. applyAverSrQuality calls setRenderScale
-        // itself, and the block above is the crash-cookie dance that exists because a stored scale
-        // once bricked the editor. Restoring the quality here means the scale that ends up on the
-        // device is the one the quality implies, rather than a stored number that has drifted from
-        // it -- and a second setRenderScale with the value already set early-outs, so this costs
-        // nothing when the two agree.
-        //
-        // The command line still wins, matching every other override in this file: --aversr sets
-        // averSrQuality_ in onInit, and --render-scale pins the scale, so neither is overwritten by
-        // a stored preference here.
-        if (prefsDevice_ && renderScaleOverride_ == 1.0f && !averSrFromCli_) {
-            const int stored = static_cast<int>(prefFloat("display.aversr",
-                                                          static_cast<f32>(static_cast<int>(averSrQuality_))));
-            // Clamped rather than trusted: editor.ini is a text file a person can edit, and an
-            // out-of-range enum would index the name table off its end.
-            const int q = stored < 0 ? 0 : (stored > 3 ? 3 : stored);
-            if (static_cast<aver::sr::Quality>(q) != averSrQuality_)
-                applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(q));
         }
 
         keybinds_.loadFromPrefs();
@@ -22154,23 +22409,37 @@ private:
         if (maxFrames_ == 0) {
             if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
                 setPrefBool("display.vsync", prefsDevice_->vsync());
-            if (prefsDevice_)
-                setPrefFloat("display.renderScale", prefsDevice_->renderScale());
-            // THE UPSCALER'S QUALITY, WHICH WAS NEVER PERSISTED AT ALL. The Display page's AverSR
-            // combo writes averSrQuality_ and applies it to the device; nothing ever wrote it to a
-            // pref and nothing ever read one back, so it reset to Off on every launch.
-            //
-            // AND IT DESYNCED THE PAIR, which is the part that reads as "upscaling doesn't save
-            // properly" rather than "it forgets": applyAverSrQuality also calls setRenderScale, and
-            // display.renderScale above IS saved. So the reduced render scale came back next launch
-            // while the quality combo showed Off -- and because ensureAverSrUpscaler only ever runs
-            // when averSrQuality_ != Off, the upscaler was never rebuilt. The scene rendered at
-            // reduced resolution with nothing upscaling it, which looks like a soft image nobody
-            // asked for.
-            // setPrefFloat rather than an int helper because there is no int helper -- the prefs
-            // layer is float/bool/string, and every other numeric setting here goes through the
-            // float pair. The enum is four values; a float carries them exactly.
-            setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
+            // optimisation-wave-2, 3.3 A: THE THREE AverSR KEYS BELOW ARE SKIPPED OUTRIGHT, not
+            // merely written a neutral value, when the command line drove this session's render scale
+            // or AverSR level. TODAY'S OWN GUARD ENDS AT maxFrames_ == 0, so an interactive `--aversr
+            // quality` run (maxFrames_ IS 0 for an interactive session -- this is not a --frames
+            // capture) used to write itself into editor.ini with no CLI check at all, and the NEXT
+            // ordinary launch inherited a choice nobody made from the Display page. Skipping the write
+            // means a session driven by --render-scale/--aversr never touches any of the three keys,
+            // so whatever a PRIOR interactive session actually chose there survives untouched.
+            if (!averSrFromCli_ && renderScaleOverride_ == 1.0f) {
+                setPrefString("display.aversrChoice", editor::averSrChoiceName(averSrChoice_));
+                if (prefsDevice_)
+                    // THROUGH renderScaleToPersist, not the live device scale directly -- persisting
+                    // the live scale for anything but Manual is the exact bug this wave's own
+                    // 10.1/3.3-A corrections describe: Auto would persist whatever fraction the rung
+                    // it happened to land on THIS session resolved to, and the crash-cookie
+                    // render-scale block at load would apply that stale fraction before Auto ever got
+                    // a chance to re-derive it.
+                    setPrefFloat("display.renderScale",
+                                editor::renderScaleToPersist(averSrChoice_, prefsDevice_->renderScale()));
+                // THE UPSCALER'S QUALITY MIRROR -- WHICH, BEFORE display.aversrChoice EXISTED, WAS
+                // NEVER PERSISTED AT ALL (the Display page's AverSR combo wrote averSrQuality_ and
+                // applied it to the device; nothing wrote it to a pref and nothing read one back, so
+                // it reset to Off on every launch, and desynced from display.renderScale above once it
+                // was). display.aversrChoice is now the source of truth this mirror only backs up --
+                // kept for at-a-glance reading of a raw editor.ini, and so a build that predates
+                // display.aversrChoice reading the same file back still sees a level, not Off.
+                // setPrefFloat rather than an int helper because there is no int helper -- the prefs
+                // layer is float/bool/string, and every other numeric setting here goes through the
+                // float pair. The enum is four values; a float carries them exactly.
+                setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
+            }
         }
 
         keybinds_.saveToPrefs();
@@ -22237,29 +22506,84 @@ private:
             ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
 
 #if AVER_MODULE_SR
-            // AverSR quality (docs/AVERSR.md "Quality levels"): a named shortcut into the SAME
-            // render-scale knob the slider just below edits directly -- selecting a level here equals
-            // dragging the slider to its table value. This combo shows the last level CHOSEN, not a
-            // live read of the current scale, so dragging the slider afterwards leaves it stale.
-            static const char* kAverSrNames[] = {"Off", "Quality", "Balanced", "Performance"};
-            int aversrIdx = static_cast<int>(averSrQuality_);
-            if (ImGui::Combo("AverSR", &aversrIdx, kAverSrNames, 4) && prefsDevice_)
-                applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(aversrIdx));
+            // optimisation-wave-2, U2/3.3 A: AverSR now has a per-rung default (every Overall rung
+            // has a level, QualityLadder.hpp's ladder::averSrLevel), so this combo's job changed from
+            // "pick a level" to "pick a SOURCE for the level": Auto follows the SAME CLI > Display
+            // choice > project manifest > ladder chain updateAverSrAuto resolves every frame (and can
+            // move under it -- a scalability button moving the Overall rung, say), the four named
+            // items pin one level outright the way this combo always could, and "Manual scale" is
+            // what dragging the Render Scale slider below sets on its own.
+            //
+            // The Auto item's OWN label is computed fresh every time this window draws (cheap; this
+            // window is not open every frame), not read off averSrQuality_/averSrSource_ directly --
+            // those two reflect whatever averSrChoice_ CURRENTLY is, which might not be Auto, and the
+            // item still has to preview what picking Auto would resolve to right now.
+            std::string autoLabel = "Auto";
+#if AVER_MODULE_VOXI
+            if (voxiAttached_) {
+                voxi::Renderer& vxr = voxi::Renderer::get();
+                const int cliLevel = (averSrFromCli_ && !averSrCliAuto_) ? averSrCliLevel_ : -1;
+                const voxi::AverSrDecision preview = voxi::resolveAverSrLevel(
+                    cliLevel, -1, averSrProjectDefault_,
+                    voxi::autoAverSrLevel(vxr.settings(), vxr.deviceInfo()));
+                autoLabel = std::string("Auto (") +
+                           aver::sr::qualityName(static_cast<aver::sr::Quality>(preview.level)) +
+                           " from " + averSrSourceText(preview.source) + ")";
+            }
+#endif
+            static const char* kAverSrItems[] = {"", "Off", "Quality", "Balanced", "Performance", "Manual scale"};
+            const int curIdx = static_cast<int>(averSrChoice_);
+            const char* curLabel = curIdx == 0 ? autoLabel.c_str() : kAverSrItems[curIdx];
+            if (ImGui::BeginCombo("AverSR", curLabel)) {
+                for (int i = 0; i < 6; ++i) {
+                    const bool sel = curIdx == i;
+                    const char* itemLabel = i == 0 ? autoLabel.c_str() : kAverSrItems[i];
+                    if (ImGui::Selectable(itemLabel, sel)) {
+                        averSrMigrationNoteArmed_ = false;   // 3.3 A: cleared the moment ANY item is picked
+                        averSrChoice_ = static_cast<editor::AverSrChoice>(i);
+                        // Auto and Manual apply NOTHING here: Auto is picked up by updateAverSrAuto
+                        // next frame (it needs vx.settings()/deviceInfo(), not available mid-UI-draw
+                        // the same way applyAverSrQuality below is), and Manual keeps whatever scale
+                        // the slider below is already at, or is about to be dragged to.
+                        const int lvl = editor::userLevelFor(averSrChoice_);
+                        if (lvl >= 0 && prefsDevice_)
+                            applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(lvl));
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Aver Super Resolution: renders the scene smaller and resamples it\n"
                                   "back up with a bicubic Catmull-Rom filter. Off is bit-identical to\n"
                                   "no AverSR at all. See docs/AVERSR.md.\n"
                                   "\n"
-                                  "MEASURED on this build, PTTest at 2750x1639: the ray-driven primary\n"
-                                  "pass -- the largest single cost in the frame -- goes 5.0ms at Off\n"
-                                  "to 2.3 / 1.7 / 1.3ms at Quality / Balanced / Performance.");
+                                  "Auto follows the Overall preset's own AverSR default and moves with\n"
+                                  "it; the named levels and Manual scale pin one choice regardless of\n"
+                                  "the preset.\n"
+                                  "\n"
+                                  "The 5.0ms-at-Off / 2.3-1.7-1.3ms figure this tooltip used to quote\n"
+                                  "was recorded pre-ReSTIR/pre-NRD; aver-aversr-measured.md records\n"
+                                  "this figure as unverified.");
+            if (averSrMigrationNoteArmed_)
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                    "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
+                    aver::sr::qualityName(averSrQuality_));
 #endif
             // Render scale: the 3D scene's own resolution as a fraction of the window's. 1.0 (right
             // edge) is the pre-existing behaviour -- the scene renders 1:1 -- and everything below
             // trades scene sharpness for pixel-bound pass cost. The editor UI itself never moves.
             float rs = prefsDevice_ ? prefsDevice_->renderScale() : 1.0f;
-            if (ImGui::SliderFloat("Render Scale", &rs, 0.25f, 1.0f, "%.2f") && prefsDevice_)
+            if (ImGui::SliderFloat("Render Scale", &rs, 0.25f, 1.0f, "%.2f") && prefsDevice_) {
                 prefsDevice_->setRenderScale(rs);
+#if AVER_MODULE_SR
+                // 3.3 A: dragging this slider is what "Manual scale" means -- a number no named level
+                // produced. Cleared the migration note too: the slider is as much a deliberate choice
+                // as picking a combo item is.
+                averSrMigrationNoteArmed_ = false;
+                averSrChoice_ = editor::AverSrChoice::Manual;
+#endif
+            }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Renders the 3D scene at a fraction of the window's resolution, then\n"
                                   "upscales it back for display. The editor UI stays crisp either way.");
@@ -23041,6 +23365,58 @@ private:
                                        Renderer::qualityName(s.pathTracing));
             }
 
+#if AVER_MODULE_SR
+            // ---- AverSR's OWN default (U2, 3.3 A) -- NOT one of the three groups above -------------
+            // AverSR sits outside Overall/Custom detection on purpose (module boundary,
+            // Scalability.hpp's own header comment): an Overall preset moves GI/RT/PT together and
+            // never touches this. This is the one place a pinned AverSR level that has drifted from
+            // the rung's own default is visible at all.
+            {
+                const char* rungName = averSrAutoRungName(s, vx.deviceInfo());
+                std::string sourceText = averSrSource_ == voxi::AverSrSource::Auto
+                    ? (std::string("Auto from ") + rungName)
+                    : (averSrSource_ == voxi::AverSrSource::ForcedOff
+                           ? (edgeAaEnabled_ ? "--edge-aa" : "forced Off after a failed launch")
+                           : averSrSourceText(averSrSource_));
+                ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(averSrQuality_),
+                            sourceText.c_str());
+                // "(differs from the <rung> preset's default, <level>)" -- only meaningful once the
+                // resolved level did NOT come from Auto (2.3/10.2's Custom-detection gap: Custom can
+                // hide a pinned-off AverSR, and this is the line that shows it).
+                if (averSrSource_ != voxi::AverSrSource::Auto) {
+                    const u32 rungLevel = voxi::autoAverSrLevel(s, vx.deviceInfo());
+                    if (rungLevel != static_cast<u32>(averSrQuality_))
+                        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                            "(differs from the %s preset's default, %s)", rungName,
+                            aver::sr::qualityName(static_cast<aver::sr::Quality>(rungLevel)));
+                }
+                // ONE-TIME NOTE (3.3 A): the same "until the user picks any item" flag the Display
+                // combo shows and clears -- shown here too so a person who never opens the Display
+                // page still sees why AverSR turned on.
+                if (averSrMigrationNoteArmed_)
+                    ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                        "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
+                        aver::sr::qualityName(averSrQuality_));
+                // project_.averSr's own live edit state -- captured beside project_.occlusionCull in
+                // captureRenderSettingsFromUi (3.3 A). -1 ("Follow Overall preset") is itself the
+                // explicit default, not "unstated": index 0 in this combo, not a blank/no-selection.
+                static const char* kProjDefaultItems[] = {"Follow Overall preset", "Off", "Quality",
+                                                           "Balanced", "Performance"};
+                int projIdx = averSrProjectDefault_ < 0 ? 0 : averSrProjectDefault_ + 1;
+                if (ImGui::Combo("Upscaling default (AverSR)", &projIdx, kProjDefaultItems, 5)) {
+                    averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
+                    averSrMigrationNoteArmed_ = false;
+                    projectDirty_ = true;
+                }
+                uiReg_.track("project.averSr");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("The project's OWN AverSR default, round-tripped as "
+                                      "RENDER.AVERSR -- outranked by --aversr and by your own Display "
+                                      "preference, and itself outranks the Overall rung's ladder "
+                                      "default. \"Follow Overall preset\" (-1) pins nothing.");
+            }
+#endif
+
             // The three groups an Overall preset moves together, each as its own Off..Epic row: this
             // is where a project that reads Custom above actually lives, and "(modified)" flags a
             // group that is nominally AT the right tier but has a hand-edited knob (groupFollowsLadder,
@@ -23065,6 +23441,7 @@ private:
                             set.voxelResolution    = ladder::voxelResolution(t);
                             set.giCones            = ladder::giCones(t);
                             set.giUpdateInterval   = ladder::giUpdateInterval(t);
+                            set.giRestirVisibility = ladder::giRestirVisibility(t);
                             break;
                         case ScalabilityGroup::RayTracing:
                             set.rayTracing         = t;
@@ -23323,6 +23700,66 @@ private:
                 ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
                                    "   ReSTIR is selected and resumes when %s",
                                    disableReasonText(er.giMode.reason));
+
+            // optimisation-wave-2's U1: how much of F2 (candidate-hit sky) and F3 (reuse visibility)
+            // -- the contrast fix's two per-pixel rays, cb4b48df -- this ReSTIR estimator pays for.
+            // SHOWS er.giRestirVisibility.REQUESTED, deliberately, unlike the giMode combo just above:
+            // RenderSettingsResolver.hpp's own comment on this field explains why effective always
+            // equals requested for it (clamping to 0 on a failed prerequisite would read "No ray
+            // (over-bright)" while no ReSTIR runs at all) -- inertness is shown by greying the control
+            // and naming the reason below, never by the combo silently jumping to a different choice.
+            const bool visGreyed = greysControl(er.giRestirVisibility.reason);
+            ImGui::BeginDisabled(visGreyed);
+            int vis = static_cast<int>(er.giRestirVisibility.requested);
+            if (ImGui::Combo("ReSTIR visibility rays", &vis,
+                "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0")) {
+                s.giRestirVisibility = static_cast<u32>(vis); changed = true;
+            }
+            ImGui::EndDisabled();
+            uiReg_.track("project.gi.restirVisibility");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Extra rays per shaded fragment beyond the candidate/sun/sky/\n"
+                                  "reflection rays this estimator already traces (cost UNMEASURED):\n"
+                                  "  Full           up to 2 (F2 is the expensive one)\n"
+                                  "  Half           up to 0.5 at rest, plus Full on pixels with no\n"
+                                  "                 valid reconstruction this frame\n"
+                                  "  Reconstructed  0 rays -- one voxel-cone march instead\n"
+                                  "  No ray         0 -- the pre-fix behaviour\n\n"
+                                  "Known error of each approximation:\n"
+                                  "  Full           none -- this is the traced ground truth\n"
+                                  "  Half           lags about 5 frames and blurs over a 2x2\n"
+                                  "                 block where it reconstructs instead of tracing\n"
+                                  "  Reconstructed  leaks light through thin/near occluders and past\n"
+                                  "                 the voxel volume's own edge\n"
+                                  "  No ray         restores cb4b48df's over-brightness outright\n\n"
+                                  "Round-trips as RENDER.RESTIRVISIBILITY.");
+            if (visGreyed) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]",
+                                   disableReasonText(er.giRestirVisibility.reason));
+            } else if (vis == 0) {
+                // AMBER, NOT RED: this is a legal, live choice (unlike the giMode reason line above,
+                // which names a prerequisite the user cannot fix from this combo) -- it is simply the
+                // one choice that reopens a fix this project already shipped. No magnitude is quoted:
+                // R2/R3's pixel size is UNMEASURED (2.10 G).
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                    "No ray restores the pre-fix candidate-hit sky and reuse visibility (legacy bits "
+                    "4 and 8): shadowed and enclosed areas read over-bright again -- the washed-out "
+                    "look cb4b48df fixed.");
+            } else {
+                // The legacy console switches force NoRay for their OWN ray regardless of this combo
+                // (2.8's one precedence rule) -- named here so a switch left on from a by-hand A/B
+                // does not read as this combo silently doing nothing.
+                const u32 legacy = editor::consoleLightingLegacySlot();
+                if (legacy & 12u) {
+                    std::string which = (legacy & 4u) ? "voxi.legacyRestirHitSky" : "";
+                    if (legacy & 8u) which += which.empty() ? "voxi.legacyRestirReuseVisibility"
+                                                            : " / voxi.legacyRestirReuseVisibility";
+                    ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                        "Console switch %s is ON and forces No ray for that ray; this setting is "
+                        "ignored for it until the switch is off.", which.c_str());
+                }
+            }
 
             // THE DENOISER SITS HERE, UNDER THE ESTIMATOR IT FILTERS, because it is only reachable from
             // this page's own choices: it denoises the ReSTIR radiance above and the sky occlusion the
@@ -24894,6 +25331,10 @@ private:
     // cones"), not "flag not given", so the giUpdateIntervalOverride_ convention would silently make
     // `--gi-mode 0` indistinguishable from never passing the flag at all.
     int  giModeOverride_=-1;
+    // --restir-visibility none|reconstructed|half|full: optimisation-wave-2's U1 (Settings::
+    // giRestirVisibility). Same -1-is-absent sentinel and reasoning as giModeOverride_ just above --
+    // 0 (NoRay) is a real, meaningful value, not "flag not given".
+    int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
@@ -24903,7 +25344,57 @@ private:
     aver::sr::Quality averSrQuality_ = aver::sr::Quality::Off;
     // True when --aversr set the value above, so a stored preference does not overwrite the command
     // line. Persisted state loses to a flag everywhere else in this file; this makes it true here.
+    // ALSO true for --aversr auto (setAverSrCliAuto): "CLI wins" still means loadEditorPreferences
+    // must not apply a stored preference over it, even though auto has no single level of its own to
+    // pin -- averSrCliLevel_ stays -1 in that case and updateAverSrAuto lets the manifest/ladder chain
+    // decide the level every frame, per --aversr auto's own "auto means explicit CLI Auto: user
+    // preferences are ignored; manifest and ladder apply" contract (plan section 3.3 A).
     bool averSrFromCli_ = false;
+    bool averSrCliAuto_ = false;      // --aversr auto: see averSrFromCli_'s own comment just above
+    int  averSrCliLevel_ = -1;        // --aversr LEVEL (not auto): the pinned level, for
+                                       // updateAverSrAuto's resolveAverSrLevel call every frame
+    // optimisation-wave-2, U2/3.3 A: the user's own Display preference, superset of averSrQuality_
+    // (Auto and Manual besides the four named levels -- see AverSrChoice.hpp's own top comment for
+    // why aver::sr::Quality alone cannot carry either). Loaded once from display.aversrChoice (via
+    // migrateAverSrChoice the first time that key is absent), written by the Display combo, and read
+    // every frame by updateAverSrAuto as the "user" rung of the CLI > user > manifest > auto chain.
+    editor::AverSrChoice averSrChoice_ = editor::AverSrChoice::Auto;
+    // Set once, the session a stored display.renderScalePending cookie is found still armed at load
+    // (3.3 A's own "a named level did not survive its own launch" case, the non-Manual sibling of the
+    // pre-existing renderScaleCookieArmed_/display.renderScalePending dance) -- forces Off for the
+    // REST OF THIS SESSION regardless of what averSrChoice_/the manifest/the ladder would otherwise
+    // resolve to, so a level that just took the device down is never silently re-attempted a frame
+    // later. Cleared by nothing; a fresh launch is what re-arms the chance to try again.
+    bool averSrCookieTripped_ = false;
+    // Set true only when migrateAverSrChoice ran on a genuinely ABSENT display.aversrChoice key AND
+    // landed on Auto -- i.e. THIS is the first session after migrating into U2's new default. Cleared
+    // the moment the user picks any item on the Display AverSR combo or the Project Settings
+    // "Upscaling default" combo, per 3.3 A's "until the user picks any item" rule. Read by both of
+    // those surfaces to show the one-time amber note; never written back to disk itself (the
+    // migration is inferred fresh from the pref keys every load, not remembered as its own flag).
+    bool averSrMigrationNoteArmed_ = false;
+    // Set the first time updateAverSrAuto is about to apply a non-Off level THIS SESSION -- arms
+    // display.renderScalePending (and renderScaleCookieArmed_, the pre-existing 30-frame clear) before
+    // that application, the same crash-cookie protection the Manual/named-level LOAD path already
+    // gives a stored render scale, extended to cover a level Auto resolves to on its own mid-session.
+    bool averSrArmedNonOffOnce_ = false;
+    // Fires the "[AverSR] ... scene WxH -> present WxH" line exactly once per process (3.3 A's
+    // mandatory startup log, required on every run including --frames) -- see updateAverSrAuto.
+    bool averSrStartupLogged_ = false;
+    // Why the CURRENTLY APPLIED level is what it is -- Auto/Manifest/User/Cli/ForcedOff
+    // (Scalability.hpp's AverSrSource), read back by the Project Settings upscaling line and the
+    // Display combo's "Auto (<level> from <source>)" label. Written only by updateAverSrAuto, which
+    // runs every frame, so this is never stale by more than one frame.
+    voxi::AverSrSource averSrSource_ = voxi::AverSrSource::Auto;
+    // The project's own AverSR default combo's live edit state (Project Settings > Rendering, page 1)
+    // -- mirrors project_.averSr the same way occlusionCullEnabled_ mirrors project_.occlusionCull,
+    // EXCEPT unconditionally on every project open rather than only when the manifest states a value:
+    // -1 (follow the Overall preset) is itself a meaningful, explicit combo choice here, not merely
+    // "unstated", so a project that does not pin one must reset this back to -1 rather than silently
+    // inheriting whatever the PREVIOUS project's pin was (applyProjectRenderSettings' own "mirrors,
+    // not a delta" comment on projectBackend_/frameBudgetMs_ describes the identical hazard). Captured
+    // back into project_.averSr beside project_.occlusionCull in captureRenderSettingsFromUi.
+    int  averSrProjectDefault_ = -1;
     // Constructed lazily the first time a non-Off quality is applied; never rebuilt after, only
     // dropped to null when quality returns to Off. `factory` must outlive every execute() call
     // (AverSrSpatial.hpp): satisfied here since it's the SAME rhi::IDevice::resources() the editor uses for as long as the device exists.
@@ -24915,6 +25406,10 @@ private:
     // limitation this task's measurements hit, since none of its four configurations use --aversr.
     bool edgeAaEnabled_ = false;
     std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
+    // Said once per session, not once per frame: updateAverSrAuto forces Auto to Off every single
+    // frame --edge-aa occupies the upscaler slot, and re-logging that every frame would flood the log
+    // the instant both are live at once.
+    bool edgeAaAverSrWarnLogged_ = false;
 #endif
     int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     f32  rtDenoiseMotionTaper_=0.0f; // --rt-denoise-motion: 0 = no taper, the shipped default
@@ -28029,6 +28524,13 @@ Application* createApplication(int argc, char** argv) {
     int giFreeAccumulatorArg = -1;
     std::string meshHeapArg;   // empty = absent; "default" or "upload" otherwise
     int lodShareVerticesArg = -1;
+    // optimisation-wave-2, U1/section 4(a): --restir-visibility/--gi-vis-path-view/--blended-gi.
+    // Strings/bools, not ints -- parsed and applied after the loop, the same "stored as a string here
+    // so a build with the module compiled out can still recognise the flag" shape --aversr already
+    // uses (aversrArg's own comment).
+    std::string restirVisibilityArg;   // empty = absent; none|reconstructed|half|full otherwise
+    bool giVisPathViewArg = false;     // --gi-vis-path-view
+    std::string blendedGiArg;          // empty = absent; restir|cone otherwise
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -28054,6 +28556,18 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i],"--gi-free-accumulator") && i+1<argc) {
             giFreeAccumulatorArg = std::atoi(argv[++i]); continue;
         }
+        // --restir-visibility none|reconstructed|half|full: optimisation-wave-2's U1
+        // (Settings::giRestirVisibility). In THIS block for the C1061 reason at its top, like every
+        // flag added since -- parsed and applied after the loop, beside app->setGiMode(giModeArg).
+        if (!std::strcmp(argv[i],"--restir-visibility") && i+1<argc) {
+            restirVisibilityArg = argv[++i]; continue;
+        }
+        // --gi-vis-path-view: U1's path-debug view (2.10 I) -- see consoleGiVisPathViewSlot()'s own
+        // comment (EditorConsole.hpp). Takes no value, so it needs no i+1<argc guard.
+        if (!std::strcmp(argv[i],"--gi-vis-path-view")) { giVisPathViewArg = true; continue; }
+        // --blended-gi restir|cone: section 4(a)'s W6/M5 pricing switch -- see
+        // consoleBlendedGiConeSlot()'s own comment (EditorConsole.hpp).
+        if (!std::strcmp(argv[i],"--blended-gi") && i+1<argc) { blendedGiArg = argv[++i]; continue; }
         // --mesh-heap default|upload: W4. A string, not a 0/1 int, so an unrecognised spelling can be
         // reported by name at the application site below rather than silently misread as a number.
         if (!std::strcmp(argv[i],"--mesh-heap") && i+1<argc) {
@@ -28964,6 +29478,20 @@ Application* createApplication(int argc, char** argv) {
     app->setPtOverride(pt);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setGiMode(giModeArg);
+    // --restir-visibility none|reconstructed|half|full: parsed here, after the arg loop, the same
+    // "stored as a string, parsed alongside every other app->setXxx call" shape --aversr and
+    // --gbuffer-debug already use -- so an unrecognised name gets a clear error rather than silently
+    // mapping to 0 (No ray).
+    if (!restirVisibilityArg.empty()) {
+        std::string m = restirVisibilityArg;
+        for (char& c : m) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (m == "none")               app->setRestirVisibility(0);
+        else if (m == "reconstructed") app->setRestirVisibility(1);
+        else if (m == "half")          app->setRestirVisibility(2);
+        else if (m == "full")          app->setRestirVisibility(3);
+        else AVER_ERROR("[Sandbox] --restir-visibility '{}' not recognised "
+                        "(none|reconstructed|half|full)", restirVisibilityArg);
+    }
     app->setDenoiser(denoiserArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
@@ -29004,6 +29532,27 @@ Application* createApplication(int argc, char** argv) {
         editor::consoleGiFreeAccumulatorSlot() = giFreeAccumulatorArg != 0;
         AVER_INFO("[Voxi] --gi-free-accumulator {}", giFreeAccumulatorArg != 0 ? "1" : "0");
     }
+    // optimisation-wave-2, U1/section 4(a): seeded the SAME way the three console slots just above
+    // are -- straight into the raw console slot, since a per-frame reassert beside
+    // voxiRenderer_.setGiVisPathView(...)/setBlendedGiCone(...) (onUpdate) is what actually makes each
+    // one live for a --frames capture with no console.
+    if (giVisPathViewArg) {
+        editor::consoleGiVisPathViewSlot() = true;
+        AVER_INFO("[Voxi] --gi-vis-path-view on");
+    }
+    if (!blendedGiArg.empty()) {
+        std::string m = blendedGiArg;
+        for (char& c : m) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (m == "restir") {
+            editor::consoleBlendedGiConeSlot() = false;
+            AVER_INFO("[Voxi] --blended-gi restir");
+        } else if (m == "cone") {
+            editor::consoleBlendedGiConeSlot() = true;
+            AVER_INFO("[Voxi] --blended-gi cone");
+        } else {
+            AVER_ERROR("[Voxi] --blended-gi '{}' not recognised (restir|cone)", blendedGiArg);
+        }
+    }
 #endif
     // --mesh-heap default|upload (W4): routed through SandboxApp's own member rather than a device
     // call made here directly, because no rhi::IDevice exists yet at this point in main() -- the
@@ -29032,9 +29581,21 @@ Application* createApplication(int argc, char** argv) {
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
 #if AVER_MODULE_SR
-        aver::sr::Quality aversrQuality;
-        if (aver::sr::parseQuality(aversrArg.c_str(), aversrQuality)) app->setAverSrQuality(aversrQuality);
-        else AVER_ERROR("[AverSR] --aversr '{}' not recognised (off|quality|balanced|performance)", aversrArg);
+        // "auto" is EXPLICIT CLI Auto (plan 3.3 A) -- distinct from never passing --aversr at all:
+        // averSrFromCli_ still goes true (so loadEditorPreferences leaves the stored Display choice
+        // alone, "the command line wins" everywhere else in this file), but there is no single
+        // sr::Quality::Auto to hand aver::sr::parseQuality, so this is checked before it rather than
+        // added as a fifth value that enum does not have room for.
+        std::string aversrLower = aversrArg;
+        for (char& c : aversrLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (aversrLower == "auto") {
+            app->setAverSrCliAuto();
+        } else {
+            aver::sr::Quality aversrQuality;
+            if (aver::sr::parseQuality(aversrArg.c_str(), aversrQuality)) app->setAverSrQuality(aversrQuality);
+            else AVER_ERROR("[AverSR] --aversr '{}' not recognised (off|quality|balanced|performance|auto)",
+                            aversrArg);
+        }
 #else
         AVER_WARN("[AverSR] --aversr '{}' was given but this build has no AverSR module "
                   "(-DAVER_MODULE_SR=ON to include it); the editor renders at native resolution "

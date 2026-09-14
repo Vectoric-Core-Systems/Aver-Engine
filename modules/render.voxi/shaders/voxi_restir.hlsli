@@ -134,6 +134,28 @@ RWTexture2D<float2> gGiSurfPosHistOut : register(u7);
 Texture2D<float2>   gGiSurfNrmHist    : register(t13);
 RWTexture2D<float2> gGiSurfNrmHistOut : register(u8);
 
+// ---- U1's HALF-RESOLUTION VISIBILITY HISTORY (giRestirVisibility == HalfResolution) ----
+// A SECOND, HALF-EXTENT pair, at (w+1)/2 x (h+1)/2, next to the full-resolution surface-history pair
+// above: one full-resolution pixel of every 2x2 block traces F2/F3 for real each frame
+// (giVisTracedPixel, below); the other three reconstruct from this history instead of tracing --
+// see 2.10 D of the optimisation-wave-2 plan for the reconstruction and 2.10 E for the write. Packed
+// as one RGBA16F pair rather than three separate textures: F2 and F3 are read and written together at
+// exactly one pixel of every four, so a single bound pair costs one fewer SRV/UAV slot than the
+// alternative for the same information.
+//   r = F3 reuse-visibility EMA (this pixel's own reused-sample visibility, exponentially averaged).
+//   g = F2 traced-luminance EMA (the second-bounce candidate hit's own indirect estimate, luminance).
+//   b = F2 unoccluded-sky-luminance EMA (the same hit's sky term with no visibility test at all --
+//       g/b is therefore an occlusion RATIO, not an absolute value, so it rescales correctly against
+//       a non-traced pixel's own unoccluded sky rather than replaying another pixel's absolute
+//       brightness).
+//   a = 1.0 where this frame's phase pixel actually wrote a value, 0.0 everywhere else (a texture
+//       freshly created or resized starts at all zeros, which is exactly "never written" -- the same
+//       sentinel convention gGiSurfNrmHist's packed-normal channel already uses).
+// UNMEASURED size: 2 x ceil(W/2) x ceil(H/2) x 8 B -- see 2.10 F's own memory table for native and
+// AverSR-Quality figures.
+Texture2D<float4>   gGiVisHist    : register(t16);  // r = F3 reuse visibility EMA, g = F2 traced-lum EMA,
+RWTexture2D<float4> gGiVisHistOut : register(u10);  // b = F2 unoccluded-sky-lum EMA, a = 1 written / 0 never
+
 // RTXDI's own RAB_Surface contract. `linearDepth` is carried on the struct rather than re-derived by
 // RAB_GetSurfaceLinearDepth from a hardcoded view-projection, because the SAME accessor is called on
 // BOTH the current pixel's surface (built in giRestirIndirect, current gViewProj) and a previous
@@ -411,6 +433,32 @@ static const float2 kGiNeighborOffsets[32] = {
 #define RTXDI_NEIGHBOR_OFFSETS_BUFFER kGiNeighborOffsets
 static const uint kGiNeighborOffsetMask = 31u;
 
+// ---- U1's HALF-RESOLUTION RECONSTRUCTION TUNABLES (2.10 D) ----
+// ALL FIVE ARE UNMEASURED: no sweep was run to fit any of them against a ground truth, the same
+// honesty this file's other reasoned-not-measured constants (the motion-discount 32px knee, the
+// [1/4,4] Jacobian window) already carry. Mirrored byte-for-byte in
+// aver/voxi/GiVisibility.hpp's own kHistWeight/kRhoMax/kNormalPow/kPlaneTolRel/kPlaneTolCm --
+// GiVisibilityTest checks the two never drift apart.
+//
+// HIST_WEIGHT: the EMA weight the half-res write (2.10 E) blends toward at rest, lerped down to 0.5
+// under motion the same way rtShadowTemporal's own 0.9/0.5 pair is -- see that function's history
+// write for the shape this borrows. 0.8 means ~5 frames of effective averaging at rest (1/(1-0.8)).
+#define AVER_GI_VIS_HIST_WEIGHT 0.8
+// RHO_MAX: the ceiling on F2's reconstructed sky ratio (rho2 = g/b, an occlusion ratio that is in
+// [0,1] in expectation but not bounded pixel-to-pixel under EMA lag) -- keeps a stale, still-warming
+// history from scaling a non-traced pixel's unoccluded sky term up rather than down.
+#define AVER_GI_VIS_RHO_MAX 4.0
+// NORMAL_POW: the exponent on saturate(dot(neighbourNormal, N)) in the reconstruction weight --
+// higher than a plain cosine so a neighbour whose previous-frame normal only loosely agrees with
+// this receiver's contributes little, without the hard cutoff a clamp would impose.
+#define AVER_GI_VIS_NORMAL_POW 8.0
+// PLANE_TOL_REL / PLANE_TOL_CM: the two-term (relative-to-depth plus a flat floor) tolerance on
+// |dot(neighbourWorldPos - wpos, N)| a reconstruction tap must fall inside -- the same shape a
+// depth-based plane test usually takes (a fixed floor for near geometry, a fraction of distance for
+// far geometry, so neither term alone has to cover both regimes).
+#define AVER_GI_VIS_PLANE_TOL_REL 0.02
+#define AVER_GI_VIS_PLANE_TOL_CM 1.0
+
 // ---- the one RAB_ callback TemporalResampling.hlsli never needed but the spatial half does ----
 // SpatioTemporalResampling.hlsli's spatial samples (via Rtxdi/GI/SpatialResampling.hlsli) walk off
 // the reprojected pixel by up to samplingRadius and have to be pulled back on-screen before anything
@@ -461,6 +509,130 @@ RTXDI_ReservoirBufferParameters giReservoirBufferParams() {
     return p;
 }
 
+// ---- U1's HALF-RESOLUTION RECONSTRUCTION (giRestirVisibility == HalfResolution, 2.10 D) ----
+// PLACED HERE, AFTER RAB_GetGBufferSurface (above) AND BEFORE giTraceInitialCandidate (below):
+// giVisReconstruct calls RAB_GetGBufferSurface itself (reusing its bounds check and its t12/t13
+// read rather than a third copy of that lookup), so it must be declared after it; it is called from
+// giRestirIndirect's own decode block, before giTraceInitialCandidate is ever invoked, so it also
+// has to exist before that call site.
+//
+// kGiVisPhase: which of a 2x2 block's four full-resolution pixels traces F2/F3 for real on a given
+// frame, cycling every 4 frames so every pixel gets its own turn -- the SAME table read from both
+// ends: giVisTracedPixel below decides THIS frame's traced pixel from it directly, and
+// giVisReconstruct (further below) reads the PREVIOUS frame's entry (frameIdx - 1) to know which
+// full-resolution pixel actually wrote the half-res texel it is about to sample.
+static const uint2 kGiVisPhase[4] = { uint2(0, 0), uint2(1, 1), uint2(1, 0), uint2(0, 1) };
+
+// Is pixel `p` this 2x2 block's traced pixel on frame `frame`? `& 3u`, not `% 4u`, matching this
+// file's own bitmask convention (kGiNeighborOffsetMask, tileMask/turnMask in voxi_rt.hlsli) -- 4 is
+// a compile-time power of two, so the two are identical, and the mask form is what the rest of this
+// codebase already writes at every other cyclic-schedule site.
+bool giVisTracedPixel(uint2 p, uint frame) {
+    const uint2 ph = kGiVisPhase[frame & 3u];
+    return (p.x & 1u) == ph.x && (p.y & 1u) == ph.y;
+}
+
+// One reconstructed visibility sample: `valid` says whether ANY tap below survived every rejection
+// test, `v3`/`g`/`b` mirror gGiVisHist's own r/g/b channels (F3 reuse-visibility EMA, F2
+// traced-luminance EMA, F2 unoccluded-sky-luminance EMA), and `motionPx` is this pixel's own
+// reprojection distance -- computed once here and reused by the half-res history write's own motion
+// knee (2.10 E) so that write does not repeat this function's reprojection arithmetic a second time.
+struct GiVisRecon { bool valid; float v3; float g; float b; float motionPx; };
+
+// Reconstructs this pixel's F2/F3 answer from its non-traced neighbours' own half-resolution
+// history, depth/normal-weighted the same way a spatial denoiser upsamples -- see 2.10 D's own "why
+// this upsampling is sound" for the argument (a previous-frame surface that matches this receiver's
+// plane and normal draws candidates from the same hemisphere distribution, so the expected F2/F3
+// answer is smooth in (position, normal) and weighting by both preserves that).
+GiVisRecon giVisReconstruct(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
+    GiVisRecon rec = (GiVisRecon)0;   // valid = false, everything else 0 -- the honest "no reconstruction" answer
+
+    // ---- 1. THE VALIDITY CHECK COMES FIRST, BEFORE ANY t12/t13/t16 READ (checklist item 10) ----
+    // gGiRestirParams.y is "does a real previous frame's surface-history pair (t12/t13) exist yet"
+    // -- the identical field RAB_GetGBufferSurface itself tests first, so this can never disagree
+    // with what that function is about to do. gAmbientParams.w bit 8 is the sibling test for t16:
+    // "does gGiVisHist hold a real previous frame", set only once beginShadowHistory has actually
+    // written it once (VoxiRenderer::endShadowHistory). Either false means every tap below would
+    // read stale or newly-allocated storage with nothing meaningful in it, so this returns invalid
+    // before touching any of the three textures a tap would otherwise sample.
+    if (((uint)gAmbientParams.w & 8u) == 0u || gGiRestirParams.y < 0.5) return rec;
+
+    // ---- 2. THE SAME REPROJECTION RECIPE giRestirIndirect's OWN screenSpaceMotion USES, further
+    // down this file -- gPrevViewProj paired with gSceneViewport (never gSceneViewportCur), this
+    // file's own standing convention wherever a PREVIOUS frame's rect is needed (see
+    // RAB_ClampSamplePositionIntoView's own comment on that convention). Reused rather than
+    // re-derived a second way, so the two reprojections can never disagree about where this pixel
+    // was last frame.
+    const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
+    if (prevClip.w <= 1e-4) return rec;
+    const float3 prevNdc = prevClip.xyz / prevClip.w;
+    const float2 prevPx = gSceneViewport.xy +
+        float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5) * gSceneViewport.zw;
+    rec.motionPx = length(prevPx - pixel);
+
+    // ---- 3. BILINEAR TAPS INTO THE HALF-RESOLUTION HISTORY ----
+    // prevPx is a FULL-resolution coordinate; halving it lands in gGiVisHist's own texel space, and
+    // the -0.5 recentres onto the half-res grid the way an ordinary bilinear filter's texel-corner
+    // convention does.
+    const float2 hp   = prevPx * 0.5 - 0.5;
+    const float2 base = floor(hp);
+    const float2 f    = hp - base;
+    const float  wgt[4] = { (1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y };
+    const int2   taps[4] = { int2(base), int2(base) + int2(1, 0), int2(base) + int2(0, 1),
+                             int2(base) + int2(1, 1) };
+
+    uint visW, visH;
+    gGiVisHist.GetDimensions(visW, visH);
+
+    float wsum = 0.0, rsum = 0.0, gsum = 0.0, bsum = 0.0;
+    [unroll] for (uint k = 0; k < 4; ++k) {
+        const int2 t = taps[k];
+        // 4a. BOUNDS-CHECK AGAINST gGiVisHist's OWN DIMENSIONS, not gGiSurfNrmHist's -- this pair is
+        // sized (w+1)/2 x (h+1)/2, half the full-resolution surface history, so this tap's own
+        // texture is the edge that matters here.
+        if (t.x < 0 || t.y < 0 || t.x >= (int)visW || t.y >= (int)visH) continue;
+        if (wgt[k] <= 0.0) continue;   // a bilinear corner exactly on a texel needs no neighbour tap
+
+        // 4b. THE WRITER'S FULL-RESOLUTION PIXEL, from LAST frame's phase table (frameIdx - 1u, not
+        // frameIdx): this reconstruction runs THIS frame against a history the PREVIOUS frame wrote,
+        // and giVisTracedPixel's own phase table is what decided which of the four full-resolution
+        // pixels inside t's 2x2 block actually wrote it. Unsigned wrap at frameIdx 0 is deliberate
+        // and matches HLSL's own uint arithmetic (checked by GiVisibilityTest).
+        const uint2 writer = uint2(t) * 2u + kGiVisPhase[(frameIdx - 1u) & 3u];
+        // RAB_GetGBufferSurface ALREADY BOUNDS-CHECKS AND READS t13 THEN t12 -- reused rather than a
+        // third copy of that lookup; its own "no real previous frame" test reads the same
+        // gGiRestirParams.y field already checked in step 1, so the two can never disagree.
+        const RAB_Surface ps = RAB_GetGBufferSurface(int2(writer), true);
+        if (!RAB_IsSurfaceValid(ps)) continue;
+
+        const float4 vh = gGiVisHist.Load(int3(t, 0));
+        if (vh.a < 0.5) continue;   // never written this texel -- the sentinel the half-res write (2.10 E) sets
+
+        // 4c. THE PLANE TEST: a two-term tolerance (a flat floor plus a fraction of distance) against
+        // the SAME worldPos/linearDepth RAB_GetGBufferSurface just reconstructed -- reused rather
+        // than a fourth copy of "is this plausibly the same surface".
+        const float planeTol = AVER_GI_VIS_PLANE_TOL_CM + AVER_GI_VIS_PLANE_TOL_REL * ps.linearDepth;
+        if (abs(dot(ps.worldPos - wpos, N)) > planeTol) continue;
+
+        const float nDot = saturate(dot(ps.normal, N));
+        const float w = wgt[k] * pow(nDot, AVER_GI_VIS_NORMAL_POW);
+        wsum += w; rsum += w * vh.r; gsum += w * vh.g; bsum += w * vh.b;
+    }
+
+    // ---- 5. VALID ONLY PAST A NOISE FLOOR ----
+    // Not merely "at least one tap survived": a single near-grazing bilinear corner (a tiny wgt[k])
+    // would otherwise hand back a near-zero-confidence reconstruction as if it were as trustworthy as
+    // four agreeing taps. 1e-3 is a floor on the SUM of up to four weights each in [0,1] -- generous
+    // enough to admit one dim but real tap, tight enough to reject pure numerical noise.
+    rec.valid = wsum > 1e-3;
+    if (rec.valid) {
+        rec.v3 = rsum / wsum;
+        rec.g  = gsum / wsum;
+        rec.b  = bsum / wsum;
+    }
+    return rec;
+}
+
 // ---- the initial candidate: ONE cosine ray, traced and shaded through machinery this file already has ----
 // Traces off (wpos, N) along a cosine-weighted hemisphere direction and shades whatever it hits
 // through the SAME RayQuery + flat geometry table + gRtMaterials + averShadeDirect machinery
@@ -470,14 +642,27 @@ RTXDI_ReservoirBufferParameters giReservoirBufferParams() {
 // Returns false on a miss: nothing a reservoir can reproject. The caller then hands RTXDI an EMPTY
 // initial reservoir for this frame and lets temporal resampling (RTXDI_IsValidGIReservoir gates on
 // M != 0) carry the pixel from history alone -- exactly the situation that function already handles.
+// U1's F2 PATH SELECTOR AND ITS THREE OUTPUTS (2.10 A/B): `f2Path` is the decode block's own verdict
+// (giRestirIndirect, 3 trace / 2 half-res ratio / 1 reconstructed / 0 legacy-no-ray), `rho2` is the
+// half-res reconstruction's own occlusion ratio (only meaningful when f2Path == 2u), and the three
+// `out` parameters carry back what F2's TRACED path (f2Path == 3u) observed so the half-res history
+// write further down this file (2.10 E) has something to store -- set only on that one path, and
+// default-initialised to "nothing observed" everywhere else, the same convention nonFiniteCandidate
+// already uses.
 bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJitter,
                              out float3 samplePos, out float3 sampleNormal, out float3 sampleRadiance,
-                             out bool nonFiniteCandidate) {
+                             out bool nonFiniteCandidate, uint f2Path, float rho2,
+                             out float f2LumTraced, out float f2LumSky, out bool f2Observed) {
     samplePos = sampleNormal = sampleRadiance = 0.0;
     // Set on every path, including the early `return false` below: this is an `out` parameter and
     // HLSL, like C++, requires it be written on every exit -- and false is the correct default,
     // since neither early-out here has computed a radiance yet for a guard to have caught anything.
     nonFiniteCandidate = false;
+    // Same convention, same reason, for U1's three new outputs: false/0/0 is "F2's traced path did
+    // not run this invocation", true whenever a caller sees it, and it is written FOR REAL only where
+    // f2Path == 3u actually traces (below) -- every other exit, early or not, leaves this default
+    // standing, which is the honest answer since nothing was observed on those paths.
+    f2LumTraced = 0.0; f2LumSky = 0.0; f2Observed = false;
 
     // Cosine-weighted hemisphere sample (Malley's method: a uniform point on the unit disc, lifted
     // onto the hemisphere) -- the standard importance sample for a Lambertian receiver, so its own
@@ -713,9 +898,40 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // THE NaN-SAFE CLAMP AT THIS FUNCTION'S OWN END STILL RUNS LAST, after `radiance` (built from indY
     // below, same as before) leaves this block -- F2 changes what feeds that clamp, not the clamp
     // itself.
+    // ---- U1 (2.10 B): FOUR PATHS NOW, NOT TWO -- the legacy/corrected split above is joined by
+    // Reconstructed (a voxel-cone march standing in for the traced ray) and Half's own non-traced
+    // reconstruction (a plain sky-luminance ratio, no ray, no cone). THE LEGACY BRANCH'S CONDITION
+    // GAINS ONLY `|| f2Path == 0u` -- its body is UNCHANGED text, because f2Path == 0u already means
+    // "legacy bit 4 is set, or giRestirVisibility is No ray" (the decode block folds both into the
+    // one path number, 2.10 A), so this branch is correct for either reason without needing to know
+    // which. THE TRACE BRANCH'S BODY (the final `else`) IS BYTE-IDENTICAL to what stood here before
+    // this task -- only reached at f2Path == 3u now, and the three new `out` params are written at
+    // its own end, after `indY` is final, exactly mirroring what a caller who traced this ray would
+    // have observed.
     float3 indY = 0.0;
-    if (((uint)gAmbientParams.z & 4u) != 0u) {
+    if (((uint)gAmbientParams.z & 4u) != 0u || f2Path == 0u) {
         indY = averSkyIrradiance(s.N) * gAmbient.r;
+    } else if (f2Path == 1u) {
+        // ---- RECONSTRUCTED: ONE VOXEL-CONE MARCH STANDS IN FOR THE TRACED RAY ----
+        // traceCone's own contract (voxi_cone.hlsli:62; forward-declared in voxi_rt.hlsli for this
+        // exact reason -- see that prototype's own comment) returns premultiplied radiance plus
+        // coverage, and PSVoxel already reads 1 - a as "this direction is open to the sky"
+        // (voxi.hlsl:2326-2330's skyVis) -- so `indY ~= V*E_sky + (1-V)*L_hit` here is the SAME
+        // reading applied at a second-bounce hit instead of an injected voxel, the structure the
+        // traced ray's own expectation has. gVoxelParams.w guards on the volume being enabled at
+        // all, matching every other conditional voxel read in this file; with it off the legacy
+        // unoccluded sky is the only thing left to fall back to.
+        if (gVoxelParams.w > 0.5) {
+            const float4 cone = traceCone(hitPos, s.N, AVER_VOX_INJECT_APERTURE);
+            indY = averSkyIrradiance(s.N) * gAmbient.r * saturate(1.0 - cone.a) + min(cone.rgb, AVER_VOX_MAXRAD);
+        } else indY = averSkyIrradiance(s.N) * gAmbient.r;
+    } else if (f2Path == 2u) {
+        // ---- HALF, NON-TRACED PIXEL WITH A VALID RECONSTRUCTION: NO RAY, NO CONE, ONE RATIO ----
+        // rho2 (computed at the call site, giRestirIndirect) is the neighbourhood's own occluded-
+        // over-unoccluded sky luminance ratio -- clamped at AVER_GI_VIS_RHO_MAX (2.10's own comment
+        // on that constant) since it is an EMA-lagged ratio, not a value bounded to [0,1] on any
+        // single frame the way a fresh trace's V would be.
+        indY = averSkyIrradiance(s.N) * gAmbient.r * clamp(rho2, 0.0, AVER_GI_VIS_RHO_MAX);
     } else {
         const float2 xi2 = rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.71);
         const float  c2  = sqrt(saturate(1.0 - dot(xi2, xi2)));
@@ -729,6 +945,13 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         if (q2.CommittedStatus() != COMMITTED_TRIANGLE_HIT) indY = averSkyRadianceCheap(dir2) * gAmbient.r;
         else { const float3 uvw = voxelUVW(r2.Origin + dir2 * q2.CommittedRayT());
                if (gVoxelParams.w > 0.5 && insideVolume(uvw)) indY = min(gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0).rgb, AVER_VOX_MAXRAD); }
+        // U1's HALF-RES HISTORY (2.10 E) NEEDS THIS PATH'S OWN LUMINANCE, SEPARATELY FROM THE SKY IT
+        // WAS COMPARED AGAINST -- only reachable here, at f2Path == 3u, the one path that actually
+        // traced. averShadowLum is this file's own standing luminance reduction (Rec.709 weights,
+        // voxi_rt.hlsli:1654), reused rather than a second formula.
+        f2Observed  = true;
+        f2LumTraced = averShadowLum(indY);
+        f2LumSky    = averShadowLum(averSkyIrradiance(s.N) * gAmbient.r);
     }
     radiance += s.kdAlbedo * indY;
 
@@ -783,11 +1006,52 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // declaration for why it is a `static` rather than a parameter.
     gGiPoisonPdfHit = false;
 
+    // ---- U1 (2.10 A): DECODE THE VISIBILITY MODE AND THE TWO RAYS' PATHS, ONCE, UP FRONT ----
+    // visMode is settings_.giRestirVisibility as the C++ side clamped and packed it
+    // (VoxiRenderer::beginShadowHistory, givis::packAmbientW) -- 0 No ray, 1 Reconstructed,
+    // 2 HalfResolution, 3 Full. halfBound additionally requires the half-res pair actually be bound
+    // THIS frame (bit 4): an allocation failure (2.11) leaves visMode == 2 but the pair unbound, and
+    // that must behave as Full, not silently read a null descriptor. tracedPx is THIS pixel's own
+    // verdict from the phase table (giVisTracedPixel) when Half is active; it is trivially true
+    // (every pixel "traces") for every other mode, so the f2Path/f3Path arithmetic below needs no
+    // separate branch per mode.
+    //
+    // giVisReconstruct is called HERE, once, rather than separately for F2 and F3: both rays share
+    // one reconstruction (2.10 D's own header note), and calling it twice would trace the same four
+    // taps twice for no new information.
+    const uint visMode   = (uint)gAmbientParams.w & 3u;
+    const bool halfBound = visMode == 2u && ((uint)gAmbientParams.w & 4u) != 0u;
+    const bool tracedPx  = !halfBound || giVisTracedPixel(pixelPos, frameIdx);
+    // NOT a ternary: HLSL's conditional operator only supports numeric scalar/vector/matrix results,
+    // never a struct (DXC: "conditional operator only supports results with numeric scalar, vector,
+    // or matrix types") -- GiVisRecon is a struct, so `halfBound ? giVisReconstruct(...) : (GiVisRecon)0`
+    // is a hard compile error, not merely a style choice. `rec` starts at the same all-zero/invalid
+    // default the ternary's false-branch spelled out, and is only overwritten when halfBound.
+    GiVisRecon rec = (GiVisRecon)0;
+    if (halfBound) rec = giVisReconstruct(wpos, N, pixel, frameIdx);
+    // Path numbers, shared by F2 and F3 except where a legacy bit singles one of them out below:
+    // 3 trace, 2 half-res ratio, 1 reconstructed (voxel cone / temporal-only), 0 legacy/no-ray.
+    uint f2Path = 3u, f3Path = 3u;
+    if (visMode == 1u)                       { f2Path = 1u; f3Path = 1u; }
+    if (halfBound && !tracedPx && rec.valid) { f2Path = 2u; f3Path = 2u; }   // no valid reconstruction: trace, as Full
+    if (((uint)gAmbientParams.z & 4u) != 0u || visMode == 0u) f2Path = 0u;   // legacy bit wins (2.8)
+    if (((uint)gAmbientParams.z & 8u) != 0u || visMode == 0u) f3Path = 0u;
+
+    // rho2: F2's RECONSTRUCTED-NON-TRACED path (f2Path == 2u) reads the neighbourhood's own occluded/
+    // unoccluded sky ratio rather than an absolute luminance -- a RATIO OF EXPECTATIONS
+    // (sum(w*g) / sum(w*b), giVisReconstruct's own wsum/gsum/bsum), not an average of per-tap ratios
+    // (2.10 D.6's own distinction; GiVisibilityTest checks the two estimators disagree on a skewed
+    // field so this is not an interchangeable simplification).
+    // Computed here, once, rather than inside giTraceInitialCandidate, since F2 is the only reader.
+    const float rho2 = (rec.b > 1e-4) ? (rec.g / rec.b) : 1.0;
+
     float3 samplePos, sampleNormal, sampleRadiance;
     bool nonFiniteCandidate = false;
+    float f2LumTraced = 0.0, f2LumSky = 0.0;
+    bool  f2Observed  = false;
     RTXDI_GIReservoir initial = RTXDI_EmptyGIReservoir();
     if (giTraceInitialCandidate(wpos, N, pixel, frameJitter, samplePos, sampleNormal, sampleRadiance,
-                                 nonFiniteCandidate)) {
+                                 nonFiniteCandidate, f2Path, rho2, f2LumTraced, f2LumSky, f2Observed)) {
         const float cosTheta = saturate(dot(normalize(samplePos - wpos), N));
         // THE SAME FLOOR, because this is the gate that actually decides what gets stored. The
         // recomputed cosTheta is the sampled one up to precision (dir is built from it and samplePos
@@ -945,6 +1209,15 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         const float motionT  = saturate(motionPx / 32.0);
         stparams.numSamples     = (uint)round(lerp(2.0, 1.0, motionT));
         stparams.samplingRadius = lerp(32.0, 8.0, motionT);
+        // ---- U1 (2.10 C): RECONSTRUCTED FORCES TEMPORAL-ONLY, AFTER THE MOTION DISCOUNT ABOVE, NOT
+        // BEFORE ---- f3Path == 1u means giRestirVisibility selected Reconstructed (or the pixel is
+        // in Half's non-traced/no-valid-reconstruction limbo that already collapsed to Reconstructed
+        // above -- it has not, f2Path/f3Path == 1u only ever comes from visMode == 1u itself, see the
+        // decode block), and the spatial half of this pass is exactly the extra reuse Reconstructed's
+        // own cost model (2.10 F) accounts for as zero. Setting numSamples AFTER the motion-discount
+        // lerp above means this always wins regardless of motionT -- checked by
+        // GiVisibilityTest's own source assertion that this line follows the lerp textually.
+        if (f3Path == 1u) stparams.numSamples = 0u;
         RTXDI_RuntimeParameters rParams = (RTXDI_RuntimeParameters)0;   // no checkerboard
         // neighborOffsetMask is the field the spatial half actually reads: RTXDI_
         // CalculateSpatialResamplingOffset masks its index by this before it ever touches
@@ -1020,16 +1293,23 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // measurably already do (the denoiser-on band above). Shipping a FOURTH unmeasured backstop on top
     // of three that measured as no-ops would be exactly the pattern this task was written to stop.
 
-    // KNOWN LIMITATION, not fixed here: a pixel covered by TRANSLUCENT geometry is written to THIS
-    // reservoir slot TWICE in one frame. PSRayDriven writes every pixel first; the blended glass
-    // replay is PSMainVoxi drawn over the same pixels, and the two share one compiled shader binary
-    // differing only in blend state and depth-write, so no #define or per-pass constant can tell
-    // them apart from inside this function. It degrades gracefully rather than silently: next frame
-    // the OPAQUE surface reprojects into a slot that still describes the glass hit,
-    // RTXDI_IsValidNeighbor's depth/normal test rejects the mismatch (glass and whatever sits behind
-    // it are rarely coplanar), and that pixel falls back to a fresh candidate exactly as if no
-    // history existed at all. The cost is LOST TEMPORAL REUSE behind glass -- one extra frame of
-    // noise where reuse should have carried over -- not wrong light.
+    // ---- W6/M5: NO LONGER A KNOWN LIMITATION -- GATED ON gAverHistoryWrite, ON BY DEFAULT ----
+    // Until this task, a pixel covered by TRANSLUCENT geometry was written to THIS reservoir slot
+    // TWICE in one frame: PSRayDriven writes every pixel first; the blended glass/water replay is
+    // PSMainVoxi drawn over the same pixels, and the two share one compiled shader binary differing
+    // only in blend state and depth-write, so no #define or per-pass constant could tell them apart
+    // from inside this function -- only a PER-DRAW signal (the material's own transmission/blend
+    // flags, D3D12's own "this draw replayed blended" bit) can, and gAverHistoryWrite is exactly that
+    // signal, set once at the top of PSMainVoxi (voxi.hlsl) and read here as a plain gate rather than
+    // threaded through as a new parameter. The OLD degrade-gracefully path -- the opaque surface
+    // reprojecting into a slot that still described the glass hit, RTXDI_IsValidNeighbor's depth/
+    // normal test rejecting the mismatch, and one extra frame of noise while reuse rebuilt from
+    // scratch -- is what voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) still reproduces,
+    // byte-identical, for A/B: it forces gAverHistoryWrite back to true on every fragment regardless
+    // of blend state (voxi.hlsl's own PSMainVoxi comment on the flag). PSRayDriven's own writes are
+    // never suppressed by this gate at all -- a blended pane never reaches that entry point (see its
+    // own header comment), so it sets gAverHistoryWrite = true unconditionally rather than computing
+    // a blendedFragment test it can never need.
     // ---- NEVER STORE A CORPSE: weightSum 0 with M != 0 POISONS EVERY PIXEL THAT TAPS IT ----
     //
     // RTXDI_FinalizeGIResampling writes ONLY weightSum -- it never touches M or radiance. So a
@@ -1075,15 +1355,34 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const bool nonFiniteRad     = any(isnan(result.radiance)) || any(isinf(result.radiance));
     const bool giPoisonStoreHit = nonFiniteWeight || nonFiniteRad;
     if (corpseWeight || giPoisonStoreHit) result = RTXDI_EmptyGIReservoir();
-    RTXDI_StoreGIReservoir(result, resParams, pixelPos, writeSlice);
+    // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- this is the reservoir store
+    // this function's own KNOWN LIMITATION comment, just above, used to describe as an accepted,
+    // unconditional double write: a blended-replay fragment (PSMainVoxi's glass/water pane) used to
+    // overwrite THIS pixel's reservoir a second time with the pane's own candidate, so next frame the
+    // OPAQUE surface behind it reprojected into a slot describing the glass hit instead. See voxi.hlsl's
+    // own gAverHistoryWrite/averDrawIsTranslucent for the flag, and voxi.hlsl's PSMainVoxi for where a
+    // blended fragment clears it. voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the
+    // old unconditional store, byte-identical, for A/B; PSRayDriven never sees this pixel's write
+    // suppressed at all, since it sets gAverHistoryWrite = true unconditionally (a blended pane never
+    // reaches that entry point -- see its own header comment).
+    if (gAverHistoryWrite) RTXDI_StoreGIReservoir(result, resParams, pixelPos, writeSlice);
 
     // NEXT FRAME'S "previous surface" -- see gGiSurfPosHist/gGiSurfNrmHist's own declaration for
     // the two-texture format and the 0-packed-normal sentinel RAB_GetGBufferSurface tests for
     // "nothing written here". Nudged off exactly zero so a legitimately-packed normal never
     // collides with that sentinel.
     const uint packedN = RTXDI_EncodeNormalizedVectorToSnorm2x16(N);
-    gGiSurfPosHistOut[pixelPos] = wpos.xy;
-    gGiSurfNrmHistOut[pixelPos] = float2(wpos.z, asfloat(packedN == 0u ? 1u : packedN));
+    // W6/M5: GATED THE SAME WAY THE RESERVOIR STORE ABOVE IS, FOR THE SAME REASON -- a blended-replay
+    // fragment writing its own (glass/water) surface into this pixel's history is the identical
+    // double-write, one level up: next frame's giVisReconstruct/RAB_GetGBufferSurface taps would
+    // silently read the pane's position/normal instead of the opaque surface's. Both channels share
+    // one gate rather than two, since they are always written together (this file's own header
+    // comment on the pair: "TWO RG32Float TEXTURES... gGiSurfPosHist carries xy... gGiSurfNrmHist
+    // carries z... plus the packed normal").
+    if (gAverHistoryWrite) {
+        gGiSurfPosHistOut[pixelPos] = wpos.xy;
+        gGiSurfNrmHistOut[pixelPos] = float2(wpos.z, asfloat(packedN == 0u ? 1u : packedN));
+    }
 
     // Hoisted to function scope (not declared inside the block below) so the poison-view combination
     // at the end of this function -- after the NRD block further down -- can still read them.
@@ -1139,9 +1438,17 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // Surface states at its own header: RIS with a target pdf that ignores visibility, multiplied
         // here by the true contribution f*V, stays an unbiased estimator of the VISIBLE integral,
         // because the pdf's support is a superset of the visible one.
-        float visF3 = 1.0;
-        if (((uint)gAmbientParams.z & 8u) == 0u && !(freshValid && all(result.position == freshPos)) &&
-            dist2 > 1e-8) {
+        // ---- U1 (2.10 C): f3Path == 3u GUARDS THE RAY NOW, AND THE ORIGINAL CONDITION TEXT IS
+        // OTHERWISE UNCHANGED ---- `reused` restates the same "is this actually a resampled sample,
+        // not this frame's own already-proven-visible candidate" test the ray's own condition already
+        // computes, named once so the new Half branch below does not repeat it a third time; the ray
+        // branch keeps the original inline expression rather than reading `reused` itself, so its
+        // condition text stays the literal string this file (and GiVisibilityTest) has always had,
+        // with only `f3Path == 3u &&` inserted.
+        float visF3 = 1.0; bool f3Observed = false;
+        const bool reused = !(freshValid && all(result.position == freshPos)) && dist2 > 1e-8;
+        if (((uint)gAmbientParams.z & 8u) == 0u && f3Path == 3u &&
+            !(freshValid && all(result.position == freshPos)) && dist2 > 1e-8) {
             const float dist = sqrt(dist2);
             const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
             RayDesc rv;
@@ -1153,6 +1460,46 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
             qv.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, rv);
             averRtProceedSolid(qv);
             if (qv.CommittedStatus() == COMMITTED_TRIANGLE_HIT) visF3 = 0.0;
+            f3Observed = true;
+        } else if (f3Path == 2u && reused) {
+            // HALF, non-traced pixel with a valid reconstruction: the neighbourhood's own reused-
+            // sample visibility stands in for a ray. reused still gates this -- THIS frame's own
+            // fresh, already-visibility-proven candidate needs no substitute either way.
+            visF3 = rec.v3;
+        }
+
+        // ---- U1 (2.10 E): THE HALF-RESOLUTION HISTORY WRITE -- ONE TEXEL PER 2x2 BLOCK, PER FRAME ----
+        // Gated on THREE things: gAverHistoryWrite (W6/M5 -- a blended-replay fragment must not
+        // overwrite the opaque surface's own history, same reasoning as every other gated write this
+        // task adds), halfBound (Half must actually be running with its pair bound this frame), and
+        // tracedPx (only the 2x2 block's own traced pixel has a real F2/F3 observation to store this
+        // frame -- see giVisTracedPixel's own comment: exactly one full-resolution pixel per block
+        // writes, so a fallback-traced pixel elsewhere in the block does NOT also write here and race
+        // the phase pixel's own write).
+        //
+        // h: the SAME motion-discounted EMA shape rtShadowTemporal's own history write uses (voxi_rt.
+        // hlsli, 0.9/0.5 pair) -- AVER_GI_VIS_HIST_WEIGHT at rest, falling to 0.5 as rec.motionPx
+        // (computed once, inside giVisReconstruct, and reused here rather than re-derived) approaches
+        // the same 32px knee this file's spatial-reuse motion discount already uses.
+        //
+        // r/g/b: each channel is "this frame's fresh observation, blended toward the reconstructed
+        // history when one exists" for an OBSERVED ray (f2Observed/f3Observed true -- this frame
+        // actually traced F2 or F3), or "carry the reconstructed history forward unchanged" when this
+        // frame did not observe that ray but a reconstruction was available (rec.valid), or the
+        // honest prior (visF3's own default 1.0, "nothing occluding yet"; 0.0 for the two luminance
+        // channels, "nothing traced yet") when NEITHER a fresh observation NOR history exists -- the
+        // first frame this texel is ever written. f3Observed/f2Observed and rec.valid are never both
+        // false while f2Path/f3Path == 3u traced this frame (a trace always sets its own Observed
+        // flag), so this only ever falls to the "neither" case on a genuinely first write.
+        if (gAverHistoryWrite && halfBound && tracedPx) {
+            const float h = lerp(AVER_GI_VIS_HIST_WEIGHT, 0.5, saturate(rec.motionPx / 32.0));
+            const float r = f3Observed ? (rec.valid ? lerp(visF3, rec.v3, h) : visF3)
+                                        : (rec.valid ? rec.v3 : 1.0);
+            const float g = f2Observed ? (rec.valid ? lerp(f2LumTraced, rec.g, h) : f2LumTraced)
+                                        : (rec.valid ? rec.g : 0.0);
+            const float b = f2Observed ? (rec.valid ? lerp(f2LumSky, rec.b, h) : f2LumSky)
+                                        : (rec.valid ? rec.b : 0.0);
+            gGiVisHistOut[pixelPos >> 1] = float4(r, g, b, 1.0);
         }
 
         // result.radiance * result.weightSum is RTXDI's own finalised estimator (weightSum already
@@ -1235,7 +1582,13 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         const float3 ycocg = float3(dot(outDiffuse, float3( 0.25, 0.5,  0.25)),
                                     dot(outDiffuse, float3( 0.5,  0.0, -0.5 )),
                                     dot(outDiffuse, float3(-0.25, 0.5, -0.25)));
-        gGiRadianceOut[pixelPos] = float4(ycocg, hitT);
+        // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT -- the NRD INPUT, not merely a history
+        // texture, and the most visible half of C9's finding: an unguarded write here handed NRD's
+        // permanent accumulation pool the PANE's own GI estimate for a pixel the opaque surface
+        // behind it also claims, and REBLUR then denoises across both without any way to tell them
+        // apart. voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the old
+        // unconditional write, byte-identical, for A/B.
+        if (gAverHistoryWrite) gGiRadianceOut[pixelPos] = float4(ycocg, hitT);
     }
 
     // LAST FRAME'S DENOISED ANSWER REPLACES THIS FRAME'S RAW ONE. One frame of lag, which is what
@@ -1246,7 +1599,14 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // ReSTIR estimate stands, noisy but correct.
     uint gw = 0, gh = 0;
     gNrdGi.GetDimensions(gw, gh);
-    if (gw > 0u && gh > 0u) {
+    // W6/M5: `gAverHistoryWrite &&` LEADS THIS TEST -- the sibling half of C9's finding (this file's
+    // own gGiRadianceOut write above is the other half): a blended-replay fragment must not read back
+    // the OPAQUE surface's denoised answer as if it were its own, the exact "a pane is handed the
+    // denoised GI of the surface behind it" mis-attribution. Skipping the readback leaves `outDiffuse`
+    // at the raw estimate computed just above -- this fragment's own, noisy but correct -- and its own
+    // write above is skipped by the same gate, so a blended fragment neither reads nor writes the
+    // opaque surface's NRD state.
+    if (gAverHistoryWrite && gw > 0u && gh > 0u) {
         // _NRD_YCoCgToLinear, the matching half of the write above. REBLUR hands back what it
         // filtered, in the basis it filtered it in; NRD's own back-end unpack is this same transform
         // and also ends in a max against zero, because the chroma round trip can put a channel
@@ -1353,6 +1713,30 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         if (giPoisonNrdHit)       return float3(0.0, 0.0, 1.0);
         if (giPoisonEstCeilHit)   return float3(1.0, 0.0, 0.0);
         if (giPoisonNrdCeilHit)   return float3(0.0, 1.0, 0.0);
+    }
+
+    // ---- U1's PATH DEBUG VIEW (voxi.giVisPathView, gAmbientParams.w bit 64; 2.10 I) ----
+    //
+    // A SEPARATE VIEW FROM THE POISON ONE ABOVE, gated `gGiRestirParams.w <= 0.5` so the two can
+    // never fight over the same return -- the poison view's own block above returns first whenever
+    // both are on, so this is simply unreachable then; deliberate, not a bug, since the poison view
+    // answers "is anything broken" and this one answers "which path did F2 take", and the two
+    // questions are more useful asked one at a time on the same pixel than interleaved.
+    //
+    // PAINTS F2's PATH. F3 follows the same path except under legacy bit 8 (gAmbientParams.z & 8u),
+    // which this view does not separately colour -- F2 and F3 share one path number except where a
+    // legacy bit singles one of them out (the decode block, giRestirIndirect's own top), and by far
+    // the more expensive of the two rays is the one this view exists to make visible.
+    //
+    // LIKE THE POISON VIEW, this replaces indirect diffuse AFTER the NRD write above, so it never
+    // enters history and never feeds back into next frame's reprojection -- a debug paint that itself
+    // corrupted the signal it exists to diagnose would defeat the point.
+    if (gGiRestirParams.w <= 0.5 && ((uint)gAmbientParams.w & 64u) != 0u) {
+        if (f2Path == 0u) return float3(1.0, 1.0, 0.0);                 // YELLOW: no ray (mode 0 or legacy bit 4)
+        if (f2Path == 1u) return float3(0.0, 1.0, 0.0);                 // GREEN: reconstructed (voxel cone)
+        if (f2Path == 2u) return float3(0.0, 0.0, 1.0);                 // BLUE: half-res reconstruction
+        return (halfBound && !tracedPx) ? float3(1.0, 0.0, 0.0)        // RED: half-res fallback, traced
+                                        : float3(1.0, 1.0, 1.0);        // WHITE: traced (Full, or Half's phase pixel)
     }
 
     return outDiffuse;

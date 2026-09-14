@@ -296,7 +296,22 @@ constexpr u32 kMaxConstantSlots = 5;
 // Slots per range. Enforced: counts above this cannot declare a kind. Defined HERE, above
 // PipelineLayout, because that struct sizes its slot-kind arrays with it; BindingSetDesc further
 // down uses the same one.
-constexpr u32 kMaxBindingSlots = 16;
+//
+// 16 -> 24, optimisation-wave-2 (U1/2.9, contract C2-8, integration cross-lane fix): kVoxiSrvCount
+// (VoxiRenderer.cpp) grew to 17 with the half-resolution ReSTIR visibility history's read slot
+// (t16), one past the old 16-slot ceiling -- BindingSetDesc::srvCount is checked against this
+// constant on every backend (D3D12Device.cpp's createBindingSet, VulkanResourceFactory.cpp's
+// identical check) and would refuse Voxi's own main binding set outright, and
+// VoxiRenderer::giTableKinds' `srv[16] = ...` write would be one past the end of a 16-element
+// C array -- undefined behaviour, not merely a refused set. Every array, loop bound and
+// static_assert sized off this one constant (PipelineLayout/BindingSetDesc's four slot-kind
+// arrays, VulkanCommon.hpp's kVkUavBindingBase and its own slot-state arrays,
+// VulkanResourceFactory.cpp's register-map loops, VulkanRegisterMap.hpp's kMaxRegisterBinds)
+// widens automatically with it -- no other file hardcodes the literal 16 independently (checked
+// by grep). Raised to 24, not merely 17, for headroom: this is the second wave in a row to grow
+// Voxi's SRV table, and the material table (table 1, pbr::kMaterialSrvCount) has its own,
+// independent budget against this same ceiling that this headroom also protects.
+constexpr u32 kMaxBindingSlots = 24;
 
 // The binding layout a pipeline declares.
 // Declared ahead of PipelineLayout, which now carries slot kinds; defined in full further down,
@@ -601,7 +616,7 @@ public:
     // A FIXED-SIZE ARRAY OF TEXTURE SRVs a shader may index by a value it COMPUTED, rather than by
     // a register the pipeline bound. This is the one exception to the "explicit descriptor tables,
     // NOT bindless" rule at the top of this file, and it is deliberately not an extension of
-    // BindingSetDesc: that path hard-refuses anything past kMaxBindingSlots (16) and every raster
+    // BindingSetDesc: that path hard-refuses anything past kMaxBindingSlots (24) and every raster
     // pipeline in the engine depends on it staying exactly as small and explicit as it is.
     //
     // WHY IT EXISTS. A ray hit has no "current draw", so there is no per-material descriptor table

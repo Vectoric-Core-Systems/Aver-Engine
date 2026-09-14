@@ -1692,15 +1692,47 @@ bool VulkanDevice::createMsaaColor() {
     return vkOk(api_.CreateImageView(device_, &vi, nullptr, &msaaColorView_), "msaa colour view");
 }
 
-// IDevice::setRenderScale, twin of D3D12Device::setRenderScale: clamp and early-out on no change,
-// then -- only if a swapchain already exists -- tear down and rebuild every scene-sized target at
-// the new size. Before a swapchain exists there's nothing to rebuild; createSwapchainResources()'s
-// own computeSceneSize() picks up whatever renderScale_ was last set to.
+// IDevice::setRenderScale, twin of D3D12Device::setRenderScale (C2-13, aver-render-scale-device-
+// loss): clamp and early-out on no change against whichever value is currently authoritative --
+// the parked one if a change is already pending, renderScale_ otherwise -- then PARK the new value
+// rather than rebuilding here. This used to call rebuildSceneTargets() immediately, which was safe
+// only as long as nothing called this mid-frame; the editor's preference load runs from buildUI(),
+// between beginFrame() and endFrame(), and AverSR Auto's onUpdate reassert (wave 2) now calls this
+// on every launch at Medium/Low's non-1.0 default. rebuildSceneTargets() frees and recreates the
+// depth buffer, MSAA target and post chain while that frame's command buffer may already have them
+// bound; waitForGpu() inside it only drains work already SUBMITTED, not a command buffer still
+// being recorded on the CPU -- so a mid-frame call recorded a submit against freed images, which is
+// what actually lost the device at present. So the value is parked and applied at the top of the
+// next beginFrame, unconditionally, by applyPendingRenderScale(): no caller needs to know, and a
+// rule with no exceptions cannot be got wrong by the next one. Before a swapchain exists there is
+// no frame to be inside and nothing to rebuild -- createSwapchainResources()'s own
+// computeSceneSize() picks up whatever renderScale_ was last set to, so that path still applies
+// immediately, exactly as before.
 void VulkanDevice::setRenderScale(f32 scale) {
+    const f32 asked = scale;
     scale = std::fmax(0.25f, std::fmin(1.0f, scale));
-    if (scale == renderScale_) return;
-    renderScale_ = scale;
-    if (!hasSwapchain_) return;   // applied at the next createSwapchainResources
+    const f32 effective = pendingRenderScaleValid_ ? pendingRenderScale_ : renderScale_;
+    if (scale == effective) return;
+    if (!hasSwapchain_) {   // applied at the next createSwapchainResources
+        AVER_INFO("[RHI.Vulkan] setRenderScale: {:.4f} -> {:.4f} (asked {:.4f}), before the swapchain",
+                  renderScale_, scale, asked);
+        renderScale_ = scale;
+        return;
+    }
+    AVER_INFO("[RHI.Vulkan] setRenderScale: {:.4f} -> {:.4f} (asked {:.4f}), applied next frame",
+              effective, scale, asked);
+    pendingRenderScale_ = scale;
+    pendingRenderScaleValid_ = true;
+}
+
+// Applies a PARKED setRenderScale() at a frame boundary; see this function's declaration comment
+// (VulkanCommon.hpp) and setRenderScale's own comment above for the full account. Mirrors
+// D3D12Device::applyPendingRenderScale() exactly, field for field.
+void VulkanDevice::applyPendingRenderScale() {
+    if (!pendingRenderScaleValid_) return;
+    pendingRenderScaleValid_ = false;
+    if (pendingRenderScale_ == renderScale_) return;
+    renderScale_ = pendingRenderScale_;
     rebuildSceneTargets();
 }
 
@@ -2559,6 +2591,10 @@ void VulkanDevice::notifyRenderTargetsChanged() {
 // ================================================================================================
 void VulkanDevice::beginFrame() {
     if (!hasSwapchain_) return;
+    // FIRST, BEFORE ANYTHING RECORDS: a render-scale change frees and recreates the depth buffer,
+    // MSAA target and post chain, and doing that mid-recording is what lost the device at Present
+    // (C2-13, aver-render-scale-device-loss). See setRenderScale's comment for the full account.
+    applyPendingRenderScale();
 
     ++frameSerial_;
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;

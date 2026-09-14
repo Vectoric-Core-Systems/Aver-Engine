@@ -102,6 +102,20 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // comment below for why that forces the branch wider than a single ring-loop if/else here.
     // gAmbientParams.z bit 16 therefore now affects PSMainVoxi/PSVoxel/PSVoxelDebug/PSRayDriven
     // (voxi_cone.hlsli) AND the particle pass and PSClusterMain (this file) alike.
+    //
+    // gAmbientParams.z ALSO NOW CARRIES BIT 32 (W6/M5, optimisation-wave-2 plan section 4): a
+    // blended-replay fragment's per-pixel history writes are suppressed by default and bit 32
+    // restores the old unconditional writes for A/B. NOTHING IN THIS PRELUDE READS IT, same as every
+    // other bit of z/w this file declares for SIZE only (see this comment's own opening paragraph) --
+    // the cluster-material and particle passes this file serves have no per-draw blend state of their
+    // own to gate on and no history textures of the kind gAverHistoryWrite protects.
+    //
+    // gAmbientParams.w NOW CARRIES U1's GI-VISIBILITY MODE (bits 0-1, 4, 8) and W6/M5's own
+    // blended-history bits (16, 32) plus the giVisPathView debug bit (64) -- see voxi.hlsl's own
+    // gAmbientParams comment (the field this cbuffer mirrors byte-for-byte) for the full bit table.
+    // NOTHING IN THIS PRELUDE READS ANY OF THEM: coneTracedIndirect below has no candidate ray, no
+    // reused sample and no blended-replay concept of its own -- U1 and W6/M5 are both entirely
+    // voxi.hlsl's PSMainVoxi/PSRayDriven and voxi_restir.hlsli's own concern.
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare. NOTHING IN THIS
     // PRELUDE READS x, same as gAmbientParams above it -- declared for size only.

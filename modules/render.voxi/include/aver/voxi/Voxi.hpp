@@ -431,11 +431,48 @@ struct Settings {
     // stays that way regardless of what tier globalIllumination is set to.
     //
     // SCOPE, STATED RATHER THAN LEFT FOR SOMEONE TO DISCOVER BY READING THE SHADER: candidate
-    // generation + RTXDI TEMPORAL resampling only. NO SPATIAL reuse -- RTXDI_GISpatialResampling /
-    // RTXDI_GISpatioTemporalResampling (third_party/rtxdi/Include/Rtxdi/GI/SpatialResampling.hlsli,
-    // SpatioTemporalResampling.hlsli) are vendored and unused; a future slice can add a spatial pass
-    // over the SAME reservoir buffer without touching this field's contract.
+    // generation + RTXDI SPATIO-TEMPORAL resampling -- temporal reuse AND a spatial pass, not merely
+    // the former. STALE UNTIL THIS WAVE: an earlier revision of this comment said "NO SPATIAL reuse"
+    // and named RTXDI_GISpatialResampling / RTXDI_GISpatioTemporalResampling
+    // (third_party/rtxdi/Include/Rtxdi/GI/SpatialResampling.hlsli, SpatioTemporalResampling.hlsli) as
+    // "vendored and unused" -- true of the plain spatial variant, which this file genuinely never
+    // calls, but not of the spatio-temporal one it does: giRestirIndirect's own
+    // RTXDI_GISpatioTemporalResampling call (voxi_restir.hlsli) runs 1-2 spatial taps alongside its
+    // temporal ones (stparams.numSamples, voxi_restir.hlsli:944-947, :969) -- voxi_restir.hlsli's own
+    // header comment already states this correction (:61-69); this field's comment had simply drifted
+    // from it.
     u32 giMode = 0;
+    // ---- ReSTIR GI VISIBILITY: how much of F2 (candidate-hit sky) and F3 (reuse visibility) -- the
+    // contrast fix's two per-pixel rays, cb4b48df -- each rung of globalIllumination pays for ----
+    //
+    // U1's setting. NoRay restores cb4b48df's pre-fix behaviour outright for both rays (the legacy
+    // over-brightness that fix exists to remove); Reconstructed replaces both with one voxel-cone march
+    // the diffuse gather already pays for, so it costs no extra ray at all; HalfResolution traces exact
+    // visibility on one pixel in four per frame and reconstructs the rest from a depth/normal-aware
+    // neighbourhood, with a pixel lacking a valid reconstruction falling back to tracing (so its worst
+    // frame costs what Full costs, never more); Full traces every pixel every frame -- today's
+    // behaviour, byte for byte. See ladder::giRestirVisibility (QualityLadder.hpp) for the per-rung
+    // reasoning and RenderSettingsResolver.hpp's Resolution::giRestirVisibility for how a UI reads it.
+    //
+    // DERIVED FROM globalIllumination ON A TIER CHANGE, exactly like giCones/voxelResolution/
+    // giUpdateInterval above -- and for the identical reason THE DEFAULT IS 2 (HalfResolution): THE
+    // DEFAULT TIER IS Medium, the derivation only fires on a tier CHANGE, and a struct default that
+    // disagrees with its own tier's rung would never reach the value it claims (the same trap
+    // giUpdateInterval and rtShadowRays document above, restated here because this field can fall into
+    // it exactly as easily).
+    //
+    // COMPOSES WITH THE LEGACY BITS, NOT REPLACED BY THEM: voxi.legacyRestirHitSky and
+    // voxi.legacyRestirReuseVisibility (console-only switches, never persisted) each force NoRay for
+    // their OWN ray regardless of what this field asks for -- a set legacy bit always wins, for that one
+    // ray only. This field never writes that slot and the two never collide over ownership of it.
+    //
+    // STORED EXACTLY AS REQUESTED, RESOLVED AT READ TIME -- like giMode just above, and only meaningful
+    // while giMode itself resolves to ReSTIR: RenderSettingsResolver.hpp's resolve() computes
+    // Resolution::giRestirVisibility.effective, which deliberately EQUALS requested always (see that
+    // field's own comment there for why "fixing" that to match giMode/rtRenderMode/denoiser's usual
+    // rule would be wrong for this one).
+    enum class RestirVisibility : u32 { NoRay = 0, Reconstructed = 1, HalfResolution = 2, Full = 3 };
+    u32 giRestirVisibility = 2;   // must equal ladder::giRestirVisibility(Quality::Medium)
     // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
     //
     // Off by default, and ON IS A REAL COST the user is choosing rather than one a denoiser helped
@@ -666,6 +703,8 @@ public:
     static u32 voxelResolutionForQuality(Quality q);
     // Total cones for the diffuse gather, including the axial one. See Settings::giCones.
     static u32 giConesForQuality(Quality q);
+    // U1: how much of F2/F3's cost each GI tier pays for. See Settings::giRestirVisibility.
+    static u32 giRestirVisibilityForQuality(Quality q);
     static u32 refractionForQuality(Quality q);
     // Returns the revoxelisation interval a GI quality tier resolves to, derived by setSettings on a
     // tier change under exactly the same "only if the caller left it untouched" rule as the grid edge

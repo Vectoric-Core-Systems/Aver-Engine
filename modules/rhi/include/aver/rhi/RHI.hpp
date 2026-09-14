@@ -458,8 +458,12 @@ public:
     // which the editor UI and the backbuffer/viewport texture stay pinned to (they never see this
     // value). Clamped to [0.25, 1.0]. 1.0 (the default) reproduces the pre-existing behaviour of
     // sizing the scene 1:1 with the swapchain, byte-for-byte -- a backend that never implements this
-    // is exactly that default, permanently. Rebuilds the scene-sized targets immediately if a
-    // swapchain already exists.
+    // is exactly that default, permanently. Deferred to the next beginFrame() when a swapchain
+    // already exists (optimisation-wave-2, C2-13): D3D12Device and VulkanDevice both PARK the value
+    // and apply it through their own applyPendingRenderScale(), called as the first statement of
+    // beginFrame(), rather than rebuilding immediately here -- see either implementation's own
+    // setRenderScale comment for why an immediate rebuild mid-frame is what actually loses the
+    // device (aver-render-scale-device-loss).
     virtual void setRenderScale(f32 scale) { (void)scale; }
     virtual f32  renderScale() const { return 1.0f; }
 

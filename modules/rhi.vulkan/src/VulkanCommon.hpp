@@ -684,7 +684,7 @@ constexpr u32 kVkSetSamplers  = 3;
 constexpr u32 kVkSetInstances = 4;
 constexpr u32 kVkDescriptorSetCount = 5;   // table0, table1, constants, samplers, instances
 // UAV bindings start here so a layout whose srvCount grows later never renumbers an already-cached
-// UAV binding; kMaxBindingSlots (16) bounds one set's slot count, so SRV/UAV ranges never collide.
+// UAV binding; kMaxBindingSlots (24) bounds one set's slot count, so SRV/UAV ranges never collide.
 constexpr u32 kVkUavBindingBase = kMaxBindingSlots;
 
 // Moves the shared prelude's per-frame constant buffer to the descriptor set this backend
@@ -1395,10 +1395,17 @@ public:
     // Decouples the scene's render targets from the swapchain's: the scene renders at
     // round(present * scale) while everything present-resolution (backbuffer, viewport texture,
     // capture) stays pinned to width_/height_ (IDevice::setRenderScale's contract, RHI.hpp).
-    // NOT inline: the setter does real work -- computeSceneSize() plus a full
-    // rebuildSceneTargets() when a swapchain is already live.
+    // NOT inline: the setter does real work -- PARKS the value (pendingRenderScale_) rather than
+    // rebuilding here. See applyPendingRenderScale's comment for why (aver-render-scale-device-
+    // loss); this is the Vulkan twin of D3D12Device::setRenderScale, fixed there in fa74459 and
+    // left outstanding here until wave 2 (C2-13) -- AverSR Auto now calls this from onUpdate on
+    // every launch, at Medium/Low's non-1.0 default, so the immediate-rebuild path was no longer
+    // a rare CLI-only corner.
     void setRenderScale(f32 scale) override;
-    f32 renderScale() const override { return renderScale_; }
+    // Reports what the last caller ASKED FOR (the parked value when one is pending), not what is
+    // currently resident, so a read-back immediately after a set sees the value it just wrote
+    // rather than the old one for one frame. Mirrors D3D12Device::pendingOrCurrentRenderScale().
+    f32 renderScale() const override { return pendingRenderScaleValid_ ? pendingRenderScale_ : renderScale_; }
     ISwapchain* createSwapchain(const SwapchainDesc& desc) override;
     void beginFrame() override;
     void endFrame() override;
@@ -1568,6 +1575,16 @@ private:
     // the post chain's size-dependent targets (releasePostTargets()), and renotify every
     // registered render feature of the new size.
     void rebuildSceneTargets();
+    // Applies a PARKED setRenderScale() at a frame boundary, mirroring D3D12Device::
+    // applyPendingRenderScale exactly: called as the very first statement of beginFrame(), before
+    // anything records into that frame's command buffer. rebuildSceneTargets() frees and recreates
+    // the depth buffer, MSAA target and post chain -- doing that while a command buffer already
+    // has those images bound (setRenderScale can be called mid-frame, e.g. from the editor's
+    // buildUI() between beginFrame() and endFrame(), or now from AverSR Auto's onUpdate reassert)
+    // records a submit against freed resources, which is what actually loses the device at
+    // present -- waitForGpu() inside rebuildSceneTargets only drains work already SUBMITTED, not a
+    // command buffer still being recorded on the CPU. See aver-render-scale-device-loss.
+    void applyPendingRenderScale();
     void waitForGpu();
     // Blocks until the timeline semaphore reaches `value`. False only when the device has been
     // lost -- the Vulkan analog of D3D12's waitFence(); VK_ERROR_DEVICE_LOST is the one VkResult
@@ -1821,6 +1838,12 @@ private:
     // default viewport, the post chain's targets, and onRenderTargetsChanged do.
     u32 sceneWidth_ = 0, sceneHeight_ = 0;
     f32 renderScale_ = 1.0f;   // [0.25, 1.0]; see IDevice::setRenderScale
+    // PARKED value from a setRenderScale() call made with a swapchain already live: renderScale_
+    // itself does not move until applyPendingRenderScale() runs at the top of the next beginFrame.
+    // pendingRenderScaleValid_ false means "nothing parked" -- renderScale_ is authoritative, same
+    // meaning as D3D12Device::pendingRenderScaleValid_.
+    f32  pendingRenderScale_ = 1.0f;
+    bool pendingRenderScaleValid_ = false;
     void computeSceneSize() {
         sceneWidth_  = width_  ? static_cast<u32>(std::lround(static_cast<f32>(width_)  * renderScale_)) : 0;
         sceneHeight_ = height_ ? static_cast<u32>(std::lround(static_cast<f32>(height_) * renderScale_)) : 0;

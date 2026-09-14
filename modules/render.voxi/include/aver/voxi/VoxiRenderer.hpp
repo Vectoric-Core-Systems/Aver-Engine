@@ -70,6 +70,30 @@ public:
     // via the console: `set voxi.giPoisonView true`.
     void setGiPoisonView(bool on);
 
+    // U1/2.10 I: the ReSTIR-GI half-resolution VISIBILITY path-debug view, riding gAmbientParams.w
+    // bit 64 (see beginShadowHistory's own packAmbientW call and voxi_restir.hlsli's path-view block
+    // for the colour legend: yellow no ray, green reconstructed, blue half-res reconstruction, red
+    // half-res fallback traced, white traced/Full). NOT the same view as setGiPoisonView above --
+    // that one is suppressed while this is on, and vice versa; see giRestirIndirect's own comment for
+    // the precedence. NO LOG, same shape as setGiPoisonView immediately above: SandboxApp reasserts
+    // this from the console/--gi-vis-path-view slot every frame regardless of whether the user just
+    // touched it, and a debug view is not the kind of change resetGiHistory's neighbours log either.
+    // Reachable by hand via the console: `set voxi.giVisPathView true`.
+    void setGiVisPathView(bool on);
+
+    // W6/M5: LIVE PRICING SWITCH for the blended-history-write fix (see PSMainVoxi's own
+    // gAverHistoryWrite gate, voxi.hlsl, and the optimisation-wave-2 plan's section 4). OFF (the
+    // default) shades a blended (translucent) fragment's indirect diffuse through ReSTIR GI exactly
+    // like an opaque one, paying its own share of the ReSTIR/shadow/reflection/AO history work that
+    // W6's fix now lets it keep -- ON drops that fragment back to the voxel cone gather every other
+    // tier already ships, the cheaper term this switch exists to price against. Carried as
+    // gAmbientParams.w bit 16 (see beginShadowHistory's own packAmbientW call). REASSERT IDIOM, same
+    // shape as setNrdLegacyCamera/setLightingLegacyBits above: guarded on an actual CHANGE, because
+    // SandboxApp reasserts this from the console/--blended-gi slot every frame regardless of whether
+    // the user just touched it. Reachable by hand via the console: `set voxi.blendedGiCone true`.
+    void setBlendedGiCone(bool on);
+    bool blendedGiCone() const { return blendedGiCone_; }
+
     // LIVE A/B SWITCH for the NRD camera-contract fix in beginShadowHistory (see that function's own
     // comment on its NRD block for the mechanism and the third_party citations). Default OFF, i.e.
     // bit-identical to the fixed behaviour for anyone who never touches this. ON reinstates the
@@ -93,6 +117,11 @@ public:
     //   bit 4  (R2)  the ReSTIR candidate hit's own indirect sky has no visibility test
     //   bit 8  (R3)  a reused ReSTIR sample shades with no visibility test at all
     //   bit 16 (R6)  the cone gather is cosine-distributed AND cosine-weighted (an effective cos^2)
+    //   bit 32 (M5)  a blended (translucent) fragment writes the shadow/reflection/AO histories and
+    //                reads NRD's denoised output back the OLD, WRONG way -- see PSMainVoxi's
+    //                gAverHistoryWrite gate (voxi.hlsl) and the optimisation-wave-2 plan's section 4.
+    //                Unlike bits 1/4/8/16 above, this one also resets RT history (shadow/reflection/
+    //                AO), not only GI and NRD -- see setLightingLegacyBits' own .cpp comment.
     // 0 (the default) means every fix in the plan is live; setting a bit REINSTATES that one piece
     // of the OLD, WRONG behaviour, for comparison only -- never a setting to leave on, the same
     // posture setNrdLegacyCamera above takes. See EditorConsole.hpp's five voxi.legacy* variables
@@ -1139,8 +1168,23 @@ private:
         // the shader -- which is precisely what the giParams note above warns happens to a row
         // described as free. z is now ALSO spent: setLightingLegacyBits' u32 legacy bitmask (see its
         // own comment above for the bit table), stored as a float and decoded back with a u32 cast in
-        // every shader that reads gAmbientParams.z -- 0 means every lighting-contrast fix is live. w
-        // is what is left, and the warning above still applies to it.
+        // every shader that reads gAmbientParams.z -- 0 means every lighting-contrast fix is live.
+        //
+        // w IS NOW ALSO SPENT -- U1/2.9's own bitmask, packed and decoded by givis::packAmbientW
+        // (GiVisibility.hpp), the SAME numeric-cast idiom z above already uses (a plain
+        // static_cast<f32> of the u32 word, decoded back with `(uint)gAmbientParams.w` in every
+        // shader that reads it -- NOT a bit-reinterpretation). bits 0-1 (& 3u) are
+        // Settings::giRestirVisibility (0 NoRay, 1 Reconstructed, 2 HalfResolution, 3 Full), clamped;
+        // bit 4 (& 4u) says the half-resolution ReSTIR visibility pair (t16/u10, giVisHist_) is bound
+        // this frame; bit 8 (& 8u) says t16 holds a real previous frame; bit 16 (& 16u) is W6/M5's
+        // setBlendedGiCone -- a blended fragment's indirect diffuse takes the voxel cone gather
+        // instead of ReSTIR; bit 32 (& 32u) says the backend replays translucent draws blended THIS
+        // frame (D3D12 only -- see setBlendedGiCone's own header comment for why Vulkan never sets
+        // it); bit 64 (& 64u) is setGiVisPathView's debug view. Single writer: beginShadowHistory,
+        // which publishes it twice -- once unconditionally near the top of the function (histBound/
+        // histValid false, the same F5 reasoning giRestirParams.w's own comment below gives for why
+        // giMode 0 needs a live value too) and again inside the giSurf block once it actually knows
+        // whether the sixth pair bound and holds a valid previous frame.
         //
         // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
@@ -1537,6 +1581,13 @@ private:
     // Warned once for the same reason nrdWarnedMsaa_ is: a condition that cannot self-heal by
     // waiting would just repeat the same WARN every frame.
     bool                  nrdWarnedCameraFactor_ = false;
+    // 3.4 b: set the first time this frame's G-buffer inputs (viewZ/motionVectors/normalRoughness)
+    // disagree in size with the signal NRD is about to be resized to (rtAoHitDist_/giRadiance_) --
+    // see beginShadowHistory's own NRD-rect-vs-resource guard for why this can happen even though
+    // targets are reallocated together on an ordinary resize (3.4 a). Cleared the moment the sizes
+    // agree again, UNLIKE nrdWarnedMsaa_/nrdWarnedCameraFactor_ above: this condition is expected to
+    // self-heal within a frame or two, and a LATER, unrelated mismatch episode should still warn.
+    bool                  nrdWarnedInputSizeMismatch_ = false;
     // voxi.nrdLegacyCamera's live backing store -- see setNrdLegacyCamera's own comment (VoxiRenderer.hpp)
     // for what ON reinstates and why toggling either way resets NRD's history.
     bool                  nrdLegacyCamera_ = false;
@@ -1638,6 +1689,38 @@ private:
     // but NOT their rtHistValid_ flag -- see giHistValid_ below for why sharing it would be wrong.
     rhi::TextureHandle giSurfPosHist_[2] = {0, 0};
     rhi::TextureHandle giSurfNrmHist_[2] = {0, 0};
+
+    // ---- U1/2.11: the half-resolution ReSTIR VISIBILITY history pair (t16/u10) ----
+    // See giVisHistWanted() for when this is wanted (a strict subset of giRestirWanted() -- only
+    // Settings::giRestirVisibility's HalfResolution mode), and ensureShadowHistory/beginShadowHistory
+    // for creation, the starting bind and the per-frame ping-pong swap. Half the linear dimension of
+    // giSurfPosHist_/giSurfNrmHist_, rounded up: 2.10 D/E write exactly one full-resolution pixel per
+    // 2x2 block per frame, so one texel per block is all this needs to hold. RGBA16F: r = the F3
+    // reuse-visibility EMA, g = the F2 traced-luminance EMA, b = the F2 unoccluded-sky-luminance EMA,
+    // a = 1 written / 0 never (giVisReconstruct's own validity test against it, voxi_restir.hlsli).
+    rhi::TextureHandle giVisHist_[2] = {0, 0};
+    // True only once a full write+swap cycle has happened with the pair actually bound this frame --
+    // the SAME shape giHistValid_ below has, and independent for the identical reason THAT flag is
+    // independent of rtHistValid_: giRestirVisibility_ can move to or away from
+    // HalfResolution mid-session while giHistValid_ (or rtHistValid_) is already true from an
+    // unrelated cycle, so trusting either shared flag here would feed giVisReconstruct a "previous
+    // frame" that never actually existed for THIS pair.
+    bool giVisHistValid_ = false;
+    // Latched so an allocation failure (the pair is small, but a device can already be out of memory
+    // by the time this frame's create runs) warns once rather than every frame it keeps failing --
+    // same idiom as giAccumRecreateFailedLogged_/nrdWarnedMsaa_ elsewhere in this class. Cleared on
+    // the next successful create, same reason giAccumRecreateFailedLogged_'s own comment gives.
+    bool giVisHistFailLogged_ = false;
+    // Settings::giRestirVisibility, cached at setSettings like giMode_ beside it. 2 (HalfResolution)
+    // matches the struct default Voxi.hpp gives it (Quality::Medium's own ladder rung), so a renderer
+    // that somehow renders a frame before its first setSettings call behaves as Medium would rather
+    // than as NoRay (0), which is what an un-initialised u32 read as before this field existed.
+    u32 giRestirVisibility_ = 2;
+    // voxi.blendedGiCone's live backing store -- see setBlendedGiCone's own comment.
+    bool blendedGiCone_ = false;
+    // voxi.giVisPathView's live backing store -- see setGiVisPathView's own comment.
+    bool giVisPathView_ = false;
+
     // False right after the pair is (re)created (construction, a resize, or giMode's OWN on/off
     // edge) and true only once a full write+swap cycle has happened with giRestirWanted() true.
     //
@@ -1746,6 +1829,15 @@ private:
     // buffer/surface history regardless of what giMode asks for -- same VRAM-consciousness
     // aoHistoryWanted() applies to its own pair.
     bool giRestirWanted() const { return rayTracingWanted() && giEnabled() && giMode_ == 1u; }
+
+    // U1/2.11: whether the half-resolution ReSTIR VISIBILITY history pair (t16/u10, giVisHist_) is
+    // wanted this frame -- a STRICT SUBSET of giRestirWanted() above, gated further on
+    // Settings::giRestirVisibility actually asking for HalfResolution (2). Full (3), Reconstructed
+    // (1) and NoRay (0) never read or write this pair, so allocating it for them would be VRAM held
+    // for a mode that is not running -- the same VRAM-consciousness aoHistoryWanted()/
+    // giRestirWanted() already apply to their own pairs. Gates giVisHist_'s own allocation in
+    // ensureShadowHistory the same way giRestirWanted() gates the surface-history pair's.
+    bool giVisHistWanted() const { return giRestirWanted() && giRestirVisibility_ == 2u; }
 
 public:
     // THE SKY-OCCLUSION RAY'S HIT DISTANCE FOR THIS FRAME, or 0 when the ray is not running at this

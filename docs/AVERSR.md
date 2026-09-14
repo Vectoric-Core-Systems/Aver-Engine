@@ -19,15 +19,23 @@ work, and nothing in it may claim to be, or imply it is, FSR or DLSS.
 
 > **This table used to list a temporal upscaler as "the default, and genuinely ours" and the spatial
 > one as its fallback.** Neither was true of the tree: no `AverSrTemporal.*` exists anywhere under
-> `modules/render.sr/`, and the actual shipped default is **`Off`** — no upscaler runs at all unless
-> `--aversr <level>` or the Editor Preferences combo asks for one, per `modules/render.sr/README.md`.
+> `modules/render.sr/`. The shipped default used to be **`Off`** — no upscaler ran at all unless
+> `--aversr <level>` or the Editor Preferences combo asked for one. **Optimisation wave 2 (U2, 0.6)
+> changed that: AverSR is now on by default at every Overall quality rung** — `Quality` at Epic and
+> High, `Balanced` at Medium, `Performance` at Low. `Off` still exists and is still a selectable
+> level; it is simply no longer what a project gets without asking. See "Default: Auto", below, for
+> the per-rung table and the precedence a resolved level actually follows.
 > What *is* built is the spatial resample and, since, a second `IUpscaler` implementation doing
 > edge-detecting AA rather than resolution change — neither of those is a "fallback" for the other,
 > they are the only two backends that exist. `IDevice::setUpscaler`/`upscaler()` and the D3D12/Vulkan
 > composite-pass call site are real and wired (`modules/render.sr/README.md`, "Backend wiring"); a
 > non-`Off` level was measured (PTTest, 2750×1639) taking the ray-driven primary pass from 5.0ms at
-> `Off` to 2.3 / 1.7 / 1.3ms at Quality / Balanced / Performance. `SpatialUpscaler::execute()` has
-> still never been proven against a live swapchain by a GPU capture, per the same source.
+> `Off` to 2.3 / 1.7 / 1.3ms at Quality / Balanced / Performance. **SUSPECT**: that table's baseline
+> was contaminated by a second renderer running concurrently (`aver-two-renderers-at-once.md`) and
+> predates ReSTIR and NRD, both of which add their own pixel-bound cost that AverSR now also shrinks;
+> `aver-aversr-measured.md` records the figure itself as unverified, and no composed-default number
+> has replaced it (UNMEASURED). `SpatialUpscaler::execute()` has still never been proven against a
+> live swapchain by a GPU capture, per the same source.
 
 **Upscalers are not combined.** One runs per frame. Running two costs double and they fight over the
 same history — "merge FSR and DLSS into one better upscaler" is not a thing that exists.
@@ -152,7 +160,8 @@ Modularity claimed in a comment is worth nothing; the matrix row is what makes i
 ## Quality levels
 
 `Off` renders at native resolution and runs no upscaler at all — the pre-existing behaviour, and it
-must stay bit-identical to having no AverSR in the build.
+must stay bit-identical to having no AverSR in the build. It remains one of the five values a user,
+a project or the CLI can pick; see "Default: Auto" for what a project gets when nobody picks one.
 
 | Level | Render scale | Pixels vs native |
 |---|---|---|
@@ -163,6 +172,52 @@ must stay bit-identical to having no AverSR in the build.
 
 These map onto `IDevice::setRenderScale`; AverSR does not have a second resolution concept of its
 own.
+
+## Default: Auto
+
+Optimisation wave 2 (U2, 0.6) put AverSR on by default at every Overall quality rung. `Auto` is not
+a fifth render-scale level — it is a ladder lookup that resolves to one of the four levels above:
+
+| Rung | Auto resolves to |
+|---|---|
+| Epic | `Quality` |
+| High | `Quality` |
+| Medium | `Balanced` |
+| Low | `Performance` |
+
+Epic and High take the gentlest level deliberately: those rungs are about image quality, and they
+are where the GI ReSTIR visibility setting (`voxi.giRestirVisibility`) also defaults to `Full` — its
+own most expensive mode. A project whose Overall combo reads Custom has no single rung to look up;
+Auto then uses the ladder value at the higher of its GI and RT tiers.
+
+**Precedence, highest first:**
+
+1. CLI `--render-scale <factor>` — a literal scale, outranks everything.
+2. CLI `--aversr off|quality|balanced|performance|auto`.
+3. the editor's Display preference (`display.aversrChoice`: Auto / Off / Quality / Balanced /
+   Performance / Manual scale). Picking `Auto` here defers to the source below, explicitly.
+4. `RENDER.AVERSR` in the project manifest.
+5. Auto — the table above, computed from the Overall rung (or Custom's GI/RT tiers).
+
+The packaged game (`AverGame.exe`) walks the same chain minus step 3: there is no Display
+preference outside the editor, so a manifest value or Auto is all it has.
+
+AverSR deliberately stays outside Custom detection — it lives at the module boundary above
+`voxi::Settings` (see "Module boundaries", above), so a project reading Custom in the Overall combo
+says nothing about its resolved upscaling level on its own. Where the two disagree, the editor's
+Project Settings "Upscaling" line names the source and, when it differs from the rung's own default,
+says so.
+
+**Startup log.** Every run — interactive and `--frames` alike — logs the resolved level once, on
+change or at startup:
+
+    [AverSR] {level} ({source}): scene {sw}x{sh} -> present {w}x{h}; pass --aversr off for native captures
+
+`{source}` is one of `Auto`, `Manifest`, `User` (the Display choice), `Cli`, or `ForcedOff` (a
+device-loss cookie tripped on the previous launch forced this session's level to `Off`). Because
+Auto applies to `--frames` runs the same as an interactive session, a capture or probe script that
+needs native-resolution pixels has to say `--aversr off` explicitly rather than rely on the rung's
+default — `scripts/gates.ps1`, `scripts/pt-compare.ps1` and `scripts/rt-spread.ps1` all do.
 
 ## Prerequisites
 

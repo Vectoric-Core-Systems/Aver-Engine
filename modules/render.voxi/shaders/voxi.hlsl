@@ -84,7 +84,35 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          point and the sample (voxi_restir.hlsli).
     //   bit 16 (R6) the cone gather's directions are weighted by cosine again on top of an already
     //          cosine-distributed direction, i.e. cos^2 (voxi_cone.hlsli, voxi_gi.hlsli).
-    // w is what is left, and the warning above still applies to it.
+    //   bit 32 (W6) a blended-replay fragment (glass/water) writes its own per-pixel history --
+    //          reservoir, surface history, NRD GI input, RT shadow/AO/reflection history -- again,
+    //          instead of leaving the opaque surface's own history alone (voxi_restir.hlsli,
+    //          voxi_rt.hlsli, PSMainVoxi's rtReflectionTemporal below). Console
+    //          voxi.legacyBlendedHistoryWrite; --lighting-legacy 32.
+    //
+    // w carries GI-VISIBILITY (U1) and BLENDED-HISTORY (W6/M5) bits, decoded the same inline way as z
+    // above -- NOT through packAmbientW's own inverse at the read site, only at the one C++ writer
+    // (VoxiRenderer::beginShadowHistory, aver::voxi::givis::packAmbientW):
+    //   bits 0-1 RestirVisibility mode (Settings::giRestirVisibility, clamped 0..3): 0 No ray,
+    //          1 Reconstructed, 2 HalfResolution, 3 Full. Decoded once, at the top of
+    //          giRestirIndirect (voxi_restir.hlsli), into f2Path/f3Path -- every other reader of
+    //          this mode reads those two derived values, never this field a second time.
+    //   bit 4  the half-resolution visibility pair (gGiVisHist/gGiVisHistOut, t16/u10,
+    //          voxi_restir.hlsli) is bound THIS frame. Mode 2 with this bit clear means the pair
+    //          failed to allocate (2.11) and behaves as Full, not a null-descriptor read.
+    //   bit 8  gGiVisHist (t16) holds a REAL previous frame, not just-created or just-resized
+    //          storage -- the sibling of gGiRestirParams.y for this pair.
+    //   bit 16 (W6/M5) a blended-replay fragment takes the voxel-cone gather instead of ReSTIR for
+    //          its diffuse term -- voxi.blendedGiCone / --blended-gi cone, PSMainVoxi's own M5
+    //          branch below. Default restir (this bit clear): today's image, unchanged.
+    //   bit 32 the RENDERING BACKEND replayed translucent draws blended THIS frame (D3D12 only --
+    //          Vulkan never marks a draw blended, VulkanDevice.cpp, C10) -- what actually enables
+    //          W6's per-fragment discriminator (averDrawIsTranslucent() below) to mean anything;
+    //          without it every fragment behaves as opaque for history-write purposes regardless of
+    //          material, which is the correct answer on a backend that has no blended replay pass to
+    //          protect history from in the first place.
+    //   bit 64 voxi.giVisPathView (2.10 I): paints giRestirIndirect's own F2 path colour in place of
+    //          shading, suppressed while the poison view (gGiRestirParams.w) above is also on.
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
@@ -290,6 +318,37 @@ float averCausticFocus(float3 wpos) {
 
     return focus * gCausticMax.w;
 }
+
+// ---- W6/M5: THE PER-FRAGMENT HISTORY-WRITE DISCRIMINATOR (D3: on by default, no tier drop) ----
+//
+// DECLARED UNCONDITIONALLY, ABOVE THE #if AVER_RT BELOW, EVEN THOUGH EVERY READER OF IT LIVES INSIDE
+// THAT GUARD -- because PSMainVoxi, which SETS it (see this function's own top, after N is built), is
+// NOT itself behind #if AVER_RT: a rasteriser-only build (AVER_RT 0) must still compile that
+// assignment, even though gAverHistoryWrite then goes unread all the way down. The alternative --
+// declaring it inside the guard, beside its only readers -- would fail that build on an undeclared
+// identifier, exactly the kind of "compiles on one variant, breaks the other silently at a DIFFERENT
+// build's compile time" trap this file's own header comments warn about elsewhere (voxi_restir.hlsli's
+// ordering-contract note, most explicitly).
+//
+// `static`, NOT a cbuffer field or a new gAmbientParams bit: like gGiPoisonPdfHit (voxi_restir.hlsli),
+// this is per-invocation storage, fresh for every pixel-shader thread, set once near the top of
+// whichever entry point runs (PSMainVoxi below; PSRayDriven sets it unconditionally true, see that
+// function's own comment) and read by every gated history write between here and the end of the
+// translation unit. true is the correct default: an entry point that never touches it (VSMain, VSky,
+// PSVoxel, ...) behaves exactly as if the write were unconditional, which is what every one of them
+// was before this task.
+static bool gAverHistoryWrite = true;
+
+// Is THIS fragment a translucent (glass/water) draw, replayed blended? Mirrors pbr::isTranslucent
+// (Material.cpp:70-72: `alphaMode == Blend || transmission > 0`) exactly, and for the same reason
+// that function checks both: AVER_MAT_ALPHA_BLEND alone is set only for AlphaMode::Blend
+// (MaterialGpu.cpp:94), so an opaque-flagged material authored with transmission > 0 (frosted glass
+// with no alpha blending, say) would otherwise fall through this test and keep writing history it
+// should not. gTransmission is a material constant (material_prelude.hlsl:66); AVER_MAT_ALPHA_BLEND
+// is defined at material_prelude.hlsl:113. Called only from behind gAmbientParams.w bit 32 (PSMainVoxi,
+// below) -- on Vulkan, where that bit is never set, this function is declared but never evaluated at
+// runtime for any fragment, matching C10's own finding that Vulkan never marks a draw blended.
+bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) != 0u || gTransmission > 0.0; }
 
 #if AVER_RT
 #include "voxi_rt.hlsli"
@@ -668,7 +727,17 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pi
         // WRITE THE RAW TEMPORAL VALUE, NEVER FILTERED -- same rule as rtShadowTemporal's history
         // write. Feeding a filtered value back makes the spatial pass a compounding IIR filter,
         // the reflection slowly dissolving.
-        gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
+        //
+        // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- see this file's own
+        // gAverHistoryWrite/averDrawIsTranslucent comment, above the #if AVER_RT region this function
+        // lives in, for the flag's definition, and PSMainVoxi below for where a blended fragment
+        // clears it. Before this gate, a blended (glass/water) replay fragment overwrote this texel
+        // with the PANE's own reflection, the same class of double write this task's C9 finding
+        // names for the RT shadow/AO histories (voxi_rt.hlsli) and the ReSTIR GI histories
+        // (voxi_restir.hlsli). voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the
+        // old unconditional write, byte-identical, for A/B.
+        if (gAverHistoryWrite)
+            gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
         hit = curHit;
         return curHit ? rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy) : col;
     }
@@ -703,7 +772,10 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pi
     hit = curHit;
     // Raw, not filtered -- see the untiled branch's own note on why feeding the spatial result back
     // into the history makes it a compounding filter.
-    gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
+    //
+    // W6/M5: same gate, same reason, as the untiled branch's own copy of this write above.
+    if (gAverHistoryWrite)
+        gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
     return curHit ? rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy) : col;
 }
 #endif
@@ -973,6 +1045,29 @@ GBufferOut PSMainVoxi(VSOut i) {
 float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     float3 N = normalize(i.nrmWS);
+
+    // ---- W6/M5: DOES THIS FRAGMENT'S HISTORY WRITE BELONG TO IT? ----
+    //
+    // blendedFragment is true only when BOTH are true: the backend actually replayed translucent
+    // draws blended THIS frame (gAmbientParams.w bit 32 -- D3D12 only, C10; the bit is simply clear
+    // on every other backend, so this reduces to always-false there with no second #if needed), AND
+    // this specific fragment's own material is translucent (averDrawIsTranslucent, above the #if
+    // AVER_RT region this file opens further down -- see that function's own comment for why it
+    // checks both AVER_MAT_ALPHA_BLEND and gTransmission).
+    //
+    // gAverHistoryWrite is the gate everything downstream reads: false only when this fragment is a
+    // blended replay AND the legacy override (gAmbientParams.z bit 32, voxi.legacyBlendedHistoryWrite)
+    // is NOT forcing the old unconditional behaviour back on. Computed HERE, unconditionally (this
+    // line runs whether or not AVER_RT is compiled in), because the flag has to be correct before ANY
+    // of this function's own history writes are reached -- and the FIRST of them is not the diffuse-GI
+    // block further down, it is rtShadowTemporal, called within a few lines of this one to build
+    // sunVis, which writes gRtShadowHistOut on the very path this fragment's shading starts with.
+    // Setting the flag at this function's own top, before that first call, is what makes every later
+    // gate (reflection, GI diffuse, RT shadow/AO history) see the right value without each of them
+    // needing to recompute it.
+    const bool blendedFragment = ((uint)gAmbientParams.w & 32u) != 0u && averDrawIsTranslucent();
+    gAverHistoryWrite = !blendedFragment || ((uint)gAmbientParams.z & 32u) != 0u;
+
     float3 L = normalize(gLightDir.xyz);
     float ndl = saturate(dot(N, L));
 #if AVER_RT
@@ -1028,7 +1123,14 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // cone gather here instead of reading a null-filled slot.
 #if AVER_RT
     if (gVoxelParams.w > 0.5) {
-        if (gGiRestirParams.x > 0.5) {
+        // ---- M5: PRICE THE BLENDED PASS'S RESTIR SHARE ----
+        // `--blended-gi cone` (voxi.blendedGiCone, gAmbientParams.w bit 16) drops a blended-replay
+        // fragment to the voxel-cone gather instead of ReSTIR, purely to MEASURE what ReSTIR's own
+        // cost is on the blended pass against the "blended replay" GPU span (D3D12Device.cpp) -- see
+        // section 4(a) of the optimisation-wave-2 plan. Default restir (this added test false): the
+        // condition collapses to the original `gGiRestirParams.x > 0.5` and today's image is
+        // unchanged. blendedFragment is computed once, above, at this function's own top.
+        if (gGiRestirParams.x > 0.5 && !(blendedFragment && ((uint)gAmbientParams.w & 16u) != 0u)) {
             ind = giRestirIndirect(i.wpos, N, rtViewZ, i.pos.xy, (uint)gRtHistParams.z, ao);
             giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind);
             restirSuppliedDiffuse = true;
@@ -1360,6 +1462,17 @@ RayDrivenGBufferOut PSRayDriven(SkyOut i) {
 RayDrivenOut PSRayDriven(SkyOut i) {
     RayDrivenOut o;
 #endif
+
+    // W6/M5: EXPLICITLY TRUE, NOT LEFT TO THE STATIC'S OWN DEFAULT. A blended (glass/water) draw
+    // never reaches this entry point at all -- see this function's own header comment, "WHAT A
+    // TRANSLUCENT SURFACE SHARES WITH THIS PASS": the primary ray here traces AVER_RT_MASK_OPAQUE
+    // only, and glass is routed into the translucent lane and drawn by PSMainVoxi's own blended
+    // replay instead. So PSRayDriven has no blendedFragment computation of its own and never needs
+    // one; setting the flag explicitly here, rather than computing a test that could only ever read
+    // false, says that plainly instead of leaving a reader to prove the negative from this function's
+    // absence of one. Every history write below (the sky-miss surface-history sentinel just below,
+    // and the AO hit-distance write further down) is therefore always live for this pass.
+    gAverHistoryWrite = true;
 
     // The same NDC-to-world-ray reconstruction PSVoxelDebug does, through the same gInvViewProj,
     // so the primary ray and the debug raymarch cannot disagree about where a pixel looks.

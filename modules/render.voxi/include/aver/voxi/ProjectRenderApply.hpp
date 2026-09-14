@@ -49,18 +49,18 @@ inline void applyManifestTiers(const fmt::ProjectDesc& project, Settings& s) {
 // SandboxApp.cpp's applyProjectVoxiSettings applies in its SECOND setSettings call, same order, same
 // sentinels, with ONE deliberate change (N6):
 //
-// THE N6 FIX. Nine of these knobs are TIER-DERIVED: Renderer::setSettings only recomputes one of them
+// THE N6 FIX. Ten of these knobs are TIER-DERIVED: Renderer::setSettings only recomputes one of them
 // from its tier when the tier CHANGES in that same call (Voxi.cpp's own derivation block) -- so a
 // manifest that states a tier but says nothing about one of its derived knobs used to just inherit
 // whatever was ALREADY LIVE, tier change or not. Project A pins GICONES 7 at GI Epic; project B states
 // GI Epic too and never mentions GICONES; opening B right after A used to run Epic's cones at 7, not
 // the ladder's 13, because the tier never "changed" out from under B's own apply. Here, the ABSENCE of
-// one of these nine keys does not mean "leave it" -- it means "follow the tier `s` was just committed
+// one of these ten keys does not mean "leave it" -- it means "follow the tier `s` was just committed
 // to", which is what running this function AFTER applyManifestTiers has already been committed through
 // setSettings (see applyManifestTwoPhase) is what actually gives it: `s.globalIllumination`,
 // `s.rayTracing` and `s.pathTracing` here are the DEVICE-CLAMPED, POST-DERIVATION tiers, not the raw
-// manifest ask. The nine: voxelResolution, giCones, giUpdateInterval (GI); rtShadowRays,
-// rtPixelsPerRayTile, rtShadowDenoise, rtRenderMode, refractionMode (RT); ptBounces (PT).
+// manifest ask. The ten: voxelResolution, giCones, giUpdateInterval, giRestirVisibility (GI);
+// rtShadowRays, rtPixelsPerRayTile, rtShadowDenoise, rtRenderMode, refractionMode (RT); ptBounces (PT).
 //
 // SANITY THIS FIX COSTS NOTHING TODAY: Settings{}'s own defaults already equal ladder(Medium) per
 // group (QualityLadder.hpp's static_asserts enforce this), and a tier CHANGE already re-derives these
@@ -103,6 +103,12 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     if (project.giMode   >= 0) s.giMode   = static_cast<u32>(project.giMode);
     if (project.denoiser  >= 0) s.denoiser = project.denoiser != 0;
 
+    // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
+    // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
+    // giRestirVisibility happened to already be live at.
+    if (project.restirVisibility >= 0) s.giRestirVisibility = static_cast<u32>(project.restirVisibility);
+    else                                 s.giRestirVisibility = ladder::giRestirVisibility(s.globalIllumination);
+
     if (project.refractionMode >= 0) s.refractionMode = static_cast<u32>(project.refractionMode);
     else                               s.refractionMode = ladder::refraction(s.rayTracing);
 
@@ -114,7 +120,7 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // rather than split into applyManifestTiers for the same reason that file states: this is the call
     // that carries every knob a manifest can state, and separating them by derivation would be a
     // distinction only that file's own history explains. giUpdateInterval IS tier-derived, unlike its
-    // two neighbours here, and gets the same N6 else-branch as the nine above.
+    // two neighbours here, and gets the same N6 else-branch as the ten above.
     if (project.msaa        >  0) s.msaa        = static_cast<Msaa>(project.msaa);
     if (project.meshShaders >= 0) s.meshShaders = project.meshShaders != 0;
 
@@ -167,7 +173,7 @@ inline void applyManifestTwoPhase(const fmt::ProjectDesc& project, Settings& s, 
 
 // ---- CAPTURE: Settings -> manifest -----------------------------------------------------------------
 
-// Applies the capture rule for ONE of the nine keyed derived knobs to one ProjectDesc field.
+// Applies the capture rule for ONE of the ten keyed derived knobs to one ProjectDesc field.
 // `group` is which Scalability group this knob belongs to, for the overallFollowMask bit test and for
 // reading each side's TIER through groupTier (Scalability.hpp) -- the same tier accessor
 // groupFollowsLadder and applyOverall already use, so "the group's tier" means the same thing
@@ -216,10 +222,10 @@ inline void captureClamped(int& manifestField, u32 requestedField, u32 liveField
 // the commit, so "live" means what it says). `overallFollowMask` is whatever applyOverall (or an
 // Overall button that just called it) returned this same edit, 0 when no Overall preset ran.
 //
-// THE NINE KEYED DERIVED KNOBS use captureKnob's four-step rule above: GI's voxelResolution/giCones/
-// giUpdateInterval, RT's rtShadowRays/rtPixelsPerRayTile/rtShadowDenoise/rtRenderMode/refractionMode,
-// PT's ptBounces. giSkyOcclusionRays/giSkyOcclusionTile have NO manifest key and are never captured --
-// there is nothing in `project` to write them into.
+// THE TEN KEYED DERIVED KNOBS use captureKnob's four-step rule above: GI's voxelResolution/giCones/
+// giUpdateInterval/giRestirVisibility, RT's rtShadowRays/rtPixelsPerRayTile/rtShadowDenoise/
+// rtRenderMode/refractionMode, PT's ptBounces. giSkyOcclusionRays/giSkyOcclusionTile have NO manifest
+// key and are never captured -- there is nothing in `project` to write them into.
 //
 // THE FIVE DEVICE-CLAMPED FIELDS (the three tier enums, meshShaders, msaa) use captureClamped's rule.
 //
@@ -238,6 +244,8 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     captureKnob(project.giCones, requested.giCones, live.giCones,
                 ScalabilityGroup::GlobalIllumination, requested, live, overallFollowMask);
     captureKnob(project.giUpdateInterval, requested.giUpdateInterval, live.giUpdateInterval,
+                ScalabilityGroup::GlobalIllumination, requested, live, overallFollowMask);
+    captureKnob(project.restirVisibility, requested.giRestirVisibility, live.giRestirVisibility,
                 ScalabilityGroup::GlobalIllumination, requested, live, overallFollowMask);
 
     captureKnob(project.rtShadowRays, requested.rtShadowRays, live.rtShadowRays,

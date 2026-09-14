@@ -87,6 +87,11 @@ struct ProjectDesc {
     // RENDER.DENOISER: 0/1, NVIDIA NRD over the sky occlusion and the ReSTIR GI radiance. Needs the
     // G-buffer and MSAA 1 -- see Voxi::Settings::denoiser, which owns the explanation.
     int denoiser           = -1; // RENDER.DENOISER         0/1
+    // RENDER.RESTIRVISIBILITY: the ReSTIR GI contrast fix's two per-pixel rays (F2 candidate-hit sky,
+    // F3 reuse) -- see voxi::Settings::giRestirVisibility, which owns the explanation. -1 is one of the
+    // TEN tier-derived GI/RT/PT knobs ProjectRenderApply.hpp's N6 rule covers: absent follows whatever
+    // the GI tier's own ladder rung says, not whatever value happened to already be live.
+    int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full
     int refractionMode     = -1; // RENDER.REFRACTIONMODE   0=Off 1=Screen-space 2=Ray-traced
     f32 refractionStrength = -1.0f; // RENDER.REFRACTIONSTRENGTH  bend scale
     f32 refractionEdgeFade = -1.0f; // RENDER.REFRACTIONEDGEFADE  hides the screen-space miss at edges
@@ -114,6 +119,14 @@ struct ProjectDesc {
     // authored, which is what every existing project gets and what every MEASUREMENT needs -- a
     // renderer that quietly retunes itself cannot be A/B'd against anything.
     f32 frameBudgetMs = -1.0f;  // RENDER.FRAMEBUDGETMS  e.g. 16.7 for 60 Hz; <= 0 = off
+
+    // RENDER.AVERSR: the project-level default for AverSR upscaling. Deliberately NOT a voxi::Settings
+    // field and NOT applied through ProjectRenderApply.hpp -- render.voxi must never include render.sr
+    // (the module boundary docs/AVERSR.md states), so both hosts read project.averSr directly rather
+    // than through the shared Voxi apply path every other RENDER.* key above goes through. -1 follows
+    // the Overall rung's own AverSR default (ladder::averSrLevel); the editor's Display > AverSR choice
+    // and CLI --aversr both outrank this when they are stated.
+    int averSr = -1; // RENDER.AVERSR  -1 follow preset, 0 off, 1 quality, 2 balanced, 3 performance
 
     // ---- FOUR THINGS THE UI COULD SET AND THE FILE COULD NOT HOLD ------------------------------
     //
@@ -157,12 +170,12 @@ struct ProjectDesc {
                voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
-               giCones >= 0 || giMode >= 0 || denoiser >= 0 ||
+               giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
-               !backend.empty() || frameBudgetMs > 0.0f;
+               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0;
     }
 
     // ---- WINDOW.* -- how a shipped game presents itself -----------------------------------------

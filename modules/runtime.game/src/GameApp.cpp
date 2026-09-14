@@ -52,6 +52,12 @@
 // separation pass) -- see attachVoxi and applyProjectRenderSettings below for the two call sites.
 // Pulls in RenderSettingsResolver.hpp (voxi::resolve, for pushFrame's G-buffer switch) along the way.
 #  include "aver/voxi/ProjectRenderApply.hpp"
+// Scalability.hpp (3.3 C, contract C2-12): resolveAverSrLevel/autoAverSrLevel/AverSrDecision/
+// AverSrSource, for onInit's AverSR apply block below. Pulls in QualityLadder.hpp (the
+// kAverSrOff..kAverSrPerformance numbering) and, through RenderSettingsResolver.hpp, Voxi.hpp itself
+// -- already included one line up, so this adds no new dependency, only new names from a header this
+// translation unit did not previously reach into.
+#  include "aver/voxi/Scalability.hpp"
 // NrdDenoiser.hpp, for Denoiser::available() alone -- attachVoxi's nrdSupported computation below is
 // the SandboxApp.cpp:2508-2514 mirror site R1 requires (same expression, `backend() == D3D12 &&
 // available()`). Aver.Render.NRD is "ALWAYS linkable" (its own CMakeLists' own words) and reaches this
@@ -353,6 +359,43 @@ bool isOcproject(const char* p) {
     return true;
 }
 
+#if AVER_MODULE_VOXI
+// [AverSR] log naming (3.3 C). The line's shape is C2-10's fixed "[AverSR] {level} ({source}): scene
+// {}x{} -> present {}x{}" -- these two functions supply the two words. This file must not include
+// aver/sr/AverSrQuality.hpp (the module boundary render.voxi and runtime.game both have to respect,
+// Scalability.hpp's own header comment), so the level's name is typed out locally rather than
+// borrowed from aver::sr::qualityName's identical table. This is NOT a second source of truth for the
+// NUMBERING itself: `level` is the quality ladder's own kAverSrOff..kAverSrPerformance
+// (QualityLadder.hpp, 3.2), and game/src/GameMain.cpp's own static_asserts (3.2) are what actually
+// cross-check that numbering against aver::sr::Quality's, under AVER_MODULE_SR -- this function only
+// has to spell the same four words sr::qualityName already does.
+const char* averSrLevelName(u32 level) {
+    switch (level) {
+        case voxi::ladder::kAverSrOff:         return "Off";
+        case voxi::ladder::kAverSrQuality:     return "Quality";
+        case voxi::ladder::kAverSrBalanced:    return "Balanced";
+        case voxi::ladder::kAverSrPerformance: return "Performance";
+        default:                               return "Off";
+    }
+}
+
+// Mirrors the editor's own Project Settings source vocabulary (3.3 A) for the subset a packaged game
+// can actually produce. GameApp::onInit always passes userLevel=-1 to resolveAverSrLevel (no Display
+// page to prefer from -- U2's own "the packaged game uses the same chain minus the user choice") and
+// never forces a crash cookie, so User and ForcedOff are named here defensively; that call site
+// should never actually produce them.
+const char* averSrSourceName(voxi::AverSrSource source) {
+    switch (source) {
+        case voxi::AverSrSource::Auto:      return "Auto";
+        case voxi::AverSrSource::Manifest:  return "project default";
+        case voxi::AverSrSource::User:      return "your Display preference";
+        case voxi::AverSrSource::Cli:       return "--aversr";
+        case voxi::AverSrSource::ForcedOff: return "forced Off after a failed launch";
+    }
+    return "Auto";
+}
+#endif
+
 } // namespace
 
 GameConfig parseArgs(int argc, char** argv) {
@@ -401,6 +444,21 @@ GameConfig parseArgs(int argc, char** argv) {
             const int period = std::atoi(argv[i + 2]);
             c.camWobblePeriod = period > 0 ? static_cast<u32>(period) : 0u;
             i += 2;
+        }
+        // --aversr off|quality|balanced|performance|auto (3.3 C): see GameConfig::averSrArg's own
+        // comment for why this is parsed LOCALLY, into a raw int, rather than through
+        // aver::sr::parseQuality. equalsAsciiCI is the same case-insensitive comparator
+        // ocgraphRecord/ocgraphDeclaresClass already use above; v is guarded for null before use
+        // exactly like this function's own valueAfter callers do everywhere else. An unrecognised
+        // value is ignored, matching this parser's own convention (see the header) that a bad or
+        // foreign argument must never be fatal.
+        else if (std::strcmp(a, "--aversr") == 0) {
+            const char* v = valueAfter(argc, argv, i, nullptr);
+            if      (v && equalsAsciiCI(v, "off"))         { c.averSrArg = 0;  ++i; }
+            else if (v && equalsAsciiCI(v, "quality"))     { c.averSrArg = 1;  ++i; }
+            else if (v && equalsAsciiCI(v, "balanced"))    { c.averSrArg = 2;  ++i; }
+            else if (v && equalsAsciiCI(v, "performance")) { c.averSrArg = 3;  ++i; }
+            else if (v && equalsAsciiCI(v, "auto"))        { c.averSrArg = -1; ++i; }
         }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
@@ -1681,6 +1739,46 @@ void GameApp::onInit(Engine& e) {
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
 #endif
     openProject(e);
+#if AVER_MODULE_VOXI
+    // AverSR (3.3 C, contract C2-12): resolved and installed right here, directly after openProject --
+    // applyProjectRenderSettings (called from inside openProject, see its own comment) has already
+    // committed the open project's GI/RT tiers into voxi::Renderer::get().settings() by this point,
+    // which is what makes autoAverSrLevel's Custom -> max(GI tier, RT tier) fallback (Scalability.hpp)
+    // read the PROJECT's tiers rather than the compiled-in Settings{} default. CLI (--aversr) beats
+    // the project's RENDER.AVERSR beats Auto -- the same resolveAverSrLevel chain the editor uses,
+    // with userLevel pinned to -1 always: a packaged game has no Display page to prefer from (U2's own
+    // "the packaged game uses the same chain minus the user choice").
+    if (rhi::IDevice* dev = e.device()) {
+        const voxi::Renderer& vx = voxi::Renderer::get();
+        const voxi::AverSrDecision dec = voxi::resolveAverSrLevel(
+            cfg_.averSrArg, -1, project_.averSr, voxi::autoAverSrLevel(vx.settings(), vx.deviceInfo()));
+
+        // NULL WHEN THE SR MODULE IS NOT LINKED into this build, and that is the legal default --
+        // averSrInstaller_ is set only from game/src/GameMain.cpp under its own AVER_MODULE_SR guard,
+        // the sole translation unit in this executable allowed to name sr::anything (setAverSrInstaller's
+        // own comment). A resolved level with no installer present stays at native scale below: the
+        // game must still BUILD AND RUN with the SR module absent, not merely compile with it
+        // unreachable.
+        f32 scale = 1.0f;
+        if (dec.level != voxi::ladder::kAverSrOff && averSrInstaller_ &&
+            averSrInstaller_(*dev, dec.level, averSrUpscaler_, scale)) {
+            dev->setRenderScale(scale);
+            dev->setUpscaler(averSrUpscaler_.get());
+        }
+
+        // "scene {}x{} -> present {}x{}" mirrors rhi::IDevice::setRenderScale's own documented formula
+        // ("the scene renders at round(present * scale)", RHI.hpp) -- there is no public scene-size
+        // accessor on IDevice to read back (a backend's own sceneWidth_/sceneHeight_ are private), so
+        // this computes the same round() a backend would, from the window's present size and whatever
+        // scale actually ended up in effect just above (native 1.0 unless the installer just ran).
+        const u32 presentW = e.window() ? e.window()->width()  : cfg_.width;
+        const u32 presentH = e.window() ? e.window()->height() : cfg_.height;
+        const u32 sceneW = static_cast<u32>(std::lround(static_cast<f64>(presentW) * scale));
+        const u32 sceneH = static_cast<u32>(std::lround(static_cast<f64>(presentH) * scale));
+        AVER_INFO("[AverSR] {} ({}): scene {}x{} -> present {}x{}",
+                  averSrLevelName(dec.level), averSrSourceName(dec.source), sceneW, sceneH, presentW, presentH);
+    }
+#endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // AFTER openProject: needs registerBuiltins' unit cube (or spawns it itself when no project ever
     // reached that call -- see spawnParticleTestContent's own comment) and overrides the camera
@@ -1972,6 +2070,16 @@ void GameApp::onShutdown(Engine& e) {
     // exactly this reason -- it must outlive the device, which it does by construction, but only if
     // it is unregistered before the device goes.
     rhi::IDevice* dev = e.device();
+    // AverSR (3.3 C, contract C2-12): DETACH BEFORE DESTROY, the FIRST statement after `dev` exists --
+    // the device holds a RAW, non-owning pointer into averSrUpscaler_ (rhi::IDevice::setUpscaler's own
+    // comment), so resetting the unique_ptr before telling the device to forget it would leave that
+    // pointer dangling for however many frames remain before the device itself goes. Unconditional and
+    // harmless when AverSR was never installed this run: setUpscaler(nullptr) on an already-null slot,
+    // and reset() on an already-null unique_ptr, are both no-ops. Mirrors the exact ordering
+    // SandboxApp.cpp's own clearAverSrUpscaler/applyAverSrQuality guard for the identical crash class
+    // (search: "--aversr-cycle").
+    if (dev) dev->setUpscaler(nullptr);
+    averSrUpscaler_.reset();
     if (dev && pcgAttached_) { dev->removeRenderFeature(&pcgVolume_); pcgAttached_ = false; }
     pcgVolume_.shutdown();
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE

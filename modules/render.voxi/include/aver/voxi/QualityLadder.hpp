@@ -163,6 +163,52 @@ constexpr u32 giUpdateInterval(Quality q) {
     }
 }
 
+// RESTIR GI VISIBILITY (U1): how much of F2 (candidate-hit sky) and F3 (reuse visibility) -- the
+// contrast fix's two per-pixel rays, cb4b48df -- each rung pays for. See Settings::giRestirVisibility
+// (Voxi.hpp) for what each of the four values (NoRay/Reconstructed/HalfResolution/Full) actually
+// changes in the shader, and why the struct default (2, HalfResolution) has to equal this ladder's
+// Medium rung.
+//
+// HIGH AND EPIC ARE YOUR DECISION: Full, unconditionally -- U1 names both explicitly rather than
+// leaving them to this file's own judgement. Full is also the only value that keeps F2 and F3
+// byte-identical to what cb4b48df shipped, which is the point at the two rungs this whole ladder
+// otherwise treats as "no compromise" (Full ReSTIR reuse here; RayTraced refraction, the widest cone
+// count and the highest shadow-ray count elsewhere in this file).
+//
+// LOW AND MEDIUM ARE MINE, AND BOTH ARE UNMEASURED:
+//   Low = Reconstructed (1). RT Low rasterises (ladder::rtRenderMode below returns 0 for Low), so F2/F3
+//   would otherwise be paid once per SHADED FRAGMENT rather than once per pixel, and PTTest ships with
+//   its depth prepass off (PTTest.ocproject:21), so overdraw multiplies that further. Reconstructed
+//   traces no extra ray at all -- one voxel-cone march the diffuse gather's own aperture already pays
+//   for -- so it does not compound with overdraw the way a traced ray would (the march itself is still
+//   paid per fragment; see this project's optimisation-wave-2 plan, section 2.10 F, for how much of
+//   Low's saving that leaves -- UNMEASURED). NoRay was rejected for Low because it is exactly the
+//   over-brightness cb4b48df's contrast fix exists to remove, at the one tier whose ambient occlusion
+//   the fix touches least.
+//   Medium = HalfResolution (2). Medium is ray-driven (ladder::rtRenderMode below returns 1 for
+//   Medium), so the cost is once per PIXEL, not once per fragment, and HalfResolution traces exact
+//   visibility on one pixel in four per frame at rest -- at most 0.5 extra rays per pixel where Full
+//   pays up to 2. A pixel with no valid history reconstruction traces as Full, so HalfResolution's
+//   worst frame (every pixel disoccluded at once) costs exactly what Full's does; it never costs more.
+//   Neither rung has a timed number behind it. This wave's by-hand verification (section 5 of the same
+//   plan) settles both before either default ships to anyone who was not the one who chose it.
+//
+// OFF IS INERT AND RETURNS 3 (Full), by the same convention rtShadowRays/giSkyOcclusionRays use above:
+// with globalIllumination Off, ReSTIR GI never runs at all (RenderSettingsResolver.hpp's
+// DisableReason::RequiresRestirGi), so this value is never read by a shader; returning the tier that
+// changes nothing if ReSTIR ever did run (Full is what every image looked like before this field
+// existed) is the safest inert answer, exactly as giCones(Off) stays 6 rather than dropping to Low's 3.
+constexpr u32 giRestirVisibility(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 3;   // inert: ReSTIR GI is not running (RequiresRestirGi)
+        case Quality::Low:    return 1;   // Reconstructed -- mine, UNMEASURED (RT Low rasterises)
+        case Quality::Medium: return 2;   // HalfResolution -- mine, UNMEASURED (Medium is ray-driven)
+        case Quality::High:   return 3;   // Full -- your decision (U1)
+        case Quality::Epic:   return 3;   // Full -- your decision (U1)
+        default:              return 3;   // an unknown tier must not silently under-correct the contrast fix
+    }
+}
+
 // ================================================================= Ray Tracing ====================
 
 // WHICH REFRACTION MODE THE TIER ASKS FOR. RayTraced only at the top two rungs, because it spends a
@@ -449,6 +495,63 @@ constexpr u32 ptBounces(Quality q) {
     }
 }
 
+// ================================================================= AverSR ==========================
+
+// AVERSR (U2): THE SPATIAL-UPSCALE LEVEL EACH OverallQuality RUNG DEFAULTS TO. Not one of the render
+// features this file otherwise ladders (globalIllumination/rayTracing/pathTracing) -- AverSR is a
+// PRESENT-SIZE upscale that every one of those features renders BEHIND, at a smaller internal
+// resolution, so it composes with all of them rather than belonging to any one. See Scalability.hpp's
+// own header comment for why that keeps it out of voxi::Settings and out of Custom detection (module
+// boundary: render.voxi must never include render.sr), and this project's optimisation-wave-2 plan,
+// section 3.3, for where a user's own Display choice, a project manifest and the CLI each outrank this
+// default (Scalability.hpp's resolveAverSrLevel is that precedence chain, minus the level-picking UI
+// itself).
+//
+// kAverSrOff/kAverSrQuality/kAverSrBalanced/kAverSrPerformance mirror aver::sr::Quality's own numbering
+// (AverSrQuality.hpp: Off=0, Quality=1, Balanced=2, Performance=3) byte for byte, restated here rather
+// than included, because this module must not depend on render.sr at all -- the static_asserts in
+// SandboxApp.cpp and GameMain.cpp (built under AVER_MODULE_SR) check the two enumerations agree, so a
+// future reordering on either side fails a build instead of silently mismatching a level number.
+inline constexpr u32 kAverSrOff = 0, kAverSrQuality = 1, kAverSrBalanced = 2, kAverSrPerformance = 3;
+
+// THE LEVEL EACH RUNG DEFAULTS TO. Off returns native (kAverSrOff) -- with GI, RT and PT all off there
+// is nothing left to spend a reduced internal resolution buying back, and a project that explicitly
+// asked for Off should not silently render smaller anyway.
+//
+// SUSPECT EVIDENCE, labelled as such because that is where it is measured (aver-aversr-measured.md;
+// this project's optimisation-wave-2 plan, section 3.1, has the full account): PTTest, 2026-08-31, 200
+// frames -- Quality -4.0 ms / -21.6% edge sharpness; Balanced -4.9 / -25.3%; Performance -5.6 / -29.4%.
+// That table's own baseline was contaminated by a second renderer running at the same time (plan's C13)
+// and it predates both ReSTIR and NRD, two pixel-bound additions Epic's frame carries today -- so the
+// SAVING at every level is expected to exceed what is recorded here (UNMEASURED; the plan's section
+// 5.0/5.2 settles it), while the DELTAS between levels are what this ladder actually leans on below, and
+// even those inherit the contamination: a corrected baseline could change the deltas, not merely the
+// absolute milliseconds.
+//
+// EPIC AND HIGH TAKE THE GENTLEST LEVEL (Quality, 1) ON THAT SUSPECT EVIDENCE: Quality -> Balanced
+// trades 0.9 ms for 3.7 points of edge sharpness; Balanced -> Performance trades 0.7 ms for 4.1 more --
+// diminishing time bought for a growing sharpness cost. Epic and High are the two rungs this ladder
+// otherwise treats as "about image quality" everywhere else (Full ReSTIR visibility above, RayTraced
+// refraction, the widest cone/shadow-ray counts), so they take AverSR's gentlest rung for the same
+// reason, not a separately measured one.
+//
+// MEDIUM TAKES THE MIDDLE LEVEL (Balanced, 2), LOW THE WIDEST (Performance, 3): Low rasterises at this
+// struct's own 4x MSAA default (ladder::rtRenderMode above returns 0 for Low), so it keeps real
+// geometric antialiasing at a quarter of the internal pixel count even at AverSR's most aggressive
+// level -- the one tier that can afford to spend the most on upscaling, because it is not the one
+// spending MSAA on nothing the way every ray-driven rung above it does (single-sample; see
+// Settings::rtRenderMode's own "WHAT DEFAULTING TO IT TRADES AWAY").
+constexpr u32 averSrLevel(Quality q) {
+    switch (q) {
+        case Quality::Off:    return kAverSrOff;           // nothing left to buy back at Off
+        case Quality::Low:    return kAverSrPerformance;   // widest -- MSAA already carries the AA cost
+        case Quality::Medium: return kAverSrBalanced;
+        case Quality::High:   return kAverSrQuality;        // gentlest -- an image-quality rung
+        case Quality::Epic:   return kAverSrQuality;        // gentlest -- an image-quality rung
+        default:              return kAverSrOff;            // an unknown tier must not silently downscale
+    }
+}
+
 } // namespace aver::voxi::ladder
 
 namespace aver::voxi {
@@ -478,6 +581,8 @@ static_assert(Settings{}.giCones          == ladder::giCones(Quality::Medium),
               "giCones' struct default no longer matches GI Medium's ladder rung");
 static_assert(Settings{}.giUpdateInterval == ladder::giUpdateInterval(Quality::Medium),
               "giUpdateInterval's struct default no longer matches GI Medium's ladder rung");
+static_assert(Settings{}.giRestirVisibility == ladder::giRestirVisibility(Quality::Medium),
+              "giRestirVisibility's struct default no longer matches GI Medium's ladder rung");
 
 static_assert(Settings{}.rtShadowRays       == ladder::rtShadowRays(Quality::Medium),
               "rtShadowRays' struct default no longer matches RT Medium's ladder rung");

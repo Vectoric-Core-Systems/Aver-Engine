@@ -851,6 +851,15 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
 float3 voxelUVW(float3 wp);
 bool   insideVolume(float3 uvw);
 
+// F2's RECONSTRUCTED path (voxi_restir.hlsli, 2.10 B of the optimisation-wave-2 plan) needs one
+// voxel-cone march, and needs it long before voxi_cone.hlsli's real definition is reachable: that
+// file is #include'd only after voxi_restir.hlsli (voxi.hlsl:798, following the #include at :297),
+// so this is the SAME forward-declare-then-define split the two lines above already use, for the
+// identical reason. Defined at voxi_cone.hlsli:62; signature copied verbatim from there, so a
+// changed definition that forgets to update this prototype fails loudly (a mismatched forward
+// declaration is a compile error, not a silent drift) rather than being missed.
+float4 traceCone(float3 originWS, float3 dir, float aperture);
+
 // What one hemisphere gather learned. `sky` and `bounce` are written only under AVER_AO_UNIFIED and
 // are zero otherwise, so a caller that ignores them gets exactly the old behaviour and exactly the
 // old cost -- the branches that fill them are compiled out, not merely unread.
@@ -1422,7 +1431,16 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // block, which is a trap this file has been caught by before.
     uint nrdW = 0, nrdH = 0;
     gNrdAo.GetDimensions(nrdW, nrdH);
-    if (nrdW > 0u && nrdH > 0u) {
+    // W6/M5: `gAverHistoryWrite &&` LEADS THIS TEST NOW -- a blended-replay fragment (voxi.hlsl's
+    // PSMainVoxi, this frame's translucent pane) must not read back the OPAQUE surface's own
+    // denoised answer, the exact mis-attribution this task's C9 finding names ("a pane is handed
+    // the denoised GI/AO of the surface behind it"). Skipping the readback leaves `vis` at the
+    // fresh/history blend just above -- this fragment's own measurement, not someone else's -- and
+    // the pane's own write below is gated the same way, so neither half of the pair mixes the two
+    // surfaces' signals. See voxi.hlsl's own gAverHistoryWrite/averDrawIsTranslucent for the gate's
+    // definition and voxi_restir.hlsli's identical readback gate (gGiRadianceOut's NRD GI readback)
+    // for the sibling fix.
+    if (gAverHistoryWrite && nrdW > 0u && nrdH > 0u) {
         // STILL WRITTEN TO THE HISTORY BELOW, because that history is what the NEXT frame's
         // reprojection reads and what the pass falls back to the moment NRD stops running -- a
         // frame where the G-buffer is switched off would otherwise resume from a stale average.
@@ -1435,7 +1453,15 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // AND RAW, NEVER FILTERED, which is the same single most important line the shadow path has:
     // feeding the spatially filtered result back into the history turns this into an IIR filter
     // whose artefacts compound every frame. The filter applies on the way OUT, below.
-    gAoHistOut[uint2(pixel)] = float2(vis, curDepth);
+    //
+    // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- see voxi.hlsl's own
+    // gAverHistoryWrite/averDrawIsTranslucent comment for the flag's definition and
+    // voxi.hlsl's PSMainVoxi for where it is set per fragment. Before this gate, PSMainVoxi's
+    // blended (glass/water) replay pass wrote THIS texel a second time with the PANE's own AO
+    // measurement, overwriting the opaque surface's -- the "non-atomic double write" this file's
+    // own C9 comment used to describe as accepted-but-unfixed. voxi.legacyBlendedHistoryWrite
+    // (gAmbientParams.z bit 32) restores the old unconditional write, byte-identical, for A/B.
+    if (gAverHistoryWrite) gAoHistOut[uint2(pixel)] = float2(vis, curDepth);
     // THE RAW MEASUREMENT, NOT THE ACCUMULATED ONE -- the exact opposite of the line above it, and
     // deliberately so. The history write is accumulated because THIS shader is the thing that
     // consumes it next frame and wants the average. This one goes to an external denoiser that
@@ -1445,19 +1471,16 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     //
     // AFTER the gRtDenoiseParams.w early-out above, which is what makes the slot safe to touch.
     //
-    // IT INHERITS THE BLENDED-REPLAY DOUBLE WRITE, and that is worth stating rather than leaving to
-    // be found. PSMainVoxi runs for the translucent replay too (its own PSO, same pixel shader), so
-    // a glass pane in front of an opaque surface writes this texel a second time with the PANE's
-    // measurement. The two history writes above have exactly the same problem and have had it since
-    // they were written -- it is the "non-atomic double write" already on the denoising task list,
-    // where the fix is to suppress the history writes on the blended pass, for all of them at once.
-    //
-    // IT IS WORSE HERE THAN THERE, THOUGH, WHICH IS WHY THIS NOTE EXISTS. A wrong value in the
-    // history gets blended away over the following frames. This one goes straight out as THIS
-    // FRAME'S measurement of this pixel, so an external denoiser is handed the pane's distance for
-    // the surface behind it with nothing to average it against. Guarding only this write would make
-    // the three inconsistent for no gain; fix them together or not at all.
-    gAoHitDistOut[uint2(pixel)] = amb.hitDist;
+    // W6/M5: GATED THE SAME WAY, FOR THE SAME REASON, AND THE THREE ARE NOW FIXED TOGETHER.
+    // PSMainVoxi runs for the translucent replay too (its own PSO, same pixel shader), so a glass
+    // pane in front of an opaque surface used to write this texel a second time with the PANE's
+    // measurement -- worse here than at the history write just above, because this value goes
+    // straight out as THIS FRAME'S measurement with nothing to average it against, so an external
+    // denoiser was handed the pane's hit distance for the surface behind it. The three history
+    // writes this file's own comment used to call inconsistent-if-only-one-were-guarded (gAoHistOut
+    // just above, this one, and gRtShadowHistOut further down) are gated identically now, so none of
+    // them can disagree about which fragment last wrote them.
+    if (gAverHistoryWrite) gAoHitDistOut[uint2(pixel)] = amb.hitDist;
     return rtAoSpatial(vis, wpos, N, pixel, curDepth);
 }
 
@@ -1760,7 +1783,13 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
             const float weight = lerp(0.9, 0.5, t);
             vis = lerp(fresh, histV, weight);
         }
-        gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+        // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- see voxi.hlsl's own
+        // gAverHistoryWrite/averDrawIsTranslucent comment for the flag's definition. Before this
+        // gate, a blended (glass/water) replay fragment overwrote this texel with the PANE's own
+        // shadow measurement, the same "non-atomic double write" this file's AO history writes
+        // documented above. voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the
+        // old unconditional write, byte-identical, for A/B.
+        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
         // FILTERED HERE TOO -- this branch is what Medium (the DEFAULT tier) runs, and used to
         // return `fresh` unfiltered, leaving the default's hard 0/1 shadow untouched: the penumbra
         // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
@@ -1826,7 +1855,11 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
     // a filtered value back into gRtShadowHistOut makes this an IIR filter (a temporal filter by
     // another name) whose artefacts compound every frame. The filter applies on READ, below; writing
     // it here to "save work" is the bug, not the optimisation.
-    gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+    //
+    // W6/M5: same gate, same reason, as the tiled branch's own copy of this write above -- see there
+    // for the full account of what an unguarded write to this texture used to cost a blended pane's
+    // opaque background.
+    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
     // The same saturate, and for the same reason -- see the tiled branch above.
     return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
 }

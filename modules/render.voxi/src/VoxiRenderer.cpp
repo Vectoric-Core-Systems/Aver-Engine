@@ -9,6 +9,7 @@
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/voxi/VoxiGiShaders.hpp"   // kGiSrvCount/kGiUavCount: the "typed twice" fix below
+#include "aver/voxi/GiVisibility.hpp"   // givis::packAmbientW/halfDim -- the C++/HLSL bit-table's one definition
 
 #include "VoxiShaders.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
@@ -129,7 +130,12 @@ void giSamplers(rhi::PipelineLayout& l) {
 // newest ones: t12/t13, RTXDI ReSTIR GI's previous-frame surface history (read side, position and
 // normal split across a PAIR of textures -- see giSurfPosHist_ in VoxiRenderer.hpp for why one
 // alone could not hold both: rhi::Format has no four-channel 32-bit float).
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 7;
+//
+// +8, NOT +7, AS OF U1/2.9 (the wave-2 optimisation plan): t16 is the newest slot, the
+// half-resolution ReSTIR VISIBILITY history's read side (giVisHist_ in VoxiRenderer.hpp) -- see
+// giVisHistWanted()'s own comment for why it is its own optional slot rather than riding t12/t13's
+// giRestirWanted() condition.
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 8;
 
 // The denoiser index Voxi asks NRD to run. create() is handed exactly one kind
 // (ReblurDiffuseOcclusion), so this is 0 -- named rather than written as a bare literal at the
@@ -154,7 +160,11 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // +5, not +2: u4/u5 are the sky-occlusion pair as before, u6 is RTXDI's own reservoir
 // StructuredBuffer (RTXDI_PackedGIReservoir, 32 bytes/element -- see giReservoirs_) and u7/u8 are
 // giSurfPosHist_/giSurfNrmHist_'s write sides, the UAV twins of t12/t13 above.
-constexpr u32 kVoxiUavCount = kGiUavCount + 6;
+//
+// +7, NOT +6, AS OF U1/2.9: u10 is the newest slot, the half-resolution ReSTIR VISIBILITY history's
+// write side (giVisHist_'s UAV twin of t16 above) -- same optional-slot reasoning as t16's own
+// comment gives.
+constexpr u32 kVoxiUavCount = kGiUavCount + 7;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -205,6 +215,12 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // later through REBLUR_DIFFUSE. Both absent unless ReSTIR GI and NRD are BOTH running, which
     // is why the shader tests dimensions rather than trusting the slot.
     srv[15] = rhi::SlotKind::Texture2D;             // t15 NRD-denoised ReSTIR GI radiance (read)
+    // t16/u10: U1/2.9's half-resolution ReSTIR VISIBILITY history pair (giVisHist_ in
+    // VoxiRenderer.hpp) -- bound only while giVisHistWanted() (Settings::giRestirVisibility ==
+    // HalfResolution), the identical optional-slot shape t14/t15 above already have: the shader
+    // tests GetDimensions() rather than trusting the slot, because Full/Reconstructed/NoRay never
+    // allocate this pair at all.
+    srv[16] = rhi::SlotKind::Texture2D;             // t16 ReSTIR visibility half-res history (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -223,7 +239,8 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[7] = rhi::SlotKind::Texture2D;              // u7 GI-restir surface POSITION history (write)
     uav[8] = rhi::SlotKind::Texture2D;              // u8 GI-restir surface NORMAL history (write)
     uav[9] = rhi::SlotKind::Texture2D;              // u9 ReSTIR GI radiance + hit distance (write)
-    static_assert(kVoxiSrvCount == 16 && kVoxiUavCount == 10 && kGiSrvCount == 9 && kGiUavCount == 4,
+    uav[10] = rhi::SlotKind::Texture2D;             // u10 ReSTIR visibility half-res history (write)
+    static_assert(kVoxiSrvCount == 17 && kVoxiUavCount == 11 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -525,10 +542,15 @@ void VoxiRenderer::shutdown() {
     // closing three times in this file already.
     for (rhi::TextureHandle& t : giSurfPosHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : giSurfNrmHist_) { if (t) res_->destroyTexture(t); t = 0; }
+    // U1/2.11: THE SIXTH PAIR, added alongside this same fix rather than after it -- not repeating
+    // the "zeroing a handle looks like releasing it" mistake the comment above the fourth/fifth pairs
+    // describes closing three times in this file already.
+    for (rhi::TextureHandle& t : giVisHist_)     { if (t) res_->destroyTexture(t); t = 0; }
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
     giHistValid_ = false;
+    giVisHistValid_ = false;
     rtShadowHistW_ = rtShadowHistH_ = 0;
     rtHistWriteIdx_ = 0;
     rtHistValid_ = false;
@@ -572,6 +594,11 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // already been running for a while, or off while it stays on), and onRenderTargetsChanged only
     // ever sees a resize -- this is the one place that edge is visible at all.
     const bool wasGiRestirWanted = giRestirWanted();
+    // U1/2.11: giVisHistWanted()'s OWN edge, for the identical reason wasGiRestirWanted exists --
+    // giRestirVisibility_ can move to or away from HalfResolution independently of giMode/the
+    // rayTracing tier, and onRenderTargetsChanged only ever sees a resize.
+    const bool wasVisWanted = giVisHistWanted();
+    const u32 wasVis = giRestirVisibility_;
     settings_ = s;
     // Applied here rather than only through the direct setters, so the editor's Rendering page and
     // the project manifest can drive them the same way every other setting already does; the direct
@@ -581,6 +608,12 @@ void VoxiRenderer::setSettings(const Settings& s) {
     rtShadowDenoise_ = s.rtShadowDenoise;
     rtRenderMode_    = s.rtRenderMode;
     giMode_          = s.giMode;
+    // U1: clamped defensively even though Settings::clamp() (Voxi.cpp) already does the same thing --
+    // a typo lands on Full (3), the corrected transport, never on 0/NoRay, which is what an
+    // unclamped out-of-range value would silently decode as through the shader's `& 3u` mask (2.9's
+    // bit table). std::min rather than a ternary, matching the idiom setGiUpdateInterval/
+    // setShadowRays above already use for their own clamps.
+    giRestirVisibility_ = std::min(s.giRestirVisibility, 3u);
     ptBounces_       = s.ptBounces;
     // LATCHED, not assigned. The pipelines this decides the shape of are built once; a later change
     // would leave the member disagreeing with the shaders actually compiled, which is worse than
@@ -598,10 +631,26 @@ void VoxiRenderer::setSettings(const Settings& s) {
     }
     setGiUpdateInterval(s.giUpdateInterval);
 
+    // U1/2.11: a genuine mode change resets the GI reservoir history, NRD's history and the
+    // half-resolution visibility history together -- all three carry a stale answer to a question
+    // the shader no longer asks the same way once visMode changes (2.8's precedence rule; the
+    // identical reasoning setLightingLegacyBits' own R0/R2/R3 branch already gives for its bits).
+    // Gated on giRestirWanted(): a change while ReSTIR GI itself is not running has nothing live to
+    // invalidate. NOT resetGiHistory()/resetNrdHistory() themselves -- those are the NAMED,
+    // user-facing console commands and each logs its own "console command" line; this is a
+    // setSettings-driven edge, not a console action, so it logs its own line instead.
+    if (giRestirVisibility_ != wasVis && giRestirWanted()) {
+        giHistValid_ = false;
+        giVisHistValid_ = false;
+        nrd_.forceHistoryReset();
+        AVER_INFO("[Voxi] ReSTIR visibility rays: {} -> {} (GI/NRD/visibility history reset)",
+                  wasVis, giRestirVisibility_);
+    }
+
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
     // and that call will apply the current setting itself when it arrives.
     if ((rayTracingWanted() != wasWanted || aoHistoryWanted() != wasAoWanted ||
-         giRestirWanted() != wasGiRestirWanted) &&
+         giRestirWanted() != wasGiRestirWanted || giVisHistWanted() != wasVisWanted) &&
         rtHistWantW_ && rtHistWantH_)
         if (!ensureShadowHistory(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] ray-traced history could not follow a ray-tracing setting change at {}x{}",
@@ -633,6 +682,24 @@ void VoxiRenderer::setDebugView(bool on) { debugView_ = on; }
 
 void VoxiRenderer::setGiPoisonView(bool on) { giPoisonView_ = on; }
 
+// See the header's own comment. NO LOG, the same shape as setGiPoisonView immediately above: this is
+// a debug view reasserted from the console/--gi-vis-path-view slot every frame regardless of whether
+// the user just touched it, and a log line on every one of those frames would be noise, not
+// information.
+void VoxiRenderer::setGiVisPathView(bool on) { giVisPathView_ = on; }
+
+// See the header's own comment for what M5 prices. Guarded on an actual CHANGE, the REASSERT IDIOM
+// setNrdLegacyCamera/setLightingLegacyBits just below already use: SandboxApp reasserts this from
+// the console/--blended-gi slot every frame regardless of whether the user just touched it, and this
+// switch carries no history-reset cost the way those two do -- it only changes which term a blended
+// fragment's indirect diffuse reads THIS frame, so a plain reassign-and-log is enough.
+void VoxiRenderer::setBlendedGiCone(bool on) {
+    if (on == blendedGiCone_) return;
+    blendedGiCone_ = on;
+    AVER_INFO("[Voxi] blended-fragment indirect diffuse: {} (M5 pricing switch, console/--blended-gi)",
+              on ? "voxel cone gather" : "ReSTIR (default)");
+}
+
 // See the header's own comment for what this switch reinstates and why. Guarded on an actual CHANGE
 // (unlike setGiPoisonView above) because SandboxApp reasserts this from the console slot every frame
 // regardless of whether the user just touched it (the same per-frame idiom
@@ -663,9 +730,9 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
     const u32 changed = bits ^ lightingLegacyBits_;
     lightingLegacyBits_ = bits;
     AVER_INFO("[Voxi] lighting legacy bits: ring={} doubleCount={} hitSky={} reuseVis={} cones={} "
-              "(console)",
+              "blendedHistory={} (console)",
               (bits & 1u) ? 1 : 0, (bits & 2u) ? 1 : 0, (bits & 4u) ? 1 : 0, (bits & 8u) ? 1 : 0,
-              (bits & 16u) ? 1 : 0);
+              (bits & 16u) ? 1 : 0, (bits & 32u) ? 1 : 0);
     // R0/R2/R3 (bits 1, 4, 8): the ReSTIR estimator itself samples, adds or reuses differently under
     // these, so GI and NRD history accumulated on one side of the flip is a stale answer to a
     // question the shader no longer asks the same way -- same reasoning resetGiHistory's own
@@ -674,6 +741,15 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
     // R0 (bit 1) also reshapes the sky-occlusion ray (voxi_rt.hlsli), whose reprojected history AO
     // tracks separately from the GI reservoir's.
     if (changed & 1u) resetAoHistory();
+    // W6/M5 (4 b): bit 32 changes whether a blended (translucent) fragment writes the shadow,
+    // reflection and AO histories at all this frame (PSMainVoxi's gAverHistoryWrite gate, voxi.hlsl)
+    // -- flipping it makes every pixel any blended pane covers answer a different question about its
+    // own cross-frame history than it did the frame before, the identical staleness resetGiHistory's
+    // own per-command comment already gives for bits 1/4/8 above. GI and NRD ride along for the same
+    // reason they do there; RT (shadow/reflection/AO) rides along too, unlike bits 1/4/8, because bit
+    // 32 -- unlike those three -- changes what those three histories themselves hold, not only the
+    // GI reservoir/NRD.
+    if (changed & 32u) { resetGiHistory(); resetNrdHistory(); resetRtHistory(); }
 }
 
 // See the header's own comment for the shape every one of these five shares: flip an existing
@@ -681,6 +757,12 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
 // if the user closes the editor before reading the console's own scrollback.
 void VoxiRenderer::resetGiHistory() {
     giHistValid_ = false;
+    // U1/2.8: the half-resolution visibility pair rides along -- a legacy-bit flip (or any other
+    // caller of this command) while giRestirVisibility_ is HalfResolution would otherwise leave
+    // giVisReconstruct's own reprojection carrying a stale answer forward: f2Observed/f3Observed go
+    // false wherever the legacy bit forces "no ray", so nothing refreshes the pair's EMA, and only
+    // this flag stops reprojection from trusting it anyway.
+    giVisHistValid_ = false;
     AVER_INFO("[Voxi] GI ReSTIR reservoir history reset by console command (resetgihistory); "
               "next frame uses a fresh candidate only (expect one visibly noisier frame), both "
               "ping-pong slices clean within 2 frames.");
@@ -3395,12 +3477,18 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // 3532x1987, held for a feature that never runs. Teardown rather than a bare early-out, so
     // switching ray tracing OFF at runtime gives the memory back instead of stranding it.
     if (!rayTracingWanted()) {
-        const bool had = rtShadowHist_[0] || rtReflHist_[0] || rtAoHist_[0] || giSurfPosHist_[0];
+        const bool had = rtShadowHist_[0] || rtReflHist_[0] || rtAoHist_[0] || giSurfPosHist_[0] ||
+                          giVisHist_[0];
         for (rhi::TextureHandle& t : rtShadowHist_)  { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtReflHist_)    { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtAoHist_)      { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : giSurfPosHist_) { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : giSurfNrmHist_) { if (t) res_->destroyTexture(t); t = 0; }
+        // U1/2.11: giVisHistWanted() REQUIRES giRestirWanted(), which itself requires
+        // rayTracingWanted() -- so this branch already implies the half-res visibility pair cannot
+        // be wanted either, the identical reasoning the reservoir-buffer comment two lines below
+        // gives for its own release here.
+        for (rhi::TextureHandle& t : giVisHist_)     { if (t) res_->destroyTexture(t); t = 0; }
         if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
         if (rtAoHitDist_) { res_->destroyTexture(rtAoHitDist_); rtAoHitDist_ = 0; }
         // giRestirWanted() REQUIRES rayTracingWanted(), so this branch already implies ReSTIR GI
@@ -3408,6 +3496,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
         giReservoirElemCapacity_ = 0;
         giHistValid_ = false;
+        giVisHistValid_ = false;
         rtShadowHistW_ = rtShadowHistH_ = 0;
         rtHistWriteIdx_ = 0;
         rtHistValid_ = false;
@@ -3429,6 +3518,10 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         // have an independent wanted-condition (giRestirWanted()) rather than riding aoHistoryWanted()'s.
         (giSurfPosHist_[0] && giSurfPosHist_[1] && giSurfNrmHist_[0] && giSurfNrmHist_[1] &&
          giReservoirs_) == giRestirWanted() &&
+        // U1/2.11: the sixth pair's own test, the identical shape -- giVisHistWanted() is a stricter
+        // question than giRestirWanted() (2.9's own comment on giVisHistWanted()), so it needs its
+        // own independent check here rather than riding either of the two above.
+        (giVisHist_[0] && giVisHist_[1]) == giVisHistWanted() &&
         rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;
 
@@ -3437,8 +3530,13 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     for (rhi::TextureHandle& t : rtAoHist_)      { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : giSurfPosHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : giSurfNrmHist_) { if (t) res_->destroyTexture(t); t = 0; }
+    // U1/2.11: the sixth pair, torn down and recreated below on the identical "resolution/wanted
+    // condition changed" edge as the fourth/fifth pair immediately above -- see the early-out test's
+    // own comment for why it needed a THIRD, independent test rather than riding either of theirs.
+    for (rhi::TextureHandle& t : giVisHist_)     { if (t) res_->destroyTexture(t); t = 0; }
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     giHistValid_ = false;   // same reason rtHistValid_ two lines below is cleared: a stale resolution
+    giVisHistValid_ = false;   // ditto, for the sixth pair's own previous-frame contents
     // THE FOURTH ONE, AND IT WAS MISSING HERE WHILE BEING PRESENT IN THE OTHER TWO TEARDOWNS --
     // exactly the shape of leak the comment at the top of shutdown() records this function having
     // had before, and for the same reason: the release paths are three separate lists and adding a
@@ -3619,6 +3717,62 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         if (!giRadiance_) return false;
         d.initialState = rhi::ResourceState::ShaderResource;
 
+        // ---- U1/2.11: the sixth pair, the half-resolution ReSTIR VISIBILITY history (t16/u10) ----
+        // ONLY WHILE giVisHistWanted() -- a STRICTER question than the giRestirWanted() this whole
+        // block already runs under (see giVisHistWanted()'s own comment): Full/Reconstructed/NoRay
+        // never read or write this pair, so allocating it for them would be VRAM held for a mode
+        // that is not running, the identical VRAM-consciousness this function already applies to the
+        // AO pair (aoHistoryWanted()) and this pair's own siblings above.
+        //
+        // HALF THE LINEAR DIMENSION, ROUNDED UP: 2.10 D/E write exactly one full-resolution pixel per
+        // 2x2 block per frame, so one texel per block is all this needs to hold.
+        //
+        // A FAILED ALLOCATION IS NOT FATAL TO THE REST OF ReSTIR GI, unlike every `return false`
+        // above in this block: it destroys both handles, warns once through giVisHistFailLogged_ and
+        // falls through to the reservoir-buffer growth below -- the shader's own bit-4 decode (2.9)
+        // then runs Half as Full with no extra plumbing, "wrong-but-running beats a dead renderer"
+        // the same posture giShadowTex_'s own comment (VoxiRenderer.hpp) already takes.
+        if (giVisHistWanted()) {
+            const u32 vw = givis::halfDim(width), vh = givis::halfDim(height);
+            rhi::TextureDesc vd;
+            vd.dim    = rhi::TextureDim::Tex2D;
+            vd.width  = vw;
+            vd.height = vh;
+            vd.mips   = 1;
+            vd.format = rhi::Format::RGBA16F;
+            vd.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+            vd.initialState = rhi::ResourceState::ShaderResource;
+            vd.debugName = "Voxi ReSTIR visibility history A";
+            giVisHist_[0] = res_->createTexture(vd);
+            vd.debugName = "Voxi ReSTIR visibility history B";
+            giVisHist_[1] = res_->createTexture(vd);
+            if (!giVisHist_[0] || !giVisHist_[1]) {
+                if (giVisHist_[0]) { res_->destroyTexture(giVisHist_[0]); giVisHist_[0] = 0; }
+                if (giVisHist_[1]) { res_->destroyTexture(giVisHist_[1]); giVisHist_[1] = 0; }
+                if (!giVisHistFailLogged_) {
+                    giVisHistFailLogged_ = true;
+                    AVER_WARN("[Voxi] ReSTIR half-resolution visibility history could not be created "
+                              "at {}x{}; Half resolution runs as Full (said once)", vw, vh);
+                }
+            } else {
+                giVisHistFailLogged_ = false;
+                const f64 pairMiB = static_cast<f64>(vw) * static_cast<f64>(vh) * 8.0 * 2.0 /
+                                   (1024.0 * 1024.0);
+                AVER_INFO("[Voxi] ReSTIR half-resolution visibility history: 2 x {}x{} RGBA16F = "
+                          "{:.1f} MiB", vw, vh, pairMiB);
+            }
+        } else if (giVisHist_[0]) {
+            // giRestirVisibility left HalfResolution (or ReSTIR GI's own wanted edge moved) without
+            // the whole-history teardown branch at the top of this function running -- e.g.
+            // width/height changed while giVisHistWanted() was already false. Nothing after this
+            // point needs the pair, and holding it is exactly the VRAM-for-a-mode-not-running waste
+            // this whole block exists to avoid elsewhere -- the identical edge case giReservoirs_'s
+            // own else-if just below handles for the reservoir buffer.
+            res_->destroyTexture(giVisHist_[0]);
+            res_->destroyTexture(giVisHist_[1]);
+            giVisHist_[0] = giVisHist_[1] = 0;
+        }
+
         // GROWN, NOT ALWAYS REBUILT -- the same "just enough" rule rtVerts_/rtIndices_ apply
         // (buildGeometryTable): the block-rounded pitch is a STEP function of width/height, so most
         // resizes (anything that doesn't cross a 16-pixel-block boundary) need no new buffer at all,
@@ -3641,14 +3795,24 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
                       elemCount, kGiReservoirElemBytes,
                       static_cast<f64>(bd.bytes) / (1024.0 * 1024.0), width, height);
         }
-    } else if (giReservoirs_) {
+    } else {
         // giMode was switched off (or ray tracing was) without the whole-history teardown branch at
         // the top of this function running -- e.g. width/height changed while giRestirWanted() was
         // already false. Nothing after this point needs the buffer, and holding it is exactly the
         // VRAM-for-a-feature-not-running waste this whole function exists to avoid elsewhere.
-        res_->destroyBuffer(giReservoirs_);
-        giReservoirs_ = 0;
-        giReservoirElemCapacity_ = 0;
+        if (giReservoirs_) {
+            res_->destroyBuffer(giReservoirs_);
+            giReservoirs_ = 0;
+            giReservoirElemCapacity_ = 0;
+        }
+        // U1/2.11: the sixth pair rides the identical edge case -- giVisHistWanted() REQUIRES
+        // giRestirWanted(), so this branch (giRestirWanted() false) already implies the pair cannot
+        // be wanted either, whether or not it happened to survive from before this same edge.
+        if (giVisHist_[0]) {
+            res_->destroyTexture(giVisHist_[0]);
+            res_->destroyTexture(giVisHist_[1]);
+            giVisHist_[0] = giVisHist_[1] = 0;
+        }
     }
 
     rtShadowHistW_ = width;
@@ -3676,6 +3840,12 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     if (giSurfNrmHist_[0]) {
         res_->setUav(bindings_, 8, giSurfNrmHist_[0], 0);
         res_->setSrv(bindings_, 13, giSurfNrmHist_[1]);
+    }
+    // U1/2.11: the sixth pair's own starting bind, the identical shape -- beginShadowHistory swaps
+    // u10/t16 every frame, together, exactly like u7/t12 and u8/t13 above.
+    if (giVisHist_[0]) {
+        res_->setUav(bindings_, 10, giVisHist_[0], 0);
+        res_->setSrv(bindings_, 16, giVisHist_[1]);
     }
     // The reservoir StructuredBuffer is bound ONCE, like rtAoHitDist_ above -- it never ping-pongs as
     // a DESCRIPTOR, only the ARRAY INDEX RTXDI_ReservoirPositionToPointer computes from
@@ -3738,6 +3908,21 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // with this one and has been removed rather than kept as a silently-agreeing second source of
     // truth for the same cbuffer field.
     cb_.giRestirParams[3] = giPoisonView_ ? 1.0f : 0.0f;
+    // ---- U1/2.9/2.11: gAmbientParams.w, THE SINGLE WRITER ----
+    // Published here, before the early return just below, for the identical reason F5's
+    // giRestirParams[3] write immediately above is: PSMainVoxi/PSRayDriven decode this every frame
+    // the scene renders normally, not only the frames that reach the giSurf block further down (which
+    // runs only under giRestirWanted()) -- a giMode-0 frame, or one where the fourth/fifth pair
+    // failed to bind, still needs a live mode/blended-cone/replay/path-view word rather than whatever
+    // a giMode-1 frame last left behind. histBound and histValid are FALSE here -- neither is known
+    // true until the giSurf block below confirms the sixth pair is actually bound this frame -- and
+    // that block recomputes and overwrites this same component once it knows better. See
+    // givis::packAmbientW's own comment (GiVisibility.hpp) for the bit table this shares byte-for-byte
+    // with voxi.hlsl/voxi_restir.hlsli/voxi_gi.hlsli's own gAmbientParams.w decode.
+    const u32 ambW = givis::packAmbientW(giRestirVisibility_, /*histBound=*/false, /*histValid=*/false,
+                                         blendedGiCone_, dev_ && dev_->backend() == rhi::Backend::D3D12,
+                                         giVisPathView_);
+    cb_.ambientParams[3] = static_cast<f32>(ambW);
     if (!shadowHistoryActive()) {
         // ---- F3: A SKIPPED FRAME MUST NOT LEAVE THE VALIDITY FLAGS TRUSTING FROZEN STATE ----
         //
@@ -3770,6 +3955,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // here resets history on a frame that was not actually skipped.
         rtHistValid_ = false;
         giHistValid_ = false;
+        // U1/2.11: the sixth pair rides the identical F3 reasoning above -- a skipped frame leaves
+        // giVisHist_'s contents exactly as frozen as giSurfPosHist_/giSurfNrmHist_'s, and the giSurf
+        // block below (which is what would otherwise clear this) does not run on a skipped frame
+        // either.
+        giVisHistValid_ = false;
         nrdPrevCameraValid_ = false;
         return;
     }
@@ -3842,6 +4032,37 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // gGiRestirParams.x -- already set above -- is exactly the flag the shader's write is
         // guarded on, so the two can never disagree about whether the slot is real.
         if (giRadiance_) res_->setUav(bindings_, 9, giRadiance_, 0);
+
+        // ---- U1/2.11: the sixth pair's own swap, when both giVisHist_ handles exist ----
+        // giVisHistWanted() implies giRestirWanted(), so this block already runs under the same
+        // condition that gated ensureShadowHistory's own creation of the pair -- the handle check is
+        // what tells this frame whether that creation actually succeeded (see the failure branch
+        // there: it destroys both rather than returning false, so a device out of memory leaves this
+        // pair silently absent and the rest of ReSTIR GI running normally).
+        if (giVisHist_[writeIdx] && giVisHist_[readIdx]) {
+            ctx.textureBarrier(giVisHist_[writeIdx], rhi::ResourceState::ShaderResource,
+                               rhi::ResourceState::UnorderedAccess);
+            // THE READ SIDE IS GATED ON giVisHistValid_, NOT giHistValid_ -- the two pairs' validity
+            // can disagree (giVisHistWanted() is a narrower condition that can start or stop wanting
+            // this pair on a frame the fourth/fifth pair's own validity is untouched by), the same
+            // reason giHistValid_ itself is not shared with rtHistValid_.
+            if (giVisHistValid_)
+                ctx.textureBarrier(giVisHist_[readIdx], rhi::ResourceState::UnorderedAccess,
+                                   rhi::ResourceState::ShaderResource);
+            res_->setUav(bindings_, 10, giVisHist_[writeIdx], 0);
+            res_->setSrv(bindings_, 16, giVisHist_[readIdx]);
+            // Recomputed with histBound = true and histValid = giVisHistValid_, now that both are
+            // actually known -- overwrites the FALSE/FALSE word this function published near the top,
+            // before shadowHistoryActive() was even known true. Every other component of ambW (mode,
+            // blendedGiCone_, the D3D12-only blended-replay bit, giVisPathView_) is unchanged from
+            // that first write, so this is not a second source of truth for them, only the two bits
+            // that could not be known until now.
+            const u32 ambW2 = givis::packAmbientW(giRestirVisibility_, /*histBound=*/true,
+                                                  giVisHistValid_, blendedGiCone_,
+                                                  dev_ && dev_->backend() == rhi::Backend::D3D12,
+                                                  giVisPathView_);
+            cb_.ambientParams[3] = static_cast<f32>(ambW2);
+        }
     }
 
     // ---- NVIDIA NRD, denoising LAST FRAME's sky-occlusion hit distance into t14 ----
@@ -3892,7 +4113,45 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         const rhi::TextureHandle sizeFrom = rtAoHitDist_ ? rtAoHitDist_ : giRadiance_;
         const bool haveSize = res_->textureInfo(sizeFrom, sizeDesc);
         const u32 tw = haveSize ? sizeDesc.width : 0u, th = haveSize ? sizeDesc.height : 0u;
-        if (in.viewZ && in.motionVectors && in.normalRoughness && tw && th && nrd_.resize(tw, th)) {
+
+        // ---- 3.4 b: THE NRD RECT VS RESOURCE GUARD ----
+        //
+        // CORRECT BY CONSTRUCTION ON EVERY ORDINARY FRAME (3.4 a): onRenderTargetsChanged REALLOCATES
+        // every Voxi target -- the G-buffer included -- at the reduced internal size AverSR asks for,
+        // so tw/th above and the G-buffer's own resource size agree without this ever running its
+        // mismatch branch. What this guards against is the ORDINARY frame's assumption breaking for
+        // ONE frame: a render-scale change lands between two frames (the D3D12/Vulkan "park, apply at
+        // beginFrame" pattern 3.3 D/C2-13 both use), or a resize the device has not yet caught up
+        // with. NRD has no story for a rect that does not match its own inputs' resource size --
+        // undefined, not merely wrong -- so this is checked here, once, against all three G-buffer
+        // inputs rather than trusted from tw/th alone. The same "find the line that CONSUMES it"
+        // posture the hit-distance-unit and motion-vector-scale comments above this block already
+        // take, and the same precedent the backdrop's own size check set (D3D12Device.cpp's
+        // sceneColorBackdropTexture consumer) after ITS absence once removed the device.
+        rhi::TextureDesc gzDesc{}, gmvDesc{}, gnrDesc{};
+        const bool haveGbufSizes = in.viewZ && in.motionVectors && in.normalRoughness &&
+                                   res_->textureInfo(in.viewZ, gzDesc) &&
+                                   res_->textureInfo(in.motionVectors, gmvDesc) &&
+                                   res_->textureInfo(in.normalRoughness, gnrDesc);
+        const bool gbufSizeOk = haveSize && haveGbufSizes &&
+                                gzDesc.width == tw && gzDesc.height == th &&
+                                gmvDesc.width == tw && gmvDesc.height == th &&
+                                gnrDesc.width == tw && gnrDesc.height == th;
+        // WARNED ONCE PER MISMATCH EPISODE, NOT ONCE EVER -- unlike nrdWarnedMsaa_/nrdWarnedEncoding_
+        // above, this condition is expected to clear itself (the next reallocation catches back up),
+        // and a LATER, unrelated episode should still be reported rather than silenced by an earlier
+        // one already having fired. Cleared the moment the sizes agree again.
+        if (haveSize && haveGbufSizes && !gbufSizeOk) {
+            nrd_.forceHistoryReset();
+            if (!nrdWarnedInputSizeMismatch_) {
+                nrdWarnedInputSizeMismatch_ = true;
+                AVER_WARN("[NRD] input size mismatch ({}x{} signal vs {}x{} G-buffer); skipping this "
+                          "frame", tw, th, gzDesc.width, gzDesc.height);
+            }
+        } else if (gbufSizeOk) {
+            nrdWarnedInputSizeMismatch_ = false;
+        }
+        if (gbufSizeOk && tw && th && nrd_.resize(tw, th)) {
             render::nrd::FrameSettings fs{};
             fs.resourceWidth = fs.rectWidth  = tw;
             fs.resourceHeight = fs.rectHeight = th;
@@ -4250,6 +4509,14 @@ void VoxiRenderer::endShadowHistory() {
     // so a frame where the textures failed to bind for some other reason does not falsely claim a
     // written previous frame next time).
     if (cb_.giRestirParams[0] > 0.5f) giHistValid_ = true;
+    // U1/2.11: the sixth pair's own validity, mirrored from the SAME word beginShadowHistory's giSurf
+    // block already recomputed once it knew the pair was actually bound (bit 4 of ambientParams.w --
+    // see givis::packAmbientW's own bit table). The giRestirParams[0] test is the identical defensive
+    // shape giHistValid_'s own line just above already takes -- bit 4 can only be set inside the very
+    // same nested block that also sets giRestirParams[0] to 1.0, so the two tests agree by
+    // construction, and pairing them costs nothing while keeping this line readable next to its twin.
+    if (cb_.giRestirParams[0] > 0.5f && (static_cast<u32>(cb_.ambientParams[3]) & 4u))
+        giVisHistValid_ = true;
 }
 
 // Picks between a pipeline and its G-buffer twin -- see the header's own comment on the "Gbuf"

@@ -34,8 +34,9 @@ struct VkRegisterBind {
     u32  binding;   // and the binding within that set
 };
 
-// The most registers one PipelineLayout can declare: 16 SRV + 16 UAV per table, 4 samplers, and
-// every constant slot (the map has to be COMPLETE -- see buildRegisterBinds). Sized so
+// The most registers one PipelineLayout can declare: kMaxBindingSlots SRV + kMaxBindingSlots UAV
+// per table (24 + 24 as of optimisation-wave-2, up from 16), 4 samplers, and every constant slot
+// (the map has to be COMPLETE -- see buildRegisterBinds). Sized so
 // buildRegisterBinds is never asked to truncate, which it would do silently.
 constexpr u32 kMaxRegisterBinds = 4 * kMaxBindingSlots + 4 + kMaxConstantSlots + 1;   // +1: the instanced pipeline gInstanceWorlds register
 

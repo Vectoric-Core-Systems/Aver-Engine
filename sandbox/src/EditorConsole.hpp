@@ -414,6 +414,30 @@ inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
 inline bool& consoleGiBoundedDispatchSlot() { static bool v = false; return v; }
 inline bool& consoleGiFreeAccumulatorSlot() { static bool v = false; return v; }
 
+// optimisation-wave-2's U1 path-debug view (2.10 I) -- the SAME raw-slot idiom as
+// consoleGiPoisonViewSlot() above and for the identical reason: VoxiRenderer::setGiVisPathView is
+// private renderer state with no path through voxi::Renderer::Settings/setSettings. Paints F2's
+// resolved path (traced/reconstructed/half-res/no-ray) directly over indirect diffuse, so a by-hand
+// verification run can see whether U1's Half mode is actually reconstructing or quietly falling back
+// to Full everywhere (2.10 I's own comment on the poison view outranking this one when both are on).
+// Written by `set voxi.giVisPathView` or seeded from --gi-vis-path-view for a --frames capture with
+// no console, and reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate,
+// right beside the voxiRenderer_.setGiPoisonView(consoleGiPoisonViewSlot()) call this mirrors. Default
+// OFF: painting replaces indirect diffuse, so it must never happen just from opening the Console tab.
+inline bool& consoleGiVisPathViewSlot() { static bool v = false; return v; }
+
+// W6/M5's pricing switch (section 4(a) of the optimisation-wave-2 plan) -- SAME raw-slot idiom as
+// consoleGiVisPathViewSlot() directly above: VoxiRenderer::setBlendedGiCone is a public method (like
+// setGiForceRebuild etc.) but, like every renderer setting in this file's raw-slot family, does not
+// round-trip through voxi::Renderer::Settings/setSettings. false (the default) keeps a blended
+// (alpha-blend or transmissive) fragment shading from ReSTIR, the fixed W6 behaviour and today's
+// image; true forces the pre-existing cone-gather fallback on every blended fragment instead, so the
+// "blended replay" span this wave's own M5 measurement reads (D3D12Device.cpp:5073) can be priced with
+// and without ReSTIR's share of it. Written by `set voxi.blendedGiCone` or seeded from --blended-gi
+// restir|cone, and reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate,
+// right beside the voxiRenderer_.setGiVisPathView(consoleGiVisPathViewSlot()) call this mirrors.
+inline bool& consoleBlendedGiConeSlot() { static bool v = false; return v; }
+
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
 // tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
 // ConsoleBatch's own comment for why the split is closures rather than two struct copies.
@@ -618,6 +642,30 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware, rayTracing != Off and globalIllumination != Off -- resolves back to 0 (the stored request is kept, untouched) when any is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vU32(voxi::resolve(r.settings(), r.deviceInfo()).giMode.effective); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
+    // optimisation-wave-2's U1: how much of F2 (candidate-hit sky) and F3 (reuse visibility) -- the
+    // contrast fix's two per-pixel rays, cb4b48df -- giMode 1 pays for at this GI tier. A GI-group
+    // tier-derived DIAL, like voxi.giCones/voxi.voxelResolution above, so it belongs with the other
+    // dials `set voxi.globalIllumination <tier>` re-derives unless set in the same line.
+    //
+    // READS THE RAW STORED FIELD, not resolve()'s effective value, unlike voxi.giMode just above --
+    // Resolution::giRestirVisibility.effective deliberately EQUALS requested always
+    // (RenderSettingsResolver.hpp's own comment on that field explains why: clamping to 0 on a failed
+    // prerequisite would read "No ray (over-bright)" while no ReSTIR runs at all), so reading the raw
+    // field here reports the identical number resolve() would, without the extra resolve() call --
+    // the same "read the raw field, since raw and effective always agree for this one" shape
+    // voxi.refractionMode's own comment documents for the reason its own request/effective can diverge
+    // and why this dial's cannot.
+    t.push_back({"voxi.giRestirVisibility", VarType::U32, false,
+        "0 no ray (pre-fix, over-bright), 1 reconstructed (no ray), 2 half resolution, 3 full. Only "
+        "applies when voxi.giMode resolves to 1. voxi.legacyRestirHitSky / "
+        "voxi.legacyRestirReuseVisibility, when on, force 'no ray' for their own ray regardless of "
+        "this.",
+        []{ return vU32(Renderer::get().settings().giRestirVisibility); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirVisibility = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 3) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution) or 3 (full) -- values above 3 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
+            return true;
+        }});
     // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
     // idiom rather than an ordinary dialSetters entry. SEVEN of the eight colours below are giMode 1
     // (ReSTIR) only: those guards live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never
@@ -642,6 +690,25 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiPoisonViewSlot() = on; });
+        }});
+    // optimisation-wave-2's U1 path-debug view (2.10 I) -- see consoleGiVisPathViewSlot()'s own
+    // comment above for the raw-slot idiom and why. Paints F2's resolved path (yellow = no ray,
+    // green = reconstructed, blue = half-res reconstruction, red = half-res fallback trace, white =
+    // full trace) directly over indirect diffuse, so a Half-mode run can be checked by eye for
+    // whether it is actually reconstructing anywhere instead of quietly tracing every pixel as Full.
+    // Suppressed while voxi.giPoisonView is also on (that view answers a different, higher-priority
+    // question -- corruption, not which visibility path ran -- and paints first).
+    t.push_back({"voxi.giVisPathView", VarType::Bool, false,
+        "U1 path-debug view: paints F2's resolved visibility path over indirect diffuse -- yellow = "
+        "no ray (mode 0 or a legacy bit), green = reconstructed (voxel cone), blue = half-resolution "
+        "reconstruction, red = half-resolution fallback (traced because no valid reconstruction was "
+        "available this pixel), white = full trace. Suppressed while voxi.giPoisonView is also on, "
+        "which paints first. Off by default: the paint replaces indirect diffuse, so it must never "
+        "happen just from opening the Console tab.",
+        []{ return vBool(consoleGiVisPathViewSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiVisPathViewSlot() = on; });
         }});
     // NOT a Settings field, SAME SHAPE as voxi.giPoisonView directly above and for the identical
     // reason -- see consoleNrdLegacyCameraSlot()'s own comment. [live]: toggling this resets NRD's
@@ -708,6 +775,23 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "instead of cos (root cause R6; gAmbientParams.z bit 16). Default OFF weights each cone once. "
         "Affects giMode 0, the non-RT fallback, and the cluster and particle passes.",
         legacyBitRead(16u), legacyBitStage(16u)});
+    // W6/M5's OWN legacy A/B switch (section 4(b) of the optimisation-wave-2 plan) -- one bit more of
+    // the SAME consoleLightingLegacySlot() word the five above share, so it composes with them (and
+    // with --lighting-legacy) exactly the same way: one root cause isolated at a time. ON reinstates
+    // the pre-W6 behaviour for comparison only -- a blended (alpha-blend or transmissive) fragment's
+    // per-pixel reservoir store, surface history and NRD readback go back to writing/reading
+    // unconditionally, so the opaque surface behind glass or water loses temporal reuse to whichever
+    // pane covered it last, on D3D12 (Vulkan never marks a draw blended -- see VulkanDevice.cpp's own
+    // blended=false comment -- so this bit is inert there, like the others in this table already are
+    // off their own backend's gaps). Default OFF/false: the FIXED behaviour (W6) is what ships.
+    t.push_back({"voxi.legacyBlendedHistoryWrite", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: a blended (alpha-blend or "
+        "transmissive) fragment's per-pixel GI/NRD history writes and readbacks stop being suppressed, "
+        "so the opaque surface behind glass or water is overwritten by whichever pane covered it last "
+        "(root cause W6; gAmbientParams.z bit 32; D3D12 only -- inert on Vulkan, which never marks a "
+        "draw blended). Default OFF keeps W6's fix; VoxiRenderer::setLightingLegacyBits is the piece "
+        "that resets GI/NRD/RT history on this bit's transition, the same as the five bits above it.",
+        legacyBitRead(32u), legacyBitStage(32u)});
     // ---- the engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME raw-slot/
     // deviceSetters shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s own comment
     // for why these three, unlike the tier/dial fields, cannot be staged as ordinary Settings dials).
@@ -746,6 +830,23 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiFreeAccumulatorSlot() = on; });
+        }});
+    // W6/M5's pricing switch (section 4(a) of the optimisation-wave-2 plan) -- see
+    // consoleBlendedGiConeSlot()'s own comment above for the raw-slot idiom and why. Measurement only,
+    // like the three above: neither value changes the rendered image on its own, only which term a
+    // blended (alpha-blend or transmissive) fragment shades its indirect diffuse from. Default false
+    // keeps W6's fix -- ReSTIR shades every fragment, blended ones included, the way the D3 decision
+    // ships it. true drops blended fragments back to the pre-W6 cone gather so the ReSTIR share of
+    // the "blended replay" span (D3D12Device.cpp:5073) can be read by difference.
+    t.push_back({"voxi.blendedGiCone", VarType::Bool, false,
+        "Measurement only (W6/M5): false (default) shades a blended fragment's indirect diffuse from "
+        "ReSTIR like any opaque fragment, the fixed W6 behaviour. true forces the pre-existing "
+        "voxel-cone gather on blended fragments instead, so ReSTIR's own share of the 'blended "
+        "replay' span can be read by taking 'frametime' with this true, then false.",
+        []{ return vBool(consoleBlendedGiConeSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleBlendedGiConeSlot() = on; });
         }});
     // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
     // the same honesty voxi.giMode above documents at length, and through the SAME mechanism now:

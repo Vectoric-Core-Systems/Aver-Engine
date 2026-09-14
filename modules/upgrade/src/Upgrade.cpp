@@ -180,6 +180,15 @@ bool step_0_4_to_0_5(const Context& ctx, std::string* err) {
 //   - `.ocproject` gained RENDER.GIMODE and RENDER.DENOISER. Both parse an absent key as -1, "not
 //     stated", which leaves each setting at the engine's own default. A project that never states a key
 //     is not asking for anything, so there is nothing in its directory to repair.
+//   - `.ocproject` gained RENDER.RESTIRVISIBILITY (optimisation wave 2, U1). Absent parses to -1 and
+//     follows the GI tier's own ladder rung, the same N6 rule every other tier-derived knob here
+//     already gets -- NOT a migration in the sense above, because the rung an existing project follows
+//     is a real behaviour change rather than a no-op: a giMode-1 (ReSTIR) project at GI Low or Medium
+//     that never stated this key moves from tracing Full (the only behaviour that existed before this
+//     wave) to Reconstructed or HalfResolution respectively. That is the render fix's own kind of
+//     change -- how the engine shades a scene, not what the scene's file contains -- so it is disclosed
+//     here rather than repaired by a step. PTTest is GI Epic (PTTest.ocproject: RENDER.GI 4), whose own
+//     ladder rung is Full, so PTTest's own image is unchanged.
 //   - `.ocanim` gained an optional NTFD chunk (notify durations). Absent means every notify is
 //     instantaneous -- the only kind 0.5 had -- and the writer omits the chunk when every duration is zero.
 //   - `.ocanim` gained an optional CTAN chunk (curve tangents). Absent means empty tangents, and empty

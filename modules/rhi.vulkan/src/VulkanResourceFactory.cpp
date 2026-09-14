@@ -768,11 +768,15 @@ u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
     // only in an omitted field silently share one module. The constant-slot mask alone was enough
     // while patchCbuffersForLayout was the only per-layout step; buildRegisterBinds made the SRV,
     // UAV and sampler counts matter too.
+    // kMaxBindingSlots (24, raised from 16 in optimisation-wave-2) must still fit in the 5-bit field
+    // each count below gets -- 5 bits covers 0..31, so this only breaks if the constant is ever raised
+    // past 31, which would corrupt every field after the first it overflows into.
+    static_assert(kMaxBindingSlots <= 31, "shaderVariantKey packs each *Count into a 5-bit field below");
     u32 key = 0;
     key |= 1u << kObjectConstantRegister;      // pushConstantLayout always places b1, declared or not
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (layout.constantDwords[k]) key |= 1u << k;
-    // kMaxBindingSlots is 16, so each count needs 5 bits; samplerCount is capped at 4, so 3.
+    // kMaxBindingSlots is 24, so each count needs 5 bits (covers 0..31); samplerCount is capped at 4, so 3.
     key |= (layout.srvCount  & 31u) << 5;
     key |= (layout.uavCount  & 31u) << 10;
     key |= (layout.srvCount1 & 31u) << 15;

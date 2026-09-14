@@ -74,7 +74,12 @@ for ($i = 1; $i -le $Runs; $i++) {
     $out = [System.IO.Path]::GetTempFileName()
     $err = [System.IO.Path]::GetTempFileName()
     try {
-        Start-Process -FilePath $Exe -ArgumentList (@('--frames', "$Frames", '--no-vsync') + $Gates[$Gate]) `
+        # AverSR (0.6 optimisation wave 2, U2) now defaults to Auto at every quality rung, and Auto
+        # applies to --frames runs too. This script's whole question is how much a probe pixel moves
+        # between IDENTICAL runs of the same binary; an upscaler resolving to a different internal
+        # resolution would be a second, uncontrolled source of that movement, confounding the one the
+        # header's "RUN A CONTROL" note is trying to isolate. Pin native resolution.
+        Start-Process -FilePath $Exe -ArgumentList (@('--frames', "$Frames", '--no-vsync', '--aversr', 'off') + $Gates[$Gate]) `
                       -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError $err | Out-Null
         $text = (Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue)
     } finally {

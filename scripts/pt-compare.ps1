@@ -93,7 +93,12 @@ function Invoke-Capture([string] $name, [string[]] $extra) {
     # EXISTS"), reintroduced one layer down: the arguments were made positional and correct, and then
     # taken apart again by the launcher.
     $q = { param($s) '"' + $s + '"' }
-    $args = @('--frames', $Frames, (& $q $Project), (& $q $Level), '--screenshot', (& $q $shot)) + $extra
+    # AverSR (0.6 optimisation wave 2, U2) now defaults to Auto at every quality rung, and Auto
+    # applies to --frames runs too. Check 3 above already downsamples both captures to the TRACER's
+    # native size precisely so the comparison is not measuring an upscaler; a raster capture that
+    # additionally shrank its OWN internal resolution under Auto would silently change what that
+    # downsample is comparing. Pin native resolution on every capture.
+    $args = @('--frames', $Frames, (& $q $Project), (& $q $Level), '--screenshot', (& $q $shot), '--aversr', 'off') + $extra
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     # Start-Process, for the reason spelled out in gates.ps1's Invoke-Gate: Sandbox.exe is

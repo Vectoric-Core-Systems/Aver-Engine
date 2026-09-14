@@ -126,6 +126,11 @@ void Renderer::setSettings(const Settings& s) {
     if (n.globalIllumination != settings_.globalIllumination && n.giCones == settings_.giCones)
         n.giCones = giConesForQuality(n.globalIllumination);
 
+    // U1: how much of F2/F3's cost this tier pays for, derived exactly as giCones is above -- same
+    // "changed tier AND untouched field" rule, same reason. See Settings::giRestirVisibility.
+    if (n.globalIllumination != settings_.globalIllumination && n.giRestirVisibility == settings_.giRestirVisibility)
+        n.giRestirVisibility = giRestirVisibilityForQuality(n.globalIllumination);
+
     // REFRACTION FOLLOWS THE RAY-TRACING TIER, by the same by-value rule as every derived knob here:
     // only when the tier MOVED and the caller did not set the mode itself in the same call. A caller
     // asking for the value the field already holds is indistinguishable from one who never asked --
@@ -192,6 +197,11 @@ void Renderer::setSettings(const Settings& s) {
     // Same reasoning as rtRenderMode directly above: 1 is the only mode besides the cone gather, so
     // a garbage value clamps to the DEFAULT (0, cones) rather than silently landing on ReSTIR GI.
     n.giMode             = n.giMode > 1u ? 0u : n.giMode;
+    // U1: 3 (Full) is the top of RestirVisibility, so a typo lands on the CORRECTED transport -- never
+    // on 0 (NoRay), which would silently reintroduce the over-brightness cb4b48df's contrast fix exists
+    // to remove. Unlike giMode/rtRenderMode just above, whose typos clamp to "nothing changed" (0), a
+    // typo here clamps to the tier's own safest answer instead.
+    n.giRestirVisibility = n.giRestirVisibility > 3u ? 3u : n.giRestirVisibility;
     // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
     // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);
@@ -282,6 +292,7 @@ const char* Renderer::featureName(Feature f) {
 // exported, P/Invoke-adjacent API surface, and QualityLadder.hpp is not.
 u32 Renderer::refractionForQuality(Quality q) { return ladder::refraction(q); }         // reasoning: QualityLadder.hpp, ladder::refraction
 u32 Renderer::giConesForQuality(Quality q) { return ladder::giCones(q); }               // reasoning: QualityLadder.hpp, ladder::giCones
+u32 Renderer::giRestirVisibilityForQuality(Quality q) { return ladder::giRestirVisibility(q); } // reasoning: QualityLadder.hpp, ladder::giRestirVisibility
 u32 Renderer::voxelResolutionForQuality(Quality q) { return ladder::voxelResolution(q); } // reasoning: QualityLadder.hpp, ladder::voxelResolution
 u32 Renderer::giUpdateIntervalForQuality(Quality q) { return ladder::giUpdateInterval(q); } // reasoning: QualityLadder.hpp, ladder::giUpdateInterval
 u32 Renderer::giSkyOcclusionRaysForQuality(Quality q) { return ladder::giSkyOcclusionRays(q); } // reasoning: QualityLadder.hpp, ladder::giSkyOcclusionRays

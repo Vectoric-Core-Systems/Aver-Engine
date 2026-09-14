@@ -107,6 +107,19 @@ struct GameConfig {
     // every existing --frames capture through this executable is bit-identical without it.
     f32 camWobbleDeg = 0.0f;      // yaw amplitude in degrees
     u32 camWobblePeriod = 0;      // period in FRAMES; sin() is 0 at every whole multiple
+
+    // --aversr off|quality|balanced|performance|auto (3.3 C, contract C2-12): the CLI's own AverSR
+    // level, parsed LOCALLY (GameApp.cpp's parseArgs) into the quality ladder's own numbering
+    // (QualityLadder.hpp's kAverSrOff=0/kAverSrQuality=1/kAverSrBalanced=2/kAverSrPerformance=3,
+    // section 3.2) rather than through aver::sr::parseQuality -- this struct, and GameApp behind it,
+    // must never include aver/sr/* (the module boundary Scalability.hpp's own header comment states:
+    // render.voxi and runtime.game must never depend on render.sr), so this stays a raw int the same
+    // way the engine's other pre-enum CLI overrides do. -1 (DEFAULT) means "the CLI said nothing" and
+    // is read identically to an explicit "auto": GameApp::onInit's resolveAverSrLevel call then falls
+    // through to the open project's RENDER.AVERSR and, failing that, the quality ladder's per-rung
+    // default (U2). UNMEASURED: this host's own frame cost at a reduced internal resolution has not
+    // been run.
+    int averSrArg = -1;   // -1 = unstated/auto, else the ladder's own numbering 0..3
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -125,6 +138,21 @@ GameConfig parseArgs(int argc, char** argv);
 class GameApp final : public Application {
 public:
     explicit GameApp(GameConfig cfg);
+
+    // AverSR (3.3 C, contract C2-12): the composition root (game/src/GameMain.cpp, the one
+    // translation unit in this executable allowed to name sr::anything -- see its own header comment)
+    // hands this a function that builds a concrete aver::sr::SpatialUpscaler against a device and
+    // reports the render scale for a resolved level. GameApp itself never includes aver/sr/* and
+    // never names sr::Quality, matching the module boundary render.voxi and runtime.game must both
+    // respect (Scalability.hpp's own header comment: "render.voxi must never include render.sr").
+    // Called once by createApplication, before Engine::run ever calls onInit. LEFT NULL is the legal
+    // default for an AverGame.exe built with the SR module absent: onInit's apply step (below) still
+    // resolves a level through resolveAverSrLevel, it simply has nothing to install it with, and the
+    // game renders at native resolution exactly as it always did -- the SR module being absent from a
+    // build must never be a build failure or a run failure.
+    using AverSrInstaller = bool (*)(rhi::IDevice& dev, u32 level, std::unique_ptr<rhi::IUpscaler>& out,
+                                      f32& renderScale);
+    void setAverSrInstaller(AverSrInstaller fn) { averSrInstaller_ = fn; }
 
     BootConfig config() const override;
     void onInit(Engine&) override;
@@ -317,6 +345,17 @@ private:
     f32 giExtent_ = 1200.0f;   // cm
 
     SceneDrawStats drawStats_;
+
+    // AverSR (3.3 C). NON-OWNING on the device's side, exactly like rhi::IDevice::setUpscaler's own
+    // comment describes for the editor's identical member: the device holds a bare pointer into this,
+    // so it is detached (setUpscaler(nullptr)) before this unique_ptr ever resets -- see onShutdown,
+    // first statement after `dev`, mirroring the ordering SandboxApp.cpp's own clearAverSrUpscaler /
+    // applyAverSrQuality already guard for the identical crash class (--aversr-cycle). Stays null for
+    // the whole run whenever averSrInstaller_ is null or onInit resolves Off.
+    std::unique_ptr<rhi::IUpscaler> averSrUpscaler_;
+    // Set once, from the composition root, by setAverSrInstaller -- see that method's own comment.
+    // Null is the ordinary, legal "this build has no SR module linked" case, not an error state.
+    AverSrInstaller averSrInstaller_ = nullptr;
 
 #if AVER_MODULE_VOXI
     // BY VALUE, and registered NON-OWNING with addRenderFeature. The device holds a bare pointer to

@@ -19,6 +19,7 @@
 #include "aver/voxi/Voxi.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 // Both directives are needed: u32/f32 live in aver itself (aver/core/Types.hpp), while Quality,
 // Settings, Feature, Renderer, DisableReason and ladder:: live one level down in aver::voxi -- exactly
@@ -120,10 +121,17 @@ int main() {
     checkLadder("giSkyOcclusionRays",ladder::giSkyOcclusionRays, 0,  0,   0,   1,   1);
     checkLadder("giSkyOcclusionTile",ladder::giSkyOcclusionTile, 1,  1,   1,   1,   1);
     checkLadder("ptBounces",         ladder::ptBounces,          1,  2,   2,   3,   4);
+    // U1: {Off 3, Low 1, Medium 2, High 3, Epic 3} -- see ladder::giRestirVisibility's own comment for
+    // why High/Epic are your decision (Full) and Low/Medium are mine, UNMEASURED.
+    checkLadder("giRestirVisibility",ladder::giRestirVisibility, 3,  1,   2,   3,   3);
+    // U2: {Off 0, Low 3, Medium 2, High 1, Epic 1} -- kAverSr* mirror sr::Quality's own numbering.
+    checkLadder("averSrLevel",       ladder::averSrLevel, ladder::kAverSrOff, ladder::kAverSrPerformance,
+                ladder::kAverSrBalanced, ladder::kAverSrQuality, ladder::kAverSrQuality);
 
     std::printf("[INFO ] === Renderer::*ForQuality forwards ladder::* at every tier ===\n");
     checkForwards("refraction",         Renderer::refractionForQuality,         ladder::refraction);
     checkForwards("giCones",            Renderer::giConesForQuality,            ladder::giCones);
+    checkForwards("giRestirVisibility", Renderer::giRestirVisibilityForQuality, ladder::giRestirVisibility);
     checkForwards("voxelResolution",    Renderer::voxelResolutionForQuality,    ladder::voxelResolution);
     checkForwards("giUpdateInterval",   Renderer::giUpdateIntervalForQuality,   ladder::giUpdateInterval);
     checkForwards("giSkyOcclusionRays", Renderer::giSkyOcclusionRaysForQuality, ladder::giSkyOcclusionRays);
@@ -144,6 +152,8 @@ int main() {
           "Settings{}.giCones matches ladder::giCones(Medium)");
     check(Settings{}.giUpdateInterval == ladder::giUpdateInterval(Quality::Medium),
           "Settings{}.giUpdateInterval matches ladder::giUpdateInterval(Medium) -- the 1 -> 2 move");
+    check(Settings{}.giRestirVisibility == ladder::giRestirVisibility(Quality::Medium),
+          "Settings{}.giRestirVisibility matches ladder::giRestirVisibility(Medium) -- U1's HalfResolution default");
     check(Settings{}.rtShadowRays       == ladder::rtShadowRays(Quality::Medium),
           "Settings{}.rtShadowRays matches ladder::rtShadowRays(Medium)");
     check(Settings{}.rtPixelsPerRayTile == ladder::rtPixelsPerRayTile(Quality::Medium),
@@ -225,6 +235,7 @@ int main() {
         nonDecreasing("refraction",        ladder::refraction);
         nonDecreasing("giSkyOcclusionRays",ladder::giSkyOcclusionRays);
         nonDecreasing("ptBounces",         ladder::ptBounces);
+        nonDecreasing("giRestirVisibility",ladder::giRestirVisibility);
         nonIncreasing("giUpdateInterval",  ladder::giUpdateInterval);
         nonIncreasing("rtShadowDenoise",   ladder::rtShadowDenoise);
         // Exception 1 (section 4): rtRenderMode at Low changes the METHOD (raster), not the amount --
@@ -446,6 +457,223 @@ int main() {
               "groupFollowsLadder is false once a knob (giCones) is hand-overridden away from the ladder");
     }
 
+    std::printf("[INFO ] === U1: giRestirVisibility prerequisites, through resolve() ===\n");
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Medium;
+        s.giMode = 0;
+        s.giRestirVisibility = 3;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirVisibility.reason == DisableReason::RequiresRestirGi,
+              "giRestirVisibility.reason is RequiresRestirGi when giMode is 0, with RT/GI tiers otherwise fine");
+        check(r.giRestirVisibility.effective == r.giRestirVisibility.requested,
+              "giRestirVisibility.effective == requested even while inert (never clamped to 0 on a failed prerequisite)");
+    }
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Off;
+        s.giMode = 1;
+        s.giRestirVisibility = 2;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirVisibility.reason == DisableReason::RequiresRayTracingEnabled,
+              "giRestirVisibility inherits giMode's own reason (RequiresRayTracingEnabled) when RT tier is Off");
+        check(r.giRestirVisibility.effective == r.giRestirVisibility.requested,
+              "giRestirVisibility.effective == requested here too");
+    }
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Medium;
+        s.giMode = 1;
+        s.giRestirVisibility = 0;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirVisibility.reason == DisableReason::None,
+              "giRestirVisibility has no reason once giMode itself resolves to ReSTIR with every prerequisite met");
+        check(r.giRestirVisibility.effective == 0,
+              "giRestirVisibility.effective passes an in-range request (NoRay, 0) straight through");
+    }
+    {
+        Settings s{};
+        s.giRestirVisibility = 99;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirVisibility.requested == 3,
+              "resolve() clamps an out-of-range giRestirVisibility (99) to 3 on its own, independent of Voxi.cpp's clamp");
+    }
+    check(std::strcmp(disableReasonText(DisableReason::RequiresRestirGi), "Unavailable.") != 0,
+          "disableReasonText(RequiresRestirGi) is its own sentence, not the generic fallback");
+
+    std::printf("[INFO ] === U1: giRestirVisibility follows Overall Quality and groupFollowsLadder ===\n");
+    {
+        for (u32 t = 1; t <= 4; ++t) {
+            const OverallQuality q = static_cast<OverallQuality>(t);
+            const Quality tier = static_cast<Quality>(t);
+            Settings s{};
+            applyOverall(s, q, fullDevice());
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "applyOverall(%s) writes giRestirVisibility to ladder::giRestirVisibility(%s)",
+                          tierName(tier), tierName(tier));
+            check(s.giRestirVisibility == ladder::giRestirVisibility(tier), buf);
+        }
+    }
+    {
+        Settings s{};
+        applyOverall(s, OverallQuality::Medium, fullDevice());
+        check(groupFollowsLadder(s, ScalabilityGroup::GlobalIllumination),
+              "GI still follows the ladder immediately after applyOverall (giRestirVisibility included)");
+        s.giRestirVisibility = (ladder::giRestirVisibility(Quality::Medium) + 1u) % 4u;   // any other legal value
+        check(!groupFollowsLadder(s, ScalabilityGroup::GlobalIllumination),
+              "groupFollowsLadder is false once giRestirVisibility alone is hand-overridden away from the ladder");
+        check(overallFromSettings(s, fullDevice()) == OverallQuality::Custom,
+              "overallFromSettings reads Custom once giRestirVisibility alone has drifted from Medium's rung");
+    }
+
+    std::printf("[INFO ] === U1: giRestirVisibility, through Renderer::get() -- tier-change derivation, explicit override, clamp ===\n");
+    {
+        Renderer::get().setDeviceInfo(fullDevice());
+        Settings s = Renderer::get().settings();
+        s.globalIllumination = Quality::Off;
+        Renderer::get().setSettings(s);   // establish Off as the live tier
+
+        s = Renderer::get().settings();
+        s.globalIllumination = Quality::Low;
+        Renderer::get().setSettings(s);
+        // Off and Low deliberately differ (3 vs 1) -- unlike Off and High/Epic, which share Full (3) and
+        // would let this check pass even if the derivation never ran at all.
+        check(Renderer::get().settings().giRestirVisibility == ladder::giRestirVisibility(Quality::Low),
+              "an Off -> Low tier change re-derives giRestirVisibility (field left untouched in the same call)");
+    }
+    {
+        Renderer::get().setDeviceInfo(fullDevice());
+        Settings s = Renderer::get().settings();
+        s.globalIllumination = Quality::Off;
+        Renderer::get().setSettings(s);
+
+        s = Renderer::get().settings();
+        s.globalIllumination = Quality::Epic;
+        s.giRestirVisibility = 1;   // explicit request in the SAME call that changes the tier
+        Renderer::get().setSettings(s);
+        check(Renderer::get().settings().giRestirVisibility == 1,
+              "an explicit giRestirVisibility set in the same call as a tier change survives the derivation");
+    }
+    {
+        Renderer::get().setDeviceInfo(fullDevice());
+        Settings s = Renderer::get().settings();
+        s.giRestirVisibility = 9;
+        Renderer::get().setSettings(s);
+        check(Renderer::get().settings().giRestirVisibility == 3,
+              "giRestirVisibility 9 (garbage) clamps to 3 (Full), never to 0 (NoRay)");
+    }
+
+    std::printf("[INFO ] === U2: ladder::averSrLevel / overallAverSrLevel / autoAverSrLevel ===\n");
+    {
+        for (u32 t = 1; t <= 4; ++t) {
+            const OverallQuality q = static_cast<OverallQuality>(t);
+            const Quality tier = static_cast<Quality>(t);
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "overallAverSrLevel(%s) == ladder::averSrLevel(%s)", tierName(tier), tierName(tier));
+            check(overallAverSrLevel(q) == ladder::averSrLevel(tier), buf);
+        }
+        check(overallAverSrLevel(OverallQuality::Custom) == ladder::averSrLevel(Quality::Off),
+              "overallAverSrLevel(Custom) casts to Quality::Off's level (0) -- never called this way in practice, still defined");
+    }
+    {
+        // GI Epic, RT Low, NEITHER following its own ladder rung (both left at Settings{}'s Medium
+        // knobs) -- overallFromSettings must read Custom for this pair, which is the precondition
+        // autoAverSrLevel's Custom branch needs.
+        Settings s{};
+        s.globalIllumination = Quality::Epic;
+        s.rayTracing = Quality::Low;
+        check(overallFromSettings(s, fullDevice()) == OverallQuality::Custom,
+              "GI Epic + RT Low (neither following its own ladder) reads Custom -- precondition for the next check");
+        check(autoAverSrLevel(s, fullDevice()) == ladder::averSrLevel(Quality::Epic),
+              "autoAverSrLevel on Custom takes the HIGHER of GI/RT tier (Epic over Low) -- averSrLevel(Epic) == 1 (Quality)");
+    }
+    {
+        const DeviceInfo noRt = noRtHardwareDevice();
+        Settings s{};
+        s.globalIllumination  = Quality::High;
+        s.voxelResolution     = ladder::voxelResolution(Quality::High);
+        s.giCones             = ladder::giCones(Quality::High);
+        s.giUpdateInterval    = ladder::giUpdateInterval(Quality::High);
+        s.giRestirVisibility  = ladder::giRestirVisibility(Quality::High);
+        s.rayTracing = Quality::Epic;   // ignored entirely: RayTracing is unavailable on this device
+        check(overallFromSettings(s, noRt) == OverallQuality::High,
+              "a no-RT device reads High from GI alone -- precondition for the next check");
+        check(autoAverSrLevel(s, noRt) == ladder::averSrLevel(Quality::High),
+              "autoAverSrLevel on a device without RT hardware follows GI's tier alone, via overallFromSettings");
+    }
+
+    std::printf("[INFO ] === U2: resolveAverSrLevel precedence -- CLI > user > manifest > auto ===\n");
+    {
+        // A correct oracle, written independently of resolveAverSrLevel's own body, against the stated
+        // precedence -- checked against the real function rather than against itself.
+        auto oracleCorrect = [](int cli, int user, int manifest, u32 autoL) -> AverSrDecision {
+            if (cli >= 0)      return AverSrDecision{static_cast<u32>(cli),      AverSrSource::Cli};
+            if (user >= 0)     return AverSrDecision{static_cast<u32>(user),     AverSrSource::User};
+            if (manifest >= 0) return AverSrDecision{static_cast<u32>(manifest), AverSrSource::Manifest};
+            return AverSrDecision{autoL, AverSrSource::Auto};
+        };
+        // THE NEGATIVE CONTROL: user ranked ABOVE cli, the wrong order -- exists to prove this sweep can
+        // actually fail. It only diverges from the correct oracle in the cases where BOTH cli and user
+        // are present at once (the only cases the two orderings disagree on a winner).
+        auto oracleWrongOrder = [](int cli, int user, int manifest, u32 autoL) -> AverSrDecision {
+            if (user >= 0)     return AverSrDecision{static_cast<u32>(user),     AverSrSource::User};
+            if (cli >= 0)      return AverSrDecision{static_cast<u32>(cli),      AverSrSource::Cli};
+            if (manifest >= 0) return AverSrDecision{static_cast<u32>(manifest), AverSrSource::Manifest};
+            return AverSrDecision{autoL, AverSrSource::Auto};
+        };
+
+        const int kAbsent = -1;
+        const u32 autoL = 2u;
+        bool allAgree = true;
+        bool wrongOracleEverDisagreed = false;
+        int combos = 0;
+        // 3 presence bits (cli/user/manifest) x 2 value variants per present source = 16 cases --
+        // covering both "who wins" (presence) and "which value wins" for whichever source does.
+        for (int hasCli = 0; hasCli < 2; ++hasCli) {
+            for (int hasUser = 0; hasUser < 2; ++hasUser) {
+                for (int hasManifest = 0; hasManifest < 2; ++hasManifest) {
+                    for (int variant = 0; variant < 2; ++variant) {
+                        const int cli      = hasCli      ? (variant == 0 ? 0 : 3) : kAbsent;
+                        const int user     = hasUser     ? (variant == 0 ? 1 : 2) : kAbsent;
+                        const int manifest = hasManifest ? (variant == 0 ? 2 : 1) : kAbsent;
+                        ++combos;
+
+                        const AverSrDecision got  = resolveAverSrLevel(cli, user, manifest, autoL);
+                        const AverSrDecision want = oracleCorrect(cli, user, manifest, autoL);
+                        if (got.level != want.level || got.source != want.source) allAgree = false;
+
+                        if (hasCli && hasUser) {
+                            const AverSrDecision wrong = oracleWrongOrder(cli, user, manifest, autoL);
+                            if (wrong.level != want.level || wrong.source != want.source)
+                                wrongOracleEverDisagreed = true;
+                        }
+                    }
+                }
+            }
+        }
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "resolveAverSrLevel agrees with the CLI>user>manifest>auto oracle over all %d presence/value combinations",
+                      combos);
+        check(allAgree, buf);
+        check(wrongOracleEverDisagreed,
+              "negative control: a user-above-cli oracle DOES disagree with the correct one somewhere in the sweep (the test can fail)");
+    }
+    {
+        const AverSrDecision fallback = resolveAverSrLevel(-1, -1, -1, 1u);
+        check(fallback.source == AverSrSource::Auto && fallback.level == 1u,
+              "resolveAverSrLevel falls back to Auto with autoLevel passed through when nothing else is present");
+        const AverSrDecision clampedCli = resolveAverSrLevel(99, -1, -1, 0u);
+        check(clampedCli.level == 3u && clampedCli.source == AverSrSource::Cli,
+              "resolveAverSrLevel clamps an out-of-range CLI level (99) to 3, not to 0 or a wraparound");
+        const AverSrDecision clampedAuto = resolveAverSrLevel(-1, -1, -1, 99u);
+        check(clampedAuto.level == 3u,
+              "resolveAverSrLevel clamps an out-of-range autoLevel too, not only the -1-able inputs");
+    }
+
     std::printf("[INFO ] === disableReasonText and refusalFeatureFor ===\n");
     {
         bool allNonNull = true;
@@ -474,6 +702,8 @@ int main() {
         check(!refusalFeatureFor(DisableReason::RequiresNrd, f), "RequiresNrd does not map");
         check(!refusalFeatureFor(DisableReason::NothingToDenoise, f), "NothingToDenoise does not map");
         check(!refusalFeatureFor(DisableReason::RequiresMsaaOne, f), "RequiresMsaaOne does not map (it is the soft reason)");
+        check(!refusalFeatureFor(DisableReason::RequiresRestirGi, f),
+              "RequiresRestirGi does not map -- nothing already logs it the way refuse() logs a hardware refusal");
     }
 
     std::printf("[INFO ] === %d assertions, %d failed ===\n", g_checks, g_failures);

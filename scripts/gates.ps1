@@ -341,7 +341,13 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     # every API call and is a per-call tax no ordinary run should pay, but the per-gate C/E/W counts
     # below come out of it, and a gate that reported no corruption because nothing was watching
     # would be worse than no gate at all.
-    $all = @('--frames', "$frames", '--debug-layer') + $gateArgs + $extra
+    # AverSR (0.6 optimisation wave 2, U2) now defaults to Auto at every quality rung, and Auto
+    # applies to --frames runs the same as an interactive session (docs/AVERSR.md, "Default: Auto").
+    # A gate's whole method is reading a raw probe pixel out of the composited frame; scaling the
+    # internal resolution before that composite would change what pixel raw() is even reading,
+    # regardless of which rung the running scene resolves to. Pin native resolution explicitly rather
+    # than rely on whatever Auto would otherwise pick.
+    $all = @('--frames', "$frames", '--debug-layer', '--aversr', 'off') + $gateArgs + $extra
 
     # START-PROCESS, NOT `& $exe`, AND THAT IS NOT A STYLE CHOICE. Sandbox.exe is linked
     # /SUBSYSTEM:WINDOWS as of 0.5.0 so the editor never opens a console window, and Windows
