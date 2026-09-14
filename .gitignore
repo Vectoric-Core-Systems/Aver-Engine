@@ -52,8 +52,9 @@ Thumbs.db
 scripting/**/bin/
 scripting/**/obj/
 
-# Agent worktrees (transient, created by tooling)
-.claude/worktrees/
+# Claude Code's per-checkout folder: agent worktrees, scratch output and local tool state. All of it is
+# machine-local and transient, so the whole folder stays out of VCS rather than one subfolder at a time.
+.claude/
 
 # Python bytecode, from importing tools/mcp/aver_mcp.py to test it
 __pycache__/
