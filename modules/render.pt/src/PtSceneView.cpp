@@ -571,6 +571,19 @@ void PtSceneView::setQuality(u32 rung) {
     AVER_INFO("[PT] scene view: quality rung {} -- accumulator {}x{}", quality_, accumWidth_, accumHeight_);
 }
 
+void PtSceneView::setLegacyEnvironment(bool legacy) {
+    if (legacy == legacyEnvironment_) return;   // idempotent: safe to call every frame
+    legacyEnvironment_ = legacy;
+    // Every sample already in the accumulator was drawn under the OTHER environment; leaving them
+    // in would blend two different sky calibrations into one running mean, the same reasoning the
+    // sun/sky-change branch below applies to a moved sun. No rebuildScene()/sceneReady_ reset: the
+    // scene, target and resolution are untouched, only which sky a diffuse miss reads.
+    sampleCursor_ = 0;
+    convergedLogged_ = false;
+    AVER_INFO("[PT] scene view: legacy environment {} -- accumulation restarted",
+              legacy ? "ON (unmatched reference sky, comparison only)" : "OFF (matched to raster)");
+}
+
 void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     if (!dev_ || !pt_.available()) return;
     // COLD START: prePass() runs at the TOP of beginFrame(), before this run's onRender() has made
@@ -700,6 +713,7 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     d.samples = kSamplesPerStep;
     d.firstSample = sampleCursor_;
     d.reset = (sampleCursor_ == 0);
+    d.legacyEnvironment = legacyEnvironment_;   // R5/F6, see setLegacyEnvironment
     // OPTED IN HERE AND NOWHERE ELSE. This is the view a person looks at, so the traversal a dim
     // fourth-bounce path saves is worth the variance it adds -- and this view accumulates to
     // kMaxSamples, which averages that variance away. PtFurnaceTest deliberately leaves the field at

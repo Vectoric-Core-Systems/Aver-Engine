@@ -67,7 +67,24 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // rays existed.
     // y = the COHERENCE TILE EDGE those rays share a direction across (1 = per-pixel). Claimed within
     // days of this row being written down as spare, which is what gGiParams directly above warns
-    // happens; z/w are what is left, and the warning still applies to them.
+    // happens.
+    // z = LIGHTING LEGACY BITS (VoxiRenderer::setLightingLegacyBits; a u32 bitmask stored as a float,
+    // 0 meaning everything corrected -- a block that has never been written is all zeros, which is
+    // exactly the "corrected" state). Each bit restores one pre-fix behaviour for A/B comparison only;
+    // decoded INLINE at each reader as `((uint)gAmbientParams.z & <bit>u) != 0u`, never through a
+    // shared helper, so every reader stays independently grep-able:
+    //   bit 1  (R0) the ReSTIR candidate ray and the sky-occlusion ray sample a fixed 45-degree ring
+    //          again, instead of a cosine hemisphere (voxi_restir.hlsli, voxi_rt.hlsli).
+    //   bit 2  (R1) a ReSTIR-supplied receiver's own sky is counted twice again -- once through the
+    //          traced miss, once more through ind4.ambient/ind.ambient. THIS FILE reads this bit: see
+    //          the sky-ownership subtraction in PSMainVoxi and PSRayDriven below (F4).
+    //   bit 4  (R2) a ReSTIR candidate's hit point reads the sky again with no visibility test and no
+    //          cosine weighting (voxi_restir.hlsli).
+    //   bit 8  (R3) a reused ReSTIR sample is shaded again with no visibility test between the shading
+    //          point and the sample (voxi_restir.hlsli).
+    //   bit 16 (R6) the cone gather's directions are weighted by cosine again on top of an already
+    //          cosine-distributed direction, i.e. cos^2 (voxi_cone.hlsli, voxi_gi.hlsli).
+    // w is what is left, and the warning above still applies to it.
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
@@ -985,6 +1002,12 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // comment (just above this function) for why exact-equality detection is safe here and what
     // precedence this buys the new specular-ceiling marker further down.
     bool giDiffusePoisoned = false;
+    // F4 (R1): true only when the branch below actually took the ReSTIR path, so `ind` is
+    // giRestirIndirect's own traced-sky estimate rather than the cone gather's. Only that estimate
+    // double-counts the receiver's sky (once through its own traced miss, once more through
+    // ind4.ambient below) -- the cone gather never did, so this flag gates the sky-ownership
+    // subtraction after the occlusion block to exactly the case that needs it.
+    bool restirSuppliedDiffuse = false;
     // GIMODE SWITCHES THE DIFFUSE BOUNCE ESTIMATOR -- see Settings::giMode (Voxi.hpp) for the full
     // contract. Only reachable in the AVER_RT-compiled variant: ReSTIR GI's candidate ray needs the
     // ray-tracing toolkit (gScene, RtInstance, gRtMaterials -- all declared inside this file's own
@@ -1000,6 +1023,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         if (gGiRestirParams.x > 0.5) {
             ind = giRestirIndirect(i.wpos, N, rtViewZ, i.pos.xy, (uint)gRtHistParams.z, ao);
             giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind);
+            restirSuppliedDiffuse = true;
         } else
             ind = coneTracedIndirect(i.wpos, N, ao);
     }
@@ -1069,7 +1093,6 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     bool giPoisonSpecCeilHit = false;
     ind4.ambient      = averSkyIrradiance(averShadingNormal(s));
     ind4.ambientScale = gAmbient.r;
-    ind4.diffuse      = ind;
     // TRACED SKY VISIBILITY WHEN THE TIER PAYS FOR IT, the cone gather's own estimate otherwise.
     // gAmbientParams.x is already 0 on any frame without an acceleration structure (VoxiRenderer
     // gates it on rtActive_), so this needs no second RUNTIME test -- but it does need a
@@ -1084,6 +1107,27 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #else
     ind4.occlusion    = ao;
 #endif
+    // F4 (R1): ind4.diffuse is set HERE, after ind4.occlusion exists, not beside ind4.ambient above --
+    // the sky-ownership subtraction below needs the occlusion this receiver actually traced/gathered
+    // THIS frame, and moving the assignment down is cheaper than caching ao a second time.
+    //
+    // ONE OWNER FOR THE SKY, at giMode 1: giRestirIndirect's own traced miss already gave this pixel
+    // its sky (see gAmbientParams.z's cbuffer comment, R1). Adding ind4.ambient on top of `ind` counted
+    // it twice -- exactly the FmsEms/kD identity material_prelude.hlsl's averIndirectTerms computes
+    // (diffAmbient = (FmsEms + kD) * ambient, diffBounce = kD * ind4.diffuse, both summed): subtracting
+    // g * A (A = ambient * scale * occlusion * matAO, g = gVoxelParams.y) from `ind` here turns
+    // diffBounce's kD * ind4.diffuse into kD * (est - g * A), which combines with diffAmbient's
+    // (FmsEms + kD) * A to read kD * est + FmsEms * A + (1 - g) * kD * A -- the sky counted exactly
+    // once, through giRestirIndirect's own traced visibility, with FmsEms still keeping its full
+    // irradiance (ind4.ambient itself is not zeroed -- see PSRayDriven's own "ONE OWNER FOR THE
+    // ENVIRONMENT" comment below for why zeroing it measured worse: it throws away the multi-scatter
+    // compensation FmsEms multiplies). Skipped whenever `ind` is a poison colour (subtracting from a
+    // sentinel would corrupt the very debug view it exists to show) or `ind` never came from
+    // giRestirIndirect at all (restirSuppliedDiffuse false: the cone gather's `ind` was never
+    // double-counted, so there is nothing here to remove).
+    ind4.diffuse      = ind;
+    if (restirSuppliedDiffuse && !giDiffusePoisoned && ((uint)gAmbientParams.z & 2u) == 0u)
+        ind4.diffuse = ind - ind4.ambient * ind4.ambientScale * ind4.occlusion * s.occlusion * gVoxelParams.y;
 #if AVER_RT
     // Ray traced when the acceleration structure and geometry table both exist; preferred over the
     // cone trace unconditionally since the cone is bounded by the voxel volume and this is not.
@@ -1740,6 +1784,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // ReSTIR branch below actually painted one of giRestirIndirect's own seven colours over
     // ind.diffuse.
     bool giDiffusePoisoned = false;
+    // F4 (R1): mirrors PSMainVoxi's own restirSuppliedDiffuse -- see that copy's comment (search
+    // gAmbientParams.z's cbuffer entry, R1) for the full identity. True only when the ReSTIR branch
+    // below actually supplied ind.diffuse, which is the only estimator that double-counts this
+    // receiver's own sky.
+    bool rdRestirSuppliedDiffuse = false;
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     // ablated: no cone gather
 #elif AVER_AO_UNIFIED
@@ -1759,6 +1808,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
             ind.diffuse = giRestirIndirect(wpos, N, mul(float4(wpos, 1.0), gViewProj).w,
                                            i.pos.xy, (uint)gRtHistParams.z, rdAo);
             giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind.diffuse);
+            rdRestirSuppliedDiffuse = true;
         } else
             ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
     }
@@ -1933,6 +1983,14 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Epic uses anyway -- so this mode measures the RAY, not the presence of ambient occlusion.
     ind.occlusion    = rdAo;
 #endif
+    // F4 (R1): PSMainVoxi's twin, applied here after ind.occlusion is final and before
+    // averShadeIndirect reads ind -- see ind4's copy above (search "ONE OWNER FOR THE SKY") for the
+    // full identity and why it is a subtraction rather than zeroing ind.ambient. Never set inside the
+    // AO_UNIFIED branch above: that branch's ind.diffuse (amb.bounce) is the traced bounce ALONE, with
+    // its own occlusion already folded in and no sky term riding along with it, so
+    // rdRestirSuppliedDiffuse stays false there and this is a no-op for that tier.
+    if (rdRestirSuppliedDiffuse && !giDiffusePoisoned && ((uint)gAmbientParams.z & 2u) == 0u)
+        ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     radiance = averShadeIndirect(radiance, s, ind);
 
     // THE BOUNCE CARRIES THE DIFFUSE RESPONSE, not raw albedo: a metal reflects almost nothing

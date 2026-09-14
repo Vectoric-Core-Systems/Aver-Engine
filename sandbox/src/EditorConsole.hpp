@@ -389,6 +389,18 @@ inline bool& consoleGiPoisonViewSlot() { static bool v = false; return v; }
 // the voxiRenderer_.setGiPoisonView(consoleGiPoisonViewSlot()) call this mirrors.
 inline bool& consoleNrdLegacyCameraSlot() { static bool v = false; return v; }
 
+// The lighting-contrast fix's legacy bitmask (contrast-fix plan, F7) -- the SAME raw-slot idiom as
+// consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot() directly above and for the identical reason:
+// VoxiRenderer::setLightingLegacyBits is private renderer state with no path through
+// voxi::Renderer::Settings/setSettings. ONE u32 here backs FIVE console variables below
+// (voxi.legacyRestirSampleRing etc.), each one flipping a single bit rather than the whole word, so
+// the user can A/B one root cause at a time. Seeded whole from --lighting-legacy for a --frames
+// capture, which has no console to flip five bits by hand; reasserted onto the live voxiRenderer_
+// once a frame from SandboxApp.cpp's onUpdate, right beside the
+// voxiRenderer_.setNrdLegacyCamera(consoleNrdLegacyCameraSlot()) call this mirrors. See
+// VoxiRenderer::setLightingLegacyBits' own header comment for the bit table.
+inline u32& consoleLightingLegacySlot() { static u32 v = 0; return v; }
+
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
 // tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
 // ConsoleBatch's own comment for why the split is closures rather than two struct copies.
@@ -636,6 +648,53 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleNrdLegacyCameraSlot() = on; });
         }});
+    // ---- the lighting-contrast fix's five legacy A/B switches (contrast-fix plan, section 3's A/B
+    // table) -- one bit each of consoleLightingLegacySlot()'s own u32, so the user can isolate ONE
+    // root cause at a time instead of typing a bitmask by hand. SAME raw-slot/deviceSetters shape as
+    // voxi.giPoisonView and voxi.nrdLegacyCamera directly above; only the read/stage pair differ,
+    // since these five share one underlying word instead of each owning a whole bool. Default
+    // OFF/false on every one of them: the FIXED behaviour is what ships, and ALL FIVE true must
+    // reproduce HEAD's image exactly (review checklist item 12) -- never a setting to leave on.
+    auto legacyBitRead = [](u32 bit) {
+        return [bit]{ return vBool((consoleLightingLegacySlot() & bit) != 0u); };
+    };
+    auto legacyBitStage = [](u32 bit) {
+        return [bit](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([bit, on](rhi::IDevice&){
+                if (on) consoleLightingLegacySlot() |= bit; else consoleLightingLegacySlot() &= ~bit;
+            });
+        };
+    };
+    t.push_back({"voxi.legacyRestirSampleRing", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: the ReSTIR candidate ray and the "
+        "sky-occlusion ray both sample a fixed 45-degree ring instead of a cosine-weighted hemisphere "
+        "(root cause R0 of the contrast-fix plan; gAmbientParams.z bit 1). Default OFF samples the "
+        "cosine hemisphere and resets GI/NRD/AO history on either transition.",
+        legacyBitRead(1u), legacyBitStage(1u)});
+    t.push_back({"voxi.legacySkyDoubleCount", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: giMode 1's receiver counts its own "
+        "sky twice, once through the traced ReSTIR estimate and again through the ambient term (root "
+        "cause R1; gAmbientParams.z bit 2). Default OFF counts it once, through the traced estimate.",
+        legacyBitRead(2u), legacyBitStage(2u)});
+    t.push_back({"voxi.legacyRestirHitSky", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: the ReSTIR candidate hit's own "
+        "second-bounce sky is added with no visibility test at all (root cause R2; gAmbientParams.z "
+        "bit 4). Default OFF traces one visibility ray for it and resets GI/NRD history on either "
+        "transition.",
+        legacyBitRead(4u), legacyBitStage(4u)});
+    t.push_back({"voxi.legacyRestirReuseVisibility", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: a spatio-temporally reused ReSTIR "
+        "sample shades with no visibility test between the receiver and the reused sample's position "
+        "(root cause R3; gAmbientParams.z bit 8). Default OFF traces that visibility ray and resets "
+        "GI/NRD history on either transition.",
+        legacyBitRead(8u), legacyBitStage(8u)});
+    t.push_back({"voxi.legacyConeWeights", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: the cone gather's directions are "
+        "cosine-distributed AND cosine-weighted a second time, an effective cos^2 distribution "
+        "instead of cos (root cause R6; gAmbientParams.z bit 16). Default OFF weights each cone once. "
+        "Affects giMode 0, the non-RT fallback, and the cluster and particle passes.",
+        legacyBitRead(16u), legacyBitStage(16u)});
     // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
     // the same honesty voxi.giMode above documents at length, and through the SAME mechanism now:
     // voxi::resolve()'s denoiser field, not a raw Settings read. denoiser was never clamped inside
@@ -805,6 +864,18 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
         readField(&rhi::PostSettings::maxRadiance), stageClamped(&rhi::PostSettings::maxRadiance, 0.0f, 1e6f)});
 }
 
+// The path tracer's matched-environment legacy switch (contrast-fix plan F6/F7; root cause R5) --
+// the SAME raw-slot idiom as consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot() above, but
+// DELIBERATELY NOT declared inside their AVER_MODULE_VOXI guard: aver::pt::PtSceneView's own
+// registration and tier selection have to keep working with AVER_MODULE_VOXI off (see
+// SandboxApp.cpp's own comment on ptSceneViewWantEnabled_ for why), and a slot that variable and
+// SandboxApp.cpp's per-frame reassert both need cannot live inside a guard the path tracer does not
+// share. Written by `set pt.legacyEnvironment` (registerRhiVars just below, the one variable table
+// this file builds unconditionally) or seeded from --pt-legacy-env for a --frames capture with no
+// console, and reasserted onto the live ptSceneView_ once a frame from SandboxApp.cpp's onUpdate via
+// PtSceneView::setLegacyEnvironment.
+inline bool& consolePtLegacyEnvSlot() { static bool v = false; return v; }
+
 // Direct rhi::IDevice toggles that live OUTSIDE PostSettings entirely -- rhi.* rather than post.*,
 // because they are not part of the camera post-processing chain PostSettings describes, they are raw
 // per-device render state. Staged through ConsoleBatch::deviceSetters (a plain list of "call this on
@@ -819,6 +890,24 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice& d){ d.setDepthPrepassEnabled(on); });
+        }});
+    // pt.*, not rhi.*: registered here only because this is the one variable table this file builds
+    // with NO module guard (see consolePtLegacyEnvSlot()'s own comment for why that matters for the
+    // path tracer specifically) -- not because this is per-device render state the way
+    // rhi.depthPrepass above is. ON reinstates root cause R5 for comparison only: the path tracer's
+    // diffuse-bounce miss returns the unmatched reference sky (skyColor/averSkyPhysical, 8x dimmer)
+    // instead of the SAME calibrated SH the raster ambient term uses (PtFrame gPtTrace.z). Default
+    // OFF matches the raster's diffuse sky lobe for lobe; camera rays and rays after a specular
+    // bounce use skyColor either way. See PtSceneView::setLegacyEnvironment.
+    t.push_back({"pt.legacyEnvironment", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: the path tracer's diffuse-bounce "
+        "miss returns the unmatched reference sky instead of the same calibrated sky the raster "
+        "ambient term uses (root cause R5; PtFrame gPtTrace.z). Default OFF matches the raster's "
+        "diffuse sky lobe for lobe. Toggling either way re-arms the path tracer's accumulation.",
+        []{ return vBool(consolePtLegacyEnvSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consolePtLegacyEnvSlot() = on; });
         }});
 }
 

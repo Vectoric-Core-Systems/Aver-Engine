@@ -196,6 +196,17 @@ public:
     void setQuality(u32 rung);
     u32  quality() const { return quality_; }
 
+    // R5/F6 (contrast-fix plan): true restores the pre-fix reference sky (skyColor() on every miss,
+    // unmatched to the raster's calibrated diffuse ambient); false (the default PtDispatch::
+    // legacyEnvironment already carries) is the matched, corrected environment. Idempotent, like
+    // setQuality above -- safe to call every frame from wherever the caller stores the console/CLI
+    // slot. A change RE-ARMS ACCUMULATION (resets sampleCursor_, not the scene or the target: no
+    // acceleration structure or resolution is affected) because every sample already summed into the
+    // buffer was drawn under the OTHER environment, same reasoning as the sun/sky-change branch in
+    // prePass(). Logs one AVER_INFO line on an actual change.
+    void setLegacyEnvironment(bool legacy);
+    bool legacyEnvironment() const { return legacyEnvironment_; }
+
 private:
     // An order-sensitive FNV-1a hash of drawsPrev_ (mesh, world bits, albedo bits) -- the exact same
     // shape and constants VoxiRenderer::giDrawsKey() uses, for the same reason: a cache whose
@@ -224,6 +235,9 @@ private:
     // comment records the two traps (padding in a by-value return, and cloudTime being a clock).
     rhi::SkyAtmosphere sky_{};
     bool     haveSky_ = false;
+    // R5/F6: mirrors into every accumulate() dispatch's PtDispatch::legacyEnvironment; see
+    // setLegacyEnvironment's own comment above.
+    bool     legacyEnvironment_ = false;
     // Said once per restart cause, so a permanently-restarting accumulator is distinguishable from a
     // working one in a log. It was silent before, which is why nobody could tell.
     bool     camResetLogged_ = false;

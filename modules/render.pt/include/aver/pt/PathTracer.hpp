@@ -138,6 +138,22 @@ struct PtDispatch {
     // the furnace simply does not ask for it: this defaults to 0, PtFurnaceTest never sets it, and
     // its arithmetic is bit-identical to before. PtSceneView opts in.
     u32      rouletteDepth = 0;
+
+    // R5/F6 (contrast-fix plan): a MISS following a cosine-hemisphere-sampled bounce reads
+    // averSkyRadianceCheap() -- the SAME calibrated, SH-sourced sky the raster's diffuse ambient and
+    // ReSTIR already use -- instead of the raw, uncalibrated skyColor() every miss used before. See
+    // pt_pathtrace.hlsl's ptEnvironment/lastDiffuse comments for the full arithmetic; camera rays and
+    // a miss straight after a SPECULAR or dielectric bounce are unaffected either way, matching the
+    // raster's own specular reflections (also uncalibrated skyColor()).
+    //
+    // DEFAULTS FALSE, i.e. corrected/matched -- the user's own call (contrast-fix plan section 8):
+    // the path tracer is meant as pt-compare's REFERENCE, and a reference whose sky is 8x dimmer than
+    // the renderer it is checking (kSkyIrradianceCalibration) cannot tell the two apart. true
+    // restores the old, unmatched behaviour, byte-identical to before this field existed, for
+    // comparison only -- see PtSceneView::setLegacyEnvironment. PtFurnaceTest never sets this either:
+    // averSkyRadianceCheap() returns averFurnaceL() under the furnace exactly as skyColor() does
+    // (shared_prelude.hlsl), so which branch fires cannot change the furnace's arithmetic.
+    bool     legacyEnvironment = false;
 };
 
 // Where one camera's accumulation lands: the buffer, and the descriptors naming its scene.

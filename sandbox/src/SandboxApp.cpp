@@ -3224,6 +3224,15 @@ public:
         // BEFORE device_->beginFrame() (see Engine::frameStep()) -- the only safe place to add or
         // remove a render feature. See syncPtSceneView()'s own comment for why.
         syncPtSceneView(e.device());
+        // The path tracer's matched-environment legacy switch (contrast-fix plan F6/F7; root cause
+        // R5) -- OUTSIDE any AVER_MODULE_VOXI guard and right beside syncPtSceneView() rather than
+        // beside voxiRenderer_'s own reasserts further down, because ptSceneView_'s registration and
+        // tier selection have to keep working with AVER_MODULE_VOXI off (see ptSceneViewWantEnabled_'s
+        // own comment on this file), and consolePtLegacyEnvSlot() (EditorConsole.hpp) is declared
+        // outside that guard for the identical reason. Reasserted every frame regardless of whether
+        // the user just touched it, the same idiom as every other raw console slot in this file;
+        // PtSceneView::setLegacyEnvironment only acts, and re-arms accumulation, on an actual change.
+        if (ptSceneView_) ptSceneView_->setLegacyEnvironment(editor::consolePtLegacyEnvSlot());
 #if AVER_MODULE_VOXI
         // --pt-quality-ramp [N]: verification-only, exists because THIS TRANSITION HAD A BUG no flag
         // could reach. Raising the PT rung on an already-rendered view re-arms PtSceneView at a new
@@ -3964,6 +3973,11 @@ public:
             // editor::consoleNrdLegacyCameraSlot()'s own comment and VoxiRenderer::setNrdLegacyCamera's
             // for what this reasserts and why the setter itself only acts on an actual change.
             voxiRenderer_.setNrdLegacyCamera(editor::consoleNrdLegacyCameraSlot());
+            // The lighting-contrast fix's legacy bitmask: identical idiom, right beside the toggle it
+            // mirrors -- see editor::consoleLightingLegacySlot()'s own comment and
+            // VoxiRenderer::setLightingLegacyBits' for the bit table and what reasserting this every
+            // frame (regardless of whether the user just touched it) costs versus what it buys.
+            voxiRenderer_.setLightingLegacyBits(editor::consoleLightingLegacySlot());
             // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
             // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
             // than only at attach time.
@@ -27725,8 +27739,17 @@ Application* createApplication(int argc, char** argv) {
     // the exact shape of the --no-rt/--no-gi bug this file already paid for once.
     bool gpuTimingArg = false;
     f32 rtDenoiseMotionArg = 0.0f;   // --rt-denoise-motion, 0 = the shipped default (no taper)
+    // --lighting-legacy <bits>: seeds editor::consoleLightingLegacySlot() directly (see where this
+    // is applied, beside the other console-slot seeds after `app` exists, further down) rather than
+    // routing through a Settings field -- there is no console to type `set voxi.legacyRestirSampleRing
+    // true` into on a --frames capture. 0 (the default, flag absent) means every lighting-contrast
+    // fix stays live. IN THIS LOOP for the usual C1061 reason: the else-if chain below is already at
+    // MSVC's nesting limit and one more branch does not compile.
+    int lightingLegacyArg = 0;
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
+        // --lighting-legacy N: same C1061 reason as --rd-ablate above.
+        if (!std::strcmp(argv[i], "--lighting-legacy"))      lightingLegacyArg = std::atoi(argv[i + 1]);
         // --gi-mode N: selects the indirect-diffuse estimator (0 = voxel cones, 1 = RTXDI ReSTIR GI).
         // In THIS loop for the same C1061 reason as --rd-ablate above.
         if (!std::strcmp(argv[i], "--gi-mode"))              giModeArg = std::atoi(argv[i + 1]);
@@ -27772,6 +27795,14 @@ Application* createApplication(int argc, char** argv) {
     bool unlitArg = false;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--unlit")) unlitArg = true;
+    // --pt-legacy-env: seeds editor::consolePtLegacyEnvSlot() directly, for the identical
+    // --frames-has-no-console reason --lighting-legacy above does -- see where this is applied,
+    // beside that seed, further down. Takes no value, so its own full-length loop like --unlit just
+    // above: matched only in the i+1<argc loop, a trailing "--pt-legacy-env" would be silently
+    // ignored.
+    bool ptLegacyEnvArg = false;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--pt-legacy-env")) ptLegacyEnvArg = true;
     // --clear-shader-cache: a maintenance action, valueless, so it gets its own full-length loop
     // for --gpu-timing's reason -- matched only in the i+1<argc loop, a trailing one would be
     // silently ignored, which for a "did it clear?" command is the worst possible failure.
@@ -28788,6 +28819,23 @@ Application* createApplication(int argc, char** argv) {
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);
+    // --lighting-legacy / --pt-legacy-env: seed the raw console slots directly (EditorConsole.hpp),
+    // the same slots `set voxi.legacyRestirSampleRing`/etc. and `set pt.legacyEnvironment` write --
+    // there is no app->setXxx for these because there is no SandboxApp member behind them, only the
+    // per-frame reasserts beside voxiRenderer_.setNrdLegacyCamera(...) and syncPtSceneView(...)
+    // already do the rest. Applied here, after `app` exists but before Engine::run's first frame, so
+    // the very first onUpdate() already reasserts whatever a --frames capture asked for.
+    //
+    // consoleLightingLegacySlot() ITSELF IS GUARDED, unlike consolePtLegacyEnvSlot() just below --
+    // it is declared inside EditorConsole.hpp's AVER_MODULE_VOXI block (it feeds
+    // VoxiRenderer::setLightingLegacyBits and nothing else), so seeding it has to be guarded here the
+    // same way, while --lighting-legacy itself is still parsed unconditionally above like every other
+    // flag in that loop. consolePtLegacyEnvSlot() carries no such guard (see its own comment) because
+    // the path tracer it feeds has to keep working with AVER_MODULE_VOXI off.
+#if AVER_MODULE_VOXI
+    editor::consoleLightingLegacySlot() = static_cast<u32>(lightingLegacyArg);
+#endif
+    editor::consolePtLegacyEnvSlot() = ptLegacyEnvArg;
     app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);

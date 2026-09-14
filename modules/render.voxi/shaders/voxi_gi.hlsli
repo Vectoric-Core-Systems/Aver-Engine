@@ -86,6 +86,22 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // declared as the FULL FrameConstants so a caller can bind giFrameConstants() verbatim (see the
     // header note above), and a shorter declaration would quietly stop being that. Appended, never
     // inserted: every field above keeps its offset.
+    //
+    // gAmbientParams.z BIT 16 IS NOT DECODED HERE, and this is a deliberate omission recorded rather
+    // than fixed: the contrast-fix plan's F5 (R6, "cone weights") assumed this file's coneTracedIndirect
+    // ring loop was mirrored byte-for-byte against voxi_cone.hlsli's own (the plan cites voxi_cone.
+    // hlsli's OWN "mirrored byte-for-byte" comment, which is actually about traceCone, not this whole
+    // function). It is not. voxi_cone.hlsli's ring loop already draws cosine-stratified, golden-angle
+    // directions (`cosT = sqrt(saturate(1.0 - t))`, t stratified over `ring`) and was the R6 bug's
+    // target; THIS file's ring loop below still uses the older fixed-elevation single ring
+    // (`N * 0.5 + tangent * 0.866`, no stratification at all) that voxi_cone.hlsli had before that
+    // upgrade, and its aperture is a fixed 0.577 rather than voxi_cone.hlsli's cone-count-derived one.
+    // Porting F5's fix here verbatim would not be the small, reviewable patch the plan describes --
+    // it would mean first porting the unrelated stratified-sampling and variable-aperture upgrades
+    // this file never received, which is a bigger, un-briefed change to the particle and cluster
+    // material passes that read this prelude. Left exactly as HEAD; see this lane's report for the
+    // file:line contradiction. gAmbientParams.z bit 16 therefore affects PSMainVoxi/PSVoxel/
+    // PSVoxelDebug/PSRayDriven (voxi_cone.hlsli) only, not the particle pass or PSClusterMain.
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare. NOTHING IN THIS
     // PRELUDE READS x, same as gAmbientParams above it -- declared for size only.

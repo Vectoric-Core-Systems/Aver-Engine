@@ -12,6 +12,33 @@ target_link_libraries(VoxiRtSeqTest PRIVATE Aver.Core)
 target_compile_definitions(VoxiRtSeqTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(VoxiRtSeqTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# VoxiHemiSampleTest -- the lighting-contrast fix's F1 sampler (root cause R0): a cosine-weighted
+# hemisphere sample checked against the fixed 45-degree ring it replaces. Same shape as
+# VoxiRtSeqTest above: links Aver.Core only, no GPU, source assertions read the actual HLSL text
+# through AVER_REPO_ROOT.
+add_executable(VoxiHemiSampleTest src/VoxiHemiSampleTest.cpp)
+target_link_libraries(VoxiHemiSampleTest PRIVATE Aver.Core)
+target_compile_definitions(VoxiHemiSampleTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(VoxiHemiSampleTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ConeWeightTest -- the lighting-contrast fix's F5 cone weights (root cause R6): the voxel cone
+# gather's directions checked against the true cosine-hemisphere moments, and coneTracedIndirect's
+# body checked byte-identical between voxi_cone.hlsli and voxi_gi.hlsli. Same linkage as the two
+# tests above.
+add_executable(ConeWeightTest src/ConeWeightTest.cpp)
+target_link_libraries(ConeWeightTest PRIVATE Aver.Core)
+target_compile_definitions(ConeWeightTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(ConeWeightTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SkyOwnershipIdentityTest -- the lighting-contrast fix's F4 sky-ownership identity (root cause R1):
+# an algebraic identity over material_prelude.hlsl's own diffAmbient/diffBounce formulas, checked
+# against 10k random tuples, plus the source strings F4 (voxi.hlsl) and F6 (pt_pathtrace.hlsl) land.
+# Same linkage as the tests above.
+add_executable(SkyOwnershipIdentityTest src/SkyOwnershipIdentityTest.cpp)
+target_link_libraries(SkyOwnershipIdentityTest PRIVATE Aver.Core)
+target_compile_definitions(SkyOwnershipIdentityTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(SkyOwnershipIdentityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GiCacheTest -- the .cache derived-data entry a GI volume is baked into.
 #
 # Links Aver.Formats and nothing renderer-shaped, because the half worth testing without a GPU is

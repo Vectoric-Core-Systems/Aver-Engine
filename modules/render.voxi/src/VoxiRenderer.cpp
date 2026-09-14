@@ -641,6 +641,29 @@ void VoxiRenderer::setNrdLegacyCamera(bool on) {
               on ? "the OLD, WRONG pre-fix encoding (comparison only)" : "the fixed encoding");
 }
 
+// See the header's own comment for the bit table and the contrast-fix plan's CONTRACT section
+// (section 2) for exactly where each bit is read in the shaders. Guarded on an actual CHANGE, the
+// same reason setNrdLegacyCamera above is: SandboxApp reasserts this from the console slot every
+// frame regardless of whether the user just touched it, and resetting history on every one of those
+// frames would mean neither GI nor NRD nor AO ever accumulates past one frame.
+void VoxiRenderer::setLightingLegacyBits(u32 bits) {
+    if (bits == lightingLegacyBits_) return;
+    const u32 changed = bits ^ lightingLegacyBits_;
+    lightingLegacyBits_ = bits;
+    AVER_INFO("[Voxi] lighting legacy bits: ring={} doubleCount={} hitSky={} reuseVis={} cones={} "
+              "(console)",
+              (bits & 1u) ? 1 : 0, (bits & 2u) ? 1 : 0, (bits & 4u) ? 1 : 0, (bits & 8u) ? 1 : 0,
+              (bits & 16u) ? 1 : 0);
+    // R0/R2/R3 (bits 1, 4, 8): the ReSTIR estimator itself samples, adds or reuses differently under
+    // these, so GI and NRD history accumulated on one side of the flip is a stale answer to a
+    // question the shader no longer asks the same way -- same reasoning resetGiHistory's own
+    // per-command comment gives for a console-driven reset.
+    if (changed & (1u | 4u | 8u)) { resetGiHistory(); resetNrdHistory(); }
+    // R0 (bit 1) also reshapes the sky-occlusion ray (voxi_rt.hlsli), whose reprojected history AO
+    // tracks separately from the GI reservoir's.
+    if (changed & 1u) resetAoHistory();
+}
+
 // See the header's own comment for the shape every one of these five shares: flip an existing
 // validity flag, touch no texture/buffer handle, log through AVER_INFO so the bisection survives even
 // if the user closes the editor before reading the console's own scrollback.
@@ -967,6 +990,11 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // every pixel rather than a disabled feature. max(1) is the identity, not a guard against a
     // caller mistake -- Settings clamps the authored value already.
     cb_.ambientParams[1] = static_cast<f32>(std::max(settings_.giSkyOcclusionTile, 1u));
+    // THE LIGHTING-CONTRAST LEGACY BITMASK (setLightingLegacyBits' own comment has the bit table) --
+    // sent every frame with NO condition, same as ambientParams[1] immediately above: a block that
+    // has never been written is all zeros, which every shader that reads gAmbientParams.z takes to
+    // mean every fix is live.
+    cb_.ambientParams[2] = static_cast<f32>(lightingLegacyBits_);
     // Refraction rides giParams' spare .yzw -- only .x was used, so these ride a row the HLSL mirror
     // already declares at no layout cost (mirrored by hand in more than one place; see
     // MaterialConstants' note on what a silent offset mistake costs). A fourth refraction knob needs

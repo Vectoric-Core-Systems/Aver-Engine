@@ -82,6 +82,23 @@ public:
     // `set voxi.nrdLegacyCamera true`.
     void setNrdLegacyCamera(bool on);
 
+    // LIVE A/B SWITCHES for the lighting-contrast fix (contrast-fix plan, section 2's CONTRACT): a
+    // u32 BITMASK, one bit per superseded piece of transport, forwarded byte-for-byte into
+    // cb_.ambientParams[2] (gAmbientParams.z in voxi.hlsl/voxi_restir.hlsli/voxi_rt.hlsli/
+    // voxi_cone.hlsli) EVERY FRAME WITH NO CONDITION -- see the .cpp for that write. The shaders
+    // decode it inline, bit by bit, with no shared helper, so each one compiles on its own:
+    //   bit 1  (R0)  the ReSTIR candidate/sky-occlusion rays sample a fixed 45-degree ring
+    //   bit 2  (R1)  the receiver counts its own sky twice (traced AND through ambient)
+    //   bit 4  (R2)  the ReSTIR candidate hit's own indirect sky has no visibility test
+    //   bit 8  (R3)  a reused ReSTIR sample shades with no visibility test at all
+    //   bit 16 (R6)  the cone gather is cosine-distributed AND cosine-weighted (an effective cos^2)
+    // 0 (the default) means every fix in the plan is live; setting a bit REINSTATES that one piece
+    // of the OLD, WRONG behaviour, for comparison only -- never a setting to leave on, the same
+    // posture setNrdLegacyCamera above takes. See EditorConsole.hpp's five voxi.legacy* variables
+    // (and --lighting-legacy, for a --frames capture with no console) for how a bit gets set, and
+    // this method's own .cpp comment for which bits reset which cross-frame history.
+    void setLightingLegacyBits(u32 bits);
+
     // ---- per-history reset commands, each a plain bool flip -- NO reallocation, ever ----
     // Driven from the console (resetgihistory/resetrthistory/resetaohistory/resetnrdhistory/
     // resetallhistory in EditorConsole.hpp, via voxi::Renderer's own request/consume flags -- see
@@ -1049,7 +1066,10 @@ private:
         // y IS THE COHERENCE TILE EDGE the sky-occlusion rays share a direction across (1 = a fresh
         // direction per pixel, the identity). It was claimed spare here while already being read by
         // the shader -- which is precisely what the giParams note above warns happens to a row
-        // described as free. z/w are what is left, and that warning still applies to them.
+        // described as free. z is now ALSO spent: setLightingLegacyBits' u32 legacy bitmask (see its
+        // own comment above for the bit table), stored as a float and decoded back with a u32 cast in
+        // every shader that reads gAmbientParams.z -- 0 means every lighting-contrast fix is live. w
+        // is what is left, and the warning above still applies to it.
         //
         // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
@@ -1706,6 +1726,11 @@ private:
     // See setGiPoisonView's own comment. Independent of debugView_ above -- the two can never be
     // confused for each other because this one never sets debugViewActive()/suppressesScene().
     bool giPoisonView_ = false;
+    // See setLightingLegacyBits' own header comment for the bit table. 0 (every fix in the
+    // contrast-fix plan live) until a console command or --lighting-legacy sets a bit; forwarded
+    // into cb_.ambientParams[2] every frame with no condition, same as giPoisonView_ feeds
+    // giRestirParams.w every frame regardless of whether anyone has ever touched it.
+    u32 lightingLegacyBits_ = 0;
     bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit
     // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build
     // before this toggle existed -- nobody who never calls the setter sees any difference at all.

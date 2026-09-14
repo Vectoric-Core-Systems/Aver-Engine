@@ -593,6 +593,48 @@ float2 rtDiscSample(uint k, float ang0) {
     return float2(cos(a), sin(a)) * rad;
 }
 
+// ---- F1 (R0): A COSINE-WEIGHTED HEMISPHERE SAMPLE, NOT A FIXED 45-DEGREE RING ----
+//
+// THE BUG THIS REPLACES. rtDiscSample(0, ang0) always returns a point at radius sqrt(0.5) on the
+// unit disc -- k=0 makes rtRadicalInverse2(k+1) exactly 0.5, so sqrt of that is fixed regardless of
+// ang0, which only rotates the azimuth. Lifted onto the hemisphere by cosTheta = sqrt(1 -
+// dot(xi,xi)), that is cosTheta == 1/sqrt(2) for EVERY pixel, on EVERY frame: not a noisy cosine
+// sample, a deterministic 45-degree ring. The ReSTIR candidate (giTraceInitialCandidate, below in
+// voxi_restir.hlsli) and the sky-occlusion ray just below in this file both drew from it. A roof
+// edge, or any occluder boundary that does not happen to sit at 45 degrees, reads too open or too
+// closed by a fixed, scene-dependent step -- and no amount of temporal accumulation can average that
+// away, because every frame draws the identical direction (this file's own words on rtAmbientTraced's
+// per-pixel-only hash, a few hundred lines below, are the same disease: "a deterministic wrong answer
+// is exactly what temporal accumulation cannot fix").
+//
+// WHY A NEW FUNCTION RATHER THAN FIXING rtDiscSample ITSELF: rtShadow and rtReflection (both this
+// file, further down) call rtDiscSample too, deliberately, for a sun disc and a fixed specular ring
+// respectively -- neither wants a cosine-hemisphere distribution, and changing what
+// rtDiscSample returns out from under them would silently retarget two features this task does not
+// own. This is a sibling sampler for the one caller that actually wanted Malley's method: a uniform
+// point on the unit disc (u in [0,1), not the radical-inverse radius above), lifted onto the
+// hemisphere via sqrt(u). For a cosine-weighted disc sample, P(cosTheta < c) = c^2 -- the correct
+// cosine law -- which the fixed-ring sampler above never had regardless of how ang0 was chosen.
+//
+// idx = frameIdx * n + k KEEPS THE SEQUENCE NESTED ACROSS RAY COUNT, exactly like rtRadicalInverse2's
+// own comment: raising n does not renumber the samples a lower n already drew, it only appends past
+// them within the same frame's block. u then folds a fresh radical-inverse term together with a
+// per-pixel, per-stream hash (streamSalt keeps two callers at the same (pixel, frame, k) -- the
+// ReSTIR candidate at streamSalt 0.0 and the sky-occlusion ray at 0.37 -- from ever drawing the same
+// u), so successive frames sweep u across [0,1) rather than repeating one radius forever.
+//
+// DETERMINISTIC IN (pixel, frame index) ONLY, no true per-frame RNG: this file's standing rule that
+// RT sampling be a pure function of its inputs for the gate oracle (voxi_rt.hlsli:1652-1659, on
+// exactly this question for rtShadowTemporal's own frameIdx use) applies here the same way -- a
+// --frames N run always ends on the same frameIdx, so the same run reproduces the same pixel, and
+// this sampler is safe for the same reason that one already is.
+float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float streamSalt) {
+    const uint  idx = frameIdx * max(n, 1u) + k;
+    const float u   = frac(rtRadicalInverse2(idx + 1u) + rtHash(pixelKey + float2(streamSalt, 17.0 + streamSalt)));
+    const float a   = rtHash(pixelKey) * 6.2831853 + (float)idx * 2.39996323 + streamSalt;
+    return float2(cos(a), sin(a)) * sqrt(u);
+}
+
 // Traces occlusion rays toward the sun's DISC and returns the fraction that reached it: 0 fully
 // shadowed, 1 fully lit, everything between a real penumbra.
 //
@@ -891,7 +933,14 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     // nothing -- max(...,1.0) is the same floor the RayDesc uses a few lines down.
     const float aoTMax = max(gVoxelParams.z, 1.0);
     [loop] for (uint k = 0; k < n; ++k) {
-        const float2 d = rtDiscSample(k, ang0);
+        // ---- F1 (R0), gAmbientParams.z bit 1: legacy 45-degree ring vs. the cosine hemisphere ----
+        // true (bit set) keeps this ray on rtDiscSample's fixed ring for comparison, exactly as it
+        // always sampled; false (the corrected default) draws rtHemiDiscSample instead -- see that
+        // function's own comment for why the ring was wrong and what replaces it. aoTile, not pixel,
+        // because this ray already shares its azimuth across a coherence tile (see ang0 above);
+        // streamSalt 0.37 keeps this stream's u apart from the ReSTIR candidate's own 0.0 at the same
+        // (pixel, frame, k).
+        const float2 d = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(k, ang0) : rtHemiDiscSample(k, n, (uint)gRtHistParams.z, aoTile, 0.37);
         // Malley: lift the disc point onto the hemisphere. r^2 + z^2 == 1 by construction, so the
         // result is unit length without a normalize() that would perturb the very cosine
         // distribution being relied on.

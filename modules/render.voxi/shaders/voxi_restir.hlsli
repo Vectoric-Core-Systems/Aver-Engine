@@ -485,7 +485,15 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // are the SAME per-pixel-rotated low-discrepancy sequence rtReflection's own cone sample uses,
     // jittered per frame the same way (frameJitter) rather than frozen per pixel -- see rtReflection
     // for what a frozen-per-pixel sample cost the reflection ray before that was fixed.
-    const float2 xi = rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter);
+    // ---- F1 (R0), gAmbientParams.z bit 1: legacy 45-degree ring vs. the cosine hemisphere ----
+    // true (bit set) keeps rtDiscSample's fixed ring -- the HEAD expression, unchanged -- for
+    // comparison; false (the corrected default) draws rtHemiDiscSample (voxi_rt.hlsli, just after
+    // rtDiscSample) instead, which is uniform over frames rather than pinned to cosTheta = 1/sqrt(2).
+    // Frame index from gRtHistParams.z, not this function's own frameJitter parameter: frameJitter is
+    // already frameIdx*2.39996323 (an angle), and rtHemiDiscSample wants the raw index to build its
+    // own nested (frame, k) sequence. streamSalt 0.0 keeps this stream's u apart from F2's second-
+    // bounce sample and the sky-occlusion ray's, both of which draw at the same (pixel, frame, k=0).
+    const float2 xi = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter) : rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.0);
     const float  cosTheta = sqrt(saturate(1.0 - dot(xi, xi)));
     // ---- THE FLOOR IS A FIREFLY BOUND, AND 1e-4 WAS NOT ONE ----
     //
@@ -530,9 +538,18 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // This used to `return false`, and that is the single clearest reason the reported darkness is
     // ReSTIR-ONLY: a cosine-weighted ray that escapes carries the sky's radiance, and for a shadowed
     // surface under an open arcade the sky is most of the hemisphere and therefore most of the true
-    // indirect term. coneTracedIndirect gathers it (the volume is injected with sky), so switching
-    // Indirect diffuse from Voxel cones to ReSTIR dropped that entire contribution on the floor --
-    // exactly the surfaces the user reports going near-black while sunlit ones stay correct.
+    // indirect term. Switching Indirect diffuse from Voxel cones to ReSTIR dropped that entire
+    // contribution on the floor -- exactly the surfaces the user reports going near-black while
+    // sunlit ones stay correct.
+    //
+    // OWNERSHIP, CORRECTED (R1/F4, voxi.hlsl): an earlier version of this comment justified the gap
+    // by claiming "coneTracedIndirect gathers it (the volume is injected with sky)" -- read elsewhere
+    // as license to add the sky back a second time at the receiver (voxi.hlsl's ind4.ambient/
+    // ind.ambient), which is what made giMode 1 count it twice. That claim was false:
+    // coneTracedIndirect's own `bounce` (voxi_cone.hlsli) is the volume's RE-EMITTED radiance, a
+    // LATER bounce, not this ray's own visible sky. THIS branch, with a traced ray behind it, is now
+    // the RECEIVER'S ONE AND ONLY copy of the sky term for giMode 1 -- voxi.hlsl's F4 (gAmbientParams.z
+    // bit 2) subtracts its own ambient copy back out precisely so this stays true.
     //
     // IT ALSO COST THE ESTIMATOR ITS ANCHOR. Returning false leaves `initial` empty with M = 0, and
     // the MIS denominator is seeded `selectedTargetPdf * inputReservoir.M` -- so a miss was not
@@ -659,11 +676,61 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     //
     // WHAT IT COSTS, STATED RATHER THAN LEFT TO BE REDISCOVERED: a metallic hit has kdAlbedo = 0, so
     // it contributes almost NO bounce light and reads as a black hole for GI. That is a real gap and
-    // it is still open. Closing it needs a term weighted by metalness AND scaled/occluded the way the
-    // diffuse ambient is -- not an unconditional sky specular on every surface, which is what this
-    // reverts. See aver-ambient-overbright-open-vs-enclosed for why unoccluded ambient in an interior
-    // is already over-bright here before anything is added to it.
-    radiance += s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
+    // it is still open -- F2 below does not touch it, since s.kdAlbedo multiplies whatever indY
+    // resolves to either way. Closing it needs a term weighted by metalness AND scaled/occluded the
+    // way the diffuse ambient is -- not an unconditional sky specular on every surface, which is what
+    // this reverts.
+    //
+    // ---- F2 (R2): THE DIFFUSE HALF NOW OWNS ITS OWN VISIBILITY, WHERE IT USED TO HAVE NONE ----
+    //
+    // THE GAP THIS CLOSES. averSkyIrradiance(s.N) is a function of the normal ALONE (voxi.hlsl's own
+    // comment on it) -- it has no notion of what actually stands in front of this candidate hit, so a
+    // second-bounce point under an overhang or inside a corner received the FULL open-sky irradiance
+    // exactly as if it stood in the open. See aver-ambient-overbright-open-vs-enclosed for why
+    // unoccluded ambient in an interior is already over-bright before anything is added to it -- this
+    // was one more unoccluded read of the same sky, one bounce deeper.
+    //
+    // gAmbientParams.z bit 4 TRUE keeps that old unoccluded read, byte-identical to HEAD, for
+    // comparison only. FALSE (the corrected default -- ON, per the user's own call, because this
+    // extra ray sits behind the legacy bit rather than a second switch) traces one more cosine-
+    // weighted ray from this hit instead: a miss reads the same sky function rtAmbientTraced's own
+    // miss branch uses (averSkyRadianceCheap), now genuinely visibility-tested; a hit inside the GI
+    // volume reads that voxel's stored exitant radiance directly -- the THIRD bounce, missing
+    // altogether before this -- and a hit outside the volume contributes nothing, the same rule
+    // rtAmbientTraced's own AVER_AO_UNIFIED branch already applies to the identical case (voxi_rt.hlsli,
+    // a few hundred lines up).
+    //
+    // THE ARITHMETIC: L_o,ind(y) = (kd_y/PI) * Integral(L cos dw). Drawing the second direction from a
+    // cosine-weighted hemisphere (rtHemiDiscSample, the same sampler F1 above uses -- streamSalt 0.71
+    // keeps this stream's u apart from F1's own 0.0 at the same pixel/frame/k) makes PI and the
+    // cosine cancel, so one sample gives kd_y * L(w2) directly -- the same convention PSVoxel's own
+    // injection pass writes the volume under. In the open, V_y = 1 and this reduces exactly to the
+    // legacy value above. gVoxelParams.y (giIntensity) is deliberately NOT applied on this branch: it
+    // is applied exactly once, to the WHOLE estimate, at giRestirIndirect's own `est` -- applying it
+    // here too would double it on this one bounce alone. Approximation carried over unchanged from the
+    // volume's own injection: the value already contains AVER_VOX_FEEDBACK 3.0.
+    //
+    // THE NaN-SAFE CLAMP AT THIS FUNCTION'S OWN END STILL RUNS LAST, after `radiance` (built from indY
+    // below, same as before) leaves this block -- F2 changes what feeds that clamp, not the clamp
+    // itself.
+    float3 indY = 0.0;
+    if (((uint)gAmbientParams.z & 4u) != 0u) {
+        indY = averSkyIrradiance(s.N) * gAmbient.r;
+    } else {
+        const float2 xi2 = rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.71);
+        const float  c2  = sqrt(saturate(1.0 - dot(xi2, xi2)));
+        const float3 up2 = abs(s.N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 T2 = normalize(cross(up2, s.N)); const float3 B2 = cross(s.N, T2);
+        const float3 dir2 = normalize(T2 * xi2.x + B2 * xi2.y + s.N * c2);
+        RayDesc r2; const float bias2 = max(gRtParams.z, 1e-4) * (1.0 + length(hitPos - gCamPos.xyz) * 5e-4);
+        r2.Origin = hitPos + s.N * bias2; r2.Direction = dir2; r2.TMin = bias2; r2.TMax = max(gVoxelParams.z, 1.0);
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q2;
+        q2.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r2); averRtProceedSolid(q2);
+        if (q2.CommittedStatus() != COMMITTED_TRIANGLE_HIT) indY = averSkyRadianceCheap(dir2) * gAmbient.r;
+        else { const float3 uvw = voxelUVW(r2.Origin + dir2 * q2.CommittedRayT());
+               if (gVoxelParams.w > 0.5 && insideVolume(uvw)) indY = min(gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0).rgb, AVER_VOX_MAXRAD); }
+    }
+    radiance += s.kdAlbedo * indY;
 
     samplePos      = hitPos;
     sampleNormal   = s.N;
@@ -700,7 +767,11 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
 // does, and inventing one with no real derivation behind it would be exactly the kind of fudge this
 // codebase's own house style warns against elsewhere. NOT MODELLED, stated rather than silently
 // wrong -- the unified ambient ray (gAmbientParams.x, High/Epic) already supplies AO independently
-// of whichever diffuse estimator is chosen, which is the tier this gap matters least at.
+// of whichever diffuse estimator is chosen, which is the tier this gap matters least at. STILL TRUE
+// AFTER F1-F3 (R0/R2/R3): the new hemisphere sampler, the second-bounce ray F2 adds at the candidate
+// hit, and F3's own reuse-visibility ray all correct RADIANCE this function already carried -- none
+// of them touch this `ao` output, so R4 (ReSTIR supplying no ambient occlusion at Low/Medium, where
+// this is the ONLY occlusion signal) remains open and deliberately deferred, not fixed in passing.
 float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixel, uint frameIdx,
                         out float ao) {
     ao = 1.0;
@@ -725,6 +796,19 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         if (cosTheta > AVER_GI_MIN_COS)
             initial = RTXDI_MakeGIReservoir(samplePos, sampleNormal, sampleRadiance, cosTheta / PI);
     }
+
+    // ---- F3's OWN COPY OF THIS FRAME'S FRESH CANDIDATE, TAKEN BEFORE RESAMPLING CAN REPLACE IT ----
+    // `initial` is about to be handed to RTXDI_GISpatioTemporalResampling below, which is free to
+    // hand back a completely different reservoir in `result` -- a temporal or spatial tap, not this
+    // frame's own traced sample. The visibility gate this function adds further down needs to tell
+    // those two cases apart: THIS frame's own candidate already had its visibility proven by the very
+    // ray giTraceInitialCandidate just traced, so re-tracing it would be pure waste; anything else
+    // reaching `result` has never been visibility-tested at all (F3/R3, below). Captured here, before
+    // the resampling call, because `initial` does not survive it unexamined -- RTXDI_
+    // GISpatioTemporalResampling takes it by value, and `result` may or may not still equal it once
+    // that call returns.
+    const bool freshValid = RTXDI_IsValidGIReservoir(initial);
+    const float3 freshPos = initial.position;
 
     const uint writeSlice = (uint)(gGiRestirParams.z + 0.5);
     RTXDI_GIReservoir result = initial;
@@ -1028,6 +1112,49 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         const float  dist2    = dot(toSample, toSample);
         const float  cosR     = dist2 > 1e-8 ? saturate(dot(toSample * rsqrt(dist2), N)) : 0.0;
 
+        // ---- F3 (R3): A REUSED SAMPLE HAS NEVER BEEN CHECKED FOR VISIBILITY FROM HERE ----
+        //
+        // giTraceInitialCandidate's own ray already proved THIS frame's fresh candidate visible from
+        // wpos -- tracing a ray to it is what that function did. Temporal and spatial resampling above
+        // can swap `result` for a DIFFERENT reservoir -- another frame's position, or a neighbour
+        // pixel's -- and nothing in RTXDI's own SpatioTemporalResampling.hlsli traces a ray between
+        // THIS receiver and THAT stored position: RAB_GetTemporalConservativeVisibility exists for
+        // exactly that and sits unused above, because this file selects BASIC bias correction. On a
+        // coplanar, similar-depth pixel just the far side of an occlusion edge -- the arcade floor
+        // inside vs. outside the roof line, a wall beside a window slot -- a neighbour's sunlit or
+        // sky-facing sample was being credited to a receiver that provably cannot see it.
+        //
+        // ONE RAY, SKIPPED WHEN IT CANNOT POSSIBLY BE NEEDED: gAmbientParams.z bit 8 TRUE restores
+        // HEAD exactly -- no ray, `result` shaded exactly as resampled, for comparison only. Bit 8
+        // FALSE (the corrected default, ON by the user's own call) still skips the ray for THIS
+        // frame's own fresh candidate (freshValid && result.position == freshPos -- already proven
+        // visible above) and for a degenerate same-point sample (dist2 <= 1e-8, the same guard cosR
+        // already uses); every other case -- any temporal or spatial reuse -- gets exactly one ray.
+        //
+        // SHADING ONLY, NEVER THE RESERVOIR. `result` itself is never written here, and the corpse-
+        // guard store above (this function's own NEVER STORE A CORPSE block) has already happened --
+        // a visibility miss darkens only what THIS pixel sees this frame, the same way a shadow ray
+        // would, without erasing the sample for whichever neighbour resamples it next with a different
+        // view of the same point. Unbiased for the reason this file's own RAB_GetGISampleTargetPdfFor
+        // Surface states at its own header: RIS with a target pdf that ignores visibility, multiplied
+        // here by the true contribution f*V, stays an unbiased estimator of the VISIBLE integral,
+        // because the pdf's support is a superset of the visible one.
+        float visF3 = 1.0;
+        if (((uint)gAmbientParams.z & 8u) == 0u && !(freshValid && all(result.position == freshPos)) &&
+            dist2 > 1e-8) {
+            const float dist = sqrt(dist2);
+            const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+            RayDesc rv;
+            rv.Origin    = wpos + N * bias;
+            rv.Direction = toSample / dist;
+            rv.TMin      = bias;
+            rv.TMax      = max(dist - 2.0 * bias, bias);
+            RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qv;
+            qv.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, rv);
+            averRtProceedSolid(qv);
+            if (qv.CommittedStatus() == COMMITTED_TRIANGLE_HIT) visF3 = 0.0;
+        }
+
         // result.radiance * result.weightSum is RTXDI's own finalised estimator (weightSum already
         // folds in 1/pdf and the resampling normalisation -- RTXDI_FinalizeGIResampling is what
         // produces it). But RTXDI's contract leaves the REST of the integrand to the caller: for a
@@ -1039,8 +1166,11 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // gVoxelParams.y` and this path never did, so Settings > Rendering > GI intensity (and
         // RENDER.GIINTENSITY) silently did nothing whenever giMode selected ReSTIR over the cone
         // gather. Intensity is applied BEFORE the clamp below, matching coneTracedIndirect's order,
-        // so the two estimators stay comparable at the same intensity setting.
-        const float3 est = result.radiance * (cosR * result.weightSum / PI) * gVoxelParams.y;
+        // so the two estimators stay comparable at the same intensity setting. visF3 (F3/R3, just
+        // above) is the one factor here that is not part of RTXDI's own finalised estimator: 1.0
+        // unless this frame's visibility ray found an occluder, in which case this pixel's own shaded
+        // value is zeroed without touching the stored reservoir.
+        const float3 est = result.radiance * (cosR * result.weightSum / PI) * gVoxelParams.y * visF3;
 
         // HLSL's max is `x > y ? x : y`, and every comparison against NaN is false -- so
         // max(NaN, 0.0) silently returns 0.0, not NaN. An unguarded NaN estimator (a near-zero

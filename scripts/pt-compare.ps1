@@ -39,7 +39,17 @@ param(
     [string] $OutDir = "$env:TEMP\aver-pt-compare",
     # The 3D viewport inside the editor window, in pixels of the captured screenshot. The default is
     # the docked layout at the size --frames opens; pass explicit values if the window differs.
-    [int]    $CropX = 100, [int] $CropY = 420, [int] $CropW = 2600, [int] $CropH = 1430
+    [int]    $CropX = 100, [int] $CropY = 420, [int] $CropW = 2600, [int] $CropH = 1430,
+    # Extra flags appended to BOTH captures, after the raster/tracer-selecting pair each already
+    # passes and before nothing else follows -- so, like $extra inside Invoke-Capture, these can never
+    # swallow --project/--level/--screenshot as their own value. Exists for the lighting-contrast
+    # fix's A/B switches (--lighting-legacy <bits>, --pt-legacy-env): a --frames capture has no
+    # console to flip voxi.legacyRestirSampleRing/etc. by hand, and both captures need the SAME extra
+    # flags or the comparison stops being raster-vs-tracer and starts being raster-vs-tracer-under-
+    # different-lighting. e.g. -ExtraArgs '--lighting-legacy','15' reproduces HEAD's ReSTIR transport
+    # on both sides; -ExtraArgs '--pt-legacy-env' reproduces the unmatched reference sky on the
+    # tracer side only, since the flag does nothing to the raster capture.
+    [string[]] $ExtraArgs = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,7 +114,7 @@ function Invoke-Capture([string] $name, [string[]] $extra) {
 }
 
 Write-Host "=== capturing raster (--rt-render-mode 0 --pt 0) ==="
-$raster = Invoke-Capture 'raster' @('--rt-render-mode', '0', '--pt', '0')
+$raster = Invoke-Capture 'raster' (@('--rt-render-mode', '0', '--pt', '0') + $ExtraArgs)
 
 # THE ABSENCE OF A LINE IS THE EVIDENCE. Any feature that suppresses the rasteriser announces it;
 # nothing announces that the rasteriser ran, so "no feature is painting" is the only positive
@@ -117,7 +127,7 @@ if ($raster.log -match "is painting the scene") {
 }
 
 Write-Host "=== capturing path tracer ==="
-$pt = Invoke-Capture 'pt' @('--rt-render-mode', '0')
+$pt = Invoke-Capture 'pt' (@('--rt-render-mode', '0') + $ExtraArgs)
 
 if ($pt.log -match "'Aver\.PathTracer\.SceneView' is painting the scene") {
     Ok "path-traced capture: the tracer painted the frame"

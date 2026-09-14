@@ -789,6 +789,11 @@ void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const P
     cb.sample[3] = d.rouletteDepth;
     cb.trace[0] = d.rayBias;
     cb.trace[1] = d.tMax;
+    // R5/F6: gPtTrace.z, decoded in pt_pathtrace.hlsl's miss branch. 1.0 keeps the pre-fix
+    // unmatched-reference-sky behaviour; the default (d.legacyEnvironment false) writes 0.0, which
+    // is also what an all-zero FrameCB (any caller from before this field existed) already read as,
+    // so PtFurnaceTest -- which never sets it -- is unaffected by construction.
+    cb.trace[2] = d.legacyEnvironment ? 1.0f : 0.0f;
 
     // THE ONLY TIMED SPAN THIS MODULE HAS EVER HAD, and its absence was not cosmetic. Until this
     // line the sole ScopedGpuStat anywhere in render.pt was on PtSceneView's present BLIT, so

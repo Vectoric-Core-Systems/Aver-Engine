@@ -134,18 +134,45 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     // directions from clumping the way a constant step does. The `w = dot(N,d)` cosine weight below
     // is kept -- it is what makes this a weighted average rather than a plain mean, and the axial
     // cone still carries weight 1.
+    // gAmbientParams.z bit 16 (R6 in the contrast-fix plan): the directions above are ALREADY drawn
+    // from the cosine-weighted hemisphere distribution (cosT = sqrt(1-t) below), so weighting each
+    // one by `w = dot(N,d)` a second time squares the cosine the gather is supposed to integrate
+    // against -- measured at 13 cones as E[cos] 0.7764 against the true 2/3, worse at fewer cones.
+    // ON restores that pre-fix behaviour, byte-identical to what stood here before, for comparison
+    // only; OFF (the default) is the corrected sampler beneath it. Same bitmask family as bits
+    // 1/2/4/8 owned by the ReSTIR transport lanes -- decoded inline here too, no shared helper.
+    const bool legacyConeWeights = ((uint)gAmbientParams.z & 16u) != 0u;
     const uint ring = (uint)cones - 1u;
     [loop] for (uint k = 0; k < ring; ++k) {
-        float t    = ((float)k + 0.5) / (float)ring;
-        float cosT = sqrt(saturate(1.0 - t));
-        float sinT = sqrt(saturate(t));
-        float ang  = 2.39996323 * (float)k;
-        float3 d = normalize(N * cosT + (T * cos(ang) + B * sin(ang)) * sinT);
-        float w = saturate(dot(N, d));
-        float4 c = traceCone(wpos, d, aperture);
-        sum += c * w; wsum += w;
-        const float cw = w * (insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0);
-        occ += c.a * cw; occWsum += cw;
+        if (legacyConeWeights) {
+            float t    = ((float)k + 0.5) / (float)ring;
+            float cosT = sqrt(saturate(1.0 - t));
+            float sinT = sqrt(saturate(t));
+            float ang  = 2.39996323 * (float)k;
+            float3 d = normalize(N * cosT + (T * cos(ang) + B * sin(ang)) * sinT);
+            float w = saturate(dot(N, d));
+            float4 c = traceCone(wpos, d, aperture);
+            sum += c * w; wsum += w;
+            const float cw = w * (insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0);
+            occ += c.a * cw; occWsum += cw;
+        } else {
+            // THE AXIAL CONE (traced once, above, at weight 1) IS STRATUM 0 of `cones` equal
+            // solid-angle strata; this ring covers strata 1..cones-1, so t's denominator is `cones`
+            // itself, not `ring` (= cones-1) -- k+1 skips the stratum the axial cone already took.
+            // Weight 1, not dot(N,d): the cosine weighting already lives in how `d` was drawn.
+            // AO's vote is likewise a plain inside/outside test, not `w * inside`. Golden azimuth is
+            // unchanged -- only the elevation stratification moves. New moments (13 cones):
+            // E[cos]=0.6694 (+0.4% against the true 2/3), E[cos^2]=0.5030 (+0.6%); see ConeWeightTest.
+            float t    = ((float)(k + 1u) + 0.5) / cones;
+            float cosT = sqrt(saturate(1.0 - t));
+            float sinT = sqrt(saturate(t));
+            float ang  = 2.39996323 * (float)k;
+            float3 d = normalize(N * cosT + (T * cos(ang) + B * sin(ang)) * sinT);
+            float4 c = traceCone(wpos, d, aperture);
+            sum += c; wsum += 1.0;
+            const float cw = insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0;
+            occ += c.a * cw; occWsum += cw;
+        }
     }
     sum /= wsum;
     // EVERY cone left the volume: there is genuinely nothing here to occlude against, so the old

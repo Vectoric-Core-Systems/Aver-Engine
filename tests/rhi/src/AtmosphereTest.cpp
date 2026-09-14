@@ -500,6 +500,64 @@ int main() {
         check(allZero, "a degenerate sun direction projects to zeroes, not to NaN");
     }
 
+    AVER_INFO("luminance diffuse/direct share at calibration 1x vs 8x (R8, contrast-fix plan section "
+              "8 -- kSkyIrradianceCalibration left UNCHANGED per the user's call; this is a "
+              "plausibility probe, not a regression gate, and IS ALLOWED TO FAIL)");
+    {
+        // e0 = (1,1,1), the plan's own choice for T4: an achromatic sun isolates the SHAPE of the
+        // diffuse/direct split (how much of a Lambertian receiver's light is sky vs sun) from any
+        // authored sun colour. Every AtmosphereTest check above this one deliberately uses a coloured
+        // sun (3.00/2.88/2.70) to also exercise chroma; this one wants the plan's own achromatic case
+        // instead, so a passing or failing D(8) means what the plan says it means.
+        const f32 e0[3] = {1.0f, 1.0f, 1.0f};
+        for (f32 elevDeg : {30.0f, 45.0f, 60.0f}) {
+            const f32 h  = elevDeg * 3.14159265f / 180.0f;
+            const f32 mu = std::sin(h);                        // sunCosZenith, this file's own convention
+            // Azimuth-free: an "up"-facing receiver sees the sky symmetrically about the vertical
+            // axis (checked explicitly by "sky irradiance as spherical harmonics" above, the
+            // "azimuth stops mattering" case), so which horizontal direction the sun sits in cannot
+            // change the irradiance computed below -- only elevation can. x/z chosen unit so
+            // atmoSkyRadianceSH receives a normalised sun direction.
+            const f32 sunDir[3] = {std::cos(h), 0.0f, mu};
+
+            rhi::AtmosphereSkySH sh{};
+            rhi::atmoSkyRadianceSH(air, 0.0f, sunDir, e0, sunRadius, sh);
+            // E/pi at "up" (nx=0, ny=0, nz=1): the general SH reconstruction ("sky irradiance as
+            // spherical harmonics" above) restricted to this one normal -- every term that multiplies
+            // by x or y drops out at x=y=0, leaving only c[0] (the 0.282095 constant term), c[2] (the
+            // 0.325735 z term) and c[6] (the 0.078848 (3z^2-1) term, which is 2*0.078848 at z=1).
+            // These three constants are shared_prelude.hlsl:810-814's own SH basis, read-only
+            // reference for this test.
+            f32 eOverPi[3];
+            for (int c = 0; c < 3; ++c)
+                eOverPi[c] = sh.c[0][c] * 0.282095f + sh.c[2][c] * 0.325735f + sh.c[6][c] * (2.0f * 0.078848f);
+
+            rhi::AtmosphereDome dome{};
+            rhi::atmoFitDome(air, 0.0f, mu, e0, sunRadius, dome);
+
+            const f32 ambientLum = lum(eOverPi);
+            const f32 sunLum     = lum(dome.sunTransmittance);
+            // D(k) = pi*k*(E/pi) / (pi*k*(E/pi) + T*sin(h)) -- the plan's own formula, kept exactly
+            // as written (the pi cancels algebraically, but transcribing it verbatim is what makes
+            // this traceable back to section 5's T4 spec rather than to a simplification of it).
+            auto diffuseFraction = [&](f32 calibration) {
+                const f32 numerator = 3.14159265f * calibration * ambientLum;
+                return numerator / (numerator + sunLum * mu);
+            };
+            const f32 d1 = diffuseFraction(1.0f);
+            const f32 d8 = diffuseFraction(8.0f);
+            AVER_INFO("  {:>4.0f} deg: D(1x) = {:.4f}   D(8x) = {:.4f}", elevDeg, d1, d8);
+            // REPORTED, NOT CHECKED. The band's bounds are UNCONFIRMED and kSkyIrradianceCalibration was
+            // left unchanged on purpose, so an out-of-band D(8) is evidence for a future decision about the
+            // x8 calibration (contrast-fix plan R8), not a regression -- and a check() here would have made
+            // the whole suite read FAIL for it.
+            if (d8 < 0.08f || d8 > 0.30f)
+                AVER_WARN("  {:>4.0f} deg: D(8x) = {:.4f} is outside the clear-sky plausibility band [0.08, 0.30] "
+                          "(informational: evidence for the R8 calibration decision, not a failure)",
+                          elevDeg, d8);
+        }
+    }
+
     AVER_INFO(g_failures ? "AtmosphereTest: {} FAILURES" : "AtmosphereTest: all checks passed ({})",
               g_failures);
     return g_failures ? 1 : 0;
