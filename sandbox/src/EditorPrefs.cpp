@@ -263,7 +263,19 @@ void flushEditorPrefs() {
     // a byte -- but now the read gets ANOTHER chance every time there is something worth persisting,
     // instead of the file being given up on for the rest of the session after one failed attempt at
     // load. See tryRecoverReadOnly's comment for the merge that keeps this session's edits.
-    if (g_readOnly && !tryRecoverReadOnly()) return;   // still unreadable: stay dirty, try again later
+    if (g_readOnly && !tryRecoverReadOnly()) {
+        // STILL UNREADABLE: stay dirty and try again at the next flush -- but SAY SO, ONCE, AS AN ERROR.
+        // This used to return silently, so a file that stayed unreadable for a whole session lost every
+        // edit with nothing on screen: the load's AVER_WARN was the only trace, and pushFromLog never
+        // turns Warn into a toast. Found while chasing an editor.ini that stopped moving across several
+        // sessions with the code reading correct at every layer. reportWriteFailure dedups on (op, code),
+        // so the 0.25s autosave timer cannot turn this into a stream.
+        AtomicWriteError unreadable;
+        unreadable.op        = "re-read before save: the existing file is still unreadable, so nothing was written";
+        unreadable.errorCode = 0;
+        reportWriteFailure(g_path, unreadable);
+        return;
+    }
 
     const usize slash = g_path.find_last_of("/\\");
     if (slash != std::string::npos) createDirectories(g_path.substr(0, slash));
