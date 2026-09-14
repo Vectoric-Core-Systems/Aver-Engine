@@ -5,8 +5,12 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <charconv>
+#include <chrono>
 #include <map>
+#include <set>
 #include <string>
+#include <thread>
+#include <utility>
 
 namespace aver::editor {
 namespace {
@@ -17,14 +21,47 @@ std::string g_path;
 bool g_loaded = false;
 bool g_dirty  = false;
 // Latched when the file existed and could not be read. See prefsShouldRefuseWrite in the header.
+// NO LONGER PERMANENT -- see tryRecoverReadOnly below. It still means exactly what its name says
+// for as long as it is set: flushEditorPrefs will not write over a file this session never
+// successfully read.
 bool g_readOnly = false;
 
-// Reads editor.ini once. A failed read leaves an empty store and does not retry.
-//
-// THE ONE-SHOT IS CORRECT; THE INFERENCE FROM IT WAS NOT. Every pref accessor calls this, and
-// loadEditorPreferences plus keybinds_.loadFromPrefs() make dozens of those calls, so retrying a
-// failing read on each one would turn a single stat into a per-access one. What was wrong was
-// concluding that "we tried to load" also means "it is safe to overwrite".
+// A handful of retries at load, a few milliseconds apart, for the same reason the swap in
+// FileSystem.cpp's writeFileBytesAtomic retries: "the file existed and could not be read" and "a
+// virus scanner/indexer/backup agent had it open for a moment" look identical from here, and only
+// one of those two should cost the rest of the session. Bounded and cheap either way -- the
+// ordinary case is the FIRST read succeeding, and this only runs at all on the failure path.
+constexpr int kLoadReadRetries = 3;
+constexpr int kLoadReadRetryDelayMs = 10;
+
+// Parses `key=value` lines from `text` into `out`, skipping blanks and `#` comments -- the same
+// grammar ensureLoaded and tryRecoverReadOnly both need. `onKey`, when set, is called for every key
+// found (used by the merge below to know which keys the file already agreed with this session on).
+template <class OnKey>
+void parseInto(const std::string& text, std::map<std::string, std::string, std::less<>>& out,
+              OnKey onKey) {
+    usize line = 0;
+    while (line < text.size()) {
+        usize end = text.find('\n', line);
+        if (end == std::string::npos) end = text.size();
+        std::string_view row(text.data() + line, end - line);
+        line = end + 1;
+        if (!row.empty() && row.back() == '\r') row.remove_suffix(1);
+        if (row.empty() || row.front() == '#') continue;
+
+        const usize eq = row.find('=');
+        if (eq == std::string_view::npos) continue;
+        std::string key(row.substr(0, eq));
+        onKey(key, out);
+        out.emplace(std::move(key), std::string(row.substr(eq + 1)));
+    }
+}
+
+// Reads editor.ini once (with the bounded retry above), or leaves the store read-only for the
+// session if it never becomes readable. Every pref accessor calls this, and loadEditorPreferences
+// plus keybinds_.loadFromPrefs() make dozens of those calls in a row, so retrying on EVERY one of
+// them would turn a single stat into a per-access one -- g_loaded still latches after this first
+// attempt, same as before. What changed is that "this one attempt" is now a few attempts.
 void ensureLoaded() {
     if (g_loaded) return;
     g_loaded = true;
@@ -37,32 +74,87 @@ void ensureLoaded() {
     g_path = dir + "/editor.ini";
 
     std::string text;
-    if (!readFileText(g_path, text)) {
+    bool ok = readFileText(g_path, text);
+    for (int attempt = 1; !ok && attempt < kLoadReadRetries && fileExists(g_path); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kLoadReadRetryDelayMs));
+        ok = readFileText(g_path, text);
+    }
+
+    if (!ok) {
         // A MISSING FILE IS THE ORDINARY FIRST RUN. An UNREADABLE one is not, and the two arrive
         // here as the same `false` -- so existence is asked separately, and a session that could
         // not read an existing file never writes over it.
         if (prefsShouldRefuseWrite(false, fileExists(g_path))) {
             g_readOnly = true;
-            AVER_WARN("[Prefs] {} exists but could not be read; preferences are READ-ONLY for this "
-                      "session rather than being overwritten with defaults", g_path);
+            AVER_WARN("[Prefs] {} exists but could not be read after {} attempt(s); preferences are "
+                      "READ-ONLY for this session rather than being overwritten with defaults -- a "
+                      "later save will retry the read and merge in whatever this session has not "
+                      "already changed", g_path, kLoadReadRetries);
         }
         return;
     }
 
-    usize line = 0;
-    while (line < text.size()) {
-        usize end = text.find('\n', line);
-        if (end == std::string::npos) end = text.size();
-        std::string_view row(text.data() + line, end - line);
-        line = end + 1;
-        if (!row.empty() && row.back() == '\r') row.remove_suffix(1);
-        if (row.empty() || row.front() == '#') continue;
-
-        const usize eq = row.find('=');
-        if (eq == std::string_view::npos) continue;
-        g_values.emplace(std::string(row.substr(0, eq)), std::string(row.substr(eq + 1)));
-    }
+    parseInto(text, g_values, [](const std::string&, const auto&) {});
     AVER_INFO("[Prefs] {} setting(s) from {}", g_values.size(), g_path);
+}
+
+// Distinct write-failure signatures already reported THIS SESSION -- keyed on (operation, error
+// code) rather than a single bool, so a DIFFERENT failure arriving later (a full disk, say, after
+// an antivirus lock clears) is still reported once of its own. Without this, a swap that keeps
+// failing under the autosave timer's 0.25s cadence would log four times a second for as long as
+// the lock lasted -- Log.cpp's writer has no dedup of its own (every AVER_* call reaches stderr and
+// the Output Log unconditionally), so nothing upstream would have caught it either.
+std::set<std::pair<std::string, u32>> g_reportedWriteFailures;
+
+// Logs a write failure ONCE per distinct (operation, error code) this session, naming the path, the
+// step that failed, and the platform error if one was captured. AVER_ERROR rather than AVER_WARN --
+// deliberately, and it is the only change here to what gets logged AT rather than how often:
+// pushFromLog (EditorNotifications.cpp) only turns Error/Critical into a toast, by design ("Warn is
+// excluded because this editor logs Warn for ordinary outcomes"), so this reaches the user as a
+// real notification through the sink SandboxApp already installs, with NO NEW INCLUDE and NO NEW
+// COUPLING from this file to EditorNotifications.hpp -- and "a preference silently never reaching
+// disk" is exactly the kind of failed-but-the-process-is-fine outcome Log.hpp defines Error to mean.
+void reportWriteFailure(const std::string& path, const AtomicWriteError& err) {
+    const auto key = std::make_pair(err.op, err.errorCode);
+    if (!g_reportedWriteFailures.insert(key).second) return;   // already told this session
+
+    const std::string detail = err.errorCode ? describePlatformError(err.errorCode) : std::string();
+    if (err.errorCode != 0 && !detail.empty())
+        AVER_ERROR("[Prefs] could not write {} ({}, error {}: {})", path,
+                  err.op.empty() ? "unknown step" : err.op, err.errorCode, detail);
+    else if (err.errorCode != 0)
+        AVER_ERROR("[Prefs] could not write {} ({}, error {})", path,
+                  err.op.empty() ? "unknown step" : err.op, err.errorCode);
+    else
+        AVER_ERROR("[Prefs] could not write {} ({})", path, err.op.empty() ? "unknown step" : err.op);
+}
+
+// Re-attempts the read that latched g_readOnly, called lazily from flushEditorPrefs rather than on
+// its own timer -- flushEditorPrefs already only runs when there is something worth persisting, so
+// this only costs anything on a session that is both read-only AND has a pending change, which is
+// exactly the situation worth spending a retry on.
+//
+// MERGE ON RECOVERY: every key currently in g_values was set by THIS session (the store started
+// empty -- the load never succeeded), so session values win simply by never being overwritten; any
+// OTHER key the file holds -- settings from a previous run this session never had a chance to load
+// -- is adopted, so recovering does not silently drop them the next time this writes.
+bool tryRecoverReadOnly() {
+    std::string text;
+    if (!readFileText(g_path, text)) return false;
+
+    // Called BEFORE parseInto's emplace for that key, so `sessionAlreadyHasKey` reflects the map as
+    // it stood before this line -- prefsShouldAdoptFromFile is the actual policy (see the header);
+    // parseInto's own emplace enacts it unconditionally (a no-op for a key already present is
+    // exactly "do not adopt"), so this lambda's only job is counting for the log line below.
+    usize adopted = 0;
+    parseInto(text, g_values, [&](const std::string& key, const auto& values) {
+        if (prefsShouldAdoptFromFile(values.find(key) != values.end())) ++adopted;
+    });
+
+    AVER_INFO("[Prefs] {} became readable again; adopted {} setting(s) this session had not already "
+              "changed, keeping every edit this session made", g_path, adopted);
+    g_readOnly = false;
+    return true;
 }
 
 } // namespace
@@ -157,14 +249,21 @@ bool prefsShouldRefuseWrite(bool readSucceeded, bool fileExists) {
 
 bool editorPrefsReadOnly() { return g_readOnly; }
 
+// See the header: session values win, full stop.
+bool prefsShouldAdoptFromFile(bool sessionAlreadyHasKey) {
+    return !sessionAlreadyHasKey;
+}
+
 void flushEditorPrefs() {
     if (!g_dirty) return;
     if (g_path.empty()) { g_dirty = false; return; }   // nowhere to write; stop asking
-    // READ-ONLY BEATS DIRTY. The store is empty only because the read failed, so writing it would
-    // replace a good file with a header and nothing else -- and writeFileTextAtomic below makes
-    // that replacement complete and irreversible. Drop the dirty bit for the same reason the
-    // empty-path bail does: there is nothing this session can do about it, so stop asking.
-    if (g_readOnly) { g_dirty = false; return; }
+    // READ-ONLY NO LONGER BEATS DIRTY UNCONDITIONALLY. It used to: the store was empty only because
+    // the read failed, so writing it would replace a good file with a header and nothing else. That
+    // guarantee still holds -- tryRecoverReadOnly re-reads before anything below is allowed to write
+    // a byte -- but now the read gets ANOTHER chance every time there is something worth persisting,
+    // instead of the file being given up on for the rest of the session after one failed attempt at
+    // load. See tryRecoverReadOnly's comment for the merge that keeps this session's edits.
+    if (g_readOnly && !tryRecoverReadOnly()) return;   // still unreadable: stay dirty, try again later
 
     const usize slash = g_path.find_last_of("/\\");
     if (slash != std::string::npos) createDirectories(g_path.substr(0, slash));
@@ -179,8 +278,17 @@ void flushEditorPrefs() {
     // once at shutdown, so the window in which a crash or a kill can catch a half-written file
     // is no longer vanishing -- and the failure mode of the plain writer is an editor.ini
     // truncated to nothing, which loses every preference rather than the last one.
-    if (!writeFileTextAtomic(g_path, out)) {
-        AVER_WARN("[Prefs] could not write {}", g_path);
+    //
+    // AtomicFallback::DirectWrite: editor.ini says of ITSELF, in the header this loop just wrote,
+    // "cache-grade: safe to delete, and deleting it only resets the editor's appearance". A write
+    // that cannot complete the crash-safe swap (something else has it open) falling back to a plain
+    // write is exactly the trade that comment already signs off on -- the crash-mid-write risk the
+    // swap guards against is real but small next to a whole session's preferences never reaching
+    // disk at all. See writeFileBytesAtomic's own doc for the general argument and who must NOT do
+    // this (a level, a material, a save -- content actually worth crash-protecting).
+    AtomicWriteError err;
+    if (!writeFileTextAtomic(g_path, out, AtomicFallback::DirectWrite, &err)) {
+        reportWriteFailure(g_path, err);
         return;                     // KEEP g_dirty SET, so the next flush retries
     }
     // CLEARED ONLY ON SUCCESS. It used to be cleared before the write was attempted, so a failed

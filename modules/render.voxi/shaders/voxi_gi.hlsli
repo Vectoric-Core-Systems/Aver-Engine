@@ -87,21 +87,21 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // header note above), and a shorter declaration would quietly stop being that. Appended, never
     // inserted: every field above keeps its offset.
     //
-    // gAmbientParams.z BIT 16 IS NOT DECODED HERE, and this is a deliberate omission recorded rather
-    // than fixed: the contrast-fix plan's F5 (R6, "cone weights") assumed this file's coneTracedIndirect
-    // ring loop was mirrored byte-for-byte against voxi_cone.hlsli's own (the plan cites voxi_cone.
-    // hlsli's OWN "mirrored byte-for-byte" comment, which is actually about traceCone, not this whole
-    // function). It is not. voxi_cone.hlsli's ring loop already draws cosine-stratified, golden-angle
-    // directions (`cosT = sqrt(saturate(1.0 - t))`, t stratified over `ring`) and was the R6 bug's
-    // target; THIS file's ring loop below still uses the older fixed-elevation single ring
-    // (`N * 0.5 + tangent * 0.866`, no stratification at all) that voxi_cone.hlsli had before that
-    // upgrade, and its aperture is a fixed 0.577 rather than voxi_cone.hlsli's cone-count-derived one.
-    // Porting F5's fix here verbatim would not be the small, reviewable patch the plan describes --
-    // it would mean first porting the unrelated stratified-sampling and variable-aperture upgrades
-    // this file never received, which is a bigger, un-briefed change to the particle and cluster
-    // material passes that read this prelude. Left exactly as HEAD; see this lane's report for the
-    // file:line contradiction. gAmbientParams.z bit 16 therefore affects PSMainVoxi/PSVoxel/
-    // PSVoxelDebug/PSRayDriven (voxi_cone.hlsli) only, not the particle pass or PSClusterMain.
+    // gAmbientParams.z BIT 16 IS NOW DECODED HERE TOO (follow-up to the contrast-fix plan's F5/R6):
+    // this file's own coneTracedIndirect below was never mirrored byte-for-byte against voxi_cone.
+    // hlsli's -- it kept the older fixed-elevation single ring (`N * 0.5 + tangent * 0.866`, aperture a
+    // constant 0.577) after voxi_cone.hlsli moved to a cosine-stratified, golden-angle ring with a
+    // cone-count-derived aperture, so the cluster-material and particle passes were getting a THIRD,
+    // uncorrected diffuse-gather estimate next to voxi_cone.hlsli's legacy-off and legacy-on ones.
+    // coneTracedIndirect below now carries the same corrected gather, reading the bit itself rather
+    // than through a shared helper (same as every other reader of this bitmask). Its legacy branch
+    // (bit ON) restores THIS FILE'S OWN pre-fix gather byte-for-byte, not voxi_cone.hlsli's: the two
+    // files' "legacy" differs because this file's old aperture was a fixed constant threaded through
+    // the whole gather (axial cone included), where voxi_cone.hlsli's aperture was already cone-count-
+    // derived before R6 and stayed that way under its own bit 16 -- see coneTracedIndirect's own
+    // comment below for why that forces the branch wider than a single ring-loop if/else here.
+    // gAmbientParams.z bit 16 therefore now affects PSMainVoxi/PSVoxel/PSVoxelDebug/PSRayDriven
+    // (voxi_cone.hlsli) AND the particle pass and PSClusterMain (this file) alike.
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare. NOTHING IN THIS
     // PRELUDE READS x, same as gAmbientParams above it -- declared for size only.
@@ -204,41 +204,104 @@ float4 traceCone(float3 originWS, float3 dir, float aperture) {
 }
 
 // Cosine-weighted gather of six cones over the hemisphere: one along the normal, five in a ring.
-// Returns the indirect diffuse radiance and, through `ao`, the ambient occlusion. VERBATIM from
-// VoxiShaders.hpp's own coneTracedIndirect -- the SAME cone trace PSMainVoxi itself runs when
-// gVoxelParams.w says GI is on; a caller gates that check itself, the same way PSMainVoxi's own
-// call site does, rather than this function re-testing it.
+// Returns the indirect diffuse radiance and, through `ao`, the ambient occlusion.
+//
+// NO LONGER ONE VERBATIM COPY of VoxiShaders.hpp's own coneTracedIndirect. gAmbientParams.z bit 16
+// (voxi.legacyConeWeights -- the same bit voxi_cone.hlsli decodes, R6 in the contrast-fix plan) now
+// selects between this file's OWN pre-fix gather (ON, restored byte-for-byte below) and the SAME
+// corrected cosine-stratified gather voxi_cone.hlsli's own bit-16-OFF branch runs: identical
+// cone-count-derived aperture, identical golden-angle stratified ring at weight 1, identical read of
+// the cone count (gGiParams.x). Before this fix the cluster-material and particle passes ran a THIRD,
+// uncorrected estimate here -- a fixed 60-degree ring at one elevation, no stratification at all --
+// next to voxi_cone.hlsli's two; see ConeWeightTest's own section on this file for the moments that
+// scheme produced.
+//
+// THE SPLIT IS AROUND THE WHOLE FUNCTION, not just the ring loop the way voxi_cone.hlsli's own bit 16
+// is: that file's aperture was already cone-count-derived on BOTH sides of its bit, so only the ring's
+// direction/weight scheme needed branching. This file's OLD aperture was a fixed constant threaded
+// through the axial cone too, so restoring it byte-for-byte needs the branch to start before the axial
+// cone is even traced -- two honest copies of the code each side claims to be, not a shared aperture
+// variable that would make neither branch a real copy of anything.
 float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     float3 up = abs(N.z) < 0.9 ? float3(0,0,1) : float3(1,0,0);
     float3 T = normalize(cross(up, N)), B = cross(N, T);
-    const float aperture = 0.577;              // ~60 degree cone
+
+    if (((uint)gAmbientParams.z & 16u) != 0u) {
+        // LEGACY, VERBATIM: this file's own coneTracedIndirect exactly as it stood before this fix,
+        // restored bit-for-bit for A/B comparison only. See voxi_cone.hlsli's own bit 16 for the
+        // sibling toggle in the main (non-cluster, non-particle) pass -- a DIFFERENT old scheme,
+        // because this file's old aperture was fixed where voxi_cone.hlsli's was already
+        // cone-count-derived even under its own legacy bit.
+        const float aperture = 0.577;              // ~60 degree cone
+
+        float4 sum = traceCone(wpos, N, aperture);
+        float wsum = 1.0;
+        // AO IS AVERAGED ONLY OVER CONES THAT HAD VOLUME TO MARCH. traceCone breaks the instant a
+        // sample leaves the voxel volume and returns whatever alpha it had, near zero for a cone that
+        // exits early -- which a plain average reads as "nothing occluding this direction", crediting
+        // the surface with full sky. A cone that left the volume has NO INFORMATION about occlusion,
+        // which is not the same as information that nothing is there, so it is excluded from the
+        // average rather than voting "open". The radiance sum still takes every cone: leaving the
+        // volume does genuinely mean no more bounced light was found along that direction.
+        float occW = insideVolume(voxelUVW(wpos + N * gVoxelParams.z)) ? 1.0 : 0.0;
+        float occ = sum.a * occW;
+        float occWsum = occW;
+        const uint  ring = (uint)max(gGiParams.x, 1.0) - 1u;
+        const float dphi = ring > 0u ? 6.2831853 / (float)ring : 0.0;
+        [loop] for (uint k = 0; k < ring; ++k) {
+            float ang = dphi * (float)k;
+            float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
+            float w = saturate(dot(N, d));
+            float4 c = traceCone(wpos, d, aperture);
+            sum += c * w; wsum += w;
+            const float cw = w * (insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0);
+            occ += c.a * cw; occWsum += cw;
+        }
+        sum /= wsum;
+        // EVERY cone left the volume: there is genuinely nothing here to occlude against, so the old
+        // answer (fully open) is right, and that case must not change.
+        occ = occWsum > 1e-4 ? occ / occWsum : 0.0;
+        ao = saturate(1.0 - occ);
+        return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+    }
+
+    // CORRECTED (default). The math below is the same text as voxi_cone.hlsli's own corrected gather
+    // (its coneTracedIndirect, legacyConeWeights == false branch), whitespace aside -- ConeWeightTest
+    // checks the two are identical once indentation is normalised; they cannot be raw-byte-identical
+    // because voxi_cone.hlsli's copy lives one nesting level deeper, inside its own ring-loop if/else,
+    // than this top-level branch does.
+    //
+    // APERTURE FROM THE CONE COUNT, not a constant -- see voxi_cone.hlsli's own comment on this exact
+    // formula for the derivation (tiling the hemisphere with N cones gives each cos(theta) = 1 - 1/N)
+    // and why this file's OLD fixed 0.577 (the legacy branch above) went blurrier, not sharper, at
+    // higher GI tiers.
+    const float cones    = max(gGiParams.x, 1.0);
+    const float cosHalf  = saturate(1.0 - 1.0 / cones);
+    const float aperture = sqrt(max(1.0 - cosHalf * cosHalf, 1e-6)) / max(cosHalf, 1e-6);   // tan
 
     float4 sum = traceCone(wpos, N, aperture);
     float wsum = 1.0;
-    // AO IS AVERAGED ONLY OVER CONES THAT HAD VOLUME TO MARCH. traceCone breaks the instant a sample
-    // leaves the voxel volume and returns whatever alpha it had, near zero for a cone that exits
-    // early -- which a plain average reads as "nothing occluding this direction", crediting the
-    // surface with full sky. A cone that left the volume has NO INFORMATION about occlusion, which
-    // is not the same as information that nothing is there, so it is excluded from the average
-    // rather than voting "open". The radiance sum still takes every cone: leaving the volume does
-    // genuinely mean no more bounced light was found along that direction.
-    //
-    // The far endpoint is the test rather than a flag out of traceCone, because this function is
-    // mirrored byte-for-byte in voxi.hlsl and voxi_gi.hlsli and a signature change is two files and
-    // a new way for them to drift. A cone whose FAR end is inside the volume never broke early.
+    // AO IS AVERAGED ONLY OVER CONES THAT HAD VOLUME TO MARCH -- see the legacy branch above (and
+    // voxi_cone.hlsli's own copy) for the full rationale; unchanged by this fix.
     float occW = insideVolume(voxelUVW(wpos + N * gVoxelParams.z)) ? 1.0 : 0.0;
     float occ = sum.a * occW;
     float occWsum = occW;
-    // Mirrors VoxiShaders.hpp's coneTracedIndirect -- see the note there.
-    const uint  ring = (uint)max(gGiParams.x, 1.0) - 1u;
-    const float dphi = ring > 0u ? 6.2831853 / (float)ring : 0.0;
+    // A COSINE-DISTRIBUTED SPIRAL, NOT ONE RING, at weight 1: the cosine weighting already lives in how
+    // `d` is drawn, so weighting it again by dot(N,d) would square the distribution the gather is
+    // supposed to integrate against -- see voxi_cone.hlsli's own bit-16 comment for the arithmetic that
+    // exposed it. The axial cone above is stratum 0 of `cones` equal solid-angle strata; this ring
+    // covers strata 1..cones-1, so t's denominator is `cones` itself, not `ring` -- k+1 skips the
+    // stratum the axial cone already took.
+    const uint ring = (uint)cones - 1u;
     [loop] for (uint k = 0; k < ring; ++k) {
-        float ang = dphi * (float)k;
-        float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
-        float w = saturate(dot(N, d));
+        float t    = ((float)(k + 1u) + 0.5) / cones;
+        float cosT = sqrt(saturate(1.0 - t));
+        float sinT = sqrt(saturate(t));
+        float ang  = 2.39996323 * (float)k;
+        float3 d = normalize(N * cosT + (T * cos(ang) + B * sin(ang)) * sinT);
         float4 c = traceCone(wpos, d, aperture);
-        sum += c * w; wsum += w;
-        const float cw = w * (insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0);
+        sum += c; wsum += 1.0;
+        const float cw = insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0;
         occ += c.a * cw; occWsum += cw;
     }
     sum /= wsum;
@@ -246,9 +309,10 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     // answer (fully open) is right, and that case must not change.
     occ = occWsum > 1e-4 ? occ / occWsum : 0.0;
     ao = saturate(1.0 - occ);
-    // Bounded exactly as VoxiShaders.hpp's coneTracedIndirect is -- read the long note there
-    // for why the ceiling is the injection's own constant. Two copies of this gather exist, and
-    // clamping one of them only would be a difference between the raster and cluster paths that
-    // nothing in the build would report.
+    // Bounded exactly as voxi_cone.hlsli's coneTracedIndirect is -- see that file's own note for why
+    // the ceiling is the injection's own constant. TWO copies of this gather exist (voxi_cone.hlsli,
+    // included into voxi.hlsl for PSMainVoxi/PSVoxel/PSVoxelDebug/PSRayDriven; this file, for the
+    // cluster-material and particle passes); clamping only one of them would be a difference between
+    // the raster/ray-driven and cluster/particle paths that nothing in the build would report.
     return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
 }

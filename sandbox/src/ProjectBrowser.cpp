@@ -109,10 +109,26 @@ void ProjectBrowser::init() {
 }
 
 // Writes the recent project list to disk.
+//
+// ATOMIC, WITH THE SAME DirectWrite FALLBACK EditorPrefs.cpp uses for editor.ini, and for the same
+// reason: recent.txt is exactly as cache-grade as that file -- it is rebuilt from ProjectBrowser's
+// own folder scan (rescan(), above) plus whatever survives here, never the only copy of anything,
+// and "lost the most-recent-first ordering once" is a far smaller failure than "a preference change
+// silently never reaches disk", which is the failure this lane's brief was written to chase down.
+// This used to be a plain writeFileText -- no temp file, no rename -- so a crash mid-write could
+// truncate it to nothing; it now gets the crash-safe swap AND the retry that swap gained in
+// FileSystem.cpp for free, plus the same escape hatch when the swap genuinely cannot complete.
 void ProjectBrowser::saveRecents() const {
     createDirectories(userDataDir());
-    if (!writeFileText(recentsPath(), list_.serialise()))
-        AVER_WARN("[Editor] could not write the recent project list to {}", recentsPath());
+    AtomicWriteError err;
+    if (!writeFileTextAtomic(recentsPath(), list_.serialise(), AtomicFallback::DirectWrite, &err)) {
+        const std::string detail = err.errorCode ? describePlatformError(err.errorCode) : std::string();
+        if (!detail.empty())
+            AVER_WARN("[Editor] could not write the recent project list to {} ({}, error {}: {})",
+                      recentsPath(), err.op.empty() ? "unknown step" : err.op, err.errorCode, detail);
+        else
+            AVER_WARN("[Editor] could not write the recent project list to {}", recentsPath());
+    }
 }
 
 // Finds every project worth showing: the recent list, plus every .ocproject one level under the

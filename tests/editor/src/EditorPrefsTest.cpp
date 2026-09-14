@@ -183,6 +183,21 @@ int main() {
         check(!editor::editorPrefsReadOnly(), "this session read its file, so it is not read-only");
     }
 
+    // ---- recovering from read-only must never step on a change the session already made ------
+    //
+    // THE MERGE RULE, as its own pure decision -- see prefsShouldAdoptFromFile's header comment.
+    // tryRecoverReadOnly itself (EditorPrefs.cpp) is not reachable from here for the same reason the
+    // block above tests prefsShouldRefuseWrite instead of staging a locked file: ensureLoaded
+    // latches once per process with no reset hook, so the read-only path this decision guards can
+    // never be driven through the front door in one test binary. The predicate IS the decision; the
+    // merge loop only obeys it.
+    {
+        check(!editor::prefsShouldAdoptFromFile(true),
+              "a key THIS SESSION already set is never overwritten by the file's older value");
+        check(editor::prefsShouldAdoptFromFile(false),
+              "a key this session never touched IS adopted from the file, so recovery loses nothing");
+    }
+
     // ---- restore the developer's own file -----------------------------------------------------
     if (hadFile) writeFileText(path, original);
     else         writeFileText(path, "");

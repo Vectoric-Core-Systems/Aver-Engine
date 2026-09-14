@@ -285,10 +285,13 @@ int main() {
         // before any swap is attempted. This is the exact technique the task brief suggested: "a
         // directory where a file should be".
         std::filesystem::create_directory(tmp, ec);
-        check(!writeFileTextAtomic(target, "must never land: temp write blocked"),
+        AtomicWriteError err1;
+        check(!writeFileTextAtomic(target, "must never land: temp write blocked",
+                                   AtomicFallback::Refuse, &err1),
               "an atomic write fails when its own temporary path is blocked by a directory");
         check(readFileText(target, readBack) && readBack == second,
               "...and the ORIGINAL is untouched -- still the second version, byte for byte");
+        check(err1.op == "write temp", "...and outError says WHICH step failed: writing the temp file");
         std::filesystem::remove(tmp, ec);
 
         // FAILURE CASE 2: the temporary write succeeds, but the swap cannot -- something else has
@@ -300,17 +303,68 @@ int main() {
         {
             File blocker;
             check(blocker.open(target, File::Mode::Read), "a handle is opened to block the rename");
-            check(!writeFileTextAtomic(target, "must never land: rename blocked"),
+            AtomicWriteError err2;
+            check(!writeFileTextAtomic(target, "must never land: rename blocked",
+                                       AtomicFallback::Refuse, &err2),
                   "an atomic write fails when the destination cannot be replaced");
+            check(err2.op.rfind("swap", 0) == 0, "...and outError says the SWAP is what failed, not the temp write");
+            check(isTransientFileError(err2.errorCode),
+                  "...with a platform error the retry policy itself classifies as worth retrying -- "
+                  "it just could not be retried AWAY because this handle never closed");
         }   // the blocking handle closes here, before the file is inspected
         check(readFileText(target, readBack) && readBack == second,
               "...and the ORIGINAL is STILL untouched after the failed rename");
         check(!std::filesystem::exists(tmp, ec),
               "...and the temporary was cleaned up rather than left as litter");
+
+        // FAILURE CASE 3: the same blocked swap, but with AtomicFallback::DirectWrite -- and a
+        // handle opened to allow this ordinary difference: FILE_SHARE_WRITE (so a second, plain
+        // CreateFile for writing succeeds) WITHOUT FILE_SHARE_DELETE (so the RENAME still cannot
+        // replace the directory entry out from under it). Raw CreateFileW rather than aver::File,
+        // which hardcodes FILE_SHARE_READ only and cannot express this -- the same reason the
+        // sparse-file case above this one already drops to the raw API. This is the case
+        // writeFileBytesAtomic's DirectWrite fallback exists for: a swap that cannot complete
+        // while a plain write to the same path still can.
+        {
+            const std::wstring wTarget = std::filesystem::path(target).wstring();
+            HANDLE blocker = CreateFileW(wTarget.c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+            check(blocker != INVALID_HANDLE_VALUE,
+                  "a handle sharing READ and WRITE (but not DELETE) is opened on the destination");
+
+            const std::string third = "third version, written directly because the swap could not land";
+            AtomicWriteError err3;
+            const bool wrote = writeFileTextAtomic(target, third, AtomicFallback::DirectWrite, &err3);
+            if (blocker != INVALID_HANDLE_VALUE) CloseHandle(blocker);
+
+            check(wrote, "with AtomicFallback::DirectWrite, the write LANDS even though the swap could not");
+            check(err3.op.rfind("swap", 0) == 0,
+                  "...and outError still names the swap as what failed, even on a call that overall succeeded");
+            check(readFileText(target, readBack) && readBack == third,
+                  "...and the file on disk is the NEW content, not the second version reverted to");
+            check(!std::filesystem::exists(tmp, ec),
+                  "...with no '.tmp' left behind by the fallback either");
+        }
 #else
-        AVER_WARN("   SKIP  the rename-blocked case needs a Windows share-mode handle -- unverified here");
+        AVER_WARN("   SKIP  the rename-blocked cases need a Windows share-mode handle -- unverified here");
         ++g_skipped;
 #endif
+    }
+
+    // ---- isTransientFileError: the retry policy, as a plain decision over integers ------------------
+    //
+    // No Windows header needed to state or check this -- see the function's own doc comment. Tested
+    // directly because it IS the policy: get this wrong and the swap above either retries a
+    // permissions error it can never clear (wasted time on every failure) or gives up instantly on a
+    // scanner that would have let go a moment later (the whole bug this lane exists to fix).
+    {
+        check(isTransientFileError(32), "ERROR_SHARING_VIOLATION is worth retrying");
+        check(isTransientFileError(33), "ERROR_LOCK_VIOLATION is worth retrying");
+        check(isTransientFileError(5), "ERROR_ACCESS_DENIED is worth retrying");
+        check(!isTransientFileError(2), "ERROR_FILE_NOT_FOUND is not -- a missing path will not appear");
+        check(!isTransientFileError(3), "ERROR_PATH_NOT_FOUND is not, for the same reason");
+        check(!isTransientFileError(0), "0 (no error) is not transient -- it is not an error at all");
     }
 
     std::filesystem::remove_all(dir, ec);

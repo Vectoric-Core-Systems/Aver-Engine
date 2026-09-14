@@ -51,4 +51,17 @@ bool prefsShouldRefuseWrite(bool readSucceeded, bool fileExists);
 // editor surfaces this; nothing else should have to care.
 bool editorPrefsReadOnly();
 
+// THE MERGE RULE FOR RECOVERING FROM READ-ONLY, pulled out as its own pure decision for the same
+// reason prefsShouldRefuseWrite above is: a read-only store's file can become readable again mid-
+// session (see the .cpp's tryRecoverReadOnly), and the moment it does, every key already in memory
+// and every key still only on disk have to be reconciled into one map before anything gets written.
+//
+// SESSION VALUES WIN. `sessionAlreadyHasKey` is true for a key this session set through setPref*
+// while the store thought it had nothing on disk to lose -- adopting the file's older value for
+// that key instead would silently discard the very edit the user is waiting to see saved, which is
+// the read-only bug coming back wearing a recovery feature as a disguise. A key the session never
+// touched has no such edit to protect, so the file's copy of it is exactly what recovering means to
+// restore.
+bool prefsShouldAdoptFromFile(bool sessionAlreadyHasKey);
+
 } // namespace aver::editor

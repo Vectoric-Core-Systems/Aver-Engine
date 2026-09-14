@@ -81,9 +81,65 @@ bool writeFileText(const std::string& path, const std::string& text);
 // A failed write reports false and leaves `path` untouched, including when `path` does not exist
 // yet (an ordinary first save): the temporary is either never created (the write into it failed)
 // or deleted again (the rename failed), so a save that fails never leaves ".tmp" litter behind.
-bool writeFileBytesAtomic(const std::string& path, const void* data, usize size);
+//
+// THE SWAP ITSELF NOW RETRIES. `path` being briefly held open by something outside this process --
+// a virus scanner's on-access scan of the file this function just finished writing, an indexer, a
+// backup agent -- used to be indistinguishable from "can never be replaced" and failed on the first
+// try. It is now retried a small bounded number of times, trying ReplaceFileW as well as
+// MoveFileExW on each pass, before giving up; every existing caller gets this for free with no
+// signature change, because it only makes a swap that COULD succeed more likely to, and changes
+// nothing about what happens when it genuinely cannot.
+//
+// `fallback` and `outError` are the two things a caller can opt into without changing the default
+// behaviour above (both are optional; every existing call site is unaffected):
+//   * `outError`, when non-null, is filled in on a failure with which step failed ("write temp",
+//     "swap (MoveFileExW)", "swap (ReplaceFileW)") and the platform error code for it, so a caller
+//     that wants to say something more useful than "could not write" can.
+//   * `fallback` decides what happens when the retried swap STILL cannot complete. The default,
+//     `AtomicFallback::Refuse`, is today's behaviour: report failure and leave `path` exactly as it
+//     was. `AtomicFallback::DirectWrite` instead falls back to a plain truncating write straight to
+//     `path` -- trading away the crash-safety guarantee for "the content reaches disk at all" -- and
+//     exists for content a caller has explicitly decided is cheap to lose to a crash mid-write, a
+//     narrower risk than the one a stuck external lock already poses to it. A level, a material, a
+//     mesh, a save or the project manifest must never pass this: losing the crash-safety guarantee
+//     on those is a worse trade than the write occasionally failing outright.
+enum class AtomicFallback {
+    Refuse,       // leave `path` untouched and report failure -- the default, and the ONLY choice
+                  // for anything whose half-written or reverted state would be worse than stale
+    DirectWrite,  // if the swap cannot complete, write `path` directly instead of failing outright
+};
+
+// True for a platform error code that plausibly means "another process has this file open right
+// now" (worth a small bounded retry) rather than "this can never work" (retrying is wasted effort).
+// Pulled out as its own testable decision for the same reason aver::editor::prefsShouldRefuseWrite
+// is one: ERROR_SHARING_VIOLATION (32), ERROR_LOCK_VIOLATION (33) and ERROR_ACCESS_DENIED (5) are
+// part of the stable Win32 error ABI (winerror.h), so the POLICY of which codes are worth retrying
+// can be stated and tested as plain integers, with no Windows header and no live failure needed to
+// reach it. Used by the swap retry in writeFileBytesAtomic/renameFile; meaningless for the errno
+// values the non-Windows build puts in AtomicWriteError::errorCode; that path does not call this.
+bool isTransientFileError(u32 platformErrorCode);
+
+// What writeFileBytesAtomic/writeFileTextAtomic can report about a failure, when the caller wants
+// more than a bare `false`. `op` is empty and `errorCode` is 0 unless a write step actually failed
+// (a no-op call, or one that succeeded, never touches this).
+struct AtomicWriteError {
+    std::string op;         // "write temp", "swap (MoveFileExW)", or "swap (ReplaceFileW)"
+    u32         errorCode = 0;   // GetLastError() on Windows, errno elsewhere; 0 if not applicable
+};
+
+bool writeFileBytesAtomic(const std::string& path, const void* data, usize size,
+                          AtomicFallback fallback = AtomicFallback::Refuse,
+                          AtomicWriteError* outError = nullptr);
 // Writes `text` to the file safely; see writeFileBytesAtomic for what "safely" means and why.
-bool writeFileTextAtomic(const std::string& path, const std::string& text);
+bool writeFileTextAtomic(const std::string& path, const std::string& text,
+                         AtomicFallback fallback = AtomicFallback::Refuse,
+                         AtomicWriteError* outError = nullptr);
+
+// Human-readable text for a platform error code (errorCode above), for a log line that says WHY a
+// write failed rather than just that it did. FormatMessage on Windows, strerror elsewhere. Empty if
+// the platform has nothing to offer for that code -- a caller should treat that as "no extra detail"
+// rather than print an empty parenthetical.
+std::string describePlatformError(u32 code);
 
 // Deletes a file. True if it is gone afterwards -- INCLUDING when it never existed, because "make
 // sure this is not there" is what every caller actually wants and a missing file already satisfies

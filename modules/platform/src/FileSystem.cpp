@@ -3,6 +3,7 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -51,8 +52,61 @@ std::string knownFolder(REFKNOWNFOLDERID id) {
     return s;
 }
 
+// Bounded: three attempts total, a few milliseconds apart. This is sized for "another process had
+// it open for a moment" (a virus scanner's on-access scan of the file this process just finished
+// writing, an indexer, a backup agent), not for anything that needs seconds to clear -- a lock that
+// outlives this is not a lock this function's caller can wait out anyway, and the whole retry only
+// runs on the failure path in the first place.
+constexpr int kSwapAttempts = 3;
+constexpr DWORD kSwapRetryDelayMs = 10;
+
+// Swaps `tmp` into `path`, trying MoveFileExW and then ReplaceFileW on each pass, and retrying while
+// the failure looks transient. Returns true the instant either call succeeds. On total failure,
+// `outOp`/`outErr` carry the LAST attempt's operation name and GetLastError, so a caller can log
+// something more useful than "could not write".
+bool swapWithRetry(const std::wstring& wTmp, const std::wstring& wPath,
+                   std::string& outOp, DWORD& outErr) {
+    for (int attempt = 0; attempt < kSwapAttempts; ++attempt) {
+        if (attempt > 0) Sleep(kSwapRetryDelayMs);
+
+        if (MoveFileExW(wTmp.c_str(), wPath.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
+            return true;
+        }
+        outOp = "swap (MoveFileExW)";
+        outErr = GetLastError();
+
+        // ReplaceFileW is the platform's OWN "replace a file something else may have open"
+        // primitive, so it is worth trying on the SAME pass before sleeping and trying MoveFileExW
+        // again. It refuses a `path` that does not exist yet with ERROR_FILE_NOT_FOUND -- the
+        // ordinary first-save case, not the sharing failure this is hunting -- so that specific code
+        // does not clobber the more informative one MoveFileExW just reported.
+        if (ReplaceFileW(wPath.c_str(), wTmp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS,
+                         nullptr, nullptr) != 0) {
+            return true;
+        }
+        const DWORD replaceErr = GetLastError();
+        if (replaceErr != ERROR_FILE_NOT_FOUND) { outOp = "swap (ReplaceFileW)"; outErr = replaceErr; }
+
+        if (!isTransientFileError(static_cast<u32>(outErr))) break;   // a real reason: sleeping will not fix it
+    }
+    return false;
+}
+
 } // namespace
 #endif
+
+// See the header: which platform error codes are worth a bounded retry. Defined here, outside the
+// Windows-only block above, so it needs no Windows header to compile or to test -- the three codes
+// it names are plain integers from the stable Win32 error ABI, not live values this function has to
+// ask the OS for.
+bool isTransientFileError(u32 platformErrorCode) {
+    constexpr u32 kErrorSharingViolation = 32;
+    constexpr u32 kErrorLockViolation = 33;
+    constexpr u32 kErrorAccessDenied = 5;
+    return platformErrorCode == kErrorSharingViolation || platformErrorCode == kErrorLockViolation ||
+          platformErrorCode == kErrorAccessDenied;
+}
 
 // The directory containing the running executable.
 std::string executableDir() {
@@ -172,8 +226,13 @@ bool renameFile(const std::string& from, const std::string& to) {
     // specified to fail when the destination exists on some implementations, and replace-in-place is
     // exactly the operation write-to-temp-then-swap needs. WRITE_THROUGH makes the rename itself
     // durable before returning, so a crash cannot leave the directory entry unwritten.
-    return MoveFileExW(widen(from).c_str(), widen(to).c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    //
+    // RETRIED, via swapWithRetry, rather than one shot -- see that function's comment. Every caller
+    // of renameFile (OcSave.cpp, Settings.cpp, RegionFile.cpp, and writeFileBytesAtomic below) gets
+    // this for free with no change on their part: it only improves the odds a swap that COULD
+    // succeed does, and behaves exactly as before when it genuinely cannot.
+    std::string op; DWORD err = 0;
+    return swapWithRetry(widen(from), widen(to), op, err);
 #else
     std::error_code ec;
     std::filesystem::rename(from, to, ec);
@@ -185,25 +244,87 @@ bool renameFile(const std::string& from, const std::string& to) {
 // the rename that swaps a COMPLETE replacement into place. See the header comment for the full
 // argument; this is that same write-to-temp-then-swap pattern aver::fmt::saveOcSave and
 // aver_settings_flush already ship with, factored out to one place.
-bool writeFileBytesAtomic(const std::string& path, const void* data, usize size) {
+bool writeFileBytesAtomic(const std::string& path, const void* data, usize size,
+                         AtomicFallback fallback, AtomicWriteError* outError) {
+    if (outError) *outError = AtomicWriteError{};
+
     const std::string tmp = path + ".tmp";
     // The temporary is written with the plain, truncating writeFileBytes -- truncate-on-open is
     // harmless here because `tmp` is not a file anything else depends on; the SWAP below is what
     // makes `path` itself safe, not this write.
-    if (!writeFileBytes(tmp, data, size)) return false;
-    if (!renameFile(tmp, path)) {
+    if (!writeFileBytes(tmp, data, size)) {
+        if (outError) outError->op = "write temp";
+        // DirectWrite exists for when the SWAP cannot complete, not when the write into `tmp` itself
+        // fails -- if the destination directory will not accept a new file at all, it will not accept
+        // one at `path` either, so there is nothing this fallback could still land. Fall through to
+        // the ordinary failure return.
+        return false;
+    }
+
+#if defined(_WIN32)
+    std::string op; DWORD err = 0;
+    if (!swapWithRetry(widen(tmp), widen(path), op, err)) {
+        if (outError) { outError->op = op; outError->errorCode = static_cast<u32>(err); }
         // The temporary is removed on a failed swap so a later attempt does not inherit a stale
         // one and the save directory does not accumulate ".tmp" debris. `path` is untouched
-        // either way -- the rename never started, so whatever was there (or was not) still is.
+        // either way -- the swap never completed, so whatever was there (or was not) still is.
         deleteFile(tmp);
+        if (fallback == AtomicFallback::DirectWrite) {
+            // THE TRADE, spelled out because it is a real one. The swap exists to survive THIS
+            // PROCESS crashing mid-write -- writeFileBytes below has the ordinary truncate-on-open
+            // hazard, and a crash between the truncate and the last byte landing would leave `path`
+            // corrupted rather than merely stale. What just failed above is a DIFFERENT risk: a
+            // THIRD PARTY (a scanner, an indexer, a backup agent) holding `path` open long enough
+            // that even the retried swap could not replace it. The two risks are independent, and a
+            // caller opting into DirectWrite is one that has already decided losing the first
+            // guarantee is better than the preference never reaching disk at all -- see the enum's
+            // doc comment for who that is and, just as importantly, who must never do this.
+            return writeFileBytes(path, data, size);
+        }
         return false;
     }
     return true;
+#else
+    // POSIX rename() has no share-mode concept -- replacing a file someone else has open just
+    // unlinks the old inode from under their still-valid handle -- so there is no swap-retry story
+    // here, and DirectWrite's only use on this path is the rare case where `tmp` and `path` do not
+    // share a filesystem (EXDEV) and a direct write can still land where a rename across devices
+    // cannot.
+    if (!renameFile(tmp, path)) {
+        if (outError) { outError->op = "swap"; outError->errorCode = static_cast<u32>(errno); }
+        deleteFile(tmp);
+        if (fallback == AtomicFallback::DirectWrite) return writeFileBytes(path, data, size);
+        return false;
+    }
+    return true;
+#endif
 }
 
 // Writes `text` to the file safely; see writeFileBytesAtomic.
-bool writeFileTextAtomic(const std::string& path, const std::string& text) {
-    return writeFileBytesAtomic(path, text.data(), text.size());
+bool writeFileTextAtomic(const std::string& path, const std::string& text,
+                        AtomicFallback fallback, AtomicWriteError* outError) {
+    return writeFileBytesAtomic(path, text.data(), text.size(), fallback, outError);
+}
+
+// See the header: FormatMessage on Windows, strerror elsewhere.
+std::string describePlatformError(u32 code) {
+    if (code == 0) return {};
+#if defined(_WIN32)
+    LPWSTR buf = nullptr;
+    const DWORD n = FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, static_cast<DWORD>(code), 0, reinterpret_cast<LPWSTR>(&buf), 0, nullptr);
+    if (n == 0 || !buf) return {};
+    std::wstring w(buf, n);
+    LocalFree(buf);
+    // FormatMessage's text ends in "\r\n" (or a trailing period plus that) -- trimmed so it reads as
+    // one clause in a log line rather than leaving a blank line dangling after it.
+    while (!w.empty() && (w.back() == L'\r' || w.back() == L'\n' || w.back() == L' ')) w.pop_back();
+    return narrow(w);
+#else
+    const char* s = std::strerror(static_cast<int>(code));
+    return s ? std::string(s) : std::string();
+#endif
 }
 
 // ---- File ---------------------------------------------------------------------------------------
