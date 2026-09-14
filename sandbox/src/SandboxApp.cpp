@@ -17100,27 +17100,51 @@ private:
                         const ImVec2 uv0(at.x / bw, at.y / bh);
                         const ImVec2 uv1((at.x + w) / bw, (at.y + h) / bh);
                         ImGui::Image(static_cast<ImTextureID>(tex), ImVec2(w, h), uv0, uv1);
-                        // Drop target for content-browser assets (see kAssetDragDropType). The scene
-                        // symbols the actual placement needs live in spawnFromAssetDrop, guarded on
-                        // their own -- this call site stays compilable with the module off either way.
+                        // Drop target for content-browser assets. The scene symbols the actual placement
+                        // needs live in spawnFromAssetDrop, guarded on their own -- this call site stays
+                        // compilable with the module off either way.
+                        //
+                        // ONE PAYLOAD PER DRAG, AND IT IS THE BROWSER'S MOVE PAYLOAD. ImGui keeps exactly
+                        // one payload per drag: SetDragDropPayload with cond 0 means ImGuiCond_Always and
+                        // overwrites the type (imgui.cpp SetDragDropPayload). The browser used to set
+                        // kAssetDragDropType and then kCbMoveDragDropType on the SAME drag, so only the
+                        // move payload was ever delivered -- and this target, accepting only the asset
+                        // type, silently ignored every drop. The browser now sends its whole selection
+                        // under kCbMoveDragDropType and THIS target keeps what it can place.
+                        // kAssetDragDropType is still accepted for any source that sends one asset.
                         if (ImGui::BeginDragDropTarget()) {
-                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropType)) {
+                            const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
+                            if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
+                            if (payload && payload->Data) {
                                 const std::string droppedPath(
                                     static_cast<const char*>(payload->Data),
                                     payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
                                 const ImVec2 mp = ImGui::GetMousePos();
 #if AVER_MODULE_SCENE
-                                // ONE PATH PER LINE. A multi-selection drag sends every selected
-                                // placeable asset (see cbDragPayloadFor); a single drag sends one path
-                                // with no newline in it, which this loop yields unchanged.
+                                // ONE PATH PER LINE. A multi-selection drag sends every selected entry;
+                                // a single drag sends one path with no newline in it, which this loop
+                                // yields unchanged. Folders and non-placeable files are skipped HERE,
+                                // since the payload is the browser's unfiltered selection.
                                 //
                                 // ALL AT THE SAME POINT, not fanned out: the cursor names one place,
                                 // and each lands on whatever is under it -- so a stack of assets
                                 // dropped together piles up rather than scattering to positions
                                 // nobody chose. Moving them apart afterwards is a drag each; guessing
                                 // a layout for them is not undoable in one gesture.
-                                for (const std::string& one : editor::splitDropPayload(droppedPath))
+                                const std::vector<std::string> dragged = editor::splitDropPayload(droppedPath);
+                                usize placed = 0;
+                                for (const std::string& one : dragged) {
+                                    std::error_code dirEc;
+                                    if (std::filesystem::is_directory(std::filesystem::path(one), dirEc)) continue;
+                                    if (!isPlaceableAssetExt(lowerExt(std::filesystem::path(one)))) continue;
                                     spawnFromAssetDrop(e, one, mp.x, mp.y);
+                                    ++placed;
+                                }
+                                if (placed == 0) {
+                                    cbStatus_ = "Nothing in that drag can be placed in the level (only .ocmesh/.ocparticle assets can)";
+                                    AVER_INFO("[Editor] drop: none of the {} dragged item(s) is a placeable asset",
+                                              dragged.size());
+                                }
 #else
                                 cbStatus_ = "Placing objects needs the scene module";
                                 AVER_WARN("[Editor] drop: scene module not compiled in, ignoring '{}'", droppedPath);
@@ -18187,9 +18211,10 @@ private:
     }
 
     // Renames a file or folder and follows the rename in the selection and the history.
-    // The drag payload for a BROWSER move: everything selected, unfiltered. Mirrors
-    // cbDragPayloadFor's "a drag starting outside the selection carries just that item" rule, because
-    // grabbing an unselected file and dragging it is unambiguously about that file.
+    // The ONE drag payload a Content Browser item sends: everything selected, unfiltered, and every
+    // drop target filters what it can use (see the viewport drop target for why there is only one).
+    // A drag starting outside the selection carries just that item, because grabbing an unselected
+    // file and dragging it is unambiguously about that file.
     std::string cbMoveDragPayloadFor(const std::string& dragged) const {
         if (!cbIsSelected(dragged) || cbSelection_.size() <= 1) return dragged;
         std::string blob;
@@ -19490,34 +19515,16 @@ private:
 
     void cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clear(); }
 
-    // The drag payload for a Content Browser item: every SELECTED placeable asset when the dragged
-    // item is one of them, otherwise just the item under the cursor.
-    //
-    // NEWLINE-SEPARATED, and the viewport splits it. A payload is a flat byte blob, and one path per
-    // line is the least it can be while carrying several -- a path cannot contain a newline on any
-    // filesystem this runs on. A single-item drag produces a blob with no newline in it, byte for byte
-    // what the old single-path payload was, so nothing downstream had to change to keep working.
-    //
-    // FOLDERS AND NON-PLACEABLES ARE DROPPED FROM THE LIST, not refused: a selection of eleven files
-    // where two are .txt should still place the nine, and the viewport's drop target is documented as
-    // never having to reject a payload it received.
     // What the drag preview says: the one name, or how many are coming.
+    //
+    // The payload it counts is cbMoveDragPayloadFor's: NEWLINE-SEPARATED paths, one per line (a path
+    // cannot contain a newline on any filesystem this runs on), the whole selection, unfiltered. There
+    // is no separate "placeable assets only" payload any more -- ImGui carries one payload per drag, so
+    // each drop target filters what it can use (the viewport keeps .ocmesh/.ocparticle and skips the
+    // rest, so a selection of eleven files where two are .txt still places the nine).
     static std::string cbDragLabel(const std::string& name, const std::string& blob) {
         const usize n = static_cast<usize>(std::count(blob.begin(), blob.end(), '\n')) + 1;
         return n <= 1 ? name : std::to_string(n) + " assets";
-    }
-
-    std::string cbDragPayloadFor(const std::string& dragged) const {
-        if (!cbIsSelected(dragged) || cbSelection_.size() <= 1) return dragged;
-        std::string blob;
-        for (const std::string& p : cbSelection_) {
-            std::error_code ec;
-            if (std::filesystem::is_directory(p, ec)) continue;
-            if (!isPlaceableAssetExt(lowerExt(std::filesystem::path(p)))) continue;
-            if (!blob.empty()) blob += '\n';
-            blob += p;
-        }
-        return blob.empty() ? dragged : blob;
     }
 
 
@@ -19737,14 +19744,15 @@ private:
                     // EVERY ENTRY IS DRAGGABLE, folders included. This used to be gated on "placeable
                     // in the viewport", which is the right question for the VIEWPORT and the wrong one
                     // for the browser: a folder could not be dragged at all, and a selection holding
-                    // one silently left it behind. Two payloads now ride the same drag, each target
-                    // taking the type it understands -- so viewport placement is unchanged while the
-                    // browser gets the whole, unfiltered selection.
+                    // one silently left it behind.
+                    //
+                    // ONE PAYLOAD, THE WHOLE SELECTION. "Two payloads on one drag" does not exist in
+                    // ImGui: a second SetDragDropPayload overwrites the first one's TYPE (cond 0 is
+                    // ImGuiCond_Always), so the asset payload set here for the viewport was replaced
+                    // by the move payload a line later, and every drop on the viewport did nothing.
+                    // Each target now takes this one payload and keeps what it understands: the
+                    // viewport places the .ocmesh/.ocparticle files in it, a folder moves all of it.
                     if (ImGui::BeginDragDropSource()) {
-                        if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path))) {
-                            const std::string blob = cbDragPayloadFor(e.full);
-                            ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
-                        }
                         const std::string moveBlob = cbMoveDragPayloadFor(e.full);
                         ImGui::SetDragDropPayload(kCbMoveDragDropType, moveBlob.c_str(), moveBlob.size() + 1);
                         // The label is emitted unconditionally now: it is the drag's only visual, and
@@ -19913,13 +19921,10 @@ private:
                         cbOpenEntry(e.full, e.isDir);
                     }
                 }
-                // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
-                // so the viewport drop target never has to reject a payload it received.
-                if (ImGui::BeginDragDropSource()) {   // see the gallery's note: folders drag too
-                    if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path))) {
-                        const std::string blob = cbDragPayloadFor(e.full);
-                        ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
-                    }
+                // ONE PAYLOAD, THE WHOLE SELECTION -- see the gallery's note: folders drag too, and a
+                // second SetDragDropPayload would overwrite the first, which is exactly how viewport
+                // drops broke. The viewport keeps the placeable files from this payload itself.
+                if (ImGui::BeginDragDropSource()) {
                     const std::string moveBlob = cbMoveDragPayloadFor(e.full);
                     ImGui::SetDragDropPayload(kCbMoveDragDropType, moveBlob.c_str(), moveBlob.size() + 1);
                     ImGui::TextUnformatted(cbDragLabel(e.name, moveBlob).c_str());
@@ -21342,12 +21347,25 @@ private:
                     // sequence used to be written out here, and the picker below would have been a
                     // second copy of it -- the "two implementations of one fact" shape this file
                     // keeps paying for. assignParticleEffect owns it; both callers just hand it a path.
+                    // THE BROWSER'S ONE PAYLOAD. The Content Browser sends its whole selection under
+                    // kCbMoveDragDropType (ImGui keeps exactly one payload per drag, see the viewport
+                    // drop target), so this row takes the first .ocparticle in it. kAssetDragDropType
+                    // is still accepted from any source that sends a single asset.
                     if (ImGui::BeginDragDropTarget()) {
-                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropType)) {
-                            const std::string dropped(
+                        const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
+                        if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
+                        if (payload && payload->Data) {
+                            const std::string blob(
                                 static_cast<const char*>(payload->Data),
                                 payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
-                            assignParticleEffect(selEntity_, dropped);
+                            bool assigned = false;
+                            for (const std::string& one : editor::splitDropPayload(blob)) {
+                                if (lowerExt(std::filesystem::path(one)) != ".ocparticle") continue;
+                                assignParticleEffect(selEntity_, one);
+                                assigned = true;
+                                break;
+                            }
+                            if (!assigned) cbStatus_ = "Only a .ocparticle effect can be dropped on this emitter";
                         }
                         ImGui::EndDragDropTarget();
                     }
