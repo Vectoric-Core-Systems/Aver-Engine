@@ -361,6 +361,26 @@ struct GpuTimingReport {
     std::vector<GpuTimingNode> nodes;
 };
 
+// A snapshot of the adapter's video memory budget and current usage, split the way both backends'
+// own APIs split it: LOCAL is memory on the GPU's own bus (VRAM on a discrete card, the whole pool
+// on a UMA/integrated one); NON_LOCAL is everything else the driver can spill into (system memory
+// reached over PCIe on a discrete card, effectively unused on UMA). "Budget" is the OS's current
+// ceiling for this process, not the adapter's physical total -- it moves as other applications and
+// the desktop compositor claim or release their own share, which is exactly why this is polled
+// rather than read once at startup.
+//
+// `supported` is the same two-state shape as GpuTimingReport::supported just above: false means the
+// backend could not answer THIS call (no IDXGIAdapter3 on this device, the Vulkan extension absent,
+// or the query itself failed), and every numeric field is then 0 rather than a stale or guessed
+// value -- a caller must check this before trusting zero to mean "no memory used".
+struct VideoMemoryInfo {
+    bool supported = false;
+    u64  localBudgetBytes = 0;      // D3D12 DXGI_MEMORY_SEGMENT_GROUP_LOCAL Budget / Vulkan: sum of heapBudget over DEVICE_LOCAL memory heaps
+    u64  localUsageBytes = 0;       // ...CurrentUsage / sum of heapUsage over DEVICE_LOCAL memory heaps
+    u64  nonLocalBudgetBytes = 0;   // ...NON_LOCAL Budget / sum over every other heap
+    u64  nonLocalUsageBytes = 0;    // ...NON_LOCAL CurrentUsage / sum over every other heap
+};
+
 // One GPU device: frame loop, scene state, immediate drawing, capture and in-window UI.
 class IDevice {
 public:
@@ -512,6 +532,49 @@ public:
     virtual MeshHandle createMesh(const MeshVertex* verts, u32 vertexCount,
                                   const u32* indices, u32 indexCount) {
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
+    }
+
+    // Polls the adapter's current video memory budget and usage (see VideoMemoryInfo's own comment
+    // for the LOCAL/NON_LOCAL split and what `supported` false means). Defaults to an unsupported,
+    // all-zero report so D3D11, Null, and every test mock compile and behave unchanged without
+    // implementing this.
+    virtual VideoMemoryInfo videoMemory() const { return {}; }
+
+    // Chooses which GPU heap createMesh() uploads a static mesh's vertex/index buffers to, for every
+    // call made AFTER this one -- meshes already created keep whatever heap they were built on.
+    // Default false = BufferKind::Upload, which is today's behaviour on every backend: the buffer
+    // lives in CPU-visible, GPU-cacheable memory the whole engine already reads correctly, at the
+    // cost of every draw, shadow, voxelisation, and BLAS build fetching it back across the bus on a
+    // discrete card rather than out of local VRAM. True moves new static meshes to the Default heap,
+    // trading a one-shot upload-time copy (see the D3D12 implementation's own comment on why that
+    // copy is synchronous) for that per-frame bus traffic. See VoxiRenderer.cpp's own ray-tracing
+    // geometry, which already puts BLAS-backing buffers on the Default heap for the identical reason
+    // -- this generalises that precedent to ordinary raster meshes rather than introducing a new one.
+    // A backend that never implements this (D3D11, Null, every mock) is that default, permanently.
+    virtual void setStaticMeshHeapDefault(bool onDefaultHeap) { (void)onDefaultHeap; }
+    virtual bool staticMeshHeapDefault() const { return false; }
+
+    // Creates a new mesh that SHARES `source`'s vertex buffer and has its own, independent index
+    // buffer -- the inverse split from createSkinTargetMesh's shared-index/own-vertices shape just
+    // below, and the one an LOD ladder actually wants: coarser LOD levels of the same asset reuse
+    // the same vertex positions/normals/uvs and only thin out which triangles reference them, so
+    // duplicating the vertex stream per level is pure waste -- W11 in the engine optimisation plan.
+    // The vertex buffer is REFCOUNTED across every mesh sharing it (source plus every
+    // createMeshSharingVertices call against it); destroyMesh on any of them while shares remain
+    // outstanding is refused rather than freeing memory a sibling mesh still draws.
+    //
+    // `source` must be alive and its own vertices must not already be compute-written (a skin target
+    // -- sharing a buffer a compute pass writes into would make every sharer's geometry jitter with
+    // whatever the source was last posed to, not a bug a caller would think to suspect). Bounds
+    // (centre/radius/AABB) are copied from `source`, since a coarser index list over the same vertex
+    // positions cannot exceed the source's own extents.
+    //
+    // Returns 0 on any refusal -- unsupported backend, dead or invalid source, or a compute-written
+    // source -- and the caller MUST THEN FALL BACK TO createMesh with its own full, independent
+    // vertex array, exactly as if this entry point did not exist. A backend that never implements
+    // this (D3D11, Null, every mock, and Vulkan until it does) is that fallback path, permanently.
+    virtual MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
+        (void)source; (void)indices; (void)indexCount; return 0;
     }
 
     // Releases a mesh's GPU memory. False if the handle is invalid, already dead, or still shared.

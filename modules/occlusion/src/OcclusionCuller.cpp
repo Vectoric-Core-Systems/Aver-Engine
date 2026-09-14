@@ -24,6 +24,7 @@
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include "aver/rhi/ShaderFiles.hpp"   // these three kernels are deployed files
@@ -368,7 +369,23 @@ public:
         // whatever WAS already submitted -- ordinarily everything through the end of the previous
         // frame -- does not change which slot is written or read (kInFlight rotation is unconditional
         // either way), only whether the CPU stalls here first.
-        if (debugForceWaitIdle_) res.waitIdle();
+        // M2(d): the stall itself, not just that it happened. Scoped to exactly the call the comment
+        // above already justifies -- neither the position nor debugForceWaitIdle_'s default changes
+        // here, only whether this module can now say how much of a frame that drain actually costs.
+        if (debugForceWaitIdle_) {
+            const auto waitT0 = std::chrono::steady_clock::now();
+            res.waitIdle();
+            const f64 waitMs = std::chrono::duration<f64, std::milli>(
+                                   std::chrono::steady_clock::now() - waitT0).count();
+            waitIdleTotalMs_ += waitMs;
+            waitIdleMaxMs_ = waitMs > waitIdleMaxMs_ ? waitMs : waitIdleMaxMs_;
+            ++waitIdleCalls_;
+            if ((waitIdleCalls_ & (waitIdleCalls_ - 1)) == 0)
+                AVER_INFO("[Occlusion] GPU drain (waitIdle) {:.2f} ms this call, {:.2f} ms mean, "
+                          "{:.2f} ms max over {} call(s)",
+                          waitMs, waitIdleTotalMs_ / static_cast<f64>(waitIdleCalls_), waitIdleMaxMs_,
+                          waitIdleCalls_);
+        }
 
         // THE FIRST CALL READS NOTHING, BECAUSE THERE IS NOTHING TO READ, and reading it anyway is
         // what produced "19 of 19 tested entities culled (100.0%)" on the opening frame of every
@@ -760,6 +777,13 @@ private:
     bool readbackLagExpected_ = false;   // see readbackLagIsExactlyOneCall()
     bool debugForceWaitIdle_ = true;     // see setDebugForceWaitIdle() / this class's own top comment
                                           // -- defaults true: see the FOLLOW-UP paragraph above kInFlight
+
+    // M2(d): running totals for the waitIdle() stall above, since nothing measured it before.
+    // Self-reported wall-clock only -- see the [Occlusion] GPU drain log line -- not a GPU timestamp
+    // and not validated against a profiler. Reported on a power-of-two cadence (waitIdleCalls_), the
+    // same shape as D3D12Device.cpp's shader-compile report and MaterialSystem's own update() line.
+    f64 waitIdleTotalMs_ = 0.0, waitIdleMaxMs_ = 0.0;
+    u64 waitIdleCalls_ = 0;
 
     // SECOND STALENESS DETECTOR -- box IDENTITY across the one-call lag, not GPU timing. See
     // testBatch()'s own comment beside boxesStableAcrossLag's computation for what this catches that

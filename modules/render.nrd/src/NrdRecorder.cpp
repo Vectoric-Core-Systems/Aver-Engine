@@ -6,6 +6,49 @@
 
 namespace aver::render::nrd {
 
+namespace {
+
+// M6: bytes per texel for the plain (non-block-compressed) formats NRD's pools and OUT_* targets are
+// ever built from -- see PoolTexture's own comment on `format` in NrdDenoiser.hpp: NRD's format list
+// is wider than this RHI's, and Unknown is how that gap already reports itself. No existing helper
+// answers this (checked modules/rhi/include for a bytes-per-texel or format-size function; there is
+// none), so it is restated here rather than exported: nothing outside this one memory report needs it
+// yet, and a second copy of a table this small is cheaper than a shared header neither side has asked
+// for. 0 means "cannot size this one" -- a block-compressed format (never actually requested here; a
+// UAV-writable compute target could not be block-compressed in the first place) or Unknown -- and the
+// caller must count it separately rather than guess, per the C-7 log contract.
+u32 bytesPerTexel(rhi::Format f) {
+    switch (f) {
+        case rhi::Format::R8Unorm:
+        case rhi::Format::R8Uint:         return 1;
+        case rhi::Format::RG8Unorm:
+        case rhi::Format::R16Unorm:
+        case rhi::Format::R16Uint:
+        case rhi::Format::R16F:           return 2;
+        case rhi::Format::RGBA8Unorm:
+        case rhi::Format::RGBA8UnormSrgb:
+        case rhi::Format::R32Float:
+        case rhi::Format::R32Uint:
+        case rhi::Format::D32Float:
+        case rhi::Format::R32Typeless:
+        case rhi::Format::RG16F:
+        case rhi::Format::RGB10A2Unorm:   return 4;
+        case rhi::Format::RGBA16F:
+        case rhi::Format::RG32Float:      return 8;
+        case rhi::Format::BC1Unorm:
+        case rhi::Format::BC1UnormSrgb:
+        case rhi::Format::BC3Unorm:
+        case rhi::Format::BC3UnormSrgb:
+        case rhi::Format::BC5Unorm:
+        case rhi::Format::BC7Unorm:
+        case rhi::Format::BC7UnormSrgb:
+        case rhi::Format::Unknown:
+        default:                           return 0;
+    }
+}
+
+} // namespace
+
 Recorder::~Recorder() { destroy(); }
 
 // ---------------------------------------------------------------------------------------------
@@ -215,6 +258,42 @@ bool Recorder::resize(u32 width, u32 height) {
         if (!outDiffRadHitDistTex_) { releasePools(); failedWidth_ = width; failedHeight_ = height; return false; }
     }
     failedWidth_ = failedHeight_ = 0;   // this size works; a later one may still not
+
+    // M6: pool memory, COMPUTED FROM THE TEXTURE DESCRIPTIONS ABOVE, not queried from the device --
+    // this RHI has no per-resource residency query, so the only honest number to report is exactly
+    // what this function itself just asked createTexture() for, at the same downsample factor per
+    // pool entry `make()` used above. Logged once per successful (re)allocation, i.e. exactly the
+    // calls that reach here rather than the idempotent early return at the top of resize() -- a
+    // caller that asks every frame with an unchanged size never sees a repeat of this line.
+    {
+        u64 bytes = 0;
+        u32 unknownCount = 0;
+        auto addPool = [&](const PoolTexture* pool, u32 poolSize) {
+            for (u32 i = 0; i < poolSize; ++i) {
+                const PoolTexture& pt = pool[i];
+                const u32 f = pt.downsampleFactor ? pt.downsampleFactor : 1u;
+                const u32 w = (width_ + f - 1) / f, h = (height_ + f - 1) / f;
+                const u32 bpt = bytesPerTexel(pt.format);
+                if (bpt) bytes += static_cast<u64>(w) * h * bpt;
+                else     ++unknownCount;
+            }
+        };
+        addPool(lay.permanentPool, lay.permanentPoolSize);
+        addPool(lay.transientPool, lay.transientPoolSize);
+        // The OUT_* targets are full resolution (see makeOut() above), and their formats are fixed
+        // constants of this file rather than an NRD PoolTexture -- makeOut()'s own two call sites
+        // name them (rhi::Format::R16Unorm, rhi::Format::RGBA16F) -- so they are sized through the
+        // same bytesPerTexel() table rather than a second, separately-maintained pair of numbers.
+        if (outDiffHitDistTex_)
+            bytes += static_cast<u64>(width_) * height_ * bytesPerTexel(rhi::Format::R16Unorm);
+        if (outDiffRadHitDistTex_)
+            bytes += static_cast<u64>(width_) * height_ * bytesPerTexel(rhi::Format::RGBA16F);
+        AVER_INFO("[NRD] pools: {} permanent + {} transient texture(s) at {}x{}, {:.1f} MiB computed "
+                  "from their formats ({} of unknown size not counted)",
+                  lay.permanentPoolSize, lay.transientPoolSize, width_, height_,
+                  static_cast<f64>(bytes) / (1024.0 * 1024.0), unknownCount);
+    }
+
     return true;
 }
 

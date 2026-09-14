@@ -224,6 +224,23 @@ u32 parseU32(const char* s, u32 fallback) {
     return static_cast<u32>(v);
 }
 
+// M7 (C-7): the SAME [Stats] video-memory line for every --stats dump this host prints -- one shared
+// shape rather than the periodic and one-shot end-of-run dumps (onUpdate, below) each spelling it out
+// and drifting apart. Mirrors SandboxApp.cpp's gpuTimingCheck [GPU] line and the RHI backends' own
+// init-time [RHI.D3D12]/[RHI.Vulkan] line -- same fields, same MB rounding (bytes/1048576), different
+// prefix. `supported` false (D3D11, a Vulkan device with no VK_EXT_memory_budget, every mock) prints a
+// distinct sentence rather than a row of zeros a reader could mistake for "nothing in use".
+void logStatsVideoMemory(rhi::IDevice& dev) {
+    const rhi::VideoMemoryInfo vm = dev.videoMemory();
+    if (vm.supported) {
+        AVER_INFO("[Stats] video memory: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
+                  vm.localUsageBytes / 1048576, vm.localBudgetBytes / 1048576,
+                  vm.nonLocalUsageBytes / 1048576, vm.nonLocalBudgetBytes / 1048576);
+    } else {
+        AVER_INFO("[Stats] video memory: not reported by this backend");
+    }
+}
+
 #if AVER_MODULE_SYNAPSE_SCENE
 // A level's own .ocnav sits beside it with the same stem -- e.g. Content/Maps/Arena.ocworld ->
 // Content/Maps/Arena.ocnav. Deliberately a SEPARATE copy of sandbox/src/NavBakeCommand.cpp's own
@@ -371,6 +388,20 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
         else if (std::strcmp(a, "--screenshot") == 0)      { c.screenshotPath = valueAfter(argc, argv, i, ""); ++i; }
+        // --no-vsync (M7): measurement parity with SandboxApp.cpp's identical flag -- see
+        // GameConfig::vsyncOff for where and how it is applied.
+        else if (std::strcmp(a, "--no-vsync") == 0) { c.vsyncOff = true; }
+        // --cam-wobble DEG PERIOD (M7): the SAME measurement-only yaw swing SandboxApp.cpp's own
+        // --cam-wobble drives -- see GameConfig::camWobbleDeg/camWobblePeriod. Both values are
+        // consumed only when BOTH are present (i+2<argc): a lone --cam-wobble with nothing after it,
+        // or with only one number, leaves the config untouched rather than eating whatever argument
+        // happened to follow as if it were the period.
+        else if (std::strcmp(a, "--cam-wobble") == 0 && i + 2 < argc) {
+            c.camWobbleDeg = static_cast<f32>(std::atof(argv[i + 1]));
+            const int period = std::atoi(argv[i + 2]);
+            c.camWobblePeriod = period > 0 ? static_cast<u32>(period) : 0u;
+            i += 2;
+        }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
@@ -1410,7 +1441,24 @@ void GameApp::pushFrame(Engine& e) {
     // NO setViewportRect. The editor confines the scene to the dockspace's central node; a game
     // renders to the whole backbuffer, so leaving the rect alone is the correct behaviour and not
     // an omission.
-    const Vec3 fwd    = camForward();
+    //
+    // --cam-wobble DEG PERIOD (M7): identical formula and reasoning to SandboxApp::onUpdate's own
+    // --cam-wobble application -- a sine that returns to zero at every whole multiple of the period,
+    // driven off the frame counter (frames_, incremented once at the top of onUpdate before pushFrame
+    // ever runs this frame) rather than the clock, so the path is identical every run. Applied as a
+    // TEMPORARY offset to yaw_ for exactly this camForward() call and then restored immediately,
+    // never accumulated onto yaw_ itself: yaw_ is the free camera's real orientation, and drivePlayCamera
+    // rewrites it from the possessed pawn every frame a session is playing, so there is nowhere safe
+    // to accumulate drift the way a standalone member could.
+    f32 wobble = 0.0f;
+    if (cfg_.camWobbleDeg != 0.0f && cfg_.camWobblePeriod != 0) {
+        wobble = cfg_.camWobbleDeg * 0.01745329252f *
+                 std::sin(6.2831853f * static_cast<f32>(frames_ - 1) / static_cast<f32>(cfg_.camWobblePeriod));
+    }
+    const f32 yawBeforeWobble = yaw_;
+    yaw_ += wobble;
+    const Vec3 fwd = camForward();
+    yaw_ = yawBeforeWobble;
     const f32  aspect = viewAspect(e);
     const Mat4 view   = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0, 0, 1});
     const f32  zNear = 2.0f, zFar = 200000.0f;   // centimetres
@@ -1565,6 +1613,20 @@ void GameApp::onInit(Engine& e) {
     AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={} PARTICLES={}",
               AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
               AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING, AVER_MODULE_PARTICLES);
+    // --no-vsync (M7): applied HERE, the first point in onInit a device is guaranteed to exist --
+    // Engine::run creates it before calling onInit at all, unlike argv parsing (parseArgs), which
+    // runs before any device does. Mirrors SandboxApp.cpp's own vsyncOffRequested_ handling
+    // (vsyncCanDisable() then setVSync(false), else WARN) with a [Game] prefix instead of [Sandbox].
+    // A one-shot call, not a per-frame reassert: unlike the editor, nothing in a shipped game flips
+    // vsync back on mid-run, so there is nothing later to win back over.
+    if (cfg_.vsyncOff) {
+        if (rhi::IDevice* dev = e.device()) {
+            if (dev->vsyncCanDisable()) { dev->setVSync(false); AVER_INFO("[Game] vsync OFF (--no-vsync)"); }
+            else AVER_WARN("[Game] --no-vsync ignored: this display path cannot tear");
+        } else {
+            AVER_WARN("[Game] --no-vsync ignored: no device");
+        }
+    }
     // FIRST of the render features. Its prePass stages this frame's bone matrices, and the scene
     // pass then asks drawHandle() for a posed handle that must already exist.
     attachSkinning(e);
@@ -1727,6 +1789,29 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
                 AVER_INFO("[Stats] GPU total (marked passes): {:.2f}ms  |  CPU frame (this instant): "
                           "{:.2f}ms -- a rough bound signal, not a matched pair.",
                           gpuMs, static_cast<f64>(t.dt) * 1000.0);
+            logStatsVideoMemory(*e.device());
+        }
+    }
+    // M7: the ONE-SHOT END-OF-RUN dump, distinct from the periodic one directly above. A bounded
+    // (--frames N) capture can end before statsIntervalSec ever elapses once -- a 60-frame run at 60
+    // FPS is one second long, and the default interval alone is 5 -- so a script that passes both
+    // --frames and --stats to price a specific short scenario could see NO dump at all without this.
+    // Fires at the SAME frame gpuTimingCheck/rayProbeCheck use in SandboxApp.cpp (maxFrames-2, or
+    // maxFrames-1 for a very short run) so a script comparing this host's numbers against the
+    // editor's own --gpu-timing/--ray-probe dumps is reading the same instant in both. Gated on
+    // cfg_.statsIntervalSec > 0 (i.e. --stats was actually asked for) so a run with no --stats pays
+    // nothing extra, and latched by statsFinalDumped_ so it can never fire twice.
+    if (cfg_.statsIntervalSec > 0.0f && cfg_.maxFrames > 0 && !statsFinalDumped_ && e.device()) {
+        const u64 want = cfg_.maxFrames > 8 ? cfg_.maxFrames - 2 : cfg_.maxFrames - 1;
+        if (frames_ >= want) {
+            statsFinalDumped_ = true;
+            const f64 gpuMs = rhi::formatGpuTiming(e.device()->gpuTiming(),
+                                                   [](const std::string& line) { AVER_INFO("[Stats] {}", line); });
+            if (gpuMs > 0.0)
+                AVER_INFO("[Stats] GPU total (marked passes): {:.2f}ms  |  CPU frame (this instant): "
+                          "{:.2f}ms -- a rough bound signal, not a matched pair.",
+                          gpuMs, static_cast<f64>(t.dt) * 1000.0);
+            logStatsVideoMemory(*e.device());
         }
     }
     // Input is READ here, never rolled here. See onRender for why.

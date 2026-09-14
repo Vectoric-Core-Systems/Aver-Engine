@@ -1025,6 +1025,67 @@ void destroyImageCommitted(VulkanDevice& dev, VkImage image, VkDeviceMemory memo
 }
 
 // ================================================================================================
+// 2b. W4: one-shot device-buffer upload. See VulkanCommon.hpp's declaration for the full contract;
+//     this is the STAGING-BUFFER half of what a Default-heap mesh needs that an Upload-heap one
+//     never did (writeBuffer refuses a non-mapped buffer -- VulkanResourceFactory::writeBuffer's own
+//     ERROR, "not BufferKind::Upload"). Sits here rather than in the anonymous namespace above
+//     because it is a VulkanResourceFactory member (declared in VulkanCommon.hpp so
+//     VulkanDevice::createMesh/createMeshSharingVertices can call it), but it calls
+//     runOneShotCommands/createBufferCommitted/destroyBufferCommitted exactly as
+//     transitionFreshImage above does, all defined in this same TU.
+// ================================================================================================
+bool VulkanResourceFactory::uploadToDeviceBuffers(const VkBuffer* dsts, const void* const* srcs,
+                                                   const VkDeviceSize* sizes, u32 count, const char* what) {
+    if (!dsts || !srcs || !sizes || count == 0) return true;
+    VkDeviceSize total = 0;
+    for (u32 i = 0; i < count; ++i) total += sizes[i];
+    if (total == 0) return true;
+
+    // ONE staging buffer for every destination, not one per buffer -- the whole point of batching
+    // createMesh's vertex AND index upload into a single call is one map/memcpy/submit/wait instead
+    // of two, and a second staging allocation here would throw that batching away.
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    if (!createBufferCommitted(*dev_, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               staging, stagingMemory, nullptr, what ? what : "rhi uploadToDeviceBuffers staging"))
+        return false;
+
+    u8* mapped = nullptr;
+    if (!vkOk(dev_->api().MapMemory(dev_->vkDevice(), stagingMemory, 0, VK_WHOLE_SIZE, 0,
+                                    reinterpret_cast<void**>(&mapped)),
+              what ? what : "rhi uploadToDeviceBuffers map")) {
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        return false;
+    }
+    std::vector<VkDeviceSize> offsets(count);
+    VkDeviceSize cursor = 0;
+    for (u32 i = 0; i < count; ++i) {
+        offsets[i] = cursor;
+        if (srcs[i] && sizes[i]) std::memcpy(mapped + cursor, srcs[i], static_cast<usize>(sizes[i]));
+        cursor += sizes[i];
+    }
+    // HOST_COHERENT was required above (alongside HOST_VISIBLE), so no vkFlushMappedMemoryRanges is
+    // needed before the copy commands below read it -- same reasoning as writeBuffer's own coherent
+    // fast path.
+    dev_->api().UnmapMemory(dev_->vkDevice(), stagingMemory);
+
+    const bool ok = runOneShotCommands(*dev_, [&](VkCommandBuffer cmd) {
+        for (u32 i = 0; i < count; ++i) {
+            if (!sizes[i]) continue;
+            VkBufferCopy region{offsets[i], 0, sizes[i]};
+            dev_->api().CmdCopyBuffer(cmd, staging, dsts[i], 1, &region);
+        }
+    }, what ? what : "rhi uploadToDeviceBuffers copy");
+
+    // The wait inside runOneShotCommands has already retired this submit, so the staging buffer is
+    // safe to free immediately -- there is nothing left for the caller to clean up from this call
+    // either way, matching the contract's own "the staging buffer is destroyed either way" note.
+    destroyBufferCommitted(*dev_, staging, stagingMemory);
+    return ok;
+}
+
+// ================================================================================================
 // 3. Construction / destruction / init / selfTest
 // ================================================================================================
 

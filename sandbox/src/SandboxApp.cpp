@@ -3978,6 +3978,15 @@ public:
             // VoxiRenderer::setLightingLegacyBits' for the bit table and what reasserting this every
             // frame (regardless of whether the user just touched it) costs versus what it buys.
             voxiRenderer_.setLightingLegacyBits(editor::consoleLightingLegacySlot());
+            // engine-optimisation-plan wave 1 (M1-M4/W3/W12, C-2/C-5): identical idiom, right beside
+            // the toggles it mirrors just above -- see consoleGiForceRebuildSlot()'s own comment
+            // (EditorConsole.hpp) for why these three are raw slots rather than ordinary dials. Each
+            // setter acts only on an actual change and logs only on change (C-2's own contract), so
+            // reasserting all three unconditionally every frame costs nothing when nobody has touched
+            // the console since the last frame.
+            voxiRenderer_.setGiForceRebuild(editor::consoleGiForceRebuildSlot());
+            voxiRenderer_.setGiBoundedDispatch(editor::consoleGiBoundedDispatchSlot());
+            voxiRenderer_.setGiFreeAccumulator(editor::consoleGiFreeAccumulatorSlot());
             // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
             // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
             // than only at attach time.
@@ -4302,12 +4311,25 @@ public:
     // Loads every .ocmesh under the project's Content, keyed by fnv1a64 of its forward-slash relative path.
     void loadProjectMeshes(Engine& e) {
 #if AVER_MODULE_SCENE
+        // W4 (--mesh-heap): the FIRST statement, unconditionally, so every static mesh this call
+        // uploads -- built-ins are created earlier, at :2058-2091, and predate this call entirely, so
+        // they stay on the Upload heap regardless of this flag -- lands on whichever heap the flag
+        // asked for. setStaticMeshHeapDefault only affects createMesh calls made AFTER it, so this
+        // has to run before the very first one below, not after an early return might skip it.
+        if (e.device()) e.device()->setStaticMeshHeapDefault(meshHeapDefault_);
         const std::string dir = project_.contentDir();
         if (dir.empty()) return;
         std::error_code ec;
         if (!std::filesystem::exists(dir, ec)) return;
 
         u32 loaded = 0, failed = 0;
+#if AVER_MODULE_TRIFACTOR
+        // W11 (--lod-share-vertices): summed across every mesh's LOD ladder built below, printed once
+        // as the [Mesh] LOD ladders line at the end of this function -- see that line's own comment.
+        u32 lodCoarserLevels = 0;
+        u32 lodSharedLevels = 0;
+        u64 lodSharedVertexBytesSaved = 0;
+#endif
         for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
             if (ec) break;
             if (!it->is_regular_file(ec)) continue;
@@ -4376,14 +4398,28 @@ public:
                 bool ok = true;
                 for (u32 lvl = 1; lvl < levels && ok; ++lvl) {
                     const fmt::OcMeshLod& lod = md.coarserLods[lvl - 1];
-                    const rhi::MeshHandle lh = e.device()->createMesh(
-                        verts.data(), (u32)verts.size(), lod.indices.data(), (u32)lod.indices.size());
+                    // W11 (--lod-share-vertices): try sharing LOD0's own vertex buffer (`h`) first --
+                    // 0 back means the device refused (an unsupported backend, or `h`'s vertices are
+                    // compute-written, e.g. a skin target -- see createMeshSharingVertices' own
+                    // comment for the full list) and the caller MUST fall back, exactly as if the flag
+                    // were off. Off by default, so this is a no-op call on the common path.
+                    rhi::MeshHandle lh = lodShareVertices_
+                        ? e.device()->createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size())
+                        : 0;
+                    if (lh) {
+                        ++lodSharedLevels;
+                        lodSharedVertexBytesSaved += static_cast<u64>(verts.size()) * sizeof(rhi::MeshVertex);
+                    } else {
+                        lh = e.device()->createMesh(verts.data(), (u32)verts.size(),
+                                                     lod.indices.data(), (u32)lod.indices.size());
+                    }
                     if (!lh) {
                         AVER_WARN("[Mesh] '{}' LOD {} refused by the device; ladder truncated at {} level(s)",
                                   rel, lvl, ladder.handles.size());
                         ok = false;
                         break;
                     }
+                    ++lodCoarserLevels;
                     ladder.handles.push_back(lh);
                     ladder.triCounts.push_back(trifactor::levelTriangleCount(md, lvl));
                     ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
@@ -4511,6 +4547,19 @@ public:
         if (loaded || failed)
             AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
                       failed ? (", " + std::to_string(failed) + " failed") : "");
+#if AVER_MODULE_TRIFACTOR
+        // W11: once per loadProjectMeshes, not per mesh -- the existing lodCount= line on each mesh's
+        // own [Mesh] '...' -> ... line above (unchanged, byte-identical) is what a per-mesh check
+        // sums; this is the run-wide total the flag's own trade (vertex-buffer sharing) is measured
+        // against. Printed even when both counts are 0 (--lod-share-vertices off, or no mesh in this
+        // project has a coarser LOD at all), so its absence in a log is never ambiguous with "the
+        // line was never reached".
+        if (lodCoarserLevels || lodSharedLevels)
+            AVER_INFO("[Mesh] LOD ladders: {} coarser level(s), {} sharing their LOD0 vertex buffer "
+                      "({:.1f} MiB of vertex data not duplicated)",
+                      lodCoarserLevels, lodSharedLevels,
+                      static_cast<f64>(lodSharedVertexBytesSaved) / (1024.0 * 1024.0));
+#endif
 #if AVER_MODULE_LANDSCAPE
             // Rebuilt here rather than lazily on entering Foliage mode: this is the moment the set of
             // placeable meshes actually changes, and editorModeAvailable() asks whether the palette
@@ -6491,12 +6540,24 @@ public:
             {
                 const f64 walkMs = std::chrono::duration<f64, std::milli>(
                     std::chrono::steady_clock::now() - tWalk0).count();
-                if ((sceneWalkReports_ & (sceneWalkReports_ + 1)) == 0)
+                if ((sceneWalkReports_ & (sceneWalkReports_ + 1)) == 0) {
                     AVER_INFO("[Sandbox] scene walk {:.1f}ms -- {:.1f}ms in cluster dispatch across {} "
                               "drawn ({:.1f}us each), {:.1f}ms in the rest over {} entities",
                               walkMs, dispatchMs, drawn,
                               drawn ? dispatchMs * 1000.0 / static_cast<f64>(drawn) : 0.0,
                               walkMs - dispatchMs, n);
+#if AVER_MODULE_VOXI
+                    // M2(c): the CPU cost of Voxi's acceleration-structure per-draw loop on its last
+                    // rebuild (VoxiRenderer::lastAccelBuildCpuMs, C-2), printed at the SAME widening
+                    // cadence as the scene-walk line directly above so the two land in the log
+                    // together as one picture of where a frame's CPU time goes. Reads 0.0 until the
+                    // first GI rebuild has actually reached the per-draw loop -- see that method's own
+                    // comment (VoxiRenderer.hpp) for why "no build yet" and "a build that measured
+                    // zero" cannot be told apart from this number alone.
+                    AVER_INFO("[Sandbox] Voxi acceleration-structure draw loop {:.2f} ms CPU (last build)",
+                              voxiRenderer_.lastAccelBuildCpuMs());
+#endif
+                }
                 ++sceneWalkReports_;
             }
             if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_ || ownerHidden != lastSceneOwnerHidden_) {
@@ -8188,6 +8249,13 @@ public:
         camWobbleDeg_ = degrees;
         camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
     }
+    // --mesh-heap default|upload (W4): read at the top of loadProjectMeshes, the first point in the
+    // frame a device is guaranteed to exist -- argv parsing happens before Engine::run creates one.
+    // false (DEFAULT, "upload") is today's behaviour, untouched by this flag's absence.
+    void setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
+    // --lod-share-vertices 0|1 (W11): read inside loadProjectMeshes' LOD-ladder loop. false (DEFAULT)
+    // is today's behaviour -- every LOD level gets its own independent vertex buffer.
+    void setLodShareVertices(bool on) { lodShareVertices_ = on; }
     // --cam-translate SPEED: fly the camera forward along camForward() by SPEED world-cm every
     // frame, starting at frame 1. UNLIKE --cam-wobble (pure rotation about a fixed point, which
     // barely changes what-occludes-what -- the same walls occlude the same objects, just at
@@ -23928,6 +23996,20 @@ private:
             if (lvl == LogLevel::Error) AVER_ERROR("[GPU] {}", msg);
             else                        AVER_INFO ("[GPU] {}", msg);
         });
+        // M6: the SAME video-memory snapshot the [RHI.D3D12]/[RHI.Vulkan] init-time line reports
+        // (C-1's rhi::IDevice::videoMemory), printed here too so a --frames capture's log carries a
+        // budget/usage reading from near the END of the run, beside the frame-time breakdown just
+        // above -- not only from device creation, before the run's own allocations exist. `supported`
+        // false (D3D11, a Vulkan device with no VK_EXT_memory_budget, every mock) prints a distinct
+        // sentence rather than a row of zeros a reader could mistake for "nothing in use".
+        const rhi::VideoMemoryInfo vm = e.device() ? e.device()->videoMemory() : rhi::VideoMemoryInfo{};
+        if (vm.supported) {
+            AVER_INFO("[GPU] video memory: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
+                      vm.localUsageBytes / 1048576, vm.localBudgetBytes / 1048576,
+                      vm.nonLocalUsageBytes / 1048576, vm.nonLocalBudgetBytes / 1048576);
+        } else {
+            AVER_INFO("[GPU] video memory: not reported by this backend");
+        }
     }
 
     // --resize-cycle N: resize the real window every N frames during a bounded run.
@@ -24832,6 +24914,18 @@ private:
     f32  camWobbleBaseYaw_=0.0f;     // the yaw to swing about, latched on the first wobbled frame
     bool camWobbleBased_=false;
     f32  camTranslateSpeed_=0.0f;    // --cam-translate SPEED: forward-flight, cm/frame, 0 = no motion
+    // --mesh-heap default|upload (W4): false (DEFAULT) = every new static mesh's vertex/index buffers
+    // go on the Upload heap, today's behaviour on every backend. true moves them to the Default heap
+    // instead -- see rhi::IDevice::setStaticMeshHeapDefault's own comment for the trade. Applies to
+    // createMesh calls made AFTER it is set, so it is read once, at the top of loadProjectMeshes,
+    // before that call's first mesh upload -- not reasserted per frame, since meshes load once.
+    bool meshHeapDefault_ = false;
+    // --lod-share-vertices 0|1 (W11): false (DEFAULT) = today's behaviour, every coarser LOD level
+    // gets its own independent vertex buffer even though it duplicates LOD0's vertex data untouched.
+    // true shares LOD0's vertex buffer across every level via createMeshSharingVertices, falling back
+    // to the independent-buffer path on any refusal (unsupported backend, or the mesh's own vertices
+    // are compute-written). Read inside loadProjectMeshes' LOD-ladder loop, once per mesh at load time.
+    bool lodShareVertices_ = false;
 
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
@@ -27907,6 +28001,16 @@ Application* createApplication(int argc, char** argv) {
     int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
     bool windowedArg = false;
     bool fullscreenArg = false;
+    // engine-optimisation-plan, wave 1 (C-6). -1 IS ABSENT for the three GI dials, same sentinel and
+    // reasoning as giSkyOccRays/giSkyOccTile above: each is a plain on/off, but 0 is a REAL value (the
+    // measurement forced OFF explicitly), so a 0-default could not tell "not given" apart from "given
+    // as 0". meshHeapArg/lodShareVerticesArg use their own sentinels (empty string, -1) for the same
+    // reason -- see their own application sites below for what each actually does.
+    int giForceRebuildArg = -1;
+    int giBoundedDispatchArg = -1;
+    int giFreeAccumulatorArg = -1;
+    std::string meshHeapArg;   // empty = absent; "default" or "upload" otherwise
+    int lodShareVerticesArg = -1;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -27914,6 +28018,33 @@ Application* createApplication(int argc, char** argv) {
         // --open-level-picker: open File > Open Level's modal on the first frame, so a --frames run
         // can screenshot it. In THIS loop for the C1061 reason above, like every flag added since.
         if (!std::strcmp(argv[i],"--open-level-picker")) { openLevelPickerArg=true; continue; }
+        // --gi-force-rebuild / --gi-bounded-dispatch / --gi-free-accumulator / --mesh-heap /
+        // --lod-share-vertices: engine-optimisation-plan wave 1's measurement and opt-in dials
+        // (M1-M4/W3/W4/W11/W12). NOT in the `i + 1 < argc` pre-chain loop above this one (the one
+        // that seeds beam/shot/etc.): a value stored there is never CONSUMED, so it falls through to
+        // the bare-path branch at the bottom of the main argv loop (`argv[i][0]!='-'`) and gets
+        // stored as `beam` instead of being read as this flag's argument -- exactly the failure mode
+        // that branch's own comment warns about. In THIS loop for the C1061 reason above, like every
+        // flag added since, and as a plain `if`/`continue`, never an `else if` (the chain below this
+        // loop is already at MSVC's nesting limit).
+        if (!std::strcmp(argv[i],"--gi-force-rebuild") && i+1<argc) {
+            giForceRebuildArg = std::atoi(argv[++i]); continue;
+        }
+        if (!std::strcmp(argv[i],"--gi-bounded-dispatch") && i+1<argc) {
+            giBoundedDispatchArg = std::atoi(argv[++i]); continue;
+        }
+        if (!std::strcmp(argv[i],"--gi-free-accumulator") && i+1<argc) {
+            giFreeAccumulatorArg = std::atoi(argv[++i]); continue;
+        }
+        // --mesh-heap default|upload: W4. A string, not a 0/1 int, so an unrecognised spelling can be
+        // reported by name at the application site below rather than silently misread as a number.
+        if (!std::strcmp(argv[i],"--mesh-heap") && i+1<argc) {
+            meshHeapArg = argv[++i]; continue;
+        }
+        // --lod-share-vertices 0|1: W11.
+        if (!std::strcmp(argv[i],"--lod-share-vertices") && i+1<argc) {
+            lodShareVerticesArg = std::atoi(argv[++i]); continue;
+        }
         // --gi-sky-occlusion-rays N: how many sky-visibility rays the AMBIENT term traces per pixel.
         //
         // IT EXISTED AS A SETTING WITH NO WAY TO SET IT. Settings::giSkyOcclusionRays shipped
@@ -28836,6 +28967,47 @@ Application* createApplication(int argc, char** argv) {
     editor::consoleLightingLegacySlot() = static_cast<u32>(lightingLegacyArg);
 #endif
     editor::consolePtLegacyEnvSlot() = ptLegacyEnvArg;
+    // engine-optimisation-plan wave 1 (C-6 application): seeded the SAME way --lighting-legacy is
+    // seeded just above -- straight into the raw console slot, since a per-frame reassert beside
+    // voxiRenderer_.setLightingLegacyBits(...) is what actually makes each one live (SandboxApp.cpp's
+    // onUpdate, right beside the Voxi settings block). Guarded on AVER_MODULE_VOXI because the slots
+    // themselves live inside EditorConsole.hpp's AVER_MODULE_VOXI block (C-5) -- they feed
+    // VoxiRenderer methods and nothing else, so a build with Voxi off has nowhere for them to go.
+#if AVER_MODULE_VOXI
+    if (giForceRebuildArg >= 0) {
+        editor::consoleGiForceRebuildSlot() = giForceRebuildArg != 0;
+        AVER_INFO("[Voxi] --gi-force-rebuild {}", giForceRebuildArg != 0 ? "1" : "0");
+    }
+    if (giBoundedDispatchArg >= 0) {
+        editor::consoleGiBoundedDispatchSlot() = giBoundedDispatchArg != 0;
+        AVER_INFO("[Voxi] --gi-bounded-dispatch {}", giBoundedDispatchArg != 0 ? "1" : "0");
+    }
+    if (giFreeAccumulatorArg >= 0) {
+        editor::consoleGiFreeAccumulatorSlot() = giFreeAccumulatorArg != 0;
+        AVER_INFO("[Voxi] --gi-free-accumulator {}", giFreeAccumulatorArg != 0 ? "1" : "0");
+    }
+#endif
+    // --mesh-heap default|upload (W4): routed through SandboxApp's own member rather than a device
+    // call made here directly, because no rhi::IDevice exists yet at this point in main() -- the
+    // window and device are created inside Engine::run, well after argv parsing finishes. The member
+    // is read at the top of loadProjectMeshes, the first place a device is guaranteed to exist.
+    if (!meshHeapArg.empty()) {
+        if (meshHeapArg == "default") {
+            app->setMeshHeapDefault(true);
+            AVER_INFO("[Sandbox] --mesh-heap default: new static meshes go on the Default heap");
+        } else if (meshHeapArg == "upload") {
+            app->setMeshHeapDefault(false);
+            AVER_INFO("[Sandbox] --mesh-heap upload: new static meshes stay on the Upload heap (today's behaviour)");
+        } else {
+            AVER_ERROR("[Sandbox] --mesh-heap '{}' not recognised (default|upload)", meshHeapArg);
+        }
+    }
+    // --lod-share-vertices 0|1 (W11): same reasoning as --mesh-heap just above -- staged on the app,
+    // consumed inside loadProjectMeshes where a device actually exists.
+    if (lodShareVerticesArg >= 0) {
+        app->setLodShareVertices(lodShareVerticesArg != 0);
+        AVER_INFO("[Sandbox] --lod-share-vertices {}", lodShareVerticesArg != 0 ? "1" : "0");
+    }
     app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);

@@ -401,6 +401,19 @@ inline bool& consoleNrdLegacyCameraSlot() { static bool v = false; return v; }
 // VoxiRenderer::setLightingLegacyBits' own header comment for the bit table.
 inline u32& consoleLightingLegacySlot() { static u32 v = 0; return v; }
 
+// The three engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME SHAPE as
+// consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot()/consoleLightingLegacySlot() directly above,
+// and for the identical reason: VoxiRenderer::setGiForceRebuild/setGiBoundedDispatch/
+// setGiFreeAccumulator are public methods on the renderer (unlike giPoisonView, which is private), but
+// none of the three round-trips through voxi::Renderer::Settings/setSettings -- so this table still
+// cannot stage them as ordinary dials, only as raw slots reasserted once a frame. Written by their
+// matching `set voxi.gi*` command and reasserted onto the live voxiRenderer_ from SandboxApp.cpp's
+// onUpdate, right beside the voxi.giPoisonView/nrdLegacyCamera reasserts these three mirror -- see
+// each setter's own header comment (VoxiRenderer.hpp) for what changing it actually does.
+inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
+inline bool& consoleGiBoundedDispatchSlot() { static bool v = false; return v; }
+inline bool& consoleGiFreeAccumulatorSlot() { static bool v = false; return v; }
+
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
 // tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
 // ConsoleBatch's own comment for why the split is closures rather than two struct copies.
@@ -695,6 +708,45 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "instead of cos (root cause R6; gAmbientParams.z bit 16). Default OFF weights each cone once. "
         "Affects giMode 0, the non-RT fallback, and the cluster and particle passes.",
         legacyBitRead(16u), legacyBitStage(16u)});
+    // ---- the engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME raw-slot/
+    // deviceSetters shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s own comment
+    // for why these three, unlike the tier/dial fields, cannot be staged as ordinary Settings dials).
+    // Default OFF on all three: none changes the rendered image when off, only what the renderer
+    // measures or how it schedules work getting there.
+    t.push_back({"voxi.giForceRebuild", VarType::Bool, false,
+        "Measurement only: forces every GI tick to rebuild from scratch, the way the very first tick "
+        "after a level load always does. The GI derived-data cache (VoxiRenderer::setGiCacheDir) is "
+        "neither read nor written while this is on, so a baked volume on disk is left untouched but "
+        "ignored -- this isolates the cost of a full rebuild from the cost of everything the cache and "
+        "the update-interval gate normally do to avoid one. Default OFF.",
+        []{ return vBool(consoleGiForceRebuildSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiForceRebuildSlot() = on; });
+        }});
+    t.push_back({"voxi.giBoundedDispatch", VarType::Bool, false,
+        "Measurement only: the GI volume's clear/resolve/mip compute passes dispatch only over the "
+        "voxel box the injected draws can actually touch this rebuild, instead of the whole grid. "
+        "Falls back to the full grid on the first build, a moved or resized volume, an unbounded draw, "
+        "or a cache restore -- see GiDispatchBounds.hpp's own comment for the box math. Intended to "
+        "produce IDENTICAL output to the full-grid path; the gain from skipping empty voxels is "
+        "UNMEASURED. Default OFF.",
+        []{ return vBool(consoleGiBoundedDispatchSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiBoundedDispatchSlot() = on; });
+        }});
+    t.push_back({"voxi.giFreeAccumulator", VarType::Bool, false,
+        "Measurement only: frees the GI injection accumulator (roughly 2 GB at 512^3) after 240 "
+        "consecutive quiet GI ticks -- ticks that needed no rebuild -- and recreates it the instant a "
+        "change needs one again, which then runs one tick later than it otherwise would while the "
+        "texture is recreated. Trades that one-tick latency and a recreation cost against holding the "
+        "memory for the entire session regardless of how long the volume sits idle. Default OFF.",
+        []{ return vBool(consoleGiFreeAccumulatorSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiFreeAccumulatorSlot() = on; });
+        }});
     // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
     // the same honesty voxi.giMode above documents at length, and through the SAME mechanism now:
     // voxi::resolve()'s denoiser field, not a raw Settings read. denoiser was never clamped inside

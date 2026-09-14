@@ -4,6 +4,8 @@
 
 #include "aver/core/Log.hpp"
 
+#include <chrono>
+
 namespace aver::pbr {
 
 namespace {
@@ -120,6 +122,11 @@ void MaterialSystem::shutdown() {
     // shutdown() and whatever update() eventually re-populates the table after the next init().
     gpuIndexOf_.clear();
     gpuTable_.clear();
+    // W10's scratch pair holds the PREVIOUS generation's backing storage between update() calls (see
+    // its own comment in the header) -- left non-empty here it would be exactly as stale as
+    // gpuIndexOf_/gpuTable_ above would have been, for the same reason.
+    indexOfScratch_.clear();
+    tableScratch_.clear();
     res_ = nullptr;
 }
 
@@ -235,6 +242,12 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     auto it = entries_.find(h);
     if (it != entries_.end()) return it->second;
 
+    // M2(b): this is the ONE place a material's GPU residency is actually built, whether the call
+    // came from update()'s own loop or -- lazily, for a material nobody has drawn yet -- from
+    // bindingSet()/constants() at a draw site. inUpdate_ (set only around update()'s loop, see its
+    // own comment) is what tells the two apart for the log line's split.
+    const auto t0 = std::chrono::steady_clock::now();
+
     Entry e;
     rhi::BindingSetDesc bd;
     bd.srvCount = kMaterialSrvCount;
@@ -247,6 +260,12 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     } else {
         AVER_ERROR("[PBR] binding set for material {} could not be created", h);
     }
+
+    buildMsPending_ += std::chrono::duration<f64, std::milli>(
+                           std::chrono::steady_clock::now() - t0).count();
+    ++buildsPending_;
+    if (inUpdate_) ++buildsInUpdate_; else ++buildsOnDraw_;
+
     return entries_.emplace(h, e).first->second;
 }
 
@@ -257,17 +276,40 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
 // would just be a second place this could disagree with the first.
 void MaterialSystem::update() {
     if (!res_) return;
+    const auto t0 = std::chrono::steady_clock::now();
     MaterialLibrary& lib = MaterialLibrary::get();
 
+    // W10 / DO-NOT-DO #21: tableScratch_/indexOfScratch_ are the SECOND, PERSISTENT container of the
+    // alternating pair -- built fresh into here every call, then swapped with gpuIndexOf_/gpuTable_
+    // below, never compared against or filled into the SAME object twice in a row. See the header's
+    // comment on tableScratch_/indexOfScratch_ for the bug a single reused container produces.
+    tableScratch_.clear();
     const u32 n = lib.count();
-    std::vector<MaterialConstants> table;
-    table.reserve(n + 1u);
-    table.push_back(fallbackConstants_);   // row 0, always -- see gpuMaterialTable()'s own comment
-    std::unordered_map<MaterialHandle, u32> indexOf;
-    indexOf.reserve(n);
+    tableScratch_.reserve(n + 1u);
+    tableScratch_.push_back(fallbackConstants_);   // row 0, always -- see gpuMaterialTable()'s own comment
+    indexOfScratch_.clear();
+    indexOfScratch_.reserve(n);
+
+    // M2(b): a burst of Entry builds may have gone quiet between the previous update() call and this
+    // one -- a project's materials finished streaming in, or a run of first-draw builds stopped. This
+    // is checked BEFORE this call's own loop runs (which may start a new burst of its own), so a
+    // quiet call reports the OLD burst and a busy one keeps accumulating instead of reporting early.
+    if (buildsPending_ > 0 && buildsPending_ == buildsPendingAtLastUpdateEnd_) {
+        AVER_INFO("[PBR] {} material(s) built in {:.1f} ms ({} inside update(), {} on first draw)",
+                  buildsPending_, buildMsPending_, buildsInUpdate_, buildsOnDraw_);
+        buildsPending_ = 0;
+        buildMsPending_ = 0.0;
+        buildsInUpdate_ = 0;
+        buildsOnDraw_ = 0;
+    }
 
     // Reading the flag clears it, so this is the one consumer. Driven off the library's own
     // enumeration, because a material created this frame has no entry yet.
+    //
+    // inUpdate_ brackets exactly this loop -- see entryFor()'s own comment -- so a build entryFor()
+    // performs here is counted "inside update()" and one a draw site triggers between update() calls
+    // is counted "on first draw", and the two can never be confused with each other.
+    inUpdate_ = true;
     for (u32 i = 0; i < n; ++i) {
         const MaterialHandle h = lib.at(i);
         if (!h) continue;
@@ -286,9 +328,10 @@ void MaterialSystem::update() {
                 if (it->second.set) writeSlots(*d, it->second.set, true);
             }
         }
-        indexOf.emplace(h, static_cast<u32>(table.size()));
-        table.push_back(it->second.constants);
+        indexOfScratch_.emplace(h, static_cast<u32>(tableScratch_.size()));
+        tableScratch_.push_back(it->second.constants);
     }
+    inUpdate_ = false;
 
     // Destruction is deferred by RHI contract, so retiring mid-frame is safe.
     for (auto it = entries_.begin(); it != entries_.end();) {
@@ -303,9 +346,26 @@ void MaterialSystem::update() {
     // every insert/erase by hand as the loop above goes: std::unordered_map::operator== already
     // compares by CONTENT (every key present in both, with equal values), not bucket order or size
     // alone, which is exactly "did any material's row move" and nothing more or less than that.
-    if (indexOf != gpuIndexOf_) ++gpuRevision_;
-    gpuIndexOf_.swap(indexOf);
-    gpuTable_.swap(table);
+    //
+    // THE TWO SIDES OF THIS COMPARISON MUST BE DISTINCT OBJECTS, which is the entire reason
+    // indexOfScratch_ is a separate persistent member rather than a local rebuilt every call: a
+    // container compared against itself is always equal to itself, gpuRevision_ would stop
+    // advancing, and every material created after the first update() call would never reach
+    // gpuIndexOf_/gpuTable_ at all (DO-NOT-DO #21).
+    if (indexOfScratch_ != gpuIndexOf_) ++gpuRevision_;
+    gpuIndexOf_.swap(indexOfScratch_);
+    gpuTable_.swap(tableScratch_);
+
+    buildsPendingAtLastUpdateEnd_ = buildsPending_;
+
+    // M2(a): total update() cost, on the same power-of-two cadence D3D12Device.cpp already uses for
+    // its shader-compile report. UNMEASURED against a profiler -- this is a wall-clock straddle of
+    // the function body and nothing more.
+    const f64 ms = std::chrono::duration<f64, std::milli>(
+                       std::chrono::steady_clock::now() - t0).count();
+    ++updateCalls_;
+    if ((updateCalls_ & (updateCalls_ - 1)) == 0)
+        AVER_INFO("[PBR] material update {:.3f} ms over {} material(s)", ms, n);
 }
 
 // `h`'s row in gpuMaterialTable() as of the last update(), or 0 (the fallback row) for a handle this

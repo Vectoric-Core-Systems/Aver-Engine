@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>      // pipelines_ -- see its declaration for why it is not a vector
+#include <initializer_list>   // D3D12ResourceFactory::uploadBuffers' parameter (W4 Default-heap meshes)
 #include <string>
 #include <utility>
 #include <vector>
@@ -458,6 +459,19 @@ struct GpuMesh {
     u32  ibShares = 0;
     MeshHandle ibSource = 0;
 
+    // W11: the mirror-image sharing relationship, for createMeshSharingVertices -- an LOD ladder's
+    // coarser levels reuse the SAME vertex stream (positions/normals/uvs never change across an
+    // asset's LODs) and thin out only which triangles reference it, the inverse split from a skin
+    // target's own-vertices/shared-indices shape just above. `vbOwned` is false on a sharer (never
+    // frees vb/vbBuffer); `vbShares` counts live sharers on the ROOT mesh (refuses destruction while
+    // any remain); `vbSource` is how a sharer finds its root to decrement on destruction. Deliberately
+    // NOT reusing ibSource/ibShares/ibOwned for this: a mesh can be both a skin target's index-sharing
+    // SOURCE and a vertex-sharing ROOT at once (nothing here rules that combination out), and one
+    // field per relationship is what keeps those two counts from being able to collide.
+    bool vbOwned = true;
+    u32  vbShares = 0;
+    MeshHandle vbSource = 0;
+
     // False once destroyMesh has released this slot. The slot itself is KEPT -- see
     // IDevice::destroyMesh for why a stale handle must address a dead mesh rather than a live one.
     bool alive = true;
@@ -769,6 +783,10 @@ public:
     }
     bool gBufferHistoryInvalid() const override { return !gbufferEnabled_ || gbufHistoryInvalid_; }
 
+    // OUT-OF-LINE: queries adapter3_, which init() only fills in after D3D12CreateDevice succeeds.
+    // See VideoMemoryInfo's own comment (RHI.hpp) for the field meanings.
+    VideoMemoryInfo videoMemory() const override;
+
     IResourceFactory* resources() override;
     // Same context object drawMesh()'s overridesScenePipeline branch uses internally, exposed so a
     // caller can interleave its own setPipeline/dispatchMeshClusters calls for a SUBSET of instances
@@ -889,6 +907,18 @@ public:
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     bool destroyMesh(MeshHandle mesh) override;
+
+    // W4: which heap createMesh() puts a static mesh's vertex/index buffers on, for calls made AFTER
+    // this setter -- see IDevice::setStaticMeshHeapDefault (RHI.hpp) for the full contract. The
+    // setter logs nothing itself; the first Default-heap mesh createMesh() actually builds logs the
+    // C-7 line once (staticMeshDefaultHeapLogged_'s own comment), which is the observable event a
+    // reader of the log actually wants, not the flag flip that may precede it by any number of frames.
+    void setStaticMeshHeapDefault(bool onDefaultHeap) override { staticMeshDefaultHeap_ = onDefaultHeap; }
+    bool staticMeshHeapDefault() const override { return staticMeshDefaultHeap_; }
+
+    // W11: a new mesh sharing `source`'s vertex buffer, with its own index buffer. See
+    // IDevice::createMeshSharingVertices (RHI.hpp) for the refcounting and refusal contract.
+    MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) override;
     bool destroyLineMesh(LineHandle mesh) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
         if (!mesh || mesh > meshes_.size()) return 0;
@@ -1365,6 +1395,19 @@ private:
     struct SkinSeed { MeshHandle dst; MeshHandle src; };
     std::vector<SkinSeed> skinSeeds_;
     void seedSkinTargets();
+
+    // W4: false (the default) reproduces today's behaviour exactly -- every static mesh createMesh()
+    // builds lives on the Upload heap. See IDevice::setStaticMeshHeapDefault (RHI.hpp) for the
+    // trade this makes.
+    bool staticMeshDefaultHeap_ = false;
+    // C-7's "static meshes on the Default heap" line fires once, on the FIRST Default-heap mesh
+    // createMesh() actually builds -- not on the setter flipping, which can happen any number of
+    // frames before (or after, if it flips back) a mesh is next created.
+    bool staticMeshDefaultHeapLogged_ = false;
+    // W4 4a: on ANY failure uploading a Default-heap mesh's buffers, createMesh() falls back to the
+    // Upload path for that one mesh and warns here -- once, since a failure mode that recurs every
+    // mesh for the rest of the run would otherwise spam identically for each one.
+    bool staticMeshDefaultHeapUploadFailWarned_ = false;
     PerFrameCB frameCB_{};
     u32 width_ = 0, height_ = 0;
     // Scene's OWN render-target size: width_/height_ scaled by renderScale_, rounded, floored at 1.
@@ -1505,6 +1548,12 @@ private:
     // True when the device is running on the software rasteriser (WARP).
     bool softwareAdapter_ = false;
     bool warpConsRasterLogged_ = false;
+    // QueryVideoMemoryInfo's interface -- acquired once at init from whichever adapter device_ was
+    // actually created against (WARP or hardware; see init()'s two adapter-selection branches), via
+    // .As() off the IDXGIAdapter1 each already holds locally. NULL when that cast fails -- an older
+    // DXGI, or a driver that never exposes IDXGIAdapter3 -- which is exactly what videoMemory() below
+    // tests to report VideoMemoryInfo::supported false rather than call through a null pointer.
+    ComPtr<IDXGIAdapter3> adapter3_;
 
     // ---- generic RHI (render-feature modules) ----
     // Raw pointers, deleted in the destructor: both types are incomplete here.
@@ -1535,6 +1584,16 @@ private:
     // approximation, not a new failure.
     static constexpr u32 kMaxBlendLayerResolves = 8;
     bool          blendLayerCapWarned_ = false;
+    // M3: a cheap on-change log of what the blended replay actually did, so a session's log can
+    // answer "is this frame even doing translucency work" without turning on GPU timing. Widened
+    // rather than once-per-change (a scene that gains and loses one pane of glass every other frame
+    // would otherwise log every other frame forever): see the log site for the power-of-two gate.
+    // ~0u is not a real (draws, resolves) pair -- it forces the FIRST comparison after startup to
+    // count as a change and log once, rather than requiring the accidental case drawn==0 && resolves
+    // ==0 to already match.
+    u32 blendStatDrawsLogged_ = ~0u;
+    u32 blendStatResolvesLogged_ = ~0u;
+    u32 blendStatChanges_ = 0;
     // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
     // PSComposite then tonemaps an image that is already the right size, so its own resample
     // becomes 1:1 and neither the shader nor its pipeline changes.
@@ -1739,6 +1798,16 @@ constexpr u64 kRhiRingBytes = 2u << 20;
 // space instead of reporting a problem.
 constexpr u64 kRhiRingMaxBytes = 64ull << 20;
 
+// One destination/source/size triple for D3D12ResourceFactory::uploadBuffers. A NAMED struct rather
+// than an anonymous one nested in the parameter list, so a caller outside this class (W4's
+// D3D12Device::createMesh, uploading a Default-heap mesh's vertex and index buffers together) can
+// spell the type of the initializer_list it is building.
+struct BufferUploadItem {
+    ID3D12Resource* dst = nullptr;   // must already be a freshly created Default-heap buffer in COMMON
+    const void* src = nullptr;
+    u64 bytes = 0;
+};
+
 // The generic RHI factory: handle tables, the shared descriptor heap, and deferred destruction.
 class D3D12ResourceFactory final : public IResourceFactory {
 public:
@@ -1821,6 +1890,26 @@ private:
     // in COPY_DEST; on success it has been transitioned to `d.initialState` and the GPU has finished.
     bool uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td, const TextureDesc& d,
                            u32 mips);
+
+    // W4: fills one or more freshly created DEFAULT-heap buffers via a single UPLOAD-heap staging
+    // buffer and a one-shot command list, blocking until the copy has retired -- the same shape as
+    // uploadInitialData just above, generalised from one texture's mip chain to an arbitrary set of
+    // buffer destinations. Exists because writeBuffer() refuses any buffer that isn't mapped (i.e.
+    // BufferKind::Upload), and a mesh created on the Default heap (setStaticMeshHeapDefault) still
+    // has to receive its vertex/index bytes from SOMEWHERE before the first frame that might draw or
+    // BLAS-build it -- see D3D12Device::createMesh and ::createMeshSharingVertices, its two callers.
+    //
+    // Every `dst` MUST already be a freshly created Default-heap buffer in D3D12_RESOURCE_STATE_COMMON
+    // (createBuffer's own initial state for BufferKind::Default): with no prior history on the
+    // resource, the runtime implicitly promotes it to COPY_DEST on this list's own CopyBufferRegion,
+    // exactly as seedSkinTargets' own comment explains for the identical situation. This function then
+    // transitions each `dst` explicitly back to COMMON before closing the list, so that promotion does
+    // not linger for whatever list a caller records next -- the same explicit undo seedSkinTargets
+    // performs on its own copy.
+    //
+    // Returns false on any failure (staging allocation, the one-shot list, or the fence wait); the
+    // caller is then responsible for falling back or leaving its destination buffers unpopulated.
+    bool uploadBuffers(std::initializer_list<BufferUploadItem> items);
 
     // Table lookups. Every one returns nullptr for an out-of-range or freed handle; callers log.
     RhiTexture*    texture(TextureHandle h);
@@ -1996,6 +2085,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             name[sizeof(name) - 1] = '\0';
             adapterName_ = name;
             softwareAdapter_ = true;
+            warp.As(&adapter3_);   // best-effort; null leaves videoMemory() reporting unsupported
             AVER_WARN("[RHI.D3D12] using the WARP software rasteriser ('{}') - expect single-digit frame rates", adapterName_);
         } else {
             AVER_WARN("[RHI.D3D12] WARP requested but unavailable - falling back to hardware");
@@ -2016,6 +2106,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             std::wcstombs(name, ad.Description, sizeof(name) - 1);
             name[sizeof(name) - 1] = '\0';
             adapterName_ = name;
+            adapter.As(&adapter3_);   // best-effort; null leaves videoMemory() reporting unsupported
             break;
         }
         adapter.Reset();
@@ -2029,6 +2120,20 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
     initGpuTiming();
+
+    // Logged once, here rather than left to whatever periodic caller polls videoMemory() later,
+    // because a session's very first log lines are the ones a memory-pressure bug report actually
+    // has -- by the time anyone notices stutter and goes looking, the run may be hours old. Silent
+    // when unsupported (no IDXGIAdapter3, or the query itself failed): there is no C-7 text defined
+    // for that case on this line, unlike the Vulkan backend's explicit "not reported".
+    {
+        const VideoMemoryInfo vmem = videoMemory();
+        if (vmem.supported) {
+            AVER_INFO("[RHI.D3D12] video memory at init: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
+                      vmem.localUsageBytes / (1024ull * 1024ull), vmem.localBudgetBytes / (1024ull * 1024ull),
+                      vmem.nonLocalUsageBytes / (1024ull * 1024ull), vmem.nonLocalBudgetBytes / (1024ull * 1024ull));
+        }
+    }
 
     // BOUND THE SHADER BLOB CACHE. Its key is the whole compiler input, which is what makes it
     // correct with no invalidation logic -- a changed input simply misses -- and the price of that is
@@ -2132,6 +2237,24 @@ D3D12Device::~D3D12Device() {
 
 IResourceFactory* D3D12Device::resources() { return rhiFactory_; }
 IRenderContext* D3D12Device::renderContext() { return rhiContext_; }
+
+// Polls the OS's current video memory budget and usage for this adapter. See VideoMemoryInfo's own
+// comment (RHI.hpp) for what the LOCAL/NON_LOCAL split means and why `supported` false leaves every
+// field 0 rather than a stale or guessed value.
+VideoMemoryInfo D3D12Device::videoMemory() const {
+    VideoMemoryInfo info;
+    if (!adapter3_) return info;   // no IDXGIAdapter3 on this device -- see adapter3_'s own comment
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonLocal{};
+    if (FAILED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
+        FAILED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonLocal)))
+        return info;   // leaves `info` at its unsupported, all-zero default
+    info.supported = true;
+    info.localBudgetBytes = local.Budget;
+    info.localUsageBytes = local.CurrentUsage;
+    info.nonLocalBudgetBytes = nonLocal.Budget;
+    info.nonLocalUsageBytes = nonLocal.CurrentUsage;
+    return info;
+}
 
 // See RHI.hpp's comment on IDevice::sceneDepthTexture. Lazily (re)adopts depthBuffer_ whenever
 // createDepthBuffer() has run since the last call -- see depthTexDirty_'s comment for why that flag,
@@ -2924,33 +3047,81 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
 
-    // THROUGH THE FACTORY, not CreateCommittedResource: same upload heap and contents, but only a
-    // factory buffer has an RhiBuffer entry and can be given a descriptor -- without it a shader
+    // W4: which heap this mesh's buffers land on. Starts as the caller's current standing request
+    // (setStaticMeshHeapDefault) and is forced false below if the Default-heap path fails, so one
+    // mesh's bad luck (an out-of-memory staging allocation, say) falls back instead of failing this
+    // call outright -- the Upload heap is what every mesh already lived on before this flag existed.
+    bool useDefault = staticMeshDefaultHeap_;
+
+    // THROUGH THE FACTORY, not CreateCommittedResource: same heap and contents either way, but only
+    // a factory buffer has an RhiBuffer entry and can be given a descriptor -- without it a shader
     // could never read a mesh's own geometry, which a ray needs beyond a plain hit test.
-    BufferDesc vd;
-    vd.bytes = vbytes;
-    vd.kind = BufferKind::Upload;
-    vd.debugName = "mesh vertices";
-    m.vbBuffer = rhiFactory_->createBuffer(vd);
+    //
+    // A lambda rather than inlining the Default/Upload branches into two near-duplicate blocks below:
+    // it is called once for the caller's requested heap and, on failure of a Default-heap attempt,
+    // called again for Upload -- the ONLY two call shapes this needs, and writing the allocate+upload
+    // sequence out twice is exactly how the two copies drift (one gets a bugfix the other doesn't).
+    auto allocateAndUpload = [&](bool onDefaultHeap) -> bool {
+        BufferDesc vd;
+        vd.bytes = vbytes;
+        vd.kind = onDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+        vd.debugName = "mesh vertices";
+        m.vbBuffer = rhiFactory_->createBuffer(vd);
 
-    BufferDesc idd;
-    idd.bytes = ibytes;
-    idd.kind = BufferKind::Upload;
-    idd.debugName = "mesh indices";
-    m.ibBuffer = rhiFactory_->createBuffer(idd);
+        BufferDesc idd;
+        idd.bytes = ibytes;
+        idd.kind = onDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+        idd.debugName = "mesh indices";
+        m.ibBuffer = rhiFactory_->createBuffer(idd);
 
-    RhiBuffer* vrb = rhiFactory_->buffer(m.vbBuffer);
-    RhiBuffer* irb = rhiFactory_->buffer(m.ibBuffer);
-    if (!vrb || !vrb->res || !irb || !irb->res) {
-        AVER_ERROR("[RHI.D3D12] createMesh could not allocate its buffers");
-        if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
-        if (m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
-        return 0;
+        RhiBuffer* vrb = rhiFactory_->buffer(m.vbBuffer);
+        RhiBuffer* irb = rhiFactory_->buffer(m.ibBuffer);
+        if (!vrb || !vrb->res || !irb || !irb->res) {
+            AVER_ERROR("[RHI.D3D12] createMesh could not allocate its buffers");
+            if (m.vbBuffer) { rhiFactory_->destroyBuffer(m.vbBuffer); m.vbBuffer = 0; }
+            if (m.ibBuffer) { rhiFactory_->destroyBuffer(m.ibBuffer); m.ibBuffer = 0; }
+            return false;
+        }
+        m.vb = vrb->res;
+        m.ib = irb->res;
+
+        if (onDefaultHeap) {
+            // SYNCHRONOUS, deliberately, not queued the way seedSkinTargets defers its own copy:
+            // createMesh is also called MID-FRAME (the scene walk streaming a chunk in, SandboxApp's
+            // part split), and a mesh drawn or BLAS-built later in that SAME frame must never read
+            // uninitialised Default-heap memory. Queuing this the way skin targets are seeded would
+            // reopen exactly that window for every ordinary static mesh. The one-shot list this
+            // issues reaches the queue and is waited on before createMesh returns, so the frame's own
+            // command list -- recorded afterwards -- is guaranteed to see initialised data.
+            // UNMEASURED: the GPU round trip this adds at load time, once per mesh, has not been
+            // timed against the per-frame bus traffic it removes; see W4's brief.
+            if (!rhiFactory_->uploadBuffers({{m.vb.Get(), verts, vbytes}, {m.ib.Get(), indices, ibytes}})) {
+                rhiFactory_->destroyBuffer(m.vbBuffer); m.vbBuffer = 0; m.vb.Reset();
+                rhiFactory_->destroyBuffer(m.ibBuffer); m.ibBuffer = 0; m.ib.Reset();
+                if (!staticMeshDefaultHeapUploadFailWarned_) {
+                    staticMeshDefaultHeapUploadFailWarned_ = true;
+                    AVER_WARN("[RHI.D3D12] Default-heap upload failed for a static mesh; falling back "
+                              "to the Upload heap for it, and for any that fail the same way after it "
+                              "(said once)");
+                }
+                return false;
+            }
+        } else {
+            rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
+            rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+        }
+        return true;
+    };
+
+    if (!allocateAndUpload(useDefault)) {
+        if (!useDefault) return 0;   // the ordinary Upload path itself failed -- nothing left to try
+        useDefault = false;
+        if (!allocateAndUpload(useDefault)) return 0;
+    } else if (useDefault && !staticMeshDefaultHeapLogged_) {
+        staticMeshDefaultHeapLogged_ = true;
+        AVER_INFO("[RHI.D3D12] static meshes on the Default heap (--mesh-heap default): vertex and "
+                  "index buffers uploaded through a one-shot staging copy");
     }
-    m.vb = vrb->res;
-    m.ib = irb->res;
-    rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
-    rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
 
     m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
     m.vbv.SizeInBytes = static_cast<UINT>(vbytes);
@@ -2961,6 +3132,110 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
 
     meshes_.push_back(std::move(m));
     return static_cast<MeshHandle>(meshes_.size());
+}
+
+// W11: creates a mesh that SHARES `source`'s vertex buffer and owns its own index buffer -- the
+// inverse split from createSkinTargetMesh just below (shared indices, own compute-written vertices).
+// See IDevice::createMeshSharingVertices (RHI.hpp) for the full refcounting and refusal contract;
+// this is its D3D12 implementation.
+MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
+    if (!device_ || !rhiFactory_ || !indices || indexCount == 0) return 0;
+    if (source == 0 || source > meshes_.size()) {
+        AVER_ERROR("[RHI.D3D12] createMeshSharingVertices with an invalid source handle");
+        return 0;
+    }
+    const GpuMesh& src = meshes_[source - 1];
+    // Silent refusals, the same shape as createSkinTargetMesh's own "not fully formed" checks just
+    // below: a caller offering one of these is expected to fall back to createMesh (IDevice's own
+    // contract says so), not to be told why in the log every time an LOD importer merely PROBES
+    // whether sharing is available for a given asset.
+    if (!src.alive || src.computeWritten || !src.vb || src.vbv.SizeInBytes == 0) return 0;
+
+    // Collapse a sharing CHAIN to its one root rather than letting a sharer become another sharer's
+    // source: sharing FROM `source` shares the SAME underlying buffer `source` itself shares (or
+    // owns), so the root is source's own root when source is itself a sharer. This is what keeps
+    // destroyMesh's give-back a single decrement on one root, never a walk through N levels.
+    const MeshHandle root = src.vbOwned ? source : src.vbSource;
+    if (root == 0 || root > meshes_.size() || !meshes_[root - 1].alive) return 0;
+
+    GpuMesh m;
+    // Copied from `src`, not re-derived from `root`: src.vb/vbv/vbBuffer already mirror the root's
+    // buffer whether src is the root itself or itself a sharer (this function sets them identically
+    // either way, just below), so reading them off src is correct and needs no special case for a
+    // chain. Bounds likewise -- a coarser index list over the SAME vertex positions can never exceed
+    // the shared buffer's own extents, so the source's bounds are exactly the sharer's bounds too;
+    // createMesh on this same vertex array would compute the identical sphere and AABB.
+    m.vb = src.vb;
+    m.vbv = src.vbv;
+    m.vbBuffer = src.vbBuffer;
+    m.vertexCount = src.vertexCount;
+    m.boundsCentre[0] = src.boundsCentre[0];
+    m.boundsCentre[1] = src.boundsCentre[1];
+    m.boundsCentre[2] = src.boundsCentre[2];
+    m.boundsRadius = src.boundsRadius;
+    for (int a = 0; a < 3; ++a) { m.boundsMin[a] = src.boundsMin[a]; m.boundsMax[a] = src.boundsMax[a]; }
+    m.vbOwned = false;
+    m.vbSource = root;
+
+    const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
+    // Through the SAME Upload/Default policy createMesh() itself uses (staticMeshDefaultHeap_ and its
+    // one-mesh fallback-on-failure), so a coarser LOD level built while --mesh-heap default is set
+    // behaves exactly like an ordinary mesh created under it -- see createMesh's own comment on why
+    // this is a lambda rather than a second near-duplicate of the allocate+upload sequence.
+    bool useDefault = staticMeshDefaultHeap_;
+    auto allocateIndices = [&](bool onDefaultHeap) -> bool {
+        BufferDesc idd;
+        idd.bytes = ibytes;
+        idd.kind = onDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+        idd.debugName = "mesh indices (shared vertices)";
+        m.ibBuffer = rhiFactory_->createBuffer(idd);
+        RhiBuffer* irb = rhiFactory_->buffer(m.ibBuffer);
+        if (!irb || !irb->res) {
+            AVER_ERROR("[RHI.D3D12] createMeshSharingVertices could not allocate its index buffer");
+            if (m.ibBuffer) { rhiFactory_->destroyBuffer(m.ibBuffer); m.ibBuffer = 0; }
+            return false;
+        }
+        m.ib = irb->res;
+        if (onDefaultHeap) {
+            if (!rhiFactory_->uploadBuffers({{m.ib.Get(), indices, ibytes}})) {
+                rhiFactory_->destroyBuffer(m.ibBuffer); m.ibBuffer = 0; m.ib.Reset();
+                if (!staticMeshDefaultHeapUploadFailWarned_) {
+                    staticMeshDefaultHeapUploadFailWarned_ = true;
+                    AVER_WARN("[RHI.D3D12] Default-heap upload failed for a static mesh; falling back "
+                              "to the Upload heap for it, and for any that fail the same way after it "
+                              "(said once)");
+                }
+                return false;
+            }
+        } else {
+            rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+        }
+        return true;
+    };
+
+    if (!allocateIndices(useDefault)) {
+        if (!useDefault) return 0;
+        useDefault = false;
+        if (!allocateIndices(useDefault)) return 0;
+    } else if (useDefault && !staticMeshDefaultHeapLogged_) {
+        staticMeshDefaultHeapLogged_ = true;
+        AVER_INFO("[RHI.D3D12] static meshes on the Default heap (--mesh-heap default): vertex and "
+                  "index buffers uploaded through a one-shot staging copy");
+    }
+
+    m.indexCount = indexCount;
+    m.ibv.BufferLocation = m.ib->GetGPUVirtualAddress();
+    m.ibv.SizeInBytes = static_cast<UINT>(ibytes);
+    m.ibv.Format = DXGI_FORMAT_R32_UINT;
+    m.ibOwned = true;   // this mesh's OWN index buffer, unlike its borrowed vertices
+
+    meshes_.push_back(std::move(m));
+    const MeshHandle h = static_cast<MeshHandle>(meshes_.size());
+    // Counted on the ROOT, AFTER push_back -- `src` and any earlier reference to `root`'s slot in
+    // meshes_ may have been invalidated by the reallocation above, the identical hazard
+    // createSkinTargetMesh's own ibShares increment documents (see its comment there).
+    meshes_[root - 1].vbShares += 1;
+    return h;
 }
 
 // Creates a mesh that shares `source`'s indices but owns a Default-heap, UAV-capable vertex buffer
@@ -3053,8 +3328,19 @@ void D3D12Device::seedSkinTargets() {
         const GpuMesh& s = meshes_[sd.src - 1];
         if (!d.vb || !s.vb) continue;
         // The destination is a fresh Default-heap buffer in COMMON, so it PROMOTES to COPY_DEST
-        // implicitly and needs no barrier to get there; the source is an upload-heap resource
-        // permanently in GENERIC_READ and needs none either.
+        // implicitly and needs no barrier to get there. The source USED TO BE guaranteed an
+        // upload-heap resource permanently in GENERIC_READ, needing no barrier either -- W4 broke
+        // that guarantee: with --mesh-heap default, `s` may itself be a Default-heap mesh (an
+        // ordinary static mesh someone is skinning FROM), whose buffer this same copy also promotes
+        // implicitly, COMMON -> COPY_SOURCE this time, and which therefore needs the identical
+        // explicit undo the destination gets below. An upload-heap source is NEVER barriered here --
+        // GENERIC_READ is that heap type's one fixed state (RhiBuffer::stateFixed under
+        // AVER_RHI_TRACK_STATE refuses any transition off it), and the runtime never actually moves
+        // it off GENERIC_READ for a copy source in the first place.
+        const bool srcIsDefault = [&] {
+            RhiBuffer* srb = rhiFactory_->buffer(s.vbBuffer);
+            return srb && srb->desc.kind == BufferKind::Default;
+        }();
         cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
 
         // The promotion LASTS FOR THE REST OF THE COMMAND LIST -- decay happens at submit, not at
@@ -3064,6 +3350,15 @@ void D3D12Device::seedSkinTargets() {
         auto back = transition(d.vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                D3D12_RESOURCE_STATE_COMMON);
         cmdList_->ResourceBarrier(1, &back);
+        if (srcIsDefault) {
+            // Mirrors `back` just above for COPY_SOURCE instead of COPY_DEST -- same reasoning,
+            // same lifetime (this command list), same reason it must be explicit rather than left to
+            // decay at submit: the skinning pass's own later read of `s.vb` (this mesh is still an
+            // ordinary drawable mesh, not exclusively a skin source) must find it back at COMMON.
+            auto srcBack = transition(s.vb.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                      D3D12_RESOURCE_STATE_COMMON);
+            cmdList_->ResourceBarrier(1, &srcBack);
+        }
         AVER_TRACE("[RHI.D3D12] skin target {} seeded with the rest pose of mesh {}", sd.dst, sd.src);
     }
     skinSeeds_.clear();
@@ -3441,6 +3736,16 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
                   mesh, m.ibShares);
         return false;
     }
+    // W11: the mirror-image refusal for a vertex-sharing ROOT -- same reasoning as ibShares just
+    // above (createSkinTargetMesh's sharers), aimed at createMeshSharingVertices's sharers instead.
+    // Freeing a shared vertex buffer out from under a still-live LOD mesh would leave it drawing (or
+    // being BLAS-built, or read as ray-traced geometry) from memory the heap has handed to something
+    // else -- silent corruption elsewhere, not an error here.
+    if (m.vbShares > 0) {
+        AVER_WARN("[RHI.D3D12] destroyMesh({}) refused: {} mesh(es) still share its vertices",
+                  mesh, m.vbShares);
+        return false;
+    }
 
     // The acceleration structures FIRST. A BLAS holds this mesh's vertex and index GPU addresses,
     // so releasing the buffers while one is live would leave ray tracing traversing freed memory --
@@ -3450,7 +3755,9 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     // Then the buffers, through the factory, so they retire behind the fence rather than being
     // released while a command list still in flight references them.
     if (rhiFactory_) {
-        if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        // ONLY IF OWNED. A vertex-sharing mesh's vertices belong to its root (W11, mirroring the
+        // index-ownership check just below for a skin target).
+        if (m.vbOwned && m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
         // ONLY IF OWNED. A skin target's indices belong to its source.
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
     }
@@ -3458,6 +3765,11 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     if (!m.ibOwned && m.ibSource != 0 && m.ibSource <= meshes_.size()) {
         GpuMesh& src = meshes_[m.ibSource - 1];
         if (src.ibShares > 0) src.ibShares -= 1;
+    }
+    // W11: the same give-back for a vertex-sharing mesh's root.
+    if (!m.vbOwned && m.vbSource != 0 && m.vbSource <= meshes_.size()) {
+        GpuMesh& root = meshes_[m.vbSource - 1];
+        if (root.vbShares > 0) root.vbShares -= 1;
     }
 
     // The slot is CLEARED AND KEPT, never recycled. A handle held past its mesh then names
@@ -3472,6 +3784,8 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     m.ibBuffer = 0;
     m.computeWritten = false;
     m.ibSource = 0;
+    m.vbOwned = true;
+    m.vbSource = 0;
     m.boundsRadius = 0.0f;
     m.alive = false;
     return true;
@@ -4749,6 +5063,12 @@ void D3D12Device::endFrame() {
         // opaque scene and the sky, before any translucent draw.
         resolveBlendBackdrop();
         u32 blendLayerResolves = 0;
+        // M3 counters -- see blendStatDrawsLogged_'s own comment for why these are logged on change
+        // rather than every frame. `blendDrawsDone` counts draws that survive the stale-handle check
+        // below, not blendedDraws_.size(): a capture can outlive its mesh within the same frame, and
+        // the log line should say what actually reached the GPU, not what was merely queued.
+        u32 blendDrawsDone = 0;
+        bool blendCapReached = false;
 
         beginGpuSpan("blended replay");
         // Only the FIRST feature that overridesScenePipeline() is asked, the same assumption the
@@ -4810,6 +5130,7 @@ void D3D12Device::endFrame() {
                 // capture and flush) -- the same "stale handle draws nothing" rule drawMesh() applies
                 // to a live call, applied here to a deferred one.
                 if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
+                ++blendDrawsDone;
 
                 // Re-capture so this surface sees the ones behind it: everything drawn so far this
                 // flush is further from the camera, exactly what this draw's correction needs to
@@ -4825,12 +5146,15 @@ void D3D12Device::endFrame() {
                         // msaaColor_ to RESOLVE_SOURCE and back; a resource BARRIER changes state, it
                         // doesn't unbind, so the targets set before this loop are still bound.
                         resolveBlendBackdrop();
-                    } else if (!blendLayerCapWarned_) {
-                        blendLayerCapWarned_ = true;
-                        AVER_WARN("[RHI.D3D12] more than {} overlapping translucent layers this "
-                                  "frame; the ones beyond that composite against a backdrop missing "
-                                  "the nearer surfaces, as every layer did before per-layer capture "
-                                  "existed (said once)", kMaxBlendLayerResolves);
+                    } else {
+                        blendCapReached = true;
+                        if (!blendLayerCapWarned_) {
+                            blendLayerCapWarned_ = true;
+                            AVER_WARN("[RHI.D3D12] more than {} overlapping translucent layers this "
+                                      "frame; the ones beyond that composite against a backdrop missing "
+                                      "the nearer surfaces, as every layer did before per-layer capture "
+                                      "existed (said once)", kMaxBlendLayerResolves);
+                        }
                     }
                 }
                 blendDrewAny = true;
@@ -4873,6 +5197,21 @@ void D3D12Device::endFrame() {
                 boundPso_ = nullptr;
             }
             fovValid_ = false;   // see the block comment above for why this is hygiene, not a fix
+        }
+
+        // M3: logged on CHANGE, not every frame -- see blendStatDrawsLogged_'s own comment. Reached
+        // for BOTH branches above: the !blendedPso branch left blendDrawsDone/blendLayerResolves/
+        // blendCapReached at their initial 0/0/false, which is the honest answer ("nothing replayed")
+        // and still worth a log line the first time a frame queues blended draws no feature can take.
+        if (blendDrawsDone != blendStatDrawsLogged_ || blendLayerResolves != blendStatResolvesLogged_) {
+            ++blendStatChanges_;
+            if ((blendStatChanges_ & (blendStatChanges_ - 1)) == 0) {
+                AVER_INFO("[RHI.D3D12] blended replay: {} translucent draw(s), {} layer re-capture(s) (cap {}){}",
+                          blendDrawsDone, blendLayerResolves, kMaxBlendLayerResolves,
+                          blendCapReached ? ", cap reached" : "");
+            }
+            blendStatDrawsLogged_ = blendDrawsDone;
+            blendStatResolvesLogged_ = blendLayerResolves;
         }
         endGpuSpan();   // "blended replay"
     }
@@ -5705,6 +6044,81 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi upload fence")) return false;
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    dev_->queue_->Signal(f.Get(), 1);
+    if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+    if (ev) CloseHandle(ev);
+
+    retire(staging);
+    collect();
+    return true;
+}
+
+// See the declaration's own comment for the promotion contract every `dst` must already satisfy.
+// UNMEASURED: this blocks the calling thread on a GPU round trip per call (one per mesh, since
+// createMesh calls this once for its vertex+index pair together), and nothing here has timed what
+// that costs at load time on real content -- see W4's brief for why that cost was accepted anyway.
+bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem> items) {
+    ID3D12Device* dev = dev_->device_.Get();
+    u64 total = 0;
+    for (const auto& it : items) total += it.bytes;
+    if (total == 0) return true;   // nothing to copy is not a failure
+
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    auto ud = bufferDesc(total);
+    ComPtr<ID3D12Resource> staging;
+    if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
+              "rhi buffer staging")) return false;
+    setDebugName(staging.Get(), "rhi buffer staging");
+
+    u8* mapped = nullptr;
+    D3D12_RANGE none{0, 0};
+    if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi buffer staging Map"))
+        return false;
+    std::vector<u64> offsets;
+    offsets.reserve(items.size());
+    {
+        u64 offset = 0;
+        for (const auto& it : items) {
+            offsets.push_back(offset);
+            if (it.src && it.bytes) std::memcpy(mapped + offset, it.src, static_cast<size_t>(it.bytes));
+            offset += it.bytes;
+        }
+    }
+    staging->Unmap(0, nullptr);
+
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (!hrOk(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)),
+              "rhi buffer upload alloc")) return false;
+    if (!hrOk(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
+              IID_PPV_ARGS(&list)), "rhi buffer upload list")) return false;
+
+    {
+        size_t idx = 0;
+        for (const auto& it : items) {
+            if (it.dst && it.bytes) list->CopyBufferRegion(it.dst, 0, staging.Get(), offsets[idx], it.bytes);
+            ++idx;
+        }
+    }
+
+    // EXPLICIT, not left to submit-time decay -- see this function's own comment on why the
+    // promotion must not linger past this one-shot list.
+    std::vector<D3D12_RESOURCE_BARRIER> back;
+    back.reserve(items.size());
+    for (const auto& it : items)
+        if (it.dst && it.bytes)
+            back.push_back(transition(it.dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+    if (!back.empty()) list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
+
+    list->Close();
+    ID3D12CommandList* lists[] = {list.Get()};
+    dev_->queue_->ExecuteCommandLists(1, lists);
+
+    ComPtr<ID3D12Fence> f;
+    if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
+        return false;
     HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     dev_->queue_->Signal(f.Get(), 1);
     if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }

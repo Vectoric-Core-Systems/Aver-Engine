@@ -66,6 +66,20 @@ target_link_libraries(CameraFactorTest PRIVATE Aver.Core)
 target_include_directories(CameraFactorTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
 set_target_properties(CameraFactorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GiDispatchBoundsTest -- W3's occupied-bounds arithmetic (aver/voxi/GiDispatchBounds.hpp): the box a
+# bounded GI rebuild confines CSClear/CSResolve/CSMip to, and the C++ mirror of voxi.hlsl's MipCB
+# cbuffer. Same shape as CameraFactorTest just above: the header depends on nothing but
+# aver/core/Types.hpp by design (see its own top comment), so this links Aver.Core alone and reaches
+# the header with an include path rather than a library dependency. AVER_REPO_ROOT, for the same
+# reason VoxiRtSeqTest above needs it: the final section reads modules/render.voxi/shaders/voxi.hlsl
+# itself to check the MipCB declaration and the CSClear/CSResolve/CSMip guard line are still the exact
+# text this header's callers depend on.
+add_executable(GiDispatchBoundsTest src/GiDispatchBoundsTest.cpp)
+target_link_libraries(GiDispatchBoundsTest PRIVATE Aver.Core)
+target_include_directories(GiDispatchBoundsTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+target_compile_definitions(GiDispatchBoundsTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(GiDispatchBoundsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver that
 # decides what greys and why (RenderSettingsResolver.hpp), and the UE-style Overall Quality scalability
 # preset (Scalability.hpp).

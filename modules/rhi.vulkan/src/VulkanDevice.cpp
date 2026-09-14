@@ -339,6 +339,7 @@ bool loadInstanceApi(VulkanApi& api, VkInstance instance, bool debugUtilsAvailab
     AVER_VK_INST(GetPhysicalDeviceFeatures);
     AVER_VK_INST(GetPhysicalDeviceFeatures2);
     AVER_VK_INST(GetPhysicalDeviceMemoryProperties);
+    AVER_VK_INST(GetPhysicalDeviceMemoryProperties2);   // core 1.1; MAY resolve null -- see its own field comment
     AVER_VK_INST(GetPhysicalDeviceQueueFamilyProperties);
     AVER_VK_INST(GetPhysicalDeviceFormatProperties);
     AVER_VK_INST(GetPhysicalDeviceImageFormatProperties);
@@ -708,6 +709,11 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     const bool wantMeshShader = std::find(devExts.begin(), devExts.end(), std::string(VK_EXT_MESH_SHADER_EXTENSION_NAME)) != devExts.end();
     const bool wantAccelStruct = std::find(devExts.begin(), devExts.end(), std::string(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) != devExts.end();
     const bool wantRayQuery = std::find(devExts.begin(), devExts.end(), std::string(VK_KHR_RAY_QUERY_EXTENSION_NAME)) != devExts.end();
+    // M6: no feature struct to chain and enable -- VK_EXT_memory_budget adds only a queryable
+    // pNext struct (VkPhysicalDeviceMemoryBudgetPropertiesEXT), never a VkPhysicalDeviceFeatures2
+    // bit -- so "was it in the enabled list" is the whole story, recorded here from the same
+    // devExts vector every other want* bool above reads.
+    memoryBudgetExt_ = std::find(devExts.begin(), devExts.end(), std::string(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) != devExts.end();
 
     VkPhysicalDeviceMeshShaderFeaturesEXT meshFeat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
@@ -823,6 +829,21 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     if (!rhiFactory_->init()) { delete rhiFactory_; rhiFactory_ = nullptr; }
     else rhiContext_ = new VulkanRenderContext(this, rhiFactory_);
 
+    // M6: one snapshot at init, same C-7 shape the D3D12 backend's own init-time line uses (and the
+    // one gpuTiming()-adjacent host-side "[GPU] video memory: ..." line reads this same call every
+    // frame thereafter) -- MB, not bytes, since a raw byte count on a multi-GB budget is not
+    // something a log line should make a human parse.
+    {
+        const VideoMemoryInfo vmem = videoMemory();
+        if (vmem.supported) {
+            AVER_INFO("[RHI.Vulkan] video memory at init: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
+                      vmem.localUsageBytes / (1024 * 1024), vmem.localBudgetBytes / (1024 * 1024),
+                      vmem.nonLocalUsageBytes / (1024 * 1024), vmem.nonLocalBudgetBytes / (1024 * 1024));
+        } else {
+            AVER_INFO("[RHI.Vulkan] video memory: not reported (VK_EXT_memory_budget absent)");
+        }
+    }
+
     AVER_INFO("[RHI.Vulkan] device ready on adapter '{}'", adapterName_);
     if (rhiFactory_) rhiFactory_->selfTest();
     return true;
@@ -911,6 +932,38 @@ VulkanDevice::~VulkanDevice() {
 
 IResourceFactory* VulkanDevice::resources() { return rhiFactory_; }
 IRenderContext* VulkanDevice::renderContext() { return rhiContext_; }
+
+// M6. Sums VkPhysicalDeviceMemoryBudgetPropertiesEXT's two per-heap arrays into the LOCAL/NON_LOCAL
+// split VideoMemoryInfo declares (RHI.hpp), matching D3D12's own DXGI_MEMORY_SEGMENT_GROUP split in
+// spirit: LOCAL is the heaps flagged VK_MEMORY_HEAP_DEVICE_LOCAL_BIT (VRAM on a discrete card, the
+// whole pool on a UMA/integrated one), NON_LOCAL is every other heap. Polled live, not cached at
+// init, since the whole point of "budget" is that it moves as other processes and the desktop
+// compositor claim or release their own share.
+//
+// UNMEASURED: this backend has no editor UI session on this machine to run it through (house rule:
+// no run, no build). Checked by eye against the vendored vulkan_core.h struct layout and against
+// D3D12Device's own videoMemory() contract in RHI.hpp; not exercised on a live VkDevice.
+VideoMemoryInfo VulkanDevice::videoMemory() const {
+    VideoMemoryInfo out;
+    if (!memoryBudgetExt_ || !api_.GetPhysicalDeviceMemoryProperties2 || !physicalDevice_) return out;
+
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    props2.pNext = &budget;
+    api_.GetPhysicalDeviceMemoryProperties2(physicalDevice_, &props2);
+
+    // Heap COUNT/FLAGS come from memoryProps_ (queried once at init via the plain, non-"2" call;
+    // see its own field comment) rather than props2.memoryProperties above -- a physical device's
+    // heap layout is architecturally fixed for its life either way, so this just avoids depending on
+    // the "2" struct's own copy of the same fixed data being filled the way this call expects.
+    for (u32 i = 0; i < memoryProps_.memoryHeapCount && i < VK_MAX_MEMORY_HEAPS; ++i) {
+        const bool local = (memoryProps_.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        (local ? out.localBudgetBytes : out.nonLocalBudgetBytes) += budget.heapBudget[i];
+        (local ? out.localUsageBytes  : out.nonLocalUsageBytes)  += budget.heapUsage[i];
+    }
+    out.supported = true;
+    return out;
+}
 
 // Lazily (re)adopts depthBuffer_ into the factory's texture table whenever createDepthBuffer() has
 // run since the last call -- depthTexDirty_ (not a size comparison) is the trigger, since this
@@ -1732,9 +1785,18 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
 
-    BufferDesc vd; vd.bytes = vbytes; vd.kind = BufferKind::Upload; vd.debugName = "mesh vertices";
+    // W4: --mesh-heap default (setStaticMeshHeapDefault) moves new static meshes off the Upload
+    // heap this backend has always used, trading a one-shot upload-time staging copy for the
+    // per-frame bus traffic every draw/shadow/voxelisation/BLAS-build fetching an Upload-heap
+    // buffer back across the bus on a discrete card otherwise pays -- see IDevice's own contract
+    // (RHI.hpp) and VoxiRenderer's BLAS-backing buffers, which already made this exact trade for
+    // ray-tracing geometry. UNMEASURED here: this backend has no editor session on this machine to
+    // run a load through (house rule: no run, no build).
+    const bool useDefaultHeap = staticMeshDefaultHeap_;
+    const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+    BufferDesc vd; vd.bytes = vbytes; vd.kind = kind; vd.debugName = "mesh vertices";
     m.vbBuffer = rhiFactory_->createBuffer(vd);
-    BufferDesc idd; idd.bytes = ibytes; idd.kind = BufferKind::Upload; idd.debugName = "mesh indices";
+    BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = "mesh indices";
     m.ibBuffer = rhiFactory_->createBuffer(idd);
 
     RhiBuffer* vrb = rhiFactory_->buffer(m.vbBuffer);
@@ -1747,11 +1809,162 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     }
     m.vb = vrb->buffer; m.vbMemory = vrb->memory; m.vbAddress = vrb->address;
     m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
-    rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
-    rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+
+    if (useDefaultHeap) {
+        // ONE staging buffer, ONE one-shot submit for both buffers together -- see
+        // uploadToDeviceBuffers' own comment for why this has to be synchronous (createMesh runs
+        // mid-frame too: SandboxApp.cpp:6267, :8510) and why a SEPARATE command buffer is what makes
+        // that legal (vkCmdCopyBuffer inside beginFrame's dynamic-rendering scope is not).
+        const VkBuffer dsts[2] = {m.vb, m.ib};
+        const void* srcs[2] = {verts, indices};
+        const VkDeviceSize sizes[2] = {vbytes, ibytes};
+        if (rhiFactory_->uploadToDeviceBuffers(dsts, srcs, sizes, 2, "rhi createMesh default-heap upload")) {
+            if (!meshDefaultHeapLogged_) {
+                meshDefaultHeapLogged_ = true;
+                AVER_INFO("[RHI.Vulkan] static meshes on the Default heap (--mesh-heap default): "
+                          "vertex and index buffers uploaded through a one-shot staging copy");
+            }
+        } else {
+            // FALL BACK TO THE UPLOAD HEAP FOR THIS ONE MESH, not globally: staticMeshDefaultHeap_
+            // stays on, so the NEXT mesh tries Default again -- a transient failure (a one-shot
+            // command-buffer submit racing device teardown, say) should not silently downgrade every
+            // later mesh for the rest of the run. WARN once: the failure mode that actually recurs
+            // (out of device-local memory, a driver refusal) is systemic, and a line per mesh during
+            // a big scene load would flood the log for one cause already stated once.
+            if (!meshDefaultHeapFallbackWarned_) {
+                meshDefaultHeapFallbackWarned_ = true;
+                AVER_WARN("[RHI.Vulkan] Default-heap mesh upload failed; falling back to the Upload "
+                          "heap for this mesh (further meshes still try the Default heap)");
+            }
+            rhiFactory_->destroyBuffer(m.vbBuffer);
+            rhiFactory_->destroyBuffer(m.ibBuffer);
+            BufferDesc vd2; vd2.bytes = vbytes; vd2.kind = BufferKind::Upload; vd2.debugName = "mesh vertices";
+            m.vbBuffer = rhiFactory_->createBuffer(vd2);
+            BufferDesc idd2; idd2.bytes = ibytes; idd2.kind = BufferKind::Upload; idd2.debugName = "mesh indices";
+            m.ibBuffer = rhiFactory_->createBuffer(idd2);
+            vrb = rhiFactory_->buffer(m.vbBuffer);
+            irb = rhiFactory_->buffer(m.ibBuffer);
+            if (!vrb || !vrb->buffer || !irb || !irb->buffer) {
+                AVER_ERROR("[RHI.Vulkan] createMesh could not allocate its buffers on the Upload-heap fallback");
+                if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+                if (m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+                return 0;
+            }
+            m.vb = vrb->buffer; m.vbMemory = vrb->memory; m.vbAddress = vrb->address;
+            m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
+            rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
+            rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+        }
+    } else {
+        rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
+        rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+    }
 
     meshes_.push_back(std::move(m));
     return static_cast<MeshHandle>(meshes_.size());
+}
+
+// W11: a new mesh sharing `source`'s vertex buffer, with its own independent index buffer -- the
+// LOD-ladder case IDevice::createMeshSharingVertices exists for (RHI.hpp's full contract): a
+// coarser LOD level keeps the same vertex positions/normals/uvs and only thins out which triangles
+// reference them, so duplicating the vertex stream per level is pure waste. See GpuMesh's
+// vbOwned/vbShares/vbSource fields for the bookkeeping this mirrors from the existing
+// ibOwned/ibShares/ibSource (createSkinTargetMesh) scheme, in the opposite direction.
+MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
+    if (!device_ || !rhiFactory_ || !indices || indexCount == 0) return 0;
+    if (source == 0 || source > meshes_.size()) {
+        AVER_ERROR("[RHI.Vulkan] createMeshSharingVertices with an invalid source handle");
+        return 0;
+    }
+    const GpuMesh& src = meshes_[source - 1];
+    if (!src.alive || !src.vb || src.vertexCount == 0) return 0;
+    // A compute-written (skin target) source's vertex buffer is rewritten every frame by whatever
+    // last posed it -- sharing it would make every sharer's geometry jitter with that pose instead
+    // of drawing its own, unposed LOD, which is not a bug a caller would think to suspect. RHI.hpp's
+    // own contract states this refusal explicitly.
+    if (src.computeWritten) {
+        AVER_WARN("[RHI.Vulkan] createMeshSharingVertices refused: source mesh {} is compute-written (a skin target)", source);
+        return 0;
+    }
+
+    // THE BUFFER THIS SHARE ACTUALLY POINTS AT: `source` itself when source owns its vertices, or
+    // source's own root when source is ALREADY a share. A share never points at another share -- see
+    // the vbShares increment below, which always lands on THIS resolved root, so a chain of
+    // createMeshSharingVertices calls off the same original mesh collapses to one shared buffer and
+    // one share count, never a multi-hop chain destroyMesh would have to walk.
+    const MeshHandle root = src.vbOwned ? source : src.vbSource;
+    if (root == 0 || root > meshes_.size()) return 0;
+    const GpuMesh& rootMesh = meshes_[root - 1];
+    if (!rootMesh.alive || !rootMesh.vb) return 0;
+
+    const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
+    const bool useDefaultHeap = staticMeshDefaultHeap_;
+    const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+    BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = "mesh indices (LOD, shared vertices)";
+    const BufferHandle ibBuffer = rhiFactory_->createBuffer(idd);
+    if (!ibBuffer) { AVER_ERROR("[RHI.Vulkan] createMeshSharingVertices could not allocate its index buffer"); return 0; }
+    RhiBuffer* irb = rhiFactory_->buffer(ibBuffer);
+    if (!irb || !irb->buffer) { rhiFactory_->destroyBuffer(ibBuffer); return 0; }
+
+    GpuMesh m;
+    // SHARED, not owned -- copied straight from the root, mirroring createSkinTargetMesh's identical
+    // treatment of a shared index buffer just below (m.ib = src.ib; m.ibMemory = VK_NULL_HANDLE).
+    m.vb = rootMesh.vb; m.vbMemory = rootMesh.vbMemory; m.vbAddress = rootMesh.vbAddress;
+    m.vbBuffer = rootMesh.vbBuffer;
+    m.vertexCount = rootMesh.vertexCount;
+    m.vbOwned = false;
+    m.vbSource = root;
+
+    m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
+    m.ibBuffer = ibBuffer;
+    m.indexCount = indexCount;
+    // ibOwned stays true (GpuMesh's default): this mesh's OWN index buffer, never shared.
+
+    // Bounds are copied from `source` (RHI.hpp's contract), not from `root` -- identical today since
+    // createSkinTargetMesh never changes bounds either, but the two need not always coincide and the
+    // contract names source specifically.
+    m.boundsCentre[0] = src.boundsCentre[0]; m.boundsCentre[1] = src.boundsCentre[1]; m.boundsCentre[2] = src.boundsCentre[2];
+    m.boundsRadius = src.boundsRadius;
+
+    if (useDefaultHeap) {
+        const VkBuffer dsts[1] = {m.ib};
+        const void* srcs[1] = {indices};
+        const VkDeviceSize sizes[1] = {ibytes};
+        if (rhiFactory_->uploadToDeviceBuffers(dsts, srcs, sizes, 1, "rhi createMeshSharingVertices default-heap upload")) {
+            if (!meshDefaultHeapLogged_) {
+                meshDefaultHeapLogged_ = true;
+                AVER_INFO("[RHI.Vulkan] static meshes on the Default heap (--mesh-heap default): "
+                          "vertex and index buffers uploaded through a one-shot staging copy");
+            }
+        } else {
+            if (!meshDefaultHeapFallbackWarned_) {
+                meshDefaultHeapFallbackWarned_ = true;
+                AVER_WARN("[RHI.Vulkan] Default-heap mesh upload failed; falling back to the Upload "
+                          "heap for this mesh (further meshes still try the Default heap)");
+            }
+            rhiFactory_->destroyBuffer(m.ibBuffer);
+            BufferDesc idd2; idd2.bytes = ibytes; idd2.kind = BufferKind::Upload; idd2.debugName = "mesh indices (LOD, shared vertices)";
+            m.ibBuffer = rhiFactory_->createBuffer(idd2);
+            irb = rhiFactory_->buffer(m.ibBuffer);
+            if (!irb || !irb->buffer) {
+                AVER_ERROR("[RHI.Vulkan] createMeshSharingVertices could not allocate its index buffer on the Upload-heap fallback");
+                if (m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+                return 0;
+            }
+            m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
+            rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+        }
+    } else {
+        rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
+    }
+
+    meshes_.push_back(std::move(m));
+    const MeshHandle h = static_cast<MeshHandle>(meshes_.size());
+    // AFTER push_back, by index rather than through the `rootMesh`/`src` references above: push_back
+    // may have reallocated meshes_, exactly the reason createSkinTargetMesh's own ibShares increment
+    // (:1791) is a fresh index lookup rather than a reuse of an earlier reference.
+    meshes_[root - 1].vbShares += 1;
+    return h;
 }
 
 MeshHandle VulkanDevice::createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) {
@@ -1824,14 +2037,29 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
         AVER_WARN("[RHI.Vulkan] destroyMesh({}) refused: {} skin target(s) still share its indices", mesh, m.ibShares);
         return false;
     }
+    // W11: symmetric to the ibShares refusal above, for the other buffer this GpuMesh can share --
+    // freeing a mesh whose VERTEX buffer a createMeshSharingVertices() LOD sibling still points at
+    // would leave that sibling drawing freed memory.
+    if (m.vbShares > 0) {
+        AVER_WARN("[RHI.Vulkan] destroyMesh({}) refused: {} LOD mesh(es) still share its vertices", mesh, m.vbShares);
+        return false;
+    }
     if (rhiFactory_) rhiFactory_->destroyBlasForMesh(mesh);
     if (rhiFactory_) {
-        if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        // Only destroy the vertex buffer when THIS mesh owns it -- a share's vbBuffer handle names
+        // the ROOT's buffer (createMeshSharingVertices copies it verbatim), and destroying it here
+        // would free memory the root and every OTHER sharer still draws. Mirrors the ibOwned gate on
+        // the very next line, which has made the identical check for the index buffer all along.
+        if (m.vbOwned && m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
     }
     if (!m.ibOwned && m.ibSource != 0 && m.ibSource <= meshes_.size()) {
         GpuMesh& src = meshes_[m.ibSource - 1];
         if (src.ibShares > 0) src.ibShares -= 1;
+    }
+    if (!m.vbOwned && m.vbSource != 0 && m.vbSource <= meshes_.size()) {
+        GpuMesh& root = meshes_[m.vbSource - 1];
+        if (root.vbShares > 0) root.vbShares -= 1;
     }
     m.vb = VK_NULL_HANDLE; m.ib = VK_NULL_HANDLE;
     m.vbMemory = VK_NULL_HANDLE; m.ibMemory = VK_NULL_HANDLE;
@@ -1840,6 +2068,8 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
     m.vbBuffer = 0; m.ibBuffer = 0;
     m.computeWritten = false;
     m.ibSource = 0;
+    m.vbOwned = true;
+    m.vbSource = 0;
     m.boundsRadius = 0.0f;
     m.alive = false;
     return true;

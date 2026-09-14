@@ -137,6 +137,14 @@ inline constexpr const char* kRequiredDeviceExtensions[] = {
 // contract ("every field only ever reduces"). Requested if present; a backend that requested these
 // and failed device creation when they were missing would be doing the opposite of what the task's
 // ground truth asks for.
+//
+// THE ONE EXCEPTION IS VK_EXT_MEMORY_BUDGET at the tail: it gates no DeviceCaps bit at all, only
+// VulkanDevice::videoMemory() (M6) -- there is no per-adapter capability this extension's absence
+// should ever refuse a FEATURE over, only a reporting call that already has an honest
+// unsupported/all-zero answer (VideoMemoryInfo::supported == false). It is requested here rather
+// than through a second extension-enumeration pass for the identical reason every other entry in
+// this list is: one enumerate, one enable list, one place that decides what is actually on the
+// device.
 inline constexpr const char* kOptionalDeviceExtensions[] = {
     VK_EXT_MESH_SHADER_EXTENSION_NAME,                  // -> DeviceCaps::meshShaderTier
     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,       // -> DeviceCaps::rayTracingTier
@@ -147,6 +155,8 @@ inline constexpr const char* kOptionalDeviceExtensions[] = {
                                                          //    VK_KHR_ray_tracing_pipeline isn't
                                                          //    needed)
     VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,   // -> DeviceCaps::conservativeRaster
+    VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,                // -> VulkanDevice::videoMemory() only (M6);
+                                                         //    gates no DeviceCaps bit -- see above
 };
 
 // ================================================================================================
@@ -174,6 +184,13 @@ struct VulkanApi {
     PFN_vkGetPhysicalDeviceFeatures GetPhysicalDeviceFeatures = nullptr;
     PFN_vkGetPhysicalDeviceFeatures2 GetPhysicalDeviceFeatures2 = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties = nullptr;
+    // Core 1.1, instance-level, resolved beside GetPhysicalDeviceProperties2/GetPhysicalDeviceFeatures2
+    // above -- MAY BE NULL on a driver that somehow reports 1.1 support and does not export it, which
+    // is why VulkanDevice::videoMemory() checks this pointer itself rather than trusting
+    // memoryBudgetExt_ alone. Chains VkPhysicalDeviceMemoryBudgetPropertiesEXT (M6) to read the live
+    // budget/usage per heap; plain GetPhysicalDeviceMemoryProperties above stays the source for heap
+    // COUNT/FLAGS/SIZE, which do not change at runtime and are already cached in memoryProps_.
+    PFN_vkGetPhysicalDeviceMemoryProperties2 GetPhysicalDeviceMemoryProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties = nullptr;
     PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties = nullptr;
     PFN_vkGetPhysicalDeviceImageFormatProperties GetPhysicalDeviceImageFormatProperties = nullptr;
@@ -942,6 +959,17 @@ struct GpuMesh {
     bool ibOwned = true;
     u32  ibShares = 0;
     MeshHandle ibSource = 0;
+    // W11: VERTEX-buffer sharing, the mirror image of ibOwned/ibShares/ibSource above rather than a
+    // reuse of them -- a createSkinTargetMesh share and a createMeshSharingVertices share point in
+    // OPPOSITE directions (the former shares indices and owns its vertices; the latter shares
+    // vertices and owns its indices), and a single pair of fields could not distinguish "my indices
+    // are shared" from "my vertices are shared" for a mesh that is somehow both. See
+    // IDevice::createMeshSharingVertices's contract (RHI.hpp) for the LOD-ladder case this exists
+    // for. vbSource, when !vbOwned, always names the ROOT (never another share) -- see
+    // VulkanDevice::createMeshSharingVertices's own note on why a share of a share collapses.
+    bool vbOwned = true;
+    u32  vbShares = 0;
+    MeshHandle vbSource = 0;
     bool alive = true;
 };
 struct GpuLineMesh {
@@ -1335,6 +1363,12 @@ public:
     Backend backend() const override { return Backend::Vulkan; }
     const char* adapterName() const override { return adapterName_.c_str(); }
     DeviceCaps caps() const override { return caps_; }
+    // M6: the adapter's current VRAM budget/usage, split LOCAL/NON_LOCAL exactly as
+    // VideoMemoryInfo's own comment (RHI.hpp) specifies. NOT inline (queries the driver every call,
+    // unlike every trivial getter around it) -- defined in VulkanDevice.cpp beside queryCaps().
+    // supported == false whenever VK_EXT_memory_budget or GetPhysicalDeviceMemoryProperties2 is
+    // absent, honestly, rather than a stale or guessed number.
+    VideoMemoryInfo videoMemory() const override;
     IResourceFactory* resources() override;
     IRenderContext* renderContext() override;
     void addRenderFeature(IRenderFeature* f) override;
@@ -1378,6 +1412,17 @@ public:
     u64 viewportTextureId() override;
     bool selfTest(const f32 inRGBA[4], f32 outRGBA[4]) override;
     MeshHandle createMesh(const MeshVertex* verts, u32 vertexCount, const u32* indices, u32 indexCount) override;
+    // W4: chooses the heap createMesh() (and createMeshSharingVertices()'s own new index buffer)
+    // upload to for every call made AFTER this one -- trivial store/load, exactly like setVSync/
+    // vsync() beside it; see IDevice's own contract (RHI.hpp) for the false=Upload/true=Default
+    // meaning and why a mesh already built keeps whatever heap it was built on.
+    void setStaticMeshHeapDefault(bool onDefaultHeap) override { staticMeshDefaultHeap_ = onDefaultHeap; }
+    bool staticMeshHeapDefault() const override { return staticMeshDefaultHeap_; }
+    // W11: a new mesh sharing `source`'s vertex buffer with its own index buffer -- see
+    // IDevice::createMeshSharingVertices's full contract (RHI.hpp) and GpuMesh's vbOwned/vbShares/
+    // vbSource fields above. NOT inline: real allocation and (conditionally) a one-shot upload;
+    // defined in VulkanDevice.cpp beside createMesh.
+    MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) override;
     bool destroyMesh(MeshHandle mesh) override;
     bool destroyLineMesh(LineHandle mesh) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
@@ -1556,6 +1601,11 @@ private:
     u32 maxPushConstantsSize_ = 128;      // queried; 128 is only the GUARANTEED minimum until it is
     VkDeviceSize minUboAlignment_ = 256;  // queried: limits.minUniformBufferOffsetAlignment
     VkDeviceSize minStorageAlignment_ = 256;  // queried: limits.minStorageBufferOffsetAlignment
+    // M6: whether VK_EXT_memory_budget actually made it into the enabled device-extension list --
+    // set once, right after that list is built, from the same devExts vector every other want*
+    // bool in init() reads. videoMemory() also re-checks api_.GetPhysicalDeviceMemoryProperties2
+    // itself (see that pointer's own comment), so this flag alone is necessary but not sufficient.
+    bool memoryBudgetExt_ = false;
 
     // ---- surface / swapchain ----
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
@@ -1751,6 +1801,17 @@ private:
     struct SkinSeed { MeshHandle dst; MeshHandle src; };
     std::vector<SkinSeed> skinSeeds_;
 
+    // ---- W4: default-heap static meshes (--mesh-heap default) ----
+    bool staticMeshDefaultHeap_ = false;   // setStaticMeshHeapDefault's stored value; false = today's Upload-heap behaviour
+    // The C-7 "static meshes on the Default heap" line, once for this device's life -- logged on the
+    // first mesh actually built that way, not at flag-set time, so a run that sets the flag but never
+    // builds a mesh (an empty scene) says nothing.
+    bool meshDefaultHeapLogged_ = false;
+    // The upload-failure fallback WARN, once for this device's life -- see createMesh's own comment
+    // on why a per-mesh warning would flood the log on a big scene load when the failure mode is
+    // systemic (out of device-local memory, a driver refusal) rather than per-mesh.
+    bool meshDefaultHeapFallbackWarned_ = false;
+
     u32 width_ = 0, height_ = 0;
     // The scene's OWN render-target size: width_/height_ scaled by renderScale_, rounded, floored
     // at 1; equal to width_/height_ at renderScale_ == 1.0 (the default), so a build that never
@@ -1899,6 +1960,22 @@ public:
     // the (possibly reused) handle, or 0 on a null image or a failed view.
     TextureHandle adoptExternalDepthTexture(VkImage image, VkDeviceMemory memory, u32 width, u32 height,
                                              TextureHandle existing);
+
+    // W4: fills every `dsts[i]` (`count` of them, `sizes[i]` bytes from `srcs[i]`) via ONE
+    // HOST_VISIBLE staging buffer and ONE one-shot command-buffer submit -- see
+    // VulkanDevice::createMesh's own comment for why this exists (a Default-heap buffer refuses
+    // writeBuffer, which requires BufferKind::Upload's persistent mapping) and why it is
+    // SYNCHRONOUS (createMesh runs mid-frame too; vkCmdCopyBuffer is illegal inside the
+    // dynamic-rendering scope beginFrame opens, and this records into a SEPARATE command buffer via
+    // runOneShotCommands, which also means the wait inside it has already retired the staging
+    // buffer by the time this returns -- nothing here is left for the caller to free). Every `dst`
+    // must already be a valid buffer this factory (or createBufferCommitted) made with
+    // TRANSFER_DST usage, which toVkBufferUsage's "everything is everything" policy grants every
+    // buffer unconditionally. `what` names the call in any failure log, same convention as
+    // createBufferCommitted's own debugName parameter. False on any failure -- the staging buffer
+    // is destroyed either way, so the caller never has anything left to clean up from this call.
+    bool uploadToDeviceBuffers(const VkBuffer* dsts, const void* const* srcs, const VkDeviceSize* sizes,
+                               u32 count, const char* what);
 
     // ---- table lookups, reachable from VulkanRenderContext (friend) for render-target binding,
     // barriers, and drawMesh's mesh-table resolution ----

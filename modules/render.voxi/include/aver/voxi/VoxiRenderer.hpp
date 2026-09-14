@@ -6,6 +6,7 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
+#include "aver/voxi/GiDispatchBounds.hpp"   // W3: VoxelBox/GiDispatchConstants -- see the .cpp for how
 #include "aver/render/nrd/NrdRecorder.hpp"
 
 #include <unordered_map>
@@ -169,6 +170,50 @@ public:
     void setGiUpdateInterval(u32 n);
     u32  giUpdateInterval() const { return giUpdateInterval_; }
 
+    // ---- M4/W3/W12: three independent measurement/optimisation dials, each off by default and each
+    // reasserted every frame by the host (SandboxApp's --gi-force-rebuild/--gi-bounded-dispatch/
+    // --gi-free-accumulator and their matching voxi.* console variables) -- so each setter below must
+    // be cheap on a no-op call and log only on an actual change, the same "reassert idiom" every other
+    // per-frame console dial in this class already follows. ----
+
+    // M4: forces every GI tick past the snapshot gate, so a --gi-force-rebuild run measures a bake on
+    // every single tick rather than the ~96-98% skip rate the gate normally achieves. ALSO bypasses
+    // the on-disk GI cache in both directions (neither read nor written) -- see the .cpp's rebuild
+    // branch for why a forced tick that hit the cache would measure a cache restore instead of the
+    // bake it exists to time. Default false: bit-identical to today's gated, cached behaviour.
+    void setGiForceRebuild(bool on);
+    bool giForceRebuild() const { return giForceRebuild_; }
+    // W3: bounds the clear/resolve/mip-filter dispatch to the box the draw list's own bounds say a
+    // rebuild can possibly change, instead of the whole [0,res)^3 grid, on a rebuild that doesn't need
+    // the full volume re-derived. See voxelizePass's own comment for the box selection and the
+    // induction argument for why a voxel outside the box is already the right answer. Default false:
+    // dispatch counts, barriers and the resulting image are bit-identical to today's full-grid
+    // behaviour until this is turned on -- and even then the CENSUS half of W3 (how big the box WOULD
+    // be) is measured every rebuild regardless of this flag, so its value can be judged before opting
+    // in.
+    void setGiBoundedDispatch(bool on);
+    bool giBoundedDispatch() const { return giBoundedDispatch_; }
+    // W12: frees the injection accumulator -- voxelResBuilt_^3*4 R32_UINT texels, 16 B/voxel, the
+    // single largest GI resource that sits idle between bakes -- after the rebuild gate has gone
+    // quiet (no rebuild, nothing converging) for kGiAccumulatorQuietTicks ticks in a row, and
+    // recreates it the next time a rebuild actually needs one. Default false: the accumulator is
+    // created once at startup and kept for the renderer's life, exactly as before this existed.
+    //
+    // THE ONE-TICK DELAY THIS BUYS. With the flag on, a rebuild that arrives while the accumulator is
+    // freed does not run that same tick: it asks for the accumulator back (see the .cpp's gate) and
+    // the rebuild actually happens on the NEXT tick, once manageInjectionAccumulator() has recreated
+    // it. That is an image-timing difference -- one extra tick of staleness on the volume the very
+    // first time a still scene starts moving again after being freed -- and it exists ONLY while this
+    // flag is on; it is never a behaviour change for anyone who leaves it at the default.
+    void setGiFreeAccumulator(bool on);
+    bool giFreeAccumulator() const { return giFreeAccumulator_; }
+    // M2(c): the CPU cost of buildAccelerationStructures' own per-draw loop over drawsPrev_ for the
+    // last build that reached it -- population pass through the loop's closing brace, NOT the BLAS/
+    // TLAS GPU recording around it, which already has its own GPU timestamp (rhi::ScopedGpuStat
+    // "Voxi acceleration structures"). 0 until the first build that reaches the loop; an early return
+    // (no ray tracing wanted, or an empty draw list) leaves whatever the previous build measured.
+    f64 lastAccelBuildCpuMs() const { return lastAccelBuildCpuMs_; }
+
     // WHAT THE SHADERS WERE ACTUALLY COMPILED FOR, which is not the same question as what
     // Settings::layeredBsdf currently holds. The setting can be changed at any time; the pipelines
     // were built once, and this reports what they contain. The editor compares the two to decide
@@ -315,6 +360,14 @@ private:
     bool createShadowResources();
     // Creates the radiance volume, the injection accumulator and every binding set over them.
     bool createVoxelVolume(u32 resolution);
+    // W12: just the injection accumulator (voxelAccumTex_) at the given resolution -- the same desc,
+    // debugName and error text createVoxelVolume has always used for it, factored out so
+    // manageInjectionAccumulator() can recreate it after a free without duplicating either.
+    bool createInjectionAccumulator(u32 resolution);
+    // W12: recreates or frees the injection accumulator for this frame -- see the .cpp for the two
+    // branches and prePass()'s own comment on why this must run before anything else this frame binds
+    // bindings_.
+    void manageInjectionAccumulator(rhi::IRenderContext& ctx);
     // Creates every pipeline the feature runs.
     bool createPipelines();
     // Creates the subset that bakes sample count and render-target formats -- now TWO pipelines per
@@ -485,6 +538,24 @@ private:
     // What the last frame's pass over the draw list actually cost, in structures. Logged only when
     // it CHANGES: a number this important should be visible, and a line every frame is noise.
     u32 lastBlasRebuilds_ = 0xFFFFFFFFu;
+
+    // ---- W10: buildAccelerationStructures' own per-build scratch, hoisted out of the function ----
+    // USED TO BE TWO LOCALS -- `std::vector<rhi::TlasInstance> inst` and
+    // `std::unordered_map<u64, pbr::MaterialConstants> matConstantsByKey` -- reallocated from empty
+    // every single build, a std::vector and an unordered_map both paying a heap allocation, every
+    // frame, for a container whose SHAPE (how many instances, how many distinct materials) barely
+    // moves build to build even though its CONTENT does. .clear() at the top of
+    // buildAccelerationStructures (right after the early-return, beside rtInstanceData_.clear() and
+    // the rest of that build's per-frame state) keeps the underlying storage, so a steady-state scene
+    // reuses the same allocation indefinitely; only a build whose instance/material count grows past
+    // the previous high-water mark pays a reallocation, exactly like rebuiltThisFrame_ above already
+    // does for the identical reason.
+    std::vector<rhi::TlasInstance> tlasInstScratch_;
+    std::unordered_map<u64, pbr::MaterialConstants> matConstantsScratch_;
+
+    // ---- M2(c): what buildAccelerationStructures' own per-draw loop cost, CPU side ----
+    // See lastAccelBuildCpuMs()'s own comment for the exact bracket this measures.
+    f64 lastAccelBuildCpuMs_ = 0.0;
     // Occlusion rays per pixel toward the sun's disc. FOUR by default: one gives the hard aliased
     // edge this replaced, and the cost is linear, so this is the knob to turn down first if ray
     // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
@@ -1185,6 +1256,73 @@ private:
     bool         drawCapReported_ = false;   // the draw-list-full warning is worth saying once, not every frame
     u64  giGateNextReport_ = 64;   // doubles each time, so the steady state gets reported too
     u64  giGateLastTicks_ = 0, giGateLastSkipped_ = 0;
+
+    // ---- M4: force every tick past the gate above, bypassing the cache in both directions --------
+    // See setGiForceRebuild's own comment (public section, next to setGiUpdateInterval) for the full
+    // contract. Backing store only; the setter is where a change gets logged.
+    bool giForceRebuild_ = false;
+
+    // ---- W3: bound the clear/resolve/mip-filter dispatch to the box a rebuild can actually change --
+    // See setGiBoundedDispatch's own comment for the contract and voxelizePass's own comment for the
+    // box-selection rule and the induction argument that makes it safe. Backing store plus the
+    // bookkeeping a rebuild needs to know what the LAST rebuild's box covered.
+    bool giBoundedDispatch_ = false;
+    // This rebuild's own box0 (what clear/resolve actually ran over), stashed so filterMips can
+    // derive each mip level's own box from it via mipBox() without voxelizePass having to pass it as
+    // a parameter or filterMips having to recompute the pre-pass walk over drawsPrev_ a second time.
+    VoxelBox giDispatchBox0_{};
+    // The LAST rebuild's own draws box (the union of every surviving draw's world AABB, NOT box0 --
+    // box0 also folds in THIS rebuild's own draws box, and unioning box0 into next rebuild's box would
+    // let the covered region grow forever instead of tracking only the two rebuilds a voxel's value
+    // can actually still depend on). See voxelizePass's own comment for why the union of exactly these
+    // two draws boxes is enough.
+    VoxelBox giBoxPrevDraws_{};
+    // False whenever the box above cannot be trusted as "last rebuild's box": no rebuild has run yet,
+    // the last rebuild had a draw with no usable AABB (anyUnbounded), or the volume was just restored
+    // whole from the on-disk cache (giCacheRestore sets this false on a hit -- a restore doesn't know
+    // what box the file's bake used). False forces the NEXT rebuild's box0 to be the full grid.
+    bool giBoxPrevValid_ = false;
+    // The resolution/centre/extent the box above was recorded under. A volume that moved, resized or
+    // rebuilt at a different resolution since invalidates the box even though giBoxPrevValid_ itself
+    // is still true -- the STORED coordinates would describe a different volume than the one about to
+    // be voxelised.
+    u32 giBoxRes_ = 0;
+    f32 giBoxCentre_[3] = {};
+    f32 giBoxExtent_ = -1.0f;
+
+    // ---- W12: free the injection accumulator after the gate has gone quiet for a while -----------
+    // See setGiFreeAccumulator's own comment for the contract and manageInjectionAccumulator()'s own
+    // comment (.cpp) for the two branches and the Vulkan ordering hazard that fixes where it is called
+    // from.
+    bool giFreeAccumulator_ = false;
+    // Set by the rebuild gate the tick it finds voxelAccumTex_ missing and needs it -- consumed (and
+    // cleared) by manageInjectionAccumulator() the NEXT prePass, which is the one-tick delay
+    // setGiFreeAccumulator's own comment documents. Also true's-equivalent path: !giFreeAccumulator_
+    // alone is enough to recreate (turning the flag off must bring the accumulator straight back), so
+    // this flag only matters while giFreeAccumulator_ is actually on.
+    bool giAccumWanted_ = false;
+    // Latched so a recreate failure (out of memory, most likely) warns once rather than every tick it
+    // keeps failing -- same idiom as layeredBsdfWarned_/nrdWarnedMsaa_ elsewhere in this class. Reset
+    // on the next successful recreate, so a LATER failure (a different cause) is not silenced by an
+    // EARLIER one already having been reported.
+    bool giAccumRecreateFailedLogged_ = false;
+    // Consecutive GI ticks with nothing to do: the skip branch increments this while
+    // giConvergeTicks_ == 0 (a converging bake is busy, whatever the snapshot gate alone would have
+    // said), and any rebuild resets it to 0. Compared against kGiAccumulatorQuietTicks below to decide
+    // whether the accumulator has been idle long enough to free.
+    u32 giQuietTicks_ = 0;
+    // A tiny stand-in UAV (4x1x1, R32_UINT) bound to bindings_/clearBindings_/resolveBindings_ slot 1
+    // in place of voxelAccumTex_ while it is freed -- every binding set that names a resource must be
+    // rebound to something else BEFORE that resource is destroyed (aver-view-outlives-its-buffer.md),
+    // and this is that something else. Created once on the first free, kept until shutdown().
+    rhi::TextureHandle voxelAccumPlaceholder_ = 0;
+    // UNMEASURED. How many consecutive quiet GI ticks before the accumulator is freed -- a guess at
+    // "long enough that a still editor session is actually done lighting for now, short enough that
+    // scrubbing a timeline or nudging the sun doesn't recreate it every few seconds", not a number
+    // anyone has timed a real editing session against. 240 ticks is a few seconds at Epic's default
+    // giUpdateInterval of 1; raising or lowering it only trades how eagerly the memory comes back
+    // against how often a idle-then-resumed session pays the one-tick recreate delay.
+    static constexpr u32 kGiAccumulatorQuietTicks = 240;
 
     // ---- the GI derived-data cache -------------------------------------------------------------
     //

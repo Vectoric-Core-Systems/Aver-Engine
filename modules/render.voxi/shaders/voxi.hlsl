@@ -784,8 +784,16 @@ float giShadowFactor(float3 wpos, float3 N, float ndl) {
     return s / 9.0;
 }
 
-// Mip level being read by CSMip (b3: b0/b1 are taken by the graphics root signature).
-cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
+// Per-dispatch constants for CSClear/CSResolve/CSMip (b3: b0/b1 are taken by the graphics root
+// signature). 32 B total, packed gSrcMip@0, gBoxLo@4 (12 B), gBoxHi@16 (12 B), _boxPad@28 -- mirrored
+// byte-for-byte by aver::voxi::GiDispatchConstants (GiDispatchBounds.hpp), which static_asserts its own
+// size against this layout so the two cannot drift apart silently. gSrcMip is CSMip's source-level
+// index, unused by CSClear/CSResolve (always mip 0). gBoxLo/gBoxHi is a half-open voxel-space box
+// [gBoxLo,gBoxHi) in the DESTINATION mip's own coordinate space; the C++ caller (VoxiRenderer, not this
+// file) computes and uploads the box for whichever level a given dispatch targets before every one of
+// the three kernels' Dispatch calls -- see aver-voxi-cbuffer-three-mirrors.md and the W3 spec for why
+// this lives in its own cbuffer rather than growing VoxiFrame.
+cbuffer MipCB : register(b3) { uint gSrcMip; uint3 gBoxLo; uint3 gBoxHi; uint _boxPad; };
 
 #include "voxi_cone.hlsli"
 
@@ -2339,10 +2347,21 @@ void PSVoxel(VoxOut i) {
     InterlockedAdd(gVoxelAccum[a + uint3(3,0,0)], 1u, prev);   // fragments covering this voxel
 }
 
+// All three kernels below dispatch over their destination mip level's FULL extent -- the group count
+// the C++ side requests never shrinks -- and instead skip work per-thread with this guard, so a thread
+// whose voxel falls outside [gBoxLo,gBoxHi) returns before touching any resource. With bounded dispatch
+// off, the C++ side sets gBoxLo=0 and gBoxHi=(this level's dimension), so the guard only ever rejects
+// threads at or beyond the texture edge -- exactly the threads whose writes D3D12/Vulkan already drop
+// silently out-of-bounds today. Every tier's voxel resolution is a power of two (QualityLadder.hpp), so
+// at mip 0 the dispatch already divides evenly by the 4-wide group and no thread id reaches that edge;
+// deeper mips can, since ceil(mipDim/4)*4 can overshoot mipDim, and this guard is what already made
+// that safe before bounded dispatch existed -- it is not new behaviour, only named and reused here.
+
 // Zeroes the accumulator before injection.
 [numthreads(4,4,4)]
 void CSClear(uint3 id : SV_DispatchThreadID) {
-    uint3 a = uint3(id.x * 4, id.y, id.z);
+    uint3 v = id + gBoxLo; if (any(v >= gBoxHi)) return;
+    uint3 a = uint3(v.x * 4, v.y, v.z);
     [unroll] for (uint k = 0; k < 4; ++k) gVoxelAccum[a + uint3(k,0,0)] = 0;
 }
 
@@ -2350,11 +2369,12 @@ void CSClear(uint3 id : SV_DispatchThreadID) {
 // fragments that covered each voxel.
 [numthreads(4,4,4)]
 void CSResolve(uint3 id : SV_DispatchThreadID) {
-    uint3 a = uint3(id.x * 4, id.y, id.z);
+    uint3 v = id + gBoxLo; if (any(v >= gBoxHi)) return;
+    uint3 a = uint3(v.x * 4, v.y, v.z);
     uint n = gVoxelAccum[a + uint3(3,0,0)];
-    if (n == 0) { gVoxelUAV[id] = 0.0; return; }
+    if (n == 0) { gVoxelUAV[v] = 0.0; return; }
     float3 s = float3(gVoxelAccum[a], gVoxelAccum[a + uint3(1,0,0)], gVoxelAccum[a + uint3(2,0,0)]);
-    gVoxelUAV[id] = float4(s / (AVER_VOX_FIXED * (float)n), 1.0);   // alpha = occupancy
+    gVoxelUAV[v] = float4(s / (AVER_VOX_FIXED * (float)n), 1.0);   // alpha = occupancy
 }
 
 // ================= Voxi: mip filtering =================
@@ -2362,13 +2382,14 @@ void CSResolve(uint3 id : SV_DispatchThreadID) {
 // SINGLE-MIP view of the source at t0 and the destination level at u0.
 [numthreads(4,4,4)]
 void CSMip(uint3 id : SV_DispatchThreadID) {
-    int3 s = int3(id) * 2;
+    uint3 v = id + gBoxLo; if (any(v >= gBoxHi)) return;
+    int3 s = int3(v) * 2;
     float4 a = 0;
     [unroll] for (int x=0;x<2;++x)
     [unroll] for (int y=0;y<2;++y)
     [unroll] for (int z=0;z<2;++z)
         a += gVoxelTex.Load(int4(s + int3(x,y,z), gSrcMip));
-    gVoxelUAV[id] = a * 0.125;
+    gVoxelUAV[v] = a * 0.125;
 }
 
 // Debug view: raymarches the volume straight to screen over the sky. Returns linear radiance.

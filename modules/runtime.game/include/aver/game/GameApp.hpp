@@ -94,6 +94,19 @@ struct GameConfig {
     // are plain RHI calls, not an editor feature, so a --frames run can write a PNG here the same way.
     // Empty = no screenshot requested (the default, and the only behaviour before this field existed).
     std::string screenshotPath;
+    // --no-vsync (M7): AverGame's own measurement parity with SandboxApp.cpp's identical flag. False
+    // (DEFAULT) leaves vsync exactly as the backend opened it -- a shipped game syncs to the display
+    // the way a player expects. True disables it once, the instant a device exists, the same
+    // vsyncCanDisable()/setVSync(false) pair the editor uses; a display path that cannot tear (see
+    // rhi::IDevice::vsyncCanDisable's own comment) logs a warning and is left synced rather than
+    // silently ignored.
+    bool vsyncOff = false;
+    // --cam-wobble DEG PERIOD (M7): the SAME measurement-only yaw swing SandboxApp.cpp's own
+    // --cam-wobble drives -- see its setCamWobble's comment for why a sine that returns to zero,
+    // driven off the frame counter and never the clock. 0 (DEFAULT, either field) is no motion, so
+    // every existing --frames capture through this executable is bit-identical without it.
+    f32 camWobbleDeg = 0.0f;      // yaw amplitude in degrees
+    u32 camWobblePeriod = 0;      // period in FRAMES; sin() is 0 at every whole multiple
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -387,6 +400,12 @@ private:
     u64 frames_ = 0;
     // Seconds since the last --stats dump. See GameConfig::statsIntervalSec.
     f32 statsTimer_ = 0.0f;
+    // M7: true once the one-shot END-OF-RUN --stats dump has fired on a bounded (--frames N) run --
+    // see onUpdate's own comment for why a bounded run needs this in addition to the periodic
+    // statsTimer_ dump above (a short --frames run can end before statsIntervalSec ever elapses once).
+    // Mirrors SandboxApp::gpuTimingDone_'s latch, same reasoning: fire exactly once, near the last
+    // frame, never again.
+    bool statsFinalDumped_ = false;
 };
 
 } // namespace aver::game

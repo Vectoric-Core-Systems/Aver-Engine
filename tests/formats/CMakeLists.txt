@@ -382,3 +382,14 @@ if(TARGET Aver.Render.Voxi)
   set_target_properties(ProjectRenderApplyTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# TextureSrgbTableTest -- W5's sRGB decode lookup table (modules/formats/src/Texture.cpp). Compares
+# the real, public generateMipChain() against a verbatim copy of the PRE-CHANGE std::pow form, byte
+# for byte, because a table that was merely CLOSE to the curve would still change every decoded texel
+# in a project -- see the test file's own header. NO add_test HERE, for MeshTest's own reason above:
+# aver_register_ctest_in (root CMakeLists) already walks every *Test target and registers it against
+# the FAIL_REGULAR_EXPRESSION every suite here is written to.
+add_executable(TextureSrgbTableTest src/TextureSrgbTableTest.cpp)
+target_link_libraries(TextureSrgbTableTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(TextureSrgbTableTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
