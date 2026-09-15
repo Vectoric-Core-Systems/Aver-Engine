@@ -89,6 +89,11 @@
 // unqualified `SurfaceLook` inside a SandboxApp member function resolves to the nested one every time
 // (class-scope lookup wins over a namespace one), never to this header's.
 #include "SceneSubmission.hpp"
+// The pick()'s-eye view of a mesh (positions/normals/indices) and its nearest-hit ray/triangle test --
+// see ViewportPick.hpp's own top comment. A second pure header for the same reason SceneSubmission.hpp
+// is one: pick()'s ray/triangle math is otherwise untestable inside a 29,000-line file with no header
+// of its own.
+#include "ViewportPick.hpp"
 
 // The material sampler register on the cluster pipeline (materialShaderDefines() gets the same
 // number). Fixed at s0 so it never moves whether or not AVER_MODULE_VOXI is compiled in -- Voxi's own
@@ -643,6 +648,23 @@ static bool rayAabb(const Vec3& o, const Vec3& d, const Vec3& mn, const Vec3& mx
         }
     }
     tHit = tmin; return true;
+}
+// Converts an interleaved MeshVertex/index pair into a PickGeometry -- used only for the file's three
+// built-in meshes (sphere/cube/drone), whose CPU-side vertices already exist as this exact array at
+// creation time. Project meshes never go through here: pickGeometryFor (below) builds theirs straight
+// from fmt::OcMeshData's own separate position/normal arrays, which this would just have to
+// un-interleave right back out of.
+static aver::editor::PickGeometry buildPickGeometry(const std::vector<rhi::MeshVertex>& v,
+                                                      const std::vector<u32>& idx) {
+    aver::editor::PickGeometry g;
+    g.positions.reserve(v.size() * 3);
+    g.normals.reserve(v.size() * 3);
+    for (const rhi::MeshVertex& mv : v) {
+        g.positions.push_back(mv.px); g.positions.push_back(mv.py); g.positions.push_back(mv.pz);
+        g.normals.push_back(mv.nx);   g.normals.push_back(mv.ny);   g.normals.push_back(mv.nz);
+    }
+    g.indices = idx;
+    return g;
 }
 // Builds the floor grid line list out to extent ext with the given cell step.
 static void buildGrid(std::vector<rhi::LineVertex>& v, f32 ext, f32 step) {
@@ -2098,6 +2120,12 @@ public:
             meshBounds_[cubeId]    = unitBounds;
             meshTris_[sphereId]    = static_cast<u32>(si.size() / 3);
             meshTris_[cubeId]      = static_cast<u32>(ci.size() / 3);
+            // TRIANGLE-ACCURATE PICKING for the two built-ins, filled here rather than lazily: unlike
+            // a project mesh's OcMeshData, sv/si and uv_/ui_ are already in hand and about to go out of
+            // scope, so deferring this would mean re-deriving a sphere/cube's geometry from nothing
+            // (there is no .ocmesh on disk for either -- pickGeometryFor has no file to lazily load).
+            pickGeometry_[sphereId] = buildPickGeometry(sv, si);
+            pickGeometry_[cubeId]   = buildPickGeometry(uv_, ui_);   // uv_/ui_, matching sceneMeshes_[cubeId] == unitCube
 
             // Third built-in: the quadcopter appendDrone builds, for the graph-driven drone actor
             // (setDroneEnabled) that used to spawn as a bare unit cube. Must stay in step with
@@ -2112,6 +2140,7 @@ public:
             // top 0.154, skid bottom -0.218) -- a bound must never be tighter than the geometry it describes.
             meshBounds_[droneId] = {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}};
             meshTris_[droneId]   = static_cast<u32>(di.size() / 3);
+            pickGeometry_[droneId] = buildPickGeometry(dv, di);
 
             // Kept so a dev check can build geometry of its own without re-uploading a cube.
             unitCubeMesh_ = unitCube;
@@ -2637,6 +2666,13 @@ public:
             if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
             // Same -1 sentinel reasoning: 0 is a real answer ("denoiser off"), not an absent flag.
             if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
+            // --reblur-accum N: the console's voxi.reblurMaxAccumulatedFrameNum, for a --frames run that
+            // has no console. No manifest key names it, and the manifest apply starts from the live
+            // settings, so setting it here once is enough; Voxi clamps it to NRD's own [0,63].
+            if (reblurAccumOverride_ >= 0) {
+                k.reblurMaxAccumulatedFrameNum = static_cast<u32>(reblurAccumOverride_);
+                AVER_INFO("[Voxi] --reblur-accum {}: REBLUR_DIFFUSE history depth", reblurAccumOverride_);
+            }
             voxi::Renderer::get().setSettings(k);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -3161,6 +3197,20 @@ public:
         // on it, rather than costing a whole extra frame of lag for no reason.
         if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
         if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
+        // --sun-set-at: the same write the Directional Light panel's Elevation/Azimuth sliders make.
+        if (sunSetAtFrames_ > 0 && --sunSetAtFrames_ == 0) {
+            sky_.setSunAngles(sunSetElevDeg_, sunSetAzimDeg_);
+            AVER_INFO("[Sandbox] --sun-set-at: sun moved to elevation {:.1f} deg, azimuth {:.1f} deg",
+                      sunSetElevDeg_, sunSetAzimDeg_);
+        }
+#if AVER_MODULE_VOXI
+        // --gi-history-reset-at: the resetgihistory and resetnrdhistory console commands' own requests.
+        if (giHistoryResetAtFrames_ > 0 && --giHistoryResetAtFrames_ == 0) {
+            voxi::Renderer::get().requestGiHistoryReset();
+            voxi::Renderer::get().requestNrdHistoryReset();
+            AVER_INFO("[Sandbox] --gi-history-reset-at: GI reservoir and NRD history reset requested");
+        }
+#endif
         // Clears the render-scale crash cookie once this session proves the scale survivable. Thirty
         // frames, not one: device loss is noticed at Present.
         // --shader-source: pick up an HLSL edit without restarting.
@@ -4390,6 +4440,10 @@ public:
 
             const u64 id = fnv1a64(std::string_view(rel));
             sceneMeshes_[id] = h;
+            // A project mesh can take a built-in's id (its own Meshes/cube.ocmesh, say), and the
+            // built-in's pick triangles, seeded at creation, would then answer for this mesh. Dropped
+            // here so pickGeometryFor reads this file instead.
+            pickGeometry_.erase(id);
             // The path back from an id: every other map here goes id -> data, so anything wanting to
             // NAME a loaded mesh (the foliage palette, a future asset picker) had no way to. Populated
             // here because this is the one place with both halves at once.
@@ -4826,6 +4880,7 @@ public:
                 meshParts_.erase(pit);
             }
             sceneMeshes_.erase(id); meshTris_.erase(id); meshSlot0Material_.erase(id);
+            pickGeometry_.erase(id);   // whatever pickGeometryFor cached (loaded or empty) for this id
             if (const auto oit = selOutlineLines_.find(id); oit != selOutlineLines_.end()) {
                 if (oit->second) e.device()->destroyLineMesh(oit->second);
                 selOutlineLines_.erase(oit);
@@ -7400,6 +7455,11 @@ public:
     }
     void setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
     void setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
+    // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: see sunSetAtFrames_'s own comment.
+    void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg) {
+        sunSetAtFrames_ = framesIn; sunSetElevDeg_ = elevDeg; sunSetAzimDeg_ = azimDeg;
+    }
+    void setGiHistoryResetAt(int framesIn) { giHistoryResetAtFrames_ = framesIn; }
 #if AVER_MODULE_SR
     void setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }   // --aversr-cycle [N]
 #endif
@@ -7873,6 +7933,18 @@ public:
                 voxiRenderer_.submit(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
                                      rs.matSet, rs.matConstants, rs.matBytes,
                                      /*translucent=*/rs.look.blended, route.hiddenFromOwner);
+                // THE PATH TRACER NEEDS THE SAME OFF-SCREEN GEOMETRY, AND THIS IS ITS ONLY WAY IN.
+                // PtSceneView::submitDraw is otherwise reached only through drawMesh(), which this
+                // branch exists to skip -- so the path-traced view traced a scene holding only what
+                // the camera could see (and no cluster-dispatched instance at all): no roof overhead,
+                // no wall behind the camera. Measured on PTTest NewSponza: Voxi's TLAS held 400
+                // instances while the path tracer "re-armed on 154", with 73 entities frustum-culled.
+                // Owner-hidden draws stay out: PtSceneView has no owner-hidden mask lane, so it would
+                // paint the owner's own body over the camera, and the raster route never hands it
+                // those either.
+                if (ptSceneView_ && !route.hiddenFromOwner)
+                    ptSceneView_->submitDraw(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
+                                             rs.matSet, rs.matConstants, rs.matBytes, rs.look.blended);
             }
 #endif
         }
@@ -7976,6 +8048,7 @@ public:
     // and visibility mode are read per pixel at draw time, not baked into a pipeline at load.
     void setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
     void setDenoiser(int n) { denoiserOverride_ = n; }                          // --denoiser 0|1
+    void setReblurAccum(int n) { reblurAccumOverride_ = n; }                    // --reblur-accum N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
     // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone --
@@ -8141,6 +8214,17 @@ public:
     // device-loss class aver-render-scale-device-loss documents.
     void updateAverSrAuto(Engine& e) {
         if (!voxiAttached_) return;
+#if AVER_WITH_IMGUI
+        // NOT BEFORE THE PREFERENCES HAVE LOADED. onUpdate runs BEFORE buildUI, and buildUI is where
+        // loadEditorPreferences first runs (prefsLoaded_). So on frame 1 this used to resolve a level from
+        // the member defaults (Auto), arm display.renderScalePending in the in-memory prefs store and
+        // apply it -- and loadEditorPreferences, later in that SAME frame, read the cookie this function
+        // had just armed as "the last launch did not survive applying Auto", latched
+        // averSrCookieTripped_ and forced AverSR Off. Every launch, whatever the Display choice or the
+        // project's RENDER.AVERSR asked for: the render scale sat at 1.0 no matter what was picked. A
+        // headless run never builds the UI or loads preferences, so there is nothing to wait for there.
+        if (!prefsLoaded_ && !headless_) return;
+#endif
         rhi::IDevice* dev = e.device();
         voxi::Renderer& vxr = voxi::Renderer::get();
 
@@ -16151,19 +16235,74 @@ private:
         rd = farW - ro;
     }
 
+#if AVER_MODULE_SCENE
+    // Lazy, memoized PickGeometry for a PROJECT mesh (the built-ins are seeded at creation, :2113-2142,
+    // and never reach the loading branch below). Mirrors selectionOutlineLines' own reason for reading
+    // a .ocmesh a second time: loadProjectMeshes uploads to the GPU and lets OcMeshData go, so a mesh's
+    // positions/normals/indices are not in memory for pick() to test a ray against. A pick is a click,
+    // not a frame -- this costs one file read the first time a click ray reaches a given mesh, and
+    // (like selectionOutlineLines' cache) nothing on any later click near it, success OR failure: an
+    // id mapped to an empty PickGeometry IS the cached "unavailable, use the bounds" answer, so a
+    // missing path or a load failure is warned about once, not on every subsequent click.
+    const aver::editor::PickGeometry& pickGeometryFor(u64 meshId) {
+        if (const auto it = pickGeometry_.find(meshId); it != pickGeometry_.end()) return it->second;
+
+        aver::editor::PickGeometry g;   // stays empty (and is still cached) on either failure below
+        const auto pit = meshPathById_.find(meshId);
+        const std::string content = project_.contentDir();
+        if (pit == meshPathById_.end() || content.empty()) {
+            AVER_WARN("[Pick] mesh id {} has no known project path; clicking it falls back to its "
+                      "bounding box.", meshId);
+        } else {
+            fmt::OcMeshData md;
+            std::string why;
+            if (fmt::loadOcMesh(content + "/" + pit->second, md, &why)) {
+                g.positions = std::move(md.positions);
+                g.normals = std::move(md.normals);
+                g.indices = std::move(md.indices);
+            } else {
+                AVER_WARN("[Pick] '{}' would not (re)load for triangle picking ({}); falling back to "
+                          "its bounding box.", pit->second, why);
+            }
+        }
+        return pickGeometry_.emplace(meshId, std::move(g)).first->second;
+    }
+#endif
+
     // Selects whatever the cursor's ray hits first, across both the placeholder and scene worlds.
+    //
+    // THE NEAREST TRIANGLE WINS, DOUBLE-SIDED, because ray-driven primary visibility (the editor's
+    // default render mode) traces with no cull flag and draws back faces too -- a click has to be able
+    // to hit what the camera can actually see. The one exception is an entity's OWN back faces when the
+    // ray starts inside ITS bounds (insideBox below, the ab3bca81 case): those are the inside walls of
+    // whatever the camera is standing in, so a closed shape (a rock, a crate) cannot be selected from
+    // its own inside. An enclosing SHELL (NewSponza's building) stays selectable from inside it: its
+    // interior walls are authored facing INTO the room, so from in there they are front faces.
+    //
+    // Testing triangles rather than bounds also means a nearer wall now BLOCKS an object behind it,
+    // which bounds-only picking never did: previously, clicking a wall could still select a prop
+    // standing behind it whenever the prop's own box happened to win the t comparison.
+    //
+    // A skinned/posed entity (its drawn vertices move in a compute pass this ray never runs against)
+    // and any mesh whose triangles are not resident -- pickGeometryFor came back empty: an unresolved
+    // id, or a project .ocmesh that would not load -- both fall back to the bounding-box test instead,
+    // keeping the ORIGINAL ab3bca81 rule: t > 0.0f, so an object whose bounds enclose the camera is not
+    // auto-selected by every click (it stays reachable from the Outliner).
     void pick(Engine& e, const ImGuiIO& io) {
         (void)e;
         Vec3 ro, rd;
         viewportRay(io.MousePos.x, io.MousePos.y, ro, rd);
         int best=-1; f32 bestT=1e30f;
+        // Placeholder objects_ (MeshObj boxes/the floor) stay bounds-only: for these, the box IS the
+        // geometry, so a triangle test would buy nothing. Same t > 0.0f start-inside guard as the scene
+        // loop below, compared against the same bestT, so the nearer of the two worlds still wins.
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i){
                 MeshObj& o=objects_[i]; if(!o.visible) continue;
                 Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
                 const Mat4 iw = tr.toMatrix().inverse();
                 const Vec3 lo=xformPoint(iw,ro), ld=xformVec(iw,rd);
-                f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
+                f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t>0.0f && t<bestT){ bestT=t; best=i; }
             }
 
         // AvId, not scene::Entity: pick() spans both the placeholder and scene worlds, so bestEnt is
@@ -16172,6 +16311,12 @@ private:
         AvId bestEnt = kInvalidId;
 #if AVER_MODULE_SCENE
         {
+            // (a) BROADPHASE: every eligible entity whose local-space box the ray actually enters,
+            // with the box's own hit distance tBox and whether the ray started inside it (insideBox).
+            // No selection decision is made here -- an entry is a CANDIDATE for the triangle test
+            // below, not a pick.
+            struct PickCandidate { scene::Entity ent; u64 meshId; f32 tBox; bool insideBox; Vec3 lo, ld; };
+            std::vector<PickCandidate> candidates;
             scene::World& w = scene::World::instance();
             const u32 n = w.count();
             for (u32 i = 0; i < n; ++i) {
@@ -16189,7 +16334,36 @@ private:
                 if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
                 const Mat4 iw = w.worldMatrix(ent).inverse();
                 const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
-                f32 t; if (rayAabb(lo, ld, lmin, lmax, t) && t < bestT) { bestT = t; bestEnt = ent; best = -1; }
+                f32 tBox;
+                if (!rayAabb(lo, ld, lmin, lmax, tBox)) continue;
+                candidates.push_back({ent, mr->mesh, tBox, tBox <= 0.0f, lo, ld});
+            }
+
+            // (b) NEAREST BOX FIRST, then stop as soon as a candidate's own tBox can no longer beat
+            // bestT: rayAabb's tBox is a lower bound on any triangle hit inside that same box (a
+            // triangle cannot be nearer than the box that contains it), so every candidate after that
+            // point is provably farther than the best hit already found -- a real early-out, not a
+            // heuristic.
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const PickCandidate& a, const PickCandidate& b) { return a.tBox < b.tBox; });
+
+            for (const PickCandidate& c : candidates) {
+                if (c.tBox >= bestT) break;
+                // (c) A skinned/posed entity's resting geometry is not what is actually drawn (its
+                // vertices move in a compute pass this ray was never run against), so -- like a mesh
+                // whose triangles are not resident -- it keeps the bounds-only rule instead.
+                const bool posedOrSkinned = skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
+                const aver::editor::PickGeometry* geo = posedOrSkinned ? nullptr : &pickGeometryFor(c.meshId);
+                if (!geo || geo->empty()) {
+                    if (c.tBox > 0.0f) { bestT = c.tBox; bestEnt = c.ent; best = -1; }
+                    continue;
+                }
+                // skipBackFaces = insideBox: double-sided from outside (matching ray-driven rendering,
+                // which draws back faces), single-sided when the ray starts inside this entity's own
+                // box, where a back face is the inside of whatever the camera is standing in.
+                f32 tTri;
+                if (aver::editor::rayPickGeometry(*geo, c.lo, c.ld, /*skipBackFaces=*/c.insideBox, bestT, tTri))
+                    { bestT = tTri; bestEnt = c.ent; best = -1; }
             }
         }
 #endif
@@ -22269,7 +22443,10 @@ private:
                 const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
                 if (stored == 1.0f) {
                     prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
-                } else if (pending) {
+                } else if (pending && !renderScaleCookieArmed_) {
+                    // `&& !renderScaleCookieArmed_`: a cookie THIS process armed is not evidence that the
+                    // PREVIOUS launch crashed -- see updateAverSrAuto's prefsLoaded_ gate for the frame-1
+                    // ordering that once made exactly that misreading happen on every launch.
                     AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
                                   "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
                                   "was not the cause; the scale itself is the thing that needs fixing.",
@@ -22283,7 +22460,9 @@ private:
                     renderScaleCookieArmed_ = true;
                     prefsDevice_->setRenderScale(stored);
                 }
-            } else if (pending) {
+            } else if (pending && !renderScaleCookieArmed_) {
+                // (`&& !renderScaleCookieArmed_`: same reason as the Manual branch above -- a cookie this
+                // process armed itself says nothing about the previous launch.)
                 // A NAMED LEVEL (or a level Auto resolved to in a PRIOR session) DID NOT SURVIVE ITS
                 // OWN LAUNCH -- the same crash this cookie already protects Manual's raw scale from,
                 // for a level applied through applyAverSrQuality instead of a raw setRenderScale.
@@ -22540,6 +22719,10 @@ private:
                     const char* itemLabel = i == 0 ? autoLabel.c_str() : kAverSrItems[i];
                     if (ImGui::Selectable(itemLabel, sel)) {
                         averSrMigrationNoteArmed_ = false;   // 3.3 A: cleared the moment ANY item is picked
+                        // AN EXPLICIT PICK LIFTS THE CRASH-COOKIE LATCH. The CRITICAL line that sets it
+                        // tells the user to "choose a level again if that was not the cause" -- which
+                        // did nothing while updateAverSrAuto kept forcing Off for the whole session.
+                        averSrCookieTripped_ = false;
                         averSrChoice_ = static_cast<editor::AverSrChoice>(i);
                         // Auto and Manual apply NOTHING here: Auto is picked up by updateAverSrAuto
                         // next frame (it needs vx.settings()/deviceInfo(), not available mid-UI-draw
@@ -23406,6 +23589,7 @@ private:
                 if (ImGui::Combo("Upscaling default (AverSR)", &projIdx, kProjDefaultItems, 5)) {
                     averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
                     averSrMigrationNoteArmed_ = false;
+                    averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch, as the Display combo's does
                     projectDirty_ = true;
                 }
                 uiReg_.track("project.averSr");
@@ -25336,6 +25520,7 @@ private:
     // 0 (NoRay) is a real, meaningful value, not "flag not given".
     int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
+    int  reblurAccumOverride_=-1;    // --reblur-accum N: REBLUR_DIFFUSE history depth for a --frames run; -1 is "flag not given"
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) is what a build with no
@@ -25790,6 +25975,14 @@ private:
     int ptQualityRampCountdown_ = 0;
     int ptSceneToggleOnAutoFrames_ = 0;
     int ptSceneToggleOffAutoFrames_ = 0;
+    // --sun-set-at N ELEV AZIM and --gi-history-reset-at N: VERIFICATION ONLY. Simulate a human dragging
+    // the Directional Light panel's Elevation/Azimuth sliders, and typing resetgihistory +
+    // resetnrdhistory, N frames into a bounded --frames run -- the only way to capture what indirect
+    // light does in the frames AFTER a live sun move, which a level's own SUN line (applied before the
+    // first frame) can never show. Countdowns from process start, the same shape as the two above.
+    int sunSetAtFrames_ = 0;
+    f32 sunSetElevDeg_ = 0.0f, sunSetAzimDeg_ = 0.0f;
+    int giHistoryResetAtFrames_ = 0;
     // True while a stored non-unity render scale is on trial this session; see the prefs-apply site.
     bool renderScaleCookieArmed_ = false;
 #if AVER_MODULE_SR
@@ -28030,6 +28223,15 @@ private:
     // differently in the Content Browser. Recorded rather than re-read: loadProjectMeshes has already
     // parsed the file by the time it knows this, otherwise reachable only by opening every mesh.
     std::unordered_set<u64> skinnedMeshIds_;
+    // Per-mesh triangle data for pick() (ViewportPick.hpp), keyed the same as sceneMeshes_/meshBounds_.
+    // Built-ins are filled at creation, above (:2113-2142); a project mesh id is filled LAZILY, by pickGeometryFor,
+    // the first time a click ray actually reaches it -- loadProjectMeshes discards its CPU-side
+    // OcMeshData once the GPU upload is done (same reason selOutlineLines_ re-reads on demand), so
+    // paying for every mesh's positions/normals/indices up front would spend memory on meshes no click
+    // ever tests. An id mapped to an EMPTY PickGeometry means "tried and unavailable" -- pick() falls
+    // back to that mesh's bounding box, and the empty entry stops the failed load from being retried
+    // on every later click.
+    std::unordered_map<u64, aver::editor::PickGeometry> pickGeometry_;
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
     // startupComplete's settle detector; see it for why these are mutable and why a frame count.
     mutable int startupSettleCount_ = -2;   // -2 so it cannot match lastSceneDrawn_'s -1 start
@@ -28306,6 +28508,7 @@ Application* createApplication(int argc, char** argv) {
     // A/B against a manifest that already picks an estimator (RENDER.GIMODE) can be overridden at all.
     int giModeArg = -1;
     int denoiserArg = -1;   // --denoiser 0|1
+    int reblurAccumArg = -1;   // --reblur-accum N
     // REFRACTION: the tier picks a mode, these override it. -1 is "not given", the sentinel every
     // other render override here uses, since `take()` tests for exactly that -- a 0-means-absent
     // sentinel would make `--refraction 0` (OFF) silently undiscardable.
@@ -28364,6 +28567,8 @@ Application* createApplication(int argc, char** argv) {
         // same C1061 reason, and it exists at all because the pass needs the G-buffer -- which for
         // most of this pass's life meant it was reachable ONLY by also passing --gbuffer by hand.
         if (!std::strcmp(argv[i], "--denoiser"))              denoiserArg = std::atoi(argv[i + 1]);
+        // --reblur-accum N: REBLUR_DIFFUSE's history depth, the console's voxi.reblurMaxAccumulatedFrameNum.
+        if (!std::strcmp(argv[i], "--reblur-accum"))          reblurAccumArg = std::atoi(argv[i + 1]);
         // --rt-denoise-motion F: see VoxiRenderer::setRtDenoiseMotionTaper. In THIS loop rather than
         // the chain below for the reason stated at the top of it -- that chain is at MSVC's nesting
         // limit and one more else-if there is a hard compile error.
@@ -28497,6 +28702,18 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--occlusion-waitidle")) occlusionWaitIdleArg = true;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--no-occlusion-waitidle")) occlusionNoWaitIdleArg = true;
+    // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: verification-only, see sunSetAtFrames_. Their
+    // own loops rather than the long else-if chain further down, which is at the compiler's nesting limit.
+    int sunSetAtArg = 0, giHistoryResetAtArg = 0;
+    f32 sunSetElevArg = 0.0f, sunSetAzimArg = 0.0f;
+    for (int i = 1; i + 3 < argc; ++i)
+        if (!std::strcmp(argv[i], "--sun-set-at")) {
+            sunSetAtArg   = std::atoi(argv[i + 1]);
+            sunSetElevArg = static_cast<f32>(std::atof(argv[i + 2]));
+            sunSetAzimArg = static_cast<f32>(std::atof(argv[i + 3]));
+        }
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--gi-history-reset-at")) giHistoryResetAtArg = std::atoi(argv[i + 1]);
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     bool openLevelPickerArg=false; std::string openLevelArg; bool noEditorChrome=false; bool sceneCensus=false;
@@ -29493,6 +29710,7 @@ Application* createApplication(int argc, char** argv) {
                         "(none|reconstructed|half|full)", restirVisibilityArg);
     }
     app->setDenoiser(denoiserArg);
+    if (reblurAccumArg >= 0) app->setReblurAccum(reblurAccumArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);
@@ -29687,6 +29905,8 @@ Application* createApplication(int argc, char** argv) {
     if (ptQualityRamp > 0)    app->setPtQualityRamp(ptQualityRamp);
     if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
+    if (sunSetAtArg > 0)         app->setSunSetAt(sunSetAtArg, sunSetElevArg, sunSetAzimArg);
+    if (giHistoryResetAtArg > 0) app->setGiHistoryResetAt(giHistoryResetAtArg);
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);

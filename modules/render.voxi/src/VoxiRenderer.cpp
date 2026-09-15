@@ -4021,7 +4021,18 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         res_->setUav(bindings_, 8, giSurfNrmHist_[writeIdx], 0);
         res_->setSrv(bindings_, 13, giSurfNrmHist_[readIdx]);
         cb_.giRestirParams[0] = 1.0f;                       // t12/t13/u6/u7/u8 are bound this frame
-        cb_.giRestirParams[1] = giHistValid_ ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
+        // ---- A MOVED SUN VOIDS THE RESERVOIRS FOR THE FRAME IT MOVES, the same test rtHistParams[1]
+        // applies to the shadow history further down this function. A reservoir keeps the radiance its
+        // sample was shaded with, so after a sun move every reused sample still carries the OLD sun.
+        // MEASURED on PTTest's NewSponza, fixed camera and exposure, linear radiance x1000 on the arcade
+        // wall: moving the sun from 71.7 to 47.2 degrees left 12.2 three frames later against a settled
+        // 1.8, and letting go took 40-150 frames -- the same with NRD off and at any REBLUR history
+        // depth, so the lag was never the denoiser's. Treating this frame as having no history restarts
+        // each pixel from its fresh candidate, traced under the new sun, and the next frame reuses those:
+        // with this and reuse history 1 (voxi_restir.hlsli) the same move read 9.7 / 2.6 / 1.7 at
+        // +3 / +17 / +42 frames against 12.2 / 8.7 / 3.8 before. What is left in the first frames is
+        // NRD's own history, deliberately not reset, so a drag stays denoised.
+        cb_.giRestirParams[1] = (giHistValid_ && !rtHistSunMoved()) ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);  // this frame's reservoir array slice
         // giRestirParams[3] (the poison-view flag; was "spare", repurposed rather than a new field --
         // see setGiPoisonView's own comment and giRestirIndirect's POISON DEBUG VIEW block,
