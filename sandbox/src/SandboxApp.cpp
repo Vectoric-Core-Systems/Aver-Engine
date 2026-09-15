@@ -3190,6 +3190,20 @@ public:
         // on it, rather than costing a whole extra frame of lag for no reason.
         if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
         if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
+        // --sun-set-at: the same write the Directional Light panel's Elevation/Azimuth sliders make.
+        if (sunSetAtFrames_ > 0 && --sunSetAtFrames_ == 0) {
+            sky_.setSunAngles(sunSetElevDeg_, sunSetAzimDeg_);
+            AVER_INFO("[Sandbox] --sun-set-at: sun moved to elevation {:.1f} deg, azimuth {:.1f} deg",
+                      sunSetElevDeg_, sunSetAzimDeg_);
+        }
+#if AVER_MODULE_VOXI
+        // --gi-history-reset-at: the resetgihistory and resetnrdhistory console commands' own requests.
+        if (giHistoryResetAtFrames_ > 0 && --giHistoryResetAtFrames_ == 0) {
+            voxi::Renderer::get().requestGiHistoryReset();
+            voxi::Renderer::get().requestNrdHistoryReset();
+            AVER_INFO("[Sandbox] --gi-history-reset-at: GI reservoir and NRD history reset requested");
+        }
+#endif
         // Clears the render-scale crash cookie once this session proves the scale survivable. Thirty
         // frames, not one: device loss is noticed at Present.
         // --shader-source: pick up an HLSL edit without restarting.
@@ -7434,6 +7448,11 @@ public:
     }
     void setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
     void setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
+    // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: see sunSetAtFrames_'s own comment.
+    void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg) {
+        sunSetAtFrames_ = framesIn; sunSetElevDeg_ = elevDeg; sunSetAzimDeg_ = azimDeg;
+    }
+    void setGiHistoryResetAt(int framesIn) { giHistoryResetAtFrames_ = framesIn; }
 #if AVER_MODULE_SR
     void setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }   // --aversr-cycle [N]
 #endif
@@ -25947,6 +25966,14 @@ private:
     int ptQualityRampCountdown_ = 0;
     int ptSceneToggleOnAutoFrames_ = 0;
     int ptSceneToggleOffAutoFrames_ = 0;
+    // --sun-set-at N ELEV AZIM and --gi-history-reset-at N: VERIFICATION ONLY. Simulate a human dragging
+    // the Directional Light panel's Elevation/Azimuth sliders, and typing resetgihistory +
+    // resetnrdhistory, N frames into a bounded --frames run -- the only way to capture what indirect
+    // light does in the frames AFTER a live sun move, which a level's own SUN line (applied before the
+    // first frame) can never show. Countdowns from process start, the same shape as the two above.
+    int sunSetAtFrames_ = 0;
+    f32 sunSetElevDeg_ = 0.0f, sunSetAzimDeg_ = 0.0f;
+    int giHistoryResetAtFrames_ = 0;
     // True while a stored non-unity render scale is on trial this session; see the prefs-apply site.
     bool renderScaleCookieArmed_ = false;
 #if AVER_MODULE_SR
@@ -28663,6 +28690,18 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--occlusion-waitidle")) occlusionWaitIdleArg = true;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--no-occlusion-waitidle")) occlusionNoWaitIdleArg = true;
+    // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: verification-only, see sunSetAtFrames_. Their
+    // own loops rather than the long else-if chain further down, which is at the compiler's nesting limit.
+    int sunSetAtArg = 0, giHistoryResetAtArg = 0;
+    f32 sunSetElevArg = 0.0f, sunSetAzimArg = 0.0f;
+    for (int i = 1; i + 3 < argc; ++i)
+        if (!std::strcmp(argv[i], "--sun-set-at")) {
+            sunSetAtArg   = std::atoi(argv[i + 1]);
+            sunSetElevArg = static_cast<f32>(std::atof(argv[i + 2]));
+            sunSetAzimArg = static_cast<f32>(std::atof(argv[i + 3]));
+        }
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--gi-history-reset-at")) giHistoryResetAtArg = std::atoi(argv[i + 1]);
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     bool openLevelPickerArg=false; std::string openLevelArg; bool noEditorChrome=false; bool sceneCensus=false;
@@ -29853,6 +29892,8 @@ Application* createApplication(int argc, char** argv) {
     if (ptQualityRamp > 0)    app->setPtQualityRamp(ptQualityRamp);
     if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
+    if (sunSetAtArg > 0)         app->setSunSetAt(sunSetAtArg, sunSetElevArg, sunSetAzimArg);
+    if (giHistoryResetAtArg > 0) app->setGiHistoryResetAt(giHistoryResetAtArg);
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
