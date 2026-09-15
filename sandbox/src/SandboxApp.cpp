@@ -2666,6 +2666,13 @@ public:
             if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
             // Same -1 sentinel reasoning: 0 is a real answer ("denoiser off"), not an absent flag.
             if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
+            // --reblur-accum N: the console's voxi.reblurMaxAccumulatedFrameNum, for a --frames run that
+            // has no console. No manifest key names it, and the manifest apply starts from the live
+            // settings, so setting it here once is enough; Voxi clamps it to NRD's own [0,63].
+            if (reblurAccumOverride_ >= 0) {
+                k.reblurMaxAccumulatedFrameNum = static_cast<u32>(reblurAccumOverride_);
+                AVER_INFO("[Voxi] --reblur-accum {}: REBLUR_DIFFUSE history depth", reblurAccumOverride_);
+            }
             voxi::Renderer::get().setSettings(k);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -8041,6 +8048,7 @@ public:
     // and visibility mode are read per pixel at draw time, not baked into a pipeline at load.
     void setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
     void setDenoiser(int n) { denoiserOverride_ = n; }                          // --denoiser 0|1
+    void setReblurAccum(int n) { reblurAccumOverride_ = n; }                    // --reblur-accum N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
     // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone --
@@ -25512,6 +25520,7 @@ private:
     // 0 (NoRay) is a real, meaningful value, not "flag not given".
     int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
+    int  reblurAccumOverride_=-1;    // --reblur-accum N: REBLUR_DIFFUSE history depth for a --frames run; -1 is "flag not given"
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) is what a build with no
@@ -28499,6 +28508,7 @@ Application* createApplication(int argc, char** argv) {
     // A/B against a manifest that already picks an estimator (RENDER.GIMODE) can be overridden at all.
     int giModeArg = -1;
     int denoiserArg = -1;   // --denoiser 0|1
+    int reblurAccumArg = -1;   // --reblur-accum N
     // REFRACTION: the tier picks a mode, these override it. -1 is "not given", the sentinel every
     // other render override here uses, since `take()` tests for exactly that -- a 0-means-absent
     // sentinel would make `--refraction 0` (OFF) silently undiscardable.
@@ -28557,6 +28567,8 @@ Application* createApplication(int argc, char** argv) {
         // same C1061 reason, and it exists at all because the pass needs the G-buffer -- which for
         // most of this pass's life meant it was reachable ONLY by also passing --gbuffer by hand.
         if (!std::strcmp(argv[i], "--denoiser"))              denoiserArg = std::atoi(argv[i + 1]);
+        // --reblur-accum N: REBLUR_DIFFUSE's history depth, the console's voxi.reblurMaxAccumulatedFrameNum.
+        if (!std::strcmp(argv[i], "--reblur-accum"))          reblurAccumArg = std::atoi(argv[i + 1]);
         // --rt-denoise-motion F: see VoxiRenderer::setRtDenoiseMotionTaper. In THIS loop rather than
         // the chain below for the reason stated at the top of it -- that chain is at MSVC's nesting
         // limit and one more else-if there is a hard compile error.
@@ -29698,6 +29710,7 @@ Application* createApplication(int argc, char** argv) {
                         "(none|reconstructed|half|full)", restirVisibilityArg);
     }
     app->setDenoiser(denoiserArg);
+    if (reblurAccumArg >= 0) app->setReblurAccum(reblurAccumArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);
