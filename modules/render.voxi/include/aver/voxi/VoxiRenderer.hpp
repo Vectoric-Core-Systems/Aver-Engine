@@ -122,10 +122,6 @@ public:
     //                gAverHistoryWrite gate (voxi.hlsl) and the optimisation-wave-2 plan's section 4.
     //                Unlike bits 1/4/8/16 above, this one also resets RT history (shadow/reflection/
     //                AO), not only GI and NRD -- see setLightingLegacyBits' own .cpp comment.
-    //   bit 64       a ReSTIR candidate hit shades with its material factors alone, no base-colour or
-    //                metal-rough map -- white bare metal for every textured glTF surface
-    //                (giTraceInitialCandidate, voxi_restir.hlsli). Textured ray-driven pipeline only;
-    //                resets GI and NRD.
     // 0 (the default) means every fix in the plan is live; setting a bit REINSTATES that one piece
     // of the OLD, WRONG behaviour, for comparison only -- never a setting to leave on, the same
     // posture setNrdLegacyCamera above takes. See EditorConsole.hpp's five voxi.legacy* variables
