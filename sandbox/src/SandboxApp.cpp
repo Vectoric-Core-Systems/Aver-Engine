@@ -8141,6 +8141,17 @@ public:
     // device-loss class aver-render-scale-device-loss documents.
     void updateAverSrAuto(Engine& e) {
         if (!voxiAttached_) return;
+#if AVER_WITH_IMGUI
+        // NOT BEFORE THE PREFERENCES HAVE LOADED. onUpdate runs BEFORE buildUI, and buildUI is where
+        // loadEditorPreferences first runs (prefsLoaded_). So on frame 1 this used to resolve a level from
+        // the member defaults (Auto), arm display.renderScalePending in the in-memory prefs store and
+        // apply it -- and loadEditorPreferences, later in that SAME frame, read the cookie this function
+        // had just armed as "the last launch did not survive applying Auto", latched
+        // averSrCookieTripped_ and forced AverSR Off. Every launch, whatever the Display choice or the
+        // project's RENDER.AVERSR asked for: the render scale sat at 1.0 no matter what was picked. A
+        // headless run never builds the UI or loads preferences, so there is nothing to wait for there.
+        if (!prefsLoaded_ && !headless_) return;
+#endif
         rhi::IDevice* dev = e.device();
         voxi::Renderer& vxr = voxi::Renderer::get();
 
@@ -22269,7 +22280,10 @@ private:
                 const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
                 if (stored == 1.0f) {
                     prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
-                } else if (pending) {
+                } else if (pending && !renderScaleCookieArmed_) {
+                    // `&& !renderScaleCookieArmed_`: a cookie THIS process armed is not evidence that the
+                    // PREVIOUS launch crashed -- see updateAverSrAuto's prefsLoaded_ gate for the frame-1
+                    // ordering that once made exactly that misreading happen on every launch.
                     AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
                                   "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
                                   "was not the cause; the scale itself is the thing that needs fixing.",
@@ -22283,7 +22297,9 @@ private:
                     renderScaleCookieArmed_ = true;
                     prefsDevice_->setRenderScale(stored);
                 }
-            } else if (pending) {
+            } else if (pending && !renderScaleCookieArmed_) {
+                // (`&& !renderScaleCookieArmed_`: same reason as the Manual branch above -- a cookie this
+                // process armed itself says nothing about the previous launch.)
                 // A NAMED LEVEL (or a level Auto resolved to in a PRIOR session) DID NOT SURVIVE ITS
                 // OWN LAUNCH -- the same crash this cookie already protects Manual's raw scale from,
                 // for a level applied through applyAverSrQuality instead of a raw setRenderScale.
@@ -22540,6 +22556,10 @@ private:
                     const char* itemLabel = i == 0 ? autoLabel.c_str() : kAverSrItems[i];
                     if (ImGui::Selectable(itemLabel, sel)) {
                         averSrMigrationNoteArmed_ = false;   // 3.3 A: cleared the moment ANY item is picked
+                        // AN EXPLICIT PICK LIFTS THE CRASH-COOKIE LATCH. The CRITICAL line that sets it
+                        // tells the user to "choose a level again if that was not the cause" -- which
+                        // did nothing while updateAverSrAuto kept forcing Off for the whole session.
+                        averSrCookieTripped_ = false;
                         averSrChoice_ = static_cast<editor::AverSrChoice>(i);
                         // Auto and Manual apply NOTHING here: Auto is picked up by updateAverSrAuto
                         // next frame (it needs vx.settings()/deviceInfo(), not available mid-UI-draw
@@ -23406,6 +23426,7 @@ private:
                 if (ImGui::Combo("Upscaling default (AverSR)", &projIdx, kProjDefaultItems, 5)) {
                     averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
                     averSrMigrationNoteArmed_ = false;
+                    averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch, as the Display combo's does
                     projectDirty_ = true;
                 }
                 uiReg_.track("project.averSr");
