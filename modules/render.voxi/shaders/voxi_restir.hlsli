@@ -1201,7 +1201,23 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         RTXDI_GISpatioTemporalResamplingParameters stparams = (RTXDI_GISpatioTemporalResamplingParameters)0;
         stparams.depthThreshold        = 0.1;
         stparams.normalThreshold       = 0.5;
-        // ---- 8, NOT 20, AND THE REASON IS THE STABILITY MARGIN RATHER THAN LAG ----
+        // ---- 1, NOT 8: A YOUNG HISTORY OVERSHOT, AND ITS DEPTH BOUGHT NOTHING NRD DID NOT ----
+        //
+        // MEASURED on PTTest's NewSponza, fixed camera and exposure, linear radiance x1000 on a shadowed
+        // arcade wall. At 8, reuse over-estimated while reservoirs were young and decayed to the right
+        // answer over ~70 frames: 3.6 at frame 45 against 2.3 settled, where the same pipeline with
+        // reuse removed read 2.4 at both. RTXDI_CombineGIReservoirs sums M across the fresh, temporal
+        // and spatial streams with only a per-tap clamp, so a lineage a few frames old claims far more
+        // independent samples than it holds, and the BASIC normalisation over-weights it. That transient
+        // is what a user saw after moving the sun -- bounce light lingering bright, then "going dark"
+        // over one to two seconds -- and resetting the history did not help, because a fresh history
+        // overshoots the same way. At 1: no overshoot (2.4 at frame 45), the same settled value (2.3), a
+        // sun move settled in ~20-35 frames instead of ~70-150, and no measurable noise cost after NRD --
+        // still-frame grain 0.112 vs 0.111, frame-to-frame flicker 0.0108 vs 0.0107 (relative RMS), and
+        // under a 6-degree camera wobble 1954 vs 1935 firefly outliers per frame with identical flicker.
+        //
+        // WHAT FOLLOWS IS THE EARLIER 20 -> 8 ANALYSIS, kept because the spatial tap count below still
+        // leans on it:
         //
         // Write the weight recursion with K taps each capped at M, plus the fresh candidate's M = 1:
         //     W_next = [ (PI/cos)*1 + K*M*J*W ] / (1 + K*M)
@@ -1228,11 +1244,9 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // tap instead of the measured ratio: E[J] over accepted taps is now exactly 1.0 by
         // construction, not merely close to it, so the contraction factor K*M/(1+K*M) is stable for
         // ANY K*M -- the runaway this margin analysis was defending against can no longer arise
-        // through the Jacobian at all. maxHistoryLength is left at 8 anyway rather than reopened
-        // here: revisiting it is a separate change from the two this task scoped (the Jacobian fix
-        // and the motion discount below), and 8 costs nothing now that it is no longer load-bearing
-        // for stability -- it just means less history than the number could safely support.
-        stparams.maxHistoryLength      = 8;
+        // through the Jacobian at all. That is what made dropping to 1 a free choice rather than a
+        // stability trade -- see the measurement at the top of this block.
+        stparams.maxHistoryLength      = 1;
         // ---- 0, AND THE 1 IT REPLACES WAS DISARMING EVERY SPATIAL TAP ----
         //
         // `usingFallback` inside RTXDI_GISpatioTemporalResampling is a LATCH, not a per-tap flag: it
