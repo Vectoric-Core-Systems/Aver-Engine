@@ -16175,18 +16175,26 @@ private:
     }
 
     // Selects whatever the cursor's ray hits first, across both the placeholder and scene worlds.
+    // Objects whose bounds contain the camera are skipped, not auto-selected -- see the t > 0.0f
+    // guard below.
     void pick(Engine& e, const ImGuiIO& io) {
         (void)e;
         Vec3 ro, rd;
         viewportRay(io.MousePos.x, io.MousePos.y, ro, rd);
         int best=-1; f32 bestT=1e30f;
+        // A START-INSIDE HIT IS SKIPPED HERE, in both loops below. rayAabb starts tmin at 0, so
+        // when ro is already inside an object's box it returns t == 0, which beats every other
+        // candidate's t > 0 -- the object whose bounds enclose the camera (a level shell, say) was
+        // selected by every click and nothing inside it could ever be picked. Same t > 0.0f guard
+        // dropWorldPoint already uses; the enclosing object stays selectable from the Outliner.
+        // BOUNDS ONLY: picking is AABB-only, so "inside" means inside the box, not the triangles.
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i){
                 MeshObj& o=objects_[i]; if(!o.visible) continue;
                 Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
                 const Mat4 iw = tr.toMatrix().inverse();
                 const Vec3 lo=xformPoint(iw,ro), ld=xformVec(iw,rd);
-                f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t<bestT){ bestT=t; best=i; }
+                f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t>0.0f && t<bestT){ bestT=t; best=i; }
             }
 
         // AvId, not scene::Entity: pick() spans both the placeholder and scene worlds, so bestEnt is
@@ -16212,7 +16220,7 @@ private:
                 if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
                 const Mat4 iw = w.worldMatrix(ent).inverse();
                 const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
-                f32 t; if (rayAabb(lo, ld, lmin, lmax, t) && t < bestT) { bestT = t; bestEnt = ent; best = -1; }
+                f32 t; if (rayAabb(lo, ld, lmin, lmax, t) && t > 0.0f && t < bestT) { bestT = t; bestEnt = ent; best = -1; }
             }
         }
 #endif
