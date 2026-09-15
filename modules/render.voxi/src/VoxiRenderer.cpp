@@ -730,14 +730,14 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
     const u32 changed = bits ^ lightingLegacyBits_;
     lightingLegacyBits_ = bits;
     AVER_INFO("[Voxi] lighting legacy bits: ring={} doubleCount={} hitSky={} reuseVis={} cones={} "
-              "blendedHistory={} (console)",
+              "blendedHistory={} hitUntextured={} (console)",
               (bits & 1u) ? 1 : 0, (bits & 2u) ? 1 : 0, (bits & 4u) ? 1 : 0, (bits & 8u) ? 1 : 0,
-              (bits & 16u) ? 1 : 0, (bits & 32u) ? 1 : 0);
-    // R0/R2/R3 (bits 1, 4, 8): the ReSTIR estimator itself samples, adds or reuses differently under
-    // these, so GI and NRD history accumulated on one side of the flip is a stale answer to a
-    // question the shader no longer asks the same way -- same reasoning resetGiHistory's own
-    // per-command comment gives for a console-driven reset.
-    if (changed & (1u | 4u | 8u)) { resetGiHistory(); resetNrdHistory(); }
+              (bits & 16u) ? 1 : 0, (bits & 32u) ? 1 : 0, (bits & 64u) ? 1 : 0);
+    // R0/R2/R3 (bits 1, 4, 8) and the untextured candidate hit (bit 64): the ReSTIR estimator itself
+    // samples, adds, reuses or shades differently under these, so GI and NRD history accumulated on
+    // one side of the flip is a stale answer to a question the shader no longer asks the same way --
+    // same reasoning resetGiHistory's own per-command comment gives for a console-driven reset.
+    if (changed & (1u | 4u | 8u | 64u)) { resetGiHistory(); resetNrdHistory(); }
     // R0 (bit 1) also reshapes the sky-occlusion ray (voxi_rt.hlsli), whose reprojected history AO
     // tracks separately from the GI reservoir's.
     if (changed & 1u) resetAoHistory();

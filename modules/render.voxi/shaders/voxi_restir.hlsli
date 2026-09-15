@@ -779,12 +779,10 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     const RtMaterial mat = gRtMaterials[inst.materialIndex];
     const float3 L = normalize(gLightDir.xyz);
 
-    // THE SAME UNTEXTURED SURFACE PSRayDriven BUILDS WHEN AVER_RT_BINDLESS ISN'T COMPILED IN --
-    // per-instance factor times per-material factor, no maps sampled. A second bounce is exactly
-    // where that approximation is cheapest to accept: RTXDI resamples this radiance over many
-    // frames (and, once a spatial pass lands, neighbours), so a flat-shaded hit converges toward a
-    // textured one's LOW-FREQUENCY answer, which is the only part indirect light hands back to the
-    // FIRST surface anyway.
+    // THE UNTEXTURED SURFACE PSRayDriven BUILDS WHEN AVER_RT_BINDLESS ISN'T COMPILED IN --
+    // per-instance factor times per-material factor -- is only the STARTING point here. Under
+    // AVER_RT_BINDLESS the hit's own base-colour map multiplies it just below; see that block for
+    // why "a flat-shaded hit converges toward the textured one's low-frequency answer" was wrong.
     AverSurface s = (AverSurface)0;
     s.N           = hitN;
     s.V           = -dir;
@@ -798,6 +796,44 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         s.H = vl2 > 1e-12 ? VL * rsqrt(vl2) : s.N;
     }
     s.albedo      = inst.albedo * mat.baseColorFactor.rgb;
+#ifdef AVER_RT_BINDLESS
+    // ---- THE HIT'S BASE-COLOUR MAP, WITHOUT WHICH EVERY TEXTURED SURFACE BOUNCED LIGHT AS WHITE ----
+    //
+    // The comment this replaces argued a flat-shaded hit converges to the textured one's
+    // LOW-FREQUENCY answer. It does not: resampling averages the radiance it is given, and a glTF
+    // material with a base-colour map carries baseColorFactor 1, so the "low-frequency answer" it
+    // converged to was a WHITE wall's, not the mean of the texture. Albedo enters one bounce twice
+    // (receiver x hit) and ray-driven primary visibility already textured the receiver, so the
+    // estimate came out too bright by about 1/mean(hit albedo).
+    //
+    // MEASURED on PTTest NewSponza, fixed camera, linear radiance x1000 on a shadowed arcade wall:
+    // ReSTIR's bounce light 11.5 against the complete-geometry path tracer's 3.0 at the same depth
+    // (3.8x); the same path tracer with its texture lookup removed jumped 3.0 -> 34.1. The long
+    // "darker and darker" settle is ReSTIR reuse's start-up transient on top of that over-bright level,
+    // not light being lost.
+    //
+    // THE FOOTPRINT is rtReflection's device (voxi_rt.hlsli) with a fixed 5% cone: a cosine-lobe
+    // bounce has no ray differential of its own, and mip 0 was measured there as a throughput cost,
+    // not just aliasing. Only the mip changes with it, never the texture's mean.
+    //
+    // The raster PSMainVoxi build has no bindless table, so a rasterised ReSTIR receiver still gets
+    // the flat factor -- a residual, stated rather than hidden. gAmbientParams.z bit 64 reinstates the
+    // untextured hit for comparison only (voxi.legacyRestirHitUntextured).
+    if (((uint)gAmbientParams.z & 64u) == 0u) {
+        const float2 candMeshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
+        const float2 candUV     = averRtSurfaceUV(mat, inst, hitPos, hitN, candMeshUV);
+        const float  candRad    = max(0.05 * q.CommittedRayT(), 1e-3);
+        const float3 candUp     = abs(hitN.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 candT      = normalize(cross(candUp, hitN));
+        const float3 candB      = cross(hitN, candT);
+        float2 candGx, candGy;
+        averRtUvGrad(mat, inst, hitN,
+                     gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
+                     gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
+                     candT * candRad, candB * candRad, candGx, candGy);
+        s.albedo *= averRtSampleSlot(mat, 0, candUV, candGx, candGy, float4(1, 1, 1, 1)).rgb;
+    }
+#endif
     s.metallic    = saturate(inst.metallic * mat.metallicFactor);
     s.rough       = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);
     s.ndv         = saturate(dot(s.N, s.V));

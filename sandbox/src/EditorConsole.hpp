@@ -792,6 +792,15 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "draw blended). Default OFF keeps W6's fix; VoxiRenderer::setLightingLegacyBits is the piece "
         "that resets GI/NRD/RT history on this bit's transition, the same as the five bits above it.",
         legacyBitRead(32u), legacyBitStage(32u)});
+    // The untextured ReSTIR candidate hit's legacy A/B switch -- one more bit of the same word, same
+    // posture as the six above: ON only to compare against the fixed image.
+    t.push_back({"voxi.legacyRestirHitUntextured", VarType::Bool, false,
+        "ON reinstates the pre-fix behaviour for comparison only: a ReSTIR candidate hit shades with "
+        "its material factors alone and never samples its base-colour map, so every textured surface "
+        "bounces light as if it were white and GI reads several times too bright (gAmbientParams.z "
+        "bit 64; textured ray-driven pipeline only). Default OFF samples the map and resets GI/NRD "
+        "history on either transition.",
+        legacyBitRead(64u), legacyBitStage(64u)});
     // ---- the engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME raw-slot/
     // deviceSetters shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s own comment
     // for why these three, unlike the tier/dial fields, cannot be staged as ordinary Settings dials).
