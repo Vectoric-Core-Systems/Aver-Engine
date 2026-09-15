@@ -796,6 +796,8 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         s.H = vl2 > 1e-12 ? VL * rsqrt(vl2) : s.N;
     }
     s.albedo      = inst.albedo * mat.baseColorFactor.rgb;
+    // The metal-rough map's two channels -- 1.0, no change, wherever the block below does not sample it.
+    float candRoughMap = 1.0, candMetalMap = 1.0;
 #ifdef AVER_RT_BINDLESS
     // ---- THE HIT'S BASE-COLOUR MAP, WITHOUT WHICH EVERY TEXTURED SURFACE BOUNCED LIGHT AS WHITE ----
     //
@@ -832,10 +834,23 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
                      gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
                      candT * candRad, candB * candRad, candGx, candGy);
         s.albedo *= averRtSampleSlot(mat, 0, candUV, candGx, candGy, float4(1, 1, 1, 1)).rgb;
+        // ---- THE METAL-ROUGH MAP TOO, AND WITHOUT IT EVERY AUTHORED HIT WAS BARE METAL ----
+        //
+        // An authored draw's look carries metallic and roughness 1.0 as pure multipliers
+        // (resolveSurfaceLook, SceneSubmission.hpp), and a glTF material with a metal-rough map carries
+        // metallicFactor and roughnessFactor 1 -- the real values live in the map, G roughness and B
+        // metallic, the packing PSRayDriven unpacks. Read from the factors alone, s.metallic came out
+        // 1.0 and kdAlbedo 0, so a hit returned only a specular glint of the sun. Untextured, that
+        // glint off a white metal passed for a bright bounce; once base colour was sampled it became a
+        // dark metal's, and first-bounce light measured 3.3x below the path tracer's on PTTest's arcade
+        // wall, leaving the sun-independent ambient to dominate: moving the sun barely changed it.
+        const float4 candMR = averRtSampleSlot(mat, 1, candUV, candGx, candGy, float4(1, 1, 1, 1));
+        candRoughMap = candMR.g;
+        candMetalMap = candMR.b;
     }
 #endif
-    s.metallic    = saturate(inst.metallic * mat.metallicFactor);
-    s.rough       = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);
+    s.metallic    = saturate(inst.metallic * mat.metallicFactor * candMetalMap);
+    s.rough       = clamp(inst.roughness * mat.roughnessFactor * candRoughMap, 0.045, 1.0);
     s.ndv         = saturate(dot(s.N, s.V));
     s.f90         = mat.f90;
     s.reflectance = mat.reflectance;
@@ -915,11 +930,9 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // comparison only. FALSE (the corrected default -- ON, per the user's own call, because this
     // extra ray sits behind the legacy bit rather than a second switch) traces one more cosine-
     // weighted ray from this hit instead: a miss reads the same sky function rtAmbientTraced's own
-    // miss branch uses (averSkyRadianceCheap), now genuinely visibility-tested; a hit inside the GI
-    // volume reads that voxel's stored exitant radiance directly -- the THIRD bounce, missing
-    // altogether before this -- and a hit outside the volume contributes nothing, the same rule
-    // rtAmbientTraced's own AVER_AO_UNIFIED branch already applies to the identical case (voxi_rt.hlsli,
-    // a few hundred lines up).
+    // miss branch uses (averSkyRadianceCheap), now genuinely visibility-tested; a hit is SHADED WHERE
+    // IT LANDS -- its own textured albedo under one sun shadow ray, the second bounce of the sun. See
+    // the hit branch itself, below, for why it no longer reads the GI volume.
     //
     // THE ARITHMETIC: L_o,ind(y) = (kd_y/PI) * Integral(L cos dw). Drawing the second direction from a
     // cosine-weighted hemisphere (rtHemiDiscSample, the same sampler F1 above uses -- streamSalt 0.71
@@ -928,8 +941,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // injection pass writes the volume under. In the open, V_y = 1 and this reduces exactly to the
     // legacy value above. gVoxelParams.y (giIntensity) is deliberately NOT applied on this branch: it
     // is applied exactly once, to the WHOLE estimate, at giRestirIndirect's own `est` -- applying it
-    // here too would double it on this one bounce alone. Approximation carried over unchanged from the
-    // volume's own injection: the value already contains AVER_VOX_FEEDBACK 3.0.
+    // here too would double it on this one bounce alone.
     //
     // THE NaN-SAFE CLAMP AT THIS FUNCTION'S OWN END STILL RUNS LAST, after `radiance` (built from indY
     // below, same as before) leaves this block -- F2 changes what feeds that clamp, not the clamp
@@ -940,10 +952,9 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // GAINS ONLY `|| f2Path == 0u` -- its body is UNCHANGED text, because f2Path == 0u already means
     // "legacy bit 4 is set, or giRestirVisibility is No ray" (the decode block folds both into the
     // one path number, 2.10 A), so this branch is correct for either reason without needing to know
-    // which. THE TRACE BRANCH'S BODY (the final `else`) IS BYTE-IDENTICAL to what stood here before
-    // this task -- only reached at f2Path == 3u now, and the three new `out` params are written at
-    // its own end, after `indY` is final, exactly mirroring what a caller who traced this ray would
-    // have observed.
+    // which. THE TRACE BRANCH (the final `else`) is only reached at f2Path == 3u, and the three new
+    // `out` params are written at its own end, after `indY` is final, exactly mirroring what a caller
+    // who traced this ray would have observed.
     float3 indY = 0.0;
     if (((uint)gAmbientParams.z & 4u) != 0u || f2Path == 0u) {
         indY = averSkyIrradiance(s.N) * gAmbient.r;
@@ -979,8 +990,58 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q2;
         q2.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r2); averRtProceedSolid(q2);
         if (q2.CommittedStatus() != COMMITTED_TRIANGLE_HIT) indY = averSkyRadianceCheap(dir2) * gAmbient.r;
-        else { const float3 uvw = voxelUVW(r2.Origin + dir2 * q2.CommittedRayT());
-               if (gVoxelParams.w > 0.5 && insideVolume(uvw)) indY = min(gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0).rgb, AVER_VOX_MAXRAD); }
+        else {
+            // ---- THE HIT IS SHADED WHERE IT LANDS, NOT READ BACK OUT OF THE GI VOLUME ----
+            //
+            // This used to read the voxel under the hit, and that value is not the second bounce.
+            // PSVoxel stores the sun PLUS a sky term whose visibility comes from one 60-degree cone over
+            // coarse mips, which under-occludes a thin roof, PLUS AVER_VOX_FEEDBACK x3 of the room -- a
+            // constant tuned against the path tracer back when that view traced only what the camera
+            // could see. MEASURED on PTTest's arcade wall, fixed camera, linear radiance x1000, sun at
+            // 72 / 35 degrees: that read added 7.7 / 6.8 where the complete path tracer's whole
+            // multi-bounce light is 0.9 / 0.9, and almost none of it moved with the sun -- so moving the
+            // sun barely changed an interior. With the volume's sky and feedback zeroed it added
+            // 0.4 / 0.4 against the path tracer's second bounce of 0.7 / 0.5. This computes that same
+            // quantity directly, and leaves the volume the cone gather still reads untouched. Diffuse
+            // only, like PSVoxel's own sun term; one shadow ray.
+            const RtInstance inst2 = gRtInstances[q2.CommittedInstanceID()];
+            const uint   tri2  = inst2.firstIndex + q2.CommittedPrimitiveIndex() * 3;
+            const uint   j0    = inst2.firstVertex + gRtIndices[tri2 + 0];
+            const uint   j1    = inst2.firstVertex + gRtIndices[tri2 + 1];
+            const uint   j2    = inst2.firstVertex + gRtIndices[tri2 + 2];
+            const float2 bary2 = q2.CommittedTriangleBarycentrics();
+            const float3 w2    = float3(1.0 - bary2.x - bary2.y, bary2.x, bary2.y);
+            const float3 nObj2 = normalize(gRtVerts[j0].nrm * w2.x + gRtVerts[j1].nrm * w2.y + gRtVerts[j2].nrm * w2.z);
+            float3 n2 = normalize(mul(float4(nObj2, 0.0), inst2.objectToWorld).xyz);
+            if (dot(n2, dir2) > 0.0) n2 = -n2;   // face the ray, as the candidate hit above does
+            const float ndl2 = saturate(dot(n2, L));
+            if (ndl2 > 0.0) {
+                const float3     hitPos2 = r2.Origin + dir2 * q2.CommittedRayT();
+                const RtMaterial mat2    = gRtMaterials[inst2.materialIndex];
+                float3 albedo2 = inst2.albedo * mat2.baseColorFactor.rgb;
+                float  metal2  = inst2.metallic * mat2.metallicFactor;
+#ifdef AVER_RT_BINDLESS
+                // The same two maps, footprint and bit-64 legacy switch as the candidate hit's own block.
+                if (((uint)gAmbientParams.z & 64u) == 0u) {
+                    const float2 uv2  = averRtSurfaceUV(mat2, inst2, hitPos2, n2, gRtVerts[j0].uv * w2.x + gRtVerts[j1].uv * w2.y + gRtVerts[j2].uv * w2.z);
+                    const float  rad2 = max(0.05 * q2.CommittedRayT(), 1e-3);
+                    const float3 up2b = abs(n2.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+                    const float3 t2   = normalize(cross(up2b, n2));
+                    const float3 b2   = cross(n2, t2);
+                    float2 g2x, g2y;
+                    averRtUvGrad(mat2, inst2, n2,
+                                 gRtVerts[j0].pos, gRtVerts[j1].pos, gRtVerts[j2].pos,
+                                 gRtVerts[j0].uv,  gRtVerts[j1].uv,  gRtVerts[j2].uv,
+                                 t2 * rad2, b2 * rad2, g2x, g2y);
+                    albedo2 *= averRtSampleSlot(mat2, 0, uv2, g2x, g2y, float4(1, 1, 1, 1)).rgb;
+                    metal2  *= averRtSampleSlot(mat2, 1, uv2, g2x, g2y, float4(1, 1, 1, 1)).b;
+                }
+#endif
+                const float3 kd2  = (1.0 - saturate(metal2)) * albedo2 * (1.0 - saturate(mat2.transmission));
+                const float3 vis2 = rtShadow(hitPos2, n2, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
+                indY = min(kd2 * averSunRadiance() * ndl2 * vis2 / PI, AVER_VOX_MAXRAD);
+            }
+        }
         // U1's HALF-RES HISTORY (2.10 E) NEEDS THIS PATH'S OWN LUMINANCE, SEPARATELY FROM THE SKY IT
         // WAS COMPARED AGAINST -- only reachable here, at f2Path == 3u, the one path that actually
         // traced. averShadowLum is this file's own standing luminance reduction (Rec.709 weights,

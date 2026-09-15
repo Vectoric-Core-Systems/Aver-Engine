@@ -796,10 +796,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // posture as the six above: ON only to compare against the fixed image.
     t.push_back({"voxi.legacyRestirHitUntextured", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: a ReSTIR candidate hit shades with "
-        "its material factors alone and never samples its base-colour map, so every textured surface "
-        "bounces light as if it were white and GI reads several times too bright (gAmbientParams.z "
-        "bit 64; textured ray-driven pipeline only). Default OFF samples the map and resets GI/NRD "
-        "history on either transition.",
+        "its material factors alone and never samples its base-colour or metal-rough map, so every "
+        "textured surface bounces light as if it were white bare metal (gAmbientParams.z bit 64; "
+        "textured ray-driven pipeline only). Default OFF samples both maps and resets GI/NRD history "
+        "on either transition.",
         legacyBitRead(64u), legacyBitStage(64u)});
     // ---- the engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME raw-slot/
     // deviceSetters shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s own comment
