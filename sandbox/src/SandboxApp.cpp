@@ -7873,6 +7873,18 @@ public:
                 voxiRenderer_.submit(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
                                      rs.matSet, rs.matConstants, rs.matBytes,
                                      /*translucent=*/rs.look.blended, route.hiddenFromOwner);
+                // THE PATH TRACER NEEDS THE SAME OFF-SCREEN GEOMETRY, AND THIS IS ITS ONLY WAY IN.
+                // PtSceneView::submitDraw is otherwise reached only through drawMesh(), which this
+                // branch exists to skip -- so the path-traced view traced a scene holding only what
+                // the camera could see (and no cluster-dispatched instance at all): no roof overhead,
+                // no wall behind the camera. Measured on PTTest NewSponza: Voxi's TLAS held 400
+                // instances while the path tracer "re-armed on 154", with 73 entities frustum-culled.
+                // Owner-hidden draws stay out: PtSceneView has no owner-hidden mask lane, so it would
+                // paint the owner's own body over the camera, and the raster route never hands it
+                // those either.
+                if (ptSceneView_ && !route.hiddenFromOwner)
+                    ptSceneView_->submitDraw(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
+                                             rs.matSet, rs.matConstants, rs.matBytes, rs.look.blended);
             }
 #endif
         }
