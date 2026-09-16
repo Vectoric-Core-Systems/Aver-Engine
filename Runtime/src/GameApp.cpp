@@ -21,6 +21,9 @@
 #if AVER_WITH_AUDIO_ABI
 #  include "aver/audio/audio_abi.h"
 #endif
+#if AVER_WITH_UI_ABI
+#  include "aver/ui/ui_abi.h"
+#endif
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #  include "aver/anim/AnimSystem.hpp"
@@ -906,6 +909,22 @@ void GameApp::attachVoxi(Engine& e) {
     (void)e;
 #endif
 }
+
+#if AVER_WITH_UI_ABI
+// The HUD's render feature: an overlay pass, so ordering against the scene features is free.
+void GameApp::attachGameUi(Engine& e) {
+    rhi::IDevice* dev = e.device();
+    if (!dev) return;
+
+    gameUi_ = render::ui::UiRenderer::create(*dev);
+    if (gameUi_) {
+        dev->addRenderFeature(gameUi_);
+        AVER_INFO("[Game] game UI attached");
+    } else {
+        AVER_WARN("[Game] game UI render feature failed to create -- the HUD will not draw");
+    }
+}
+#endif
 
 void GameApp::attachParticles(Engine& e) {
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
@@ -1843,6 +1862,9 @@ void GameApp::onInit(Engine& e) {
     // pass then asks drawHandle() for a posed handle that must already exist.
     attachSkinning(e);
     attachVoxi(e);
+#if AVER_WITH_UI_ABI
+    attachGameUi(e);
+#endif
     attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
@@ -2099,6 +2121,16 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
 #endif
 
+#if AVER_WITH_UI_ABI
+    // THE UI FRAME OPENS BEFORE GAMEPLAY TICKS, because ticking is when a game draws its HUD. The
+    // rect is the whole window: a game has no dockspace, the same reason pushFrame/viewAspect use
+    // the whole backbuffer. Opened even with no gameUi_, so a script always has a list to draw into.
+    {
+        const u32 uiW = e.window() ? e.window()->width()  : cfg_.width;
+        const u32 uiH = e.window() ? e.window()->height() : cfg_.height;
+        aver_ui_begin_frame(0.0f, 0.0f, static_cast<f32>(uiW), static_cast<f32>(uiH));
+    }
+#endif
     tickGameplay(t.dt);
     // BESIDE tickGameplay(), not a parallel loop of its own: this is the same per-frame call site,
     // just not gated on the same PLAYING check -- see tickProjectGraphs' own comment for why.
@@ -2185,6 +2217,16 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     pushFrame(e);
 }
 
+#if AVER_WITH_UI_ABI
+void GameApp::submitGameUi(Engine&) {
+    if (!gameUi_) return;
+
+    const auto* dl = static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list());
+    if (!dl) return;
+    gameUi_->submit(*dl);
+}
+#endif
+
 void GameApp::onRender(Engine& e) {
 #if AVER_MODULE_SCENE
     // FIRST PIXELS. onUpdate's pushFrame set the camera before beginFrame uploaded the frame
@@ -2210,6 +2252,10 @@ void GameApp::onRender(Engine& e) {
 #endif
         drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get(), opts);
     }
+#endif
+#if AVER_WITH_UI_ABI
+    // Before the screenshot request, so a --screenshot capture includes the HUD.
+    submitGameUi(e);
 #endif
     captureScreenshotIfDue(e);
 
@@ -2282,6 +2328,14 @@ void GameApp::onShutdown(Engine& e) {
         particlesAttached_ = false;
     }
     particleRenderer_.shutdown();
+#endif
+#if AVER_WITH_UI_ABI
+    // Registered after Voxi and before particles, so removed after particles and before Voxi.
+    if (dev && gameUi_) {
+        dev->removeRenderFeature(gameUi_);
+        delete gameUi_;
+        gameUi_ = nullptr;
+    }
 #endif
 #if AVER_MODULE_SCENE
     // Reverse registration order: skinning went in FIRST, so it comes out LAST of the two.

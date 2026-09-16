@@ -21,6 +21,9 @@
 #if AVER_MODULE_SCRIPTING
 #  include "aver/scripting/ScriptHost.hpp"
 #endif
+#if AVER_WITH_UI_ABI
+#  include "aver/render/ui/UiRenderer.hpp"
+#endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameRender.hpp"
@@ -232,6 +235,15 @@ private:
     void spawnParticleTestContent(rhi::IDevice& device);
 #endif
 
+#if AVER_WITH_UI_ABI
+    // Creates and registers the HUD's render feature. A create() failure is non-fatal: the game
+    // runs on with gameUi_ null and no HUD.
+    void attachGameUi(Engine& e);
+    // Hands the UI ABI's draw list to the HUD render feature, once per frame. The editor's
+    // submitGameUi also draws its UI demo widget first; that stays in the editor.
+    void submitGameUi(Engine& e);
+#endif
+
     // Attaches the density-volume builder and queues a build. --pcg-volume-test only.
     void attachPcgTest(Engine&);
     // Compares the finished GPU field against pcg::sampleDensity and reports. Returns true when the
@@ -438,6 +450,11 @@ private:
     // BY VALUE and registered NON-OWNING, same reasoning as voxiRenderer_ just above.
     particles::ParticleRenderer particleRenderer_;
     bool particlesAttached_ = false;
+#endif
+#if AVER_WITH_UI_ABI
+    // The HUD's render feature. Owned (UiRenderer::create hands back ownership, and there is no
+    // value to hold when it fails); null means no HUD.
+    render::ui::UiRenderer* gameUi_ = nullptr;
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     // Loaded once per level, right after level_.loadStartMap() -- mirrors SandboxApp's own nav_

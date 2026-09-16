@@ -100,6 +100,14 @@ if(TARGET Aver.Audio.Abi)
   target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Audio.Abi)
   target_compile_definitions(Aver.Runtime.Game PUBLIC AVER_WITH_AUDIO_ABI=1)
 endif()
+# The HUD renderer: the same three libraries Sandbox links for it. Aver.Render.UI links only
+# Aver.Core/Aver.UI/Aver.RHI, no ImGui, so stage-game.ps1's ImGui byte-scan of the exe still passes.
+# Aver.UI.Abi.dll is already on game.allowlist. Without this a HUD script's draw list was never
+# turned into pixels in a packaged game -- see GameApp's attachGameUi/submitGameUi.
+if(TARGET Aver.Render.UI AND TARGET Aver.UI.Abi)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.UI Aver.Render.UI Aver.UI.Abi)
+  target_compile_definitions(Aver.Runtime.Game PUBLIC AVER_WITH_UI_ABI=1)
+endif()
 # The lift plan's C1 list omitted this while its own DONE-WHEN expected SCRIPTING=1, and the module
 # report caught the contradiction on the first run. A game runs the project's C# gameplay, so it
 # needs the CLR host as much as the editor does -- more, since it has no other way to run anything.
