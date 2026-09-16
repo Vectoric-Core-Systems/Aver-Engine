@@ -63,9 +63,12 @@ Application* createApplication(int argc, char** argv) {
     // default) needs to tell those apart: a numeric port resolves right here and nothing may override
     // it; --mcp with no number defers to mcp.conf, resolved once engineRoot() can be asked.
     bool mcpRequested = false, mcpPortExplicit = false;
-    // --rd-ablate N, PARSED IN ITS OWN LOOP RATHER THAN THE CHAIN BELOW, not a style choice: the
-    // else-if chain that handles every other flag is already AT MSVC's block-nesting limit (C1061).
-    // Anything new lands here instead until that chain is broken up.
+    // --rd-ablate N, PARSED IN ITS OWN LOOP RATHER THAN THE CHAIN BELOW. When it was added the else-if
+    // chain that handles every other flag was AT MSVC's block-nesting limit (C1061), so this flag and
+    // every one after it went into a loop of its own; the C1061 notes on those loops record that. The
+    // chain was split into chunks on 2026-09-16 (see THE FLAG CHAIN, IN CHUNKS below), so a new flag
+    // can go there again. These loops stay as they are: several read a value without consuming it,
+    // and moving one into the chain would change which argument the bare-path fallback sees.
     // Removes ONE term from the ray-driven pixel shader so its cost can be attributed by difference. Every non-zero value renders a deliberately WRONG frame.
     int rdAblate = 0;
     // --gi-mode N: same C1061 reason as every other flag in this loop -- the else-if chain below is
@@ -458,6 +461,14 @@ Application* createApplication(int argc, char** argv) {
         }
 
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
+        // THE FLAG CHAIN, IN CHUNKS OF ~30. It was one else-if chain of 119 branches, which is
+        // MSVC's block-nesting limit: one more branch failed the build with C1061 at an unrelated line, and
+        // every flag added for months went into a separate loop above instead. Each chunk is still an
+        // else-if chain that runs its FIRST matching branch; its final `else` records that nothing in it
+        // matched, and only then does the next chunk run -- so exactly one branch runs, as before, in the
+        // same order. A new flag can go at the end of the last chunk; start a new chunk the same way if
+        // that one grows past ~30.
+        bool argMatched = true;
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
             const std::string loc = argv[++i], nm = argv[++i];
             fmt::ProjectDesc made;
@@ -725,11 +736,13 @@ Application* createApplication(int argc, char** argv) {
             reloadAt = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 20;
         }
         else if (!std::strcmp(argv[i],"--start-screen")) startScreen=true;
+        else argMatched = false;
+        if (!argMatched) { argMatched = true;   // flag chunk 2: only if no earlier chunk matched
         // --chunk-stream [N] switches chunk streaming on N frames in (default 5), the same "wait for
         // the project/scene to settle" pattern --reload-scripts uses, so a --frames capture can prove
         // streaming happened without a human clicking the menu.
         // --drone-graph <path> names the .ocgraph the drone runs. Without it the drone spawns and sits still -- honest for an engine that doesn't know any project's scripts.
-        else if (!std::strcmp(argv[i],"--drone-graph") && i+1<argc) droneGraph = argv[++i];
+        if (!std::strcmp(argv[i],"--drone-graph") && i+1<argc) droneGraph = argv[++i];
         // --landscape <path.ocland> overrides the levelname.ocland convention loadLandscapeForLevel
         // otherwise derives. Exists so a --frames capture can prove the LOD-selection path draws real
         // terrain without a level file naming one and without a human clicking anything.
@@ -845,10 +858,13 @@ Application* createApplication(int argc, char** argv) {
         // occluded fragment skips PSMainVoxi's shadow lookup/cone trace/fog entirely. Unset (the
         // default) reproduces pre-existing behaviour exactly -- see setDepthPrepassOverride's comment.
         else if (!std::strcmp(argv[i],"--depth-prepass")) depthPrepass=true;
+        else argMatched = false;
+        }   // end of flag chunk 2
+        if (!argMatched) { argMatched = true;   // flag chunk 3: only if no earlier chunk matched
         // --gbuffer: the thin forward-pass G-buffer (IDevice::setGBufferEnabled) -- velocity, view-
         // space depth, world normal+roughness, written ALONGSIDE the ordinary scene pass. Unset
         // (default) never calls it, so an unmodified run stays bit-identical to a tree that never heard of it.
-        else if (!std::strcmp(argv[i],"--gbuffer")) gbuffer=true;
+        if (!std::strcmp(argv[i],"--gbuffer")) gbuffer=true;
         // --gbuffer-debug MODE (velocity|viewz|normals): forces the G-buffer on -- like --gi-debug
         // forces --gi on -- and selects which channel GBufferDebugFeature draws. THIS is the flag that
         // makes `--frames N --probe X Y` able to assert anything about a texture nothing else samples yet.
@@ -903,6 +919,9 @@ Application* createApplication(int argc, char** argv) {
         // this proves. Same "[N] optional, default given" shape as --chunk-stream.
         // --device-lost-at <N>: SIMULATE the GPU being taken away after N presented frames, exercising the device-lost path without a real GPU disappearing.
         else if (!std::strcmp(argv[i],"--device-lost-at") && i+1<argc) deviceLostAt=std::atoi(argv[++i]);
+        else argMatched = false;
+        }   // end of flag chunk 3
+        if (!argMatched) { argMatched = true;   // flag chunk 4: only if no earlier chunk matched
         // --crash-test <kind>: deliberately kill this process, to prove the crash handler works.
         // A CRASH REPORTER THAT HAS NEVER BEEN SEEN TO FIRE IS NOT A FEATURE, it is a hope: the whole
         // mechanism only runs on the worst possible day to discover a typo in it. UE has the same
@@ -910,7 +929,7 @@ Application* createApplication(int argc, char** argv) {
         // Kinds map to distinct paths that do NOT share code: `av` faults the SEH filter, `assert`/
         // `fatal` go through AVER_ASSERT/AVER_FATAL, and `critical` logs and exits cleanly, testing the
         // standby-reporter wake path with no corpse.
-        else if (!std::strcmp(argv[i],"--crash-test") && i+1<argc) crashTest=argv[++i];
+        if (!std::strcmp(argv[i],"--crash-test") && i+1<argc) crashTest=argv[++i];
         // --pt-quality-ramp [N]: raise the Path Tracing rung one step every N frames, on a LIVE
         // view. Verification-only, same "[N] optional, default given" shape as the toggles below.
         else if (!std::strcmp(argv[i],"--pt-quality-ramp")) {
@@ -1023,6 +1042,7 @@ Application* createApplication(int argc, char** argv) {
             else if (isLevelFile(argv[i])) openMap = argv[i];
             else                           beam    = argv[i];
         }
+        }   // end of flag chunk 4
     }
 
     // SINGLE-INSTANCE FORWARDING, SENDER-SIDE GATE, placed after the bare-arg loop classifies
