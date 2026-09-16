@@ -15,8 +15,10 @@
 // the mesh is the right view for everything else. Deleting them to celebrate the mesh would have
 // traded one incomplete answer for another.
 #include "AnimEditor.hpp"
+#include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorWidgets.hpp"
+#include "SnapshotUndo.hpp"
 #include "AnimCurveGeometry.hpp"
 
 #include "ActorEditor.hpp"
@@ -301,7 +303,43 @@ public:
     // file's own draw() for both.
     void resetLayout() override;
 
+    // Snapshot undo, through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) -- see
+    // pushUndo()'s own .cpp comment for what each of the two stacks holds and why there are two.
+    void pushUndo();
+    void undo();
+    void redo();
+    bool canUndo() const { return isClip_ ? clipHistory_.canUndo() : socketHistory_.canUndo(); }
+    bool canRedo() const { return isClip_ ? clipHistory_.canRedo() : socketHistory_.canRedo(); }
+
 private:
+    // Snapshot undo state. TWO STACKS, not one: this tab edits two different assets depending on
+    // isClip_ -- a clip's notifies/notifyDurations/curves/flags on a .ocanim, or a rig's sockets on a
+    // .ocskel -- and they save() to two different files. A single shared stack would let an Undo
+    // pressed while looking at one asset pop an entry that was really a snapshot of the OTHER one,
+    // overwriting whichever is on screen with a value that was never part of it -- see pushUndo()'s
+    // own comment for the full reasoning.
+    //
+    // ONLY THE FIELDS THIS EDITOR CAN WRITE are snapshotted, not a whole clip or a whole skeleton --
+    // ParticleEditor.hpp's own comment on AnimEditor explains why: clip_.tracks carries every sampled
+    // key an importer wrote, and copying that array on a key drag this editor never touches would be
+    // a cost with nothing behind it. skel_.bones is read-only here for the same reason -- selectedBone_
+    // picks one; nothing on this tab moves one. So the clip side snapshots as this small bundle, and
+    // the socket side snapshots as itself, matching SoundEditor's own "State IS the record" shape.
+    struct ClipUndoState {
+        std::vector<fmt::OcNotify> notifies;
+        std::vector<f32> notifyDurations;
+        std::vector<fmt::OcCurve> curves;
+        u8 flags = 0;
+    };
+    SnapshotUndo<ClipUndoState> clipHistory_;
+    SnapshotUndo<std::vector<fmt::OcSocket>> socketHistory_;
+    // Copies an undo/redo result back onto clip_ or skel_.sockets, clamps whichever selection index
+    // that mode owns, and re-syncs its text-edit buffer -- ParticleEditor's own syncEditBuffers()
+    // reason: a buffer left holding the pre-undo name would show text that disagrees with the row
+    // underneath it until the author happened to retype it.
+    void applyClipUndoState(ClipUndoState&& s);
+    void applySocketUndoState();
+
     void drawTransport();
     void drawTimeline();
     void drawTracks();
@@ -411,17 +449,81 @@ private:
     SplitPane split_;
 };
 
+// Pushes the current state of whichever asset isClip_ says is being edited -- see the header's own
+// ClipUndoState comment for the two shapes and why there are two stacks rather than one. Every edit
+// site below calls this immediately before the mutation it guards, the same "push, then apply" order
+// every other asset editor's own pushUndo() call sites use.
+//
+// DISPATCHES ON isClip_ RATHER THAN TAKING A MODE ARGUMENT, because every call site already only runs
+// while its own mode is active: drawNotifies(), drawCurves() and the flag checkboxes all early-return
+// unless isClip_, and drawSockets()' own editable half runs only when it is not -- so the stack this
+// picks always agrees with the edit it is about to record.
+void AnimEditor::pushUndo() {
+    if (isClip_) clipHistory_.push(ClipUndoState{clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags});
+    else         socketHistory_.push(skel_.sockets);
+}
+
+void AnimEditor::applyClipUndoState(ClipUndoState&& s) {
+    clip_.notifies = std::move(s.notifies);
+    clip_.notifyDurations = std::move(s.notifyDurations);
+    clip_.curves = std::move(s.curves);
+    clip_.flags = s.flags;
+    // The selections are INDICES, and undo/redo can shrink either array under them.
+    if (selectedNotify_ >= static_cast<int>(clip_.notifies.size())) selectedNotify_ = -1;
+    else if (selectedNotify_ >= 0)
+        std::snprintf(notifyNameBuf_, sizeof notifyNameBuf_, "%s",
+                      clip_.notifies[static_cast<usize>(selectedNotify_)].name.c_str());
+    if (selectedCurve_ >= static_cast<int>(clip_.curves.size())) selectedCurve_ = -1;
+    else if (selectedCurve_ >= 0)
+        std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s",
+                      clip_.curves[static_cast<usize>(selectedCurve_)].name.c_str());
+}
+
+void AnimEditor::applySocketUndoState() {
+    if (selectedSocket_ >= static_cast<int>(skel_.sockets.size())) selectedSocket_ = -1;
+    else if (selectedSocket_ >= 0)
+        std::snprintf(socketNameBuf_, sizeof socketNameBuf_, "%s",
+                      skel_.sockets[static_cast<usize>(selectedSocket_)].name.c_str());
+}
+
+void AnimEditor::undo() {
+    if (isClip_) {
+        ClipUndoState s{clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags};
+        if (!clipHistory_.undo(s)) return;
+        applyClipUndoState(std::move(s));
+    } else {
+        if (!socketHistory_.undo(skel_.sockets)) return;
+        applySocketUndoState();
+    }
+    dirty_ = true;
+}
+
+void AnimEditor::redo() {
+    if (isClip_) {
+        ClipUndoState s{clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags};
+        if (!clipHistory_.redo(s)) return;
+        applyClipUndoState(std::move(s));
+    } else {
+        if (!socketHistory_.redo(skel_.sockets)) return;
+        applySocketUndoState();
+    }
+    dirty_ = true;
+}
+
 void AnimEditor::reloadIfNeeded() {
     if (!reload_) return;
     reload_ = false;
     std::string why;
     if (isClip_) {
         fmt::OcAnimation c;
-        if (fmt::loadOcAnim(path_, c, &why)) clip_ = std::move(c);
+        // A RELOAD REPLACES clip_ WHOLE, so any undo entry recorded against the old content would
+        // restore data that no longer belongs to what is on screen -- cleared for the same reason
+        // openClip() below clears it when the author switches to a different clip file entirely.
+        if (fmt::loadOcAnim(path_, c, &why)) { clip_ = std::move(c); clipHistory_.clear(); }
         else AVER_WARN("[AnimEditor] {}", why);
     } else {
         fmt::OcSkeleton s;
-        if (fmt::loadOcSkel(path_, s, &why)) skel_ = std::move(s);
+        if (fmt::loadOcSkel(path_, s, &why)) { skel_ = std::move(s); socketHistory_.clear(); }
         else AVER_WARN("[AnimEditor] {}", why);
     }
 }
@@ -494,6 +596,11 @@ void AnimEditor::openClip(const std::string& path) {
     time_ = 0.0f;
     playing_ = true;
     selectedBone_ = -1;
+    // A DIFFERENT CLIP, not an edit to this one -- clipHistory_'s entries described the clip just
+    // replaced, and an Undo reaching past this point would restore ITS notifies/curves/flags onto
+    // the one now on screen. See pushUndo()'s own comment for why the two assets this tab can open
+    // never share a stack; a clip swapped for another of the same kind gets the same treatment.
+    clipHistory_.clear();
 }
 
 void AnimEditor::drawAssetBrowser() {
@@ -705,6 +812,7 @@ void AnimEditor::drawCurves() {
     if (!isClip_) { ImGui::TextDisabled("a skeleton has no curves"); return; }
 
     if (ImGui::SmallButton("Add curve")) {
+        pushUndo();
         fmt::OcCurve c;
         // Made unique on creation, for the reason a socket is: curve() returns the FIRST match, so a
         // duplicate name leaves the loser permanently unreadable by name.
@@ -754,7 +862,7 @@ void AnimEditor::drawCurves() {
                 if (clash && clash != &c) {
                     AVER_WARN("[AnimEditor] a curve called '{}' already exists on this clip", next);
                     std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s", c.name.c_str());
-                } else if (!next.empty() && next != c.name) { c.name = next; dirty_ = true; }
+                } else if (!next.empty() && next != c.name) { pushUndo(); c.name = next; dirty_ = true; }
             }
 
             // CUBICSPLINE IS OFFERED NOW that a curve has somewhere to keep tangents (CTAN). Picking
@@ -765,6 +873,7 @@ void AnimEditor::drawCurves() {
             int mode = c.interp == fmt::OcInterp::Step ? 1 : (c.interp == fmt::OcInterp::CubicSpline ? 2 : 0);
             ImGui::SetNextItemWidth(w);
             if (ImGui::Combo("Interp", &mode, "Linear\0Step\0CubicSpline\0")) {
+                pushUndo();
                 c.interp = mode == 1 ? fmt::OcInterp::Step
                          : mode == 2 ? fmt::OcInterp::CubicSpline
                                      : fmt::OcInterp::Linear;
@@ -782,6 +891,7 @@ void AnimEditor::drawCurves() {
             const bool hasTangents = c.inTangents.size() == c.times.size() && c.outTangents.size() == c.times.size();
 
             if (ImGui::SmallButton("Add key at playhead")) {
+                pushUndo();
                 // INSERTED IN TIME ORDER. The sampler binary-searches `times`, so an out-of-order key
                 // does not merely look odd in the list -- it makes every lookup past it wrong.
                 usize at = 0;
@@ -799,6 +909,7 @@ void AnimEditor::drawCurves() {
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Delete curve")) {
+                pushUndo();
                 clip_.curves.erase(clip_.curves.begin() + static_cast<isize>(i));
                 selectedCurve_ = -1;
                 dirty_ = true;
@@ -816,7 +927,12 @@ void AnimEditor::drawCurves() {
                 ImGui::PushID(static_cast<int>(k));
                 f32 kv[2] = {c.times[k], c.values[k]};
                 ImGui::SetNextItemWidth(w * 1.4f);
-                if (ImGui::DragFloat2("##key", kv, 0.01f)) {
+                const bool keyChanged = ImGui::DragFloat2("##key", kv, 0.01f);
+                // ONE DRAG IS ONE UNDO ENTRY, not one per frame: pushed at the moment the drag
+                // ACTIVATES, before this frame's delta (if any) has been applied below, rather than
+                // once per frame while it is held.
+                if (ImGui::IsItemActivated()) pushUndo();
+                if (keyChanged) {
                     // The time is CLAMPED BETWEEN ITS NEIGHBOURS rather than sorted after the fact, so
                     // dragging a key can never reorder the array under the binary search. Dragging past
                     // a neighbour holds instead of swapping -- delete and re-add to move a key past
@@ -829,6 +945,7 @@ void AnimEditor::drawCurves() {
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("x")) {
+                    pushUndo();
                     // KEPT PARALLEL on delete too, same reason as the insert above.
                     if (hasTangents) {
                         c.inTangents.erase(c.inTangents.begin() + static_cast<isize>(k));
@@ -945,6 +1062,10 @@ void AnimEditor::drawCurveWidget(fmt::OcCurve& c) {
         const CurveHitResult hit = curveHitTest(layout, Vec2{mouse.x, mouse.y}, hitRadius);
         curveDragKind_ = hit.kind;
         curveDragKeyIndex_ = hit.keyIndex;
+        // ONE UNDO ENTRY PER GESTURE, pushed at this press rather than per frame of the drag below --
+        // and only when the press actually landed on something draggable, so a click on empty canvas
+        // (which moves nothing) does not leave a no-op entry on the stack.
+        if (curveDragKind_ != CurveHitKind::None) pushUndo();
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) curveDragKind_ = CurveHitKind::None;
 
@@ -1042,6 +1163,7 @@ void AnimEditor::drawSockets() {
     const bool haveBone = selectedBone_ >= 0 && static_cast<usize>(selectedBone_) < skel_.bones.size();
     ImGui::BeginDisabled(!haveBone);
     if (ImGui::SmallButton("Add on selected bone")) {
+        pushUndo();
         fmt::OcSocket k;
         k.bone = static_cast<u32>(selectedBone_);
         // NAMED AFTER THE BONE AND MADE UNIQUE, because the format does not enforce unique names and
@@ -1097,6 +1219,7 @@ void AnimEditor::drawSockets() {
                     AVER_WARN("[AnimEditor] a socket called '{}' already exists on this rig", next);
                     std::snprintf(socketNameBuf_, sizeof socketNameBuf_, "%s", k.name.c_str());
                 } else if (!next.empty() && next != k.name) {
+                    pushUndo();
                     k.name = next;
                     dirty_ = true;
                 }
@@ -1108,6 +1231,7 @@ void AnimEditor::drawSockets() {
             // silently did nothing when clicked.
             ImGui::BeginDisabled(!haveBone);
             if (ImGui::SmallButton("Move to selected bone") && k.bone != static_cast<u32>(selectedBone_)) {
+                pushUndo();
                 k.bone = static_cast<u32>(selectedBone_);
                 dirty_ = true;
             }
@@ -1120,13 +1244,19 @@ void AnimEditor::drawSockets() {
             // case where it IS what you have.
             f32 t[3] = {k.translation.x, k.translation.y, k.translation.z};
             ImGui::SetNextItemWidth(w * 1.6f);
-            if (ImGui::DragFloat3("Offset (cm)", t, 0.25f)) {
+            const bool offsetChanged = ImGui::DragFloat3("Offset (cm)", t, 0.25f);
+            // ONE DRAG IS ONE UNDO ENTRY -- pushed at activation, before any of this drag's own delta
+            // is applied below, not once per frame while it is held.
+            if (ImGui::IsItemActivated()) pushUndo();
+            if (offsetChanged) {
                 k.translation = Vec3{t[0], t[1], t[2]};
                 dirty_ = true;
             }
             f32 q[4] = {k.rotation.x, k.rotation.y, k.rotation.z, k.rotation.w};
             ImGui::SetNextItemWidth(w * 1.6f);
-            if (ImGui::DragFloat4("Rotation (xyzw)", q, 0.01f)) {
+            const bool rotChanged = ImGui::DragFloat4("Rotation (xyzw)", q, 0.01f);
+            if (ImGui::IsItemActivated()) pushUndo();
+            if (rotChanged) {
                 // RENORMALISED ON EDIT. Dragging four components independently leaves a quaternion
                 // that is not a rotation, and the composition downstream would scale the attachment
                 // rather than turn it. A zero-length drag falls back to identity instead of NaN.
@@ -1137,6 +1267,7 @@ void AnimEditor::drawSockets() {
             }
 
             if (ImGui::SmallButton("Delete")) {
+                pushUndo();
                 skel_.sockets.erase(skel_.sockets.begin() + static_cast<isize>(i));
                 selectedSocket_ = -1;
                 dirty_ = true;
@@ -1171,6 +1302,7 @@ void AnimEditor::drawNotifies() {
     ImGui::SameLine();
 
     if (ImGui::SmallButton("Add at playhead")) {
+        pushUndo();
         fmt::OcNotify n;
         n.time = time_;
         n.name = "OnNotify";
@@ -1229,12 +1361,16 @@ void AnimEditor::drawNotifies() {
                 // trailing space is silently unhelpful rather than an error worth refusing.
                 while (!next.empty() && next.front() == ' ') next.erase(next.begin());
                 while (!next.empty() && next.back() == ' ') next.pop_back();
-                if (!next.empty() && next != n.name) { n.name = next; dirty_ = true; }
+                if (!next.empty() && next != n.name) { pushUndo(); n.name = next; dirty_ = true; }
             }
             f32 t = n.time;
             const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
             ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
-            if (ImGui::SliderFloat("Time", &t, 0.0f, dur, "%.3f s")) {
+            const bool timeChanged = ImGui::SliderFloat("Time", &t, 0.0f, dur, "%.3f s");
+            // ONE DRAG IS ONE UNDO ENTRY -- pushed at activation, before this widget's own apply below,
+            // not once per frame while the slider is held.
+            if (ImGui::IsItemActivated()) pushUndo();
+            if (timeChanged) {
                 n.time = t;
                 time_ = t;
                 playing_ = false;
@@ -1246,13 +1382,16 @@ void AnimEditor::drawNotifies() {
             // banner for what the runtime does with a non-zero value.
             f32 stateDur = notifyDurationAt(i);
             ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
-            if (ImGui::SliderFloat("Duration", &stateDur, 0.0f, dur, "%.3f s")) {
+            const bool durChanged = ImGui::SliderFloat("Duration", &stateDur, 0.0f, dur, "%.3f s");
+            if (ImGui::IsItemActivated()) pushUndo();
+            if (durChanged) {
                 setNotifyDuration(i, stateDur);
                 dirty_ = true;
             }
             ImGui::SameLine();
             ImGui::TextDisabled(stateDur > 0.0f ? "(state)" : "(instant)");
             if (ImGui::SmallButton("Delete")) {
+                pushUndo();
                 clip_.notifies.erase(clip_.notifies.begin() + static_cast<isize>(i));
                 if (!clip_.notifyDurations.empty())
                     clip_.notifyDurations.erase(clip_.notifyDurations.begin() + static_cast<isize>(i));
@@ -1409,6 +1548,7 @@ void AnimEditor::flagCheckbox(u8 bit, const char* label) {
 #if AVER_WITH_IMGUI
     bool set = (clip_.flags & bit) != 0;
     if (ImGui::Checkbox(label, &set)) {
+        pushUndo();
         if (set) clip_.flags = static_cast<u8>(clip_.flags | bit);
         else     clip_.flags = static_cast<u8>(clip_.flags & ~bit);
         dirty_ = true;
@@ -1435,6 +1575,27 @@ void AnimEditor::draw(Engine& e) {
             else if (time_ >= clip_.duration) { time_ = clip_.duration; playing_ = false; }
         }
     }
+
+    // Ctrl+Z / Ctrl+Y reach the same undo()/redo() the buttons below call: guarded by canUndo()/
+    // canRedo() the way the buttons are, and skipped while an InputText has focus -- it has its own
+    // Ctrl+Z, and WantTextInput is how SoundEditor.cpp's own block already tells the two apart. Which
+    // stack either one reaches follows isClip_, exactly as pushUndo() does -- see its own comment.
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        if (focused && !io.WantTextInput) {
+            if (canUndo() && keybinds().pressed(CommandId::EditUndo, io)) undo();
+            if (canRedo() && keybinds().pressed(CommandId::EditRedo, io)) redo();
+        }
+    }
+    ImGui::BeginDisabled(!canUndo());
+    if (ImGui::Button(ICON_UNDO " Undo")) undo();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!canRedo());
+    if (ImGui::Button(ICON_REDO " Redo")) redo();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
 
     ImGui::Text("%s", isClip_ ? "Animation clip" : "Skeleton");
     ImGui::SameLine();

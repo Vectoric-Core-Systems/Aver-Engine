@@ -33,10 +33,9 @@
 // State is stored BY VALUE in both stacks and must be copyable (GraphEditor::UndoState,
 // fmt::OcSoundData and fmt::OcBtData all already are, which is what made the original triads
 // possible in the first place) -- a whole-state snapshot IS a copy of the whole state, by
-// construction. That copy is also why AnimEditor is explicitly not a candidate for this template
-// yet: its clip_ carries full sample arrays, and copying that on every edit is a cost this header
-// does nothing to hide. See aver-node-parity-style notes elsewhere; the decision is out of scope
-// here, not made here.
+// construction. That copy is why AnimEditor snapshots only what it edits (notifies, curves, flags, or
+// its skeleton's sockets) rather than its whole clip_, whose full sample arrays would be copied on
+// every edit -- this header does nothing to hide that cost, so the State a caller picks is the lever.
 #include <cstddef>
 #include <utility>
 #include <vector>

@@ -22,6 +22,7 @@
 // HostBridge.cs's DispTickAll for where that call used to sit and why it was deleted outright rather
 // than kept as a no-op.
 
+using System;
 using System.Collections.Generic;
 using Aver.Scene;
 
@@ -208,6 +209,84 @@ public abstract class InputMappingContext
     /// <summary>Binds the wheel to a single axis.</summary>
     protected void BindMouseWheel(InputAction action, float scale = 1f) =>
         Bindings.Add(new InputBinding(action, InputSource.MouseWheel, Key.A, scale, 0));
+
+    // The bindings a subclass's constructor set up, captured the first time any of Save/Load/
+    // ResetToDefaults below touches this instance -- NOT in a constructor of this base class, because
+    // that runs BEFORE the derived constructor's BindKey/BindAxis1D/... calls have added anything.
+    // Capturing lazily, on first touch, is equivalent as long as nothing else mutates Bindings first,
+    // and nothing else in this assembly does: these three methods are the only writers Bindings has.
+    private List<InputBinding>? _defaultBindings;
+
+    private void CaptureDefaultsIfNeeded() => _defaultBindings ??= new List<InputBinding>(Bindings);
+
+    // One key per binding SLOT, not per binding list index: BindAxis2D alone adds four bindings that
+    // all share one InputAction, and inserting a fifth ahead of them in a future version of a context
+    // would silently renumber -- and thus misload -- every slot after it. Names, not the InputSource/
+    // Key enum's underlying ints, so a value read back after an enum is reordered or extended still
+    // resolves to the right member instead of silently becoming a different one.
+    private static string SlotKeyPrefix(string contextName, string actionName, int slot) =>
+        $"Rebind.{contextName}.{actionName}.{slot}";
+
+    /// <summary>Writes this context's current bindings to <see cref="Settings"/> (which must already be
+    /// open), one Source/Key pair per binding slot. Does not call <see cref="Settings.Flush"/> itself
+    /// -- call it once after saving whatever else belongs to the same save point, the same way every
+    /// other <c>Settings.Set*</c> call works.</summary>
+    public void SaveBindings()
+    {
+        CaptureDefaultsIfNeeded();
+        var slotByAction = new Dictionary<string, int>();
+        foreach (InputBinding b in Bindings)
+        {
+            slotByAction.TryGetValue(b.Action.Name, out int slot);
+            slotByAction[b.Action.Name] = slot + 1;
+            string prefix = SlotKeyPrefix(Name, b.Action.Name, slot);
+            Settings.SetString(prefix + ".Source", b.Source.ToString());
+            Settings.SetString(prefix + ".Key", b.Key.ToString());
+        }
+    }
+
+    /// <summary>Reads bindings <see cref="SaveBindings"/> previously wrote back over this context's
+    /// current ones. A slot with nothing stored, or a stored Source/Key that no longer names an enum
+    /// member (a hand-edited or stale settings file, or one saved by a build that has since dropped a
+    /// binding) is left exactly as it already was -- THIS NEVER THROWS and never blanks a default down
+    /// to some zero value. Only touches <see cref="Bindings"/>; if this context is already pushed, call
+    /// <see cref="EnhancedInput.AddContext"/> again afterwards (safe to call on an already-pushed
+    /// context -- it replaces it) to carry the change onto the native side.</summary>
+    public void LoadBindings()
+    {
+        CaptureDefaultsIfNeeded();
+        var slotByAction = new Dictionary<string, int>();
+        for (int i = 0; i < Bindings.Count; i++)
+        {
+            InputBinding b = Bindings[i];
+            slotByAction.TryGetValue(b.Action.Name, out int slot);
+            slotByAction[b.Action.Name] = slot + 1;
+            string prefix = SlotKeyPrefix(Name, b.Action.Name, slot);
+            if (!Settings.Has(prefix + ".Source") || !Settings.Has(prefix + ".Key")) continue;
+            // TryParse alone is not enough: it also accepts a bare numeric string ("Key=9999") and
+            // hands back that int reinterpreted as the enum, defined member or not -- exactly the
+            // silent-garbage case a hand-edited settings file is here to guard against. IsDefined
+            // rejects that the same way it would reject a name that never existed.
+            if (!Enum.TryParse(Settings.GetString(prefix + ".Source"), out InputSource source) ||
+                !Enum.IsDefined(typeof(InputSource), source)) continue;
+            if (!Enum.TryParse(Settings.GetString(prefix + ".Key"), out Key key) ||
+                !Enum.IsDefined(typeof(Key), key)) continue;
+            Bindings[i] = new InputBinding(b.Action, source, key, b.Scale, b.Component);
+        }
+    }
+
+    /// <summary>Restores every binding to what this context's own constructor set up, discarding any
+    /// <see cref="LoadBindings"/> or rebind since. Touches only the in-memory list -- it does not clear
+    /// or overwrite anything in the settings store, so a caller that wants the reset to persist must
+    /// call <see cref="SaveBindings"/> (and eventually <see cref="Settings.Flush"/>) afterwards, and
+    /// one that wants it to reach the native side must re-push this context the same way
+    /// <see cref="LoadBindings"/> does.</summary>
+    public void ResetToDefaults()
+    {
+        CaptureDefaultsIfNeeded();
+        Bindings.Clear();
+        Bindings.AddRange(_defaultBindings!);
+    }
 }
 
 /// <summary>The input router: mapping contexts go in, action values come out. No per-frame step of

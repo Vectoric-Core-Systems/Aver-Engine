@@ -9,8 +9,8 @@ namespace Aver.Framework;
 /// and settings belong to the player, not to a playthrough (settings_abi.h's own opening comment:
 /// "Deleting a save must not reset the volume, and loading one must not change the resolution").
 ///
-/// Nothing in C# has called Aver.Settings before this file. It is what per-player input rebinds
-/// (<see cref="EnhancedInput"/>'s bindings) will persist through once a rebind UI exists: an
+/// This file was the FIRST C# caller of Aver.Settings; <see cref="InputMappingContext"/>'s
+/// SaveBindings/LoadBindings (EnhancedInput.cs) are the reason this store exists at all: an
 /// <see cref="InputMappingContext"/> is reconstructed from code every time its owning script spawns,
 /// so a player's remapped key has to live somewhere that outlives the C# object that describes the
 /// default -- this store, not a save file, is that somewhere.

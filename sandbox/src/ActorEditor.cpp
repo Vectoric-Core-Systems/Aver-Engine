@@ -6,6 +6,7 @@
 #include "EditorTransform.hpp"
 #include "ToolGlyphs.hpp"
 #include "EditorPrefs.hpp"
+#include "SnapshotUndo.hpp"
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -376,6 +377,29 @@ private:
 
     int draggingAxis_ = -1;   // -1 when not dragging
 
+    // ---- undo ----
+    //
+    // Snapshot undo, through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) --
+    // BtEditor/SoundEditor/FoliageTypeEditor use the same template for the same reason: a
+    // whole-state copy per edit is cheaper here than an undoable-command layer would need. The
+    // state is exactly what save() writes -- the class defaults (classes_) and the placements
+    // (script_.models) -- so an undo restores the same thing a save would have written. Undo/redo
+    // only swap FIELD VALUES within these two vectors, never resize them or touch a span or an
+    // objectId, so the byte ranges save()'s rewriteActorClasses/rewriteActorScript matched out of
+    // source_ stay valid across any number of undo/redo steps.
+    struct UndoState {
+        std::vector<fmt::ActorClassInfo> classes;
+        std::vector<fmt::ActorModel> models;
+    };
+    // ONE ENTRY PER GESTURE, not per frame: call this once, right before a drag or a field edit
+    // starts (the gizmo's own mouse-down, or a DragFloat/InputText's IsItemActivated()) -- never
+    // from inside the per-frame block that actually writes the new value, or a single drag would
+    // fill the stack with one entry per pixel moved.
+    void pushUndo() { history_.push(UndoState{classes_, script_.models}); }
+    void undo();
+    void redo();
+    SnapshotUndo<UndoState> history_;
+
     // Records the file's current write time.
     void stamp() {
         std::error_code ec;
@@ -480,6 +504,12 @@ bool ActorEditor::reloadIfChanged() {
     if (selected_ >= static_cast<int>(script_.models.size())) selected_ = -1;
     selectedNode_ = -1;
     liveStale_ = true;
+    // A NEW source_, so every span and objectId an old undo entry carries is a byte offset (or a
+    // match key) into text that no longer exists -- SoundEditor's loadFromDisk() clears the same
+    // way, for the same reason: undoing back to one would hand save() a rewrite that targets the
+    // wrong bytes. Reachable only when the tab was clean (the `dirty_` guard above), so there is
+    // nothing on the stack an author would recognise as "their" edit yet.
+    history_.clear();
     status_ = "Reloaded from disk.";
     AVER_INFO("[ActorEditor] {} changed on disk; reloaded {} placement(s)",
               path_, script_.models.size());
@@ -1121,6 +1151,31 @@ void ActorEditor::dragScaleAxis(fmt::ActorModel& m, int axis, ImVec2 delta, ImVe
 
 #endif // AVER_WITH_IMGUI
 
+// ---------------------------------------------------------------- undo
+
+void ActorEditor::undo() {
+    UndoState s{classes_, script_.models};
+    if (!history_.undo(s)) return;
+    classes_ = std::move(s.classes);
+    script_.models = std::move(s.models);
+    dirty_ = true;
+    // Neither vector is ever resized by an undo/redo -- see UndoState's own comment -- so these can
+    // only go out of range if a disk reload ran in between and changed the file's shape from under
+    // an open history. Same defensive clamp reloadIfChanged() itself applies to selected_.
+    if (selected_ >= static_cast<int>(script_.models.size())) selected_ = -1;
+    if (activeClass_ >= static_cast<int>(classes_.size())) activeClass_ = -1;
+}
+
+void ActorEditor::redo() {
+    UndoState s{classes_, script_.models};
+    if (!history_.redo(s)) return;
+    classes_ = std::move(s.classes);
+    script_.models = std::move(s.models);
+    dirty_ = true;
+    if (selected_ >= static_cast<int>(script_.models.size())) selected_ = -1;
+    if (activeClass_ >= static_cast<int>(classes_.size())) activeClass_ = -1;
+}
+
 // Draws the whole tab.
 void ActorEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
@@ -1162,6 +1217,27 @@ void ActorEditor::draw(Engine& e) {
             std::string why;
             status_ = save(&why) ? "Saved." : ("Save failed: " + why);
         }
+        ImGui::EndDisabled();
+
+        // Ctrl+Z / Ctrl+Y reach the same undo()/redo() the buttons below call: guarded by
+        // history_.canUndo()/canRedo() the way the buttons are, and skipped while an InputText has
+        // focus -- SoundEditor's own convention, so the Mesh/Material text fields above keep their
+        // native Ctrl+Z rather than losing a keystroke to the placement history.
+        {
+            const ImGuiIO& io = ImGui::GetIO();
+            const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+            if (focused && !io.WantTextInput) {
+                if (history_.canUndo() && editor::keybinds().pressed(editor::CommandId::EditUndo, io)) undo();
+                if (history_.canRedo() && editor::keybinds().pressed(editor::CommandId::EditRedo, io)) redo();
+            }
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!history_.canUndo());
+        if (ImGui::Button("Undo")) undo();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!history_.canRedo());
+        if (ImGui::Button("Redo")) redo();
         ImGui::EndDisabled();
 
         ImGui::SameLine();
@@ -1294,6 +1370,10 @@ void ActorEditor::draw(Engine& e) {
             if (haveSel && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()) {
                 const ImVec2 m = io.MousePos;
                 draggingAxis_ = pickGizmoAxis(ImVec2(m.x - at.x, m.y - at.y), s);
+                // ONE UNDO ENTRY PER DRAG, pushed at the grab -- see UndoState's own comment. The
+                // mutation below only ever runs on a LATER frame (GetMouseDragDelta is still zero
+                // on the click frame itself), so this always captures the placement's pre-drag pose.
+                if (draggingAxis_ >= 0) pushUndo();
             }
             if (!io.MouseDown[ImGuiMouseButton_Left]) draggingAxis_ = -1;
 
@@ -1390,28 +1470,46 @@ void ActorEditor::draw(Engine& e) {
         ImGui::Separator();
         ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
 
+        // Every control below pushes undo through the SAME bracket: check IsItemActivated() right
+        // after the widget, which fires once, on the frame the drag/field is grabbed and before
+        // ImGui has written anything new into it (see UndoState's own comment) -- so the snapshot
+        // pushed here is always the pre-edit value, whatever the widget does with it afterwards.
         if (k->meshPathSpan.valid()) {
             char buf[260];
             std::snprintf(buf, sizeof buf, "%s", k->meshPath.c_str());
             if (ImGui::InputText("Mesh", buf, sizeof buf)) { k->meshPath = buf; edited = true; }
+            if (ImGui::IsItemActivated()) pushUndo();
         }
         if (k->materialSpan.valid()) {
             char buf[128];
             std::snprintf(buf, sizeof buf, "%s", k->material.c_str());
             if (ImGui::InputText("Material", buf, sizeof buf)) { k->material = buf; edited = true; }
+            if (ImGui::IsItemActivated()) pushUndo();
         }
-        if (k->capsuleHeightSpan.valid())
+        if (k->capsuleHeightSpan.valid()) {
             edited |= ImGui::DragFloat("Height (cm)", &k->capsuleHeight, 1.0f, 1.0f, 1000.0f, "%.0f");
-        if (k->capsuleRadiusSpan.valid())
+            if (ImGui::IsItemActivated()) pushUndo();
+        }
+        if (k->capsuleRadiusSpan.valid()) {
             edited |= ImGui::DragFloat("Radius (cm)", &k->capsuleRadius, 0.5f, 1.0f, 500.0f, "%.0f");
-        if (k->eyeHeightSpan.valid())
+            if (ImGui::IsItemActivated()) pushUndo();
+        }
+        if (k->eyeHeightSpan.valid()) {
             edited |= ImGui::DragFloat("Eye height (cm)", &k->eyeHeight, 1.0f, 0.0f, 1000.0f, "%.0f");
-        if (k->cameraSpan[0].valid())
+            if (ImGui::IsItemActivated()) pushUndo();
+        }
+        if (k->cameraSpan[0].valid()) {
             edited |= ImGui::DragFloat("FOV (deg)", &k->cameraFovDeg, 0.5f, 5.0f, 170.0f, "%.0f");
-        if (k->lightSpan[0].valid())
+            if (ImGui::IsItemActivated()) pushUndo();
+        }
+        if (k->lightSpan[0].valid()) {
             edited |= ImGui::DragFloat("Intensity (lux)", &k->lightIntensityLux, 10.0f, 0.0f, 100000.0f, "%.0f");
-        if (k->lightSpan[1].valid())
+            if (ImGui::IsItemActivated()) pushUndo();
+        }
+        if (k->lightSpan[1].valid()) {
             edited |= ImGui::DragFloat("Light range (cm)", &k->lightRangeCm, 5.0f, 1.0f, 100000.0f, "%.0f");
+            if (ImGui::IsItemActivated()) pushUndo();
+        }
 
         ImGui::PopItemWidth();
         if (edited) { dirty_ = true; framed_ = false; }
@@ -1446,8 +1544,11 @@ void ActorEditor::draw(Engine& e) {
 
         bool changed = false;
         changed |= ImGui::DragFloat3("Position (cm)", m.pos, 1.0f);
+        if (ImGui::IsItemActivated()) pushUndo();
         changed |= ImGui::DragFloat3("Rotation (deg)", m.rot, 0.5f);
+        if (ImGui::IsItemActivated()) pushUndo();
         changed |= ImGui::DragFloat3("Scale", m.scale, 0.01f, 0.001f, 1000.0f);
+        if (ImGui::IsItemActivated()) pushUndo();
         if (changed) dirty_ = true;
     } else {
         ImGui::TextDisabled("Select a placement to edit it.");

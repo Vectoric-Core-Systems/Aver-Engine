@@ -16,9 +16,9 @@
 // same change. This tab shipped with no undo at all the night it landed -- see the plan note this
 // paragraph replaces -- specifically so that stage would not have to consolidate a fourth
 // hand-written copy; with the template already extracted, adding this tab costs SnapshotUndo.hpp
-// nothing and this tab a small pushUndo() before each field write. ActorEditor and AnimEditor are
-// still unmigrated (out of scope for this stage -- AnimEditor's clip_ carries full sample arrays,
-// where a whole-state copy per edit may be the wrong shape).
+// nothing and this tab a small pushUndo() before each field write. ActorEditor and AnimEditor use it
+// too since 2026-09-16; AnimEditor snapshots only its editable parts, since its clip_ carries full
+// sample arrays a whole-state copy per edit would duplicate.
 //
 // GUARDED ON AVER_MODULE_PARTICLES, whole-file. This header unconditionally #includes aver/formats/
 // OcParticle.hpp (Aver.Formats.Particles), which only exists when Aver.Particles does -- sandbox/
