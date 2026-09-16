@@ -1,5 +1,36 @@
 # One runtime: reconciling the editor's runtime copy with Runtime/
 
+> **STATUS, 2026-09-17 (later): C5, C6a, C8a and C9 landed; C7 and the rest of C6/C8 wait on runs and
+> decisions.** Shared by both hosts now: `GameTick.hpp` (physics/audio start, PHYSICS.*/AUDIO.* apply,
+> gameplay tick groups, AI tick -- `6302191f`), `GameCamera.hpp` (forward axis, view/projection push,
+> play camera -- `ec5bd155`, `0943915a`), `MouseCapture` and `GamePawn.hpp` (`73cfcb8f`). The editor
+> has File > Launch in Aver Engine Runtime (`86f9262a`), built but not run and not yet gated on
+> `scripts/verify-game.ps1`. All built in Release; none of C5-C9 has been run.
+>
+> Not done, and why:
+> - **C7 (render walk).** The editor's depth prepass is interleaved with its LOD/cluster selection
+>   and with the colour pass marking draws as prepassed; occlusion needs a two-pass walk; LOD needs a
+>   component whose producer side lives at mesh load. Each changes which pixels draw, so porting them
+>   or switching the editor onto `game::drawWorld` needs frame captures before and after.
+> - **C8 input publisher.** Unifying `SandboxApp::pushInput` with `game::publishInput` moves the
+>   editor's key source from ImGui key state to `InputState`, and needs the recapture, input-stuck,
+>   wheel-speed, pie-camera and viewmodel self-tests run.
+> - **C6b (sky/fog/post/AverSR push).** The hosts' precedence chains differ by design; not shared.
+>
+> Decisions for the project owner, found while scoping:
+> - The editor applies PHYSICS.GRAVITY/FIXEDSTEP and AUDIO.* only inside
+>   `applyProjectRenderSettings` (needs a RENDER.* key and Voxi attached); the runtime applies them
+>   unconditionally.
+> - The runtime ticks graph-class instances every frame; the editor only during Play. Gating the
+>   runtime on PLAYING would freeze graph-class actors in a project with no GameMode, which never
+>   reaches PLAYING in a shipped game (editor Play falls back to a spectator GameMode).
+> - Sky defaults with no SKY record differ: editor zenith/horizon (0.19,0.42,0.78)/(0.72,0.80,0.90),
+>   runtime and format (0.24,0.45,0.85)/(0.72,0.83,0.95).
+> - `--cam-wobble` shows during Play in the runtime but is overwritten by the play camera in the editor.
+> - A project cannot author exposure/bloom/tonemap, so a shipped game uses compiled defaults.
+> - A shipped game keeps publishing input while alt-tabbed (`publishInput`'s `focused` is "a window
+>   exists").
+>
 > **STATUS, 2026-09-17: C1-C4 are swapped -- the editor uses the library for content, level, water,
 > streaming and landscape.** `SandboxApp` holds `game::GameContent content_` (`b97644fe`),
 > `game::GameLevel level_` (`f3fcd628`), `game::GameWater water_` (`d822ef64`),
