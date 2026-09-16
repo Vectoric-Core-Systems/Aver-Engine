@@ -29,7 +29,9 @@ class GameContent;
 class GameLevel {
 public:
 #if AVER_MODULE_SCENE
-    // Loads a .ocworld/.ocmap. Unloads whatever was loaded first.
+    // Loads a .ocworld/.ocmap. Unloads whatever was loaded first. Dispatches on
+    // fmt::levelFileIsLegacyOcmap, as the editor's loadLevel does: a legacy .ocmap is translated into
+    // OcWorldData placements and spawn, then goes through the same pipeline.
     void load(const std::string& path, GameContent& content);
 
     // Loads the project's start map. A missing start map is INFO, not an error: a fresh project has

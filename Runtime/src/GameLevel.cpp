@@ -10,6 +10,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/formats/OcWorld.hpp"
+#  include "aver/formats/OcMap.hpp"
 #  include "aver/scene/scene_abi.h"
 #  include "aver/world/LevelInstance.hpp"
 #endif
@@ -29,12 +30,67 @@ namespace aver::game {
 // through LevelInstance.hpp, and the editor re-exports the same definition -- so the rotation
 // contract the comment here used to insist on is now enforced by there being one of it.
 
+namespace {
+
+// A LEGACY .ocmap (ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM records) TRANSLATED INTO THE SHARED
+// OcWorldData PLACEMENT PIPELINE -- mirrors SandboxApp::loadLegacyOcmapLevel's synth block
+// (SandboxLevelLoad.cpp) minus the editor-only entityLegacyDeform_/entityLegacySurface_/
+// entityLegacyMaterial_ save-round-trip maps: a shipped game never writes a level back out, so
+// nothing here needs to remember which record kind or which numeric SURFACE/material name a
+// placement came from, only where world::instantiate should put it.
+bool loadLegacyOcmap(const std::string& path, fmt::OcWorldData& synth, std::string* err) {
+    fmt::OcMapData m;
+    if (!fmt::loadOcmap(path, m, err)) return false;
+
+    synth.name = m.name;
+    synth.contentId = m.contentId;
+    synth.build = m.build;
+    synth.algo = m.algo;
+    synth.hasSpawn = m.hasSpawn;
+    synth.spawnX = m.spawnX; synth.spawnY = m.spawnY; synth.spawnZ = m.spawnZ; synth.spawnYaw = m.spawnYaw;
+    synth.placements.reserve(m.placements.size());
+    for (const fmt::OcPlacement& p : m.placements) {
+        fmt::OcWorldPlacement op;
+        op.asset = p.asset;
+        op.objectId = p.objectId;   // already fnv1a64(asset) -- see OcMap.cpp's own PLACE/DEFORM branches
+        op.x = p.x; op.y = p.y; op.z = p.z;
+        op.yaw = p.yaw; op.pitch = p.pitch; op.roll = p.roll;
+        // MATERIAL IS DELIBERATELY LEFT EMPTY on every synthesised placement, matching the editor: a
+        // legacy PLACE names a numeric SURFACE-table index and a DEFORM a soft-body material like
+        // "rubber", neither an .ocmat name -- feeding either to bindMaterial would resolve a
+        // material that doesn't exist rather than leaving the mesh's own cooked material in place.
+        //
+        // p.scale is already forced to 1.0 for a DEFORM record (OcMap.cpp hardcodes it there; legacy
+        // DEFORM has no scale concept of its own), so this one line is correct for both placement
+        // kinds without a branch, same as the editor's own version of this loop.
+        op.sx = op.sy = op.sz = (p.scale == 0.0 ? 1.0 : p.scale);
+        // EVERY legacy placement is a collision source in this pipeline's hands, matching the
+        // editor: a DEFORM's real behaviour is a server-simulated soft body, not this static box,
+        // but nothing on this path spawns a deformable cage, so a static box is the honest stand-in.
+        op.collide = true;
+        synth.placements.push_back(std::move(op));
+    }
+    return true;
+}
+
+} // namespace
+
 void GameLevel::load(const std::string& path, GameContent& content) {
     unload();
 
     fmt::OcWorldData w;
     std::string why;
-    if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+    // DISPATCH ON WHAT THE FILE ACTUALLY USES, NOT ITS EXTENSION OR HEADER LINE -- mirrors
+    // SandboxApp::loadLevel (SandboxLevelLoad.cpp): ElectricDreams' and FirstPerson's own .ocmap
+    // files are pure OCWORLD content that happens to keep the older extension, while
+    // OpenConstructor's demoworld.ocmap genuinely needs the legacy grammar. Without this, a
+    // genuinely legacy file went through fmt::loadOcworld, which "succeeds" on the same `OCMAP 1`
+    // header line while silently dropping every ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM record --
+    // the level loaded with no placements and no warning at all.
+    const bool legacy = fmt::levelFileIsLegacyOcmap(path);
+    if (legacy) {
+        if (!loadLegacyOcmap(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+    } else if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
 
     // The placement loop is aver::world::instantiate now, shared with the editor. What is left here
     // is the part that is genuinely the GAME's: which material cache to bind into, and what to keep.
@@ -205,7 +261,12 @@ void GameLevel::load(const std::string& path, GameContent& content) {
 
     levelPath_ = path;
     levelName_ = w.name;
-    AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
+    // The editor's two load functions log these same two lines, so the hosts' logs diff cleanly.
+    if (legacy)
+        AVER_INFO("[Level] '{}' loaded from {} ({} placement(s), legacy .ocmap)", w.name, path,
+                  w.placements.size());
+    else
+        AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 #if AVER_MODULE_PHYSICS
     // One static body per COLLIDING placement, so this is checkable against the map file itself:
     // it must equal the count of PLACE lines without `nocollide`. Reported even when zero, because
