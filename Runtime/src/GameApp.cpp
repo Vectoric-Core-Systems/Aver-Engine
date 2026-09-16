@@ -1,4 +1,5 @@
 #include "aver/game/GameApp.hpp"
+#include "aver/game/GameTick.hpp"
 
 #include <filesystem>
 
@@ -600,11 +601,7 @@ void GameApp::initPhysics() {
     // with nothing below it at all. A level supplies its own collision now: GameLevel::load already
     // adds one static body per colliding PLACE. docs/GAME-LIFT.md flagged this as worth dropping
     // when it was first lifted from the editor; this is that.
-    if (aver_phys_init()) {
-        AVER_INFO("[Game] physics started (fixed step {:.4f}s)", aver_phys_fixed_step());
-    } else {
-        AVER_WARN("[Game] physics failed to start - gameplay will not collide");
-    }
+    game::startPhysics("Game");
 #endif
 }
 
@@ -617,19 +614,11 @@ void GameApp::tickGameplay(f32 dt) {
     // in a game.
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
 
-    // ORDER COPIED FROM THE CODE, NOT FROM THE COMMENT ABOVE IT. SandboxApp's tick-group comment
-    // (search: "bracket the physics step") says the tick
-    // groups "bracket the physics step: PrePhysics -> Physics -> PostPhysics", which describes the
-    // GROUPS and not where the step lands. The step actually sits between PRE_PHYSICS and PHYSICS,
-    // so PHYSICS-group ticks observe the results of this frame's simulation. Reordering to match
-    // the sentence would make every PHYSICS-group actor read last frame's transforms.
-    aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, dt);
 #if AVER_MODULE_PHYSICS
-    aver_phys_step(dt);
-    ++physSteps_;
+    if (game::tickGameplayGroups(dt)) ++physSteps_;
+#else
+    game::tickGameplayGroups(dt);
 #endif
-    aver_fw_tick(AVER_FW_TICK_PHYSICS, dt);
-    aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, dt);
 #else
     (void)dt;
 #endif
@@ -1294,30 +1283,13 @@ void GameApp::openProject(Engine& e) {
     // applyProjectRenderSettings (SandboxProject.cpp), behind that function's AVER_MODULE_VOXI,
     // hasRenderSettings() and voxiAttached_ guards, so a project with no RENDER.* key never gets them
     // there. That coupling is not copied: this runs unconditionally, like the AUDIO.* block below.
-    //
-    // GUARDED ON READINESS, same as the editor: a failed aver_phys_init() leaves the world absent, and
-    // both setters are no-ops before it succeeds.
-    if (aver_phys_ready()) {
-        if (project_.hasGravity)
-            aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
-        // CHECKED, because the setter refuses a step outside (0, 0.5] and says so by returning 0. A
-        // manifest with a nonsense step must not read as applied.
-        if (project_.fixedStep > 0.0f && !aver_phys_set_fixed_step(project_.fixedStep))
-            AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
-                      project_.fixedStep);
-    } else if (project_.hasPhysicsSettings()) {
-        AVER_INFO("[Project] physics settings will apply once the world exists");
-    }
+    game::applyProjectPhysics(project_);
 #endif
 #if AVER_WITH_AUDIO_ABI
     // AUDIO.* FROM THE MANIFEST, the third thing this host read past. SandboxApp applies these when
     // a project opens; here the master and bus volumes stayed at their defaults, so a project that
-    // ships a quiet mix shipped a loud game. Safe with no device: the ABI's setters are no-ops until
-    // aver_audio_init has succeeded.
-    if (project_.hasAudioMix) {
-        aver_audio_set_master_volume(project_.masterVolume);
-        for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
-    }
+    // ships a quiet mix shipped a loud game.
+    game::applyProjectAudioMix(project_);
 #endif
 }
 
@@ -2034,10 +2006,7 @@ void GameApp::onInit(Engine& e) {
     //
     // 0 is not an error -- the ABI defines it as "no output device" -- so this stays quiet where
     // physics warns. No sound card is a machine fact; no collision is a broken engine.
-    if (aver_audio_init()) {
-        AVER_INFO("[Game] audio started ({} Hz, {} channel(s))",
-                  aver_audio_sample_rate(), aver_audio_channels());
-    }
+    game::startAudio("Game");
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     // BEFORE openProject, matching initPhysics() immediately above -- registration needs no level
@@ -2348,16 +2317,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
     if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
 #endif
-    // AFTER flush: an agent must path from where physics/anim actually left it this frame, not from
-    // last frame's stale transform. gameNav_ may be empty (no baked navigation for this level, or
-    // none loaded yet) -- AgentSystem::tick treats that as "wait", not an error; see its own comment.
-    synapse::agentSystem().tick(scene::World::instance(), &gameNav_);
-    // Same "after flush" reasoning -- a perceiver's sight check reads this frame's actual position,
-    // not last frame's. Needs dt (unlike AgentSystem::tick) for its own think-interval throttle.
-    synapse::perceptionSystem().tick(scene::World::instance(), t.dt);
-    // AFTER perceptionSystem: a behaviour's own "CanSeeTarget"/"HasTarget" conditions read THIS
-    // frame's sight state, not last frame's.
-    synapse::btSystem().tick(scene::World::instance(), t.dt);
+    game::tickAi(t.dt, &gameNav_);
 #if AVER_MODULE_FRAMEWORK
     }
 #endif

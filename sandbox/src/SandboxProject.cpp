@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/game/GameTick.hpp"
 
 namespace aver {
 void SandboxApp::applyProject(Engine& e) {
@@ -201,23 +202,9 @@ void SandboxApp::applyProjectRenderSettings() {
     if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
 
     // ---- PHYSICS AND AUDIO, which no manifest could state until now -------------------------
-    //
-    // GUARDED ON READINESS, not attempted blind: a project can open before either subsystem has
-    // been initialised, and both ABIs are explicit that a call before init is a no-op. Applying
-    // into a world that does not exist yet would look like the setting was honoured and leave
-    // the default running.
+    // See GameTick.hpp for the readiness guard and the fixed-step refusal.
 #if AVER_MODULE_PHYSICS
-    if (aver_phys_ready()) {
-        if (project_.hasGravity)
-            aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
-        // CHECKED, because the setter refuses a step outside (0, 0.5] and says so by returning
-        // 0. A manifest with a nonsense step must not read as applied.
-        if (project_.fixedStep > 0.0f && !aver_phys_set_fixed_step(project_.fixedStep))
-            AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
-                      project_.fixedStep);
-    } else if (project_.hasPhysicsSettings()) {
-        AVER_INFO("[Project] physics settings will apply once the world exists");
-    }
+    game::applyProjectPhysics(project_);
 #endif
 // AVER_WITH_AUDIO_ABI, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
 // and an #if on one compiles this whole block to nothing while the build stays green. It means
@@ -228,10 +215,7 @@ void SandboxApp::applyProjectRenderSettings() {
 // device by a macro nobody read as a capability -- a packaged game was silent and Audio.Load
 // succeeded into nothing. Renamed for what it actually gates.
 #if AVER_WITH_AUDIO_ABI
-    if (project_.hasAudioMix) {
-        aver_audio_set_master_volume(project_.masterVolume);
-        for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
-    }
+    game::applyProjectAudioMix(project_);
 #endif
 
     // ---- THE COMMAND LINE OUTRANKS THE MANIFEST, AND UNTIL NOW IT DID NOT ----

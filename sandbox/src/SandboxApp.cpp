@@ -7,6 +7,7 @@
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
+#include "aver/game/GameTick.hpp"
 
 namespace aver {
 SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
@@ -641,26 +642,12 @@ void SandboxApp::onInit(Engine& e)  {
 
 #if AVER_MODULE_PHYSICS
     // Must start before any level loads: loading builds a static body per colliding placement.
-    // NO IMPLICIT GROUND (used to add a 100m box at z=0, hiding a pit/chasm under an invisible
-    // floor). Matches the packaged runtime: a level supplies its own collision now.
-    if (aver_phys_init()) {
-        AVER_INFO("[Sandbox] physics started (fixed step {:.4f}s)", aver_phys_fixed_step());
-    } else {
-        AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
-    }
+    game::startPhysics("Sandbox");
 #endif
 
 #if AVER_WITH_AUDIO_ABI
-    // NOTHING IN THE RUNTIME HAD EVER OPENED THE AUDIO DEVICE, so every PlaySound was a silent
-    // no-op during Play: aver_audio_init was reachable only from the Sound Editor's preview
-    // button, and every audio_abi.h entry gates on the g_started flag only that call sets.
-    // Recurring pattern: built through every layer and called by nothing.
-    // 0 is not an error here -- the ABI defines it as "no output device", so this stays quiet
-    // unlike physics's warning: no sound card is a machine fact, no collision is a broken engine.
-    if (aver_audio_init()) {
-        AVER_INFO("[Sandbox] audio started ({} Hz, {} channel(s))",
-                  aver_audio_sample_rate(), aver_audio_channels());
-    }
+    // Opens the audio device -- see GameTick.hpp for why "no output device" stays quiet.
+    game::startAudio("Sandbox");
 #endif
 
 #if AVER_MODULE_SYNAPSE_SCENE
@@ -2352,12 +2339,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     maybeViewmodelTest();
     // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
-#if AVER_MODULE_PHYSICS
-        aver_phys_step(t.dt);
-#endif
-        aver_fw_tick(AVER_FW_TICK_PHYSICS, t.dt);
-        aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, t.dt);
+        game::tickGameplayGroups(t.dt);
     }
 #endif
 #if AVER_MODULE_FLUIDS
@@ -2485,13 +2467,6 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         streaming_.tick(camPos_, t.dt, nullptr, tris);
     }
     scene::World::instance().flush();
-#if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
-    // GATED ON PLAY, matching the physics/fw_tick block above -- pathing and movement targets are
-    // gameplay, not an authoring-time preview (an AI agent chasing a goal has nothing meaningful to
-    // do while nothing else in the level is moving). Same condition as that block, re-evaluated
-    // here rather than threaded through as a local.
-    // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
-    // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
 #if AVER_WITH_AUDIO_ABI
     // Reclaim finished voices, every frame, Play or not -- the second half of the audio-device
     // gap: aver_audio_collect had the same single caller as aver_audio_init, so a graph-started
@@ -2499,15 +2474,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // voices outlive a session, so gating this would leak voices that finish after Stop.
     aver_audio_collect();
 #endif
+#if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
+    // GATED ON PLAY, matching the physics/fw_tick block above -- pathing and movement targets are
+    // gameplay, not an authoring-time preview (an AI agent chasing a goal has nothing meaningful to
+    // do while nothing else in the level is moving). Same condition as that block, re-evaluated
+    // here rather than threaded through as a local.
+    // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
+    // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        synapse::agentSystem().tick(scene::World::instance(), &nav_);
-        // Same gate, same "after flush" reasoning -- a perceiver's sight check reads this
-        // frame's actual position, not last frame's. Needs dt (unlike AgentSystem::tick) for
-        // its own think-interval throttle.
-        synapse::perceptionSystem().tick(scene::World::instance(), t.dt);
-        // AFTER perceptionSystem: a behaviour's own "CanSeeTarget"/"HasTarget" conditions read
-        // THIS frame's sight state, not last frame's.
-        synapse::btSystem().tick(scene::World::instance(), t.dt);
+        game::tickAi(t.dt, &nav_);
     }
 #endif
 #endif
