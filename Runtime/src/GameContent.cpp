@@ -351,21 +351,15 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
     look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
     look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
     look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
-    // Copied verbatim from sandbox/src/SandboxApp.cpp's table (read, not edited -- that file
-    // belongs to another agent). Ordinary outdoor vocabulary, not tied to any one demo project;
+    // Copied verbatim from sandbox/src/SandboxApp.cpp's table. Ordinary outdoor vocabulary, not tied to any one demo project;
     // see that file's own comment on why a former "M_Foliage" scatter default was removed and
     // these three names were kept anyway.
     look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.00f, 0.85f);
     look("M_Bark",    0.35f, 0.24f, 0.15f, 0.00f, 0.85f);
     look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
-    // M_Glass -- NOT VERIFIED AGAINST THE EDITOR'S TABLE, unlike the three above. The editor agent
-    // is adding its own translucent-material wiring to SandboxApp.cpp concurrently with this edit,
-    // and this file cannot see that in-progress change; these values (near-white, non-metal, near-
-    // mirror-smooth) are this session's best guess at what a built-in "glass" look should be, not a
-    // copy of a read value. CROSS-CHECK THIS ENTRY against SandboxApp.cpp's table once that edit
-    // lands, the way M_Foliage/M_Bark/M_Rock were just cross-checked above.
+    // M_Glass: the editor's values (SandboxApp.cpp's table).
     //
-    // A SEPARATE, MORE IMPORTANT LIMITATION: SurfaceLook (GameContent.hpp) has no alphaMode field
+    // NOT TRANSLUCENT: SurfaceLook (GameContent.hpp) has no alphaMode field
     // at all -- it is a colour and a metal/rough pair, nothing else. GameRender.cpp's
     // drawWorld only ever sets device.setDrawBlended(true) for an AUTHORED .ocmat whose alphaMode
     // reads AlphaMode::Blend (pbr::MaterialLibrary::desc()); a built-in look, this one included, can
@@ -374,7 +368,7 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
     // over the one-shot "no built-in look" warning this would otherwise trip), but still opaque.
     // Actual translucency needs an authored M_Glass.ocmat with BLEND set; this entry is a fallback
     // for the case where one was never authored, not a substitute for authoring one.
-    look("M_Glass", 0.95f, 0.97f, 0.98f, 0.00f, 0.05f);
+    look("M_Glass", 0.92f, 0.94f, 0.95f, 0.00f, 0.05f);
 
     AVER_INFO("[Mesh] {} built-in primitive(s), {} named surface(s)", sceneMeshes_.size(), surfaceLooks_.size());
 }
@@ -728,6 +722,8 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
 }
 
 void GameContent::releaseProjectMaterials() {
+    // Destroyed, not just forgotten: MaterialLibrary owns the material, this map only names it.
+    for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
     // resolveMaterialGraph() caches into this process-wide registry by compiled path (its own
     // idOf()), so a project close has to forget the graphs too -- otherwise a differently-authored
@@ -755,6 +751,8 @@ pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
 
 #if AVER_MODULE_PARTICLES
 void GameContent::loadProjectParticleEffects() {
+    // The table is process-global: without this a reload keeps effects whose files are gone.
+    particles::particleEffects().clear();
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
     std::error_code ec;
