@@ -458,7 +458,10 @@ add_subdirectory(modules/runtime)
 # ORDER: after modules/runtime, which the library links, and after modules/render.sr, which the host's
 # if(TARGET Aver.Render.Sr) must already be able to see. BEFORE sandbox, because the editor is to link
 # this library as its private copy of the runtime is retired.
-if(AVER_BUILD_GAME)
+#
+# Added for EITHER host: Aver.Runtime.Game.Core is the editor's too. Runtime/CMakeLists.txt builds
+# GameApp and the executable only under AVER_BUILD_GAME.
+if(AVER_BUILD_GAME OR AVER_BUILD_SANDBOX)
   add_subdirectory(Runtime)
 endif()
 
@@ -503,8 +506,8 @@ if(MSVC)
 endif()
 
 if(AVER_BUILD_TESTS)
-  # Needs Aver.Runtime.Game, so it only exists when the game runtime is built.
-  if(AVER_BUILD_GAME AND TARGET Aver.Framework)
+  # Needs Aver.Runtime.Game.Core, which exists whenever either host is built.
+  if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.Framework)
     add_subdirectory(tests/game)
   endif()
   add_subdirectory(tests/pcg)

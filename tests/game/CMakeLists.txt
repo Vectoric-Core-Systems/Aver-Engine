@@ -5,5 +5,5 @@
 # and no human, which is the point: the defect it guards (an AVER_ENABLE_UI=OFF build having no
 # input at all) compiles cleanly and only shows up when somebody presses a key.
 add_executable(InputBridgeTest src/InputBridgeTest.cpp)
-target_link_libraries(InputBridgeTest PRIVATE Aver.Runtime.Game Aver.Framework Aver.Platform Aver.Core)
+target_link_libraries(InputBridgeTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Platform Aver.Core)
 set_target_properties(InputBridgeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
