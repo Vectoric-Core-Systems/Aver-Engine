@@ -2032,7 +2032,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.playing           = playSessionActive();
         ic.releasedByUser    = releasedByUser_;
         ic.defaultPawnPlay   = defaultPawnPlay_;
-        ic.mouseCaptured     = mouseCaptured_;
+        ic.mouseCaptured     = mouse_.captured();
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
         ic.drawerOpen        = drawer_ != Drawer::None;
         ic.landscapeMode     = mode_ == EditorMode::Landscape;
@@ -2257,8 +2257,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
 #if AVER_MODULE_FRAMEWORK
     // --recapture-test OPTS IN, and it has to: the gesture it exercises lives entirely inside
-    // this block, so a bounded run that skips it cannot reach the bug. Safe now that
-    // warpToAnchor() refuses to move a background window's cursor.
+    // this block, so a bounded run that skips it cannot reach the bug. Safe now that mouse
+    // re-centring refuses to move a background window's cursor.
     const bool interactive = (maxFrames_ == 0 && !playTest_) || recapFrames_ > 0;
     // THE #if IS NOT REDUNDANT WITH uiActive(): that's a RUNTIME question that doesn't help the
     // ImGuiIO/ImGui:: names below COMPILE on a UI-less build (module-matrix.ps1's no-ui and

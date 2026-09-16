@@ -86,16 +86,13 @@
 #  include "aver/framework/framework_abi.h"
 #  include "aver/framework/framework_hooks.h"
 #endif
-// The .ocworld rotation encoding (roll/pitch/yaw degrees -> quaternion), for placePawnAtSpawn's
-// yaw. Header-only and Core-only (see its own header comment) -- pulling it in costs nothing extra
-// the way including all of aver/world/LevelInstance.hpp (already GameLevel.cpp's route to the same
-// function) would.
-#include "aver/world/LevelTransform.hpp"
+// GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
+#include "aver/game/GamePawn.hpp"
 
 // windows.h was nested inside AVER_MODULE_SCENE in the editor's own copy of this comment
-// (SandboxApp.hpp), but the Win32 calls that need it here (setMouseCaptured, warpToAnchor,
-// pollCapturedMouse) are gated on _WIN32 alone, with no scene dependency -- so this stays outside
-// every module guard for the same reason.
+// (SandboxApp.hpp), but the Win32 call that needs it here (onUpdate's capture-decision check,
+// below) is gated on _WIN32 alone, with no scene dependency -- so this stays outside every module
+// guard for the same reason.
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -631,82 +628,15 @@ void GameApp::drivePlayCamera() {
 #endif
 }
 
-// Gives the mouse to the game or hands it back. Mirrors SandboxPlay.cpp's
-// SandboxApp::setMouseCaptured verbatim; ShowCursor is a counter, so each call is paired.
+// Gives the mouse to the game or hands it back, through game::MouseCapture (MouseCapture.hpp).
 void GameApp::setMouseCaptured(bool on) {
-#if defined(_WIN32)
-    if (on == mouseCaptured_) return;
-    mouseCaptured_ = on;
-    if (on) {
-        ShowCursor(FALSE);
-        warpToAnchor();
-    } else {
-        ShowCursor(TRUE);
-        ClipCursor(nullptr);
-    }
-    AVER_INFO("[Game] mouse {} the game", on ? "captured by" : "released from");
-#else
-    mouseCaptured_ = on;
-#endif
+    mouse_.set(on, window_, "Game");
 }
 
-// Parks the cursor at the centre of the window, remembers where that was, and confines it there.
-// Mirrors SandboxPlay.cpp's SandboxApp::warpToAnchor verbatim.
-void GameApp::warpToAnchor() {
-#if defined(_WIN32)
-    HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
-    if (!hwnd) return;
-    // A WINDOW THAT IS NOT FOREGROUND HAS NO BUSINESS MOVING THE POINTER: SetCursorPos/ClipCursor
-    // below are global and would drag the cursor to this window's centre while the user works
-    // elsewhere. Windows ignores ClipCursor from a background window anyway, so only the cursor
-    // theft is lost. Anchoring to where the pointer actually IS keeps the delta honest on refocus.
-    if (::GetForegroundWindow() != hwnd) {
-        POINT q{};
-        if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
-        return;
-    }
-    RECT rc{};
-    if (!GetClientRect(hwnd, &rc)) return;
-    POINT c{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
-    ClientToScreen(hwnd, &c);
-    captureAnchorX_ = c.x; captureAnchorY_ = c.y;
-    SetCursorPos(c.x, c.y);
-    RECT screen{};
-    POINT tl{ rc.left, rc.top }, br{ rc.right, rc.bottom };
-    ClientToScreen(hwnd, &tl); ClientToScreen(hwnd, &br);
-    screen.left = tl.x; screen.top = tl.y; screen.right = br.x; screen.bottom = br.y;
-    ClipCursor(&screen);
-#endif
-}
-
-// Measures one frame of captured mouse movement, then re-centres for the next. Mirrors
-// SandboxPlay.cpp's SandboxApp::pollCapturedMouse verbatim.
+// Measures one frame of captured mouse movement and re-centres for the next, through
+// game::MouseCapture.
 void GameApp::pollCapturedMouse() {
-    captureDx_ = captureDy_ = 0.0f;
-#if defined(_WIN32)
-    if (!mouseCaptured_) return;
-    HWND fg = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
-    // A STALE ANCHOR IS A VIEW SNAP, and losing focus is how the anchor goes stale: Windows drops
-    // ClipCursor confinement the moment a window stops being foreground, and nothing re-captures on
-    // the way back (setMouseCaptured() no-ops if the state hasn't changed), so the next
-    // GetCursorPos() would measure against a pre-alt-tab anchor and hand the framework one
-    // enormous delta -- the camera whips round exactly once, the frame focus returns.
-    // RE-ANCHOR AND REPORT ZERO: one frame of no look input on refocus is imperceptible; a spin
-    // is not.
-    // ANCHOR TO WHERE THE CURSOR IS, NOT warpToAnchor(): that calls SetCursorPos, and dragging the
-    // pointer to this window's centre every frame while the user works elsewhere is a worse bug --
-    // it would also steal the cursor during a bounded --frames run with a play session up.
-    if (fg && ::GetForegroundWindow() != fg) {
-        POINT q{};
-        if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
-        return;
-    }
-    POINT p{};
-    if (!GetCursorPos(&p)) return;
-    captureDx_ = static_cast<f32>(p.x - captureAnchorX_);
-    captureDy_ = static_cast<f32>(p.y - captureAnchorY_);
-    warpToAnchor();
-#endif
+    mouse_.poll(window_);
 }
 
 void GameApp::attachPcgTest(Engine& e) {
@@ -1559,22 +1489,16 @@ void GameApp::beginPlayIfGameModeDeclared() {
 #endif
 }
 
-// PLAYER START / SPAWN PLACEMENT. Mirrors SandboxPlay.cpp's SandboxApp::placePawnAtPlayerStart
-// almost verbatim -- minus the PlayerStart MARKER lookup half of that function's own
-// playerStartTransform() call, which has no runtime equivalent (GameLevel::spawn()'s own comment: a
-// shipped game has no visible, selectable marker to prefer, only the raw SPAWN record). Called from
-// beginPlayIfGameModeDeclared(), AFTER aver_fw_begin_play succeeds.
+// PLAYER START / SPAWN PLACEMENT, through game::placePossessedPawn (GamePawn.hpp) -- minus the
+// PlayerStart MARKER lookup half of the editor's own playerStartTransform() call, which has no
+// runtime equivalent (GameLevel::spawn()'s own comment: a shipped game has no visible, selectable
+// marker to prefer, only the raw SPAWN record). Called from beginPlayIfGameModeDeclared(), AFTER
+// aver_fw_begin_play succeeds.
 bool GameApp::placePawnAtSpawn() {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     const GameLevel::SpawnPoint& sp = level_.spawn();
     if (!sp.valid) return false;
-    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-    if (!pn) return false;
-    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
-    scene::World& w = scene::World::instance();
-    if (!w.valid(pe)) return false;
-    w.setLocalPosition(pe, sp.position);
-    w.setLocalRotation(pe, world::quatFromEulerDeg(Vec3{0.0f, 0.0f, sp.yawDeg}));
+    if (!game::placePossessedPawn(sp.position, sp.yawDeg)) return false;
     AVER_INFO("[Game] pawn placed at the level's Player Start ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
               sp.position.x, sp.position.y, sp.position.z, sp.yawDeg);
     return true;
@@ -1897,9 +1821,9 @@ void GameApp::onInit(Engine& e) {
     // with no ImGui anywhere. SandboxApp cannot do this -- its input path is inside
     // `#if AVER_WITH_IMGUI` and reads ImGui::IsKeyDown -- which is why a game executable was not
     // merely unwritten but unbuildable.
-    // Borrowed for the rest of this object's life -- see the member's own comment (why setMouseCaptured/
-    // warpToAnchor/pollCapturedMouse need the HWND) -- rather than re-asking e.window() from onUpdate,
-    // mirroring SandboxApp's own window_ member the same way.
+    // Borrowed for the rest of this object's life -- see the member's own comment (why mouse_.set/
+    // poll need the HWND) -- rather than re-asking e.window() from onUpdate, mirroring SandboxApp's
+    // own window_ member the same way.
     window_ = e.window();
     if (Window* w = e.window()) {
         w->setEventCallback(&onWindowEvent, &input_);
@@ -2185,7 +2109,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last
     // frame's. Publishing after the tick would give every input one frame of latency, which is the
     // kind of thing that gets blamed on the display.
-    publishInput(input_, e.window() != nullptr, mouseCaptured_, captureDx_, captureDy_,
+    publishInput(input_, e.window() != nullptr, mouse_.captured(), mouse_.dx(), mouse_.dy(),
                  cfg_.inputEcho ? &echoHeld_ : nullptr);
     if (cfg_.inputEcho && echoHeld_ != echoLast_) {
         AVER_INFO("[Game] input: {}", echoHeld_);

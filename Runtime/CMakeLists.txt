@@ -42,6 +42,7 @@ aver_add_module(Aver.Runtime.Game.Core
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/GameWater.cpp
+    src/MouseCapture.cpp
   DEPS
     Aver.RHI
     Aver.Platform

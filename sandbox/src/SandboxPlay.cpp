@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "aver/game/GameCamera.hpp"
+#include "aver/game/GamePawn.hpp"
 #include "aver/platform/Gamepad.hpp"
 
 namespace aver {
@@ -122,13 +123,7 @@ bool SandboxApp::placePawnAtPlayerStart(const char* who) {
 #if AVER_MODULE_SCENE
     Vec3 sp{}; f32 sy = 0.0f;
     if (!playerStartTransform(sp, sy)) return false;
-    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-    if (!pn) return false;
-    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
-    scene::World& pw = scene::World::instance();
-    if (!pw.valid(pe)) return false;
-    pw.setLocalPosition(pe, sp);
-    pw.setLocalRotation(pe, quatFromEulerDeg(Vec3{0.0f, 0.0f, sy}));
+    if (!game::placePossessedPawn(sp, sy)) return false;
     AVER_INFO("[Sandbox] Play: {} spawned at the level's Player Start ({:.0f}, {:.0f}, {:.0f}) "
               "yaw {:.0f}", who, sp.x, sp.y, sp.z, sy);
     return true;
@@ -336,8 +331,8 @@ void SandboxApp::pushInput(bool uiActive) {
     // new_frame() already zeroes the delta, but saying so here keeps this function's contract one
     // sentence long -- every slot is written, every frame, whatever the gate decided.
     if (suppressed) aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
-    else if (mouseCaptured_) aver_fw_input_set_mouse(captureDx_, captureDy_, io.MouseWheel);
-    // THE UNCAPTURED BRANCH IS THE EDITOR'S NORMAL ONE (mouseCaptured_ is false outside Play),
+    else if (mouse_.captured()) aver_fw_input_set_mouse(mouse_.dx(), mouse_.dy(), io.MouseWheel);
+    // THE UNCAPTURED BRANCH IS THE EDITOR'S NORMAL ONE (mouse_.captured() is false outside Play),
     // so gameplay saw the same frame-late mouse the camera did. input_.mouseDX/DY and
     // input_.wheel() are the correctly-phased sources during onUpdate -- see the look block.
     else aver_fw_input_set_mouse(m ? static_cast<f32>(input_.mouseDX()) : 0.0f,
@@ -460,86 +455,13 @@ Vec3 SandboxApp::camForward() const {
 
 // Gives the mouse to the game or hands it back. ShowCursor is a counter, so each call is paired.
 void SandboxApp::setMouseCaptured(bool on) {
-#if defined(_WIN32)
-    if (on == mouseCaptured_) return;
-    mouseCaptured_ = on;
-    if (on) {
-        ShowCursor(FALSE);
-        warpToAnchor();
-    } else {
-        ShowCursor(TRUE);
-        ClipCursor(nullptr);
-    }
-    AVER_INFO("[Sandbox] mouse {} the game{}", on ? "captured by" : "released from",
-              on ? " (Shift+F1 to release)" : "");
-#else
-    mouseCaptured_ = on;
-#endif
-}
-
-#if defined(_WIN32)
-// Parks the cursor at the centre of the window, remembers where that was, and confines it there.
-void SandboxApp::warpToAnchor() {
-    HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
-    if (!hwnd) return;
-    // A WINDOW THAT IS NOT FOREGROUND HAS NO BUSINESS MOVING THE POINTER: SetCursorPos/ClipCursor
-    // below are global and would drag the cursor to this window's centre while the user works
-    // elsewhere. Windows ignores ClipCursor from a background window anyway, so only the cursor
-    // theft is lost. Anchoring to where the pointer actually IS keeps the delta honest on refocus.
-    if (::GetForegroundWindow() != hwnd) {
-        POINT q{};
-        if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
-        return;
-    }
-    RECT rc{};
-    if (!GetClientRect(hwnd, &rc)) return;
-    POINT c{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
-    ClientToScreen(hwnd, &c);
-    captureAnchorX_ = c.x; captureAnchorY_ = c.y;
-    SetCursorPos(c.x, c.y);
-    RECT screen{};
-    POINT tl{ rc.left, rc.top }, br{ rc.right, rc.bottom };
-    ClientToScreen(hwnd, &tl); ClientToScreen(hwnd, &br);
-    screen.left = tl.x; screen.top = tl.y; screen.right = br.x; screen.bottom = br.y;
-    ClipCursor(&screen);
+    mouse_.set(on, window_, "Sandbox", " (Shift+F1 to release)");
 }
 
 // Measures one frame of captured mouse movement, then re-centres for the next.
 void SandboxApp::pollCapturedMouse() {
-    captureDx_ = captureDy_ = 0.0f;
-    if (!mouseCaptured_) return;
-    HWND fg = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
-    // A STALE ANCHOR IS A VIEW SNAP, and losing focus is how the anchor goes stale: Windows drops
-    // ClipCursor confinement the moment a window stops being foreground, and nothing re-captures on
-    // the way back (setMouseCaptured() no-ops if the state hasn't changed), so the next
-    // GetCursorPos() would measure against a pre-alt-tab anchor and hand the framework one
-    // enormous delta -- the camera whips round exactly once, the frame focus returns.
-    // RE-ANCHOR AND REPORT ZERO: one frame of no look input on refocus is imperceptible; a spin
-    // is not.
-    // ANCHOR TO WHERE THE CURSOR IS, NOT warpToAnchor(): that calls SetCursorPos, and dragging the
-    // pointer to this window's centre every frame while the user works elsewhere is a worse bug --
-    // it would also steal the cursor during a bounded --frames run with a play session up.
-    if (fg && ::GetForegroundWindow() != fg) {
-        POINT q{};
-        if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
-        return;
-    }
-    POINT p{};
-    if (!GetCursorPos(&p)) return;
-    captureDx_ = static_cast<f32>(p.x - captureAnchorX_);
-    captureDy_ = static_cast<f32>(p.y - captureAnchorY_);
-    warpToAnchor();
+    mouse_.poll(window_);
 }
-
-#endif
-
-#if defined(_WIN32)
-#else
-void SandboxApp::warpToAnchor() {}
-
-void SandboxApp::pollCapturedMouse() { captureDx_ = captureDy_ = 0.0f; }
-
-#endif
 
 // True while a game is playing, in a build with or without the framework.
 bool SandboxApp::playSessionActive() const {

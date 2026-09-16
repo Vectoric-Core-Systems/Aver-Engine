@@ -20,6 +20,7 @@
 #include "aver/game/GameWater.hpp"
 #include "aver/game/GameStreaming.hpp"
 #include "aver/game/GameLandscape.hpp"
+#include "aver/game/MouseCapture.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -270,9 +271,9 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 #include "aver/framework/framework_hooks.h"
 #endif
 
-// windows.h was nested inside AVER_MODULE_SCENE, but the Win32 calls that need it (setMouseCaptured,
-// applyMcpCommand, warpToAnchor) are gated on _WIN32 alone, with no scene dependency -- SCENE off
-// lost the header while those guarded call sites still expected it.
+// windows.h was nested inside AVER_MODULE_SCENE, but the Win32 calls that need it (applyMcpCommand)
+// are gated on _WIN32 alone, with no scene dependency -- SCENE off lost the header while that
+// guarded call site still expected it.
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -4095,9 +4096,7 @@ private:
 #endif // AVER_MODULE_SCENE
 
     // Mouse capture, for a playing game: the cursor is hidden, confined and re-centred every frame.
-    bool mouseCaptured_ = false;
-    i32  captureAnchorX_ = 0, captureAnchorY_ = 0;
-    f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
+    game::MouseCapture mouse_;
     Window* window_ = nullptr;   // borrowed from the engine in onInit, for the HWND
 
     // ---- THE EDITOR'S OWN INPUT ACCUMULATOR ----
@@ -4143,15 +4142,7 @@ private:
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
 
     void setMouseCaptured(bool on);
-
-#if defined(_WIN32)
-    void warpToAnchor();
-
     void pollCapturedMouse();
-#else
-    void warpToAnchor();
-    void pollCapturedMouse();
-#endif
 
     bool playSessionActive() const;
     // Output Log capture. Written by logSink from any thread under logMutex_, read by the panel.

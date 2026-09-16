@@ -826,7 +826,7 @@ void SandboxApp::maybeRecaptureTest() {
 
     // ...then click back into the viewport and HOLD. A real click lasts many frames; the bug
     // needs only the frames after the first, once own_ has refreshed with releasedByUser_ false
-    // and mouseCaptured_ true.
+    // and mouse_.captured() true.
     io.AddMouseButtonEvent(0, true);
     // The recapture itself takes a frame or two to land -- the button event queues and applies
     // at ImGui's next NewFrame, and the capture block reads it the frame after. The leak is

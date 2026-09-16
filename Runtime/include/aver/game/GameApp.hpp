@@ -36,6 +36,7 @@
 #include "aver/game/GameStreaming.hpp"
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
+#include "aver/game/MouseCapture.hpp"
 
 #include <memory>
 #include <string>
@@ -328,34 +329,29 @@ private:
     // "no-graph project is unaffected" shape discoverProjectGraphs already established for graphs.
     void beginPlayIfGameModeDeclared();
 
-    // Places the possessed pawn at the level's authored Player Start / SPAWN record. Mirrors
-    // SandboxPlay.cpp's placePawnAtPlayerStart -- minus the PlayerStart MARKER lookup half of
-    // playerStartTransform, which a shipped game has no equivalent of (see GameLevel::spawn()'s own
-    // comment): the raw SPAWN record GameLevel::load already captured is the whole answer here.
-    // Called from beginPlayIfGameModeDeclared(), AFTER aver_fw_begin_play succeeds -- same ordering
-    // reason as the editor's own call site: the pawn does not exist until then. Returns false (pawn
-    // left wherever the GameMode's own spawn logic put it) when the level declares no SPAWN record.
+    // Places the possessed pawn at the level's authored Player Start / SPAWN record, through
+    // game::placePossessedPawn (GamePawn.hpp) -- minus the PlayerStart MARKER lookup half of the
+    // editor's playerStartTransform, which a shipped game has no equivalent of (see
+    // GameLevel::spawn()'s own comment): the raw SPAWN record GameLevel::load already captured is
+    // the whole answer here. Called from beginPlayIfGameModeDeclared(), AFTER aver_fw_begin_play
+    // succeeds -- same ordering reason as the editor's own call site: the pawn does not exist until
+    // then. Returns false (pawn left wherever the GameMode's own spawn logic put it) when the level
+    // declares no SPAWN record.
     bool placePawnAtSpawn();
 
     // Drives the camera from the possessed pawn. Must run AFTER World::flush and BEFORE the view
     // matrix is built, or the camera trails the pawn by one frame.
     void drivePlayCamera();
 
-    // ---- OS mouse capture, mirroring SandboxPlay.cpp's setMouseCaptured/warpToAnchor/
-    // pollCapturedMouse almost verbatim (ClipCursor + hidden cursor + re-centre every frame, deltas
-    // measured from the re-centre rather than from WM_MOUSEMOVE, refusing to warp a background
-    // window). Absent from the Runtime before this: mouse-look stopped turning the instant the OS
-    // cursor reached the window edge. See GameConfig::noMouseCapture for the bounded-run gate.
+    // ---- OS mouse capture, through game::MouseCapture (MouseCapture.hpp) -- ClipCursor + hidden
+    // cursor + re-centre every frame, deltas measured from the re-centre rather than from
+    // WM_MOUSEMOVE, refusing to warp a background window. Absent from the Runtime before this:
+    // mouse-look stopped turning the instant the OS cursor reached the window edge. See
+    // GameConfig::noMouseCapture for the bounded-run gate.
 
-    // Gives the mouse to the game (hides the cursor, confines it, re-centres it) or hands it back.
-    // A no-op when `on` already matches the current state, matching ShowCursor's own paired-call
-    // contract (SandboxPlay.cpp's own comment: "ShowCursor is a counter, so each call is paired").
+    // Gives the mouse to the game or hands it back: mouse_.set(on, window_, "Game").
     void setMouseCaptured(bool on);
-    // Parks the cursor at the window's centre, remembers where that was, and confines it there.
-    // Refuses to move a background window's cursor -- see its own definition's comment.
-    void warpToAnchor();
-    // Measures one frame of captured mouse movement into captureDx_/captureDy_, then re-centres for
-    // the next. Zeroes both and returns immediately when not currently captured.
+    // Measures one frame of captured mouse movement and re-centres for the next: mouse_.poll(window_).
     void pollCapturedMouse();
 
     // Pushes the camera, sky, fog and post settings to the device for this frame.
@@ -396,11 +392,9 @@ private:
     // onInit, for the HWND").
     Window* window_ = nullptr;
 
-    // --- mouse capture (mirrors SandboxApp.hpp's own mouseCaptured_/captureAnchorX_/Y_/
-    // captureDx_/Dy_) --- the cursor is hidden, confined and re-centred every frame while captured.
-    bool mouseCaptured_ = false;
-    i32  captureAnchorX_ = 0, captureAnchorY_ = 0;
-    f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
+    // --- mouse capture --- the cursor is hidden, confined and re-centred every frame while
+    // captured; see MouseCapture.hpp.
+    game::MouseCapture mouse_;
 
     // --- camera ---
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
