@@ -6,7 +6,26 @@
 # terminal's console when there is one and leaves redirection untouched -- see Console.hpp. gates.ps1,
 # test.ps1 and the MCP runner all capture stdout through pipes and are unaffected either way.
 add_executable(Sandbox WIN32
+  # SandboxApp: one class, declared in src/SandboxApp.hpp, defined across these files. It was a single
+  # 29,952-line SandboxApp.cpp until 2026-09-16; the split groups runtime-side methods (assets, render,
+  # level load, project, play) apart from editor-side ones so the runtime half can move into Runtime/.
+  src/SandboxMain.cpp
   src/SandboxApp.cpp
+  src/SandboxAssets.cpp
+  src/SandboxRender.cpp
+  src/SandboxLevelLoad.cpp
+  src/SandboxProject.cpp
+  src/SandboxPlay.cpp
+  src/SandboxSelection.cpp
+  src/SandboxViewport.cpp
+  src/SandboxShell.cpp
+  src/SandboxContentBrowser.cpp
+  src/SandboxPanels.cpp
+  src/SandboxSettings.cpp
+  src/SandboxLevelEdit.cpp
+  src/SandboxAutosave.cpp
+  src/SandboxMcp.cpp
+  src/SandboxSelfTests.cpp
   src/AssetEditor.cpp
   src/ActorEditor.cpp
   src/AnimEditor.cpp
@@ -435,18 +454,13 @@ if(TARGET Aver.Save)
   target_link_libraries(Sandbox PRIVATE Aver.Save)
 endif()
 
-# /bigobj on SandboxApp.cpp specifically.
-#
-# NOT a tuning flag: without it MSVC fails outright with C1128, "number of sections exceeded object
-# file format limit". The COFF object format caps a translation unit at 65,536 sections, and this one
-# file -- the whole editor, every panel, every tool, in one TU -- crossed it. Scoped to the single
-# source that needs it rather than the whole target, so the limit being hit again elsewhere stays a
-# visible event rather than something this line quietly absorbs.
-#
-# The real fix is splitting SandboxApp.cpp up, which is a much larger change than whatever edit
-# happens to be the one that tips it over.
+# NO /bigobj ANY MORE, and deliberately so. SandboxApp.cpp needed it while it was the whole editor in one
+# translation unit: MSVC failed with C1128, "number of sections exceeded object file format limit", once
+# that file crossed the COFF cap of 65,536 sections. The file was split on 2026-09-16 (see the source
+# list above) and the largest piece is about a tenth of what it was, so the flag is gone rather than
+# carried forward -- if a translation unit here hits C1128 again, that is a visible event and a sign the
+# file wants splitting, not a flag to add back quietly.
 if(MSVC)
-  set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
   # WIN32 above sets /SUBSYSTEM:WINDOWS, which makes the linker look for WinMain. The entry point
   # this engine generates is main(), so point the CRT's startup at the one that calls it. Identical
   # to Runtime/host/CMakeLists.txt, whose comment claimed Sandbox already did this long before it did.

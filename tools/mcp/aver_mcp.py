@@ -582,9 +582,14 @@ def tool_package(args):
 
 def tool_flags(args):
     """The engine's CLI flags, read out of the source so this cannot go stale."""
-    src = os.path.join(ROOT, "sandbox", "src", "SandboxApp.cpp")
-    with open(src, encoding="utf-8", errors="replace") as f:
-        text = f.read()
+    # Every file SandboxApp spans. It was the single SandboxApp.cpp until 2026-09-16; the argv parser now
+    # lives in SandboxMain.cpp, and reading only SandboxApp.cpp would return a near-empty list silently.
+    src_dir = os.path.join(ROOT, "sandbox", "src")
+    text = ""
+    for name in sorted(os.listdir(src_dir)):
+        if name.startswith("Sandbox") and name.endswith((".cpp", ".hpp")):
+            with open(os.path.join(src_dir, name), encoding="utf-8", errors="replace") as f:
+                text += f.read()
     flags = sorted(set(re.findall(r'"(--[a-z0-9-]+)"', text)))
     return {"ok": True, "count": len(flags), "flags": flags,
             "refused": {k: v for k, v in _REFUSED_FLAGS.items()}}
