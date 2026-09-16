@@ -30,6 +30,9 @@
 #if AVER_MODULE_LANDSCAPE
 #  include "aver/game/GameLandscape.hpp"
 #endif
+#if AVER_MODULE_FLUIDS
+#  include "aver/game/GameWater.hpp"
+#endif
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
 
@@ -220,7 +223,7 @@ private:
     // game with no world is a diagnosable state, and a process that dies before its first frame
     // tells the player nothing.
     void openProject(Engine&);
-    // Gives level_ the work the editor does around a level load (terrain today), before the first load.
+    // Gives level_ the work the editor does around a level load (water and terrain), before the first load.
     void installLevelHooks(Engine&);
 
     // Initialises and registers the Voxi renderer. Also what makes pbr::MaterialSystem exist:
@@ -535,6 +538,10 @@ private:
     // The level's terrain, loaded and unloaded with the level through level_'s LoadHooks (see
     // installLevelHooks) and drawn in onRender before the entities, as in the editor.
     GameLandscape landscape_;
+#endif
+#if AVER_MODULE_FLUIDS
+    // The level's water, through the same hooks as landscape_, plus the fluid volumes scripts spawn.
+    GameWater water_;
 #endif
     u64 frames_ = 0;
     // Seconds since the last --stats dump. See GameConfig::statsIntervalSec.

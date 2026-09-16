@@ -1126,20 +1126,33 @@ void GameApp::spawnParticleTestContent(rhi::IDevice& device) {
 void GameApp::installLevelHooks(Engine& e) {
 #if AVER_MODULE_SCENE
     GameLevel::LoadHooks hooks;
-#  if AVER_MODULE_LANDSCAPE
+    // Water, then terrain, the order the editor's loadLevel applies them in -- and unloads them in.
     hooks.beforePlacements = [this, &e](const std::string& path, const fmt::OcWorldData& w) {
+#  if AVER_MODULE_FLUIDS
+        if (rhi::IDevice* dev = e.device()) water_.applyLevel(*dev, w);
+#  endif
+#  if AVER_MODULE_LANDSCAPE
         pbr::MaterialSystem* ms = nullptr;
 #    if AVER_MODULE_PBR && AVER_MODULE_VOXI
         if (voxiAttached_) ms = &voxiRenderer_.materials();
 #    endif
         landscape_.loadForLevel(e.device(), project_.contentDir(), path, w, &content_, ms);
-    };
-    hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
-    // The editor's unloadLevel ends by unloading the terrain, so a level with none clears the last.
-    hooks.afterUnload = [this, &e] { landscape_.unload(e.device()); };
-#  else
-    (void)e;
 #  endif
+        (void)path; (void)w;
+    };
+#  if AVER_MODULE_LANDSCAPE
+    hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
+#  endif
+    hooks.afterUnload = [this, &e] {
+#  if AVER_MODULE_FLUIDS
+        water_.unload();
+#  endif
+#  if AVER_MODULE_LANDSCAPE
+        // A level with no terrain must clear the last level's.
+        landscape_.unload(e.device());
+#  endif
+        (void)e;
+    };
     level_.setLoadHooks(std::move(hooks));
 #else
     (void)e;
@@ -1905,7 +1918,12 @@ void GameApp::pushFrame(Engine& e) {
     }
 #endif
 
+#if AVER_MODULE_FLUIDS
+    // Underwater fog on a copy, so sky_ stays the authored sky.
+    dev->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, camPos_.z));
+#else
     dev->setSkyAtmosphere(sky_);
+#endif
     // NOT the editor's 0.055 chrome grey. Nothing outside a game's viewport is chrome, because a
     // game has no outside -- anything the sky does not cover is a bug the player should see as
     // black, not as a colour that looks deliberate.
@@ -1959,6 +1977,11 @@ void GameApp::onInit(Engine& e) {
     // FIRST of the render features. Its prePass stages this frame's bone matrices, and the scene
     // pass then asks drawHandle() for a posed handle that must already exist.
     attachSkinning(e);
+#if AVER_MODULE_FLUIDS
+    // BEFORE Voxi, as in the editor: its acceleration-structure build reads the vertex buffer the
+    // fluid scene's prePass writes, so registering after would leave ray-traced effects a frame stale.
+    if (rhi::IDevice* dev = e.device()) water_.init(*dev);
+#endif
     attachVoxi(e);
 #if AVER_WITH_UI_ABI
     attachGameUi(e);
@@ -2230,6 +2253,11 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
 #endif
     tickGameplay(t.dt);
+#if AVER_MODULE_FLUIDS
+    // Straight after the physics step, as in the editor: spawns what a level or script asked for,
+    // reads the solver's new particle positions, and pushes the player into a pool. Not gated on Play.
+    if (rhi::IDevice* dev = e.device()) water_.update(*dev, t.dt);
+#endif
     // BESIDE tickGameplay(), not a parallel loop of its own: this is the same per-frame call site,
     // just not gated on the same PLAYING check -- see tickProjectGraphs' own comment for why.
     tickProjectGraphs(t.dt);
@@ -2377,6 +2405,10 @@ void GameApp::onRender(Engine& e) {
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         if (voxiAttached_) ms = &voxiRenderer_.materials();
 #endif
+#if AVER_MODULE_FLUIDS
+        // Simulated fluid volumes, drawn first as in the editor's onRender.
+        water_.draw(*dev, content_, ms);
+#endif
 #if AVER_MODULE_LANDSCAPE
         // THE TERRAIN, BEFORE THE ENTITIES, as in the editor's onRender. The LOD scale uses the window
         // height: a game's view is the whole backbuffer, as in viewAspect.
@@ -2509,6 +2541,11 @@ void GameApp::onShutdown(Engine& e) {
     // Before physics: unloading destroys entities AND removes their static bodies, and removing a
     // body from a shut-down physics world is the wrong order.
     level_.unload();
+#endif
+#if AVER_MODULE_FLUIDS
+    // After the level's volumes were despawned above, and before physics goes: retiring a live
+    // volume calls into the solver.
+    water_.shutdown(dev);
 #endif
 #if AVER_MODULE_PHYSICS
     aver_phys_shutdown();

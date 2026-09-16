@@ -34,6 +34,7 @@ aver_add_module(Aver.Runtime.Game
     src/GameLandscape.cpp
     src/GameRender.cpp
     src/GameInput.cpp
+    src/GameWater.cpp
   DEPS
     Aver.Runtime
     Aver.Platform
@@ -73,6 +74,11 @@ endif()
 # AVER_MODULE_LANDSCAPE=1 -- the same single link sandbox/CMakeLists.txt uses.
 if(TARGET Aver.Landscape.Renderer)
   target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Landscape.Renderer)
+endif()
+# Level water (GameWater.cpp): the analytic surface, and the simulated volume, which Aver.Fluids
+# itself enables (AVER_FLUIDS_SIMULATED) only when physics is in the tree.
+if(TARGET Aver.Fluids)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Fluids)
 endif()
 
 if(TARGET Aver.Render.PBR)
