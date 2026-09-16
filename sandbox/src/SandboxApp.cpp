@@ -2258,7 +2258,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 camPos_ = center - fwd * d;
                 flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
 #if AVER_MODULE_SCENE
-                chunkStreamHaveLastPos_ = false;   // teleport; see frameCameraOnLevel for why
+                streaming_.resetVelocityTracking();   // teleport; see frameCameraOnLevel for why
 #endif
             }
         }
@@ -2469,76 +2469,20 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Chunk streaming, if switched on. Runs here so it sees THIS frame's camPos_ (the WASD/fly
     // block above already finalized it) and its evictions land in the flush() right below -- also
     // runs while just idling in the editor outside Play, deliberately: that's exactly who this feature is for.
-    if (chunkWorld_) {
-        const f32 invDt = t.dt > 1e-6f ? 1.0f / t.dt : 0.0f;
-        // First frame after enabling (or after any camera teleport -- see frameCameraOnLevel and the
-        // F-key jump above) reports zero velocity: differencing against a stale/teleported-from
-        // position would ask the streamer to prefetch a corridor toward nowhere real.
-        const Vec3 vel = chunkStreamHaveLastPos_ ? (camPos_ - chunkStreamLastCamPos_) * invDt
-                                                  : Vec3{0.0f, 0.0f, 0.0f};
-        chunkStreamLastCamPos_ = camPos_;
-        chunkStreamHaveLastPos_ = true;
-
-        // The other half of the CPU/GPU question above: the streamer reports a pending backlog in
-        // the hundreds for the first few seconds, which reads like it generates every frame
-        // forever -- it does not, the backlog drains and this settles to 0.7ms at pending=0.
-        const auto tStream0 = std::chrono::steady_clock::now();
-
-        std::vector<i32> freed;
+    if (streaming_.enabled()) {
+        const game::GameStreaming::TriangleLookupFn tris = [this](u64 id) -> u32 {
+            const auto it = meshTris_.find(id);
+            return it != meshTris_.end() ? it->second : 0u;
+        };
 #if AVER_MODULE_SCRIPTING
+        // The drone keeps its own corridor resident while it flies, not just the one around the
+        // camera -- both are StreamSource entries to streaming_.tick's second-source overload.
         if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
-            // Optional part 4: the drone flying is what pulls chunks in too, not just the camera
-            // -- both are StreamSource entries, so either one moving keeps its own corridor
-            // resident. See ChunkWorld::update's std::vector<StreamSource> overload.
-            const std::vector<world::StreamSource> sources = {
-                world::StreamSource{camPos_, vel},
-                world::StreamSource{dronePos_, droneVel_},
-            };
-            chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), sources, t.dt, &freed);
-            // Every additional density field streams on the SAME sources and dt, each against its
-            // own radius. Stats are summed rather than replaced: "resident chunks" means the whole
-            // world, not just the primary's.
-            for (auto& extra : chunkWorldsExtra_) {
-                if (!extra) continue;
-                accumulateStreamStats(chunkStreamStats_,
-                                      extra->update(scene::World::instance(), sources, t.dt, &freed));
-            }
+            const world::StreamSource drone{dronePos_, droneVel_};
+            streaming_.tick(camPos_, t.dt, &drone, tris);
         } else
 #endif
-        {
-            chunkStreamStats_ = chunkWorld_->update(scene::World::instance(), camPos_, vel, t.dt, &freed);
-            for (auto& extra : chunkWorldsExtra_) {
-                if (!extra) continue;
-                accumulateStreamStats(chunkStreamStats_,
-                                      extra->update(scene::World::instance(), camPos_, vel, t.dt, &freed));
-            }
-        }
-        {
-            const f64 streamMs = std::chrono::duration<f64, std::milli>(
-                std::chrono::steady_clock::now() - tStream0).count();
-            if ((chunkStreamReports_ & (chunkStreamReports_ + 1)) == 0)
-                AVER_INFO("[Sandbox] chunk stream update {:.1f}ms on the main thread "
-                          "(resident {}, pending {})", streamMs,
-                          chunkStreamStats_.residentChunks, chunkStreamStats_.pendingLoads);
-            ++chunkStreamReports_;
-        }
-#if AVER_MODULE_PHYSICS
-        for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
-#endif
-        // Greppable proof for a headless run: "[ChunkWorld]" lines for the first few frames that
-        // actually loaded or evicted something, then it quiets down so a long capture is not
-        // flooded once steady state is reached.
-        if (chunkStreamLogsLeft_ > 0 &&
-            (chunkStreamStats_.loadedThisUpdate > 0 || chunkStreamStats_.evictedThisUpdate > 0)) {
-            --chunkStreamLogsLeft_;
-            AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities/{}tris "
-                      "pending={} failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
-                      chunkStreamStats_.loadedThisUpdate, chunkStreamStats_.evictedThisUpdate,
-                      chunkStreamStats_.residentChunks, chunkStreamStats_.residentEntities,
-                      residentTriangleCount(),
-                      chunkStreamStats_.pendingLoads, chunkStreamStats_.failedLoads,
-                      chunkStreamStats_.totalLoads, vel.x, vel.y, vel.z);
-        }
+        streaming_.tick(camPos_, t.dt, nullptr, tris);
     }
     scene::World::instance().flush();
 #if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
@@ -2708,8 +2652,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // OPT-IN, and overrides whatever the level/slider said while on: match fog density to the
     // streaming load boundary instead. See fogDensityForOpacityAt and matchFogToStreamRadius_'s
     // comment -- this makes the world visibly foggier, on purpose, only when asked for.
-    if (matchFogToStreamRadius_ && chunkWorld_) {
-        const world::StreamSettings& st = chunkWorld_->settings().stream;
+    if (matchFogToStreamRadius_ && streaming_.enabled()) {
+        const world::StreamSettings& st = streaming_.settings().stream;
         const f32 boundaryCm = static_cast<f32>(st.loadRadius) * static_cast<f32>(st.chunkSizeCm);
         const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
         if (matched > 0.0f) fog = matched;

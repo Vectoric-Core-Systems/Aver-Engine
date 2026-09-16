@@ -1,13 +1,14 @@
 // GameStreaming: opt-in PCG chunk streaming around a moving viewer (the player camera), built on
 // aver::world::ChunkWorld.
 //
-// Mirrors SandboxApp::setChunkStreamingEnabled / warnIfCameraOutsideGeneratedBand /
-// residentTriangleCount (sandbox/src/SandboxLevelLoad.cpp) and the per-frame tick inside
-// SandboxApp::onUpdate (sandbox/src/SandboxApp.cpp) -- minus the editor-only parts: the Window-menu
-// toggle, MCP, and the graph-driven drone as a second StreamSource (see tick()).
+// Shared by every host that streams chunks around a camera: GameApp drives tick() with the camera
+// alone, while the editor's SandboxApp drives the same tick() with a second source (its graph-driven
+// drone) folded in, a triangle count folded into the load/evict log line, and its own hint appended
+// to warnIfCameraOutsideGeneratedBand's message -- the Window-menu toggle and MCP wiring stay
+// editor-only, layered on top of this.
 //
-// Takes the project, the level's PCG records and the content cache as arguments; GameApp hands over
-// what setChunkStreamingEnabled reads off SandboxApp.
+// Takes the project, the level's PCG records and the content cache as arguments -- each host hands
+// over its own project and level state; see enable() for what it does with them.
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
@@ -28,8 +29,8 @@ namespace aver::game {
 class GameContent;
 
 // One or more aver::world::ChunkWorld instances -- one per non-"Sky" PCGVOLUME a level declares --
-// kept resident around a moving viewer. See enable() for construction and tick() for the per-frame
-// step.
+// kept resident around a moving camera, and optionally a second independently-moving source. See
+// enable() for construction and tick() for the per-frame step.
 class GameStreaming {
 public:
     // Height at a world (x, y), in centimetres, for scatter placement to follow terrain. Returns
@@ -74,26 +75,29 @@ public:
 
     bool enabled() const { return primary_ != nullptr; }
 
-    // One step, driving every resident field from a single moving source (the camera). A no-op,
-    // returning a default StreamStats, when not enabled(). Call right before World::flush, which
-    // retires this frame's evictions, as the editor's tick does.
+    // One step, driving every resident field from the camera and, when given, a second
+    // independently-moving source. A no-op, returning a default StreamStats, when not enabled().
+    // Call right before World::flush, which retires this frame's evictions.
     //
     // VELOCITY IS ZEROED ON THE FIRST TICK after enable() and after resetVelocityTracking() --
     // differencing against a stale/teleported-from position would ask the streamer to prefetch a
-    // corridor toward nowhere real. Mirrors SandboxApp.cpp's identical guard on chunkStreamHaveLastPos_.
+    // corridor toward nowhere real.
     //
-    // SINGLE-SOURCE ONLY. The editor also streams around a second, independently-moving source (the
-    // graph-driven drone, via aver::world::ChunkWorld's std::vector<StreamSource> update overload) --
-    // that stays editor-only here along with the drone itself. A future caller with a second mover
-    // to keep resident around (a possessed pawn distinct from the camera, say) has nowhere to plug
-    // that in yet; extending this to take an optional second source is straightforward against
-    // ChunkWorld's existing overload if that is ever needed.
-    world::StreamStats tick(const Vec3& camPos, f32 dt);
+    // `second`, left null, means exactly today's single-source path. Non-null, it is combined with
+    // the camera into a two-entry StreamSource list -- {camPos, vel} then *second, `second`'s own
+    // velocityCmPerSec used as given -- and driven through aver::world::ChunkWorld's
+    // std::vector<StreamSource> update overload on every resident field instead of the single-source
+    // one (a possessed pawn distinct from the camera, or the editor's graph-driven drone, plug in
+    // here).
+    //
+    // `trisLookup`, when non-empty, folds residentTriangleCount(trisLookup) into the load/evict log
+    // line as a "/{}tris" segment; left empty, that line omits it.
+    world::StreamStats tick(const Vec3& camPos, f32 dt, const world::StreamSource* second = nullptr,
+                            const TriangleLookupFn& trisLookup = {});
 
     // Call after teleporting the tracked camera (a level change, a respawn, an editor-style camera
     // jump) so the next tick() computes zero velocity instead of one huge one-frame spike toward
-    // wherever the camera used to be. Mirrors SandboxViewport.cpp's frameCameraOn setting
-    // chunkStreamHaveLastPos_ = false on every teleport.
+    // wherever the camera used to be.
     void resetVelocityTracking() { haveLastPos_ = false; }
 
     // True when any resident field owns `e`. A shipped game has no World Outliner to filter with
@@ -105,15 +109,21 @@ public:
     // generator fills a single Z layer band; a camera above or below it gets an empty wanted-set by
     // construction, with no error and no chunks). Call after enable() and after any teleport that
     // might have moved the camera out of the band. A no-op when not enabled().
-    void warnIfCameraOutsideGeneratedBand(const Vec3& camPos) const;
+    //
+    // `actionHint`, non-null and non-empty, is appended after "...inside that band -- " and supplies
+    // its own final punctuation (an editor might pass "press F to focus something near ground level,
+    // or fly down."); left null, the message just ends "...inside that band."
+    void warnIfCameraOutsideGeneratedBand(const Vec3& camPos, const char* actionHint = nullptr) const;
 
     // Sum of triangle counts over every entity every resident field currently owns, via `lookup`.
-    // O(residentEntities); walked fresh rather than kept running, matching the editor's own
-    // residentTriangleCount (SandboxLevelLoad.cpp) -- a few hundred entities at most. Returns 0 when
-    // not enabled() or `lookup` is empty.
+    // O(residentEntities); walked fresh rather than kept running -- a few hundred entities at most.
+    // Returns 0 when not enabled() or `lookup` is empty.
     u64 residentTriangleCount(const TriangleLookupFn& lookup) const;
 
     const world::StreamStats& stats() const { return stats_; }
+    // The primary field's settings. Only meaningful while enabled(); returns a static
+    // default-constructed ChunkWorldSettings when not.
+    const world::ChunkWorldSettings& settings() const;
 
 private:
     static void accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add);
@@ -128,8 +138,8 @@ private:
     bool haveLastPos_ = false;
     // First few load/evict frames get an explicit log line, then it quiets down. Reset by enable().
     u32  logsLeft_ = 0;
-    // Decreasing-frequency counter for the per-tick timing line, matching SandboxApp.cpp's own
-    // chunkStreamReports_ (1, 2, 4, 8, ... frames apart) so a long run is not flooded.
+    // Decreasing-frequency counter for the per-tick timing line (1, 2, 4, 8, ... frames apart) so a
+    // long run is not flooded.
     u32  reports_ = 0;
 };
 

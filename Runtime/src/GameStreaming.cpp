@@ -38,7 +38,7 @@ void GameStreaming::disable() {
     primary_->shutdown(scene::World::instance(), freed);
     // Every extra field is torn down in the same pass and into the SAME `freed` list -- those
     // bodies are as real as the primary's, and leaving them would leak a physics body per streamed
-    // collider each time streaming is toggled. Mirrors SandboxApp::setChunkStreamingEnabled(false).
+    // collider each time streaming is toggled.
     for (auto& extra : extra_) {
         if (!extra) continue;
         accumulateStreamStats(last, extra->stats());
@@ -71,8 +71,7 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
 
     // ---- ONE ChunkWorld PER DECLARED DENSITY FIELD ----
     // A ChunkWorld's loadRadius decides how far the world populates, and one radius cannot serve a
-    // dense floor and a sparse canopy -- see aver::world::ChunkWorldSettings and
-    // SandboxApp::setChunkStreamingEnabled's identical comment for the full reasoning this mirrors.
+    // dense floor and a sparse canopy -- see aver::world::ChunkWorldSettings.
     std::vector<const fmt::OcPcgVolume*> fields;
     for (const fmt::OcPcgVolume& pv : pcgVolumes)
         if (pv.name != "Sky") fields.push_back(&pv);
@@ -229,13 +228,14 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
               primary_->settings().stream.verticalRadius);
 }
 
-world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt) {
+world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt, const world::StreamSource* second,
+                                        const TriangleLookupFn& trisLookup) {
     if (!primary_) return world::StreamStats{};
 
     const f32 invDt = dt > 1e-6f ? 1.0f / dt : 0.0f;
     // First tick after enable() (or after resetVelocityTracking()) reports zero velocity:
     // differencing against a stale/teleported-from position would ask the streamer to prefetch a
-    // corridor toward nowhere real. Mirrors SandboxApp.cpp's identical guard.
+    // corridor toward nowhere real.
     const Vec3 vel = haveLastPos_ ? (camPos - lastPos_) * invDt : Vec3{0.0f, 0.0f, 0.0f};
     lastPos_ = camPos;
     haveLastPos_ = true;
@@ -243,10 +243,24 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt) {
     const auto t0 = std::chrono::steady_clock::now();
     scene::World& world = scene::World::instance();
     std::vector<i32> freed;
-    stats_ = primary_->update(world, camPos, vel, dt, &freed);
-    for (auto& extra : extra_) {
-        if (!extra) continue;
-        accumulateStreamStats(stats_, extra->update(world, camPos, vel, dt, &freed));
+    if (second) {
+        // Both entries are as real as each other from here on -- either one moving keeps its own
+        // corridor resident, via ChunkWorld's std::vector<StreamSource> overload.
+        const std::vector<world::StreamSource> sources = {
+            world::StreamSource{camPos, vel},
+            *second,
+        };
+        stats_ = primary_->update(world, sources, dt, &freed);
+        for (auto& extra : extra_) {
+            if (!extra) continue;
+            accumulateStreamStats(stats_, extra->update(world, sources, dt, &freed));
+        }
+    } else {
+        stats_ = primary_->update(world, camPos, vel, dt, &freed);
+        for (auto& extra : extra_) {
+            if (!extra) continue;
+            accumulateStreamStats(stats_, extra->update(world, camPos, vel, dt, &freed));
+        }
     }
 #if AVER_MODULE_PHYSICS
     for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
@@ -254,7 +268,7 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt) {
 
     // The streamer reports a pending backlog in the hundreds for the first few seconds -- it is not
     // generating that much every frame forever, the backlog drains. Reported at a decreasing
-    // frequency so a long run is not flooded, matching SandboxApp.cpp's own chunkStreamReports_ gate.
+    // frequency so a long run is not flooded.
     const f64 streamMs = std::chrono::duration<f64, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
     if ((reports_ & (reports_ + 1)) == 0)
@@ -266,11 +280,20 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt) {
     // actually loaded or evicted something, then it quiets down.
     if (logsLeft_ > 0 && (stats_.loadedThisUpdate > 0 || stats_.evictedThisUpdate > 0)) {
         --logsLeft_;
-        AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities pending={} "
-                  "failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
-                  stats_.loadedThisUpdate, stats_.evictedThisUpdate, stats_.residentChunks,
-                  stats_.residentEntities, stats_.pendingLoads, stats_.failedLoads, stats_.totalLoads,
-                  vel.x, vel.y, vel.z);
+        if (trisLookup) {
+            AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities/{}tris "
+                      "pending={} failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
+                      stats_.loadedThisUpdate, stats_.evictedThisUpdate, stats_.residentChunks,
+                      stats_.residentEntities, residentTriangleCount(trisLookup),
+                      stats_.pendingLoads, stats_.failedLoads, stats_.totalLoads,
+                      vel.x, vel.y, vel.z);
+        } else {
+            AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities pending={} "
+                      "failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
+                      stats_.loadedThisUpdate, stats_.evictedThisUpdate, stats_.residentChunks,
+                      stats_.residentEntities, stats_.pendingLoads, stats_.failedLoads,
+                      stats_.totalLoads, vel.x, vel.y, vel.z);
+        }
     }
     return stats_;
 }
@@ -285,7 +308,7 @@ bool GameStreaming::owns(scene::Entity e) const {
 // SINGLE BAND of chunk layers, and a camera above or below it gets an empty wanted-set by
 // construction: no error, no chunks. A WARNING, NOT A CORRECTION -- moving the camera would be a
 // harder bug to understand than being told the range is wrong.
-void GameStreaming::warnIfCameraOutsideGeneratedBand(const Vec3& camPos) const {
+void GameStreaming::warnIfCameraOutsideGeneratedBand(const Vec3& camPos, const char* actionHint) const {
     if (!primary_) return;
     const world::StreamSettings& st = primary_->settings().stream;
     if (st.chunkSizeCm <= 0) return;
@@ -298,9 +321,16 @@ void GameStreaming::warnIfCameraOutsideGeneratedBand(const Vec3& camPos) const {
     // actually contain something rather than the coordinate its floor sits at.
     const i64 lo = i64(surfaceZ - st.verticalRadius) * st.chunkSizeCm;
     const i64 hi = i64(surfaceZ + st.verticalRadius + 1) * st.chunkSizeCm;
-    AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
-              "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band.",
-              camPos.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius);
+    if (actionHint && *actionHint) {
+        AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
+                  "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band -- {}",
+                  camPos.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius,
+                  actionHint);
+    } else {
+        AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
+                  "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band.",
+                  camPos.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius);
+    }
 }
 
 // Sum of triangle counts over every entity every resident field currently owns. O(residentEntities),
@@ -320,6 +350,12 @@ u64 GameStreaming::residentTriangleCount(const TriangleLookupFn& lookup) const {
     add(*primary_);
     for (const auto& extra : extra_) if (extra) add(*extra);
     return total;
+}
+
+const world::ChunkWorldSettings& GameStreaming::settings() const {
+    if (primary_) return primary_->settings();
+    static const world::ChunkWorldSettings kDefault{};
+    return kDefault;
 }
 
 } // namespace aver::game

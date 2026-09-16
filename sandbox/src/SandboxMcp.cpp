@@ -119,7 +119,7 @@ void SandboxApp::registerMcpAbis() {
 #if AVER_MODULE_SCENE
         if (a.fn == "stream_on") {
             setChunkStreamingEnabled(true);
-            if (!chunkWorld_) {
+            if (!streaming_.enabled()) {
                 w = "streaming did not turn on -- see the editor log (no project open, or "
                     "ChunkWorld::open failed)";
                 return false;
@@ -133,13 +133,13 @@ void SandboxApp::registerMcpAbis() {
             return true;
         }
         if (a.fn == "stream_stats") {
-            const world::StreamStats& s = chunkStreamStats_;
+            const world::StreamStats& s = streaming_.stats();
             char buf[320];
             std::snprintf(buf, sizeof buf,
                 "streaming=%s residentChunks=%u residentEntities=%u loadedThisUpdate=%u "
                 "evictedThisUpdate=%u pendingLoads=%u failedLoads=%u totalLoads=%u "
                 "lastLoadMs=%.3f totalLoadMs=%.3f",
-                chunkWorld_ ? "on" : "off", s.residentChunks, s.residentEntities,
+                streaming_.enabled() ? "on" : "off", s.residentChunks, s.residentEntities,
                 s.loadedThisUpdate, s.evictedThisUpdate, s.pendingLoads, s.failedLoads,
                 s.totalLoads, s.lastLoadMs, s.totalLoadMs);
             r = buf;
@@ -152,7 +152,7 @@ void SandboxApp::registerMcpAbis() {
             // A teleport, not a move: the next chunk-streaming update must not see this as a
             // huge one-frame velocity computed against wherever the camera used to be -- the
             // same rule frameCameraOnLevel's own comment states for the same reason.
-            chunkStreamHaveLastPos_ = false;
+            streaming_.resetVelocityTracking();
             char buf[96];
             std::snprintf(buf, sizeof buf, "camPos=(%.1f,%.1f,%.1f)", camPos_.x, camPos_.y, camPos_.z);
             r = buf;

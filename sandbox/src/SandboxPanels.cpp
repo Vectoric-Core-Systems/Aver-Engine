@@ -1848,8 +1848,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // silently discarded on a level whose file carries no FOG line.
         markLevelRecordEdited(hasLevelFog_);
 #if AVER_MODULE_SCENE
-        if (chunkWorld_) {
-            const world::StreamSettings& mst = chunkWorld_->settings().stream;
+        if (streaming_.enabled()) {
+            const world::StreamSettings& mst = streaming_.settings().stream;
             const f32 boundaryCm = static_cast<f32>(mst.loadRadius) * static_cast<f32>(mst.chunkSizeCm);
             ImGui::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
             if (ImGui::IsItemHovered())
@@ -1923,8 +1923,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 // A pure-ImGui debug window. Guarded because uiActive() is a RUNTIME test and cannot make the
 // ImGui:: names exist for the compiler -- see the mouse-capture block in onUpdate for the same trap.
 void SandboxApp::buildChunkStreamingPanel() {
-    if (!chunkWorld_) return;
-    const world::StreamStats& s = chunkStreamStats_;
+    if (!streaming_.enabled()) return;
+    const world::StreamStats& s = streaming_.stats();
     // ANCHORED TO THE VIEWPORT, not the window's top-left corner. It used to sit at a fixed
     // (12, 60) from the window origin, the viewport's corner too until a docked panel appeared on
     // the left, after which this overlay covered the mode panel's tool buttons.
@@ -1948,7 +1948,7 @@ void SandboxApp::buildChunkStreamingPanel() {
     ImGui::Text("last load: %.2f ms", s.lastLoadMs);
     ImGui::Text("resident triangles: %llu", static_cast<unsigned long long>(residentTriangleCount()));
     ImGui::Separator();
-    ImGui::TextDisabled("%s", chunkWorld_->settings().worldDir.c_str());
+    ImGui::TextDisabled("%s", streaming_.settings().worldDir.c_str());
     ImGui::End();
 }
 

@@ -993,7 +993,7 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::Separator();
 #if AVER_MODULE_SCENE
             {
-                const bool streamOn = chunkWorld_ != nullptr;
+                const bool streamOn = streaming_.enabled();
                 ImGui::BeginDisabled(!project_.valid());
                 if (ImGui::MenuItem("Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
                 ImGui::EndDisabled();

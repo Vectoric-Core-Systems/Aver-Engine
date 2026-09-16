@@ -2772,23 +2772,6 @@ bool SandboxApp::occlusionWasVisible(scene::Entity e) const {
 
 #endif
 
-#if AVER_MODULE_SCENE
-#if AVER_MODULE_SCENE
- void SandboxApp::accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add) {
-    into.residentChunks   += add.residentChunks;
-    into.residentEntities += add.residentEntities;
-    into.loadedThisUpdate += add.loadedThisUpdate;
-    into.evictedThisUpdate += add.evictedThisUpdate;
-    into.entitiesIn       += add.entitiesIn;
-    into.entitiesOut      += add.entitiesOut;
-    into.pendingLoads     += add.pendingLoads;
-    into.failedLoads      += add.failedLoads;
-    into.totalLoads       += add.totalLoads;
-}
-
-#endif
-#endif
-
  rhi::MeshHandle SandboxApp::depthProxyLookup(rhi::MeshHandle mesh, void* user) {
     const auto& m = static_cast<const SandboxApp*>(user)->depthProxy_;
     const auto it = m.find(mesh);

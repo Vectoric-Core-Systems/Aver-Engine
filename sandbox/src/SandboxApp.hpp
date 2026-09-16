@@ -18,6 +18,7 @@
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameWater.hpp"
+#include "aver/game/GameStreaming.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -290,8 +291,8 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 // The divergence census both hosts print -- see SceneCensus.hpp for why it is a census of what the
 // level loaded and not a comparison of frames.
 #include "aver/world/SceneCensus.hpp"
-// Opt-in chunk streaming around the editor camera. See SandboxApp::setChunkStreamingEnabled.
-#include "aver/world/ChunkWorld.hpp"
+// Opt-in chunk streaming around the editor camera. See SandboxApp::setChunkStreamingEnabled;
+// aver/game/GameStreaming.hpp above already pulls in ChunkWorld.hpp under AVER_MODULE_SCENE.
 // A level's SCATTER records -> the generator's palette. The editor does not do this conversion
 // itself: the game runtime needs the identical one, and one of the two would drift.
 #include "aver/world/ScatterPalette.hpp"
@@ -3418,9 +3419,9 @@ private:
     // actually computed from -- see renderSceneEntities' own trust-gate comment above the
     // box-collection loop for the full reasoning, and Occlusion.hpp's corrected "TWO-PASS" section
     // for why an answer needs this at all. Stashed AFTER buildPyramid() runs (inside
-    // occlusionBuildAndTest), the SAME idiom chunkStreamLastCamPos_/chunkStreamHaveLastPos_ already
-    // use for chunk streaming's own "camera value as of last time I looked" bookkeeping -- reused
-    // here rather than adding a second accessor to IOcclusionCuller, per this file's own comment on
+    // occlusionBuildAndTest), the SAME idiom chunk streaming already uses for its own "camera value
+    // as of last time I looked" bookkeeping -- reused here rather than adding a second accessor to
+    // IOcclusionCuller, per this file's own comment on
     // occlusionVisible_ above ("this bookkeeping belongs to the CALLER, not the culler").
     Vec3 occlusionBasisCamPos_{0.0f, 0.0f, 0.0f};
     Vec3 occlusionBasisForward_{1.0f, 0.0f, 0.0f};
@@ -4032,19 +4033,14 @@ private:
 
     static f32 fogDensityForOpacityAt(f32 distanceCm, f32 targetOpacity);
 
-    // Folds one additional field's stream stats into the running total. Counters add; `totalLoads`
-    // adds too, a lifetime counter per world.
-    // GUARDED: world::StreamStats and scene::Entity don't exist with AVER_MODULE_SCENE=OFF, and every
-    // caller of these two is already inside a SCENE guard -- missing it broke the scene-off row of module-matrix.ps1, the only thing that checks this.
+    // GUARDED: scene::Entity doesn't exist with AVER_MODULE_SCENE=OFF, and its only caller is
+    // already inside a SCENE guard -- missing it broke the scene-off row of module-matrix.ps1, the
+    // only thing that checks this.
 #if AVER_MODULE_SCENE
-    static void accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add);
-
     bool anyChunkWorldOwns(scene::Entity e) const;
 #endif
 
     void setChunkStreamingEnabled(bool on);
-
-    void warnIfCameraOutsideGeneratedBand() const;
 
     void setDroneEnabled(bool on);
 
@@ -4142,28 +4138,9 @@ private:
 #endif
 
     // ---------------- chunk streaming (opt-in, Window > Chunk Streaming) ----------------
-    // Owned only while streaming is switched on -- created by setChunkStreamingEnabled(true),
-    // destroyed by (false). Deliberately disjoint from levelEntities_: the World Outliner filters
-    // streamed entities out via chunkWorld_->owns(e), and saveLevel/undo/redo never see them.
-    std::unique_ptr<world::ChunkWorld> chunkWorld_;
-
-    // The level's SECOND and further density fields, one ChunkWorld each. Empty for every level
-    // declaring one PCGVOLUME, as before this existed.
-    // ONE WORLD PER FIELD: a ChunkWorld's streaming RADIUS is the whole point, and one radius cannot
-    // serve both a dense floor and a sparse canopy. Separate worlds let a canopy stream at radius 10
-    // with 3 samples/axis while the floor stays at 3 with 12.
-    // Also the SMALLER change: extending ChunkGenerator to hold several specs would touch the
-    // reproducibility-pinned sampling core.
-    // chunkWorld_ stays the PRIMARY so the thirty-odd panel/log-only sites keep working unchanged;
-    // only the five that must see every world walk both.
-    std::vector<std::unique_ptr<world::ChunkWorld>> chunkWorldsExtra_;
-
-    world::StreamStats chunkStreamStats_;
-    Vec3 chunkStreamLastCamPos_{};
-    bool chunkStreamHaveLastPos_ = false;   // false right after enabling or after a camera teleport,
-                                             // so the next frame reports zero velocity instead of a
-                                             // one-frame spike computed against a stale position.
-    u32  chunkStreamLogsLeft_ = 8;          // first few load/evict frames get an explicit log line
+    // PCG chunk streaming around the editor camera and the drone, shared with the runtime; its
+    // entities are transient, never saved or undo-tracked.
+    game::GameStreaming streaming_;
 #if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
 #endif
@@ -4171,7 +4148,7 @@ private:
     // ---------------- graph-driven drone (opt-in, Window > Drone or --drone) ----------------
     // Proves a native scene can be driven by an .ocgraph end to end: spawned by setDroneEnabled(true),
     // ticked via scripts_.graphTick(), released by (false). Deliberately disjoint from levelEntities_
-    // for the same reason chunkWorld_'s entities are: transient, never saved, never undo-tracked.
+    // for the same reason streaming_'s entities are: transient, never saved, never undo-tracked.
     scene::Entity droneEntity_ = scene::kInvalidEntity;
     // Whether PLAY started this drone, as opposed to the user switching it on from Window > Drone.
     // Stop takes down only the former: ending play should not remove something the user started for
@@ -4540,7 +4517,6 @@ private:
     static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user);
 
     u32 sceneWalkReports_ = 0;     // scene walks so far; the cost split reports at 2^n of them
-    u32 chunkStreamReports_ = 0;   // ditto, for the streamer's main-thread cost
 
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
