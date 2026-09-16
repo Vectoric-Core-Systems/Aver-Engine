@@ -1,6 +1,11 @@
 # One runtime: reconciling the editor's runtime copy with Runtime/
 
-> **STATUS: PLAN, 2026-09-16. Nothing in this document has been implemented yet.** It is the reconcile
+> **STATUS, 2026-09-16: the runtime-only catch-up is implemented; the editor still uses its own copy.**
+> Every gap in the table below is closed in `Runtime/` (commits `696c3666`, `2d3856ec`, `e539f30f`,
+> `6f079f41`, `b956a501`, `40456852`, `88683c93`, `30db84f4`, `23bd0ba4`), built but not yet run
+> side by side with the editor. Still open: the editor-side swaps (C1 onward), the CLI render-override
+> collapse, and the GPU cluster/LOD-selection path, which stays editor-only for now. The rest of this
+> document is the original plan, kept as written. It is the reconcile
 > map for "Phase C" of the editor/runtime split: the editor (`Sandbox.exe`) still carries a private copy
 > of the game runtime inside `SandboxApp` (now split across `sandbox/src/Sandbox*.cpp`), and the standalone
 > `AverEngineRuntime.exe` runs its own copy from `Runtime/`. The goal is ONE runtime -- the editor calls
