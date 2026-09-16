@@ -80,8 +80,8 @@ struct ImportedMaterial {
     // `*_opacity.jpg` beside it.
     //
     // RECORDED HERE, FOLDED IN LATER. This layer states what the file said; it does not decode. The
-    // fold into baseColorTex's alpha happens in the tool, where a decoder and an encoder already
-    // are (AverAssetC's mergeOpacityMaps) -- the same split that keeps --max-texture out of the
+    // fold into baseColorTex's alpha happens in the import policy layer, where a decoder and an
+    // encoder already are (mergeOpacityMaps, ImportCook.cpp) -- the same split that keeps --max-texture out of the
     // cook. A material still carrying this by the time it reaches cookMaterials has an opacity map
     // that could not be folded, and the cook ignores it rather than writing a file nothing samples.
     ImportedTexture opacityTex;

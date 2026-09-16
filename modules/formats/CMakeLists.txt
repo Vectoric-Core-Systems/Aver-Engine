@@ -84,10 +84,24 @@ if(AVER_MODULE_PBR)
       # exactly the reason this target exists: it is the step that needs pbr::MaterialDesc, and the
       # importers must stay in the PBR-free base target. Format-neutral: glTF, OBJ and USD feed it.
       src/MaterialCook.cpp
+      # The policy layer above MaterialCook.cpp: opacity-map folding, the texture-size cap, and the
+      # mesh material-slot rewrite every real import needs around a cook. MOVED from AverAssetC.cpp,
+      # where it started as file-local helpers, once the editor's own import needed the identical
+      # policy and could not reach into a tool's .cpp to get it. See ImportCook.hpp.
+      src/ImportCook.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR
   )
+  # ImportCook.cpp's opacity fold and texture-size cap re-encode through stb_image_write -- the
+  # DECLARATIONS only (Aver.Platform's own PRIVATE stb include, above in its CMakeLists.txt, is the
+  # same story for stb_image.h's READ side). The IMPLEMENTATION is deliberately NOT compiled here:
+  # this target is a static library several different executables link (AverAssetC, the editor), and
+  # each of them already carries its own single STB_IMAGE_WRITE_IMPLEMENTATION translation unit for
+  # its own screenshot/texture-write needs (AverAssetC.cpp, SandboxApp.cpp) -- a second definition
+  # reaching the same final link would be LNK2005, so this rides on the one that executable already
+  # has rather than adding a second.
+  target_include_directories(Aver.Formats.Material PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 endif()
 
 # Aver.Formats.Audio — the WAV reader, deliberately a FOURTH target, for the reason Material is a

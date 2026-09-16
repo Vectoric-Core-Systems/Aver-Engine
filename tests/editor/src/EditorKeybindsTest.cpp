@@ -135,6 +135,9 @@ int main() {
             // is by strId, not slot, so inserting play.start and file.saveAll beside their families
             // renames nothing a user has already rebound.
             "scripts.compile", "scripts.reload", "view.screenshot",
+            "edit.snapToFloor", "view.hideSelected", "view.isolateSelected", "view.unhideAll",
+            "edit.nudgeLeft", "edit.nudgeRight", "edit.nudgeForward", "edit.nudgeBack",
+            "edit.nudgeUp", "edit.nudgeDown",
         };
         const auto& defs = editor::keybindDefs();
         check(defs.size() == golden.size(),

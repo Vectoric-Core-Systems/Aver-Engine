@@ -3,8 +3,183 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#if AVER_MODULE_PBR
+#include "aver/formats/ImportCook.hpp"
+#endif
 
 namespace aver {
+
+// Converts a glTF/GLB into one .ocmesh per mesh (+ .ocskel/.ocanim if skinned) into destDir.
+// Free function, not a member: two callers share no SandboxApp -- Content Browser Import
+// (SandboxApp::importModel) and --import-gltf (createApplication, before any SandboxApp exists). The
+// loop is pure modules/formats calls.
+// Returns false with *outWhy only on a hard parse failure; a clean parse writing nothing new returns
+// true with an all-zero summary -- callers decide if that counts as failure.
+bool importGltfToDir(const std::string& src, const std::string& destDir, const std::string& contentDir,
+                     bool overwrite, GltfImportSummary& out, std::string* outWhy) {
+    std::error_code dirEc;
+    std::filesystem::create_directories(destDir, dirEc);
+
+    fmt::GltfImportResult res;
+    std::string why;
+    if (!fmt::importGltf(src, res, {}, &why)) {
+        if (outWhy) *outWhy = why;
+        return false;
+    }
+    for (const std::string& u : res.unsupported)
+        AVER_WARN("[Import] '{}' contains {} - not imported", std::filesystem::path(src).filename().string(), u);
+
+    std::error_code ec;
+    const std::string stem = std::filesystem::path(src).stem().string();
+
+#if AVER_MODULE_PBR
+    // MATERIALS AND THEIR TEXTURES, BEFORE the meshes below are written: cookImportedMaterials
+    // rewrites each mesh's materialSlots to the cooked stems, and that has to land before saveOcMesh
+    // serialises a mesh below or the .ocmesh would keep naming a material that was never written
+    // under that name -- the exact ordering AverAssetC's cookAndRewriteSlots already commits to, and
+    // for the same reason (see cookImportedMaterials's own header comment).
+    //
+    // A NO-OP WHEN contentDir IS EMPTY: importModel always passes the project's own content
+    // directory, but --import-gltf can be given none at all (the launcher-less case), and the cook
+    // already reports what it is leaving behind rather than losing it silently.
+    //
+    // maxTexture 0: no cap. Nothing in the editor's Import UI offers one yet, so this matches
+    // AverAssetC's own default when --max-texture is not given.
+    if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
+        std::vector<std::string> matWarn;
+        std::string matErr;
+        u32 materialsWritten = 0, texturesWritten = 0;
+        if (!fmt::cookImportedMaterials(res.materials, res.images, contentDir, stem, res.meshes,
+                                        /*maxTexture=*/0, overwrite, &matWarn, &matErr,
+                                        &materialsWritten, &texturesWritten)) {
+            AVER_WARN("[Import] materials: {}", matErr);
+        } else {
+            out.materialsWritten = materialsWritten;
+            out.texturesWritten = texturesWritten;
+            for (const std::string& w : matWarn) AVER_WARN("[Import] materials: {}", w);
+            if (materialsWritten || texturesWritten)
+                AVER_INFO("[Import] {} -> {} material(s), {} texture(s) under {}",
+                          std::filesystem::path(src).filename().string(), materialsWritten,
+                          texturesWritten, contentDir);
+        }
+    }
+#endif
+
+    // Parallel to res.meshes: the stem each one was written under, or empty when it was skipped
+    // (invalid, or a file of that name already existed). The scene level below names these, rather
+    // than re-deriving the naming rule -- a second copy of it only has to disagree once to write a
+    // level full of paths that resolve to nothing.
+    std::vector<std::string> stems(res.meshes.size());
+    for (usize i = 0; i < res.meshes.size(); ++i) {
+        fmt::OcMeshData& m = res.meshes[i];
+        if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
+
+        std::string base = i < res.meshNames.size() && !res.meshNames[i].empty() ? res.meshNames[i] : stem;
+        if (res.meshes.size() > 1 && base == stem) base += "_" + std::to_string(i);
+        for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+                                 c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+
+        std::string outFile = destDir + "\\" + base + ".ocmesh";
+        if (std::filesystem::exists(outFile, ec)) {
+            // THE PER-OUTPUT SKIP, MADE OVERWRITE-AWARE. The true output name is only known here, at
+            // the point it is computed, which is why `overwrite` reaches this far rather than the
+            // caller deleting a guess at what the import would write.
+            if (overwrite) {
+                editor::moveToRecycleBin(outFile);
+                AVER_INFO("[Import] '{}.ocmesh' already existed - replaced", base);
+            } else {
+                AVER_WARN("[Import] '{}.ocmesh' already exists - not overwritten", base);
+                continue;
+            }
+        }
+        if (!fmt::saveOcMesh(outFile, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
+        AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
+                  base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
+        stems[i] = base;
+        ++out.meshesWritten;
+    }
+
+    // THE SCENE, which this path used to throw away. The importer no longer welds a node's
+    // translation into its vertices -- that is what put every imported mesh's pivot metres from
+    // itself -- so without writing the placements down, a multi-part model imported through the
+    // editor's own Import button would arrive as a heap of correctly-centred pieces with no record
+    // of how they fit together. AverAssetC learned this at the same time; this is the same feature
+    // on the path the editor actually uses.
+    //
+    // ONLY WHEN IT IS A SCENE. A single-mesh file gets no level: one PLACE record is not worth a
+    // file, and the Content Browser would gain a stray .ocworld beside every chair somebody imports.
+    if (res.placements.size() > 1) {
+        fmt::OcWorldData w;
+        w.name = stem;
+        for (const fmt::GltfPlacement& p : res.placements) {
+            if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
+            if (stems[usize(p.meshIndex)].empty()) continue;
+            fmt::OcWorldPlacement op;
+            // Beside the meshes, so the reference is relative to the level's own folder the same way
+            // every other PLACE in a hand-authored level is relative to the content root.
+            op.asset = stems[usize(p.meshIndex)] + ".ocmesh";
+            op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
+            w.placements.push_back(std::move(op));
+        }
+        const std::string lvl = destDir + "\\" + stem + ".ocworld";
+        const bool lvlExists = std::filesystem::exists(lvl, ec);
+        if (w.placements.empty()) {
+            // Nothing to say; not worth a file.
+        } else if (lvlExists && !overwrite) {
+            AVER_WARN("[Import] '{}.ocworld' already exists - not overwritten, so the scene layout "
+                      "was not written", stem);
+        } else if ((lvlExists && !editor::moveToRecycleBin(lvl)) || !fmt::saveOcworld(lvl, w, &why)) {
+            AVER_WARN("[Import] could not write the scene layout: {}", why);
+        } else {
+            AVER_INFO("[Import] {} -> {}.ocworld ({} placement(s), the source scene's own layout)",
+                      std::filesystem::path(src).filename().string(), stem, w.placements.size());
+        }
+    }
+
+    // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could
+    // produce a skeleton and a clip that nothing ever wrote and no project could ever contain --
+    // and loadOcSkel/loadOcAnim had no caller in the engine's history.
+    for (usize i = 0; i < res.skeletons.size(); ++i) {
+        std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
+                         ? res.skeletonNames[i] : stem;
+        if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
+        sanitiseAssetName(base);
+        const std::string outFile = destDir + "\\" + base + ".ocskel";
+        const bool skelExists = std::filesystem::exists(outFile, ec);
+        if (skelExists && !overwrite) {
+            AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
+        } else if (skelExists && !editor::moveToRecycleBin(outFile)) {
+            AVER_WARN("[Import] '{}.ocskel' could not be replaced", base);
+        } else if (!fmt::saveOcSkel(outFile, res.skeletons[i], &why)) {
+            AVER_WARN("[Import] {}", why);
+        } else {
+            AVER_INFO("[Import] {} -> {} ({} bone(s))", std::filesystem::path(src).filename().string(),
+                      base + ".ocskel", res.skeletons[i].bones.size());
+            ++out.rigsWritten;
+        }
+    }
+    for (usize i = 0; i < res.animations.size(); ++i) {
+        std::string base = i < res.animationNames.size() && !res.animationNames[i].empty()
+                         ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
+        sanitiseAssetName(base);
+        const std::string outFile = destDir + "\\" + base + ".ocanim";
+        const bool animExists = std::filesystem::exists(outFile, ec);
+        if (animExists && !overwrite) {
+            AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
+        } else if (animExists && !editor::moveToRecycleBin(outFile)) {
+            AVER_WARN("[Import] '{}.ocanim' could not be replaced", base);
+        } else if (!fmt::saveOcAnim(outFile, res.animations[i], &why)) {
+            AVER_WARN("[Import] {}", why);
+        } else {
+            AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))",
+                      std::filesystem::path(src).filename().string(), base + ".ocanim",
+                      res.animations[i].duration, res.animations[i].tracks.size());
+            ++out.clipsWritten;
+        }
+    }
+    return true;
+}
+
 #if AVER_WITH_IMGUI
 // Returns the mounted roots: the project's Content, and the engine's source tree where present.
 std::vector<SandboxApp::CbRoot> SandboxApp::cbRoots() const {
@@ -1095,32 +1270,65 @@ void SandboxApp::cbFileOpModals() {
     }
 
     if (ImGui::BeginPopupModal("cbDelete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted(cbContextIsDir_
-            ? "Delete this folder and everything in it?"
-            : "Delete this file?");
-        ImGui::TextDisabled("%s", cbContextPath_.c_str());
+        // MULTI-DELETE: when the right-clicked/active item is part of a larger selection, Delete
+        // acts on the WHOLE selection, the same way Move/Copy already does -- cbPruneNested for the
+        // same reason cbFileOpModals' own move/copy path uses it (a folder in the selection would
+        // otherwise also try to delete its own children a second time, from a path that no longer
+        // exists by then). A single selection (or a right-click outside it) yields exactly the one
+        // path cbContextPath_ already named, so this reduces to today's behaviour unchanged.
+        const std::vector<std::string> targets =
+            (cbSelection_.size() > 1 && cbIsSelected(cbContextPath_))
+                ? cbPruneNested(cbSelection_) : std::vector<std::string>{cbContextPath_};
+
+        if (targets.size() > 1) {
+            ImGui::Text("Delete %zu items?", targets.size());
+            const usize kShow = 12;
+            for (usize i = 0; i < targets.size() && i < kShow; ++i)
+                ImGui::BulletText("%s", std::filesystem::path(targets[i]).filename().string().c_str());
+            if (targets.size() > kShow)
+                ImGui::TextDisabled("   ...and %zu more", targets.size() - kShow);
+        } else {
+            ImGui::TextUnformatted(cbContextIsDir_
+                ? "Delete this folder and everything in it?"
+                : "Delete this file?");
+            ImGui::TextDisabled("%s", cbContextPath_.c_str());
+        }
         ImGui::TextDisabled("It goes to the recycle bin, so it can be restored.");
 
         // WHAT WILL BREAK, named before the deletion rather than discovered after it. Scanned
         // once when the modal opens (IsWindowAppearing), not per frame -- it walks the content
-        // tree, and doing that every frame while a modal sits open would be absurd.
-        if (!cbContextIsDir_) {
-            if (ImGui::IsWindowAppearing()) cbDeleteRefs_ = cbFindReferencesTo(cbContextPath_);
-            if (!cbDeleteRefs_.empty()) {
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
-                                   ICON_WARNING " %zu file(s) reference this asset:", cbDeleteRefs_.size());
-                // Capped, because a shared material can be named by hundreds of levels and a
-                // modal that grows past the screen cannot be dismissed.
-                const usize shown = cbDeleteRefs_.size() < 12 ? cbDeleteRefs_.size() : usize(12);
-                for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbDeleteRefs_[i].c_str());
-                if (cbDeleteRefs_.size() > shown)
-                    ImGui::TextDisabled("   ...and %zu more", cbDeleteRefs_.size() - shown);
-                ImGui::TextDisabled("References are stored as paths, so deleting this breaks them.");
-                ImGui::Separator();
+        // tree, and doing that every frame while a modal sits open would be absurd. Aggregated
+        // across every target in the selection, not just cbContextPath_, so the warning covers the
+        // whole batch that Delete is about to touch.
+        if (ImGui::IsWindowAppearing()) {
+            cbDeleteRefs_.clear();
+            for (const std::string& t : targets) {
+                std::error_code dec;
+                if (std::filesystem::is_directory(t, dec)) continue;
+                const std::vector<std::string> refs = cbFindReferencesTo(t);
+                cbDeleteRefs_.insert(cbDeleteRefs_.end(), refs.begin(), refs.end());
             }
+            std::sort(cbDeleteRefs_.begin(), cbDeleteRefs_.end());
+            cbDeleteRefs_.erase(std::unique(cbDeleteRefs_.begin(), cbDeleteRefs_.end()), cbDeleteRefs_.end());
         }
-        if (ImGui::Button("Delete")) { cbDeleteEntry(cbContextPath_); cbDeleteRefs_.clear(); ImGui::CloseCurrentPopup(); }
+        if (!cbDeleteRefs_.empty()) {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                               ICON_WARNING " %zu file(s) reference what would be deleted:", cbDeleteRefs_.size());
+            // Capped, because a shared material can be named by hundreds of levels and a
+            // modal that grows past the screen cannot be dismissed.
+            const usize shown = cbDeleteRefs_.size() < 12 ? cbDeleteRefs_.size() : usize(12);
+            for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbDeleteRefs_[i].c_str());
+            if (cbDeleteRefs_.size() > shown)
+                ImGui::TextDisabled("   ...and %zu more", cbDeleteRefs_.size() - shown);
+            ImGui::TextDisabled("References are stored as paths, so deleting this breaks them.");
+            ImGui::Separator();
+        }
+        if (ImGui::Button("Delete")) {
+            for (const std::string& t : targets) cbDeleteEntry(t);
+            cbDeleteRefs_.clear();
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) { cbDeleteRefs_.clear(); ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
@@ -1849,6 +2057,11 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
 // plain popup. Renamed "Import Asset" to match its new title bar text.
 void SandboxApp::drawImportModal() {
     if (!ImGui::BeginPopupModal("Import Asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    // The Overwrite checkbox's own state, local to this modal rather than a member: it means
+    // nothing once the modal is closed, and IsWindowAppearing() below resets it for the next open
+    // the same way cbRenameRepoint_'s sibling checkboxes elsewhere in this file reset THEIR scans.
+    static bool s_overwrite = false;
+    if (ImGui::IsWindowAppearing()) s_overwrite = false;
     ImGui::TextUnformatted("Import an asset into the selected folder.");
     ImGui::TextDisabled(".gltf/.glb become .ocmesh; .wav/.mp3/.m4a/.flac become .ocaudio.");
     ImGui::TextDisabled("Anything else is copied as-is.");
@@ -1884,10 +2097,45 @@ void SandboxApp::drawImportModal() {
     } else {
         ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "Into: %s - %s", dest.c_str(), blocked.c_str());
     }
+
+    // REIMPORT / OVERWRITE. importAsset's own collision check (and, for a model, importGltfToDir's
+    // per-mesh one) look at the file this import would actually BECOME, which is not the source's
+    // own name for anything that gets converted rather than copied -- so this predicts the same
+    // name they will, only to decide whether the checkbox below is worth showing. It is a HINT, not
+    // the enforcement: the real decision for each file a multi-part model can produce is made where
+    // that file's true name is computed (importGltfToDir's own loop), not here.
+    bool wouldCollide = false;
+    if (blocked.empty() && importPath_[0] != '\0') {
+        std::error_code cec;
+        const std::filesystem::path srcPath(importPath_);
+        std::string ext = srcPath.extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".gltf" || ext == ".glb") {
+            wouldCollide = std::filesystem::exists(dest + "\\" + srcPath.stem().string() + ".ocmesh", cec);
+        }
+#if AVER_HAVE_AUDIO_IMPORT
+        else if (fmt::isImportableAudio(importPath_)) {
+            wouldCollide = std::filesystem::exists(
+                dest + "\\" + std::filesystem::path(fmt::ocAudioPathFor(importPath_)).filename().string(), cec);
+        }
+#endif
+        else {
+            wouldCollide = std::filesystem::exists(dest + "\\" + srcPath.filename().string(), cec);
+        }
+    }
+    if (wouldCollide) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                           ICON_WARNING " This would land on a file already here.");
+        ImGui::Checkbox("Overwrite (goes to the recycle bin first)", &s_overwrite);
+        ImGui::Separator();
+    }
+
     ImGui::BeginDisabled(importPath_[0] == '\0' || !blocked.empty());
     if (ImGui::Button("Import")) {
-        importAsset(importPath_, dest);
+        importAsset(importPath_, dest, wouldCollide && s_overwrite);
         importPath_[0] = '\0';
+        s_overwrite = false;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndDisabled();
@@ -1929,7 +2177,7 @@ std::string SandboxApp::importDestLabel(const std::string& absDir) const {
     return "Content/" + rel;
 }
 
-void SandboxApp::importAsset(const std::string& src, const std::string& destDir) {
+void SandboxApp::importAsset(const std::string& src, const std::string& destDir, bool overwrite) {
     std::error_code ec;
     if (!cbIsEditable(destDir)) {
         AVER_WARN("[Import] '{}' is engine content and is read-only", destDir);
@@ -1948,17 +2196,26 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir)
     const std::string name = std::filesystem::path(src).filename().string();
     const std::string dest = destDir + "\\" + name;
     if (std::filesystem::exists(dest, ec)) {
-        AVER_WARN("[Import] '{}' already exists in {} - not overwritten; rename the source or remove it first", name, destDir);
-        notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
-                     name + " exists here already and was not overwritten.");
-        return;
+        // OVERWRITE, when the Import dialog offered it and the user chose it. This is the check that matches what the
+        // source's OWN name would collide with -- meaningful for a plain copy, where `dest` IS the
+        // final output; a converted model or audio file rarely collides here at all (the source
+        // itself is never copied), so its own overwrite handling sits deeper, at the point each
+        // converted file's true name is computed (importGltfToDir's loop, importAudio's own check).
+        if (overwrite) {
+            cbDeleteEntry(dest);
+        } else {
+            AVER_WARN("[Import] '{}' already exists in {} - not overwritten; rename the source or remove it first", name, destDir);
+            notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
+                         name + " exists here already and was not overwritten.");
+            return;
+        }
     }
     const std::string ext = std::filesystem::path(src).extension().string();
     std::string lower;
     for (const char c : ext) lower.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-    if (lower == ".gltf" || lower == ".glb") { importModel(src, destDir); return; }
+    if (lower == ".gltf" || lower == ".glb") { importModel(src, destDir, overwrite); return; }
 #if AVER_HAVE_AUDIO_IMPORT
-    if (fmt::isImportableAudio(src)) { importAudio(src, destDir); return; }
+    if (fmt::isImportableAudio(src)) { importAudio(src, destDir, overwrite); return; }
 #endif
 
     std::filesystem::copy_file(src, dest, ec);
@@ -1981,7 +2238,7 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir)
 #if AVER_WITH_IMGUI
 #if AVER_HAVE_AUDIO_IMPORT
 // Decodes .wav / .mp3 / .m4a / .flac into one .ocaudio in destDir. The source is not copied.
-void SandboxApp::importAudio(const std::string& src, const std::string& destDir) {
+void SandboxApp::importAudio(const std::string& src, const std::string& destDir, bool overwrite) {
     audio::SoundData data;
     const fmt::AudioImportResult r = fmt::audioImportFile(src, data);
     if (!r.ok) {
@@ -1998,11 +2255,18 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir)
     const std::string out = destDir + "\\" + outName;
     std::error_code ec;
     if (std::filesystem::exists(out, ec)) {
-        AVER_WARN("[Import] '{}' already exists in {} - not overwritten", outName, destDir);
-        cbStatus_ = "Already imported";
-        notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
-                     outName + " exists here already and was not overwritten.");
-        return;
+        // OVERWRITE: the same choice importAsset's own top check honours -- see its comment. This
+        // is the checkpoint that actually matters for audio, since the true output name
+        // (outName, an .ocaudio) is never what importAsset's own dest check compares against.
+        if (overwrite) {
+            cbDeleteEntry(out);
+        } else {
+            AVER_WARN("[Import] '{}' already exists in {} - not overwritten", outName, destDir);
+            cbStatus_ = "Already imported";
+            notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
+                         outName + " exists here already and was not overwritten.");
+            return;
+        }
     }
 
     std::string why;
@@ -2034,11 +2298,11 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir)
 // Converts a glTF/GLB into one .ocmesh per mesh in destDir, and registers them for this session.
 // The actual conversion is importGltfToDir (file scope, above the class) so that the same logic
 // is also reachable from the --import-gltf CLI flag, which has no SandboxApp to call a member on.
-void SandboxApp::importModel(const std::string& src, const std::string& destDir) {
+void SandboxApp::importModel(const std::string& src, const std::string& destDir, bool overwrite) {
     GltfImportSummary sum;
     std::string why;
     const std::string srcName = std::filesystem::path(src).filename().string();
-    if (!importGltfToDir(src, destDir, sum, &why)) {
+    if (!importGltfToDir(src, destDir, project_.contentDir(), overwrite, sum, &why)) {
         AVER_WARN("[Import] {}", why);
         cbStatus_ = "Import failed - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);
@@ -2050,14 +2314,41 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir)
                      "The file parsed but contained no meshes, skeletons or clips.", true);
         return;
     }
-    const std::string counts = std::to_string(sum.meshesWritten) + " mesh(es), " +
-                               std::to_string(sum.rigsWritten) + " skeleton(s) and " +
-                               std::to_string(sum.clipsWritten) + " clip(s)";
+    std::string counts = std::to_string(sum.meshesWritten) + " mesh(es), " +
+                         std::to_string(sum.rigsWritten) + " skeleton(s) and " +
+                         std::to_string(sum.clipsWritten) + " clip(s)";
+    if (sum.materialsWritten || sum.texturesWritten)
+        counts += ", with " + std::to_string(sum.materialsWritten) + " material(s) and " +
+                  std::to_string(sum.texturesWritten) + " texture(s)";
     cbStatus_ = "Imported " + counts + " from " + srcName;
     // The outcome of a slow operation, which is precisely what a notification is for.
     notifyOutcome(editor::NotifySeverity::Success, "Imported " + srcName, counts);
     cbInvalidate(destDir);
     wantMeshReload_ = true;
+}
+
+// Imports every path a drag from outside the editor dropped, into the Content Browser's CURRENT
+// folder -- one call per path through importAsset, the same funnel the Import... dialog and a
+// browser-internal drag both already go through, so a drop gets the exact same format dispatch,
+// overwrite handling and notifications as any other import.
+//
+// FOLDERS ARE SKIPPED WITH A NOTE rather than imported recursively: nothing here decides how a
+// dropped directory's contents should be laid out under the destination, and silently flattening
+// it would surprise whoever dropped it. UNSUPPORTED EXTENSIONS ARE NOT FILTERED HERE EITHER --
+// importAsset already decides what it can do with a file (convert, copy, or refuse), and a second
+// opinion here could only disagree with it.
+void SandboxApp::importDroppedFiles(const std::vector<std::string>& paths) {
+    const std::string destDir = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
+    for (const std::string& p : paths) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(p, ec)) {
+            AVER_WARN("[Import] '{}' is a folder - drop its files individually", std::filesystem::path(p).filename().string());
+            notifyOutcome(editor::NotifySeverity::Warning, "Folder not imported",
+                         std::filesystem::path(p).filename().string() + " is a folder - drop its files individually.");
+            continue;
+        }
+        importAsset(p, destDir);
+    }
 }
 
 #endif

@@ -507,9 +507,25 @@ Application* createApplication(int argc, char** argv) {
         // is the other caller. destDir is created if missing, so this also works as the first write into a brand new project.
         else if (!std::strcmp(argv[i],"--import-gltf") && i+2<argc) {
             const std::string src = argv[++i], destDir = argv[++i];
+            // THE OWNING PROJECT'S CONTENT DIR, when destDir sits inside one -- a textured import
+            // needs it to cook the file's materials and textures (importGltfToDir's own call to
+            // fmt::cookImportedMaterials). ownerProjectOf walks UP from destDir looking for the
+            // .ocproject beside it, exactly as it does for a level path; destDir need not itself be
+            // the Content root, only somewhere under a project. A destDir with no owning project --
+            // the launcher-less / scratch-directory case this flag has always supported -- gets
+            // geometry only, same as before this existed.
+            std::string contentDir;
+            const std::string ownerProject = ownerProjectOf(destDir);
+            if (!ownerProject.empty()) {
+                fmt::ProjectDesc proj;
+                std::string projWhy;
+                if (fmt::loadOcproject(ownerProject, proj, &projWhy)) contentDir = proj.contentDir();
+                else AVER_WARN("[Sandbox] found '{}' but could not load it: {} - importing geometry only",
+                              ownerProject, projWhy);
+            }
             GltfImportSummary sum;
             std::string why;
-            if (!importGltfToDir(src, destDir, sum, &why)) {
+            if (!importGltfToDir(src, destDir, contentDir, /*overwrite=*/false, sum, &why)) {
                 AVER_ERROR("[Sandbox] could not import '{}': {}", src, why);
                 std::exit(1);
             }

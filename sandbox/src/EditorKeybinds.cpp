@@ -128,6 +128,11 @@ ImGuiKey nameToKey(std::string_view s) {
 //                                Ctrl+Shift+R.
 //   Screenshot                -- NEW command (2026-09-16): F9 saves a PNG of the 3D viewport. Also in
 //                                the play-session scope, since a running game is the likeliest subject.
+//   SnapToFloor..NudgeDown    -- NEW commands (2026-09-16), the viewport placement verbs, object mode
+//                                only. End drops the selection onto what is below it. H hides it,
+//                                Shift+H hides everything else, Ctrl+H brings back what those hid --
+//                                exact modifiers, since the three share a key. Arrows and PageUp/Down
+//                                nudge by the move-snap step, repeating while held.
 //   EditSelectAll             -- Ctrl+A over the OUTLINER's drawn order. It shipped as a menu item
 //                                whose "Ctrl+A" hint was a hardcoded string with no key behind it,
 //                                so the menu advertised a shortcut that did nothing. The Content
@@ -178,6 +183,16 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::CompileScripts,  "scripts.compile",  "Compile Scripts",   {ImGuiKey_B,  true, true, false}, kAnywhereScope, true, true, false},
     {CommandId::ReloadScripts,   "scripts.reload",   "Reload Scripts",    {ImGuiKey_R,  true, true, false}, kAnywhereScope, true, true, false},
     {CommandId::Screenshot,      "view.screenshot",  "Screenshot Viewport", {ImGuiKey_F9, false,false,false}, kAnywhereScope | kScopePlaySession, true, true, false},
+    {CommandId::SnapToFloor,     "edit.snapToFloor",     "Snap to Floor",       {ImGuiKey_End,       false,false,false}, kScopeObjectMode, true, true, false},
+    {CommandId::HideSelected,    "view.hideSelected",    "Hide Selected",       {ImGuiKey_H,         false,false,false}, kScopeObjectMode, true, true, false},
+    {CommandId::IsolateSelected, "view.isolateSelected", "Hide Unselected",     {ImGuiKey_H,         false,true, false}, kScopeObjectMode, true, true, false},
+    {CommandId::UnhideAll,       "view.unhideAll",       "Unhide All",          {ImGuiKey_H,         true, false,false}, kScopeObjectMode, true, true, false},
+    {CommandId::NudgeLeft,       "edit.nudgeLeft",       "Nudge Left",          {ImGuiKey_LeftArrow, false,false,false}, kScopeObjectMode, true, true, true},
+    {CommandId::NudgeRight,      "edit.nudgeRight",      "Nudge Right",         {ImGuiKey_RightArrow,false,false,false}, kScopeObjectMode, true, true, true},
+    {CommandId::NudgeForward,    "edit.nudgeForward",    "Nudge Forward",       {ImGuiKey_UpArrow,   false,false,false}, kScopeObjectMode, true, true, true},
+    {CommandId::NudgeBack,       "edit.nudgeBack",       "Nudge Back",          {ImGuiKey_DownArrow, false,false,false}, kScopeObjectMode, true, true, true},
+    {CommandId::NudgeUp,         "edit.nudgeUp",         "Nudge Up",            {ImGuiKey_PageUp,    false,false,false}, kScopeObjectMode, true, true, true},
+    {CommandId::NudgeDown,       "edit.nudgeDown",       "Nudge Down",          {ImGuiKey_PageDown,  false,false,false}, kScopeObjectMode, true, true, true},
 }};
 
 static_assert(kDefs.size() == kCommandCount, "kDefs must have exactly one row per CommandId");

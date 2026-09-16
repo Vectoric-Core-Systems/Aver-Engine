@@ -3,6 +3,7 @@
 #include "Event.hpp"
 
 #include <string>
+#include <vector>
 
 namespace aver {
 
@@ -124,6 +125,27 @@ public:
     // Called only from Win32Window.cpp's WM_COPYDATA handler, once OpenRequestHook has accepted.
     void setPendingOpenRequest(std::string path) { pendingOpenRequest_ = std::move(path); hasPendingOpenRequest_ = true; }
 
+    // Files dropped onto the window from Explorer -- WM_DROPFILES, latched the same way as the
+    // open-request path just above and for the identical reason: Event is a fixed POD struct with no
+    // string (or array-of-string) field, so a drop cannot ride dispatch() and waits here instead for
+    // SandboxApp::onUpdate to poll it once a frame.
+    //
+    // OFF BY DEFAULT. DragAcceptFiles is a per-HWND opt-in, and this class has no other host today,
+    // but a Window that started accepting drops the moment it existed would change behaviour for
+    // every host that constructs one. setAcceptDroppedFiles(true) is SandboxApp's decision, made in
+    // onInit once a Window exists, not this class's.
+    bool hasPendingDroppedFiles() const { return !pendingDroppedFiles_.empty(); }
+    std::vector<std::string> takePendingDroppedFiles() {
+        std::vector<std::string> f; f.swap(pendingDroppedFiles_); return f;
+    }
+    // Called only from Win32Window.cpp's WM_DROPFILES handler.
+    void addPendingDroppedFile(std::string path) { pendingDroppedFiles_.push_back(std::move(path)); }
+    // Enables/disables WM_DROPFILES for this window (DragAcceptFiles under the hood). Backends with
+    // no drag-and-drop of their own simply ignore this and hasPendingDroppedFiles() stays empty
+    // forever, which is the same "no-op host" shape the rest of this class already uses.
+    void setAcceptDroppedFiles(bool accept);
+    bool acceptDroppedFiles() const { return acceptDroppedFiles_; }
+
     // Win32 single-instance forwarding: a named mutex as the "is a primary alive" existence check,
     // paired with a same-lifetime named file mapping that carries the primary's HWND. Both are
     // kernel objects Windows releases automatically when the owning process exits for ANY reason,
@@ -182,6 +204,8 @@ private:
     void* openRequestHookUser_ = nullptr;
     bool hasPendingOpenRequest_ = false;
     std::string pendingOpenRequest_;
+    std::vector<std::string> pendingDroppedFiles_;
+    bool acceptDroppedFiles_ = false;
     RenderTickFn renderTick_ = nullptr;
     void* renderTickUser_ = nullptr;
     bool modalSize_ = false;

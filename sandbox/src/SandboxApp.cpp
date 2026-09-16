@@ -598,6 +598,10 @@ void SandboxApp::onInit(Engine& e)  {
     // produces lands in the accumulator; nothing is filtered here, because filtering is policy
     // and policy is decided per-consumer, per-frame, further down.
     if (window_) window_->setEventCallback(&sandboxWindowEvent, &input_);
+    // Dragging files in from Explorer. Off by default in Window itself (see
+    // Window::setAcceptDroppedFiles); the editor is the one host that wants it. Polled once a frame
+    // in onUpdate, next to the identically-shaped hasPendingOpenRequest().
+    if (window_) window_->setAcceptDroppedFiles(true);
 
     // Single-instance forwarding, receiver registration. singleInstanceEligible_ is a superset of
     // the sender's own forward-attempt gate ("argc==2 and argv[1] doesn't start with '-'") by
@@ -1926,6 +1930,20 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // handleOpenRequest already confirmed it matches the live project, and Window::focus()
         // already brought this window forward from the WM_COPYDATA receive itself.
     }
+    // Files dragged in from Explorer, latched the same way as the open request just above (see
+    // Window::hasPendingDroppedFiles). Only meaningful with a project open -- importDroppedFiles
+    // imports into the Content Browser's current folder, and there is no Content Browser, and
+    // nowhere to copy TO, before a project exists.
+    if (window_ && window_->hasPendingDroppedFiles()) {
+        const std::vector<std::string> dropped = window_->takePendingDroppedFiles();
+        if (project_.valid()) {
+            importDroppedFiles(dropped);
+        } else {
+            AVER_WARN("[Import] {} file(s) dropped with no project open; ignored", dropped.size());
+            notifyOutcome(editor::NotifySeverity::Warning, "Nothing to import into",
+                          "Open a project before dropping files into the editor.");
+        }
+    }
     // --pt-scene-toggle-on/-off: verification-only (see the members' own comment). Checked BEFORE
     // syncPtSceneView() so the same onUpdate() that flips the want-flag is the same one that acts
     // on it, rather than costing a whole extra frame of lag for no reason.
@@ -2315,11 +2333,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // doing nothing from the same panel.
         if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantCaptureKeyboard &&
             keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
-            EditXform x;
-            if (selectedXform(x)) {
-                const f32 r = selectedRadius();
+            // selectionBounds, NOT selectedXform/selectedRadius: those describe only the selection's
+            // ANCHOR, which is what the gizmo draws on, so a spread multi-selection framed around
+            // them put most of the set outside the view. This is the union of the whole selection.
+            Vec3 center; f32 r;
+            if (selectionBounds(center, r)) {
                 const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
-                camPos_ = x.pos - fwd * d;
+                camPos_ = center - fwd * d;
                 flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
 #if AVER_MODULE_SCENE
                 chunkStreamHaveLastPos_ = false;   // teleport; see frameCameraOn for why

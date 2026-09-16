@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "ViewportMarquee.hpp"
 
 namespace aver {
 #if AVER_MODULE_SYNAPSE
@@ -1342,12 +1343,90 @@ void SandboxApp::handleManip(Engine& e) {
                     rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;
                     beginTransformEdit();
                 }
+#if AVER_MODULE_SCENE
+                // MARQUEE ARMS ON A MISS, Select tool only (the brief above is about picking an
+                // OBJECT; Move/Rotate/Scale keep their old "click empty space, deselect" meaning
+                // unchanged). pick() just cleared the selection above (or left it cleared under
+                // Ctrl -- see pick()'s own tail), so arming here costs a click on empty space
+                // nothing it did not already do; a release with no further movement below the
+                // threshold reads as that exact same click, per marqueeActive_ staying false.
+                else if (tool_ == Tool::Select && !anySelected()) {
+                    marqueeArmed_ = true; marqueeActive_ = false;
+                    marqueeX0_ = marqueeX1_ = mx; marqueeY0_ = marqueeY1_ = my;
+                }
+#endif
             }
         }
         if (!io.MouseDown[0]) {
             if (dragging_) endTransformEdit();
             dragging_=false; activeAxis_=-1;
         }
+#if AVER_MODULE_SCENE
+        // MARQUEE: continues while armed, becomes ACTIVE (and starts drawing) once the drag clears
+        // the threshold, and commits on release -- all independent of `overScene` above, since a
+        // drag that started inside the viewport must keep tracking even if the cursor strays past
+        // its edge.
+        if (marqueeArmed_) {
+            marqueeX1_ = mx; marqueeY1_ = my;
+            if (!marqueeActive_ &&
+                editor::marqueeExceedsThreshold(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_))
+                marqueeActive_ = true;
+
+            if (marqueeActive_) {
+                f32 loX, loY, hiX, hiY;
+                editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
+                // The selection outline's own orange (selectionOutlineLines' kSelR/G/B, above),
+                // diluted for the fill so the scene underneath a drag stays readable.
+                ImDrawList* dl = ImGui::GetForegroundDrawList();
+                dl->AddRectFilled(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(255, 158, 31, 40));
+                dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(255, 158, 31, 220), 0.0f, 0, 1.5f*dpi_);
+            }
+
+            if (!io.MouseDown[0]) {
+                if (marqueeActive_) {
+                    f32 loX, loY, hiX, hiY;
+                    editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
+                    // Every eligible entity -- pick()'s own broadphase eligibility -- whose world
+                    // AABB, projected corner by corner, intersects the rectangle.
+                    std::vector<scene::Entity> hitEnts;
+                    scene::World& w = scene::World::instance();
+                    const u32 n = w.count();
+                    for (u32 i = 0; i < n; ++i) {
+                        const scene::Entity ent = w.at(i);
+                        if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                        if (anyChunkWorldOwns(ent)) continue;
+                        const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                        if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                        if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+                        Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+                        Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+                        if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
+                        const Mat4 wm = w.worldMatrix(ent);
+                        f32 cx[8], cy[8]; int cn = 0;
+                        for (u32 c = 0; c < 8; ++c) {
+                            const Vec3 p{(c & 1) ? lmax.x : lmin.x, (c & 2) ? lmax.y : lmin.y, (c & 4) ? lmax.z : lmin.z};
+                            f32 sx, sy;
+                            if (project(xformPoint(wm, p), sx, sy)) { cx[cn] = sx; cy[cn] = sy; ++cn; }
+                        }
+                        if (editor::projectedAabbIntersectsRect(cx, cy, cn, loX, loY, hiX, hiY))
+                            hitEnts.push_back(ent);
+                    }
+                    // Ctrl ADDS the catch to the existing selection; a plain drag REPLACES it --
+                    // including replacing it with nothing, when the rectangle caught nothing at all.
+                    if (hitEnts.empty()) {
+                        if (!io.KeyCtrl) { multiClear(); sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+                    } else if (io.KeyCtrl) {
+                        for (const scene::Entity ent : hitEnts) if (!multiIsSelected(ent)) multiToggle(ent);
+                    } else {
+                        multiSetSingle(hitEnts.front());
+                        for (usize k = 1; k < hitEnts.size(); ++k) multiToggle(hitEnts[k]);
+                    }
+                }
+                marqueeArmed_ = false;
+                marqueeActive_ = false;
+            }
+        }
+#endif
     }
 
     // THE OUTLINER AND DETAILS COUNT AS "THE LEVEL", for the edit verbs.
@@ -1395,6 +1474,51 @@ void SandboxApp::handleManip(Engine& e) {
         // checks, exactly as it was hardcoded before this file existed.
         if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) redo();
         if (keybinds_.pressed(editor::CommandId::EditRedo, io)) redo();
+
+#if AVER_MODULE_SCENE
+        if (keybinds_.pressed(editor::CommandId::SnapToFloor, io))     snapSelectionToFloor();
+        if (keybinds_.pressed(editor::CommandId::HideSelected, io))    hideSelection();
+        if (keybinds_.pressed(editor::CommandId::IsolateSelected, io)) isolateSelection();
+        if (keybinds_.pressed(editor::CommandId::UnhideAll, io))       unhideAll();
+
+        // NUDGE: camera-relative, snapped to whichever single world axis each direction most
+        // agrees with -- moving "left" along a camera that is not axis-aligned would otherwise
+        // nudge diagonally, which is not what a cardinal step means.
+        {
+            const Vec3 rightVec = cross(Vec3{0,0,1}, camForward());
+            Vec3 fwdFlat = camForward(); fwdFlat.z = 0.0f;
+            const Vec3 rightAxis = std::fabs(rightVec.x) >= std::fabs(rightVec.y)
+                ? Vec3{rightVec.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
+                : Vec3{0.0f, rightVec.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
+            const Vec3 fwdAxis = std::fabs(fwdFlat.x) >= std::fabs(fwdFlat.y)
+                ? Vec3{fwdFlat.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
+                : Vec3{0.0f, fwdFlat.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
+            const f32 nudgeStep = snapMove_ ? moveSnap_ : 10.0f;
+
+            using CI = editor::CommandId;
+            const CI kNudgeIds[6] = {CI::NudgeLeft, CI::NudgeRight, CI::NudgeForward,
+                                      CI::NudgeBack, CI::NudgeUp, CI::NudgeDown};
+            bool anyNudgeDown = false;
+            for (CI id : kNudgeIds) {
+                const auto& ch = keybinds_.chordFor(id);
+                if (ch.isBound() && ImGui::IsKeyDown(ch.key)) { anyNudgeDown = true; break; }
+            }
+            // ONE UNDO ENTRY PER HELD RUN, not one per repeat: open it the first time a nudge key is
+            // down and close it once every nudge key is back up. The run tracks ITS OWN flag rather
+            // than editBeforeValid_, because a Details panel field drag holds that one open too and
+            // this block would otherwise close the drag's entry on every frame of it.
+            if (anyNudgeDown && !nudgeEditOpen_) nudgeEditOpen_ = beginTransformEdit();
+
+            if (keybinds_.pressed(CI::NudgeLeft, io))    nudgeSelection(rightAxis * -nudgeStep);
+            if (keybinds_.pressed(CI::NudgeRight, io))   nudgeSelection(rightAxis *  nudgeStep);
+            if (keybinds_.pressed(CI::NudgeForward, io)) nudgeSelection(fwdAxis   *  nudgeStep);
+            if (keybinds_.pressed(CI::NudgeBack, io))    nudgeSelection(fwdAxis   * -nudgeStep);
+            if (keybinds_.pressed(CI::NudgeUp, io))      nudgeSelection(Vec3{0.0f, 0.0f,  nudgeStep});
+            if (keybinds_.pressed(CI::NudgeDown, io))    nudgeSelection(Vec3{0.0f, 0.0f, -nudgeStep});
+
+            if (!anyNudgeDown && nudgeEditOpen_) { endTransformEdit(); nudgeEditOpen_ = false; }
+        }
+#endif
     }
 
     if (dragging_ && anySelected()) {
@@ -2072,6 +2196,246 @@ void SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     else                       { sel_ = best;     selEntity_ = kInvalidId; }
 }
 
+#endif
+
+#if AVER_MODULE_SCENE
+// ---- VIEWPORT PLACEMENT VERBS (2026-09-16) -----------------------------------------------------
+// End/H/Shift+H/Ctrl+H/arrows/PageUp/PageDown, dispatched from handleManip's edit-verb block.
+
+// The union of every selected entity's world-space bounds, for F (Frame Selected) to fit the WHOLE
+// set rather than just the anchor selectedXform/selectedRadius describe alone.
+//
+// EACH ENTITY'S OWN BOX is built the same way selectedRadius builds one for the anchor: its local
+// CMeshRenderer extent times the entity's OWN world scale, centred on its OWN world position -- not
+// a properly rotated world AABB. A rotated mesh's true world bounds run wider than this along axes
+// its local bounds do not already cover; selectedRadius already makes that exact trade for a single
+// object, and a more exact box here would let "frame this one object" and "frame a five-object
+// selection that happens to include it" size the same object two different ways for no reason a
+// user could see.
+bool SandboxApp::selectionBounds(Vec3& center, f32& radius) const {
+    const std::vector<scene::Entity> sel = selectedEntities();
+    if (sel.empty()) return false;
+
+    scene::World& w = scene::World::instance();
+    Vec3 mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+    for (const scene::Entity e : sel) {
+        const Transform t = worldTransformOf(w, e);
+        f32 ex = 0.0f, ey = 0.0f, ez = 0.0f;
+        if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
+            ex = (mr->aabbMax[0] - mr->aabbMin[0]) * std::fabs(t.scale.x);
+            ey = (mr->aabbMax[1] - mr->aabbMin[1]) * std::fabs(t.scale.y);
+            ez = (mr->aabbMax[2] - mr->aabbMin[2]) * std::fabs(t.scale.z);
+        }
+        // A zero (or missing) extent falls back to the scale itself, exactly as selectedRadius does
+        // for the identical reason: bounds that were never filled in must not frame as a point.
+        if (ex <= 1e-3f && ey <= 1e-3f && ez <= 1e-3f) {
+            const f32 s = 2.0f * std::fmax(1.0f, std::fmax(std::fabs(t.scale.x),
+                                            std::fmax(std::fabs(t.scale.y), std::fabs(t.scale.z))));
+            ex = ey = ez = s;
+        }
+        mn.x = std::fmin(mn.x, t.position.x - ex * 0.5f); mx.x = std::fmax(mx.x, t.position.x + ex * 0.5f);
+        mn.y = std::fmin(mn.y, t.position.y - ey * 0.5f); mx.y = std::fmax(mx.y, t.position.y + ey * 0.5f);
+        mn.z = std::fmin(mn.z, t.position.z - ez * 0.5f); mx.z = std::fmax(mx.z, t.position.z + ez * 0.5f);
+    }
+
+    center = (mn + mx) * 0.5f;
+    // Half the union box's own space diagonal, so a sphere of this radius contains the whole set --
+    // the same quantity focusOnSelection's `d = max(50, r/tan(30 deg)*1.6)` already expects from
+    // selectedRadius for a single object.
+    radius = std::fmax(1.0f, dist(mn, mx) * 0.5f);
+    return true;
+}
+
+#if AVER_WITH_IMGUI
+// End: drops every selected entity straight down onto whatever is beneath it.
+//
+// A STRAIGHT-DOWN RAY, not a full pick()-style click ray -- +Z is up in this engine (Math.hpp's own
+// top comment, and dropRestLift's "along world +Z"), so "the floor" is unambiguously -Z from each
+// entity's own position. Reuses pick()'s own two-world broadphase (placeholder boxes,
+// then scene entities sorted nearest-box-first with rayPickGeometry/pickGeometryFor refining each
+// candidate) so a selected object rests on exactly what a click on it would have hit, minus the
+// landscape height query neither pick() nor dropWorldPoint ever learned (see this function's own
+// use of surfaceHeightAt -- a straight-down query, not raycastHeightfield's march, because the ray
+// already IS straight down).
+//
+// EVERYTHING ELSE IN THE SELECTION IS INELIGIBLE GROUND: an object must not land on top of another
+// that this same command is about to move (or already has), which is why each entity's own ray
+// skips every entity in `sel`, not just itself.
+void SandboxApp::snapSelectionToFloor() {
+    const std::vector<scene::Entity> sel = selectedEntities();
+    if (sel.empty()) return;
+    scene::World& w = scene::World::instance();
+
+    // ONE UNDO ENTRY FOR THE WHOLE OPERATION: beginTransformEdit captures the anchor's transform and
+    // (via forEachMultiMoved) every other selected entity's LOCAL transform before anything below
+    // writes to them; endTransformEdit reads back wherever they ended up and pushes one Transform
+    // command covering every entity that actually moved.
+    if (!beginTransformEdit()) return;
+
+    for (const scene::Entity e : sel) {
+        if (!w.valid(e)) continue;
+        const Transform before = worldTransformOf(w, e);
+        const auto* selfMr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+
+        // The ray starts clear of the entity's OWN top, not at its pivot -- starting inside a tall
+        // mesh could report a hit on its own back faces (or, worse, on itself if it were not already
+        // excluded below).
+        f32 halfZ = 1.0f;
+        if (selfMr) {
+            const f32 ez = (selfMr->aabbMax[2] - selfMr->aabbMin[2]) * std::fabs(before.scale.z);
+            if (ez > 1e-3f) halfZ = ez * 0.5f;
+        }
+        const Vec3 ro{before.position.x, before.position.y, before.position.z + halfZ + 5.0f};
+        const Vec3 rd{0.0f, 0.0f, -1.0f};
+
+        f32 bestT = 1e30f;
+        bool hit = false;
+        f32 hitZ = 0.0f;
+
+#if AVER_MODULE_LANDSCAPE
+        // Landscape first: straight down over (x, y) is exactly surfaceHeightAt's own vertical-query
+        // case, not raycastHeightfield's march.
+        if (landscapeLoaded_) {
+            f32 z;
+            if (landscape::surfaceHeightAt(landscapeData_, ro.x, ro.y, z) && z < ro.z) {
+                bestT = ro.z - z; hit = true; hitZ = z;
+            }
+        }
+#endif
+        // Placeholder boxes (Floor/Cube), bounds-only -- pick()'s own placeholder loop. Never one of
+        // `sel`: the multi-selection this function walks is always scene entities.
+        if (!hideEditorScene_)
+            for (const MeshObj& o : objects_) {
+                if (!o.visible) continue;
+                Transform tr; tr.position = o.pos; tr.rotation = quatFromEulerDeg(o.rotDeg); tr.scale = o.scale;
+                const Mat4 iw = tr.toMatrix().inverse();
+                const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
+                f32 t;
+                if (rayAabb(lo, ld, o.aabbMin, o.aabbMax, t) && t > 0.0f && t < bestT) {
+                    bestT = t; hit = true; hitZ = ro.z - t;
+                }
+            }
+
+        // Every other eligible scene entity -- pick()'s own broadphase (streamed entities excluded,
+        // a visible resolved mesh required), minus this whole selection.
+        {
+            struct FloorCand { scene::Entity ent; u64 meshId; f32 tBox; bool insideBox; Vec3 lo, ld; };
+            std::vector<FloorCand> cands;
+            const u32 n = w.count();
+            for (u32 i = 0; i < n; ++i) {
+                const scene::Entity ent = w.at(i);
+                if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                if (std::find(sel.begin(), sel.end(), ent) != sel.end()) continue;
+                if (anyChunkWorldOwns(ent)) continue;
+                const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+                Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+                Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+                if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
+                const Mat4 iw = w.worldMatrix(ent).inverse();
+                const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
+                f32 tBox;
+                if (!rayAabb(lo, ld, lmin, lmax, tBox)) continue;
+                cands.push_back({ent, mr->mesh, tBox, tBox <= 0.0f, lo, ld});
+            }
+            std::sort(cands.begin(), cands.end(),
+                      [](const FloorCand& a, const FloorCand& b) { return a.tBox < b.tBox; });
+            for (const FloorCand& c : cands) {
+                if (c.tBox >= bestT) break;
+                const bool posedOrSkinned = skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
+                const aver::editor::PickGeometry* geo = posedOrSkinned ? nullptr : &pickGeometryFor(c.meshId);
+                if (!geo || geo->empty()) {
+                    if (c.tBox > 0.0f) { bestT = c.tBox; hit = true; hitZ = ro.z - c.tBox; }
+                    continue;
+                }
+                f32 tTri;
+                if (aver::editor::rayPickGeometry(*geo, c.lo, c.ld, /*skipBackFaces=*/c.insideBox, bestT, tTri))
+                    { bestT = tTri; hit = true; hitZ = ro.z - tTri; }
+            }
+        }
+
+        if (!hit) continue;   // nothing below it: leave it where it is
+
+        const f32 liftZ = selfMr ? editor::dropRestLift(selfMr->aabbMin[2], before.scale.z) : 0.0f;
+        Transform after = before;
+        after.position.z = hitZ + liftZ;
+        w.setLocalTransform(e, localFromWorldFor(w, e,
+            EditXform{after.position, eulerDegFromQuat(after.rotation), after.scale}));
+    }
+
+    endTransformEdit();
+}
+
+#endif   // AVER_WITH_IMGUI
+
+// Moves the whole selection by one world-space step. The undo lifecycle -- one entry per HELD RUN,
+// not one per repeat -- is the caller's job (handleManip's edit-verb block), exactly like the gizmo
+// drag's own beginTransformEdit/endTransformEdit pair a few lines above it: this only ever applies
+// one step and trusts a transform edit is already open around it.
+void SandboxApp::nudgeSelection(const Vec3& deltaCm) {
+    EditXform o;
+    if (!selectedXform(o)) return;
+    o.pos += deltaCm;
+    setSelectedXform(o);
+    scene::World& w = scene::World::instance();
+    forEachMultiMoved([&](scene::Entity ent, const Transform& xf) {
+        Transform t = xf;
+        t.position += deltaCm;
+        w.setLocalTransform(ent, t);
+    });
+}
+
+// H: session-only visibility, off. Clears CMeshRenderer's own kMeshRendererVisible bit -- the exact
+// flag the Details panel's Visible checkbox writes, so a hidden entity reads identically everywhere
+// else that flag is already consulted (the render loop, pick()'s own eligibility test). NOT an
+// undoable edit and NOT a level edit: levels do not store visibility, so this never calls pushEdit
+// and never has to mark the level unsaved.
+void SandboxApp::hideSelection() {
+    scene::World& w = scene::World::instance();
+    for (const scene::Entity e : selectedEntities()) {
+        auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+        if (!mr || !(mr->flags & scene::kMeshRendererVisible)) continue;   // already hidden: not ours to restore
+        mr->flags &= ~scene::kMeshRendererVisible;
+        editorHidden_.push_back(e);
+    }
+}
+
+// Shift+H: hides every OTHER eligible entity -- "eligible" meaning whatever pick() itself would have
+// been willing to select, so isolate never touches something a click could not have reached either
+// (a streamed chunk entity, one with no visible mesh, one whose mesh never resolved).
+void SandboxApp::isolateSelection() {
+    const std::vector<scene::Entity> sel = selectedEntities();
+    scene::World& w = scene::World::instance();
+    const u32 n = w.count();
+    for (u32 i = 0; i < n; ++i) {
+        const scene::Entity ent = w.at(i);
+        if (!w.valid(ent) || w.destroyPending(ent)) continue;
+        if (anyChunkWorldOwns(ent)) continue;
+        if (std::find(sel.begin(), sel.end(), ent) != sel.end()) continue;
+        auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+        if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+        if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+        mr->flags &= ~scene::kMeshRendererVisible;
+        editorHidden_.push_back(ent);
+    }
+}
+
+// Ctrl+H: restores exactly what hideSelection/isolateSelection turned off THIS SESSION -- not
+// "everything", so an entity some other mechanism hid is left alone.
+void SandboxApp::unhideAll() {
+    scene::World& w = scene::World::instance();
+    for (const scene::Entity e : editorHidden_) {
+        if (!w.valid(e)) continue;
+        if (auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
+            mr->flags |= scene::kMeshRendererVisible;
+    }
+    editorHidden_.clear();
+}
+
+#endif   // AVER_MODULE_SCENE
+
+#if AVER_WITH_IMGUI
 // Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
 // camera speed on the right.
 void SandboxApp::buildViewportOverlay() {

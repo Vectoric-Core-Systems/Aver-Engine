@@ -1002,7 +1002,8 @@ static inline void sanitiseAssetName(std::string& s) {
 
 // How many of each asset kind importGltfToDir actually wrote to destDir, as opposed to skipping
 // because a same-named output file was already sitting there.
-struct GltfImportSummary { u32 meshesWritten = 0, rigsWritten = 0, clipsWritten = 0; };
+struct GltfImportSummary { u32 meshesWritten = 0, rigsWritten = 0, clipsWritten = 0,
+                                materialsWritten = 0, texturesWritten = 0; };
 
 // Converts a glTF/GLB into one .ocmesh per mesh (+ .ocskel/.ocanim if skinned) into destDir.
 // Free function, not a member: two callers share no SandboxApp -- Content Browser Import
@@ -1010,121 +1011,13 @@ struct GltfImportSummary { u32 meshesWritten = 0, rigsWritten = 0, clipsWritten 
 // loop is pure modules/formats calls.
 // Returns false with *outWhy only on a hard parse failure; a clean parse writing nothing new returns
 // true with an all-zero summary -- callers decide if that counts as failure.
-static inline bool importGltfToDir(const std::string& src, const std::string& destDir,
-                             GltfImportSummary& out, std::string* outWhy) {
-    std::error_code dirEc;
-    std::filesystem::create_directories(destDir, dirEc);
-
-    fmt::GltfImportResult res;
-    std::string why;
-    if (!fmt::importGltf(src, res, {}, &why)) {
-        if (outWhy) *outWhy = why;
-        return false;
-    }
-    for (const std::string& u : res.unsupported)
-        AVER_WARN("[Import] '{}' contains {} - not imported", std::filesystem::path(src).filename().string(), u);
-
-    std::error_code ec;
-    const std::string stem = std::filesystem::path(src).stem().string();
-    // Parallel to res.meshes: the stem each one was written under, or empty when it was skipped
-    // (invalid, or a file of that name already existed). The scene level below names these, rather
-    // than re-deriving the naming rule -- a second copy of it only has to disagree once to write a
-    // level full of paths that resolve to nothing.
-    std::vector<std::string> stems(res.meshes.size());
-    for (usize i = 0; i < res.meshes.size(); ++i) {
-        fmt::OcMeshData& m = res.meshes[i];
-        if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
-
-        std::string base = i < res.meshNames.size() && !res.meshNames[i].empty() ? res.meshNames[i] : stem;
-        if (res.meshes.size() > 1 && base == stem) base += "_" + std::to_string(i);
-        for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
-                                 c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-
-        std::string outFile = destDir + "\\" + base + ".ocmesh";
-        if (std::filesystem::exists(outFile, ec)) {
-            AVER_WARN("[Import] '{}.ocmesh' already exists - not overwritten", base);
-            continue;
-        }
-        if (!fmt::saveOcMesh(outFile, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
-        AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
-                  base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
-        stems[i] = base;
-        ++out.meshesWritten;
-    }
-
-    // THE SCENE, which this path used to throw away. The importer no longer welds a node's
-    // translation into its vertices -- that is what put every imported mesh's pivot metres from
-    // itself -- so without writing the placements down, a multi-part model imported through the
-    // editor's own Import button would arrive as a heap of correctly-centred pieces with no record
-    // of how they fit together. AverAssetC learned this at the same time; this is the same feature
-    // on the path the editor actually uses.
-    //
-    // ONLY WHEN IT IS A SCENE. A single-mesh file gets no level: one PLACE record is not worth a
-    // file, and the Content Browser would gain a stray .ocworld beside every chair somebody imports.
-    if (res.placements.size() > 1) {
-        fmt::OcWorldData w;
-        w.name = stem;
-        for (const fmt::GltfPlacement& p : res.placements) {
-            if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
-            if (stems[usize(p.meshIndex)].empty()) continue;
-            fmt::OcWorldPlacement op;
-            // Beside the meshes, so the reference is relative to the level's own folder the same way
-            // every other PLACE in a hand-authored level is relative to the content root.
-            op.asset = stems[usize(p.meshIndex)] + ".ocmesh";
-            op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
-            w.placements.push_back(std::move(op));
-        }
-        const std::string lvl = destDir + "\\" + stem + ".ocworld";
-        if (w.placements.empty()) {
-            // Nothing to say; not worth a file.
-        } else if (std::filesystem::exists(lvl, ec)) {
-            AVER_WARN("[Import] '{}.ocworld' already exists - not overwritten, so the scene layout "
-                      "was not written", stem);
-        } else if (!fmt::saveOcworld(lvl, w, &why)) {
-            AVER_WARN("[Import] could not write the scene layout: {}", why);
-        } else {
-            AVER_INFO("[Import] {} -> {}.ocworld ({} placement(s), the source scene's own layout)",
-                      std::filesystem::path(src).filename().string(), stem, w.placements.size());
-        }
-    }
-
-    // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could
-    // produce a skeleton and a clip that nothing ever wrote and no project could ever contain --
-    // and loadOcSkel/loadOcAnim had no caller in the engine's history.
-    for (usize i = 0; i < res.skeletons.size(); ++i) {
-        std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
-                         ? res.skeletonNames[i] : stem;
-        if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
-        sanitiseAssetName(base);
-        const std::string outFile = destDir + "\\" + base + ".ocskel";
-        if (std::filesystem::exists(outFile, ec)) {
-            AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
-        } else if (!fmt::saveOcSkel(outFile, res.skeletons[i], &why)) {
-            AVER_WARN("[Import] {}", why);
-        } else {
-            AVER_INFO("[Import] {} -> {} ({} bone(s))", std::filesystem::path(src).filename().string(),
-                      base + ".ocskel", res.skeletons[i].bones.size());
-            ++out.rigsWritten;
-        }
-    }
-    for (usize i = 0; i < res.animations.size(); ++i) {
-        std::string base = i < res.animationNames.size() && !res.animationNames[i].empty()
-                         ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
-        sanitiseAssetName(base);
-        const std::string outFile = destDir + "\\" + base + ".ocanim";
-        if (std::filesystem::exists(outFile, ec)) {
-            AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
-        } else if (!fmt::saveOcAnim(outFile, res.animations[i], &why)) {
-            AVER_WARN("[Import] {}", why);
-        } else {
-            AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))",
-                      std::filesystem::path(src).filename().string(), base + ".ocanim",
-                      res.animations[i].duration, res.animations[i].tracks.size());
-            ++out.clipsWritten;
-        }
-    }
-    return true;
-}
+//
+// contentDir: the project's Content directory, where the glTF's materials and textures are cooked to
+// (empty = geometry only). Defined in SandboxContentBrowser.cpp.
+// overwrite: replace outputs that already exist (each goes to the recycle bin first) instead of
+// skipping them.
+bool importGltfToDir(const std::string& src, const std::string& destDir, const std::string& contentDir,
+                     bool overwrite, GltfImportSummary& out, std::string* outWhy);
 
 // Forward-declared so SandboxApp::handleOpenRequest (single-instance forwarding's accept/decline
 // check) can call them; full definitions stay in their natural home above createApplication.
@@ -2582,6 +2475,30 @@ private:
 
     void handleManip(Engine& e);
 
+#if AVER_MODULE_SCENE
+    // ---- VIEWPORT PLACEMENT VERBS (2026-09-16), dispatched from handleManip's edit-verb block and
+    // defined in SandboxViewport.cpp. Each acts on the whole multi-selection as ONE undo entry.
+    // End: drop each selected entity onto whatever is below it (rayPickGeometry + dropRestLift).
+    void snapSelectionToFloor();
+    // Arrow keys / PageUp / PageDown: move by the move-snap step (or 10 cm with snapping off).
+    void nudgeSelection(const Vec3& deltaCm);
+    // H hides the selection, Shift+H hides everything else, Ctrl+H brings back everything these hid.
+    // SESSION-ONLY, like the Details panel's Visible checkbox: levels do not store visibility.
+    void hideSelection();
+    void isolateSelection();
+    void unhideAll();
+    std::vector<scene::Entity> editorHidden_;   // what hideSelection/isolateSelection turned off
+    // The union of the whole selection's world bounds, for F (Frame Selected). selectedXform and
+    // selectedRadius describe the ANCHOR, which the gizmo needs; framing needs the set.
+    bool selectionBounds(Vec3& center, f32& radius) const;
+    // MARQUEE SELECT: a left-drag that starts on empty viewport space draws a rectangle; on release
+    // every eligible entity whose projected bounds intersect it is selected (Ctrl adds to the set).
+    bool nudgeEditOpen_ = false;   // a held nudge run's one undo entry is open (see handleManip)
+    bool marqueeArmed_ = false;    // mouse went down on empty space; becomes a marquee past a small drag
+    bool marqueeActive_ = false;
+    f32 marqueeX0_ = 0.0f, marqueeY0_ = 0.0f, marqueeX1_ = 0.0f, marqueeY1_ = 0.0f;
+#endif
+
 #if AVER_MODULE_LANDSCAPE && AVER_WITH_IMGUI
     void handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my);
 #endif
@@ -3053,13 +2970,18 @@ private:
 
     std::string importDestLabel(const std::string& absDir) const;
 
-    void importAsset(const std::string& src, const std::string& destDir);
+    // overwrite: the Import dialog's explicit choice to replace what an import would collide with.
+    void importAsset(const std::string& src, const std::string& destDir, bool overwrite = false);
+    // FILES DROPPED ON THE WINDOW FROM EXPLORER (Window::takePendingDroppedFiles, polled in onUpdate).
+    // Imports each into the Content Browser's current folder through importAsset. Defined in
+    // SandboxContentBrowser.cpp.
+    void importDroppedFiles(const std::vector<std::string>& paths);
 
 #if AVER_HAVE_AUDIO_IMPORT
-    void importAudio(const std::string& src, const std::string& destDir);
+    void importAudio(const std::string& src, const std::string& destDir, bool overwrite = false);
 #endif
 
-    void importModel(const std::string& src, const std::string& destDir);
+    void importModel(const std::string& src, const std::string& destDir, bool overwrite = false);
 
     // Writes an edited material back to the .cs under Content\Materials that declares it, found by
     // trying each in turn. Returns the file written, or "" with err set.

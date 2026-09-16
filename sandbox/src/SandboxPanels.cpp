@@ -1206,9 +1206,23 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             uiReg_.track("details.entityName");
         }
         ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
+        // MULTI-SELECTION. Computed once and reused by Transform/Mesh/Material below, which all
+        // apply to the whole set; name and components stay single-entity (the anchor alone, per
+        // multiSel_'s own header comment -- "one entity to talk about"), so this doubles as the
+        // reminder that the name field above speaks for the anchor only.
+        const std::vector<scene::Entity> multiSelected = selectedEntities();
+        if (multiSelected.size() > 1) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(anchor of %d selected)", (int)multiSelected.size());
+        }
         ImGui::Separator();
+        if (multiSelected.size() > 1)
+            ImGui::TextDisabled("%d entities selected -- Transform/Mesh/Material below apply to "
+                                "all of them; name/components affect the anchor only.",
+                                (int)multiSelected.size());
         if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+              if (multiSelected.size() <= 1) {
                 Transform xf = loc->xf;
                 Vec3 euler = eulerDegFromQuat(xf.rotation);
                 bool moved = ImGui::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
@@ -1224,6 +1238,110 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 done = done || ImGui::IsItemDeactivatedAfterEdit();
                 if (moved) w.setLocalTransform(selEntity_, xf);
                 if (done) endTransformEdit();
+              } else {
+                // MULTI-SELECTION TRANSFORM, PER COMPONENT. The anchor's own value is shown --
+                // same DragFloat3 calls as the single-entity branch above -- but a component that
+                // is actually EDITED this frame is a SET applied to every selected entity, not the
+                // gizmo's world-space DELTA (see the drag handler in SandboxViewport.cpp): typing
+                // Z=0 puts every selected prop on the floor at its own X/Y, rather than sliding the
+                // whole group by however far the anchor moved. Untouched components are left
+                // exactly where each entity's own transform already had them -- which is why a
+                // component is diffed against `orig*`, the anchor's reading from the TOP of this
+                // frame before any widget touched it, rather than assumed from which DragFloat3
+                // fired.
+                //
+                // forEachMultiMoved SUPPLIES THE SET, both for the "(mixed)" check below and for
+                // the apply: it already excludes the anchor and any entity whose parent is also
+                // selected, the same rule the gizmo drag uses so a selected child is not moved
+                // twice (endTransformEdit's own multiMoveBefore_/alsoMoved diff -- unchanged here
+                // -- then turns whatever this writes into the one undo entry for the gesture).
+                Transform xf = loc->xf;
+                Vec3 euler = eulerDegFromQuat(xf.rotation);
+                const Vec3 origPos = xf.position, origEuler = euler, origScale = xf.scale;
+
+                bool posMixed[3] = {false, false, false};
+                bool rotMixed[3] = {false, false, false};
+                bool scaleMixed[3] = {false, false, false};
+                // SAME TOLERANCE nearlySameXform/nearlySameTransform use elsewhere in this class:
+                // a "(mixed)" flag is a judgement call about two numbers meaning the same thing,
+                // not the bit-exact touch test the apply below needs.
+                forEachMultiMoved([&](scene::Entity, const Transform& oxf) {
+                    const Vec3 oe = eulerDegFromQuat(oxf.rotation);
+                    if (std::fabs(oxf.position.x - origPos.x) > 1e-4f) posMixed[0] = true;
+                    if (std::fabs(oxf.position.y - origPos.y) > 1e-4f) posMixed[1] = true;
+                    if (std::fabs(oxf.position.z - origPos.z) > 1e-4f) posMixed[2] = true;
+                    if (std::fabs(oe.x - origEuler.x) > 1e-2f) rotMixed[0] = true;
+                    if (std::fabs(oe.y - origEuler.y) > 1e-2f) rotMixed[1] = true;
+                    if (std::fabs(oe.z - origEuler.z) > 1e-2f) rotMixed[2] = true;
+                    if (std::fabs(oxf.scale.x - origScale.x) > 1e-4f) scaleMixed[0] = true;
+                    if (std::fabs(oxf.scale.y - origScale.y) > 1e-4f) scaleMixed[1] = true;
+                    if (std::fabs(oxf.scale.z - origScale.z) > 1e-4f) scaleMixed[2] = true;
+                });
+                // (mixed) NEXT TO A ROW WHOSE THREE AXES ARE ONE DragFloat3, so it cannot sit on
+                // just the disagreeing axis the way a per-field marker would -- SameLine plus a
+                // hover tooltip is the same "flag it, explain it on hover" idiom the IOR/F0
+                // consistency check above (materialPanel) already uses for the same reason.
+                const auto showMixedTag = [&](const bool m[3]) {
+                    if (!(m[0] || m[1] || m[2])) return;
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(mixed)");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("X %s   Y %s   Z %s across the selection.\n"
+                                          "Editing a field sets that value on every selected entity.",
+                                          m[0] ? "mixed" : "matches",
+                                          m[1] ? "mixed" : "matches",
+                                          m[2] ? "mixed" : "matches");
+                };
+
+                bool moved = ImGui::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+                if (ImGui::IsItemActivated()) beginTransformEdit();
+                bool done = ImGui::IsItemDeactivatedAfterEdit();
+                showMixedTag(posMixed);
+                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) {
+                    xf.rotation = quatFromEulerDeg(euler); moved = true;
+                }
+                if (ImGui::IsItemActivated()) beginTransformEdit();
+                done = done || ImGui::IsItemDeactivatedAfterEdit();
+                showMixedTag(rotMixed);
+                moved |= ImGui::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+                if (ImGui::IsItemActivated()) beginTransformEdit();
+                done = done || ImGui::IsItemDeactivatedAfterEdit();
+                showMixedTag(scaleMixed);
+
+                if (moved) {
+                    // TOUCHED, not "nonzero": the axis (or axes) a widget above actually wrote
+                    // this frame, found the same way the mixed check above found disagreement --
+                    // by comparing against the pre-edit reading.
+                    const bool touchPos[3]   = {xf.position.x != origPos.x,
+                                                xf.position.y != origPos.y,
+                                                xf.position.z != origPos.z};
+                    const bool touchRot[3]   = {euler.x != origEuler.x,
+                                                euler.y != origEuler.y,
+                                                euler.z != origEuler.z};
+                    const bool touchScale[3] = {xf.scale.x != origScale.x,
+                                                xf.scale.y != origScale.y,
+                                                xf.scale.z != origScale.z};
+                    w.setLocalTransform(selEntity_, xf);
+                    forEachMultiMoved([&](scene::Entity ent, const Transform& oxf) {
+                        Transform t = oxf;
+                        if (touchPos[0])   t.position.x = xf.position.x;
+                        if (touchPos[1])   t.position.y = xf.position.y;
+                        if (touchPos[2])   t.position.z = xf.position.z;
+                        if (touchRot[0] || touchRot[1] || touchRot[2]) {
+                            Vec3 oe = eulerDegFromQuat(oxf.rotation);
+                            if (touchRot[0]) oe.x = euler.x;
+                            if (touchRot[1]) oe.y = euler.y;
+                            if (touchRot[2]) oe.z = euler.z;
+                            t.rotation = quatFromEulerDeg(oe);
+                        }
+                        if (touchScale[0]) t.scale.x = xf.scale.x;
+                        if (touchScale[1]) t.scale.y = xf.scale.y;
+                        if (touchScale[2]) t.scale.z = xf.scale.z;
+                        w.setLocalTransform(ent, t);
+                    });
+                }
+                if (done) endTransformEdit();
+              }
             }
         }
         if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
@@ -1262,8 +1380,29 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     std::sort(cands.begin(), cands.end(),
                               [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
                     u64 picked = 0;
-                    if (assetPicker("##pickMesh", cands, mr->mesh, &picked))
-                        assignMeshId(selEntity_, picked);
+                    if (assetPicker("##pickMesh", cands, mr->mesh, &picked)) {
+                        if (multiSelected.size() <= 1) {
+                            assignMeshId(selEntity_, picked);
+                        } else {
+                            // APPLIES TO THE WHOLE SELECTION, same as Transform above -- pick a
+                            // mesh once and every selected entity that HAS a CMeshRenderer takes
+                            // it, not just the anchor whose slot the picker read from.
+                            // assignMeshId is already a per-entity, all-or-nothing call (false and
+                            // a no-op for anything without the component), so this is that same
+                            // call in a loop rather than a second implementation of it.
+                            int n = 0;
+                            for (const scene::Entity ent : multiSelected)
+                                if (assignMeshId(ent, picked)) ++n;
+                            if (n > 1) {
+                                const auto mit = meshPathById_.find(picked);
+                                cbStatus_ = "Assigned " +
+                                    (mit == meshPathById_.end()
+                                         ? std::string("mesh")
+                                         : std::filesystem::path(mit->second).filename().string()) +
+                                    " to " + std::to_string(n) + " entities";
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1309,8 +1448,24 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                               [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
                     u64 picked = 0;
                     if (assetPicker("##pickMaterial", cands,
-                                    static_cast<u64>(static_cast<u32>(shown)), &picked))
-                        assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
+                                    static_cast<u64>(static_cast<u32>(shown)), &picked)) {
+                        if (multiSelected.size() <= 1) {
+                            assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
+                        } else {
+                            // Same shape as the mesh picker just above: one pick, applied to
+                            // every selected entity that has a CMeshRenderer.
+                            int n = 0;
+                            for (const scene::Entity ent : multiSelected)
+                                if (assignMaterialToken(ent, static_cast<i32>(static_cast<u32>(picked)))) ++n;
+                            if (n > 1) {
+                                const char* pickedName =
+                                    aver_scene_material_name(static_cast<i32>(static_cast<u32>(picked)));
+                                cbStatus_ = std::string("Assigned surface ") +
+                                    (pickedName && *pickedName ? pickedName : "(unnamed)") +
+                                    " to " + std::to_string(n) + " entities";
+                            }
+                        }
+                    }
                 }
                 const auto it = surfaceMaterials_.find(shown);
                 if (it == surfaceMaterials_.end() || !it->second) {

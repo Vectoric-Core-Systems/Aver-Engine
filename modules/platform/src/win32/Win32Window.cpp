@@ -5,6 +5,7 @@
 
 #include <Windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <string>
 
 namespace aver {
@@ -241,6 +242,22 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             self->focus();
             return 1;
         }
+        // Files dropped from Explorer, latched exactly like WM_COPYDATA's path above (see
+        // Window::hasPendingDroppedFiles). Only reachable once setAcceptDroppedFiles(true) has
+        // called DragAcceptFiles -- no other host opts in, so this case is dead code for everyone
+        // else, the same "no-op unless asked" shape as OpenRequestHook.
+        case WM_DROPFILES: {
+            HDROP drop = reinterpret_cast<HDROP>(wParam);
+            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < count; ++i) {
+                const UINT wlen = DragQueryFileW(drop, i, nullptr, 0);   // excludes the NUL
+                std::wstring wpath(static_cast<usize>(wlen), L'\0');
+                if (DragQueryFileW(drop, i, wpath.data(), wlen + 1))
+                    self->addPendingDroppedFile(wideToUtf8(wpath));
+            }
+            DragFinish(drop);
+            return 0;
+        }
         default:
             break;
     }
@@ -255,6 +272,13 @@ void Window::focus() {
     HWND hwnd = static_cast<HWND>(nativeHandle_);
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
+}
+
+// Opts this window into (or back out of) WM_DROPFILES. DragAcceptFiles is the whole mechanism --
+// idempotent, so a caller does not have to track whether it already asked.
+void Window::setAcceptDroppedFiles(bool accept) {
+    acceptDroppedFiles_ = accept;
+    if (nativeHandle_) DragAcceptFiles(static_cast<HWND>(nativeHandle_), accept ? TRUE : FALSE);
 }
 
 // Publishes `hwnd` as the primary other launches should forward to (see the block comment above

@@ -44,6 +44,8 @@ enum class CommandId : u8 {
     EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate, EditSelectAll,
     AssetSave, LevelSave, SaveAll, GraphCommentBox, GraphFrameAll,
     CompileScripts, ReloadScripts, Screenshot,
+    SnapToFloor, HideSelected, IsolateSelected, UnhideAll,
+    NudgeLeft, NudgeRight, NudgeForward, NudgeBack, NudgeUp, NudgeDown,
     Count
 };
 inline constexpr usize kCommandCount = static_cast<usize>(CommandId::Count);
