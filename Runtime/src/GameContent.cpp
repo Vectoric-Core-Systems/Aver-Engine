@@ -422,6 +422,11 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         // it was. See GameContent.hpp's meshDefaultMaterial for why 0 means "ask the mesh".
         if (!md.materialSlots.empty() && !md.materialSlots[0].empty())
             meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
+        // THE PER-SUBMESH SPLIT. .ocmesh has always carried a submeshes table alongside
+        // materialSlots, and until now nothing here read it either: a mesh naming several materials
+        // (bark and leaves, say) drew as one mesh in slot 0's material end to end. See MeshPart's own
+        // comment (GameContent.hpp) and buildMeshParts' (below) for the shape this mirrors.
+        buildMeshParts(device, id, md, verts, rel);
         projectMeshIds_.push_back(id);
 
         // THE COARSE STAND-IN THE SHADOW, GI-SHADOW AND VOXELISE PASSES DRAW INSTEAD OF THIS MESH.
@@ -435,11 +440,17 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         // WHERE THIS DELIBERATELY DIVERGES FROM THE EDITOR: the editor uploads the WHOLE ladder and
         // keys the map on every level's handle, because with --lod-select its lit pass submits
         // whichever level it chose and each of those handles has to resolve. The game has no runtime
-        // LOD selection at all -- GameRender.cpp:56 submits content.meshFor(mr->mesh), which is
-        // sceneMeshes_[id], which is LOD 0's handle and nothing else -- so uploading the rest of the
-        // ladder would be VRAM that nothing can ever look up. The pick needs no upload to compute
-        // (levelWorldErrorCm reads the OcMeshData), so it is computed first and exactly ONE extra
-        // level is uploaded. The day the game learns to select, this becomes the editor's loop again.
+        // LOD selection at all -- GameRender.cpp's draw walk only ever submits meshFor(mr->mesh)
+        // itself (this handle, `h`, LOD 0 and nothing else) or, for a mesh buildMeshParts split below,
+        // one of ITS handles -- neither route ever looks up a coarser level -- so uploading the rest
+        // of the ladder would be VRAM that nothing can ever look up. The pick needs no upload to
+        // compute (levelWorldErrorCm reads the OcMeshData), so it is computed first and exactly ONE
+        // extra level is uploaded. The day the game learns to select, this becomes the editor's loop
+        // again.
+        //
+        // A SPLIT MESH'S PARTS HAVE NO PROXY: this map is keyed on `h`, the whole mesh's handle, and
+        // buildMeshParts' parts are separate handles it never mentions, so the depth passes draw
+        // each part at full detail.
 #if AVER_MODULE_TRIFACTOR
         if (md.lodCount() > 1) {
             constexpr f32 kShadowErrorCm = 20.0f;
@@ -475,6 +486,81 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
     if (loaded || failed)
         AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
                   failed ? (", " + std::to_string(failed) + " failed") : "");
+}
+
+// Splits a mesh that names more than one material into one MeshHandle per slot. Ported from
+// SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp) -- see that function's own comment for
+// why splitting at load time, rather than drawing per-submesh RANGES, is what makes this tractable at
+// all (the ray path's BLAS carries one materialIndex per instance, so a range draw would still shade
+// flat in the renderer that is actually on screen).
+//
+// COMPACTED PER PART, not sharing the parent's vertex array. createMesh COPIES what it is given, so
+// handing every part of a multi-material mesh the WHOLE vertex buffer would upload that buffer once
+// per part. The remap also gives each part honest bounds, which a future per-part culler would want
+// anyway.
+void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
+                                  const std::vector<rhi::MeshVertex>& verts, const std::string& rel) {
+    if (md.submeshes.size() <= 1) return;   // the common case: nothing to split
+
+    std::vector<MeshPart> parts;
+    parts.reserve(md.submeshes.size());
+    std::unordered_map<u32, u32> remap;
+    std::vector<rhi::MeshVertex> pv;
+    std::vector<u32> pi;
+
+    for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
+        if (sm.indexCount == 0) continue;
+        const usize end = usize(sm.indexStart) + sm.indexCount;
+        if (end > md.indices.size()) {
+            AVER_WARN("[Mesh] '{}' submesh '{}' runs past the index buffer; skipped", rel, sm.name);
+            continue;
+        }
+        remap.clear(); pv.clear(); pi.clear();
+        pi.reserve(sm.indexCount);
+        bool bad = false;
+        for (usize k = sm.indexStart; k < end; ++k) {
+            const u32 vi = md.indices[k];
+            if (vi >= verts.size()) { bad = true; break; }
+            const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(pv.size()));
+            if (inserted) pv.push_back(verts[vi]);
+            pi.push_back(it2->second);
+        }
+        if (bad || pv.empty()) {
+            AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
+            continue;
+        }
+
+        MeshPart part;
+        part.mesh = device.createMesh(pv.data(), static_cast<u32>(pv.size()),
+                                       pi.data(), static_cast<u32>(pi.size()));
+        if (!part.mesh) {
+            AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", sm.name, rel);
+            continue;
+        }
+        // THE SLOT NAMES THE MATERIAL, which is the whole point of the format's slot table -- and
+        // the cook writes those names as the .ocmat stems it produced, so a name resolves through
+        // exactly the path an authored material does (GameContent::materialForSurface).
+        if (sm.materialSlot < md.materialSlots.size()) {
+            const std::string& slot = md.materialSlots[sm.materialSlot];
+            if (!slot.empty()) part.material = aver_scene_material(0, slot.c_str());
+        }
+        parts.push_back(part);
+    }
+
+    // ONE SURVIVING PART IS NOT A SPLIT. Falling through to the ordinary single-mesh path costs a
+    // draw call less and keeps the entity's own material override meaningful.
+    if (parts.size() <= 1) {
+        for (const MeshPart& p : parts) if (p.mesh) device.destroyMesh(p.mesh);
+        return;
+    }
+    AVER_INFO("[Mesh] '{}' names {} materials; split into {} part(s) so each draws its own",
+              rel, md.materialSlots.size(), parts.size());
+    meshParts_[id] = std::move(parts);
+}
+
+const std::vector<GameContent::MeshPart>* GameContent::partsFor(u64 id) const {
+    const auto it = meshParts_.find(id);
+    return it == meshParts_.end() ? nullptr : &it->second;
 }
 
 rhi::MeshHandle GameContent::meshFor(u64 id) const {

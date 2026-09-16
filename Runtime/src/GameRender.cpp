@@ -10,6 +10,11 @@
 // straight to DrawWorldOptions::voxiRenderer (when one is attached) so shadows, GI voxelisation and
 // the RT TLAS never depend on what the raster camera can see. Only the raster drawMesh() call is
 // skipped for it.
+//
+// A mesh GameContent split into per-material parts (GameContent::partsFor) draws as one PlannedDraw
+// per part, on both routes, each part resolving its own material through the same authored > look >
+// fallback ladder -- the editor's planEntityDraws (sandbox/src/SceneSubmission.hpp) and
+// emitEntityDraws (sandbox/src/SandboxRender.cpp).
 #include "aver/game/GameRender.hpp"
 
 #if AVER_MODULE_SCENE
@@ -32,6 +37,55 @@
 #include <unordered_set>
 
 namespace aver::game {
+
+namespace {
+
+// One draw the walk will actually issue: which mesh, and which material token to resolve it with.
+// Ported from SceneSubmission.hpp's PlannedDraw (sandbox/src/SceneSubmission.hpp) -- this library
+// links no sandbox/ header, so the type and the rule below are copied rather than included.
+// rhi::MeshHandle rather than that header's plain u32: unlike SceneSubmission.hpp, which stays free
+// of rhi:: so it can be unit-tested headless, this file already includes aver/rhi/RHI.hpp, so
+// laundering the handle through an integer would buy nothing here.
+struct PlannedDraw {
+    rhi::MeshHandle mesh = 0;
+    i32 material = 0;
+};
+
+// Bounds a caller-supplied PlannedDraw buffer. Matches SandboxApp::kMaxPlannedDraws
+// (sandbox/src/SandboxApp.hpp) -- the editor's own measured ceiling (3-7 parts on the deepest
+// multi-material split it has seen) with the same wide margin, not a tuned minimum.
+constexpr u32 kMaxPlannedDraws = 64;
+
+// THE SAME RULE SceneSubmission.hpp's planEntityDraws() enforces (ported, not included, for the same
+// reason as PlannedDraw above): a mesh split into per-material parts (GameContent::partsFor) draws as
+// one PlannedDraw per part, each carrying its OWN material token -- falling back to the entity's own
+// material when a slot named nothing -- but only when chosenMesh is still the UNSUBSTITUTED mesh the
+// split was cut from. A skinned entity's posed handle is different geometry entirely (the split's
+// vertex remap does not apply to it), so it keeps a single draw and the entity's own material,
+// exactly like the editor's copy.
+u32 planEntityDraws(rhi::MeshHandle baseMesh, rhi::MeshHandle chosenMesh,
+                     const std::vector<GameContent::MeshPart>* parts, i32 entityMaterial,
+                     PlannedDraw* out, u32 outCapacity) {
+    if (parts && !parts->empty() && chosenMesh == baseMesh) {
+        u32 n = 0;
+        for (const GameContent::MeshPart& p : *parts) {
+            if (n >= outCapacity) break;
+            if (!p.mesh) continue;   // a part whose slot named nothing carries no geometry of its own
+            out[n].mesh = p.mesh;
+            out[n].material = p.material ? p.material : entityMaterial;
+            ++n;
+        }
+        return n;
+    }
+    if (chosenMesh != 0 && outCapacity > 0) {
+        out[0].mesh = chosenMesh;
+        out[0].material = entityMaterial;
+        return 1;
+    }
+    return 0;
+}
+
+} // namespace
 
 void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
                pbr::MaterialSystem* materials, render::SkinnedScene* skinning,
@@ -141,140 +195,175 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // input is always false here.
         const bool raster = !frustumCulled && !ownerHiddenHere;
 
-        // Colour: the named-surface look, or a neutral default. The authored-material half
-        // (surfaceMaterials_ and MaterialSystem) is C8's; until then a level's M_* surfaces already
-        // render with the colours the editor gives them.
-        f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
-        f32 metallic = 0.0f, roughness = 0.5f;
-
-        u32 authored = 0;
-        // Whether this entity's resolved material takes the blended draw path near the end of this
-        // loop. Only an AUTHORED .ocmat can ever set this true: a built-in SurfaceLook (three floats
-        // plus metal/rough -- see GameContent.cpp's registerBuiltins) has no BLEND record at all, and
-        // neither does the flat-gray fallback, so the `else`/`else if` below never touches it. Read
-        // straight from MaterialLibrary rather than trusting a value cached anywhere on GameContent,
-        // because the library is the one place an .ocmat's alphaMode can change after load (the
-        // material editor writes through it), and a cached copy would survive a hot-reload the mesh
-        // itself did not.
-        bool blended = false;
-#if AVER_MODULE_PBR && AVER_MODULE_SCENE
-        // THE SAME FALLBACK THE EDITOR APPLIES: 0 means "ask the mesh", not "no material".
-        // Resolved into a local rather than inline so every later read in this loop -- the
-        // blended test, the binding set, the per-draw colour -- sees the one value, the way
-        // the editor's own `mat` local does.
-        const i32 mat = mr->material ? mr->material : content.meshDefaultMaterial(mr->mesh);
-        authored = content.authoredFor(mat);
-        if (authored) {
-            // The packaged game's copy of the same rule. BOTH ROOTS OR NEITHER -- a predicate the
-            // editor honours and the game does not is this repo's most-repeated defect shape.
-            if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
-                blended = pbr::isTranslucent(*d);
-        }
-#endif
-        if (authored) {
-            // An AUTHORED material supplies its own colour and its own metal/rough through the
-            // binding set below, so the per-draw values are neutralised to 1 rather than left as
-            // the fallback. Multiplying an authored albedo by 0.8 grey is the classic way to get a
-            // world that looks correct but uniformly dingy.
-            col[0] = col[1] = col[2] = 1.0f;
-            metallic = roughness = 1.0f;
-        } else if (const GameContent::SurfaceLook* look = content.lookFor(mat)) {
-            col[0] = look->col[0]; col[1] = look->col[1]; col[2] = look->col[2];
-            metallic = look->metallic; roughness = look->roughness;
-        } else if (mat != 0) {
-            // Neither an authored .ocmat nor a built-in SurfaceLook claimed this entity's named
-            // surface -- it is about to draw the flat 0.80/0.80/0.85 gray fallback above with no
-            // record anywhere that anything went wrong. This is EXACTLY the failure a prior
-            // investigation traced to a parity gap between this table and the editor's: three names
-            // (M_Foliage, M_Bark, M_Rock) were registered in sandbox/src/SandboxApp.cpp but not here,
-            // so a level authored in the editor rendered its intended colour there and silently fell
-            // through to gray the moment the packaged game ran it. That specific gap is closed in
-            // GameContent.cpp's registerBuiltins now, but nothing stops the next one -- a look added
-            // to the editor's table and never mirrored into this one reproduces the identical silent
-            // failure. This warning is the backstop for that.
-            //
-            // ONE-SHOT, and function-local rather than a member on GameContent (which this file does
-            // not own): drawWorld runs every frame for every visible entity, so without a latch a
-            // level with a single unresolved surface used by fifty placements would log fifty lines
-            // EVERY FRAME rather than once, ever. Keyed on the interned token so the check is one
-            // hash-set lookup, not a string compare; reported by NAME via aver_scene_material_name
-            // because the token's value is process-startup-order dependent (scene_abi.h's own
-            // comment on that function) and means nothing to a person reading the log.
-            static std::unordered_set<i32> warnedUnresolvedMaterials;
-            if (warnedUnresolvedMaterials.insert(mat).second) {
-                AVER_WARN("[Game] surface '{}' has no authored .ocmat and no built-in look; "
-                          "rendering the flat gray fallback (0.80, 0.80, 0.85) instead",
-                          aver_scene_material_name(mat));
-            }
-        }
-
-        // Resolved once per entity, regardless of which route delivers it: the raster route feeds
-        // these to device.setDrawBinding's STICKY state below, the direct route feeds the SAME values
-        // straight to voxiRenderer->submit()'s drawBinding/drawConstants/drawConstantBytes -- one
-        // resolve, like SceneSubmission.hpp's deliver() reading a single ResolvedSurface for both.
-        rhi::BindingSetHandle matSet = 0;
-        const void* matConstants = nullptr;
-        u32 matBytes = 0;
-#if AVER_MODULE_PBR && AVER_MODULE_VOXI
-        // Guarded on ready(): binding a descriptor table the material system has not built is not a
-        // wrong colour on this renderer, it is a GPU hang. This project has already lost a session
-        // to an unbound root CBV that presented as "slow geometry shaders".
-        if (materials && materials->ready()) {
-            matSet = materials->bindingSet(authored);
-            matConstants = &materials->constants(authored);
-            matBytes = sizeof(pbr::MaterialConstants);
-        }
-#else
-        (void)materials;
-#endif
-
         // THE SEAM, and it is one line because the design made it one. A skinned entity's posed
         // vertices live in a DIFFERENT MeshHandle sharing this one's index buffer, so substituting
-        // the handle reaches every pass at once. Zero means "not skinned", never "not drawn".
+        // the handle reaches every pass at once. Zero means "not skinned", never "not drawn". Computed
+        // here, ahead of the draw plan below, because planEntityDraws needs to compare it against the
+        // UNSUBSTITUTED `handle` to know whether this entity's own per-material split still applies --
+        // a posed copy is different geometry from the one the split was cut from (see planEntityDraws'
+        // own comment above).
         rhi::MeshHandle drawHandle = handle;
         if (skinning) {
             if (const rhi::MeshHandle sk = skinning->drawHandle(ent)) drawHandle = sk;
         }
 
-        if (raster) {
-            if (matBytes) device.setDrawBinding(matSet, matConstants, matBytes);
+        // THE ENTITY'S OWN FALLBACK MATERIAL: 0 means "ask the mesh", not "no material" -- the same
+        // rule the editor applies. Needed unconditionally now (not only inside the PBR branch below):
+        // planEntityDraws' single-draw case reads it directly, and it is what a split part's own empty
+        // slot falls back to (planEntityDraws' `p.material ? p.material : entityMaterial`).
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+        const i32 mat = mr->material ? mr->material : content.meshDefaultMaterial(mr->mesh);
+#else
+        const i32 mat = mr->material;
+#endif
 
-            // STICKY on the device (RHI.hpp's setDrawBlended comment), so it is set on EVERY draw
-            // here, not only when true. Skipping the false case would leave a translucent entity's
-            // flag set for whatever opaque entity this walk visits next -- that next mesh would
-            // silently take the blended path too: no ray-traced shadow, no GI bounce, no shadow-
-            // cascade write, and drawn through scenePipeline(..., blended=true) instead of the
-            // ordinary opaque pipeline, purely because it happened to be drawn after a pane of glass.
-            //
-            // NO DEPTH-PREPASS GUARD NEEDED HERE, and that is a fact about this file rather than about
-            // translucency: drawWorld never calls setNextDrawPrepassed or drawMeshDepthPrepass at all
-            // -- this is the packaged-game walk, not SandboxApp.cpp's editor loop with its
-            // `prepassEligible` exclusion list (SandboxApp.cpp, search "depth prepass phase").
-            // setDrawBlended's own contract already guarantees a blended draw is "never depth-
-            // prepassed" regardless, because the device captures it at the very top of drawMesh,
-            // before the same submitDraw loop a prepass would also have to be skipped ahead of. If a
-            // depth-prepass walk is ever added to this file, it must exclude exactly the entities
-            // `blended` is true for here, the same way SandboxApp.cpp's prepassEligible excludes
-            // skinned and GPU-cluster-dispatched ones -- stated here so that addition does not have to
-            // rediscover it.
-            device.setDrawBlended(blended);
-            device.drawMesh(drawHandle, &wm.m[0][0], col, metallic, roughness);
+        // ONE MESH THAT NAMES SEVERAL MATERIALS DRAWS AS SEVERAL MESHES, ONE PER SLOT -- the split
+        // GameContent::loadProjectMeshes built (mirroring SandboxApp::buildMeshParts), planned here the
+        // way SandboxRender.cpp's own planEntityDraws call sites do. An entity with no parts (the
+        // common case) plans to exactly the one draw this loop always issued before this change.
+        PlannedDraw pdraws[kMaxPlannedDraws];
+        const u32 pdrawCount = planEntityDraws(handle, drawHandle, content.partsFor(mr->mesh), mat,
+                                                pdraws, kMaxPlannedDraws);
+
+        // Resolves one planned draw's material token into what it needs to draw with -- authored
+        // .ocmat > named-surface SurfaceLook > flat fallback, plus the MaterialSystem binding -- so a
+        // multi-part entity resolves each part's OWN token through the exact same ladder the
+        // single-material path always used for the entity's. Mirrors SandboxApp::resolveSurface
+        // (sandbox/src/SandboxRender.cpp), called once per planned draw the way that file's own
+        // emitEntityDraws() calls resolveSurface() once per draw rather than once per entity.
+        auto resolveDrawLook = [&](i32 m) {
+            struct DrawLook {
+                // The named-surface look, or a neutral default -- same fallback colour this loop has
+                // always drawn an unresolved surface with.
+                f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
+                f32 metallic = 0.0f, roughness = 0.5f;
+                // Whether this draw takes the blended path. Only an AUTHORED .ocmat can ever set this
+                // true: a built-in SurfaceLook (three floats plus metal/rough -- see GameContent.cpp's
+                // registerBuiltins) has no BLEND record at all, and neither does the flat-gray
+                // fallback, so the branches below never touch it.
+                bool blended = false;
+                rhi::BindingSetHandle matSet = 0;
+                const void* matConstants = nullptr;
+                u32 matBytes = 0;
+            } dl;
+
+            u32 authored = 0;
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+            authored = content.authoredFor(m);
+            if (authored) {
+                // The packaged game's copy of the same rule. BOTH ROOTS OR NEITHER -- a predicate the
+                // editor honours and the game does not is this repo's most-repeated defect shape. Read
+                // straight from MaterialLibrary rather than trusting a value cached anywhere on
+                // GameContent, because the library is the one place an .ocmat's alphaMode can change
+                // after load (the material editor writes through it), and a cached copy would survive
+                // a hot-reload the mesh itself did not.
+                if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
+                    dl.blended = pbr::isTranslucent(*d);
+            }
+#endif
+            if (authored) {
+                // An AUTHORED material supplies its own colour and its own metal/rough through the
+                // binding set below, so the per-draw values are neutralised to 1 rather than left as
+                // the fallback. Multiplying an authored albedo by 0.8 grey is the classic way to get a
+                // world that looks correct but uniformly dingy.
+                dl.col[0] = dl.col[1] = dl.col[2] = 1.0f;
+                dl.metallic = dl.roughness = 1.0f;
+            } else if (const GameContent::SurfaceLook* look = content.lookFor(m)) {
+                dl.col[0] = look->col[0]; dl.col[1] = look->col[1]; dl.col[2] = look->col[2];
+                dl.metallic = look->metallic; dl.roughness = look->roughness;
+            } else if (m != 0) {
+                // Neither an authored .ocmat nor a built-in SurfaceLook claimed this surface -- it is
+                // about to draw the flat 0.80/0.80/0.85 gray fallback above with no record anywhere
+                // that anything went wrong. This is EXACTLY the failure a prior investigation traced to
+                // a parity gap between this table and the editor's: three names (M_Foliage, M_Bark,
+                // M_Rock) were registered in sandbox/src/SandboxApp.cpp but not here, so a level
+                // authored in the editor rendered its intended colour there and silently fell through
+                // to gray the moment the packaged game ran it. That specific gap is closed in
+                // GameContent.cpp's registerBuiltins now, but nothing stops the next one -- a look
+                // added to the editor's table and never mirrored into this one reproduces the identical
+                // silent failure. This warning is the backstop for that.
+                //
+                // ONE-SHOT, and function-local (a lambda's local static is exactly as permanent as a
+                // plain function's -- initialised once, ever, not once per call). Keyed on the interned
+                // token so the check is one hash-set lookup, not a string compare; reported by NAME via
+                // aver_scene_material_name because the token's value is process-startup-order dependent
+                // (scene_abi.h's own comment on that function) and means nothing to a person reading
+                // the log.
+                static std::unordered_set<i32> warnedUnresolvedMaterials;
+                if (warnedUnresolvedMaterials.insert(m).second) {
+                    AVER_WARN("[Game] surface '{}' has no authored .ocmat and no built-in look; "
+                              "rendering the flat gray fallback (0.80, 0.80, 0.85) instead",
+                              aver_scene_material_name(m));
+                }
+            }
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+            // Guarded on ready(): binding a descriptor table the material system has not built is not a
+            // wrong colour on this renderer, it is a GPU hang. This project has already lost a session
+            // to an unbound root CBV that presented as "slow geometry shaders".
+            if (materials && materials->ready()) {
+                dl.matSet = materials->bindingSet(authored);
+                dl.matConstants = &materials->constants(authored);
+                dl.matBytes = sizeof(pbr::MaterialConstants);
+            }
+#else
+            (void)materials;
+#endif
+            return dl;
+        };
+
+        if (raster) {
+            for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
+                const PlannedDraw& pd = pdraws[pdi];
+                if (!pd.mesh) continue;
+                const auto dl = resolveDrawLook(pd.material);
+                if (dl.matBytes) device.setDrawBinding(dl.matSet, dl.matConstants, dl.matBytes);
+
+                // STICKY on the device (RHI.hpp's setDrawBlended comment), so it is set on EVERY draw
+                // here, not only when true. Skipping the false case would leave a translucent part's
+                // flag set for whatever opaque part or entity this walk visits next -- that next mesh
+                // would silently take the blended path too: no ray-traced shadow, no GI bounce, no
+                // shadow-cascade write, and drawn through scenePipeline(..., blended=true) instead of
+                // the ordinary opaque pipeline, purely because it happened to be drawn after a pane of
+                // glass.
+                //
+                // NO DEPTH-PREPASS GUARD NEEDED HERE, and that is a fact about this file rather than
+                // about translucency: drawWorld never calls setNextDrawPrepassed or
+                // drawMeshDepthPrepass at all -- this is the packaged-game walk, not SandboxApp.cpp's
+                // editor loop with its `prepassEligible` exclusion list (SandboxApp.cpp, search "depth
+                // prepass phase"). setDrawBlended's own contract already guarantees a blended draw is
+                // "never depth-prepassed" regardless, because the device captures it at the very top of
+                // drawMesh, before the same submitDraw loop a prepass would also have to be skipped
+                // ahead of. If a depth-prepass walk is ever added to this file, it must exclude exactly
+                // the draws `blended` is true for here, the same way SandboxApp.cpp's prepassEligible
+                // excludes skinned and GPU-cluster-dispatched ones -- stated here so that addition does
+                // not have to rediscover it.
+                device.setDrawBlended(dl.blended);
+                device.drawMesh(pd.mesh, &wm.m[0][0], dl.col, dl.metallic, dl.roughness);
+            }
             ++drawn;
         } else {
 #if AVER_MODULE_VOXI
             // THE UNIFIED DIRECT ROUTE: frustum-culled or owner-hidden, handed straight to Voxi so
             // shadows, GI voxelisation and the RT TLAS never depend on what the raster camera can see
             // -- mirrors emitEntityDraws' else-branch (SandboxRender.cpp:2195-2226) calling
-            // voxiRenderer_.submit() with the SAME mesh/look/translucency this entity would have drawn
-            // with on the raster route, plus ownerHiddenHere so a possessed pawn's own body stays out
-            // of ray-driven primary visibility (voxi.hlsl's AVER_RT_MASK_OWNER_HIDDEN lane) while still
-            // casting a shadow and bouncing light, exactly like the raster walk always did for it.
-            // options.voxiRenderer null (no Voxi feature attached) reproduces this walk's pre-existing
-            // behaviour exactly: the entity is skipped and casts nothing while culled or hidden.
+            // voxiRenderer_.submit() with the SAME mesh/look/translucency this draw would have used on
+            // the raster route, plus ownerHiddenHere so a possessed pawn's own body stays out of
+            // ray-driven primary visibility (voxi.hlsl's AVER_RT_MASK_OWNER_HIDDEN lane) while still
+            // casting a shadow and bouncing light, exactly like the raster walk always did for it. Now
+            // per planned draw, not per entity, so a culled multi-material entity's parts reach Voxi
+            // with their own materials instead of all borrowing the entity's -- the same split the
+            // raster route above now gets. options.voxiRenderer null (no Voxi feature attached)
+            // reproduces this walk's pre-existing behaviour exactly: the entity is skipped and casts
+            // nothing while culled or hidden.
             if (options.voxiRenderer) {
-                options.voxiRenderer->submit(drawHandle, &wm.m[0][0], col, metallic, roughness,
-                                             matSet, matConstants, matBytes,
-                                             /*translucent=*/blended, ownerHiddenHere);
+                for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
+                    const PlannedDraw& pd = pdraws[pdi];
+                    if (!pd.mesh) continue;
+                    const auto dl = resolveDrawLook(pd.material);
+                    options.voxiRenderer->submit(pd.mesh, &wm.m[0][0], dl.col, dl.metallic, dl.roughness,
+                                                 dl.matSet, dl.matConstants, dl.matBytes,
+                                                 /*translucent=*/dl.blended, ownerHiddenHere);
+                }
             }
 #endif
             // Priority matches SandboxRender.cpp:1086's counting convention: a frustum-culled-AND-

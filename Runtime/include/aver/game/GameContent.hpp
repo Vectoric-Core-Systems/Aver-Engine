@@ -18,6 +18,11 @@
 #include <utility>
 #include <vector>
 
+// Forward-declared rather than included: only buildMeshParts' PRIVATE signature (GameContent.cpp)
+// needs the full aver/formats/OcMesh.hpp, and this header is included widely enough that a leaf
+// forward declaration is worth it over a header nothing else here reads.
+namespace aver::fmt { struct OcMeshData; }
+
 namespace aver::game {
 
 // Every asset under the project's content root, keyed by ObjectId.
@@ -103,12 +108,30 @@ public:
     // Uploads the built-in primitives a .ocworld may name. Call once, before any project meshes.
     void registerBuiltins(rhi::IDevice& device);
 
+    // One material-slot's worth of a mesh split for naming more than one. Ported from
+    // SandboxApp::MeshPart (sandbox/src/SandboxApp.hpp) -- same two fields, same "0 means the slot
+    // named nothing, ask the entity instead" convention buildMeshParts() (GameContent.cpp) and
+    // GameRender.cpp's planEntityDraws() both read. Unlike the editor's copy, not gated behind
+    // AVER_MODULE_LANDSCAPE: this class has no landscape dependency to inherit, and nothing about a
+    // material-slot split is landscape-specific.
+    struct MeshPart {
+        rhi::MeshHandle mesh = 0;
+        i32             material = 0;
+    };
+
     // Uploads every .ocmesh under the project's content root.
     //
     // Takes an IDevice and not an Engine: the editor's version takes Engine& and uses it for
     // nothing but e.device()->createMesh, and a content cache with a handle on the whole engine is
     // how the SandboxApp god object started.
     void loadProjectMeshes(rhi::IDevice& device);
+
+    // The per-material split for a mesh with more than one submesh, or nullptr for a mesh that was
+    // never split -- either it names one material slot (the common case), or every submesh past the
+    // first was refused (buildMeshParts' "ONE SURVIVING PART IS NOT A SPLIT" rule, GameContent.cpp).
+    // GameRender.cpp's draw walk is the sole reader: it plans one draw per part instead of one draw
+    // for the whole mesh whenever this returns non-null.
+    const std::vector<MeshPart>* partsFor(u64 id) const;
 
     // THERE IS DELIBERATELY NO releaseProjectMeshes() TWIN of releaseProjectMaterials().
     // There was one, it had zero callers, and it was wrong: it erased sceneMeshes_/meshBounds_/
@@ -119,9 +142,10 @@ public:
     //
     // Nothing needs it today: openProject runs exactly once per process in the packaged game, so the
     // device's own teardown reclaims everything. Whoever adds a project-reload path should write the
-    // correct version then -- taking rhi::IDevice&, destroying each handle before erasing it, and
-    // mirroring the editor's SandboxApp::releaseProjectMeshes, which also has to destroy per-material
-    // split parts and outline line meshes this class does not have.
+    // correct version then -- taking rhi::IDevice&, and destroying before erasing every handle this
+    // class owns per mesh: the base handle, its meshParts_ split, and its depthProxyMap_ level. Do not
+    // copy the editor's SandboxApp::releaseProjectMeshes for this: it erases sceneMeshes_ without
+    // destroying the base handle.
 
     rhi::MeshHandle meshFor(u64 id) const;
     usize meshCount() const { return sceneMeshes_.size(); }
@@ -171,6 +195,20 @@ private:
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
     // Depth proxy map: LOD meshes used instead of full detail in depth passes
     std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxyMap_;
+    // mesh id -> its per-material split, for a mesh whose .ocmesh names more than one. See MeshPart.
+    std::unordered_map<u64, std::vector<MeshPart>> meshParts_;
+
+    // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
+    // one -- a no-op otherwise. Ported from SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp):
+    // same compaction (each part gets its OWN remapped vertex/index arrays, not a view into `verts`,
+    // because IDevice::createMesh copies what it is given and a part sharing the parent's whole buffer
+    // would upload it once per part), same slot-name-to-material-token rule (a submesh's materialSlot
+    // names a string in md.materialSlots, resolved through aver_scene_material the same way
+    // meshSlot0Material_ already is above), same "one surviving part is not a split" fallback. Called
+    // unconditionally from loadProjectMeshes, not gated on AVER_MODULE_LANDSCAPE the way the editor's
+    // call site is -- see MeshPart's own comment for why that guard does not belong here.
+    void buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
+                         const std::vector<rhi::MeshVertex>& verts, const std::string& rel);
 #endif
 
 #if AVER_MODULE_PBR
