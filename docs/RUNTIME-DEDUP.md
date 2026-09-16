@@ -1,10 +1,19 @@
 # One runtime: reconciling the editor's runtime copy with Runtime/
 
-> **STATUS, 2026-09-16: the runtime-only catch-up is implemented; the editor still uses its own copy.**
+> **STATUS, 2026-09-17: C1-C4 are swapped -- the editor uses the library for content, level, water,
+> streaming and landscape.** `SandboxApp` holds `game::GameContent content_` (`b97644fe`),
+> `game::GameLevel level_` (`f3fcd628`), `game::GameWater water_` (`d822ef64`),
+> `game::GameStreaming streaming_` (`85194d6b`) and `game::GameLandscape landscape_` (`2e6dcc89`,
+> which also moved the editor's sculpt/undo/save authoring into the library as an editor-only API).
+> The frame-budget controller is shared (`044818ed`). All built in Release; the level-load swap was
+> checked by hand in the editor, the water/streaming/landscape swaps are not yet. Still open: C5-C8
+> (physics/tick/audio, camera and device push, the render walk, input and the play session), the CLI
+> render-override collapse, the GPU cluster/LOD-selection path (editor-only for now), and C9.
+>
+> **STATUS, 2026-09-16: the runtime-only catch-up is implemented.**
 > Every gap in the table below is closed in `Runtime/` (commits `696c3666`, `2d3856ec`, `e539f30f`,
 > `6f079f41`, `b956a501`, `40456852`, `88683c93`, `30db84f4`, `23bd0ba4`), built but not yet run
-> side by side with the editor. Still open: the editor-side swaps (C1 onward), the CLI render-override
-> collapse, and the GPU cluster/LOD-selection path, which stays editor-only for now. The rest of this
+> side by side with the editor. The rest of this
 > document is the original plan, kept as written. It is the reconcile
 > map for "Phase C" of the editor/runtime split: the editor (`Sandbox.exe`) still carries a private copy
 > of the game runtime inside `SandboxApp` (now split across `sandbox/src/Sandbox*.cpp`), and the standalone
