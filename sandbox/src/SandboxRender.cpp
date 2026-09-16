@@ -10,8 +10,8 @@ void SandboxApp::onRender(Engine& e)  {
     handleManip(e);
 #if AVER_MODULE_LANDSCAPE
     // Drains an undo/redo that changed terrain heights. Deferred to here because this is the
-    // first point after those run that has a device -- see applyLandscapeRect's own comment.
-    flushLandscapeInvalidate(e);
+    // first point after those run that has a device -- see GameLandscape::applyHeightRect's own comment.
+    landscape_.flushPendingInvalidate(e.device());
 #endif
     // THE PROJECT LOADING SCREEN COMES DOWN HERE, not when applyProject returned. Same rule as
     // startupComplete: hold until the draw count has stopped changing, so it covers the tail of
@@ -116,55 +116,17 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
 
 #if AVER_MODULE_LANDSCAPE
-    // The landscape pass: one direct select()+draw() call, the same hand-rolled shape as the
-    // objects_ loop above -- not an IRenderFeature, and not gated on hideEditorScene: terrain is
-    // real environment geometry, staying visible through Play like the sky and fog.
-    if (landscapeLoaded_) updateLandscapeRingTiles(e.device(), eye_.x, eye_.y);
-
-    if (landscapeLoaded_ && landscapeRenderer_) {
-        // Bind the level's terrain material the first frame the material system is ready.
-        // LEVEL LOAD CANNOT BE TRUSTED TO BE LATE ENOUGH: MaterialSystem::ready() also needs its
-        // GPU side up with no guaranteed order versus the landscape load, so a per-frame bool test is cheaper than reasoning about that ordering and self-heals.
-        if (!landscapeMaterial_.empty() &&
-            (!landscapeRenderer_->hasSurfaceBinding() || !landscapeUvTilingResolved_))
-            applyLandscapeSurfaceToAll(e.device());
-
-        landscape::SelectParams lp;
-        lp.cameraCm[0] = eye_.x; lp.cameraCm[1] = eye_.y; lp.cameraCm[2] = eye_.z;
-        // Same fovY and projScale formula trifactor::projScale uses, over THIS frame's actual
-        // viewport height rather than SelectParams's 540.0f default -- a mismatched scale reads as
-        // terrain refining at the wrong distance, not a crash, which would go unnoticed.
-        lp.projScale = vpH_ / (2.0f * std::tan(radians(60.0f) * 0.5f));
-        lp.useFrustum = true;
-        f32 vpm[16];
-        for (int r = 0; r < 4; ++r)
-            for (int c = 0; c < 4; ++c) vpm[r * 4 + c] = viewProj_.m[r][c];
-        lp.frustum = landscape::Frustum::fromViewProj(vpm);
-        // A SHARE of the renderer's one shared draw budget, not the whole thing -- see the member
-        // block's own comment on kLandscapeMaxDrawsPerTile (docs/LANDSCAPE_EDITOR.md blocker 9).
-        lp.maxDraws = kLandscapeMaxDrawsPerTile;
-
-        landscape::SelectResult lsel;
-        landscapeTree_.select(lp, lsel);
-
-        // Sections carry their own world position in every sample (OcLandData::worldAt already
-        // folds originCm in -- see ChunkMesh.cpp), so the transform LandscapeRenderer::draw()
-        // applies on top is identity, not a placement matrix.
-        static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-        landscapeRenderer_->draw(*e.device(), landscapeData_, landscapeTree_, lsel, kIdentity,
-                                 landscapeUvTilingCm_);
-
-        // The ring: every procedural tile resident around the camera, drawn through the SAME
-        // select()+draw() pair, sharing the SAME per-tile budget -- that sharing keeps total draws
-        // across every resident section within the renderer's one real ceiling.
-        for (auto& kv : landscapeRingTiles_) {
-            LandscapeRingTile& tile = kv.second;
-            if (!tile.renderer) continue;
-            landscape::SelectResult rsel;
-            tile.tree.select(lp, rsel);
-            tile.renderer->draw(*e.device(), tile.data, tile.tree, rsel, kIdentity,
-                                landscapeUvTilingCm_);
-        }
+    // The landscape pass: a ring update then one direct draw call through game::GameLandscape, the
+    // same hand-rolled shape as the objects_ loop above -- not an IRenderFeature, and not gated on
+    // hideEditorScene: terrain is real environment geometry, staying visible through Play like the
+    // sky and fog.
+    if (landscape_.loaded()) {
+        pbr::MaterialSystem* landscapeMaterials = nullptr;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        landscapeMaterials = &voxiRenderer_.materials();
+#endif
+        landscape_.updateRingTiles(e.device(), eye_.x, eye_.y, &content_, landscapeMaterials);
+        landscape_.draw(*e.device(), eye_, viewProj_, vpH_, &content_, landscapeMaterials);
     }
 #endif
 

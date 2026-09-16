@@ -30,7 +30,7 @@ bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 
     fmt::OcLandData data;
     const f32 tileSizeCm = static_cast<f32>(samples - 1) * spacingCm;
     if (!landscape::synthesizeTerrainTile(landscape::TileCoord{0, 0}, 0.0f, 0.0f, tileSizeCm,
-                                          samples, landscapeNoiseParams_, data)) {
+                                          samples, landscape_.noiseParams(), data)) {
         setUpgradeStatus("Could not synthesise a landscape at that size.", editor::NotifySeverity::Error);
         return false;
     }
@@ -40,10 +40,12 @@ bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 
         setUpgradeStatus("Could not write " + dst.filename().string(), editor::NotifySeverity::Error);
         return false;
     }
-    if (!loadLandscape(device, dst.string())) {
+    if (!landscape_.loadSection(device, dst.string())) {
         setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.", editor::NotifySeverity::Error);
         return false;
     }
+    sculpting_ = false;
+    sculptCursorValid_ = false;
     recordLandscapeInLevel();
     cbInvalidate(dir.string());
     setUpgradeStatus("Created " + dst.filename().string());
@@ -59,19 +61,19 @@ bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 
 // --landscape was never named in the file -- the level looked terrain-less to anything but this
 // machine's directory listing, and moving the project broke it silently.
 void SandboxApp::recordLandscapeInLevel() {
-    if (!landscapeLoaded_ || landscapePath_.empty() || !project_.valid()) return;
+    if (!landscape_.loaded() || landscape_.path().empty() || !project_.valid()) return;
     std::error_code ec;
-    std::string rel = std::filesystem::relative(landscapePath_, project_.contentDir(), ec).string();
-    if (ec || rel.empty()) rel = landscapePath_;
+    std::string rel = std::filesystem::relative(landscape_.path(), project_.contentDir(), ec).string();
+    if (ec || rel.empty()) rel = landscape_.path();
     for (char& c : rel) if (c == '\\') c = '/';
 
     fmt::OcLandscapePlacement lp;
     if (!levelHeader_.landscapes.empty()) lp = levelHeader_.landscapes.front();   // keep name/material
     lp.section = rel;
     if (lp.name.empty()) lp.name = levelName_.empty() ? std::string("Landscape") : levelName_;
-    lp.x = landscapeData_.originCm[0];
-    lp.y = landscapeData_.originCm[1];
-    lp.z = landscapeData_.originCm[2];
+    lp.x = landscape_.data().originCm[0];
+    lp.y = landscape_.data().originCm[1];
+    lp.z = landscape_.data().originCm[2];
     levelHeader_.landscapes.assign(1, std::move(lp));
 }
 
@@ -79,17 +81,14 @@ void SandboxApp::recordLandscapeInLevel() {
 // in memory without this; it's the one place edits actually reach disk. Silent no-op if there is
 // nothing loaded or nowhere to write it, matching the Save Landscape menu item's own guard.
 void SandboxApp::saveLandscape() {
-    if (!landscapeLoaded_ || landscapePath_.empty()) return;
+    if (!landscape_.loaded() || landscape_.path().empty()) return;
     std::string why;
-    if (fmt::saveOcLand(landscapePath_, landscapeData_, &why)) {
-        landscapeDirty_ = false;
-        AVER_INFO("[Landscape] saved '{}'", landscapePath_);
-        // Saving is the natural commit point for a sculpt, so it is where the collision snapshot
-        // catches up with the heights -- see rebuildLandscapeCollision on why this is not done
-        // per stroke.
-        rebuildLandscapeCollision();
+    // Saving is the natural commit point for a sculpt, so it is where the collision snapshot
+    // catches up with the heights -- see GameLandscape::save on why this is not done per stroke.
+    if (landscape_.save(&why)) {
+        AVER_INFO("[Landscape] saved '{}'", landscape_.path());
     } else {
-        AVER_ERROR("[Landscape] could not save '{}': {}", landscapePath_, why);
+        AVER_ERROR("[Landscape] could not save '{}': {}", landscape_.path(), why);
     }
 }
 

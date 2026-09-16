@@ -899,17 +899,17 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level");
 #endif
 #if AVER_MODULE_LANDSCAPE
-            // Independent of the Save Level item above: a sculpt changes landscapeData_ in memory
-            // only (handleSculpt) -- the SAME split saveLevel/Save Level already has between "the
-            // editor's state" and "what is actually on disk".
+            // Independent of the Save Level item above: a sculpt changes the resident section
+            // (landscape_.data()) in memory only (handleSculpt) -- the SAME split saveLevel/Save
+            // Level already has between "the editor's state" and "what is actually on disk".
             {
-                const bool canSave = landscapeLoaded_ && !landscapePath_.empty();
+                const bool canSave = landscape_.loaded() && !landscape_.path().empty();
                 ImGui::BeginDisabled(!canSave);
-                if (ImGui::MenuItem(landscapeDirty_ ? "Save Landscape *" : "Save Landscape")) saveLandscape();
+                if (ImGui::MenuItem(landscape_.dirty() ? "Save Landscape *" : "Save Landscape")) saveLandscape();
                 ImGui::EndDisabled();
                 uiReg_.track("file.saveLandscape");
                 if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip(!landscapeLoaded_
+                    ImGui::SetTooltip(!landscape_.loaded()
                         ? "No landscape section loaded (--landscape, or <levelname>.ocland beside the level)."
                         : "This section has no file path to save back to.");
             }

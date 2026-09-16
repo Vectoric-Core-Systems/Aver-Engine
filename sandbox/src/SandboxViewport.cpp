@@ -209,103 +209,47 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
     return h;
 }
 
-// Writes one stored rect of samples back into the section and rebuilds what it touched.
-// SHARED BY UNDO AND REDO, which differ only in which of the two stored buffers they write. The
-// rebuild afterwards is the same work handleSculpt does per tick: the quadtree's per-level error
-// and skirt values are maxima over the level, so any height change can move them.
-void SandboxApp::applyLandscapeRect(const EditCmd& c, const std::vector<f32>& src) {
-    if (!landscapeLoaded_ || src.empty()) return;
-    const u32 n = landscapeData_.sampleCount;
-    if (c.landX1 >= n || c.landY1 >= n) return;   // section was reloaded at a different size
-    const u32 w = c.landX1 - c.landX0 + 1;
-    for (u32 y = c.landY0; y <= c.landY1; ++y)
-        for (u32 x = c.landX0; x <= c.landX1; ++x)
-            landscapeData_.heights[y * n + x] = src[(y - c.landY0) * w + (x - c.landX0)];
-
-    // Bounds are derived, not stored, and applyBrush is what normally recomputes them -- writing
-    // samples directly bypasses that, so a stroke undone at the section's high point would leave
-    // boundsMax describing terrain that no longer exists, and the quadtree's culling with it.
-    landscapeData_.boundsMin[2] = landscapeData_.boundsMax[2] = landscapeData_.heights.empty() ? 0.0f
-                                                                             : landscapeData_.heights[0];
-    for (f32 h : landscapeData_.heights) {
-        landscapeData_.boundsMin[2] = std::fmin(landscapeData_.boundsMin[2], h);
-        landscapeData_.boundsMax[2] = std::fmax(landscapeData_.boundsMax[2], h);
-    }
-
-    std::string why;
-    if (!landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
-        AVER_ERROR("[Landscape] undo left the section unbuildable: {}", why);
-        return;
-    }
-    landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-    landscapeTree_.resetHysteresis();
-
-    // THE GPU HALF IS DEFERRED ONE FRAME, why this function takes no Engine: undo()/redo() are
-    // reachable from places with no Engine to hand (the keybind path has one, the headless
-    // self-test does not). The heightfield and quadtree update HERE, synchronously, so queries see
-    // the undone state immediately; only the cached GPU meshes lag by a frame, invisibly.
-    pendingLandInvalidate_ = true;
-    pendingLandX0_ = c.landX0; pendingLandY0_ = c.landY0;
-    pendingLandX1_ = c.landX1; pendingLandY1_ = c.landY1;
-    landscapeDirty_ = true;
-}
-
-// Drains the deferred invalidation above. Called once per frame from onRender, which has the
-// device that forgetOverlapping needs.
-void SandboxApp::flushLandscapeInvalidate(Engine& e) {
-    if (!pendingLandInvalidate_) return;
-    pendingLandInvalidate_ = false;
-    if (landscapeRenderer_ && e.device())
-        landscapeRenderer_->forgetOverlapping(*e.device(), landscapeTree_,
-                                              pendingLandX0_, pendingLandY0_,
-                                              pendingLandX1_, pendingLandY1_);
-}
-
 // Replaces every height in the section with the noise parameters the panel is showing.
 // ONE UNDO ENTRY covering the whole section, using the same LandscapeStroke machinery a brush
 // stroke uses -- the difference between a generator you dare experiment with and one you only run
 // on an empty level.
-// terrainHeightAt() existed all along and was reachable from nowhere: only wired as the height
-// source for the ring tiles past a section's rim, with no way to ask for it inside.
+// The heights are computed into a LOCAL vector first, not written through GameLandscape until the
+// comparison against landBefore says something actually changed -- applyHeightRect is what does
+// the section write, the bounds recompute, the tree rebuild and the deferred GPU invalidation.
 void SandboxApp::generateLandscapeNoise(Engine& e) {
     (void)e;
-    if (!landscapeLoaded_ || landscapeData_.sampleCount == 0) return;
-    const u32 n = landscapeData_.sampleCount;
+    if (!landscape_.loaded() || landscape_.data().sampleCount == 0) return;
+    const u32 n = landscape_.data().sampleCount;
 
     EditCmd c;
     c.kind = EditCmd::Kind::LandscapeStroke;
     c.label = "Generate terrain";
     c.landX0 = 0; c.landY0 = 0; c.landX1 = n - 1; c.landY1 = n - 1;
-    c.landBefore = landscapeData_.heights;
+    c.landBefore = landscape_.data().heights;
 
+    c.landAfter.resize(static_cast<size_t>(n) * n);
     for (u32 y = 0; y < n; ++y) {
         for (u32 x = 0; x < n; ++x) {
-            const f32 wx = landscapeData_.originCm[0] + static_cast<f32>(x) * landscapeData_.spacingCm;
-            const f32 wy = landscapeData_.originCm[1] + static_cast<f32>(y) * landscapeData_.spacingCm;
-            landscapeData_.heights[static_cast<size_t>(y) * n + x] =
-                landscape::terrainHeightAt(wx, wy, landscapeNoiseParams_);
+            const f32 wx = landscape_.data().originCm[0] + static_cast<f32>(x) * landscape_.data().spacingCm;
+            const f32 wy = landscape_.data().originCm[1] + static_cast<f32>(y) * landscape_.data().spacingCm;
+            c.landAfter[static_cast<size_t>(y) * n + x] =
+                landscape::terrainHeightAt(wx, wy, landscape_.noiseParams());
         }
     }
-    c.landAfter = landscapeData_.heights;
     if (c.landBefore == c.landAfter) return;
 
-    // applyLandscapeRect does the bounds recompute, the tree rebuild and the deferred GPU
-    // invalidation. Called with the values just written so the one code path handles generate,
-    // undo and redo identically rather than three near-copies drifting apart.
-    applyLandscapeRect(c, c.landAfter);
+    landscape_.applyHeightRect(0, 0, n - 1, n - 1, c.landAfter);
     pushEdit(std::move(c));
     AVER_INFO("[Landscape] generated {}x{} samples from noise (seed {}, {} octaves)",
-              n, n, landscapeNoiseParams_.seed, landscapeNoiseParams_.octaves);
+              n, n, landscape_.noiseParams().seed, landscape_.noiseParams().octaves);
 }
 
-// Starts a stroke: remembers that nothing has been touched yet. The BEFORE samples are captured
-// lazily as the rect grows (see growSculptStroke) rather than up front, because at stroke start
-// the rect is not known -- a drag can wander anywhere.
+// Starts a stroke: remembers that nothing has been touched yet. GameLandscape captures the BEFORE
+// samples lazily as the rect grows (see growSculptStroke) rather than up front, because at stroke
+// start the rect is not known -- a drag can wander anywhere.
 void SandboxApp::beginSculptStroke() {
     sculpting_ = true;
-    strokeActive_ = true;
-    strokeEmpty_ = true;
-    strokeBefore_.clear();
+    landscape_.beginStroke();
 }
 
 // Unions this tick's touched rect into the stroke's, capturing the pre-stroke heights of anything
@@ -313,59 +257,21 @@ void SandboxApp::beginSculptStroke() {
 // THE ORDER MATTERS: this must run BEFORE applyBrush writes, or the "before" it captures is
 // already the "after". brushRect() -- previously computed only inside applyBrush and unused by the editor -- is now called by the editor directly.
 void SandboxApp::growSculptStroke(const landscape::BrushRect& r) {
-    if (r.empty || !strokeActive_) return;
-    const u32 n = landscapeData_.sampleCount;
-    u32 nx0 = r.x0, ny0 = r.y0, nx1 = r.x1, ny1 = r.y1;
-    if (!strokeEmpty_) {
-        nx0 = std::min(nx0, strokeX0_); ny0 = std::min(ny0, strokeY0_);
-        nx1 = std::max(nx1, strokeX1_); ny1 = std::max(ny1, strokeY1_);
-    }
-    if (nx1 >= n || ny1 >= n) return;
-
-    // The rect grew, so the captured buffer has to be rebuilt at the new size. Samples already
-    // inside the old rect keep their ORIGINAL pre-stroke value -- copied across from the old
-    // buffer, not re-read from the section, which by now holds painted values.
-    const u32 nw = nx1 - nx0 + 1, nh = ny1 - ny0 + 1;
-    std::vector<f32> grown(static_cast<size_t>(nw) * nh);
-    for (u32 y = ny0; y <= ny1; ++y) {
-        for (u32 x = nx0; x <= nx1; ++x) {
-            const bool inOld = !strokeEmpty_ && x >= strokeX0_ && x <= strokeX1_ &&
-                               y >= strokeY0_ && y <= strokeY1_;
-            grown[(y - ny0) * nw + (x - nx0)] =
-                inOld ? strokeBefore_[(y - strokeY0_) * (strokeX1_ - strokeX0_ + 1) + (x - strokeX0_)]
-                      : landscapeData_.heights[y * n + x];
-        }
-    }
-    strokeBefore_ = std::move(grown);
-    strokeX0_ = nx0; strokeY0_ = ny0; strokeX1_ = nx1; strokeY1_ = ny1;
-    strokeEmpty_ = false;
+    landscape_.growStroke(r);
 }
 
 // Ends a stroke and pushes ONE undo entry for the whole thing.
 void SandboxApp::endSculptStroke() {
     sculpting_ = false;
-    if (!strokeActive_) return;
-    strokeActive_ = false;
-    if (strokeEmpty_ || !landscapeLoaded_) { strokeBefore_.clear(); return; }
-
-    const u32 n = landscapeData_.sampleCount;
-    const u32 w = strokeX1_ - strokeX0_ + 1, h = strokeY1_ - strokeY0_ + 1;
+    if (!landscape_.strokeActive()) return;
     EditCmd c;
-    c.kind   = EditCmd::Kind::LandscapeStroke;
-    c.label  = "Sculpt";
-    c.landX0 = strokeX0_; c.landY0 = strokeY0_; c.landX1 = strokeX1_; c.landY1 = strokeY1_;
-    c.landBefore = std::move(strokeBefore_);
-    c.landAfter.resize(static_cast<size_t>(w) * h);
-    for (u32 y = strokeY0_; y <= strokeY1_; ++y)
-        for (u32 x = strokeX0_; x <= strokeX1_; ++x)
-            c.landAfter[(y - strokeY0_) * w + (x - strokeX0_)] = landscapeData_.heights[y * n + x];
-
+    c.kind = EditCmd::Kind::LandscapeStroke;
+    c.label = "Sculpt";
     // A stroke that changed nothing -- clicking on terrain already at the flatten target, or a
     // Smooth pass over a plane -- pushes no entry. Otherwise every stray click would cost the
-    // user a Ctrl+Z that appears to do nothing.
-    if (c.landBefore == c.landAfter) { strokeBefore_.clear(); return; }
+    // user a Ctrl+Z that appears to do nothing; endStroke() returns false for that case too.
+    if (!landscape_.endStroke(c.landBefore, c.landAfter, c.landX0, c.landY0, c.landX1, c.landY1)) return;
     pushEdit(std::move(c));
-    strokeBefore_.clear();
 }
 
 // Fills the foliage palette from every .ocfoliage TYPE ASSET under the project's content folder --
@@ -437,13 +343,13 @@ void SandboxApp::refreshFoliagePalette() {
 // Placements here are ordinary scene entities: they save with the level, select, move and undo.
 void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
     sculptCursorValid_ = false;
-    if (!landscapeLoaded_ || foliagePalette_.empty()) { foliageStroking_ = false; return; }
+    if (!landscape_.loaded() || foliagePalette_.empty()) { foliageStroking_ = false; return; }
 
     Vec3 ro, rd;
     viewportRay(mx, my, ro, rd);
     const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
     landscape::HeightfieldHit hit;
-    const bool haveHit = overScene && landscape::raycastHeightfield(landscapeData_, roA, rdA, hit);
+    const bool haveHit = overScene && landscape::raycastHeightfield(landscape_.data(), roA, rdA, hit);
     if (haveHit) {
         sculptCursorValid_ = true;   // the same cursor ring the sculpt brush draws
         sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
@@ -500,7 +406,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     const f32 y = cy + std::sin(ang) * rad;
 
     f32 z = 0.0f;
-    if (!landscape::surfaceHeightAt(landscapeData_, x, y, z)) return;   // off the section
+    if (!landscape::surfaceHeightAt(landscape_.data(), x, y, z)) return;   // off the section
 
     // WHICH SPECIES, weighted by its own type.weight -- mirroring
     // aver::world::ChunkGenerator.cpp's pickSpecies, minus the density-band test that has no
@@ -559,7 +465,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     // typical range), so the four extra probes stay local to this instance's own patch of ground
     // rather than blurring across several samples.
     const f32 yaw = sp.type.randomizeYaw ? foliageRand(foliageSeed_) * 6.2831853f : 0.0f;
-    xf.rotation = editor::foliagePlacementRotation(landscapeData_, x, y, /*epsCm=*/10.0f, yaw,
+    xf.rotation = editor::foliagePlacementRotation(landscape_.data(), x, y, /*epsCm=*/10.0f, yaw,
                                                     sp.type.alignToNormal);
     xf.scale = Vec3{sc, sc, sc};
 
@@ -1252,7 +1158,7 @@ void SandboxApp::handleManip(Engine& e) {
             if (keybinds_.pressed(editor::CommandId::ToolScale, io))  tool_=Tool::Scale;
         }
 #if AVER_MODULE_LANDSCAPE
-        if (landscapeLoaded_) {
+        if (landscape_.loaded()) {
         }
 #endif
     }
@@ -1572,13 +1478,13 @@ void SandboxApp::handleManip(Engine& e) {
 // -- and landscape::raycastHeightfield() for where that ray meets the section's surface.
 void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
     sculptCursorValid_ = false;
-    if (!landscapeLoaded_) { sculpting_ = false; return; }
+    if (!landscape_.loaded()) { sculpting_ = false; return; }
 
     Vec3 ro, rd;
     viewportRay(mx, my, ro, rd);
     const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
     landscape::HeightfieldHit hit;
-    const bool haveHit = overScene && landscape::raycastHeightfield(landscapeData_, roA, rdA, hit);
+    const bool haveHit = overScene && landscape::raycastHeightfield(landscape_.data(), roA, rdA, hit);
     if (haveHit) {
         sculptCursorValid_ = true;
         sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
@@ -1603,7 +1509,7 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
     // RELEASE ENDS THE STROKE AND PUSHES THE UNDO ENTRY: before this existed, sculpting was
     // completely invisible to Ctrl+Z, since handleSculpt mutated the heightfield in place and the
     // undo stack only ever knew about entity transforms -- Ctrl+Z after ten minutes of terrain work silently undid a moved object instead.
-    if (!io.MouseDown[0] && strokeActive_) endSculptStroke();
+    if (!io.MouseDown[0] && landscape_.strokeActive()) endSculptStroke();
 
     if (sculpting_ && haveHit) {
         landscape::BrushParams p;
@@ -1630,29 +1536,11 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
         const f32 dt = std::fmin(e.time().dt, 0.05f);
         const f32 amount = std::fmin(1.0f, dt * 6.0f);
 
-        // BEFORE applyBrush, not after: growSculptStroke captures the pre-stroke heights of any
-        // samples this tick is about to newly touch, since after the write they're no longer
-        // "pre". brushRect() existed all along; the editor had just never called it.
-        growSculptStroke(landscape::brushRect(landscapeData_, p));
-
-        const landscape::BrushRect touched = landscape::applyBrush(landscapeData_, p, amount);
-        if (!touched.empty) {
-            // REBUILDS THE WHOLE TREE, not just the touched nodes: LandscapeTree::build() has no
-            // incremental form (a coarser node's errorCm/skirtCm/radius are per-level MAXIMA, so a
-            // local change can in principle move any of them). Proportional to the section's total
-            // sample count, not the brush footprint -- cheap here, but real on a large section. Only the GPU mesh cache invalidation below is footprint-local.
-            std::string why;
-            if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
-                landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-                landscapeTree_.resetHysteresis();
-                if (landscapeRenderer_)
-                    landscapeRenderer_->forgetOverlapping(*e.device(), landscapeTree_,
-                                                           touched.x0, touched.y0, touched.x1, touched.y1);
-            } else {
-                AVER_ERROR("[Landscape] sculpt left the section unbuildable: {}", why);
-            }
-            landscapeDirty_ = true;
-        }
+        // GameLandscape::sculpt does the rest: grows the stroke's undo buffer BEFORE applyBrush
+        // writes (so the "before" it captures isn't already the "after"), applies the brush, and
+        // -- since LandscapeTree::build() has no incremental form -- rebuilds the WHOLE tree on
+        // any touch, invalidating just the touched GPU meshes.
+        landscape_.sculpt(e.device(), p, amount);
     }
 }
 
@@ -2294,9 +2182,9 @@ void SandboxApp::snapSelectionToFloor() {
 #if AVER_MODULE_LANDSCAPE
         // Landscape first: straight down over (x, y) is exactly surfaceHeightAt's own vertical-query
         // case, not raycastHeightfield's march.
-        if (landscapeLoaded_) {
+        if (landscape_.loaded()) {
             f32 z;
-            if (landscape::surfaceHeightAt(landscapeData_, ro.x, ro.y, z) && z < ro.z) {
+            if (landscape::surfaceHeightAt(landscape_.data(), ro.x, ro.y, z) && z < ro.z) {
                 bestT = ro.z - z; hit = true; hitZ = z;
             }
         }
@@ -2636,7 +2524,7 @@ void SandboxApp::buildViewportOverlay() {
         char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
         if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
         ImGui::SameLine(0, gap);
-        if (ImGui::Button(landscapeDirty_ ? "Save Terrain *" : "Save Terrain")) saveLandscape();
+        if (ImGui::Button(landscape_.dirty() ? "Save Terrain *" : "Save Terrain")) saveLandscape();
         uiReg_.track("landscape.save");
         if (ImGui::BeginPopup("brushParams")) {
             editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
@@ -2774,7 +2662,7 @@ std::string SandboxApp::makeEntityLabel(const std::string& surface, const std::s
 // alone, so a level without terrain loaded cannot be painted into.
 bool SandboxApp::editorModeIsLandscape() const {
 #if AVER_MODULE_LANDSCAPE
-    return mode_ == EditorMode::Landscape && landscapeLoaded_;
+    return mode_ == EditorMode::Landscape && landscape_.loaded();
 #else
     return false;
 #endif
@@ -2796,13 +2684,13 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
             // and the message it refused with named two workarounds, a hand-written LANDSCAPE
             // record and a CLI flag, neither of which is in the editor. The panel now offers a
             // Create Landscape button when none is resident; every tool inside it is still gated
-            // on landscapeLoaded_ by that same early return.
+            // on landscape_.loaded() by that same early return.
             return true;
         case EditorMode::Foliage: {
             // See editor::foliageModeGate (FoliageTypeEditor.hpp) for why an empty palette no
             // longer refuses entry, and for the headless test covering both branches.
             const editor::FoliageModeGate gate =
-                editor::foliageModeGate(landscapeLoaded_, foliagePalette_.empty());
+                editor::foliageModeGate(landscape_.loaded(), foliagePalette_.empty());
             if (!gate.available) return no(gate.whyNot);
             return true;
         }
@@ -2820,7 +2708,7 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
 // Foliage's equivalent of editorModeIsLandscape(): the mode is selected AND it can actually run.
 bool SandboxApp::editorModeIsFoliage() const {
 #if AVER_MODULE_LANDSCAPE
-    return mode_ == EditorMode::Foliage && landscapeLoaded_ && !foliagePalette_.empty();
+    return mode_ == EditorMode::Foliage && landscape_.loaded() && !foliagePalette_.empty();
 #else
     return false;
 #endif

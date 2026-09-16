@@ -19,6 +19,7 @@
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameWater.hpp"
 #include "aver/game/GameStreaming.hpp"
+#include "aver/game/GameLandscape.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -44,7 +45,7 @@
 #include "aver/trifactor/ClusterAdapt.hpp"
 #endif
 // The landscape runtime: a complete quadtree-LOD heightfield renderer that, before this change,
-// nothing outside tests/landscape linked. See the member block near landscapeData_ below for how it
+// nothing outside tests/landscape linked. See the member block near landscape_ below for how it
 // is hosted -- independent of AVER_MODULE_SCENE, since a section is not an ECS entity.
 #if AVER_MODULE_LANDSCAPE
 #include "aver/formats/OcLand.hpp"
@@ -60,8 +61,8 @@
 // called it.
 #include "aver/landscape/PhysicsBridge.hpp"
 // The infinite fill past an authored section's own rim: terrainHeightAt (TerrainNoise.hpp) and the
-// tile coordinate + procedural-section synthesis (TerrainTile.hpp) that lets SandboxApp keep a small
-// ring of streamed sections resident around the camera. See updateLandscapeRingTiles() below.
+// tile coordinate + procedural-section synthesis (TerrainTile.hpp) that let game::GameLandscape keep
+// a small ring of streamed sections resident around the camera. See its updateRingTiles().
 #include "aver/landscape/TerrainTile.hpp"
 #endif
 #if AVER_HAVE_AUDIO_IMPORT
@@ -1620,8 +1621,6 @@ private:
     void applyProject(Engine& e);
 
 #if AVER_MODULE_LANDSCAPE
-    bool loadLandscape(rhi::IDevice* device, const std::string& path);
-
     void maybeAutosavePrefs(f32 dt);
 
     // ONE MESH PER MATERIAL: content_ splits a mesh naming several materials at load
@@ -1661,24 +1660,12 @@ private:
     // CALLED FROM BOTH DIRECTIONS, because either can happen first: a level load can bring terrain in
     // while streaming is already running, and switching streaming on can find terrain already
     // resident. setChunkStreamingEnabled does the same wiring for the second case.
-    // THE LAMBDA CAPTURES `this`, NOT THE DATA. Sculpting mutates landscapeData_ in place, so a copy
+    // THE LAMBDA CAPTURES `this`, NOT THE DATA. Sculpting mutates the resident section (landscape_)
+    // in place, so a copy
 
     void applyLandscapeToStreaming();
 
-    void rebuildLandscapeCollision();
-
-    void unloadLandscape(rhi::IDevice* device);
-
     void saveLandscape();
-
-    void applyLandscapeSurface(landscape::LandscapeRenderer& r);
-
-    void applyLandscapeSurfaceToAll(rhi::IDevice* device = nullptr);
-
-    void loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath,
-                               const fmt::OcWorldData& w);
-
-    void updateLandscapeRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cameraYCm);
 #endif
 
     void locateAverDesign() const;
@@ -2231,13 +2218,6 @@ private:
 #endif
 
 #if AVER_MODULE_LANDSCAPE
-    void applyLandscapeRect(const EditCmd& c, const std::vector<f32>& src);
-
-    void flushLandscapeInvalidate(Engine& e);
-
-    bool pendingLandInvalidate_ = false;
-    u32  pendingLandX0_ = 0, pendingLandY0_ = 0, pendingLandX1_ = 0, pendingLandY1_ = 0;
-
     void generateLandscapeNoise(Engine& e);
 
     void beginSculptStroke();
@@ -2245,10 +2225,6 @@ private:
     void growSculptStroke(const landscape::BrushRect& r);
 
     void endSculptStroke();
-
-    bool strokeActive_ = false, strokeEmpty_ = true;
-    u32  strokeX0_ = 0, strokeY0_ = 0, strokeX1_ = 0, strokeY1_ = 0;
-    std::vector<f32> strokeBefore_;
 
     void refreshFoliagePalette();
 
@@ -2294,8 +2270,8 @@ private:
     scene::Entity playerStart_ = scene::kInvalidEntity;
 
     // The Outliner row currently being renamed in place, and its edit buffer.
-    // Create-a-landscape controls; the shape knobs are landscapeNoiseParams_, shared with the ring
-    // generator so a created section and the tiles around it come from one set of numbers.
+    // Create-a-landscape controls; the shape knobs are landscape_.noiseParams(), shared with the
+    // ring generator so a created section and the tiles around it come from one set of numbers.
     // Autosave. TEN MINUTES, and it was thirty seconds until the countdown made that cadence
     // visible for the first time.
     //
@@ -3953,37 +3929,15 @@ private:
 #endif
 
     // ---------------- landscape (opt-in; --landscape <path>, or <levelname>.ocland beside the level) ----------------
-    // Hosts ONE open .ocland section: render, level-reference, AND sculpt (see LANDSCAPE_EDITOR.md
-    // slice 0 for what's still missing: collision, an asset-editor tab). Independent of
-    // AVER_MODULE_SCENE -- a section is not an ECS entity, and draw() calls IDevice::drawMesh directly.
+    // Hosts ONE open .ocland section, through game::GameLandscape below: render, collision,
+    // level-reference AND sculpt (see LANDSCAPE_EDITOR.md slice 0 for what's still missing: an
+    // asset-editor tab). Independent of AVER_MODULE_SCENE -- a section is not an ECS entity.
     // UNGUARDED, matching chunkStreamAutoFrames_ below: setLandscapePath() must compile with the
     // module off (command-line parsing is unconditional), so the field must exist unconditionally too.
     std::string landscapeCliOverride_;
 #if AVER_MODULE_LANDSCAPE
-    fmt::OcLandData landscapeData_;
-    landscape::LandscapeTree landscapeTree_;
-    // Heap-owned so unloadLandscape() can destroy and recreate it independently of the section data,
-    // mirroring LandscapeRenderer's own forget-then-discard lifecycle (LandscapeRenderer.hpp:46-58).
-    std::unique_ptr<landscape::LandscapeRenderer> landscapeRenderer_;
-    // The material name the level's LANDSCAPE record named, held as TEXT rather than a resolved
-    // handle: the material system isn't necessarily ready when the level parses, and re-resolving
-    // from the name lets applyLandscapeSurfaceToAll() run again without caring which finished first.
-    std::string landscapeMaterial_;
-    // World centimetres per texture tile for the landscape mesh's baked UVs, from the resolved
-    // LANDSCAPE material. Defaulted to the same 1000 LandscapeRenderer::draw() itself defaults to, so
-    // a build without PBR/VOXI draws exactly as it did before this member existed.
-    f32 landscapeUvTilingCm_ = 1000.0f;
-    // False until the tiling above came from a material the library actually considers valid, not
-    // MaterialSystem's fallback. Separate from hasSurfaceBinding(): that latches on the FIRST
-    // successful apply, which can predate the material being drained into the system, freezing the tiling at the fallback's 200cm forever.
-    bool landscapeUvTilingResolved_ = false;
-    bool landscapeLoaded_ = false;
-    std::string landscapePath_;   // the section actually resident; empty when none is
-    bool landscapeDirty_ = false; // true once a sculpt has touched landscapeData_ since the last save
-    // The static body the terrain collides through, or -1. Guarded at every USE rather than here:
-    // the member is unconditional so the declaration cannot go out of scope from under a call site
-    // guarded differently -- the split-guard defect this file has been bitten by repeatedly.
-    i32 landscapeBody_ = -1;
+    // The level's terrain section and ring -- render, collision and authoring -- shared with the runtime.
+    game::GameLandscape landscape_;
 
     // Sculpt tool state. Radius/strength are shared across all four brush modes -- the same "one
     // knob set, the mode picks what it means" shape the transform tools' snap popups already use.
@@ -3997,33 +3951,6 @@ private:
     bool sculptCursorValid_ = false;      // true when this frame's cursor ray actually hit the section
     Vec3 sculptCursor_{0, 0, 0};          // world hit point, for the brush-radius ring and the next tick
     rhi::LineHandle brushRing_ = 0;       // a unit ring in the XY plane -- landscape heights run +Z
-
-    // ---------------- the ring: procedural tiles past the authored section's own rim ----------------
-    // The authored section is ALWAYS tile (0, 0) of a grid sized by its own extentCm(), centred
-    // wherever the level placed it. It keeps its own storage and every sculpt/raycast/collision/save
-    // path untouched; a ring tile is never authored or sculpted, only regenerated from terrainHeightAt whenever it re-enters residency.
-    struct LandscapeRingTile {
-        fmt::OcLandData data;
-        landscape::LandscapeTree tree;
-        std::unique_ptr<landscape::LandscapeRenderer> renderer;
-    };
-    std::unordered_map<landscape::TileCoord, LandscapeRingTile> landscapeRingTiles_;
-    landscape::TerrainNoiseParams landscapeNoiseParams_;   // shared by every ring tile AND heightSource
-    static constexpr i32 kLandscapeRingRadius = 1;         // tiles each side of the camera's tile: 3x3
-    static constexpr u32 kLandscapeMaxSectionsResident = (2 * kLandscapeRingRadius + 1) *
-                                                          (2 * kLandscapeRingRadius + 1);   // 9
-    // docs/LANDSCAPE_EDITOR.md's blocker 9: the renderer's transient constant ring is a SHARED, fixed
-    // 1 MiB no matter how many sections are resident, so the single section's own long-safe defaults
-    // (192 draws, 512 cached meshes) are a TOTAL from here on -- split evenly across the largest
-    // window this ring can hold, never handed to each tile whole. Computed once, statically:
-    // reconstructing the home tile's LandscapeRenderer to match a moving divisor would throw away its
-    // whole mesh cache on every tile crossing, a worse cost than an unspent share.
-    static constexpr u32 kLandscapeMaxDrawsPerTile =
-        192u / kLandscapeMaxSectionsResident;
-    static constexpr u32 kLandscapeMaxResidentNodesPerTile =
-        512u / kLandscapeMaxSectionsResident;
-    landscape::TileCoord landscapeLastCameraTile_{};
-    bool landscapeLastCameraTileValid_ = false;
 #endif
 
 #if AVER_MODULE_SCENE

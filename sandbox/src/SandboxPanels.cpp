@@ -561,7 +561,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
 }
 
 void SandboxApp::buildLandscapeModePanel(Engine& e) {
-    if (!landscapeLoaded_) {
+    if (!landscape_.loaded()) {
         // A DEAD END UNTIL NOW: this printed one sentence and returned, so the terrain mode
         // offered nothing at all to a level without terrain -- and nothing anywhere else in the
         // editor could make some either.
@@ -579,14 +579,14 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
                             (landCreateSamples_ - 1) * landCreateSpacingCm_ / 100.0f);
         ImGui::Spacing();
         ImGui::TextDisabled("SHAPE");
-        int seed = static_cast<int>(landscapeNoiseParams_.seed);
+        int seed = static_cast<int>(landscape_.noiseParams().seed);
         ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::InputInt("Seed", &seed)) landscapeNoiseParams_.seed = static_cast<u32>(seed);
-        editor::panelFloat("Feature Size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 40000.0f,
+        if (ImGui::InputInt("Seed", &seed)) landscape_.noiseParams().seed = static_cast<u32>(seed);
+        editor::panelFloat("Feature Size (cm)", &landscape_.noiseParams().featureSizeCm, 500.0f, 40000.0f,
                    "%.0f", ImGuiSliderFlags_Logarithmic);
-        editor::panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 6000.0f, "%.0f");
+        editor::panelFloat("Amplitude (cm)", &landscape_.noiseParams().amplitudeCm, 0.0f, 6000.0f, "%.0f");
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderInt("Octaves", &landscapeNoiseParams_.octaves, 1, 8);
+        ImGui::SliderInt("Octaves", &landscape_.noiseParams().octaves, 1, 8);
         ImGui::Spacing();
         ImGui::BeginDisabled(!project_.valid());
         if (ImGui::Button("Create Landscape", ImVec2(-1, 0)))
@@ -607,14 +607,11 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     // rest of a level rather than to wherever the heightfield happened to be authored.
     ImGui::TextDisabled("PLACEMENT");
     {
-        f32 org[3] = {landscapeData_.originCm[0], landscapeData_.originCm[1],
-                      landscapeData_.originCm[2]};
+        f32 org[3] = {landscape_.data().originCm[0], landscape_.data().originCm[1],
+                      landscape_.data().originCm[2]};
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::DragFloat3("Origin (cm)", org, 10.0f)) {
-            landscapeData_.originCm[0] = org[0];
-            landscapeData_.originCm[1] = org[1];
-            landscapeData_.originCm[2] = org[2];
-            landscapeDirty_ = true;
+            landscape_.setOriginCm(org[0], org[1], org[2]);
             recordLandscapeInLevel();
         }
         uiReg_.track("landscape.origin");
@@ -672,13 +669,13 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     // The noise generator existed and was reachable from nowhere: terrainHeightAt() was wired
     // only as the height source for procedural tiles past the authored rim, never as something a
     // level author could apply to the section they are editing.
-    editor::panelFloat("Feature size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 50000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-    editor::panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-    editor::panelInt("Octaves", &landscapeNoiseParams_.octaves, 1, 8);
-    int seed = static_cast<int>(landscapeNoiseParams_.seed);
+    editor::panelFloat("Feature size (cm)", &landscape_.noiseParams().featureSizeCm, 500.0f, 50000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    editor::panelFloat("Amplitude (cm)", &landscape_.noiseParams().amplitudeCm, 0.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    editor::panelInt("Octaves", &landscape_.noiseParams().octaves, 1, 8);
+    int seed = static_cast<int>(landscape_.noiseParams().seed);
     ImGui::TextUnformatted("Seed");
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::InputInt("##Seed", &seed)) landscapeNoiseParams_.seed = static_cast<u32>(seed);
+    if (ImGui::InputInt("##Seed", &seed)) landscape_.noiseParams().seed = static_cast<u32>(seed);
     if (ImGui::Button("Generate terrain", ImVec2(-1, 0))) generateLandscapeNoise(e);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Replaces every height in this section with the noise above.\n"
@@ -686,10 +683,10 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
 
     ImGui::Spacing();
     ImGui::Separator();
-    if (ImGui::Button(landscapeDirty_ ? "Save Terrain *" : "Save Terrain", ImVec2(-1, 0))) saveLandscape();
+    if (ImGui::Button(landscape_.dirty() ? "Save Terrain *" : "Save Terrain", ImVec2(-1, 0))) saveLandscape();
     ImGui::TextDisabled("%u x %u samples, %.0f cm spacing",
-                        landscapeData_.sampleCount, landscapeData_.sampleCount,
-                        landscapeData_.spacingCm);
+                        landscape_.data().sampleCount, landscape_.data().sampleCount,
+                        landscape_.data().spacingCm);
 }
 
 // The Foliage panel's empty-palette action: writes a starter .ocfoliage and opens its tab,

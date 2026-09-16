@@ -927,7 +927,8 @@ void SandboxApp::undo() {
             sel_ = c.objIndex; selEntity_ = kInvalidId;
             break;
 #if AVER_MODULE_LANDSCAPE
-        case EditCmd::Kind::LandscapeStroke: applyLandscapeRect(c, c.landBefore); break;
+        case EditCmd::Kind::LandscapeStroke:
+            landscape_.applyHeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landBefore); break;
 #endif
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_SCENE
         // Undo of a PAINT removes what it made; undo of an ERASE puts it back.
@@ -974,7 +975,8 @@ void SandboxApp::redo() {
             sel_ = -1; selEntity_ = kInvalidId;
             break;
 #if AVER_MODULE_LANDSCAPE
-        case EditCmd::Kind::LandscapeStroke: applyLandscapeRect(c, c.landAfter); break;
+        case EditCmd::Kind::LandscapeStroke:
+            landscape_.applyHeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landAfter); break;
 #endif
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_SCENE
         case EditCmd::Kind::FoliageStroke:

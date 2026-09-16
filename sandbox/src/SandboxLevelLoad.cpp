@@ -26,43 +26,6 @@ void SandboxApp::setFocusCompile(bool b) { tools_.armCompile(b); }
 void SandboxApp::setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); }
 
 #if AVER_MODULE_LANDSCAPE
-// Loads one .ocland section and builds its quadtree. Pure CPU -- the mesh cache is created
-// lazily by draw(), so this needs no device and may run before one exists.
-// `device` frees the section CURRENTLY resident (if any) through forgetAll before replacing it;
-// pass nullptr only when none has been created yet.
-// Returns whether a section is now resident, so a caller can distinguish "loaded" from "there is
-// no terrain here" rather than reading landscapeLoaded_ back out.
-bool SandboxApp::loadLandscape(rhi::IDevice* device, const std::string& path) {
-    unloadLandscape(device);
-    fmt::OcLandData data;
-    std::string why;
-    if (!fmt::loadOcLand(path, data, &why)) {
-        AVER_WARN("[Landscape] could not load '{}': {}", path, why);
-        return false;
-    }
-    landscape::LandscapeTree tree;
-    if (!tree.build(data, landscape::kDefaultNodeQuads, &why)) {
-        AVER_WARN("[Landscape] '{}' loaded but its quadtree would not build: {}", path, why);
-        return false;
-    }
-    landscapeData_ = std::move(data);
-    landscapeTree_ = std::move(tree);
-    // The section is tile (0,0) of the ring now -- its outer rim borders a procedural neighbour
-    // like any ring tile's does, needing the same generous floor. 2x the noise amplitude is the
-    // mathematical bound on how much a ridged-fBm field can vary at all (TerrainNoise.hpp).
-    landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-    landscapeTree_.resetHysteresis();
-    landscapeRenderer_ =
-        std::make_unique<landscape::LandscapeRenderer>(kLandscapeMaxResidentNodesPerTile);
-    landscapeLoaded_ = true;
-    landscapePath_ = path;
-    landscapeDirty_ = false;
-    AVER_INFO("[Landscape] '{}' loaded: {} node(s) across {} level(s), {}x{} samples",
-              path, landscapeTree_.nodes().size(), landscapeTree_.levelCount(),
-              landscapeData_.sampleCount, landscapeData_.sampleCount);
-    return true;
-}
-
 // Safe because the generator lives inside streaming_, which this object owns and destroys.
 void SandboxApp::applyLandscapeToStreaming() {
 #if AVER_MODULE_SCENE
@@ -78,277 +41,6 @@ void SandboxApp::applyLandscapeToStreaming() {
     setChunkStreamingEnabled(false);
     setChunkStreamingEnabled(true);
 #endif
-}
-
-// Gives the resident section a static collision body, so things can stand on the terrain.
-// REBUILT WHOLE, not patched: Jolt's heightfield shape is immutable once created, and there is no
-// partial update -- why this runs at LOAD and SAVE, not per brush stroke, which would pay for the
-// whole conversion several times a second.
-// THE CONSEQUENCE, stated rather than hidden: between sculpting and saving, what you see and what
-// you collide with disagree.
-void SandboxApp::rebuildLandscapeCollision() {
-#if AVER_MODULE_PHYSICS
-    if (landscapeBody_ >= 0) { aver_phys_remove_body(landscapeBody_); landscapeBody_ = -1; }
-    if (!landscapeLoaded_ || !aver_phys_ready()) return;
-    landscape::PhysicsHeightfield hf;
-    if (!landscape::toPhysicsHeightfield(landscapeData_, hf)) {
-        AVER_WARN("[Landscape] section is not internally consistent; no collision built");
-        return;
-    }
-    landscapeBody_ = aver_phys_add_heightfield(hf.samples.data(), static_cast<i32>(hf.sampleCount),
-                                               hf.spacingCm, hf.cornerCm[0], hf.cornerCm[1],
-                                               hf.cornerCm[2]);
-    // Deliberately NOT stamped with aver_phys_set_entity: terrain has no owning scene entity in
-    // this engine at all, not merely one this call site forgot to look up. A ray landing on it
-    // is a genuine "hit true, entity 0" -- something WAS hit, nothing owns it -- not a bug.
-    if (landscapeBody_ >= 0)
-        AVER_INFO("[Landscape] collision body #{} built ({}x{} samples)", landscapeBody_,
-                  hf.sampleCount, hf.sampleCount);
-    else
-        AVER_WARN("[Landscape] physics refused the heightfield; terrain has no collision");
-#endif
-}
-
-// Frees the resident section's meshes (when a device exists to free them through) and drops it,
-// AND every ring tile around it -- they are tile (0,0)'s neighbours and outlive their reason to
-// exist the moment (0,0) does.
-void SandboxApp::unloadLandscape(rhi::IDevice* device) {
-    if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
-    landscapeRenderer_.reset();
-#if AVER_MODULE_PHYSICS
-    if (landscapeBody_ >= 0) { aver_phys_remove_body(landscapeBody_); landscapeBody_ = -1; }
-#endif
-    landscapeLoaded_ = false;
-    landscapePath_.clear();
-    landscapeData_ = fmt::OcLandData{};
-    landscapeDirty_ = false;
-    sculpting_ = false;
-    sculptCursorValid_ = false;
-    for (auto& kv : landscapeRingTiles_)
-        if (kv.second.renderer && device) kv.second.renderer->forgetAll(*device);
-    landscapeRingTiles_.clear();
-    landscapeLastCameraTileValid_ = false;
-}
-
-// Resolves which .ocland a level is standing on, in this order:
-//   1. --landscape <path>, an explicit override that always wins
-//   2. the level's own LANDSCAPE record, resolved against the project's Content
-//   3. the levelname.ocland convention
-// Silent when none resolve: most levels have no terrain yet.
-// (2) IS WHY THE FORMAT RECORD EXISTS: it was added alongside the editor's ability to draw an
-// .ocland, but the two halves were never joined, so a level could declare its terrain and the
-// editor would ignore it and go looking for a filename instead.
-// `at` OVERRIDES THE SECTION'S OWN originCm, and doing it here -- in the data, once -- is what
-// makes every consumer (renderer, sculpt raycast, height source, physics bridge) agree without
-// being told about placement separately.
-// Pushes the level's LANDSCAPE material into one landscape renderer, as an opaque binding.
-// THE HOST DOES THE RESOLVING, the whole reason setSurfaceBinding takes bytes and a handle instead
-// of a pbr:: type: Aver.Landscape.Renderer links Core, RHI and Aver.Landscape only.
-void SandboxApp::applyLandscapeSurface(landscape::LandscapeRenderer& r) {
-#if AVER_MODULE_PBR && AVER_MODULE_VOXI
-    if (landscapeMaterial_.empty()) return;
-    pbr::MaterialSystem& ms = voxiRenderer_.materials();
-    if (!ms.ready()) return;
-    const pbr::MaterialHandle h = content_.materialForSurface(landscapeMaterial_);
-    if (!h) return;
-    const pbr::MaterialConstants& mc = ms.constants(h);
-    r.setSurfaceBinding(ms.bindingSet(h), &mc, sizeof(pbr::MaterialConstants));
-
-    // AND THE TEXTURE SCALE, the other half of "apply the material" that was missing: neither
-    // call site passed uvTilingCm, so every landscape drew at the compiled-in 1000cm default (ten-
-    // metre tiles). M_forest_leaves_02 authors `PARAM uvTiling 150` for its two-metre Poly Haven
-    // source; ten-metre tiles stretch it 6.7x past scale, exactly the pale, washed-out ground the
-    // demo captures show.
-    // WHY THIS READS uvTilesPerCm RATHER THAN THE DESC: MaterialSystem exposes constants(), not
-    // MaterialDesc, and the packed block already carries the reciprocal -- no new coupling needed.
-    // A NOTE ON uvTiling'S DOCUMENTED SCOPE: MaterialDesc calls it "read only under WorldAligned",
-    // true OF THE SHADER (averSurfaceUV) -- the mesh builder is a second, equally valid consumer
-    // that bakes the same number into UVs instead of projecting it.
-    // AND IT MUST BE THE REAL MATERIAL'S NUMBER, NOT THE FALLBACK'S: constants() returns
-    // fallbackConstants_ (uvTiling 200) for any handle not yet valid, and content_.materialForSurface() can
-    // create one on the very frame this runs -- taking the fallback silently would latch the
-    // landscape at 200cm looking like a plausible number rather than a bug. Ask the library the
-    // same question constants() asks, and retry until it says yes.
-    if (pbr::MaterialLibrary::get().valid(h) && mc.uvTilesPerCm > 0.0f) {
-        landscapeUvTilingCm_ = 1.0f / mc.uvTilesPerCm;
-        landscapeUvTilingResolved_ = true;
-    }
-#else
-    (void)r;
-#endif
-}
-
-// Re-applies it to the authored section and every resident ring tile at once. Called after a
-// level load, and after the material system becomes ready -- whichever happens second is the one
-// that actually binds anything, and neither is reliably first.
-void SandboxApp::applyLandscapeSurfaceToAll(rhi::IDevice* device) {
-    const f32 wasTiling = landscapeUvTilingCm_;
-    if (landscapeRenderer_) applyLandscapeSurface(*landscapeRenderer_);
-    for (auto& kv : landscapeRingTiles_)
-        if (kv.second.renderer) applyLandscapeSurface(*kv.second.renderer);
-
-    // THE CACHED MESHES CARRY THE OLD SCALE, so eviction belongs here (compared once around the
-    // whole sweep) rather than inside applyLandscapeSurface, which runs once per renderer and
-    // would leave every ring tile holding UVs built at the previous tiling.
-    // buildChunkMesh bakes uvTilingCm into a node's UVs and draw() caches the result, so nothing
-    // resident picks up a change on its own. Fires at most once per level, and nodes rebuild
-    // lazily on the next draw, as after a sculpt.
-    // THIS BLOCK IS NORMALLY SILENT, AND THAT IS NOT A SIGN IT DID NOTHING: the first apply happens
-    // before a single chunk mesh exists, so there's nothing to evict -- verified by instrumenting
-    // draw() directly: it receives 150, not the 1000cm default.
-    if (device && landscapeUvTilingCm_ != wasTiling) {
-        if (landscapeRenderer_) landscapeRenderer_->forgetAll(*device);
-        for (auto& kv : landscapeRingTiles_)
-            if (kv.second.renderer) kv.second.renderer->forgetAll(*device);
-        AVER_INFO("[Landscape] texture tiling {:.0f}cm per tile, from material '{}' "
-                  "(was {:.0f}); resident nodes dropped to rebuild",
-                  landscapeUvTilingCm_, landscapeMaterial_, wasTiling);
-    }
-}
-
-void SandboxApp::loadLandscapeForLevel(rhi::IDevice* device, const std::string& levelPath,
-                           const fmt::OcWorldData& w) {
-    std::string path = landscapeCliOverride_;
-    bool haveAt = false;
-    f64 at[3] = {0, 0, 0};
-
-    if (path.empty() && !w.landscapes.empty()) {
-        const fmt::OcLandscapePlacement& lp = w.landscapes.front();
-        if (w.landscapes.size() > 1)
-            AVER_WARN("[Landscape] level declares {} LANDSCAPE sections; the editor holds one and "
-                      "is using '{}'. Tiling several sections is not implemented.",
-                      w.landscapes.size(), lp.name.empty() ? lp.section : lp.name);
-        // Taken even when the section path below fails: the material is a property of the
-        // level's terrain, not of which file the heights came from, and the .ocland fallback
-        // convention still wants it.
-        landscapeMaterial_ = lp.material;
-        if (!lp.section.empty()) {
-            const std::string content = project_.contentDir();
-            path = content.empty() ? lp.section : content + "\\" + lp.section;
-            std::error_code ec;
-            if (!std::filesystem::exists(path, ec)) {
-                AVER_WARN("[Landscape] level's LANDSCAPE section '{}' does not exist at '{}' -- "
-                          "falling back to the levelname.ocland convention", lp.section, path);
-                path.clear();
-            } else {
-                at[0] = lp.x; at[1] = lp.y; at[2] = lp.z;
-                haveAt = true;
-            }
-        }
-    }
-
-    const bool explicitPath = !path.empty();
-    if (!explicitPath) {
-        std::filesystem::path p(levelPath);
-        p.replace_extension(".ocland");
-        path = p.string();
-    }
-    std::error_code ec;
-    if (!explicitPath && !std::filesystem::exists(path, ec)) return;
-    if (!loadLandscape(device, path)) return;
-
-    if (haveAt) {
-        landscapeData_.originCm[0] = static_cast<f32>(at[0]);
-        landscapeData_.originCm[1] = static_cast<f32>(at[1]);
-        landscapeData_.originCm[2] = static_cast<f32>(at[2]);
-        // The tree caches node centres and bounds derived from originCm, so it has to be rebuilt
-        // rather than nudged -- otherwise LOD selection and frustum culling would run against
-        // where the section used to be.
-        std::string why;
-        if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
-            landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-            landscapeTree_.resetHysteresis();
-            if (landscapeRenderer_ && device) landscapeRenderer_->forgetAll(*device);
-            // The section moved, so its ring-tile grid (centred on ITS centre) moved too --
-            // whatever was resident was built against the old placement and no longer borders it
-            // correctly. Simplest fix: drop the ring and let updateLandscapeRingTiles() resynthesize next frame.
-            for (auto& kv : landscapeRingTiles_)
-                if (kv.second.renderer && device) kv.second.renderer->forgetAll(*device);
-            landscapeRingTiles_.clear();
-            landscapeLastCameraTileValid_ = false;
-            AVER_INFO("[Landscape] placed at ({:.0f}, {:.0f}, {:.0f}) by the level's LANDSCAPE record",
-                      at[0], at[1], at[2]);
-        } else {
-            AVER_ERROR("[Landscape] could not rebuild after placement: {}", why);
-        }
-    }
-    rebuildLandscapeCollision();
-    applyLandscapeToStreaming();
-    applyLandscapeSurfaceToAll(device);
-}
-
-// Keeps a small window of PROCEDURAL tiles resident around (cameraXCm, cameraYCm), so the terrain
-// extends past the authored section's own rim. Cheap to call every frame -- real work only happens
-// the frame the camera's OWN tile coordinate changes, far less often than once a frame.
-// Tile (0, 0) -- the authored section -- is never touched here; this only manages the RING around it.
-void SandboxApp::updateLandscapeRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cameraYCm) {
-    if (!landscapeLoaded_) return;
-    const f32 tileSizeCm = landscapeData_.extentCm();
-    if (!(tileSizeCm > 0.0f)) return;
-    const f32 centreX = landscapeData_.originCm[0] + tileSizeCm * 0.5f;
-    const f32 centreY = landscapeData_.originCm[1] + tileSizeCm * 0.5f;
-
-    const landscape::TileCoord camTile =
-        landscape::tileAt(cameraXCm, cameraYCm, centreX, centreY, tileSizeCm);
-    if (landscapeLastCameraTileValid_ && camTile == landscapeLastCameraTile_) return;
-    landscapeLastCameraTile_ = camTile;
-    landscapeLastCameraTileValid_ = true;
-
-    // Which coordinates should be resident now -- a (2R+1)x(2R+1) window around the camera's own
-    // tile, minus (0,0) itself (that is the home tile above, not a ring tile).
-    std::vector<landscape::TileCoord> want;
-    want.reserve(kLandscapeMaxSectionsResident);
-    for (i32 dy = -kLandscapeRingRadius; dy <= kLandscapeRingRadius; ++dy)
-        for (i32 dx = -kLandscapeRingRadius; dx <= kLandscapeRingRadius; ++dx) {
-            const landscape::TileCoord t{camTile.tx + dx, camTile.ty + dy};
-            if (t.tx == 0 && t.ty == 0) continue;
-            want.push_back(t);
-        }
-
-    // Evict whatever is resident but no longer wanted.
-    for (auto it = landscapeRingTiles_.begin(); it != landscapeRingTiles_.end(); ) {
-        const bool stillWanted = std::find(want.begin(), want.end(), it->first) != want.end();
-        if (!stillWanted) {
-            if (it->second.renderer && device) it->second.renderer->forgetAll(*device);
-            it = landscapeRingTiles_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    // Synthesize and build whatever is wanted but not yet resident. Same sample count as the
-    // authored section -- it already validated against LandscapeTree::build's tiling rule, so a
-    // ring tile built the same way is guaranteed to validate too.
-    for (const landscape::TileCoord& t : want) {
-        if (landscapeRingTiles_.find(t) != landscapeRingTiles_.end()) continue;
-        LandscapeRingTile tile;
-        if (!landscape::synthesizeTerrainTile(t, centreX, centreY, tileSizeCm,
-                                              landscapeData_.sampleCount, landscapeNoiseParams_,
-                                              tile.data)) {
-            AVER_WARN("[Landscape] could not synthesize ring tile ({}, {})", t.tx, t.ty);
-            continue;
-        }
-        std::string why;
-        if (!tile.tree.build(tile.data, landscapeTree_.nodeQuads(), &why)) {
-            AVER_WARN("[Landscape] ring tile ({}, {}) quadtree would not build: {}", t.tx, t.ty, why);
-            continue;
-        }
-        // Every rim of a ring tile borders SOMETHING -- the home tile, or another ring tile --
-        // never open air, so all four get the same generous floor the home tile's outer rim got in
-        // loadLandscape() (see LandscapeTree::widenRimSkirts for why an inner-LOD skirt can't cover a cross-tree neighbour).
-        tile.tree.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-        tile.tree.resetHysteresis();
-        tile.renderer =
-            std::make_unique<landscape::LandscapeRenderer>(kLandscapeMaxResidentNodesPerTile);
-        // A tile born mid-session has to be told the surface too, or the ring renders untextured
-        // around a textured home section -- a seam that moves with the camera.
-        applyLandscapeSurface(*tile.renderer);
-        landscapeRingTiles_.emplace(t, std::move(tile));
-    }
-
-    AVER_INFO("[Landscape] ring around tile ({}, {}): {} tile(s) resident, {} draws/tile, "
-              "{} resident-node cap/tile", camTile.tx, camTile.ty, landscapeRingTiles_.size(),
-              kLandscapeMaxDrawsPerTile, kLandscapeMaxResidentNodesPerTile);
 }
 
 #endif
@@ -391,13 +83,8 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
     // through to the same continuous noise the ring tiles use.
     game::GameStreaming::HeightQueryFn height;
 #if AVER_MODULE_LANDSCAPE
-    if (landscapeLoaded_) {
-        height = [this](f32 x, f32 y, f32& outZ) {
-            if (landscape::surfaceHeightAt(landscapeData_, x, y, outZ)) return true;
-            outZ = landscape::terrainHeightAt(x, y, landscapeNoiseParams_);
-            return true;
-        };
-    }
+    if (landscape_.loaded())
+        height = [this](f32 x, f32 y, f32& outZ) { return landscape_.scatterHeightAt(x, y, outZ); };
 #endif
 
     streaming_.enable(project_, levelPcgVolumes_, levelHeader_.scatterSpecies, &content_,
@@ -540,9 +227,9 @@ u64 SandboxApp::residentTriangleCount() const {
 }
 
 // Loads a level file into the world as ordinary scene entities: transform, mesh and name.
-// TAKES Engine& so it can hand a real device down to loadLandscapeForLevel: unloadLevel/unloadLandscape
-// need a device to free what the PREVIOUS level left resident, and the only device this function ever
-// has is the one its own two callers already hold.
+// TAKES Engine& so it can hand a real device down to landscape_.loadForLevel: unloadLevel/
+// landscape_.unload need a device to free what the PREVIOUS level left resident, and the only
+// device this function ever has is the one its own two callers already hold.
 //
 // THE PARSE AND THE PLACEMENT LOOP ARE level_'s, the runtime's GameLevel, so the editor and a shipped
 // game read a level with the same code. GameLevel DISPATCHES ON WHAT THE FILE ACTUALLY USES, NOT ITS
@@ -602,7 +289,13 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
 
         // TERRAIN FIRST, THEN THE THINGS THAT STAND ON IT: this used to run at the end of loadLevel, harmless only while the ground was a flat plane -- a `snap` placement asks the ground how high it is.
 #if AVER_MODULE_LANDSCAPE
-        loadLandscapeForLevel(eng.device(), levelPath, w);
+        landscape_.setTerrainChangedHook([this] { applyLandscapeToStreaming(); });
+        landscape_.setPathOverride(landscapeCliOverride_);
+        pbr::MaterialSystem* landscapeMaterials = nullptr;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        landscapeMaterials = &voxiRenderer_.materials();
+#endif
+        landscape_.loadForLevel(eng.device(), project_.contentDir(), levelPath, w, &content_, landscapeMaterials);
 #else
         (void)eng; (void)levelPath;
 #endif
@@ -610,14 +303,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
 #if AVER_MODULE_LANDSCAPE
     // The same surface the scatter follows, so a hand-placed tree and a scattered fern sitting
     // a metre apart agree about where the ground is.
-    hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) {
-        if (!landscapeLoaded_) return false;
-        f32 z = 0.0f;
-        if (!landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(x),
-                                        static_cast<f32>(y), z)) return false;
-        outZ = static_cast<f64>(z);
-        return true;
-    };
+    hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
 #endif
     hooks.afterInstantiate = [this](const game::GameLevel::LoadedLevel& loaded) {
         if (loaded.legacy) onLegacyOcmapInstantiated(loaded);
@@ -845,11 +531,9 @@ void SandboxApp::spawnClassPlacements() {
 #if AVER_MODULE_LANDSCAPE
         // Same ground query loadLevel hands level_ as hooks.groundHeightAt -- re-expressed here
         // because level_ keeps its hooks private and this is their only other caller.
-        if (p.snapToGround && landscapeLoaded_) {
-            f32 gz = 0.0f;
-            if (landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(p.x),
-                                           static_cast<f32>(p.y), gz))
-                pz = static_cast<f64>(gz) + p.z;
+        if (p.snapToGround) {
+            f64 gz = 0.0;
+            if (landscape_.groundHeightAt(p.x, p.y, gz)) pz = gz + p.z;
         }
 #endif
         const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
@@ -1067,7 +751,10 @@ void SandboxApp::unloadLevel(Engine& eng) {
     level_.unload();
     levelPath_.clear();
 #if AVER_MODULE_LANDSCAPE
-    unloadLandscape(eng.device());
+    landscape_.unload(eng.device());
+    // The two editor-only sculpt flags landscape_.unload() itself does not know about.
+    sculpting_ = false;
+    sculptCursorValid_ = false;
 #endif
 }
 
