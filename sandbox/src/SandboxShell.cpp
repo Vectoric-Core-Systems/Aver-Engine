@@ -735,7 +735,12 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
     (void)e;   // no engine access needed; kept for the same uniform signature other menu actions use
 #if AVER_MODULE_SCENE
     if (!project_.valid() || levelPath_.empty()) return;
-    if (!skipDirtyCheck && levelHasUnsavedEdits()) { launchRuntimePrompt_ = true; return; }
+    // Anything the runtime would read from disk and find stale: the level, an asset tab, the terrain.
+    bool anythingUnsaved = levelHasUnsavedEdits() || assetEditors_.anyDirty();
+#if AVER_MODULE_LANDSCAPE
+    anythingUnsaved = anythingUnsaved || landscape_.dirty();
+#endif
+    if (!skipDirtyCheck && anythingUnsaved) { launchRuntimePrompt_ = true; return; }
 
     const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
     std::string why;
@@ -765,17 +770,24 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
     ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-    ImGui::TextWrapped("The runtime reads the level from disk, and this level has unsaved changes.");
+    const bool levelDirty = levelHasUnsavedEdits();
     bool otherDirty = assetEditors_.anyDirty();
 #if AVER_MODULE_LANDSCAPE
     otherDirty = otherDirty || landscape_.dirty();
 #endif
+    ImGui::TextWrapped("The runtime reads everything from disk.");
+    if (levelDirty)
+        ImGui::TextWrapped("This level has unsaved changes.");
     if (otherDirty)
         ImGui::TextDisabled("Unsaved asset or terrain edits are not included -- save them first.");
     ImGui::Spacing();
     ImGui::Separator();
 
-    if (ImGui::Button("Save and launch", ImVec2(160.0f * dpi_, 0.0f))) {
+    // Saves the LEVEL only; offered only when the level is what is unsaved.
+    ImGui::BeginDisabled(!levelDirty);
+    const bool saveAndLaunch = ImGui::Button("Save and launch", ImVec2(160.0f * dpi_, 0.0f));
+    ImGui::EndDisabled();
+    if (saveAndLaunch) {
         if (saveLevel(levelPath_)) {
             ImGui::CloseCurrentPopup();
             launchRuntimePrompt_ = false;

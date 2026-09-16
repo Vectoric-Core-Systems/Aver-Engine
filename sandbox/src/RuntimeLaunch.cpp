@@ -4,6 +4,9 @@
 
 #include "aver/platform/FileSystem.hpp"
 
+#include <filesystem>
+#include <system_error>
+
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -50,9 +53,14 @@ bool launchRuntime(const std::string& projectManifestPath, const std::string& le
 
     // GameConfig (Runtime/src/GameApp.cpp) reads --project for the manifest and takes the bare
     // level argument via isLevelFile; both come from disk, so there is nothing else to pass.
+    // ABSOLUTE, because the runtime starts in its own directory: a level opened from a relative
+    // command-line path would otherwise resolve against the wrong folder.
+    std::error_code ec;
+    const std::string absManifest = std::filesystem::absolute(projectManifestPath, ec).string();
+    const std::string absLevel    = std::filesystem::absolute(levelPath, ec).string();
     std::wstring cmdline = quoteArg(widen(exe)) +
-                           L" --project " + quoteArg(widen(projectManifestPath)) +
-                           L" " + quoteArg(widen(levelPath));
+                           L" --project " + quoteArg(widen(absManifest.empty() ? projectManifestPath : absManifest)) +
+                           L" " + quoteArg(widen(absLevel.empty() ? levelPath : absLevel));
     const std::wstring workDir = widen(executableDir());
 
     STARTUPINFOW si{};
