@@ -8,8 +8,8 @@
 // (sandbox/src/SandboxProject.cpp) and its frameBudget* members (sandbox/src/SandboxApp.hpp) into a
 // header-only pure function over FrameBudgetState and a Settings&, mirroring ProjectRenderApply.hpp's
 // own house style: no AVER_WARN/INFO, no voxi::Renderer::get(), no device -- so the rung ladder itself
-// is testable headless, the same reason that header gives for staying pure. The editor's
-// SandboxApp::frameBudgetTick is still a separate copy of this logic.
+// is testable headless, the same reason that header gives for staying pure. Both hosts call it: the
+// editor from SandboxApp::frameBudgetTick, the runtime from GameApp::onUpdate.
 //
 // BYTE-IDENTICAL TO THE EDITOR'S OWN COPY: same 30-frame warm-up, same 250ms hitch threshold, same
 // 0.9/0.1 EMA, same over/under-budget band (budget / budget*0.85), same 60-frame climb-back and the

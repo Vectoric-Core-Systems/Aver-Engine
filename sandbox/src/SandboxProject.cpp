@@ -517,60 +517,15 @@ void SandboxApp::frameBudgetTick(f32 dt, voxi::Settings& vs) {
     // OFF IN CAPTURE RUNS unless asked for by name. A controller that retunes quality mid-run
     // makes every bounded measurement incomparable, which is most of how this engine is
     // checked. --frame-budget is the way to exercise it in one anyway, including in a gate.
-    if (frameBudgetMs_ <= 0.0f) { frameBudgetRung_ = 0; return; }
-    if (maxFrames_ != 0 && !frameBudgetForced_) { frameBudgetRung_ = 0; return; }
-    const f32 ms = dt * 1000.0f;
-
-    // WARM-UP, AND IT IS NOT OPTIONAL. Opening a level costs seconds in one frame -- mesh
-    // uploads, shader work, the first voxelisation. Folding that into the average made the
-    // controller read "1597.6ms" on a scene running at 40, and an EMA this smooth needs about a
-    // hundred frames to forget a sample that size: it ratcheted straight to the bottom rung off
-    // a number that described loading, then sat there. Ignore the opening frames outright.
-    if (++frameBudgetFrames_ < 30) return;
-
-    // AND REJECT HITCHES AFTERWARDS, for the same reason in miniature. A single 500ms frame is a
-    // compile, a stream-in or an alt-tab; none of them is a signal about steady-state quality,
-    // and reacting to one drops quality for the second or so it takes the average to recover.
-    // Dropped rather than clamped, because a clamped hitch is still a vote for "too slow".
-    constexpr f32 kHitchMs = 250.0f;
-    if (ms > kHitchMs) return;
-
-    // Seeded on the first frame that survives both filters rather than climbing from zero, which
-    // would otherwise read as "comfortably under budget" for the first dozen frames of every launch.
-    frameBudgetAvgMs_ = frameBudgetAvgMs_ <= 0.0f ? ms : (frameBudgetAvgMs_ * 0.9f + ms * 0.1f);
-
-    // The band, not the line. Dropping at exactly the budget and climbing at exactly the budget
-    // guarantees oscillation; 15% of headroom is the gap between the two decisions.
-    const f32 over  = frameBudgetMs_;
-    const f32 under = frameBudgetMs_ * 0.85f;
-    if (frameBudgetAvgMs_ > over && frameBudgetRung_ < kFrameBudgetRungs - 1) {
-        ++frameBudgetRung_;
-        frameBudgetUnder_ = 0;
-    } else if (frameBudgetAvgMs_ < under && frameBudgetRung_ > 0) {
-        // Sixty comfortable frames -- about a second -- before giving quality back. Deliberately
-        // far slower than the drop.
-        if (++frameBudgetUnder_ >= 60) { --frameBudgetRung_; frameBudgetUnder_ = 0; }
-    } else {
-        frameBudgetUnder_ = 0;
-    }
-
-    // The ladder. Rung 0 leaves the authored settings completely alone, so a project inside its
-    // budget renders exactly what it asked for.
-    if (frameBudgetRung_ == 0) return;
-    static const u32 kInterval[kFrameBudgetRungs] = {1, 2, 4, 4, 8};
-    static const u32 kConeCap[kFrameBudgetRungs]  = {0, 0, 0, 8, 5};   // 0 = leave as authored
-    const u32 wantInterval = kInterval[frameBudgetRung_];
-    if (wantInterval > vs.giUpdateInterval) vs.giUpdateInterval = wantInterval;
-    if (kConeCap[frameBudgetRung_] && vs.giCones > kConeCap[frameBudgetRung_])
-        vs.giCones = kConeCap[frameBudgetRung_];
-
-    if (vs.giUpdateInterval != frameBudgetAppliedInterval_ || vs.giCones != frameBudgetAppliedCones_) {
-        frameBudgetAppliedInterval_ = vs.giUpdateInterval;
-        frameBudgetAppliedCones_ = vs.giCones;
+    frameBudget_.budgetMs = frameBudgetMs_;
+    if (maxFrames_ != 0 && !frameBudgetForced_) { frameBudget_.rung = 0; return; }
+    // The warm-up, hitch rejection, averaging, hysteresis and rung table are the shared
+    // controller's (FrameBudget.hpp), identical in the standalone runtime.
+    if (voxi::frameBudgetTick(frameBudget_, dt, vs))
         AVER_INFO("[Sandbox] frame budget {:.1f}ms: {:.1f}ms average -> rung {} "
                   "(GI every {} frame(s), {} cone(s))",
-                  frameBudgetMs_, frameBudgetAvgMs_, frameBudgetRung_, vs.giUpdateInterval, vs.giCones);
-    }
+                  frameBudget_.budgetMs, frameBudget_.avgMs, frameBudget_.rung, vs.giUpdateInterval,
+                  vs.giCones);
 }
 
 } // namespace aver

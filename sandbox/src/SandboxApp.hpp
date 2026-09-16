@@ -184,6 +184,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // throughout buildRenderingSettings and the G-buffer switch) and Scalability.hpp (the Overall Quality
 // preset) along the way, so this one include is every settings-separation header this file needs.
 #include "aver/voxi/ProjectRenderApply.hpp"
+#include "aver/voxi/FrameBudget.hpp"
 // NrdDenoiser.hpp, for Denoiser::available() alone -- the DeviceInfo::nrdSupported computation just
 // below is R1's other mirror site (GameApp::attachVoxi, Runtime/src/GameApp.cpp, is the
 // first; same expression, `backend() == D3D12 && available()`). Aver.Render.Voxi.Renderer links
@@ -1748,15 +1749,12 @@ private:
     // is not: an unstable controller that oscillates between two rungs is more distracting than the
     // frame it was trying to save, because the eye tracks CHANGE in indirect light far better than
     // its absolute level.
-    static constexpr i32 kFrameBudgetRungs = 5;
+    //
+    // THE CONTROLLER ITSELF is voxi::frameBudgetTick (modules/render.voxi FrameBudget.hpp), shared with
+    // the standalone runtime; frameBudget_ is its state.
     f32  frameBudgetMs_ = 0.0f;       // RENDER.FRAMEBUDGETMS; <= 0 disables the whole controller
     bool frameBudgetForced_ = false;  // --frame-budget: run the controller even in a capture
-    i32  frameBudgetRung_ = 0;        // 0 = full quality
-    f32  frameBudgetAvgMs_ = 0.0f;    // EMA, so one long frame cannot move the rung
-    u32  frameBudgetFrames_ = 0;      // frames seen; the first few are loading, not rendering
-    i32  frameBudgetUnder_ = 0;       // consecutive comfortable frames, for the climb back
-    u32  frameBudgetAppliedInterval_ = 0;
-    u32  frameBudgetAppliedCones_ = 0;
+    voxi::FrameBudgetState frameBudget_;
 
     void frameBudgetTick(f32 dt, voxi::Settings& vs);
 
