@@ -175,6 +175,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EngineScaffold.hpp"
 #include "McpConf.hpp"
 #include "IdeIntegration.hpp"
+#include "RuntimeLaunch.hpp"
 #include "ShellIntegration.hpp"
 
 #if AVER_MODULE_VOXI
@@ -2599,6 +2600,13 @@ private:
 
     void drawPendingOpenPrompt(Engine& e);
 
+    // File > Launch in Aver Engine Runtime: starts AverEngineRuntime.exe on the open level, asking
+    // first if the level has unsaved edits (drawLaunchRuntimePrompt) the same way an open would.
+    // `skipDirtyCheck` is how the prompt's own buttons launch afterwards without re-asking.
+    void launchInRuntime(Engine& e, bool skipDirtyCheck = false);
+
+    void drawLaunchRuntimePrompt(Engine& e);
+
     void drawUpgradePrompt();
 
     void buildUI(Engine& e);
@@ -3634,6 +3642,8 @@ private:
     // to happen is "open a different level".
     bool        pendingOpenPrompt_ = false;
     bool        pendingNewLevel_ = false;   // File > New Level, waiting on the unsaved-changes prompt
+    // File > Launch in Aver Engine Runtime, waiting on drawLaunchRuntimePrompt's unsaved-changes ask.
+    bool        launchRuntimePrompt_ = false;
     // File > Open Level's own picker: the list is rebuilt when it opens, not per frame.
     bool        openLevelPicker_ = false;
     bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw

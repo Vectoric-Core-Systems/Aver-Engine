@@ -42,6 +42,7 @@ add_executable(Sandbox WIN32
   src/EngineScaffold.cpp
   src/McpConf.cpp
   src/IdeIntegration.cpp
+  src/RuntimeLaunch.cpp
   src/ShellIntegration.cpp
   src/NavBakeCommand.cpp
   src/ToolsMenu.cpp

@@ -727,6 +727,80 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
 #endif
 }
 
+// File > Launch in Aver Engine Runtime. Starts a SEPARATE process that reads the level from disk,
+// the same inputs a packaged game gets -- not anything held only in the editor's memory -- so an
+// unsaved edit would silently not be there. `skipDirtyCheck` is how drawLaunchRuntimePrompt's own
+// buttons launch after already answering that question, without re-triggering the same prompt.
+void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
+    (void)e;   // no engine access needed; kept for the same uniform signature other menu actions use
+#if AVER_MODULE_SCENE
+    if (!project_.valid() || levelPath_.empty()) return;
+    if (!skipDirtyCheck && levelHasUnsavedEdits()) { launchRuntimePrompt_ = true; return; }
+
+    const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
+    std::string why;
+    if (editor::launchRuntime(project_.manifestPath, levelPath_, &why)) {
+        setUpgradeStatus("Launched " + levelFile + " in Aver Engine Runtime");
+        AVER_INFO("[Editor] launched AverEngineRuntime.exe on {}", levelPath_);
+    } else {
+        setUpgradeStatus("Could not launch Aver Engine Runtime: " + why, editor::NotifySeverity::Error);
+        AVER_ERROR("[Editor] could not launch Aver Engine Runtime: {}", why);
+    }
+#else
+    (void)skipDirtyCheck;
+#endif
+}
+
+// The unsaved-changes modal for File > Launch in Aver Engine Runtime. Same Save/Discard/Cancel
+// shape as drawPendingOpenPrompt: the runtime is a second process reading the level from disk, so
+// proceeding with unsaved edits silently ships a stale level, same as opening over them would.
+void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
+    (void)e;
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+    if (!launchRuntimePrompt_) return;
+    constexpr const char* kTitle = "Launch in Aver Engine Runtime";
+    if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+    const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextWrapped("The runtime reads the level from disk, and this level has unsaved changes.");
+    bool otherDirty = assetEditors_.anyDirty();
+#if AVER_MODULE_LANDSCAPE
+    otherDirty = otherDirty || landscape_.dirty();
+#endif
+    if (otherDirty)
+        ImGui::TextDisabled("Unsaved asset or terrain edits are not included -- save them first.");
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    if (ImGui::Button("Save and launch", ImVec2(160.0f * dpi_, 0.0f))) {
+        if (saveLevel(levelPath_)) {
+            ImGui::CloseCurrentPopup();
+            launchRuntimePrompt_ = false;
+            launchInRuntime(e, true);
+        } else {
+            // STAY OPEN on a failed save -- same reasoning as drawPendingOpenPrompt's identical
+            // guard: proceeding anyway would launch a level missing the very edits this is for.
+            AVER_ERROR("[Editor] could not save '{}'; the runtime was not launched", levelPath_);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Launch saved version", ImVec2(170.0f * dpi_, 0.0f))) {
+        ImGui::CloseCurrentPopup();
+        launchRuntimePrompt_ = false;
+        launchInRuntime(e, true);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+        ImGui::CloseCurrentPopup();
+        launchRuntimePrompt_ = false;
+    }
+    ImGui::EndPopup();
+#endif
+}
+
 // Draws the modal offering to add the project files this project is missing, listing each fix.
 void SandboxApp::drawUpgradePrompt() {
 #if AVER_WITH_IMGUI
@@ -918,6 +992,27 @@ void SandboxApp::buildUI(Engine& e) {
             if (ImGui::MenuItem("Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
                 requestViewportScreenshot();
             uiReg_.track("file.takeScreenshot");
+#if AVER_MODULE_SCENE
+            // Starts a SEPARATE process (AverEngineRuntime.exe) on this level -- the disk-only
+            // inputs a packaged game gets, unlike Play, which runs in-process against whatever is
+            // in memory. See RuntimeLaunch.hpp for what gets launched and why it runs detached.
+            {
+                const bool haveProj = project_.valid();
+                const bool haveLevel = !levelPath_.empty();
+                const std::string runtimeExe = editor::runtimeExecutablePath();
+                ImGui::BeginDisabled(!haveProj || !haveLevel || runtimeExe.empty());
+                if (ImGui::MenuItem("Launch in Aver Engine Runtime")) launchInRuntime(e);
+                ImGui::EndDisabled();
+                uiReg_.track("file.launchRuntime");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    if (!haveProj)       ImGui::SetTooltip("Open a project first.");
+                    else if (!haveLevel) ImGui::SetTooltip("Save the level first - the runtime reads it from disk.");
+                    else if (runtimeExe.empty())
+                        ImGui::SetTooltip("AverEngineRuntime.exe is not beside the editor - build the runtime (AVER_BUILD_GAME).");
+                    else ImGui::SetTooltip("Starts AverEngineRuntime.exe on this level, as a packaged game would run it.");
+                }
+            }
+#endif
             ImGui::Separator();
             // Packaging. Disabled with a SPECIFIC reason rather than a generic one: "greyed
             // out" with no explanation is the single most common way an editor wastes somebody's
@@ -1524,6 +1619,7 @@ void SandboxApp::buildUI(Engine& e) {
     drawRecoveryPrompt(e);
     drawExitPrompt(e);
     drawPendingOpenPrompt(e);
+    drawLaunchRuntimePrompt(e);
     // AFTER the modals, so a request made this frame is guarded by the prompt this frame rather
     // than being loaded out from under a modal that is about to ask about it.
     applyPendingOpen(e);
