@@ -60,6 +60,12 @@ public:
     usize size() const { return contentIndex_.size(); }
     const fmt::ProjectDesc& project() const { return project_; }
 
+    // Every indexed asset, ObjectId -> absolute path, for a picker that lists assets by type.
+    const std::unordered_map<u64, std::string>& index() const { return contentIndex_; }
+    // Points one ObjectId at a file, for a caller that makes an asset reachable with no project open
+    // (the editor's --skin-scene-test). adopt() replaces the whole index.
+    void indexAsset(u64 id, std::string absolutePath) { contentIndex_[id] = std::move(absolutePath); }
+
     // Resolver for aver::anim::AnimSystem, which takes a plain function pointer: asset discovery is
     // the host's business, not the sampler's. `user` is a GameContent*.
     static std::string resolveAnimAsset(u64 id, void* user);
@@ -86,13 +92,18 @@ public:
     // materialForSurface(), lazily and Binaries-first, so eagerly loading every project material would
     // only cost load time and memory. If an eager preload is ever wanted, wire one deliberately --
     // scanning Binaries\Materials as well as Content\Materials -- rather than reviving a stale copy.
-    void releaseProjectMaterials();
+    //
+    // `clearGraphRegistry` false leaves the process-wide pbr::materialGraphs() alone, for a host that
+    // registers graphs there itself (the editor's material graph editor does).
+    void releaseProjectMaterials(bool clearGraphRegistry = true);
 #endif
 
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
     // Remembers that an interned surface token has an authored material behind it.
     void bindSurfaceMaterial(i32 token, pbr::MaterialHandle h) { surfaceMaterials_[token] = h; }
     pbr::MaterialHandle authoredFor(i32 token) const;
+    // Every bound surface token, for a material picker.
+    const std::unordered_map<i32, pbr::MaterialHandle>& surfaceMaterials() const { return surfaceMaterials_; }
 
     /// The material token this mesh's own materialSlots[0] names, or 0 when it names none.
     ///
@@ -121,10 +132,35 @@ public:
 
     // Uploads every .ocmesh under the project's content root.
     //
-    // Takes an IDevice and not an Engine: the editor's version takes Engine& and uses it for
-    // nothing but e.device()->createMesh, and a content cache with a handle on the whole engine is
-    // how the SandboxApp god object started.
+    // Takes an IDevice and not an Engine: a content cache with a handle on the whole engine is how
+    // the SandboxApp god object started.
     void loadProjectMeshes(rhi::IDevice& device);
+
+    // What loadProjectMeshes or registerBuiltins just uploaded, handed to a host that builds more
+    // from the same data -- the editor's pick triangles, triangle counts and LOD ladder -- without
+    // reading the file again. Called once per mesh, after its split parts are built. `data` is null
+    // for a built-in, which has no .ocmesh.
+    struct LoadedMesh {
+        u64 id;
+        const std::string& relativePath;
+        const fmt::OcMeshData* data;
+        const std::vector<rhi::MeshVertex>& vertices;
+        const std::vector<u32>& indices;
+        rhi::MeshHandle handle;
+    };
+    using MeshLoadedFn = void (*)(const LoadedMesh& mesh, void* user);
+    void setMeshLoadedHook(MeshLoadedFn fn, void* user) { meshLoaded_ = fn; meshLoadedUser_ = user; }
+
+    // Whether loadProjectMeshes uploads one coarser LOD per mesh as its depth-pass stand-in
+    // (depthProxyMap). On by default; off for a host that uploads the whole LOD ladder itself and
+    // answers the depth passes from that.
+    void setBuildDepthProxies(bool on) { buildDepthProxies_ = on; }
+
+    // A mesh uploaded elsewhere, registered under `id` (the editor's --skin-scene-test).
+    void registerMesh(u64 id, rhi::MeshHandle handle, const std::pair<Vec3, Vec3>& bounds);
+
+    // The ids loadProjectMeshes loaded, in load order.
+    const std::vector<u64>& projectMeshIds() const { return projectMeshIds_; }
 
     // The per-material split for a mesh with more than one submesh, or nullptr for a mesh that was
     // never split -- either it names one material slot (the common case), or every submesh past the
@@ -133,19 +169,12 @@ public:
     // for the whole mesh whenever this returns non-null.
     const std::vector<MeshPart>* partsFor(u64 id) const;
 
-    // THERE IS DELIBERATELY NO releaseProjectMeshes() TWIN of releaseProjectMaterials().
-    // There was one, it had zero callers, and it was wrong: it erased sceneMeshes_/meshBounds_/
-    // meshSlot0Material_ entries without ever calling IDevice::destroyMesh on the handles they held,
-    // so the first caller to wire it up would have leaked the GPU vertex/index buffers (and any BLAS
-    // built from them) instead of freeing them. It could not have done otherwise -- it took no
-    // device, and this class only gets one as an argument to loadProjectMeshes.
-    //
-    // Nothing needs it today: openProject runs exactly once per process in the packaged game, so the
-    // device's own teardown reclaims everything. Whoever adds a project-reload path should write the
-    // correct version then -- taking rhi::IDevice&, and destroying before erasing every handle this
-    // class owns per mesh: the base handle, its meshParts_ split, and its depthProxyMap_ level. Do not
-    // copy the editor's SandboxApp::releaseProjectMeshes for this: it erases sceneMeshes_ without
-    // destroying the base handle.
+    // Forgets every project mesh, destroying its split parts and its depth proxy. The base handle is
+    // destroyed too unless `destroyBaseHandles` is false, which only forgets it: the editor's mesh
+    // reload passes false, because caches keyed by MeshHandle (its depth proxies and LOD ladders among
+    // them) are not cleared with the meshes, and a destroyed handle's number can be reused. Built-ins
+    // survive. The packaged game never reloads, so it never calls this.
+    void releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles = true);
 
     rhi::MeshHandle meshFor(u64 id) const;
     usize meshCount() const { return sceneMeshes_.size(); }
@@ -197,6 +226,9 @@ private:
     std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxyMap_;
     // mesh id -> its per-material split, for a mesh whose .ocmesh names more than one. See MeshPart.
     std::unordered_map<u64, std::vector<MeshPart>> meshParts_;
+    MeshLoadedFn meshLoaded_ = nullptr;
+    void* meshLoadedUser_ = nullptr;
+    bool buildDepthProxies_ = true;
 
     // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
     // one -- a no-op otherwise. Ported from SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp):

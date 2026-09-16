@@ -280,32 +280,29 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
     // behind the camera. Measured here: a five-placement level reported "5 drawn, 0 culled" from
     // every camera angle until these two lines existed.
     const std::pair<Vec3, Vec3> unitBounds{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
+    const auto add = [&](const std::string& path, const std::vector<rhi::MeshVertex>& v,
+                         const std::vector<u32>& i, const std::pair<Vec3, Vec3>& bounds) {
+        const u64 id = fnv1a64(std::string_view(path));
+        const rhi::MeshHandle h = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+        sceneMeshes_[id] = h;
+        meshBounds_[id]  = bounds;
+        if (meshLoaded_) meshLoaded_(LoadedMesh{id, path, nullptr, v, i, h}, meshLoadedUser_);
+    };
     {
         std::vector<rhi::MeshVertex> v; std::vector<u32> i;
         appendSphere(v, i, 1.0f, 24, 48);
-        const u64 id = fnv1a64(std::string_view("Meshes/sphere.ocmesh"));
-        sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
-        meshBounds_[id]  = unitBounds;
+        add("Meshes/sphere.ocmesh", v, i, unitBounds);
     }
     {
         std::vector<rhi::MeshVertex> v; std::vector<u32> i;
         appendBox(v, i, 0, 0, 0, 1.0f);
-        const u64 id = fnv1a64(std::string_view("Meshes/cube.ocmesh"));
-        sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
-        meshBounds_[id]  = unitBounds;
+        add("Meshes/cube.ocmesh", v, i, unitBounds);
     }
     {
         // Third built-in: the quadcopter appendDrone (above) builds, for the graph-driven drone actor
         // (SandboxApp.cpp's setDroneEnabled) that used to spawn as a bare unit cube.
-        //
-        // MUST STAY IN STEP WITH sandbox/src/SandboxApp.cpp's OWN copy of this same registration
-        // (search "droneId" there) -- exactly the discipline this file's surfaceLooks_ table already
-        // calls out for M_Foliage/M_Bark/M_Rock, a few lines down, and the same kind of bug (a
-        // built-in the editor has that the runtime does not, or vice versa) if it drifts.
         std::vector<rhi::MeshVertex> v; std::vector<u32> i;
         appendDrone(v, i);
-        const u64 id = fnv1a64(std::string_view("Meshes/drone.ocmesh"));
-        sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
         // NOT unitBounds: appendDrone is not isotropic (see its own comment for the exact per-axis
         // reach), so recording the cube/sphere's -1..1 box here would be roughly six times too tall
         // and would silently defeat the frustum cull the comment over this function already exists to
@@ -313,7 +310,7 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
         // describes. Padded a few thousandths beyond the generator's own exact numbers (X/Y tip reach
         // 0.765685..., top 0.154, skid bottom -0.218) rather than trimmed to them -- a bound must
         // never be tighter than the geometry it describes.
-        meshBounds_[id] = {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}};
+        add("Meshes/drone.ocmesh", v, i, {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}});
     }
 
     // The named surfaces gameplay can ask for, with the editor's exact values.
@@ -422,6 +419,7 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         // comment (GameContent.hpp) and buildMeshParts' (below) for the shape this mirrors.
         buildMeshParts(device, id, md, verts, rel);
         projectMeshIds_.push_back(id);
+        if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
 
         // THE COARSE STAND-IN THE SHADOW, GI-SHADOW AND VOXELISE PASSES DRAW INSTEAD OF THIS MESH.
         // Those passes are depth-only -- they resolve a silhouette, never a surface -- so detail a
@@ -446,7 +444,7 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         // buildMeshParts' parts are separate handles it never mentions, so the depth passes draw
         // each part at full detail.
 #if AVER_MODULE_TRIFACTOR
-        if (md.lodCount() > 1) {
+        if (buildDepthProxies_ && md.lodCount() > 1) {
             constexpr f32 kShadowErrorCm = 20.0f;
             u32 pick = 0;
             for (u32 lvl = 1; lvl < md.lodCount(); ++lvl)
@@ -555,6 +553,34 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
 const std::vector<GameContent::MeshPart>* GameContent::partsFor(u64 id) const {
     const auto it = meshParts_.find(id);
     return it == meshParts_.end() ? nullptr : &it->second;
+}
+
+void GameContent::registerMesh(u64 id, rhi::MeshHandle handle, const std::pair<Vec3, Vec3>& bounds) {
+    sceneMeshes_[id] = handle;
+    meshBounds_[id] = bounds;
+}
+
+void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles) {
+    for (const u64 id : projectMeshIds_) {
+        // The split parts are this class's own uploads, and nothing keys anything else on them.
+        if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
+            for (const MeshPart& p : pit->second)
+                if (p.mesh) device.destroyMesh(p.mesh);
+            meshParts_.erase(pit);
+        }
+        if (const auto sit = sceneMeshes_.find(id); sit != sceneMeshes_.end()) {
+            // The depth proxy is keyed on the base handle, so it goes before that handle does.
+            if (const auto dit = depthProxyMap_.find(sit->second); dit != depthProxyMap_.end()) {
+                if (dit->second) device.destroyMesh(dit->second);
+                depthProxyMap_.erase(dit);
+            }
+            if (destroyBaseHandles && sit->second) device.destroyMesh(sit->second);
+            sceneMeshes_.erase(sit);
+        }
+        meshBounds_.erase(id);
+        meshSlot0Material_.erase(id);
+    }
+    projectMeshIds_.clear();
 }
 
 rhi::MeshHandle GameContent::meshFor(u64 id) const {
@@ -721,7 +747,7 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     return h;
 }
 
-void GameContent::releaseProjectMaterials() {
+void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
     // Destroyed, not just forgotten: MaterialLibrary owns the material, this map only names it.
     for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
@@ -729,7 +755,7 @@ void GameContent::releaseProjectMaterials() {
     // idOf()), so a project close has to forget the graphs too -- otherwise a differently-authored
     // project reusing the same content-relative GRAPHREF path would inherit stale ids (or a reload
     // of the SAME project would just leak entries forever, since idOf() never expires them itself).
-    pbr::materialGraphs().clear();
+    if (clearGraphRegistry) pbr::materialGraphs().clear();
 #if AVER_MODULE_SCENE
     surfaceMaterials_.clear();
 #endif
