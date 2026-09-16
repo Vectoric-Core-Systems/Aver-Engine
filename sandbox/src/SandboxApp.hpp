@@ -3215,6 +3215,9 @@ private:
 #endif
 
     std::string makeEntityLabel(const std::string& surface, const std::string& asset);
+    // The word makeEntityLabel numbers ("Wood" for M_Wood, else the asset's stem, else "Entity"). Split
+    // out so saveLevel can tell a generated label from a renamed one without advancing labelCounts_.
+    static std::string entityLabelBase(const std::string& surface, const std::string& asset);
     Tool tool_ = Tool::Move;   // see initialTool_ for why this is Move and not Select
 
     // Which mode the viewport is in, and the brush the Landscape mode is holding. Both members are

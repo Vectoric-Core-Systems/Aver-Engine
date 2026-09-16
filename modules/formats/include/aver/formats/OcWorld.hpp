@@ -50,6 +50,19 @@ struct OcWorldPlacement {
     // decide how it looks, not this record.
     std::string className;
 
+    // THE EDITOR'S OUTLINER LABEL, when a person set one -- mirrors className's own "by name, empty
+    // means absent" contract for the identical reason: SandboxApp::entityLabels_ is a runtime map
+    // keyed by scene::Entity, and an Entity handle is process-local, so only the STRING survives a
+    // save/load round trip.
+    //
+    // EMPTY MEANS NO AUTHORED NAME, exactly as an empty className means no class -- a level written
+    // before this field existed has name empty on every placement and round-trips byte-identically.
+    // It is also what an ORDINARY renamed-never placement keeps: saveLevel only fills this in when
+    // the label differs from what makeEntityLabel would generate fresh for that placement, so a
+    // level nobody renamed anything in does not grow a NAME line on every PLACE record it already
+    // had none on.
+    std::string name;
+
     // WHICH PLACEMENT THIS ONE HANGS FROM: an index into OcWorldData::placements, or -1 for a root.
     //
     // NESTING IS A FILE-LEVEL SHAPE ONLY. In memory the placements stay a flat vector with this

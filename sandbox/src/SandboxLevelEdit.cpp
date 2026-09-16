@@ -448,6 +448,13 @@ bool SandboxApp::saveLevel(const std::string& path) {
         }
     }
 
+    // A FRESH COUNTER, SEPARATE FROM THE LIVE labelCounts_ -- see the name-vs-default check inside
+    // the loop below for why. Ordinals start back at zero here rather than wherever the session's
+    // own counter happens to be, because what this loop needs to know is what a FRESH LOAD OF THE
+    // FILE BEING WRITTEN would hand each placement, and a load always starts labelCounts_ empty
+    // too (unloadLevel clears it before the next level's entities are created).
+    std::unordered_map<std::string, u32> shadowLabelCounts;
+
     for (const scene::Entity e : levelEntities_) {
         if (!world.valid(e)) continue;
         const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
@@ -496,6 +503,32 @@ bool SandboxApp::saveLevel(const std::string& path) {
         // until the editor grows a way to show and edit a snap offset.
         const auto snapIt = entitySnapZ_.find(static_cast<u32>(e));
         if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
+        // THE OUTLINER LABEL, PERSISTED ONLY WHEN IT IS NOT THE ONE makeEntityLabel WOULD HAND
+        // BACK ANYWAY. makeEntityLabel (SandboxViewport.cpp) numbers entityLabelBase's word with an
+        // ordinal from labelCounts_ -- reproduced here with the same entityLabelBase against
+        // shadowLabelCounts instead of the live counter. Calling the real makeEntityLabel to find out would not just read the counter,
+        // it would ADVANCE it -- consuming an ordinal that belongs to the next real spawn and
+        // leaving every label after this save off by one. shadowLabelCounts is scoped to this
+        // save alone and starts at zero, matching what a fresh load of the file being written
+        // right now would count up to for this same placement, in this same order.
+        //
+        // A LEVEL NOBODY RENAMED ANYTHING IN THEREFORE WRITES NO `name` TOKENS AT ALL: every
+        // entity's stored label is exactly its shadow default, so the comparison below never
+        // fires, and an old save stays byte-identical to a new one of the same scene.
+        //
+        // THE ONE CASE THIS CAN OVER-WRITE: writeOcworld emits a parented placement's CHILD line
+        // depth-first under its parent's BEGIN, which is not necessarily this loop's own
+        // levelEntities_ order when a child sits earlier in that list than its parent. A reload
+        // then counts ordinals in the file's (parent-first) order, not this pass's, so an
+        // untouched label can occasionally fail this comparison anyway. The cost is a spurious but
+        // harmless `name` line -- the label shown is unchanged either way -- never a lost rename.
+        {
+            const std::string base = entityLabelBase(p.material, p.asset);
+            const std::string shadowDefault = base + " " + std::to_string(++shadowLabelCounts[base]);
+            const auto labelIt = entityLabels_.find(static_cast<u32>(e));
+            if (labelIt != entityLabels_.end() && labelIt->second != shadowDefault)
+                p.name = labelIt->second;
+        }
         w.placements.push_back(std::move(p));
     }
 

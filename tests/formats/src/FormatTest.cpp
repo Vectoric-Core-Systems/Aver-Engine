@@ -682,6 +682,85 @@ static void checkOcworldNesting() {
     }
 }
 
+// Checks PLACE's `name` token: the editor's outliner label, added so an F2/Details/Outliner rename
+// survives a save (SandboxLevelEdit.cpp's saveLevel / SandboxLevelLoad.cpp's loadLevel). Modelled on
+// `class` right down to the contract: absent means absent, a level written before this field existed
+// round-trips byte-identically, and the value is a single percent-encoded token because the
+// whitespace tokenizer (TextScan.hpp's splitWhitespace) has no quoting.
+static void checkOcworldPlacementName() {
+    AVER_INFO("=== .ocworld PLACE name token ===");
+    using namespace fmt;
+    std::string err;
+
+    {
+        // A PLAIN NAME needs no escaping at all, and must not disturb the material or `class` beside
+        // it -- the three are parsed by the same token loop, keyword before the material catch-all.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "PLACE a.ocmesh 0 0 0 0 0 0 1 M_Wood name Doorway\n"
+                           "PLACE b.ocmesh 1 0 0 0 0 0 1 class PlayerStart name Spawn\n",
+                           w, &err), "PLACE lines with a plain name parse");
+        check(w.placements.size() == 2, "and keep both placements");
+        check(w.placements[0].name == "Doorway" && w.placements[0].material == "M_Wood",
+              "placement 0: the name is read back verbatim, without eating the material");
+        check(w.placements[1].name == "Spawn" && w.placements[1].className == "PlayerStart",
+              "placement 1: name and class coexist, each keeping its own argument");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("name Doorway") != std::string::npos &&
+              text.find("name Spawn") != std::string::npos,
+              "the written text carries both names");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "what the writer produced parses again");
+        check(back.placements[0].name == "Doorway" && back.placements[1].name == "Spawn",
+              "with both names intact");
+        check(writeOcworld(back) == text, "and a second write reproduces the first byte for byte");
+    }
+    {
+        // SPACES, A PERCENT SIGN AND A QUOTE -- exactly what percentEncode escapes, and exactly what
+        // an F2 rename can type into the Details panel. Without escaping, the space alone would
+        // split the name into extra tokens splitWhitespace hands back as if they were more fields on
+        // the PLACE line.
+        OcWorldData w;
+        w.name = "NameEscaping";
+        OcWorldPlacement p;
+        p.asset = "b.ocmesh";
+        p.name = "Player's 100% \"Secret\" Door";
+        w.placements.push_back(p);
+        const std::string text = writeOcworld(w);
+        // ONE TOKEN: the raw name, spaces and all, must never appear literally in the file -- that
+        // is exactly the shape of bug a missing escape would produce.
+        check(text.find("Player's 100% \"Secret\" Door") == std::string::npos,
+              "the raw name never appears unescaped in the written text");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "the escaped name still parses");
+        check(back.placements.size() == 1 && back.placements[0].name == p.name,
+              "and decodes back to exactly the name that was written -- spaces, '%' and '\"' intact");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // A FILE WITH NO NAMES IS UNCHANGED -- the exact guarantee task 1 exists for: a level saved
+        // before this field existed must keep round-tripping byte-identically, not grow a `name`
+        // token on every placement it never had one on.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME NoNames\n"
+                           "PLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
+                           "PLACE b.ocmesh 1 2 3 0 0 0 2 M_B nocollide\n",
+                           w, &err), "a world with no PLACE name tokens parses");
+        check(w.placements[0].name.empty() && w.placements[1].name.empty(),
+              "and every placement's name is absent, not a derived default");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("name ") == std::string::npos && text.find("name\n") == std::string::npos,
+              "the written text carries no `name` token at all");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "it parses again");
+        check(writeOcworld(back) == text,
+              "and a second write is byte-identical -- exactly what an old, name-less save keeps doing");
+    }
+}
+
 // Checks the SCATTER record: every field, round-trip byte-identity, an unbounded density band's
 // deliberate omission from the written text, and that a line this parser does not understand (a
 // stand-in for a future record) does not disturb SCATTER or anything else already parsed.
@@ -1459,6 +1538,7 @@ int main(int argc, char** argv) {
     checkOcproject();
     checkOcworld();
     checkOcworldNesting();
+    checkOcworldPlacementName();
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();

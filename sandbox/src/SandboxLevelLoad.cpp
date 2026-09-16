@@ -1063,7 +1063,14 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     for (usize k = 0; k < inst.entities.size(); ++k) {
         const scene::Entity e = inst.entities[k];
         const fmt::OcWorldPlacement& p = w.placements[inst.placementIndex[k]];
-        entityLabels_[static_cast<u32>(e)] = makeEntityLabel(p.material, p.asset);
+        // makeEntityLabel RUNS REGARDLESS OF WHETHER p.name IS SET, and its result is thrown away
+        // when it is: the ordinal it hands back also advances labelCounts_, and that advance has
+        // to happen for every placement, named or not, or the counter falls out of step with what
+        // saveLevel's own shadow copy of this same arithmetic assumes (see the name-vs-default
+        // check in saveLevel, SandboxLevelEdit.cpp) -- a placement that carries an authored NAME
+        // still occupies a slot in the "Wall 1, Wall 2, ..." sequence, it just isn't shown.
+        const std::string generatedLabel = makeEntityLabel(p.material, p.asset);
+        entityLabels_[static_cast<u32>(e)] = p.name.empty() ? generatedLabel : p.name;
         // WHY `collide` IS REMEMBERED AND THE MATERIAL IS NOT: the surface survives on the entity
         // (CMeshRenderer::material), but `nocollide` has no component at all -- a load-time
         // instruction nothing records afterwards. Inferring it from entityBodies_ would be wrong:

@@ -25,6 +25,56 @@ std::string num(f64 v) {
     return buf;
 }
 
+// PLACE's `name` argument is free text -- an outliner label like "Player Start" or "T-Rex 2" -- and
+// splitWhitespace (TextScan.hpp) has no quoting: a raw space would split the name across two tokens,
+// and a raw '%' would make a round trip ambiguous with an escape of this function's own making. So
+// the value goes out percent-encoded into exactly one token, matching the encoding a URL query
+// string uses for the identical reason. Escaped: whitespace, '%' itself, both quote characters (a
+// future quoted-string tokenizer extension would want those reserved too) and other control bytes.
+// Left alone: everything else, so an ordinary name stays readable in the file instead of becoming a
+// wall of %XX.
+std::string percentEncode(std::string_view s) {
+    static const char* const hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (c <= 0x20 || c == 0x7f || c == '%' || c == '"' || c == '\'') {
+            out += '%';
+            out += hex[(c >> 4) & 0xF];
+            out += hex[c & 0xF];
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+// The inverse of percentEncode. A '%' not followed by two hex digits passes through literally
+// rather than failing the parse -- a hand-typed name with a stray '%' in it is a person's mistake,
+// not a reason to reject the whole file.
+std::string percentDecode(std::string_view s) {
+    const auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (usize i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            const int hi = hexVal(s[i + 1]), lo = hexVal(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += static_cast<char>((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
 } // namespace
 
 // Parses an .ocworld or .ocmap from memory. Unknown records are skipped.
@@ -381,6 +431,23 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 // keyword-plus-argument pair, not a bare flag, so the argument token is consumed
                 // (`++i`) rather than falling through and being read back as a material name.
                 else if (equalsCI(t[i], "class") && i + 1 < t.size()) { p.className = std::string(t[++i]); }
+                // `name <value>`, the identical keyword-plus-argument shape as `class` just above and
+                // as LANDSCAPE/PCGVOLUME/WATER's own `name` token elsewhere in this file -- and for
+                // the identical ordering reason: BEFORE the material fallback, or the keyword itself
+                // is what gets read back as a material name. `value` is percentDecode'd, since it was
+                // written percentEncode'd (see that function's own comment) to survive as one token
+                // through a tokenizer that has no quoting.
+                //
+                // AN OLDER READER, ONE BUILT BEFORE THIS TOKEN EXISTED, hits the material catch-all
+                // exactly as it already does for a `class <name>` line: "name" itself becomes that
+                // placement's material (if none was named yet), and the encoded value token that
+                // follows is silently dropped, since material is no longer empty. That is not a new
+                // failure mode -- `class` has read this way since it was added -- and it is, tokens
+                // for tokens, less damage than an unescaped raw name would have done: the corrupted
+                // material would be the literal word "name" rather than a fragment of someone's
+                // actual entity name, and it collides with a real material only if a project happens
+                // to have one called exactly that.
+                else if (equalsCI(t[i], "name") && i + 1 < t.size()) { p.name = percentDecode(t[++i]); }
                 else if (p.material.empty()) p.material = std::string(t[i]);
             }
             p.objectId = fnv1a64(std::string_view(p.asset));
@@ -706,6 +773,10 @@ std::string writeOcworld(const OcWorldData& w) {
         if (p.snapToGround) s += " snap";
         // Omitted when empty, same "no override is the default" rule as GAMEMODE above.
         if (!p.className.empty()) { s += " class "; s += p.className; }
+        // Omitted when empty, same rule again -- a level nobody renamed anything in gets no `name`
+        // tokens at all, which is what keeps an old save byte-identical to a new one. See
+        // percentEncode's own comment for why the value is escaped before it goes out.
+        if (!p.name.empty()) { s += " name "; s += percentEncode(p.name); }
         s += "\n";
     };
 

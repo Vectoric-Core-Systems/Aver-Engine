@@ -2752,7 +2752,7 @@ void SandboxApp::buildViewportOverlay() {
 
 // Builds an outliner label from a surface name plus an ordinal: "M_Wall" -> "Wall 3". Falls back
 // to the asset's stem.
-std::string SandboxApp::makeEntityLabel(const std::string& surface, const std::string& asset) {
+std::string SandboxApp::entityLabelBase(const std::string& surface, const std::string& asset) {
     std::string base = surface;
     if (base.rfind("M_", 0) == 0) base.erase(0, 2);
     if (base.empty()) {
@@ -2762,6 +2762,11 @@ std::string SandboxApp::makeEntityLabel(const std::string& surface, const std::s
         if (dot != std::string::npos) base.erase(dot);
     }
     if (base.empty()) base = "Entity";
+    return base;
+}
+
+std::string SandboxApp::makeEntityLabel(const std::string& surface, const std::string& asset) {
+    const std::string base = entityLabelBase(surface, asset);
     return base + " " + std::to_string(++labelCounts_[base]);
 }
 
