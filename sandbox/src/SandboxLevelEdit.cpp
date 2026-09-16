@@ -329,7 +329,7 @@ void SandboxApp::startNewLevel(Engine& eng) {
 // spawn it needs -- see the comment inside for why that pairing is not optional.
 void SandboxApp::openLevelDirect(Engine& eng, const std::string& path) {
     loadLevel(eng, path);
-    // GRAPH-AS-CLASS / any other class placement: loadLevel collects classPlacements_ but does
+    // GRAPH-AS-CLASS / any other class placement: loadLevel collects level_.classPlacements() but does
     // not spawn them -- applyProject's "Starting scripts" stage is what normally does that after
     // a fresh open. Every path that opens a level WITHOUT going through applyProject has to do it
     // here, or class placements load unspawned with no warning. The forwarded-open path did not,
@@ -537,7 +537,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // saving it DELETED every graph class in it, removing FirstPerson's game mode and targets and
     // leaving no player, with nothing in the log to say why.
     // AND THE TRANSFORM IS REBUILT FROM THE LIVE ENTITY, WHICH IT USED TO NOT BE: this wrote
-    // classPlacements_ verbatim, defended by "the editor cannot EDIT a class placement" -- FALSE,
+    // the class placements verbatim, defended by "the editor cannot EDIT a class placement" -- FALSE,
     // since spawnClassPlacements spawns a real, selectable, draggable entity per placement. What
     // didn't happen was the save reading any of it back: move one, save, reload, find it unchanged.
     // PAIRED BY RECORDED INDEX, never by position (see ClassInstance's comment).
@@ -545,7 +545,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // The pairing and snap rule live in LevelClassSave.hpp, header-only, so a test can drive them
     // with a fake lookup -- SandboxApp is add_executable-only.
     editor::appendClassPlacements(
-        classPlacements_, levelClassInstances_,
+        level_.classPlacements(), levelClassInstances_,
         [&world](int32_t e, Transform& xf) {
             const scene::Entity ent = static_cast<scene::Entity>(e);
             if (!world.valid(ent)) return false;

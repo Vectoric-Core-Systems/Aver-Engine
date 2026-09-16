@@ -151,7 +151,7 @@ void SandboxApp::registerMcpAbis() {
                            static_cast<f32>(a.args[2])};
             // A teleport, not a move: the next chunk-streaming update must not see this as a
             // huge one-frame velocity computed against wherever the camera used to be -- the
-            // same rule frameCameraOn's own comment states for the same reason.
+            // same rule frameCameraOnLevel's own comment states for the same reason.
             chunkStreamHaveLastPos_ = false;
             char buf[96];
             std::snprintf(buf, sizeof buf, "camPos=(%.1f,%.1f,%.1f)", camPos_.x, camPos_.y, camPos_.z);

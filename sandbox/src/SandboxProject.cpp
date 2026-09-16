@@ -89,7 +89,7 @@ void SandboxApp::applyProject(Engine& e) {
 #endif
 #if AVER_MODULE_FRAMEWORK
     // AFTER graph classes are declared, and AFTER "Loading level" already collected
-    // classPlacements_. GATED ON scripts_.ready(), unlike GameApp: a project opened from the
+    // level_.classPlacements(). GATED ON scripts_.ready(), unlike GameApp: a project opened from the
     // COMMAND LINE reaches this point BEFORE the scripting host bootstraps (see the "GRAPH-AS-
     // CLASS CATCH-UP" comment), and spawning before any class could be declared would only
     // manufacture "not declared" warnings.

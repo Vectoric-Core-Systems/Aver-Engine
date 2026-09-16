@@ -1704,7 +1704,7 @@ void SandboxApp::onInit(Engine& e)  {
         yaw_ = std::atan2(d.y, d.x);
         pitch_ = std::asin(d.z);
     }
-    // Last, so --cam outranks both writers above it: frameCameraOn ran back in loadStartMap,
+    // Last, so --cam outranks both writers above it: frameCameraOnLevel ran back in loadStartMap,
     // and the default framing is the branch immediately before this.
     if (camOverride_) {
         camPos_ = camPosOverride_;
@@ -2273,7 +2273,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 camPos_ = center - fwd * d;
                 flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
 #if AVER_MODULE_SCENE
-                chunkStreamHaveLastPos_ = false;   // teleport; see frameCameraOn for why
+                chunkStreamHaveLastPos_ = false;   // teleport; see frameCameraOnLevel for why
 #endif
             }
         }
@@ -2583,7 +2583,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // runs while just idling in the editor outside Play, deliberately: that's exactly who this feature is for.
     if (chunkWorld_) {
         const f32 invDt = t.dt > 1e-6f ? 1.0f / t.dt : 0.0f;
-        // First frame after enabling (or after any camera teleport -- see frameCameraOn and the
+        // First frame after enabling (or after any camera teleport -- see frameCameraOnLevel and the
         // F-key jump above) reports zero velocity: differencing against a stale/teleported-from
         // position would ask the streamer to prefetch a corridor toward nowhere real.
         const Vec3 vel = chunkStreamHaveLastPos_ ? (camPos_ - chunkStreamLastCamPos_) * invDt

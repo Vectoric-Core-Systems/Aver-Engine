@@ -965,82 +965,79 @@ u64 SandboxApp::residentTriangleCount() const {
     return total;
 }
 
-// Loads an .ocworld into the world as ordinary scene entities: transform, mesh and name.
-// TAKES Engine& (it did not before) so it can hand a real device down to loadLandscapeForLevel:
-// unloadLevel/unloadLandscape need a device to free what the PREVIOUS level left resident, and the
-// only device this function ever has is the one its own two callers already hold.
+// Loads a level file into the world as ordinary scene entities: transform, mesh and name.
+// TAKES Engine& so it can hand a real device down to loadLandscapeForLevel: unloadLevel/unloadLandscape
+// need a device to free what the PREVIOUS level left resident, and the only device this function ever
+// has is the one its own two callers already hold.
+//
+// THE PARSE AND THE PLACEMENT LOOP ARE level_'s, the runtime's GameLevel, so the editor and a shipped
+// game read a level with the same code. GameLevel DISPATCHES ON WHAT THE FILE ACTUALLY USES, NOT ITS
+// EXTENSION OR HEADER LINE: ElectricDreams and FirstPerson both ship an .ocmap starting with `OCMAP 1`
+// that is nonetheless pure OCWORLD content, while OpenConstructor's demoworld.ocmap genuinely needs the
+// legacy grammar. Without that, every level went through fmt::loadOcworld, which "succeeds" on legacy
+// OCMAP while silently skipping ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM -- opening and saving
+// demoworld.ocmap destroyed all six records with no warning.
+//
+// What the editor does around the load enters through level_'s hooks: the header, water, sky field and
+// terrain before the placements (an OCWORLD file only), and its own per-entity records after
+// (onLevelInstantiated, onLegacyOcmapInstantiated). A file that does not parse fires neither, and
+// level_ logs why.
 void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     unloadLevel(eng);
 
-    // DISPATCH ON WHAT THE FILE ACTUALLY USES, NOT ITS EXTENSION OR HEADER LINE: ElectricDreams
-    // and FirstPerson both ship an .ocmap starting with `OCMAP 1` that is nonetheless pure OCWORLD
-    // content, while OpenConstructor's demoworld.ocmap genuinely needs the legacy grammar. Without
-    // this, every level went through fmt::loadOcworld, which "succeeds" on legacy OCMAP while
-    // silently skipping ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM -- opening and saving
-    // demoworld.ocmap destroyed all six records with no warning.
-    if (fmt::levelFileIsLegacyOcmap(path)) {
-        loadLegacyOcmapLevel(eng, path);
-        return;
-    }
-
-    fmt::OcWorldData w;
-    std::string why;
-    if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
-
-
-    // CARRIED, NOT UNDERSTOOD. The editor has no UI for a PCGVOLUME and doesn't need one, but
-    // saveLevel builds a fresh OcWorldData from the editor's own state, so anything it doesn't
-    // hold is GONE on the next save. That silently deleted every PCGVOLUME in the level, including
-    // the sky field and the forest generator's own: open, save, and the record no longer exists.
-    // The same reasoning as the project manifest keeping unknown keys: preserve what you don't understand.
-    levelPcgVolumes_ = w.pcgVolumes;
-    // ...and the rest of the header, for exactly the same reason. Placements and PCG volumes are
-    // stripped because they are already held elsewhere; what is left is identity, BUILD, ALGO,
-    // SPAWN and the environment numbers the editor does not expose.
-    levelHeader_ = w;
-    levelHeader_.placements.clear();
-    levelHeader_.pcgVolumes.clear();
-    if (!levelPcgVolumes_.empty())
-        AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
-                  levelPcgVolumes_.size());
+    game::GameLevel::LoadHooks hooks;
+    hooks.beforePlacements = [this, &eng](const std::string& levelPath, const fmt::OcWorldData& w) {
+        // CARRIED, NOT UNDERSTOOD. The editor has no UI for a PCGVOLUME and doesn't need one, but
+        // saveLevel builds a fresh OcWorldData from the editor's own state, so anything it doesn't
+        // hold is GONE on the next save. That silently deleted every PCGVOLUME in the level, including
+        // the sky field and the forest generator's own: open, save, and the record no longer exists.
+        // The same reasoning as the project manifest keeping unknown keys: preserve what you don't understand.
+        levelPcgVolumes_ = w.pcgVolumes;
+        // ...and the rest of the header, for exactly the same reason. Placements and PCG volumes are
+        // stripped because they are already held elsewhere; what is left is identity, BUILD, ALGO,
+        // SPAWN and the environment numbers the editor does not expose.
+        levelHeader_ = w;
+        levelHeader_.placements.clear();
+        levelHeader_.pcgVolumes.clear();
+        if (!levelPcgVolumes_.empty())
+            AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
+                      levelPcgVolumes_.size());
 
 #if AVER_MODULE_FLUIDS
-    // AND THE LEVEL'S OWN WATER, if it authored any. Placed here rather than beside the PCGVOLUME
-    // carry above because this is the first point at which levelHeader_ holds the WATER/WAVE
-    // records the file declared.
-    applyLevelWater(eng);
+        // AND THE LEVEL'S OWN WATER, if it authored any. Placed here rather than beside the PCGVOLUME
+        // carry above because this is the first point at which levelHeader_ holds the WATER/WAVE
+        // records the file declared.
+        applyLevelWater(eng);
 #endif
 
-    // AND NOW THE SKY FIELD ACTUALLY REACHES THE CLOUD LAYER, as it already did in the packaged
-    // runtime: carrying the record through a save was all the editor ever did with it, so every
-    // new project (scaffolded with `PCGVOLUME name Sky`) opened onto a bare gradient.
-    // BY NAME, not "the first field": a level may declare a cave mask or moisture field too.
-    // The floor is INVERTED into coverage: a HIGH density floor leaves LESS material standing, so
-    // passing it through unchanged would clear the sky exactly when the author asked for overcast.
-    for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
-        if (v.name != "Sky") continue;
-        const f64 floorV = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
-        sky_.cloudsEnabled = true;
-        sky_.cloudSeed     = v.seed;
-        sky_.cloudCoverage = static_cast<f32>(1.0 - floorV);
-        AVER_INFO("[Level] sky field '{}' drives the cloud layer: seed {}, coverage {:.2f}",
-                  v.name, sky_.cloudSeed, sky_.cloudCoverage);
-        break;
-    }
+        // AND NOW THE SKY FIELD ACTUALLY REACHES THE CLOUD LAYER, as it already did in the packaged
+        // runtime: carrying the record through a save was all the editor ever did with it, so every
+        // new project (scaffolded with `PCGVOLUME name Sky`) opened onto a bare gradient.
+        // BY NAME, not "the first field": a level may declare a cave mask or moisture field too.
+        // The floor is INVERTED into coverage: a HIGH density floor leaves LESS material standing, so
+        // passing it through unchanged would clear the sky exactly when the author asked for overcast.
+        for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
+            if (v.name != "Sky") continue;
+            const f64 floorV = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
+            sky_.cloudsEnabled = true;
+            sky_.cloudSeed     = v.seed;
+            sky_.cloudCoverage = static_cast<f32>(1.0 - floorV);
+            AVER_INFO("[Level] sky field '{}' drives the cloud layer: seed {}, coverage {:.2f}",
+                      v.name, sky_.cloudSeed, sky_.cloudCoverage);
+            break;
+        }
 
-    // The placement loop is aver::world::instantiate now, shared with the game runtime. What is
-    // left here is genuinely the EDITOR's: its label table, its entity->body map, and the
-    // per-entity record saveLevel needs.
-    // TERRAIN FIRST, THEN THE THINGS THAT STAND ON IT: this used to run at the end of loadLevel, harmless only while the ground was a flat plane -- a `snap` placement asks the ground how high it is.
+        // TERRAIN FIRST, THEN THE THINGS THAT STAND ON IT: this used to run at the end of loadLevel, harmless only while the ground was a flat plane -- a `snap` placement asks the ground how high it is.
 #if AVER_MODULE_LANDSCAPE
-    loadLandscapeForLevel(eng.device(), path, w);
+        loadLandscapeForLevel(eng.device(), levelPath, w);
+#else
+        (void)eng; (void)levelPath;
 #endif
-
-    world::InstantiateOptions opt;
+    };
 #if AVER_MODULE_LANDSCAPE
     // The same surface the scatter follows, so a hand-placed tree and a scattered fern sitting
     // a metre apart agree about where the ground is.
-    opt.groundHeightAt = [this](f64 x, f64 y, f64& outZ) {
+    hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) {
         if (!landscapeLoaded_) return false;
         f32 z = 0.0f;
         if (!landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(x),
@@ -1049,13 +1046,19 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         return true;
     };
 #endif
-#if AVER_MODULE_PBR && AVER_MODULE_SCENE
-    opt.bindMaterial = [this](i32 token, const std::string& surface) {
-        const pbr::MaterialHandle h = content_.materialForSurface(surface);
-        if (h) content_.bindSurfaceMaterial(token, h);
+    hooks.afterInstantiate = [this](const game::GameLevel::LoadedLevel& loaded) {
+        if (loaded.legacy) onLegacyOcmapInstantiated(loaded);
+        else               onLevelInstantiated(loaded);
     };
-#endif
-    const world::LevelInstance inst = world::instantiate(w, opt);
+    level_.setLoadHooks(std::move(hooks));
+    level_.load(path, content_);
+}
+
+// What the editor keeps for an OCWORLD level once level_ has instantiated it: its label table, its
+// entity->body map, and the per-entity record saveLevel needs.
+void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded) {
+    const fmt::OcWorldData& w = loaded.world;
+    const world::LevelInstance& inst = loaded.instance;
     levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
     levelBodies_ = inst.bodies;
@@ -1089,33 +1092,25 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
     }
-
-#if AVER_MODULE_FRAMEWORK
-    // GRAPH-AS-CLASS / any other class placement -- collected here, SPAWNED LATER by
-    // spawnClassPlacements(): applyProject's "Loading level" stage runs BEFORE "Starting scripts",
-    // so a class declared from a .ocgraph isn't registered yet -- aver_fw_class_find would always miss it here.
-    classPlacements_.clear();
-    for (const fmt::OcWorldPlacement& p : w.placements)
-        if (!p.className.empty()) classPlacements_.push_back(p);
-#endif
+    // GRAPH-AS-CLASS / any other class placement: level_ collected them (level_.classPlacements());
+    // spawnClassPlacements() spawns them later -- applyProject's "Loading level" stage runs BEFORE
+    // "Starting scripts", so a class declared from a .ocgraph isn't registered yet here.
 
     // A level that states where the player starts gets a visible, movable marker for it. Without
     // this the SPAWN record was invisible in the editor: authored only by hand-editing the file,
     // and impossible to see or move once written.
-#if AVER_MODULE_SCENE
     playerStart_ = scene::kInvalidEntity;
     if (w.hasSpawn) {
         playerStart_ = makePlayerStart(Vec3{static_cast<f32>(w.spawnX), static_cast<f32>(w.spawnY),
                                              static_cast<f32>(w.spawnZ)},
                                         static_cast<f32>(w.spawnYaw));
     }
-#endif
 
     // FOG USED TO BE UNPACKED HERE, four lines above the call that now does it. Two places
     // reading the same record is how they drift, and this pair already had: this block set
     // fogDensity_ while saveLevel wrote a different member entirely.
     applyLevelSky(w);
-    levelPath_ = path;
+    levelPath_ = loaded.path;
     levelName_ = w.name;
 #if AVER_MODULE_SYNAPSE
     // The overlay is a DEVICE resource and this function has no device -- loadLevel is
@@ -1128,7 +1123,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     selEntity_ = scene::kInvalidEntity;
 
     // A STORED VIEWPOINT OUTRANKS AUTO-FRAMING, because it is the more specific statement:
-    // frameCameraOn guesses a view from the level's bounds, and a CAMERA record is where the
+    // frameCameraOnLevel guesses a view from the level's bounds, and a CAMERA record is where the
     // author actually was. Guessing is the fallback for a level that has never been saved with
     // one, which is every level written before the record existed.
     //
@@ -1144,7 +1139,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     // same shape both times: the run is not wrong, it just measures somewhere else, and nothing
     // says so. Refusing the restore here rather than re-applying the override afterwards keeps
     // one writer for the camera on this path instead of two that must stay in order.
-    // BOTH WRITERS ARE SKIPPED, not just the restore: the frameCameraOn fallback below is the
+    // BOTH WRITERS ARE SKIPPED, not just the restore: the frameCameraOnLevel fallback below is the
     // other way this function moves the camera, and letting it run would replace one silent
     // override with another.
     if (camOverride_) {
@@ -1170,14 +1165,14 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         AVER_INFO("[Level] camera restored to ({:.0f},{:.0f},{:.0f}) yaw {:.1f} pitch {:.1f} speed {:.0f}",
                   camPos_.x, camPos_.y, camPos_.z, w.camYaw, w.camPitch, flySpeed_);
     } else if (!w.placements.empty()) {
-        frameCameraOn(w);
+        frameCameraOnLevel();
     }
 
 #if AVER_MODULE_VOXI
     // OUTSIDE THE CAMERA CHAIN ABOVE, because fitting the GI volume used to happen at the bottom
-    // of frameCameraOn -- which is only the fallback branch. A level with a saved CAMERA record,
-    // or a run passing --cam, never fitted its volume at all: where the camera ends up and how
-    // big the level is are different questions and only one of them is about the camera.
+    // of the camera framing -- which is only the fallback branch. A level with a saved CAMERA
+    // record, or a run passing --cam, never fitted its volume at all: where the camera ends up and
+    // how big the level is are different questions and only one of them is about the camera.
     //
     // BUT AN AUTHORED VOLUME STILL WINS, and that guard is not optional. RENDER.GIVOLUME is a
     // number a person chose; a fit computed from placement bounds is a guess, and a guess must
@@ -1186,28 +1181,21 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     // 2356cm and shrank the volume for a level it already covered. project_.giExtent is 0 when
     // the manifest states nothing, which is exactly the "no author has an opinion" case the fit
     // is for.
-    if (!w.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeTo(w);
+    if (!w.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeToLevel();
 #endif
 
     // JUST LOADED MEANS JUST SAVED, as far as the exit prompt is concerned. openLevelDirect
     // does NOT unload first, so without this a level opened after editing another would
     // inherit that one's history and be reported dirty the instant it appeared.
     markLevelSaved();
-    AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
-
 }
 
-// Loads a LEGACY .ocmap -- one that actually USES at least one of ROOT/CLIENT/SURFACE/GROUND/
-// KILLZ/DEFORM, so it has to load through fmt::loadOcmap, the only parser with a branch for any of
-// them (loadOcworld above accepts the same header line without complaint but is the wrong loader).
-// Split out from loadLevel rather than folded in as a mid-function branch: a legacy file has none
-// of loadLevel's OCWORLD-only concerns, so reusing that function's body would mean guarding every
-// section against a struct that can never carry them.
-void SandboxApp::loadLegacyOcmapLevel(Engine& eng, const std::string& path) {
-    (void)eng;   // unlike loadLevel, this path has no landscape/device work to hand it to
-    fmt::OcMapData m;
-    std::string why;
-    if (!fmt::loadOcmap(path, m, &why)) { AVER_WARN("[Level] {}", why); return; }
+// What the editor keeps for a LEGACY .ocmap -- one that actually USES at least one of ROOT/CLIENT/
+// SURFACE/GROUND/KILLZ/DEFORM -- once level_ has translated and instantiated it. A legacy file has
+// none of the OCWORLD-only concerns above (header, water, sky, terrain, CAMERA), so it has its own
+// callback rather than a branch through every section of that one.
+void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& loaded) {
+    const fmt::OcMapData& m = *loaded.legacy;
 
     // CARRIED, NOT UNDERSTOOD -- see legacyMapHeader_'s own comment for which five record kinds
     // this is and why. saveLevelAsOcmap starts from this and overwrites only what the editor
@@ -1216,42 +1204,12 @@ void SandboxApp::loadLegacyOcmapLevel(Engine& eng, const std::string& path) {
     legacyMapHeader_.placements.clear();
     levelIsLegacyOcmap_ = true;
 
-    // TRANSLATED INTO THE SHARED PLACEMENT PIPELINE, not re-implemented: world::instantiate
-    // already does everything a placement needs, and OcPlacement/OcWorldPlacement already agree
-    // field for field, so this is translation, not invention.
-    // MATERIAL IS DELIBERATELY LEFT EMPTY on every synthesised placement: a legacy PLACE names a
-    // numeric SURFACE-table index and a DEFORM a soft-body material like "rubber", neither an
-    // .ocmat name -- feeding either to aver_scene_material would resolve a material that doesn't
-    // exist rather than leaving the mesh's own cooked material in place. Both values are preserved
-    // for the save through entityLegacySurface_/entityLegacyMaterial_ instead.
-    fmt::OcWorldData synth;
-    synth.name = m.name;
-    synth.contentId = m.contentId;
-    synth.build = m.build;
-    synth.algo = m.algo;
-    synth.hasSpawn = m.hasSpawn;
-    synth.spawnX = m.spawnX; synth.spawnY = m.spawnY; synth.spawnZ = m.spawnZ; synth.spawnYaw = m.spawnYaw;
-    synth.placements.reserve(m.placements.size());
-    for (const fmt::OcPlacement& p : m.placements) {
-        fmt::OcWorldPlacement op;
-        op.asset = p.asset;
-        op.objectId = p.objectId;   // already fnv1a64(asset) -- see OcMap.cpp's own PLACE/DEFORM branches
-        op.x = p.x; op.y = p.y; op.z = p.z;
-        op.yaw = p.yaw; op.pitch = p.pitch; op.roll = p.roll;
-        // `p.scale` is already forced to 1.0 for a DEFORM record (OcMap.cpp hardcodes it there;
-        // legacy DEFORM has no scale concept of its own), so this one line is correct for both
-        // placement kinds without a branch.
-        op.sx = op.sy = op.sz = (p.scale == 0.0 ? 1.0 : p.scale);
-        // EVERY legacy placement is a collision source in this editor's hands -- ocmapIsServerValid
-        // itself requires GROUND or at least one PLACE for exactly that reason. A DEFORM's real
-        // behaviour is a server-simulated soft body, not this static box, but nothing here spawns a
-        // deformable cage, so a static box is the honest stand-in, no worse than an ordinary PLACE with scale 1.
-        op.collide = true;
-        synth.placements.push_back(std::move(op));
-    }
-
-    world::InstantiateOptions opt;
-    const world::LevelInstance inst = world::instantiate(synth, opt);
+    // level_ TRANSLATED the placements into its shared pipeline (GameLevel.cpp's loadLegacyOcmap):
+    // MATERIAL IS DELIBERATELY LEFT EMPTY on every synthesised placement, because a legacy PLACE
+    // names a numeric SURFACE-table index and a DEFORM a soft-body material like "rubber", neither
+    // an .ocmat name. Both values are preserved for the save through entityLegacySurface_/
+    // entityLegacyMaterial_ instead, from the file's own records here.
+    const world::LevelInstance& inst = loaded.instance;
     levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
     levelBodies_ = inst.bodies;
@@ -1261,8 +1219,8 @@ void SandboxApp::loadLegacyOcmapLevel(Engine& eng, const std::string& path) {
         const fmt::OcPlacement& p = m.placements[inst.placementIndex[k]];
         entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), p.asset);
         entityCollide_[static_cast<u32>(e)] = true;
-        // WHICH RECORD KIND THIS ENTITY CAME FROM, AND ITS OWN FIELD -- see this function's
-        // "MATERIAL IS DELIBERATELY LEFT EMPTY" paragraph above for why these live here, and
+        // WHICH RECORD KIND THIS ENTITY CAME FROM, AND ITS OWN FIELD -- see the "MATERIAL IS
+        // DELIBERATELY LEFT EMPTY" paragraph above for why these live here, and
         // entityLegacyDeform_'s own comment for what an entity absent from these maps saves as.
         entityLegacyDeform_[static_cast<u32>(e)] = p.deform;
         if (p.deform) entityLegacyMaterial_[static_cast<u32>(e)] = p.material;
@@ -1272,29 +1230,24 @@ void SandboxApp::loadLegacyOcmapLevel(Engine& eng, const std::string& path) {
 #endif
     }
 
-#if AVER_MODULE_SCENE
     playerStart_ = scene::kInvalidEntity;
     if (m.hasSpawn) {
         playerStart_ = makePlayerStart(Vec3{static_cast<f32>(m.spawnX), static_cast<f32>(m.spawnY),
                                              static_cast<f32>(m.spawnZ)},
                                         static_cast<f32>(m.spawnYaw));
     }
-#endif
-    levelPath_ = path;
+    levelPath_ = loaded.path;
     levelName_ = m.name;
 
     sel_ = -1;
     selEntity_ = scene::kInvalidEntity;
 
-    // The legacy .ocmap path fitted the GI volume through frameCameraOn's old side effect too,
-    // so it gets the explicit call for the same reason the .ocworld path above does.
-    if (!synth.placements.empty()) frameCameraOn(synth);
+    // The legacy .ocmap path fitted the GI volume through the camera framing's old side effect too,
+    // so it gets the explicit call for the same reason the OCWORLD path above does.
+    if (!loaded.world.placements.empty()) frameCameraOnLevel();
 #if AVER_MODULE_VOXI
-    if (!synth.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeTo(synth);
+    if (!loaded.world.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeToLevel();
 #endif
-
-    AVER_INFO("[Level] '{}' loaded from {} ({} placement(s), legacy .ocmap)", m.name, path,
-              m.placements.size());
 }
 
 #endif
@@ -1306,8 +1259,9 @@ void SandboxApp::loadLegacyOcmapLevel(Engine& eng, const std::string& path) {
 // and this matches how every ORDINARY mesh placement already behaves. Accepted consequence: a
 // placed class runs OnTick immediately on load, even outside Play.
 void SandboxApp::spawnClassPlacements() {
-    for (usize pi = 0; pi < classPlacements_.size(); ++pi) {
-        const fmt::OcWorldPlacement& p = classPlacements_[pi];
+    const std::vector<fmt::OcWorldPlacement>& placements = level_.classPlacements();
+    for (usize pi = 0; pi < placements.size(); ++pi) {
+        const fmt::OcWorldPlacement& p = placements[pi];
         const int32_t c = aver_fw_class_find(p.className.c_str());
         if (c == 0) {
             AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
@@ -1316,9 +1270,8 @@ void SandboxApp::spawnClassPlacements() {
 
         f64 pz = p.z;
 #if AVER_MODULE_LANDSCAPE
-        // Same ground query loadLevel's own opt.groundHeightAt uses -- not persisted from there
-        // (opt is local to loadLevel), so re-expressed here rather than threaded through as a
-        // member for one caller.
+        // Same ground query loadLevel hands level_ as hooks.groundHeightAt -- re-expressed here
+        // because level_ keeps its hooks private and this is their only other caller.
         if (p.snapToGround && landscapeLoaded_) {
             f32 gz = 0.0f;
             if (landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(p.x),
@@ -1392,73 +1345,30 @@ void SandboxApp::applyLevelSky(const fmt::OcWorldData& w) {
     if (w.hasClouds) hasLevelClouds_ = true;
 }
 
-// Puts the editor camera where the whole level is visible, and fits the fly speed and the GI
-// volume to its bounds.
-// The level's world-space bounds as a centre and a radius. Split out of frameCameraOn because
-// TWO UNRELATED THINGS were reading it and only one of them is about the camera.
-//
-// WHAT THAT COUPLING COST. Fitting the GI volume lived at the bottom of frameCameraOn, and
-// frameCameraOn only runs for a level with NO saved CAMERA record -- it is the fallback for
-// "we do not know where to look". So saving a level's camera silently stopped its GI volume
-// being fitted, and the volume stayed at its authored default (centre 0,0,300, half-extent
-// 1200cm) no matter how big the level was. Measured on Intel Sponza, which spans X -1386..747,
-// Y -1595..1949, Z -43..1688: a third of the level sat outside its own GI volume, and nothing
-// said so. Adding --cam made it worse for the same reason -- skipping the camera framing also
-// skipped the fit.
-//
-// A radius, not a box, because that is what both consumers want: the camera wants a distance to
-// stand back by, and setVolume takes a half-edge extent.
-void SandboxApp::levelBounds(const fmt::OcWorldData& w, Vec3& centre, f32& radius) const {
-    // THE MESH BOX, SCALED AND ROTATED -- not p.sx/sy/sz used as a size. This loop read
-    // fabs(p.sx/sy/sz) as a half-extent, but sx/sy/sz is a dimensionless SCALE MULTIPLIER
-    // (Transform::scale, nothing converts it), so an ordinary PLACE (scale 1.0) contributed a 1cm
-    // cube and this "bounds" was really the placement POSITIONS' point cloud.
-    // It looked right by coincidence: PLACEG conventionally uses a unit-cube mesh, where a scale
-    // and a half-extent are the same number.
-    // Kept identical to GameLevel.cpp's placementBounds: editor preview and shipped game must fit
-    // the same volume, and these two loops have already drifted once.
-    static const Vec3 kCorner[8] = {{-1,-1,-1},{1,-1,-1},{-1,1,-1},{1,1,-1},
-                                    {-1,-1, 1},{1,-1, 1},{-1,1, 1},{1,1, 1}};
-    Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
-    for (const fmt::OcWorldPlacement& p : w.placements) {
-        const Vec3 c{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
-        // An asset with no loaded bounds contributes its position only: it occupies no space we
-        // can prove, and inventing one would let a single bad line inflate the whole volume.
-        Vec3 mlo{0,0,0}, mhi{0,0,0};
-        if (const auto* b = content_.boundsFor(fnv1a64(std::string_view(p.asset)))) { mlo = b->first; mhi = b->second; }
-        const Vec3 mc{(mlo.x+mhi.x)*0.5f, (mlo.y+mhi.y)*0.5f, (mlo.z+mhi.z)*0.5f};
-        const Vec3 mh{(mhi.x-mlo.x)*0.5f, (mhi.y-mlo.y)*0.5f, (mhi.z-mlo.z)*0.5f};
-        const Quat rot = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
-                                                      static_cast<f32>(p.pitch),
-                                                      static_cast<f32>(p.yaw)});
-        for (const Vec3& k : kCorner) {
-            const Vec3 local{(mc.x + k.x*mh.x) * static_cast<f32>(p.sx),
-                             (mc.y + k.y*mh.y) * static_cast<f32>(p.sy),
-                             (mc.z + k.z*mh.z) * static_cast<f32>(p.sz)};
-            const Vec3 wpt = c + rot.rotate(local);
-            lo.x = std::fmin(lo.x, wpt.x); hi.x = std::fmax(hi.x, wpt.x);
-            lo.y = std::fmin(lo.y, wpt.y); hi.y = std::fmax(hi.y, wpt.y);
-            lo.z = std::fmin(lo.z, wpt.z); hi.z = std::fmax(hi.z, wpt.z);
-        }
-    }
-    // Every placement missing and the sentinels never moved: a level with no placements at all.
-    // Guarded because the radius below would otherwise be computed from 1e9-(-1e9).
-    if (w.placements.empty() || lo.x > hi.x) { lo = Vec3{0,0,0}; hi = Vec3{0,0,0}; }
-    centre = Vec3{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
-    radius = std::fmax(1.0f, 0.5f * std::sqrt((hi.x-lo.x)*(hi.x-lo.x) +
-                                              (hi.y-lo.y)*(hi.y-lo.y) +
-                                              (hi.z-lo.z)*(hi.z-lo.z)));
-}
-
 #endif
 
 #if AVER_MODULE_SCENE
 #if AVER_MODULE_VOXI
-// Fits the GI volume to a level. Called on EVERY level load, whatever the camera does -- see
-// levelBounds for what happened while this was reachable only through the camera fallback.
-void SandboxApp::fitGiVolumeTo(const fmt::OcWorldData& w) {
-    Vec3 centre; f32 radius = 1.0f;
-    levelBounds(w, centre, radius);
+// Fits the GI volume to the loaded level. Called on EVERY level load, whatever the camera does.
+//
+// THE BOUNDS ARE level_'s (GameLevel::placementBounds), the same numbers the shipped game fits its
+// volume to. They were computed here by a copy of that loop, which had already drifted once.
+//
+// WHY THIS IS NOT PART OF THE CAMERA FRAMING. It lived at the bottom of the camera framing, which
+// only runs for a level with NO saved CAMERA record -- the fallback for "we do not know where to
+// look". So saving a level's camera silently stopped its GI volume being fitted, and the volume
+// stayed at its authored default (centre 0,0,300, half-extent 1200cm) no matter how big the level
+// was. Measured on Intel Sponza, which spans X -1386..747, Y -1595..1949, Z -43..1688: a third of
+// the level sat outside its own GI volume, and nothing said so. Adding --cam made it worse for the
+// same reason -- skipping the camera framing also skipped the fit.
+//
+// A radius, not a box, because that is what both consumers want: the camera wants a distance to
+// stand back by, and setVolume takes a half-edge extent.
+void SandboxApp::fitGiVolumeToLevel() {
+    Vec3 lo{0, 0, 0}, hi{0, 0, 0};
+    f32 radius = 1.0f;
+    level_.placementBounds(lo, hi, radius);   // false (lo = hi = 0, radius 1) for a level with no placements
+    const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
     giCenter_ = centre;
     giExtent_ = radius;
     AVER_INFO("[Voxi] GI volume fitted to the level: centre ({:.0f},{:.0f},{:.0f}) half-extent {:.0f}cm",
@@ -1469,9 +1379,12 @@ void SandboxApp::fitGiVolumeTo(const fmt::OcWorldData& w) {
 #endif
 
 #if AVER_MODULE_SCENE
-void SandboxApp::frameCameraOn(const fmt::OcWorldData& w) {
-    Vec3 centre; f32 radius = 1.0f;
-    levelBounds(w, centre, radius);
+// Puts the editor camera where the whole loaded level is visible, and fits the fly speed to it.
+void SandboxApp::frameCameraOnLevel() {
+    Vec3 lo{0, 0, 0}, hi{0, 0, 0};
+    f32 radius = 1.0f;
+    level_.placementBounds(lo, hi, radius);
+    const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
     const f32 dist = radius * 1.6f;
     camPos_ = Vec3{centre.x - dist * 0.65f, centre.y - dist * 0.65f, centre.z + dist * 0.55f};
     const Vec3 look = (centre - camPos_).getSafeNormal();
@@ -1514,7 +1427,6 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // releases a graph-class instance's GraphHost/VAR storage).
     for (const ClassInstance& ci : levelClassInstances_) aver_fw_destroy(ci.entity);
     levelClassInstances_.clear();
-    classPlacements_.clear();
 #endif
     scene::World& world = scene::World::instance();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
@@ -1596,6 +1508,10 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // slider had never been touched. With one member, leaving it alone would carry one level's
     // weather into the next one that declares none.
     fogDensity_ = 4e-6f;
+    // AND level_'s OWN STATE: its environment, spawn record, PCG volumes, class placements and bounds.
+    // Its entity and body lists are the load-time subset of the editor's own, already destroyed and
+    // removed above; destroying an entity already destroyed and removing a removed body are no-ops.
+    level_.unload();
     levelPath_.clear();
 #if AVER_MODULE_LANDSCAPE
     unloadLandscape(eng.device());

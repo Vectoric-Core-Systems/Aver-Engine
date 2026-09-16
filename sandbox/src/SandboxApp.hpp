@@ -16,6 +16,7 @@
 #include "aver/core/Log.hpp"
 // The runtime's content component (Runtime/), which the editor uses rather than keeping its own copy.
 #include "aver/game/GameContent.hpp"
+#include "aver/game/GameLevel.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -1827,7 +1828,7 @@ private:
     // IT USED TO DEFAULT TO OFF, opening the editor on an empty world: without streaming nothing runs
     // the scatter generator, so a 33-species level showed its terrain and 14 hand-placed pines and
     // nothing else, with the fixing flag undiscoverable.
-    // The delay is not cosmetic: frameCameraOn moves the camera on level load, so enabling on frame 0
+    // The delay is not cosmetic: frameCameraOnLevel moves the camera on level load, so enabling on frame 0
     // would stream a ring around the start position and immediately evict it.
     int chunkStreamAutoFrames_ = 5;
     int droneAutoFrames_ = 0;        // --drone: frames left before auto-enabling, 0 = off
@@ -3904,7 +3905,8 @@ private:
     bool        upgradeAsked_ = false;
     bool        exitPrompt_ = false;      // the unsaved-changes modal is up
     std::string exitPromptError_;         // why a "Save all" attempt failed
-    // Every PCGVOLUME the loaded level carried, kept verbatim so a save cannot drop them.
+    // Every PCGVOLUME the loaded level carried, kept verbatim so a save cannot drop them. The editor's
+    // own copy, seeded from the load: the Project Settings PCG page edits it in place.
     std::vector<fmt::OcPcgVolume> levelPcgVolumes_;
     // The loaded level's own header, placements and PCG volumes stripped.
     // THE SAME REASONING AS levelPcgVolumes_, GENERALISED: saveLevel used to build a fresh OcWorldData
@@ -3962,7 +3964,7 @@ private:
     // Entities placed with `snap`, and the AUTHORED z offset each was placed at. Absent = not snapped.
     std::unordered_map<u32, f64> entitySnapZ_;
 
-    // TRUE WHILE THE OPEN LEVEL WAS LOADED THROUGH THE LEGACY OCMAP PATH (loadLegacyOcmapLevel),
+    // TRUE WHILE THE OPEN LEVEL WAS LOADED THROUGH THE LEGACY OCMAP PATH (onLegacyOcmapInstantiated),
     // rather than the ordinary OCWORLD one -- decided by which RECORDS the file uses, not its header
     // or extension. saveLevel reads it to choose which writer owns the file: a level loaded as OCMAP
     // must be saved as OCMAP, or ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM survive the read only to be
@@ -3976,7 +3978,7 @@ private:
     // Which record kind each legacy-loaded entity came from (true = DEFORM, false/absent = PLACE),
     // and that record's own field the ordinary OcWorldPlacement round trip has no room for: a PLACE's
     // numeric SURFACE-table index (entityLegacySurface_; -1 = "the asset's own") or a DEFORM's
-    // soft-body material name (entityLegacyMaterial_, e.g. "rubber") -- see loadLegacyOcmapLevel's
+    // soft-body material name (entityLegacyMaterial_, e.g. "rubber") -- see onLegacyOcmapInstantiated's
     // "MATERIAL IS DELIBERATELY LEFT EMPTY" comment for why neither reaches the CMeshRenderer. An
     // entity absent from entityLegacyDeform_ saves as an ordinary PLACE with surface -1.
     std::unordered_map<u32, bool> entityLegacyDeform_;
@@ -3992,6 +3994,10 @@ private:
     // The project's content index, asset resolvers, mesh registry, built-in meshes and surface looks,
     // and material cache: the runtime's GameContent, shared with AverEngineRuntime.exe.
     game::GameContent content_;
+    // The loaded level: parsing, placement instantiation, environment, spawn record, PCG volumes, class
+    // placements and bounds -- the runtime's GameLevel. The editor's live entity list (levelEntities_,
+    // which edits add to and remove from) and every per-entity record stay SandboxApp's.
+    game::GameLevel level_;
 #if AVER_MODULE_PBR
     // mesh id -> its cached outline line mesh (0 = this mesh yields no outline). See
     // selectionOutlineLines; dropped with the project's meshes.
@@ -4111,9 +4117,15 @@ private:
 
     bool handleOpenRequest(const char* path);
 
+    // Loads through level_ (GameLevel, shared with the runtime), which parses the file -- OCWORLD or
+    // legacy .ocmap -- and instantiates its placements; the editor's own per-entity records are built
+    // in the afterInstantiate hook this installs.
     void loadLevel(Engine& eng, const std::string& path);
 
-    void loadLegacyOcmapLevel(Engine& eng, const std::string& path);
+    // loadLevel's afterInstantiate hook, one per file kind: the editor's labels, body map, save
+    // bookkeeping, PlayerStart marker, camera and GI fit for what level_ just built.
+    void onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded);
+    void onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& loaded);
 
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();
@@ -4121,13 +4133,13 @@ private:
 
     void applyLevelSky(const fmt::OcWorldData& w);
 
-    void levelBounds(const fmt::OcWorldData& w, Vec3& centre, f32& radius) const;
-
 #if AVER_MODULE_VOXI
-    void fitGiVolumeTo(const fmt::OcWorldData& w);
+    // Fits the GI volume to the loaded level's bounds (level_.placementBounds).
+    void fitGiVolumeToLevel();
 #endif
 
-    void frameCameraOn(const fmt::OcWorldData& w);
+    // Frames the editor camera on the loaded level's bounds (level_.placementBounds).
+    void frameCameraOnLevel();
 
     bool requestOpenLevel(const std::string& path, const char* why);
 
@@ -4174,12 +4186,9 @@ private:
     bool hasLevelClouds_ = false;
 
 #if AVER_MODULE_FRAMEWORK
-    // GRAPH-AS-CLASS / any other class placement -- see loadLevel's own comment (where
-    // classPlacements_ is populated) and spawnClassPlacements' (where it is consumed and
-    // levelClassInstances_ is filled) for the full ordering story. Mirrors GameLevel.hpp's own pair
-    // of members, one for one.
-    std::vector<fmt::OcWorldPlacement> classPlacements_;
-
+    // GRAPH-AS-CLASS / any other class placement: level_.classPlacements() holds what the load
+    // found; spawnClassPlacements spawns them and fills levelClassInstances_.
+    //
     // WHICH PLACEMENT EACH LIVE INSTANCE CAME FROM, carried explicitly rather than by position.
     // This used to be a bare vector<int32_t> read as index-parallel -- wrong: spawnClassPlacements
     // `continue`s past a class it cannot resolve WITHOUT pushing, so once any placement names an
