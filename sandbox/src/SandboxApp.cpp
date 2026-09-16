@@ -7,6 +7,7 @@
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
+#include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
 
 namespace aver {
@@ -2608,13 +2609,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 
     const Vec3 fwd = camForward();
     const f32 aspect = viewAspect();
-    const Mat4 view = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0,0,1});
-    const f32 zNear = 2.0f, zFar = 200000.0f;   // cm
-    const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
-    const Mat4 viewProj = view * proj;
-    const Mat4 invVP = viewProj.inverse();
-    e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
-    invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
+    const game::CameraMatrices cam = game::pushCamera(*e.device(), camPos_, fwd, aspect);
+    invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = camPos_;
 
     // ONE MEMBER FOR ONE VALUE. This used to read `fog = fogDensity_` and then, on a level
     // with a FOG record, overwrite it with a SECOND member `levelFog_` that saveLevel wrote

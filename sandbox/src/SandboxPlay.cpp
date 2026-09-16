@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/game/GameCamera.hpp"
 #include "aver/platform/Gamepad.hpp"
 
 namespace aver {
@@ -363,66 +364,10 @@ void SandboxApp::pushInput(bool uiActive) {
 // While playing, drives the view camera from the pawn's published view node, falling back to the
 // pawn's own matrix. Row 3 is the position, row 0 the forward (+X) axis.
 void SandboxApp::drivePlayCamera() {
-    scene::World& w = scene::World::instance();
-    scene::Entity e = scene::kInvalidEntity;
-
-    // Reset every call, unconditionally, ahead of every early return below -- see firstPersonPawn_'s
-    // own declaration for why a value left over from a previous call is not merely wrong but
-    // dangerous (a reused entity handle picking this frame's edit-mode selection back up).
-    firstPersonPawn_ = scene::kInvalidEntity;
-
-    if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-        if (pawn == 0) return;
-        e = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
-    } else if (dronePlayActive() && droneEntity_ != scene::kInvalidEntity) {
-        // THE DRONE IS THE PAWN WHEN THERE IS NO GameMode, so the camera follows it like one.
-        // It never was before: gated on aver_fw_controlled_pawn, and the drone fallback never
-        // calls aver_fw_begin_play, so this returned 0 immediately -- the drone flew and the
-        // camera sat wherever it was left, with no possession and no follow.
-        // Treated as the possessed pawn HERE rather than through aver_fw_begin_play, since real
-        // possession needs a PlayerController and a pawn CLASS, which the fallback exists for
-        // projects declaring neither.
-        e = droneEntity_;
-    } else {
-        return;
-    }
-    if (!w.valid(e)) return;
-
-    int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
-    aver_fw_view(&mode, &eye, &boom);
-
-    // ONLY first person hides anything. Set from `e` (the pawn itself), not `ve`/the view node
-    // below: a body mesh's COMP hangs off the pawn's own entity or an ancestor chain that ends
-    // there, never off the camera transform, so owner-hide has to compare against the same entity the hierarchy roots at.
-    firstPersonPawn_ = (mode == AVER_FW_VIEW_FIRST_PERSON) ? e : scene::kInvalidEntity;
-
-    // Prefer the view node; fall back to the pawn if it has not published one.
-    const int32_t viewId = aver_fw_view_entity();
-    const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(viewId));
-    const bool haveView = viewId != 0 && w.valid(ve);
-    const Mat4& vm = haveView ? w.worldMatrix(ve) : w.worldMatrix(e);
-    const Mat4& pm = w.worldMatrix(e);
-
-    const Vec3 headPos{vm.m[3][0], vm.m[3][1], vm.m[3][2]};
-    const Vec3 headFwd = Vec3{vm.m[0][0], vm.m[0][1], vm.m[0][2]}.getSafeNormal();
-    const Vec3 pawnPos{pm.m[3][0], pm.m[3][1], pm.m[3][2]};
-    const Vec3 pawnFwd = Vec3{pm.m[0][0], pm.m[0][1], pm.m[0][2]}.getSafeNormal();
-    const Vec3 up{0, 0, 1};
-
-    Vec3 look;
-    if (mode == AVER_FW_VIEW_FIRST_PERSON) {
-        camPos_ = haveView ? headPos : pawnPos + up * eye;
-        look    = headFwd;
-    } else {
-        const Vec3 pivot = haveView ? headPos : pawnPos + up * eye;
-        const Vec3 armDir = haveView ? headFwd : pawnFwd;
-        camPos_ = pivot - armDir * boom;
-        look    = (pivot - camPos_).getSafeNormal();
-    }
-    // camForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
-    yaw_   = std::atan2(look.y, look.x);
-    pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
+    // THE DRONE STANDS IN AS THE PAWN WHEN THERE IS NO GameMode: the drone fallback never calls
+    // aver_fw_begin_play, so without this the camera would sit still while the drone flies.
+    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_,
+                                              dronePlayActive() ? droneEntity_ : scene::kInvalidEntity);
 }
 
 #endif
@@ -434,7 +379,7 @@ bool SandboxApp::inViewport(f32 mx, f32 my) const { return mx >= vpX_ && mx < vp
 
 // The camera's forward axis, built from yaw and pitch.
 Vec3 SandboxApp::camForward() const {
-    return Vec3{ std::cos(pitch_)*std::cos(yaw_), std::cos(pitch_)*std::sin(yaw_), std::sin(pitch_) };
+    return game::cameraForward(yaw_, pitch_);
 }
 
 #if AVER_MODULE_SCRIPTING

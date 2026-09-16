@@ -1,4 +1,5 @@
 #include "aver/game/GameApp.hpp"
+#include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
 
 #include <filesystem>
@@ -626,54 +627,7 @@ void GameApp::tickGameplay(f32 dt) {
 
 void GameApp::drivePlayCamera() {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-    // Reset every call, unconditionally, ahead of every early return below -- mirrors
-    // SandboxPlay.cpp's own drivePlayCamera: a value left over from a previous call is not merely
-    // wrong but dangerous (a stale entity handle from an ended session feeding
-    // DrawWorldOptions::ownerHideRoot in onRender).
-    firstPersonPawn_ = scene::kInvalidEntity;
-
-    if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
-    const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-    if (pawn == 0) return;
-    const scene::Entity ent = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
-    scene::World& w = scene::World::instance();
-    if (!w.valid(ent)) return;
-
-    int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
-    aver_fw_view(&mode, &eye, &boom);
-
-    // ONLY FIRST PERSON HIDES ANYTHING. Set from `ent` (the pawn itself), not the view node below --
-    // mirrors SandboxPlay.cpp's own comment: a body mesh's CMeshRenderer hangs off the pawn's own
-    // entity or an ancestor chain that ends there, never off the camera transform, so owner-hide has
-    // to compare against the same entity the hierarchy roots at.
-    firstPersonPawn_ = (mode == AVER_FW_VIEW_FIRST_PERSON) ? ent : scene::kInvalidEntity;
-
-    // Prefer the view node; fall back to the pawn if it has not published one.
-    const int32_t viewId = aver_fw_view_entity();
-    const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(viewId));
-    const bool haveView = viewId != 0 && w.valid(ve);
-    const Mat4& vm = haveView ? w.worldMatrix(ve) : w.worldMatrix(ent);
-    const Mat4& pm = w.worldMatrix(ent);
-
-    const Vec3 headPos{vm.m[3][0], vm.m[3][1], vm.m[3][2]};
-    const Vec3 headFwd = Vec3{vm.m[0][0], vm.m[0][1], vm.m[0][2]}.getSafeNormal();
-    const Vec3 pawnPos{pm.m[3][0], pm.m[3][1], pm.m[3][2]};
-    const Vec3 pawnFwd = Vec3{pm.m[0][0], pm.m[0][1], pm.m[0][2]}.getSafeNormal();
-    const Vec3 up{0, 0, 1};
-
-    Vec3 look;
-    if (mode == AVER_FW_VIEW_FIRST_PERSON) {
-        camPos_ = haveView ? headPos : pawnPos + up * eye;
-        look    = headFwd;
-    } else {
-        const Vec3 pivot  = haveView ? headPos : pawnPos + up * eye;
-        const Vec3 armDir = haveView ? headFwd : pawnFwd;
-        camPos_ = pivot - armDir * boom;
-        look    = (pivot - camPos_).getSafeNormal();
-    }
-    // camForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
-    yaw_   = std::atan2(look.y, look.x);
-    pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
+    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_);
 #endif
 }
 
@@ -1761,7 +1715,7 @@ void GameApp::applyProjectRenderSettings() {
 }
 
 Vec3 GameApp::camForward() const {
-    return Vec3{ std::cos(pitch_) * std::cos(yaw_), std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_) };
+    return game::cameraForward(yaw_, pitch_);
 }
 
 f32 GameApp::viewAspect(const Engine& e) const {
@@ -1803,20 +1757,15 @@ void GameApp::pushFrame(Engine& e) {
     const Vec3 fwd = camForward();
     yaw_ = yawBeforeWobble;
     const f32  aspect = viewAspect(e);
-    const Mat4 view   = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0, 0, 1});
-    const f32  zNear = 2.0f, zFar = 200000.0f;   // centimetres
-    const Mat4 proj = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
-    const Mat4 viewProj = view * proj;           // row-vector: v * M, so view then proj
-    const Mat4 invVP = viewProj.inverse();
-    dev->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
-    invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
+    const game::CameraMatrices cam = game::pushCamera(*dev, camPos_, fwd, aspect);
+    invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = camPos_;
 
     // Logged once, and it is this commit's oracle. A game asked for 800x600 must report 1.333 and
     // one asked for 1600x900 must report 1.778; the editor's dockspace formula cannot produce
     // either, because it divides a panel that does not exist here. Cheap enough to leave in.
     if (frames_ <= 1) {
         AVER_INFO("[Game] camera: aspect={:.3f} fov=60deg near={} far={} (from the swapchain, not a viewport rect)",
-                  aspect, zNear, zFar);
+                  aspect, 2.0f, 200000.0f);
     }
 
     // ONE MEMBER FOR ONE VALUE, matching the editor's own fix: applyLevelSky seeds fogDensity_ from
