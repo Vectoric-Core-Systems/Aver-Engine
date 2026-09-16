@@ -1689,7 +1689,7 @@ void GameApp::pushFrame(Engine& e) {
     // either, because it divides a panel that does not exist here. Cheap enough to leave in.
     if (frames_ <= 1) {
         AVER_INFO("[Game] camera: aspect={:.3f} fov=60deg near={} far={} (from the swapchain, not a viewport rect)",
-                  aspect, 2.0f, 200000.0f);
+                  aspect, game::kCameraNearCm, game::kCameraFarCm);
     }
 
     // ONE MEMBER FOR ONE VALUE, matching the editor's own fix: applyLevelSky seeds fogDensity_ from

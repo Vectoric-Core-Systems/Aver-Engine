@@ -30,6 +30,11 @@ inline Vec3 cameraForward(f32 yaw, f32 pitch) {
     return Vec3{ std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch) };
 }
 
+// The clip planes pushCamera uses, in centimetres -- named so a log line can report them without
+// retyping the numbers.
+inline constexpr f32 kCameraNearCm = 2.0f;
+inline constexpr f32 kCameraFarCm  = 200000.0f;
+
 struct CameraMatrices {
     Mat4 viewProj;
     Mat4 invVP;
@@ -40,8 +45,7 @@ struct CameraMatrices {
 // (centimetres).
 inline CameraMatrices pushCamera(rhi::IDevice& device, const Vec3& pos, const Vec3& forward, f32 aspect) {
     const Mat4 view = Mat4::lookAtLH(pos, pos + forward, Vec3{0, 0, 1});
-    const f32  zNear = 2.0f, zFar = 200000.0f;   // centimetres
-    const Mat4 proj     = Mat4::perspectiveLH(radians(60.0f), aspect, zNear, zFar);
+    const Mat4 proj     = Mat4::perspectiveLH(radians(60.0f), aspect, kCameraNearCm, kCameraFarCm);
     const Mat4 viewProj = view * proj;           // row-vector: v * M, so view then proj
     const Mat4 invVP    = viewProj.inverse();
     device.setCamera(&viewProj.m[0][0], &invVP.m[0][0], &pos.x);
