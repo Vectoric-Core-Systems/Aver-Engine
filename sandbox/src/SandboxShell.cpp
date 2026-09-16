@@ -274,16 +274,8 @@ bool SandboxApp::onCloseGuard() {
     return true;
 }
 
-// Has the LEVEL been edited since it was opened?
+// Does the LEVEL differ from its file?
 //
-// THE UNDO STACK IS THE ONLY SIGNAL THERE IS. There is no per-level dirty flag anywhere in this
-// editor: saveLevel does not clear anything a later check could read, and unloadLevel wipes the
-// stack unconditionally -- so this can only be asked BEFORE a load or an unload, never after.
-// An empty stack does not PROVE nothing changed; a non-empty one proves the opposite, which is
-// the direction that must never be wrong when the question is "may I throw this away".
-//
-// It over-reports after a save (the stack is not cleared), so the worst this costs is a prompt
-// somebody dismisses. The other error costs them their level.
 // TRUE WHEN THE LEVEL DIFFERS FROM WHAT IS ON DISK, which is not the same question as "has
 // anything ever been edited" -- and it used to be answered with canUndo(), i.e. "is the undo
 // stack non-empty".

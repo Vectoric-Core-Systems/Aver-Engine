@@ -305,11 +305,9 @@ bool SandboxApp::requestOpenLevel(const std::string& path, const char* why) {
 // Drains a pending open. Called once per frame from onUpdate, which is where an Engine& is.
 void SandboxApp::applyPendingOpen(Engine& eng) {
     if (pendingOpenPath_.empty() || pendingOpenPrompt_) return;
-    // THE UNDO STACK IS THE ONLY "unsaved" SIGNAL THERE IS -- there is no per-level dirty flag
-    // anywhere in this editor, and unloadLevel clears the stack unconditionally, so it can only
-    // be read BEFORE the load. An empty stack does not prove nothing changed; a non-empty one
-    // proves the opposite, which is the direction that must never be wrong here.
-    if (canUndo()) { pendingOpenPrompt_ = true; return; }
+    // The prompt asks whether the level differs from its file, the same test the exit prompt
+    // uses; see levelHasUnsavedEdits.
+    if (levelHasUnsavedEdits()) { pendingOpenPrompt_ = true; return; }
     const std::string path = pendingOpenPath_;
     pendingOpenPath_.clear();
     openLevelDirect(eng, path);
