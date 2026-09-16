@@ -126,11 +126,15 @@ int main() {
             "tool.select", "tool.move", "tool.rotate", "tool.scale",
             "sculpt.raise", "sculpt.lower", "sculpt.smooth", "sculpt.flatten",
             "mode.toggleLandscape", "view.frameSelected",
-            "play.releaseMouse", "play.stop",
+            "play.start", "play.releaseMouse", "play.stop",
             "drawer.dismiss", "drawer.toggleContent", "drawer.toggleConsole",
             "edit.delete", "edit.undo", "edit.redo", "edit.copy", "edit.paste",
             "edit.duplicate", "edit.selectAll",
-            "asset.save", "level.save", "graph.commentBox", "graph.frameAll",
+            "asset.save", "level.save", "file.saveAll", "graph.commentBox", "graph.frameAll",
+            // 2026-09-16: Play, Save All, Compile/Reload Scripts and Screenshot gained chords. Persistence
+            // is by strId, not slot, so inserting play.start and file.saveAll beside their families
+            // renames nothing a user has already rebound.
+            "scripts.compile", "scripts.reload", "view.screenshot",
         };
         const auto& defs = editor::keybindDefs();
         check(defs.size() == golden.size(),

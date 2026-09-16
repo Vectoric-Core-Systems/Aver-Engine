@@ -2134,6 +2134,22 @@ void SandboxApp::buildViewportOverlay() {
 #if AVER_MODULE_VOXI
         ImGui::Separator();
         if (ImGui::Selectable("Voxel Radiance (GI debug)", giDebugView_)) giDebugView_ = !giDebugView_;
+        // THE SAME TWO CONSOLE-VAR-ONLY GI PAINTS Settings > Rendering exposes (SandboxSettings.cpp):
+        // raw bool slots owned by EditorConsole.hpp (consoleGiPoisonViewSlot()'s own comment there),
+        // reasserted onto the live voxiRenderer_ every frame from onUpdate. Reading and toggling the
+        // slots directly here, exactly as that page does, means this entry and the Settings checkbox
+        // are the same switch rather than two that can disagree.
+        if (ImGui::Selectable("GI Poison View (debug)", editor::consoleGiPoisonViewSlot()))
+            editor::consoleGiPoisonViewSlot() = !editor::consoleGiPoisonViewSlot();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Paints an unmistakable colour over any pixel where a ReSTIR GI guard\n"
+                              "fired this frame. See Settings > Rendering for the colour legend.");
+        if (ImGui::Selectable("GI Visibility Path View (debug)", editor::consoleGiVisPathViewSlot()))
+            editor::consoleGiVisPathViewSlot() = !editor::consoleGiVisPathViewSlot();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Paints F2's resolved GI visibility path (traced/reconstructed/\n"
+                              "half-res/no-ray) over indirect diffuse. Suppressed while GI Poison\n"
+                              "View above is also on.");
 #endif
         // G-buffer debug views: generic IDevice state (RHI.hpp), not gated on any module. Selecting
         // the ALREADY-active one turns it off (same toggle-back idiom the GI entry uses);

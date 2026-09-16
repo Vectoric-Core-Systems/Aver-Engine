@@ -1936,6 +1936,27 @@ private:
 
     void saveLevelInteractive();
 
+    // SAVE ALL: the level plus every dirty asset tab (AssetEditorHost::saveAllDirty, which until
+    // 2026-09-16 ran only from the quit prompt). File > Save All and Ctrl+Shift+S. Defined in
+    // SandboxShell.cpp.
+    void saveAll();
+
+    // VIEWPORT SCREENSHOT to <project>/Saved/Screenshots (File > Take Screenshot, F9). The writer used to
+    // exist only inside captureCheck's --frames gate. request...() only sets the latch; service...()
+    // runs once a frame beside captureCheck (SandboxRender.cpp), asks the device for a capture, and
+    // writes the PNG -- cropped to the 3D viewport -- when the frame image arrives.
+    void requestViewportScreenshot();
+    void serviceViewportScreenshot(Engine& e);
+    u8  viewportShotState_ = 0;    // 0 idle, 1 requested, 2 capture requested and awaiting the image
+    u64 viewportShotFrame_ = 0;    // engine frame the capture was requested on
+    u32 viewportShotTries_ = 0;    // frames waited for the image; gives up rather than waiting forever
+
+    // WINDOW TITLE kept in step with the open level and whether it has unsaved edits. Before 2026-09-16
+    // it was set once when a project opened and never again. Defined in SandboxApp.cpp; called once a
+    // frame and only touches the window when the text changes.
+    void refreshWindowTitle(Engine& e);
+    std::string windowTitleShown_;
+
     void startContentWatch();
 
     void pumpContentWatch();
@@ -1952,6 +1973,9 @@ private:
     std::vector<FileEvent> watchEvents_;
 
     bool autoCompile_ = false;
+    // True when --auto-compile turned it on for this run: the stored preference neither overrides it
+    // on load nor is overwritten by it on save (SandboxSettings.cpp).
+    bool autoCompileFromCli_ = false;
     int focusLevelAt_ = 0;
     // Frames left before chunk streaming auto-enables; 0 = off. ON BY DEFAULT.
     // IT USED TO DEFAULT TO OFF, opening the editor on an empty world: without streaming nothing runs
@@ -2113,7 +2137,7 @@ private:
     // captures every component via EntitySnapshot -- see EditorEntitySnapshot.hpp for what it
     // deliberately omits (hierarchy; CName's internal blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent };
         Kind kind = Kind::Transform;
         // WHICH EDIT THIS IS, monotonically. Identifies the document's state so a save can record
         // "clean as of here" -- see levelHasUnsavedEdits. Never reused, so undo and redo move the
@@ -2176,6 +2200,14 @@ private:
         // pair a Rename swaps between, and they are the outliner label rather than CName -- see
         // applyEntityLabel for why the editor's display name is the one being edited.
         std::string renameBefore, renameAfter;
+
+#if AVER_MODULE_SCENE
+        // RemoveComponent payload: the removed component's type and byte-exact contents, captured
+        // the moment before removal so undo can put it back. Reuses EntitySnapshot::Comp -- the
+        // identical "one component, byte copy" shape captureEntity's own loop already produces for
+        // `snap` above -- rather than a second version of the same three lines.
+        editor::EntitySnapshot::Comp removedComponent;
+#endif
 
         // LandscapeStroke payload: the heightfield sub-rectangle a brush stroke touched, before and
         // after.
@@ -2258,6 +2290,17 @@ private:
     void applyEntityLabel(EditId id, const std::string& label);
 
     void renameEntity(scene::Entity e, const std::string& to);
+
+    // RemoveComponent's two apply halves. restoreComponent is undo's (puts the captured bytes
+    // back); removeComponentRaw is redo's, and also what the Details panel's own removal
+    // (removeComponentFromSelection) calls to do the removal before pushing the undo entry.
+    void restoreComponent(EditId id, const editor::EntitySnapshot::Comp& comp);
+    void removeComponentRaw(EditId id, u32 type);
+
+    // Removes one component from the selected entity as one undoable command -- the Details
+    // panel's Remove Component handler. False when the entity is gone or does not carry `type`,
+    // matching World::removeComponent's own refusal so a stale click is a silent no-op.
+    bool removeComponentFromSelection(u32 type);
 #endif
 
     void pushEdit(EditCmd c);

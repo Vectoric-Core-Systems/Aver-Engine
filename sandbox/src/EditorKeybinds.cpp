@@ -89,6 +89,9 @@ ImGuiKey nameToKey(std::string_view s) {
 //   SculptRaise..SculptFlatten-- handleManip(), the Landscape-mode branch of the SAME 1..4 dispatch
 //   ModeToggleLandscape       -- handleManip(), `IsKeyPressed(ImGuiKey_Tab)` (default repeat=true)
 //   ViewFrameSelected         -- the F-focus block, `IsKeyPressed(ImGuiKey_F)` (default repeat=true)
+//   PlayStart                 -- NEW command (2026-09-16): Play had only its toolbar button and the
+//                                Simulate panel's. Alt+P, Unreal's chord for the same thing. Viewport
+//                                scope, so it cannot fire during the session it would start.
 //   PlayReleaseMouse          -- `IsKeyPressed(ImGuiKey_F1,false) && io.KeyShift` (Ctrl unchecked)
 //   PlayStop                  -- `IsKeyPressed(ImGuiKey_Escape,false)`, gated on a play session
 //   DrawerDismiss             -- `IsKeyPressed(ImGuiKey_Escape,false)`, gated on a drawer being open
@@ -114,6 +117,17 @@ ImGuiKey nameToKey(std::string_view s) {
 //                                it tests WantTextInput rather than window focus, because saving
 //                                is not a viewport gesture but renaming an entity must not save
 //                                the level on the "s" of a name.
+//   SaveAll                   -- NEW command (2026-09-16): Ctrl+Shift+S saves the level AND every dirty
+//                                asset tab (AssetEditorHost::saveAllDirty, which until then ran only
+//                                from the quit prompt). It takes Ctrl+Shift+S from LevelSave and
+//                                AssetSave, which used to fire on it because neither checked Shift:
+//                                both now check Shift, so plain Ctrl+S is unchanged and the shifted
+//                                chord means the superset instead of a second, partial save.
+//   CompileScripts/ReloadScripts -- NEW commands (2026-09-16): the two most-fired actions of the C#
+//                                loop had no chord. Ctrl+Shift+B (Visual Studio's Build) and
+//                                Ctrl+Shift+R.
+//   Screenshot                -- NEW command (2026-09-16): F9 saves a PNG of the 3D viewport. Also in
+//                                the play-session scope, since a running game is the likeliest subject.
 //   EditSelectAll             -- Ctrl+A over the OUTLINER's drawn order. It shipped as a menu item
 //                                whose "Ctrl+A" hint was a hardcoded string with no key behind it,
 //                                so the menu advertised a shortcut that did nothing. The Content
@@ -129,6 +143,9 @@ constexpr u32 kViewportScope = kScopeObjectMode | kScopeLandscapeMode;
 constexpr u32 kEditScope = kViewportScope | kScopeGraphEditor;
 // The actor editor has its own viewport with the SAME four tools, hardcoded a second time.
 constexpr u32 kToolScope = kScopeObjectMode | kScopeActorEditor;
+// Commands that mean the same thing wherever the user is -- the level, any asset tab -- so conflict
+// detection compares them against every scope a chord could collide in.
+constexpr u32 kAnywhereScope = kViewportScope | kScopeGraphEditor | kScopeActorEditor | kScopeAssetEditor;
 constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::ToolSelect,  "tool.select",  "Select Tool",           {ImGuiKey_1, false,false,false}, kToolScope,    false,false, true},
     {CommandId::ToolMove,    "tool.move",    "Move Tool",             {ImGuiKey_2, false,false,false}, kToolScope,    false,false, true},
@@ -140,22 +157,27 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::SculptFlatten, "sculpt.flatten", "Sculpt: Flatten",   {ImGuiKey_4, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::ModeToggleLandscape, "mode.toggleLandscape", "Toggle Landscape Mode", {ImGuiKey_Tab, false,false,false}, kViewportScope, false,false, true},
     {CommandId::ViewFrameSelected,   "view.frameSelected",   "Frame Selected",        {ImGuiKey_F,   false,false,false}, kEditScope | kScopeActorEditor, false,false, true},
+    {CommandId::PlayStart,        "play.start",        "Play",                 {ImGuiKey_P,      false,false,true }, kViewportScope,    true, true,  false},
     {CommandId::PlayReleaseMouse, "play.releaseMouse", "Release Mouse (Play)", {ImGuiKey_F1,     false,true, false}, kScopePlaySession, false,true,  false},
     {CommandId::PlayStop,         "play.stop",         "Stop Play Session",    {ImGuiKey_Escape, false,false,false}, kScopePlaySession, false,false, false},
     {CommandId::DrawerDismiss,       "drawer.dismiss",       "Dismiss Drawer",          {ImGuiKey_Escape, false,false,false}, kScopeDrawerOpen, false,false, false},
     {CommandId::DrawerToggleContent, "drawer.toggleContent", "Toggle Content Browser",  {ImGuiKey_Space,  true, false,false}, kScopeGlobalUI,   true, false, false},
     {CommandId::DrawerToggleConsole, "drawer.toggleConsole", "Toggle Console",          {ImGuiKey_GraveAccent, false,false,false}, kScopeGlobalUI, false,false, false},
     {CommandId::EditDelete, "edit.delete", "Delete",    {ImGuiKey_Delete, false,false,false}, kEditScope, false,false, false},
-    {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kEditScope, true, true,  false},
-    {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kEditScope, true, false, false},
+    {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kEditScope | kScopeAssetEditor, true, true,  false},
+    {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kEditScope | kScopeAssetEditor, true, false, false},
     {CommandId::EditCopy,      "edit.copy",      "Copy",      {ImGuiKey_C, true,false,false}, kEditScope, true, true, false},
     {CommandId::EditPaste,     "edit.paste",     "Paste",     {ImGuiKey_V, true,false,false}, kEditScope, true, true, false},
     {CommandId::EditDuplicate, "edit.duplicate", "Duplicate", {ImGuiKey_D, true,false,false}, kEditScope, true, true, false},
     {CommandId::EditSelectAll, "edit.selectAll", "Select All", {ImGuiKey_A, true,false,false}, kViewportScope, true, true, false},
-    {CommandId::AssetSave,     "asset.save",     "Save Asset", {ImGuiKey_S, true,false,false}, kScopeAssetEditor, true, false, false},
-    {CommandId::LevelSave,     "level.save",     "Save Level",            {ImGuiKey_S, true,false,false}, kViewportScope, true, false, false},
+    {CommandId::AssetSave,     "asset.save",     "Save Asset", {ImGuiKey_S, true,false,false}, kScopeAssetEditor, true, true, false},
+    {CommandId::LevelSave,     "level.save",     "Save Level",            {ImGuiKey_S, true,false,false}, kViewportScope, true, true, false},
+    {CommandId::SaveAll,       "file.saveAll",   "Save All",              {ImGuiKey_S, true,true, false}, kAnywhereScope, true, true, false},
     {CommandId::GraphCommentBox, "graph.commentBox", "Graph: Comment Box", {ImGuiKey_C, false,false,false}, kScopeGraphEditor, true, false, false},
     {CommandId::GraphFrameAll,   "graph.frameAll",   "Graph: Frame All",             {ImGuiKey_Home, false,false,false}, kScopeGraphEditor, false,false, false},
+    {CommandId::CompileScripts,  "scripts.compile",  "Compile Scripts",   {ImGuiKey_B,  true, true, false}, kAnywhereScope, true, true, false},
+    {CommandId::ReloadScripts,   "scripts.reload",   "Reload Scripts",    {ImGuiKey_R,  true, true, false}, kAnywhereScope, true, true, false},
+    {CommandId::Screenshot,      "view.screenshot",  "Screenshot Viewport", {ImGuiKey_F9, false,false,false}, kAnywhereScope | kScopePlaySession, true, true, false},
 }};
 
 static_assert(kDefs.size() == kCommandCount, "kDefs must have exactly one row per CommandId");
@@ -247,6 +269,12 @@ bool KeybindRegistry::pressed(CommandId id, const ImGuiIO& io) const {
     if (!c.isBound()) return false;
     if (def.checkCtrl  && io.KeyCtrl  != c.ctrl)  return false;
     if (def.checkShift && io.KeyShift != c.shift) return false;
+    // ALT ALWAYS MATCHES. The capture loop records Alt, editor.ini persists it and conflictWith() treats
+    // Alt+G and G as different chords -- but this test used to ignore Alt, so a command rebound to Alt+G
+    // (typically to dodge a conflict with G) fired on bare G too, while the conflict check said the two
+    // were distinct. No default carries Alt, and no original site checked it, so the only defaults this
+    // changes are "the key while Alt happens to be held" (e.g. Alt+Tab no longer toggles Landscape mode).
+    if (io.KeyAlt != c.alt) return false;
     return ImGui::IsKeyPressed(c.key, def.repeatAllowed);
 }
 

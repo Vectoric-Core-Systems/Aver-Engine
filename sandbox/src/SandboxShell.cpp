@@ -321,6 +321,35 @@ void SandboxApp::requestExitChecked(Engine& e) {
     e.requestExit();
 }
 
+// File > Save All, Ctrl+Shift+S. THE LEVEL, THE SAME WAY SAVE LEVEL DOES: saveLevelInteractive()
+// already opens Save Level As for a level with no path rather than inventing one to write to, and
+// already reports its own outcome -- calling it here keeps Save All and Save Level agreeing about
+// what saving a level means, instead of a second copy of that rule slowly drifting from the first.
+//
+// EVERY DIRTY ASSET TAB is the other half, via AssetEditorHost::saveAllDirty -- until now that
+// only ran from the quit prompt's "Save all and exit" button. It carries on past a failure rather
+// than stopping at the first, so nine tabs that CAN be saved still get written when a tenth can't.
+//
+// A FAILURE IS A NOTIFICATION; A SUCCESS IS QUIET. The quit prompt can afford to leave its failure
+// in the modal's own error line, because the modal is still open. Save All has no modal to write
+// into, so the notification queue -- the same one every other save outcome in this file reports
+// through -- is where a failure has to surface, or it is not surfaced at all.
+void SandboxApp::saveAll() {
+#if AVER_WITH_IMGUI
+    saveLevelInteractive();
+
+    std::string why;
+    const usize failed = assetEditors_.saveAllDirty(&why);
+    if (failed != 0) {
+        notifyOutcome(editor::NotifySeverity::Error,
+                      failed == 1 ? "1 asset could not be saved"
+                                  : std::to_string(failed) + " assets could not be saved",
+                      why, true);
+        AVER_ERROR("[Editor] Save All: {} editor(s) could not be saved: {}", failed, why);
+    }
+#endif
+}
+
 // The unsaved-changes modal. Names the files, because "you have unsaved changes" is not
 // something a user can act on.
 // Help > About. Deliberately short: what this build is, what it is drawing with, and where the
@@ -853,6 +882,9 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("file.reloadStartLevel");
             if (ImGui::MenuItem("Save Level", "Ctrl+S")) saveLevelInteractive();
             uiReg_.track("file.saveLevel");
+            if (ImGui::MenuItem("Save All", editor::chordToString(keybinds_.chordFor(editor::CommandId::SaveAll)).c_str()))
+                saveAll();
+            uiReg_.track("file.saveAll");
             // SAVE LEVEL AS, which the toolbar's own Save tooltip has been telling people to use
             // for as long as it has existed -- "File > New Level, then Save Level As" -- while
             // the menu had New / Open / Save and nothing else. saveLevel already takes an
@@ -890,6 +922,10 @@ void SandboxApp::buildUI(Engine& e) {
                         : "This section has no file path to save back to.");
             }
 #endif
+            ImGui::Separator();
+            if (ImGui::MenuItem("Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
+                requestViewportScreenshot();
+            uiReg_.track("file.takeScreenshot");
             ImGui::Separator();
             // Packaging. Disabled with a SPECIFIC reason rather than a generic one: "greyed
             // out" with no explanation is the single most common way an editor wastes somebody's

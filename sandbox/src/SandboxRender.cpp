@@ -1861,6 +1861,12 @@ void SandboxApp::onRender(Engine& e)  {
         skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, 0u);
 #endif
     captureCheck(e);
+    // AFTER captureCheck, not before: both touch the device's single capture slot, and this
+    // ordering is what lets serviceViewportScreenshot's own request skip only the one frame
+    // captureCheck requests on (see its comment) rather than also the frame after -- by the time
+    // this call could take the slot, captureCheck's read of ITS OWN request for this tick has
+    // already happened and capDone_ has latched it out of the slot for the rest of the run.
+    serviceViewportScreenshot(e);
     lumaSweepCheck(e);
     resizeCheck(e);
     gpuTimingCheck(e);
@@ -1873,6 +1879,124 @@ void SandboxApp::onRender(Engine& e)  {
     // edges since the last newFrame(). Rolling it at the top of onUpdate would discard the frame's
     // own edges -- "the game ignores single taps". Same placement, same reasoning, as GameApp.
     input_.newFrame();
+}
+
+// VIEWPORT SCREENSHOT (File > Take Screenshot, F9). See the member block above requestViewportScreenshot's
+// own declaration in SandboxApp.hpp for the state machine's shape. request...() only sets the latch --
+// the actual requestCapture() call has to happen from inside onRender, where vpX_/vpY_/vpW_/vpH_ are
+// current and the device is guaranteed to exist, neither of which a keybind handler or a menu click
+// running earlier in the frame can assume.
+void SandboxApp::requestViewportScreenshot() {
+    // A second press while one is already in flight is a no-op, not a queued second shot: the
+    // device has one capture slot, and racing two requests through this state machine would have
+    // the later one's requestCapture() silently cancel the earlier one's pending read.
+    if (viewportShotState_ != 0) return;
+    viewportShotState_ = 1;
+}
+
+// Runs once a frame, right beside captureCheck(e) in onRender -- see the comment at that call site
+// for why the ordering there (this AFTER captureCheck) is what makes the single frame-number check
+// below sufficient.
+void SandboxApp::serviceViewportScreenshot(Engine& e) {
+    if (viewportShotState_ == 0) return;
+
+    if (viewportShotState_ == 1) {
+        // --luma-sweep/--firefly-metric request a fresh capture every tick for the WHOLE run (see
+        // captureCheck's own comment) -- there is no frame where the slot is safely ours to take.
+        if (lumaSweep_ || fireflyMetric_) return;
+        // The one frame captureCheck itself calls requestCapture() on, in a bounded run: taking the
+        // slot first would have captureCheck's read land OUR pixel under the probe coordinates it
+        // remembers asking for, reporting a wrong pixel as the probe's own. Leave the latch set --
+        // requestViewportScreenshot() already refused to re-arm it -- and try again next frame.
+        const u64 f = e.time().frame;
+        const u64 sf = maxFrames_ > 8 ? maxFrames_ - 3 : 4;
+        if (maxFrames_ != 0 && f == sf) return;
+
+        const u32 cx = static_cast<u32>(vpX_ + vpW_ * 0.5f);
+        const u32 cy = static_cast<u32>(vpY_ + vpH_ * 0.5f);
+        e.device()->requestCapture(cx, cy);
+        viewportShotFrame_ = f;
+        viewportShotTries_ = 0;
+        viewportShotState_ = 2;
+        return;
+    }
+
+    // state 2: awaiting the image. ONE FRAME OF LAG IS INHERENT to requestCapture() -- same as
+    // captureCheck's own comment on the same API -- it is serviced inside present(), so a request
+    // made while handling frame f is not ready to read back until the NEXT tick.
+    if (e.time().frame <= viewportShotFrame_) return;
+    ++viewportShotTries_;
+
+    std::vector<u8> img; u32 iw = 0, ih = 0;
+    if (e.device()->getFrameImage(img, iw, ih) && iw && ih) {
+        // Crop to the 3D viewport alone, not the whole backbuffer: vpX_/vpY_/vpW_/vpH_ are already
+        // backbuffer pixels (the same convention setViewportRect documents), so this is a straight
+        // rect against the image -- but CLAMPED, not trusted, because the viewport can resize or
+        // collapse to nothing between the request going out and the image landing (a panel drag, a
+        // window resize), and an out-of-range rect must fall back to the whole frame rather than
+        // read out of bounds.
+        auto clampToRange = [](f32 v, u32 hi) -> u32 {
+            if (v <= 0.0f) return 0;
+            if (v >= (f32)hi) return hi;
+            return (u32)v;
+        };
+        const u32 cx = clampToRange(vpX_, iw);
+        const u32 cy = clampToRange(vpY_, ih);
+        const u32 cw = clampToRange(vpW_, iw - cx);
+        const u32 ch = clampToRange(vpH_, ih - cy);
+        const bool crop = cw > 0 && ch > 0;
+        const u32 outW = crop ? cw : iw;
+        const u32 outH = crop ? ch : ih;
+
+        std::vector<u8> cropped;
+        const u8* pixels = img.data();
+        if (crop) {
+            cropped.resize((size_t)outW * outH * 4);
+            for (u32 row = 0; row < outH; ++row)
+                std::memcpy(cropped.data() + (size_t)row * outW * 4,
+                            img.data() + ((size_t)(cy + row) * iw + cx) * 4,
+                            (size_t)outW * 4);
+            pixels = cropped.data();
+        }
+
+        // <project>/Saved/Screenshots -- the same `Saved/` convention autosavePathFor's own comment
+        // documents for recoverable, non-authored state. No project open falls back to the
+        // executable's own directory, the same fallback CrashReport.cpp uses for its Saved/Crashes
+        // when nothing else names a place to put it.
+        const std::string base = !project_.dir.empty() ? project_.dir : executableDir();
+        const std::string dir = base + "\\Saved\\Screenshots";
+        std::error_code mkec;
+        std::filesystem::create_directories(dir, mkec);
+
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        char ts[32];
+        std::snprintf(ts, sizeof ts, "%04u%02u%02u_%02u%02u%02u",
+                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        const std::string path = dir + "\\Screenshot_" + ts + ".png";
+
+        if (stbi_write_png(path.c_str(), (int)outW, (int)outH, 4, pixels, (int)outW * 4)) {
+            AVER_INFO("[Sandbox] screenshot: {} ({}x{})", path, outW, outH);
+            notifyOutcome(editor::NotifySeverity::Success, "Screenshot saved", path);
+        } else {
+            AVER_WARN("[Sandbox] screenshot: could not write {}", path);
+            notifyOutcome(editor::NotifySeverity::Warning, "Screenshot failed",
+                          "Could not write " + path, true);
+        }
+        viewportShotState_ = 0;
+        return;
+    }
+
+    // GIVE UP rather than wait forever: a device loss or a backend that never completes the
+    // readback must not leave the latch stuck at "pending" for the rest of the session, which would
+    // silently swallow every later F9 press -- requestViewportScreenshot() refuses to re-arm while
+    // viewportShotState_ != 0.
+    if (viewportShotTries_ >= 30) {
+        AVER_WARN("[Sandbox] screenshot: no frame image after {} frames, giving up", viewportShotTries_);
+        notifyOutcome(editor::NotifySeverity::Warning, "Screenshot failed",
+                      "The captured frame never arrived.", true);
+        viewportShotState_ = 0;
+    }
 }
 
 // Drives --skin-draw-test, handing it the LIVE viewport rect so its probes can be expressed as

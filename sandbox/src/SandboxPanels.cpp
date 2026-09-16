@@ -1233,6 +1233,15 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     if (vis) mr->flags |=  scene::kMeshRendererVisible;
                     else     mr->flags &= ~scene::kMeshRendererVisible;
                 }
+                // A SESSION-ONLY HIDE, AND THE TOOLTIP SAYS SO. No placement record carries
+                // visibility (OcWorldPlacement), and both level loaders set kMeshRendererVisible on
+                // every mesh they instantiate, so a hidden mesh comes back visible on reopen whether
+                // or not the level was saved. That is also why this toggle neither pushes an undo
+                // entry nor marks the level unsaved: dirtying the document would prompt a save that
+                // cannot keep the change.
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Hides this mesh for the current session only.\n"
+                                      "Visibility is not saved with the level.");
                 // THE FIELD IS NOW REASSIGNABLE. It printed this hex id and offered nothing --
                 // no picker, and not even a drop target: the only mesh drag-drop in the editor
                 // lands on the 3D VIEWPORT and SPAWNS A NEW ENTITY, which is a different verb.
@@ -1523,9 +1532,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     }
                     cbStatus_ = std::string("Added ") + a.name;
                     // NOT UNDOABLE, SO IT MUST AT LEAST BE DIRTY. Adding a component pushes no
-                    // EditCmd (there is no Kind for it, and Remove Component does not exist at
-                    // all), so without this the level closed clean and the component was gone.
-                    // A prompt the author can answer beats a silent loss.
+                    // EditCmd (there is no Kind for it), so without this the level closed clean
+                    // and the component was gone. A prompt the author can answer beats a silent
+                    // loss. Remove Component, just below, does not have this problem: it captures
+                    // the whole component before dropping it, so it can afford to be undoable
+                    // instead.
                     markLevelUnsaved();
                 }
                 ImGui::EndDisabled();
@@ -1534,6 +1545,41 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 else if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", a.tip);
             }
+            ImGui::EndPopup();
+        }
+
+        // ---- Remove Component ----
+        // scene::World::removeComponent is implemented and tested (tests/scene/src/SceneTest.cpp)
+        // but had zero editor callers -- Add Component's own comment above used to say so outright.
+        // kRemovable lists exactly what kAddable offers, for the same reason kAddable is an
+        // allow-list rather than a walk of the component registry: CLocal/CWorld/CHierarchy are
+        // what makes the row an entity at all, and removing one by menu would corrupt it, not
+        // simplify it.
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_DELETE " Remove Component")) ImGui::OpenPopup("removeComponent");
+        if (ImGui::BeginPopup("removeComponent")) {
+            struct Removable { u32 id; const char* name; };
+            static const Removable kRemovable[] = {
+                {scene::kComponentSoftBody, ICON_TUNE " Soft Body"},
+            };
+            bool anyPresent = false;
+            for (const Removable& r : kRemovable) {
+                const bool present = w.hasComponent(selEntity_, r.id);
+                anyPresent = anyPresent || present;
+                ImGui::BeginDisabled(!present);
+                if (ImGui::MenuItem(r.name)) {
+                    // UNDOABLE: removeComponentFromSelection captures the component byte-exact
+                    // before dropping it, so undo puts back exactly what was there -- unlike Add
+                    // Component above, which has no "before" to capture and falls back to a bare
+                    // markLevelUnsaved().
+                    if (removeComponentFromSelection(r.id))
+                        cbStatus_ = std::string("Removed ") + r.name;
+                }
+                ImGui::EndDisabled();
+                if (!present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("This entity does not have one.");
+            }
+            if (!anyPresent) ImGui::TextDisabled("Nothing removable is attached.");
             ImGui::EndPopup();
         }
 #endif

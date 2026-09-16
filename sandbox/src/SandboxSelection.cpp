@@ -314,6 +314,51 @@ void SandboxApp::renameEntity(scene::Entity e, const std::string& to) {
     pushEdit(std::move(c));
 }
 
+// Puts a removed component back, byte-exact, from the RemoveComponent payload captured just
+// before it was dropped -- undo's own half. addComponent hands back zero-filled storage (see
+// EditorEntitySnapshot::instantiateEntity's identical restore loop), so the bytes are written over
+// it here rather than trusted to already be right.
+void SandboxApp::restoreComponent(EditId id, const editor::EntitySnapshot::Comp& comp) {
+    const scene::Entity e = entityForEdit(id);
+    if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) return;
+    scene::World& w = scene::World::instance();
+    void* dst = w.addComponent(e, comp.type);
+    // A size mismatch means the component's layout changed since it was removed -- unreachable
+    // within one editor session, but refused rather than written past what addComponent handed
+    // back, the same refusal instantiateEntity makes for the identical case.
+    if (!dst || w.componentSize(comp.type) != comp.bytes.size()) return;
+    std::memcpy(dst, comp.bytes.data(), comp.bytes.size());
+}
+
+// Drops a component from an entity by edit id -- redo's own half, and also what
+// removeComponentFromSelection calls to perform the removal it then pushes an undo entry for.
+void SandboxApp::removeComponentRaw(EditId id, u32 type) {
+    const scene::Entity e = entityForEdit(id);
+    if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) return;
+    scene::World::instance().removeComponent(e, type);
+}
+
+// Removes one component from the selected entity as one undoable command. Mirrors renameEntity's
+// shape: capture the before-state, apply, push. THE BEFORE-STATE IS THE WHOLE COMPONENT, byte-
+// exact (EntitySnapshot::Comp, the same shape captureEntity's own loop produces), because undo has
+// to put back whatever was actually there, not just one flag.
+bool SandboxApp::removeComponentFromSelection(u32 type) {
+    scene::World& w = scene::World::instance();
+    if (!w.valid(selEntity_) || !w.hasComponent(selEntity_, type)) return false;
+    const void* src = w.getComponent(selEntity_, type);
+    const usize size = w.componentSize(type);
+    if (!src || size == 0) return false;
+    EditCmd c;
+    c.kind = EditCmd::Kind::RemoveComponent;
+    c.id = editIdFor(selEntity_);
+    c.removedComponent.type = type;
+    c.removedComponent.bytes.resize(size);
+    std::memcpy(c.removedComponent.bytes.data(), src, size);
+    removeComponentRaw(c.id, type);
+    pushEdit(std::move(c));
+    return true;
+}
+
 #endif
 
 void SandboxApp::pushEdit(EditCmd c) {
@@ -865,6 +910,7 @@ void SandboxApp::undo() {
 #endif
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameBefore); break;
+        case EditCmd::Kind::RemoveComponent: restoreComponent(c.id, c.removedComponent); break;
 #endif
         case EditCmd::Kind::CreateObj:   // undo a create: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
@@ -913,6 +959,7 @@ void SandboxApp::redo() {
 #endif
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameAfter); break;
+        case EditCmd::Kind::RemoveComponent: removeComponentRaw(c.id, c.removedComponent.type); break;
 #endif
         case EditCmd::Kind::CreateObj:   // redo a create: put it back
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())

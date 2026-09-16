@@ -503,6 +503,17 @@ void BtEditor::draw(Engine& e) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[BtEditor] save failed for '{}': {}", path_, why);
     }
+    // Ctrl+Z / Ctrl+Y reach the same undo()/redo() the buttons below call: guarded by canUndo()/
+    // canRedo() the way the buttons are, and skipped while an InputText has focus -- it has its own
+    // Ctrl+Z, and WantTextInput is how GraphEditor.cpp's canvas tells the two apart.
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        if (focused && !io.WantTextInput) {
+            if (canUndo() && keybinds().pressed(CommandId::EditUndo, io)) undo();
+            if (canRedo() && keybinds().pressed(CommandId::EditRedo, io)) redo();
+        }
+    }
     ImGui::SameLine();
     ImGui::BeginDisabled(!canUndo());
     if (ImGui::Button("Undo")) undo();

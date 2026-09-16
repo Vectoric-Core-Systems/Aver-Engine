@@ -39,10 +39,11 @@ enum class CommandId : u8 {
     ToolSelect, ToolMove, ToolRotate, ToolScale,
     SculptRaise, SculptLower, SculptSmooth, SculptFlatten,
     ModeToggleLandscape, ViewFrameSelected,
-    PlayReleaseMouse, PlayStop,
+    PlayStart, PlayReleaseMouse, PlayStop,
     DrawerDismiss, DrawerToggleContent, DrawerToggleConsole,
     EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate, EditSelectAll,
-    AssetSave, LevelSave, GraphCommentBox, GraphFrameAll,
+    AssetSave, LevelSave, SaveAll, GraphCommentBox, GraphFrameAll,
+    CompileScripts, ReloadScripts, Screenshot,
     Count
 };
 inline constexpr usize kCommandCount = static_cast<usize>(CommandId::Count);
@@ -64,7 +65,9 @@ struct KeybindDef {
     Chord def;
     u32 scope;
     bool checkCtrl;       // false: this command's ORIGINAL site never gated on Ctrl at all
-    bool checkShift;      // false: ditto for Shift. (Alt is never checked anywhere in this codebase.)
+    bool checkShift;      // false: ditto for Shift. Alt has no such flag: pressed() always requires Alt to
+                          // match the chord, because no original call site used Alt at all -- so no
+                          // default carries it, and a user who binds Alt+G must not also get it on G.
     bool repeatAllowed;
 };
 

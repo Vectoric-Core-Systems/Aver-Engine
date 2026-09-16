@@ -17,6 +17,9 @@ void SandboxApp::loadEditorPreferences() {
     logAutoScroll_      = prefBool ("outputLog.autoScroll",          logAutoScroll_);
     logLevelFilter_     = prefInt  ("outputLog.levelFilter",         logLevelFilter_);
     consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
+    // --auto-compile ON THE COMMAND LINE WINS FOR THIS RUN (autoCompileFromCli_, set by
+    // setAutoCompile at construction), the same precedence averSrFromCli_ gives AverSR further down.
+    if (!autoCompileFromCli_) autoCompile_ = prefBool("scripting.autoCompile", autoCompile_);
     showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
     showColliders_      = prefBool ("viewport.showColliders",        showColliders_);
     wireframe_          = prefBool ("viewport.wireframe",            wireframe_);
@@ -218,6 +221,9 @@ void SandboxApp::saveEditorPreferences() {
     setPrefBool ("outputLog.autoScroll",         logAutoScroll_);
     setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
     setPrefBool ("console.autoScroll",           consoleAutoScroll_);
+    // Not written back from a --auto-compile run: that launch must not overwrite what the user chose
+    // from the Tools menu before this session started.
+    if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
     setPrefBool ("viewport.showGrid",            showGrid_);
     setPrefBool ("viewport.showColliders",       showColliders_);
     setPrefBool ("viewport.wireframe",           wireframe_);
@@ -1727,6 +1733,46 @@ void SandboxApp::buildRenderingSettings(int page) {
                                   "Changing Quality above re-derives this from the tier.");
         }
         ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
+
+        // LIVE, CONSOLE-VAR-ONLY DEBUG PAINTS, beside the voxel-radiance one above: neither is a
+        // Settings field (consoleGiPoisonViewSlot()'s own comment, EditorConsole.hpp) -- their live
+        // values are raw bool slots reasserted onto the renderer every frame, the same slots `set
+        // voxi.giPoisonView`/`set voxi.giVisPathView` already reach from the console. Reading and
+        // writing the slots directly here means the checkbox and the console command are the same
+        // switch, not two that can disagree.
+        {
+            bool poisonView = editor::consoleGiPoisonViewSlot();
+            if (ImGui::Checkbox("Debug: GI poison view", &poisonView))
+                editor::consoleGiPoisonViewSlot() = poisonView;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Paints an unmistakable colour over any pixel where one of "
+                                  "voxi_restir.hlsli's guards fired THIS frame (giMode 1 / ReSTIR "
+                                  "only, except violet):\n"
+                                  "  magenta  store-time reservoir guard (the one that matters most)\n"
+                                  "  cyan     candidate-radiance clamp\n"
+                                  "  yellow   target-pdf guard\n"
+                                  "  orange   pre-existing final-estimate guard\n"
+                                  "  blue     NRD-readback guard\n"
+                                  "  red      raw estimate hit voxi.giRadianceCeiling, still finite\n"
+                                  "  green    NRD-denoised readback hit the same ceiling\n"
+                                  "  violet   ray-traced specular indirect ceiling hit (either "
+                                  "diffuse estimator)\n"
+                                  "All colours zero means no guard is firing.");
+
+            bool visPathView = editor::consoleGiVisPathViewSlot();
+            if (ImGui::Checkbox("Debug: GI visibility path view", &visPathView))
+                editor::consoleGiVisPathViewSlot() = visPathView;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Paints F2's resolved visibility path over indirect diffuse:\n"
+                                  "  yellow  no ray (mode 0 or a legacy bit)\n"
+                                  "  green   reconstructed (voxel cone)\n"
+                                  "  blue    half-resolution reconstruction\n"
+                                  "  red     half-resolution fallback (traced -- no valid "
+                                  "reconstruction available this pixel)\n"
+                                  "  white   full trace\n"
+                                  "Suppressed while GI poison view above is also on, which paints "
+                                  "first.");
+        }
         ImGui::EndDisabled();
     }
 
@@ -1801,6 +1847,73 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "penumbra comes out dithered rather than soft; this is what\n"
                                "resolves it without paying for more rays. Keeps no history, so\n"
                                "unlike amortisation above it costs nothing in lag under motion.");
+
+        // ---- A THIRD, SEPARATE DENOISER FROM THE TWO ABOVE (Settings::reblurMaxAccumulatedFrameNum,
+        // Voxi.hpp) -- those two filter the ray-traced SUN SHADOW; this one tunes REBLUR_DIFFUSE,
+        // which filters the ReSTIR indirect-diffuse GI estimate behind the "Denoiser (NVIDIA NRD)"
+        // checkbox on the Global Illumination page. It sits here, with this page's other
+        // "Denoiser: ..." rows, rather than there, and reaches NRD through the same s/changed/
+        // vx.setSettings(s) idiom as every other dial on this page -- VoxiRenderer re-issues
+        // nrd::SetDenoiserSettings every time setSettings() runs, so the new value takes effect
+        // next frame with no rebuild (Voxi.hpp's own comment on the field).
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Denoiser: NRD/REBLUR history depth (indirect diffuse GI)");
+        ImGui::Separator();
+        {
+            int accum = static_cast<int>(s.reblurMaxAccumulatedFrameNum);
+            if (ImGui::SliderInt("History depth (frames)", &accum, 0, 63)) {
+                s.reblurMaxAccumulatedFrameNum = static_cast<u32>(accum);
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("REBLUR_DIFFUSE's main history depth, in frames -- a latency/\n"
+                                  "noise trade, not a dispatch toggle: higher converges quieter\n"
+                                  "but lags longer behind a moving light or camera. Filters the\n"
+                                  "indirect-diffuse GI estimate (the \"Denoiser (NVIDIA NRD)\"\n"
+                                  "checkbox, Global Illumination page), not the sun shadow above.\n"
+                                  "[0,63] is NRD's own REBLUR_MAX_HISTORY_FRAME_NUM.\n"
+                                  "NOT captured to the project manifest -- like giSkyOcclusionRays/\n"
+                                  "Tile, it has no manifest key (ProjectRenderApply.hpp's own\n"
+                                  "capture rule), so it resets to the compiled default, 30, on the\n"
+                                  "next project reload rather than round-tripping through .ocproject.");
+        }
+
+        // ---- HISTORY RESETS (debug): one button per reset*history console command
+        // (EditorConsole.hpp) -- see each command's own help string there for the bisection order
+        // (GI first, then RT, then NRD) and why AO has no button of its own: requestAoHistoryReset()
+        // shares RT's own validity flag today (no independent one exists), so its button would be a
+        // second way to do exactly what Reset RT history already does. Reset All mirrors
+        // resetallhistory exactly -- GI + RT + NRD, not a redundant fourth AO call.
+        ImGui::Spacing();
+        ImGui::TextUnformatted("History resets (debug)");
+        ImGui::Separator();
+        if (ImGui::Button("Reset GI history")) vx.requestGiHistoryReset();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Invalidates the ReSTIR-GI reservoir + surface history (giMode 1\n"
+                              "only) on the next frame -- the same thing a viewport resize does to\n"
+                              "this one resource. Try this first if a GI blotch/burn-in appears.");
+        ImGui::SameLine();
+        if (ImGui::Button("Reset RT history")) vx.requestRtHistoryReset();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Invalidates RT shadow/reflection/sky-occlusion history on the next\n"
+                              "frame (all three, plus AO, share one validity flag today). Try\n"
+                              "this if resetting GI history alone did not clear the artifact.");
+        ImGui::SameLine();
+        if (ImGui::Button("Reset NRD history")) vx.requestNrdHistoryReset();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Forces NVIDIA NRD/REBLUR to throw away its own internal temporal\n"
+                              "history on the next frame. Try this if neither GI nor RT history\n"
+                              "reset cleared the artifact.");
+        ImGui::SameLine();
+        if (ImGui::Button("Reset All")) {
+            vx.requestGiHistoryReset();
+            vx.requestRtHistoryReset();
+            vx.requestNrdHistoryReset();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Runs all three resets above at once. Not the first move during a\n"
+                              "bisection -- it clears everything and says nothing about which\n"
+                              "buffer was actually poisoned; try one at a time first.");
 
         // ---- ray-driven rendering (experimental) ----
         // WHICH THING FINDS THE FIRST SURFACE: everything downstream already runs in one

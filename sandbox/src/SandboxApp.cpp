@@ -1778,6 +1778,35 @@ void SandboxApp::onInit(Engine& e)  {
     }
 }
 
+// KEEPS THE TITLE BAR IN STEP WITH THE OPEN LEVEL. Before 2026-09-16 applyProject
+// (SandboxProject.cpp) set the title exactly once, to the project's name, and nothing ever
+// touched it again -- so two different levels in the same project showed the same title, and a
+// level with unsaved edits looked identical to one just saved. Called once a frame from onUpdate.
+//
+// NO PROJECT OPEN: LEAVES THE TITLE ALONE. There is nothing to build a level-qualified title
+// from, and BootConfig already put a sensible default there (see the constructor's `c.windowTitle`).
+void SandboxApp::refreshWindowTitle(Engine& e) {
+    if (!e.window() || !project_.valid()) return;
+    // levelName_ FIRST: it is the level's own declared name (the world's `name` field on load, or
+    // what Save As just wrote it to), so it survives a level that has moved on disk since. Only a
+    // level that has never set one falls back to the saved file's stem -- and a level that has
+    // neither yet (a brand new, never-saved one) reads as "untitled", matching every other place
+    // in this file that names an unnamed level (see the exit prompt and Save Level As, both in
+    // SandboxShell.cpp).
+    std::string display = levelName_;
+    if (display.empty() && !levelPath_.empty())
+        display = std::filesystem::path(levelPath_).stem().string();
+    if (display.empty()) display = "untitled";
+    std::string title = "Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name + " \xE2\x80\x94 " + display;
+    if (levelHasUnsavedEdits()) title += "*";
+    // ONLY WHEN IT CHANGES: setTitle is a Win32 call, and this runs every frame -- most of which
+    // change nothing about the level's name or dirty state.
+    if (title != windowTitleShown_) {
+        windowTitleShown_ = title;
+        e.window()->setTitle(windowTitleShown_);
+    }
+}
+
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // FIRST in the frame, so everything downstream (view matrix, gPrevViewProj reprojection,
@@ -1829,6 +1858,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
     maybeAutosave(t.dt);
     maybeAutosavePrefs(t.dt);
+    // Reasserted every frame, like the autosave calls just above: cheap when nothing about the
+    // level's name or dirty state has changed, since it only touches the window when the built
+    // string actually differs from what is already shown.
+    refreshWindowTitle(e);
 #if AVER_MODULE_SCENE
     // See multiStale(): anything that moved the anchor without touching the set means the
     // selection collapsed to one, and this is where that is made true rather than merely
@@ -2257,6 +2290,21 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::LevelSave, io))
             saveLevelInteractive();
 
+        // CTRL+SHIFT+S SAVES EVERYTHING: the level plus every dirty asset tab (saveAll(),
+        // SandboxShell.cpp). SAME SITE AS LEVELSAVE ABOVE, deliberately -- pressed() does not
+        // consult the live scope mask (EditorKeybinds.cpp), so this is already live from inside an
+        // asset editor tab exactly as LevelSave is from the Outliner, with no separate focus gate
+        // to add for it.
+        if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::SaveAll, io))
+            saveAll();
+
+        // CTRL+SHIFT+B / CTRL+SHIFT+R mirror the Tools menu's Compile/Reload Scripts items. Same
+        // site and same reasoning as SaveAll just above: these are not a viewport gesture either.
+        if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::CompileScripts, io))
+            tools_.requestCompileScripts(project_);
+        if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::ReloadScripts, io))
+            tools_.requestReloadScripts(project_);
+
         // F frames the selection at a distance derived from its radius.
         //
         // THE OUTLINER AND DETAILS COUNT, for the reason the edit verbs below do: levelFocused_ is
@@ -2311,6 +2359,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             }
         }
         const bool wantCapture = playSessionActive() && !releasedByUser_;
+        // ALT+P STARTS PLAY, the same anyPlayActive() precondition the toolbar's own Play button
+        // disables itself on (SandboxShell.cpp) -- the chord cannot layer a second session onto one
+        // already running any more than the button can.
+        if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
+            keybinds_.pressed(editor::CommandId::PlayStart, ImGui::GetIO()))
+            startPlay();
         if (keybinds_.pressed(editor::CommandId::PlayReleaseMouse, ImGui::GetIO()) && playSessionActive())
             releasedByUser_ = !releasedByUser_;
         // ESCAPE STOPS PLAY-IN-EDITOR, the same as clicking Stop. Checked here rather than in
@@ -2319,6 +2373,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // Escape ends a drone stand-in too: Play started it, so Play's exit has to end it.
         if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive() || spectatorPlayActive()))
             stopPlay();
+        // F9 SCREENSHOTS THE VIEWPORT, IN EDIT MODE OR DURING PLAY. Checked HERE rather than beside
+        // LevelSave above: this whole block runs whenever the UI is interactive, in edit mode AND
+        // through a play session alike, so one check covers both -- adding a second at LevelSave's
+        // site (which also runs in edit mode) would fire requestViewportScreenshot() twice on the
+        // same frame there.
+        if (!ImGui::GetIO().WantTextInput && keybinds_.pressed(editor::CommandId::Screenshot, ImGui::GetIO()))
+            requestViewportScreenshot();
         if (!playSessionActive()) releasedByUser_ = false;
         setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
     }

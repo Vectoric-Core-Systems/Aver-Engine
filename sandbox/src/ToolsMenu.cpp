@@ -381,6 +381,10 @@ void ToolsMenu::drawCsModal(const fmt::ProjectDesc& project, f32 dpi, CsKind kin
         error_.clear(); result_.clear();
         std::string path; bool madeCsproj = false;
         if (createScript(project, name_, effectiveKind, &path, &madeCsproj, &error_)) {
+            // Opened the same way a compile-error row is: whichever IDE openInIde would jump a
+            // diagnostic into. A fresh file has no line to land on, so it just opens at the top.
+            const IdeInfo& ide = preferredGotoIde();
+            if (!openInIde(ide, path)) AVER_WARN("[Editor] could not open {} in {}", path, ide.name);
             name_[0] = '\0';
             ImGui::CloseCurrentPopup();
         }
@@ -827,6 +831,27 @@ void ToolsMenu::triggerToolbarCompile(const fmt::ProjectDesc& project) {
     startCompile(csproj, scriptsBinaryDir(project), reload_ != nullptr);
 }
 
+// What the Tools menu's "Compile Scripts" item does when clicked, for the Ctrl+Shift+B keybind:
+// the same canCompile checks drawScriptItems greys the item out on, then open the modal and build.
+bool ToolsMenu::requestCompileScripts(const fmt::ProjectDesc& project) {
+    if (!project.valid()) return false;
+    const std::string csproj = scriptsCsprojPath(project);
+    if (csproj.empty() || !fileExists(csproj) || !haveDotnet() || compileThread_.joinable()) return false;
+    open(Modal::Compile);
+    startCompile(csproj, scriptsBinaryDir(project), false);
+    return true;
+}
+
+// Ditto for "Reload Scripts" / Ctrl+Shift+R -- the same checks plus a reload_ function installed.
+bool ToolsMenu::requestReloadScripts(const fmt::ProjectDesc& project) {
+    if (!project.valid() || !reload_) return false;
+    const std::string csproj = scriptsCsprojPath(project);
+    if (csproj.empty() || !fileExists(csproj) || !haveDotnet() || compileThread_.joinable()) return false;
+    open(Modal::Reload);
+    startCompile(csproj, scriptsBinaryDir(project), true);
+    return true;
+}
+
 #if AVER_WITH_IMGUI
 // Recomputes the toolbar status light: building, no project, stale, failed or up to date.
 void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
@@ -871,13 +896,11 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     ImGui::TextDisabled("New scripts & classes: Content Browser  >  + Add");
     ImGui::Separator();
     const std::string csproj = haveProject ? scriptsCsprojPath(project) : std::string();
-    const std::string binDir = haveProject ? scriptsBinaryDir(project) : std::string();
     const bool haveCsproj = !csproj.empty() && fileExists(csproj);
     const bool dotnetOk = haveDotnet();
     const bool canCompile = haveProject && haveCsproj && dotnetOk && !compileThread_.joinable();
     if (ImGui::MenuItem("Compile Scripts", nullptr, false, canCompile)) {
-        open(Modal::Compile);
-        startCompile(csproj, binDir, false);
+        requestCompileScripts(project);
     }
     tip(!haveProject  ? kNoProject
         : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
@@ -886,8 +909,7 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
         : "dotnet build into Binaries\\Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
 
     if (ImGui::MenuItem("Reload Scripts", nullptr, false, canCompile && reload_ != nullptr)) {
-        open(Modal::Reload);
-        startCompile(csproj, binDir, true);
+        requestReloadScripts(project);
     }
     tip(!haveProject  ? kNoProject
         : !reload_    ? "This build has no scripting host, so there is nothing to reload into.\n(-DAVER_MODULE_SCRIPTING=OFF, or the host declined at startup.)"

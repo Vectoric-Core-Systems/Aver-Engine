@@ -89,7 +89,7 @@ void SandboxApp::setGraphTab(std::string tab) { graphTab_ = std::move(tab); }
 
 void SandboxApp::setInputProbe(bool on) { inputProbe_ = on; }
 
-void SandboxApp::setAutoCompile(bool on) { autoCompile_ = on; }
+void SandboxApp::setAutoCompile(bool on) { autoCompile_ = on; autoCompileFromCli_ = on; }
 
 void SandboxApp::setFocusLevelAt(int frame) { focusLevelAt_ = frame; }
 

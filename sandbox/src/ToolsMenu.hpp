@@ -65,6 +65,12 @@ public:
     // Builds and reloads as the toolbar button does: silent on success, Compile modal on failure.
     void triggerToolbarCompile(const fmt::ProjectDesc& project);
 
+    // Do what the Tools menu's "Compile Scripts" / "Reload Scripts" items do when clicked, for the
+    // Ctrl+Shift+B / Ctrl+Shift+R keybinds: same canCompile checks the menu items grey out on, then
+    // open the modal and start the build. False, with no side effects, when a check fails.
+    bool requestCompileScripts(const fmt::ProjectDesc& project);
+    bool requestReloadScripts(const fmt::ProjectDesc& project);
+
     // True while a build is running.
     bool compiling() const { return compileThread_.joinable(); }
 
