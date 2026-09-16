@@ -53,6 +53,12 @@ public enum InputSource
     MouseY,
     /// <summary>Wheel notches this frame.</summary>
     MouseWheel,
+    /// <summary>A gamepad button on pad 0, held = 1.</summary>
+    GamepadButton,
+    /// <summary>A gamepad axis (a thumbstick half or a trigger) on pad 0 -- raw value, no dead zone
+    /// applied at this layer (the 0.15 action dead zone still gates Held/WasPressed/WasReleased, the
+    /// same as it does for any other axis-sourced binding).</summary>
+    GamepadAxis,
 }
 
 /// <summary>A named thing the player can do — "Jump", "Fire", "Move" — independent of any key. A THIN
@@ -158,13 +164,23 @@ internal readonly struct InputBinding
 {
     public readonly InputAction Action;
     public readonly InputSource Source;
-    public readonly Key         Key;
-    public readonly float       Scale;
-    public readonly int         Component;  // 0=X, 1=Y
 
-    /// <summary>Builds one binding.</summary>
-    public InputBinding(InputAction action, InputSource source, Key key, float scale, int component)
-    { Action = action; Source = source; Key = key; Scale = scale; Component = component; }
+    // RawKey is a bare int, not a Key, because `Source` decides which enum it actually names -- a
+    // Key for InputSource.Key, a GamepadButton for GamepadButton, a GamepadAxis for GamepadAxis, and
+    // unused (0, the Key.A placeholder's own value) for a mouse source. One strongly-typed field can
+    // only ever be right for ONE of those; a bare int cast at each read site (BindKey/
+    // BindGamepadButton/BindGamepadAxis write it, Rebind() and SaveBindings/LoadBindings's own
+    // RawKeyName/TryParseRawKey read it back) is what makes a single InputBinding shape cover all of
+    // them, the same reason the native aver_fw_action_bind's own `key` parameter is a plain int32_t.
+    public readonly int   RawKey;
+    public readonly float Scale;
+    public readonly int   Component;  // 0=X, 1=Y
+
+    /// <summary>Builds one binding. <paramref name="rawKey"/> is whatever id <paramref name="source"/>
+    /// reads, already cast to int by the caller -- see <see cref="RawKey"/>'s own comment for which
+    /// enum that is per source.</summary>
+    public InputBinding(InputAction action, InputSource source, int rawKey, float scale, int component)
+    { Action = action; Source = source; RawKey = rawKey; Scale = scale; Component = component; }
 }
 
 /// <summary>A set of key-to-action mappings pushed and popped as a whole. Derive it and bind in the
@@ -180,7 +196,18 @@ public abstract class InputMappingContext
 
     /// <summary>Binds a key to an action. <paramref name="scale"/> can negate it for an axis.</summary>
     protected void BindKey(InputAction action, Key key, float scale = 1f, int component = 0) =>
-        Bindings.Add(new InputBinding(action, InputSource.Key, key, scale, component));
+        Bindings.Add(new InputBinding(action, InputSource.Key, (int)key, scale, component));
+
+    /// <summary>Binds a gamepad button to an action. <paramref name="scale"/> can negate it for an
+    /// axis, the same as <see cref="BindKey"/>.</summary>
+    protected void BindGamepadButton(InputAction action, GamepadButton button, float scale = 1f, int component = 0) =>
+        Bindings.Add(new InputBinding(action, InputSource.GamepadButton, (int)button, scale, component));
+
+    /// <summary>Binds a gamepad axis -- a thumbstick half or a trigger -- to an action.
+    /// <paramref name="scale"/> scales the raw value, the same as <see cref="BindMouseLook"/> scales a
+    /// mouse delta.</summary>
+    protected void BindGamepadAxis(InputAction action, GamepadAxis axis, float scale = 1f, int component = 0) =>
+        Bindings.Add(new InputBinding(action, InputSource.GamepadAxis, (int)axis, scale, component));
 
     /// <summary>Binds two opposed keys to one -1..1 axis.</summary>
     protected void BindAxis1D(InputAction action, Key positive, Key negative, int component = 0)
@@ -202,13 +229,13 @@ public abstract class InputMappingContext
     /// than inventing a second binding shape just to avoid one ignored field.</summary>
     protected void BindMouseLook(InputAction action, float sensitivity = 1f)
     {
-        Bindings.Add(new InputBinding(action, InputSource.MouseX, Key.A, sensitivity, 0));
-        Bindings.Add(new InputBinding(action, InputSource.MouseY, Key.A, sensitivity, 1));
+        Bindings.Add(new InputBinding(action, InputSource.MouseX, (int)Key.A, sensitivity, 0));
+        Bindings.Add(new InputBinding(action, InputSource.MouseY, (int)Key.A, sensitivity, 1));
     }
 
     /// <summary>Binds the wheel to a single axis.</summary>
     protected void BindMouseWheel(InputAction action, float scale = 1f) =>
-        Bindings.Add(new InputBinding(action, InputSource.MouseWheel, Key.A, scale, 0));
+        Bindings.Add(new InputBinding(action, InputSource.MouseWheel, (int)Key.A, scale, 0));
 
     // The bindings a subclass's constructor set up, captured the first time any of Save/Load/
     // ResetToDefaults below touches this instance -- NOT in a constructor of this base class, because
@@ -227,6 +254,43 @@ public abstract class InputMappingContext
     private static string SlotKeyPrefix(string contextName, string actionName, int slot) =>
         $"Rebind.{contextName}.{actionName}.{slot}";
 
+    // The enum member NAME for one binding's RawKey -- the ".Key" a slot stores is always a name, per
+    // SlotKeyPrefix's own comment, but WHICH enum that name belongs to depends on Source (RawKey's own
+    // comment on InputBinding explains why the field itself is a bare int). A mouse source falls to
+    // the `Key` case same as it always did -- RawKey is (int)Key.A there (BindMouseLook/BindMouseWheel
+    // above), so this reproduces the exact "A" string SaveBindings wrote before RawKey existed.
+    private static string RawKeyName(InputSource source, int rawKey) => source switch
+    {
+        InputSource.GamepadButton => ((GamepadButton)rawKey).ToString(),
+        InputSource.GamepadAxis   => ((GamepadAxis)rawKey).ToString(),
+        _                         => ((Key)rawKey).ToString(),
+    };
+
+    // The reverse of RawKeyName, with the SAME IsDefined guard LoadBindings already applies to Source
+    // below -- a hand-edited or stale settings file's ".Key" string must never resolve to a member that
+    // does not exist in whichever enum `source` picks. False (and rawKey left at 0) for anything that
+    // fails to parse or isn't defined.
+    private static bool TryParseRawKey(InputSource source, string name, out int rawKey)
+    {
+        switch (source)
+        {
+            case InputSource.GamepadButton:
+                if (Enum.TryParse(name, out GamepadButton gb) && Enum.IsDefined(typeof(GamepadButton), gb))
+                { rawKey = (int)gb; return true; }
+                break;
+            case InputSource.GamepadAxis:
+                if (Enum.TryParse(name, out GamepadAxis ga) && Enum.IsDefined(typeof(GamepadAxis), ga))
+                { rawKey = (int)ga; return true; }
+                break;
+            default:
+                if (Enum.TryParse(name, out Key k) && Enum.IsDefined(typeof(Key), k))
+                { rawKey = (int)k; return true; }
+                break;
+        }
+        rawKey = 0;
+        return false;
+    }
+
     /// <summary>Writes this context's current bindings to <see cref="Settings"/> (which must already be
     /// open), one Source/Key pair per binding slot. Does not call <see cref="Settings.Flush"/> itself
     /// -- call it once after saving whatever else belongs to the same save point, the same way every
@@ -241,7 +305,7 @@ public abstract class InputMappingContext
             slotByAction[b.Action.Name] = slot + 1;
             string prefix = SlotKeyPrefix(Name, b.Action.Name, slot);
             Settings.SetString(prefix + ".Source", b.Source.ToString());
-            Settings.SetString(prefix + ".Key", b.Key.ToString());
+            Settings.SetString(prefix + ".Key", RawKeyName(b.Source, b.RawKey));
         }
     }
 
@@ -269,9 +333,10 @@ public abstract class InputMappingContext
             // rejects that the same way it would reject a name that never existed.
             if (!Enum.TryParse(Settings.GetString(prefix + ".Source"), out InputSource source) ||
                 !Enum.IsDefined(typeof(InputSource), source)) continue;
-            if (!Enum.TryParse(Settings.GetString(prefix + ".Key"), out Key key) ||
-                !Enum.IsDefined(typeof(Key), key)) continue;
-            Bindings[i] = new InputBinding(b.Action, source, key, b.Scale, b.Component);
+            // Which enum the ".Key" string is parsed against depends on the SOURCE just parsed above --
+            // see TryParseRawKey's own comment. Must run after the Source parse for that reason.
+            if (!TryParseRawKey(source, Settings.GetString(prefix + ".Key"), out int rawKey)) continue;
+            Bindings[i] = new InputBinding(b.Action, source, rawKey, b.Scale, b.Component);
         }
     }
 
@@ -354,7 +419,7 @@ public static class EnhancedInput
             for (int bi = 0; bi < bindings.Count; bi++)
             {
                 InputBinding b = bindings[bi];
-                Fw.aver_fw_action_bind(b.Action.Handle, (int)b.Source, (int)b.Key, b.Scale, b.Component, layer.Priority);
+                Fw.aver_fw_action_bind(b.Action.Handle, (int)b.Source, b.RawKey, b.Scale, b.Component, layer.Priority);
             }
         }
     }

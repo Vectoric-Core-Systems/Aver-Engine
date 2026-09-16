@@ -81,19 +81,21 @@ public static class Input
     /// <summary>True on the frame the raw Win32 VK code <paramref name="vk"/> went up.</summary>
     public static bool GetVkUp(int vk) => Fw.aver_fw_input_vk_released(vk) != 0;
 
-    // ---- GAMEPAD, SHAPE ONLY -- see framework_abi.h's own GAMEPAD section: nothing publishes a real
-    // device into this ABI yet (ZERO CONSUMERS was the stated reason not to build a poller), so these
-    // read back whatever a future provider writes through aver_fw_input_set_gamepad_button/axis, or
-    // the all-zero/false default nothing has ever written. `pad` defaults to 0 because the ABI itself
-    // rejects any other value today (only player 0 exists until split-screen does, the same precedent
-    // aver_fw_player_controller already sets) -- kept as a parameter rather than dropped so this
-    // signature does not have to change the day a second pad becomes real.
+    // ---- GAMEPAD -- see framework_abi.h's own GAMEPAD section: these read back whatever
+    // modules/platform's poller last wrote through aver_fw_input_set_gamepad_button/axis (via
+    // Runtime/src/GameInput.cpp and sandbox/src/SandboxPlay.cpp), or the all-zero/false default when
+    // no pad is connected. Also now bindable onto a named action -- EnhancedInput.cs's own
+    // BindGamepadButton/BindGamepadAxis -- rather than only reachable by polling here every OnTick.
+    // `pad` defaults to 0 because the ABI itself rejects any other value today (only player 0 exists
+    // until split-screen does, the same precedent aver_fw_player_controller already sets) -- kept as a
+    // parameter rather than dropped so this signature does not have to change the day a second pad
+    // becomes real.
     /// <summary>True while <paramref name="button"/> is held on gamepad <paramref name="pad"/>.</summary>
     public static bool GetGamepadButton(GamepadButton button, int pad = 0) =>
         Fw.aver_fw_input_gamepad_button(pad, (int)button) != 0;
 
     /// <summary>The last-set value of <paramref name="axis"/> on gamepad <paramref name="pad"/>.
-    /// Unclamped, with no dead zone applied -- the ABI's own comment says why: a future provider's raw
+    /// Unclamped, with no dead zone applied -- the ABI's own comment says why: the poller's raw
     /// stick/trigger reading is meant to cross exactly as read.</summary>
     public static float GetGamepadAxis(GamepadAxis axis, int pad = 0) =>
         Fw.aver_fw_input_gamepad_axis(pad, (int)axis);

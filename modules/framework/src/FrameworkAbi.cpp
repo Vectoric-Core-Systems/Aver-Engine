@@ -1020,6 +1020,15 @@ struct InputState {
 // The process-wide input state.
 InputState& inputState() { static InputState s; return s; }
 
+// Rolls GamepadState's own prevButtons/prevAxes -- defined in the GAMEPAD section further down this
+// file (NAMED ACTIONS, below that, is what actually needs the snapshot: a gamepad-sourced action's
+// held/pressed/released wants a "was this already down/nonzero last frame" answer the same way KEY's
+// cur/prev and MOUSE_*'s mouse/prevMouse already give theirs). Forward-declared here, and called from
+// aver_fw_input_new_frame below, rather than defined inline, purely because GamepadState is not
+// declared yet at this point in the file -- see that section's own comment for why the roll itself
+// does not clear anything, unlike prevMouse.
+void gamepadInputNewFrame();
+
 // Rolls current key state into previous and clears the mouse deltas. Call once a frame.
 void aver_fw_input_new_frame(void) {
     InputState& s = inputState();
@@ -1031,6 +1040,9 @@ void aver_fw_input_new_frame(void) {
     // binding would never fire.
     s.prevMouse[0] = s.mouse[0]; s.prevMouse[1] = s.mouse[1]; s.prevMouse[2] = s.mouse[2];
     s.mouse[0] = s.mouse[1] = s.mouse[2] = 0.0f;
+    // Gamepad buttons/axes are LEVEL state, not a delta like the mouse, so this is a straight roll --
+    // see gamepadInputNewFrame's own comment for why it lives in the GAMEPAD section instead of here.
+    gamepadInputNewFrame();
 }
 // Sets the held state of a key. Out-of-range keys are ignored.
 void aver_fw_input_set_key(int32_t key, int32_t down) {
@@ -1092,21 +1104,37 @@ int32_t aver_fw_input_vk_released(int32_t vk) {
     return (!s.curVk[vk] && s.prevVk[vk]) ? 1 : 0;
 }
 
-// ---- GAMEPAD, SHAPE ONLY -- NO POLLING ----------------------------------------------------------
-// See framework_abi.h's own GAMEPAD section for why this stops at "state in, state out" and does not
-// open XInput itself: zero consumers today, and a real poller's hotplug/dead-zone/rumble cost is not
-// something to take on speculatively.
+// ---- GAMEPAD, STATE IN / STATE OUT --------------------------------------------------------------
+// See framework_abi.h's own GAMEPAD section for why this ABI itself still stops at "state in, state
+// out" and opens no device, applies no dead zone, and does not handle hotplug -- that is now a
+// modules/platform poller's job (Gamepad.hpp, pollGamepads), publishing through aver_fw_input_set_
+// gamepad_button/axis via Runtime/src/GameInput.cpp and sandbox/src/SandboxPlay.cpp. This section is
+// its consumer-facing surface, now including a NAMED ACTIONS binding source (below).
 
-// Gamepad button/axis state. No cur/prev pair -- unlike keys, nothing above asks for gamepad edge
-// detection (aver_fw_input_gamepad_button is a plain level read), so there is nothing to roll and
-// aver_fw_input_new_frame does not touch this struct at all.
+// Gamepad button/axis state. HAS a prev pair now -- NAMED ACTIONS below binds AVER_FW_GAMEPAD_* as an
+// action source, and its held/pressed/released need last frame's reading to detect an edge on, the
+// same thing KEY's cur/prev and MOUSE_*'s mouse/prevMouse already give theirs. aver_fw_input_gamepad_
+// button/axis themselves are UNCHANGED, still a plain level read of buttons/axes -- prevButtons/
+// prevAxes exist purely for actionAccumulate, nothing here exposes them across the ABI.
 struct GamepadState {
-    unsigned char buttons[AVER_FW_GAMEPAD_BUTTON_COUNT] = {};
-    float         axes[AVER_FW_GAMEPAD_AXIS_COUNT]      = {};
+    unsigned char buttons[AVER_FW_GAMEPAD_BUTTON_COUNT]     = {};
+    unsigned char prevButtons[AVER_FW_GAMEPAD_BUTTON_COUNT] = {};
+    float         axes[AVER_FW_GAMEPAD_AXIS_COUNT]          = {};
+    float         prevAxes[AVER_FW_GAMEPAD_AXIS_COUNT]      = {};
 };
 // The process-wide gamepad state. Single pad (index 0) -- see aver_fw_input_set_gamepad_button's own
 // comment for why every function here rejects any other `pad` value.
 GamepadState& gamepadState() { static GamepadState g; return g; }
+// Rolls buttons/axes into prevButtons/prevAxes -- see aver_fw_input_new_frame's own forward
+// declaration of this function for why it is called from there rather than defined inline. Nothing
+// gets cleared afterwards, unlike prevMouse: a gamepad button/axis is LEVEL state republished once a
+// frame by whatever provider is wired up (modules/platform's poller, via Runtime/src/GameInput.cpp
+// and sandbox/src/SandboxPlay.cpp), the same as a key, not a per-frame delta like the mouse.
+void gamepadInputNewFrame() {
+    GamepadState& g = gamepadState();
+    std::memcpy(g.prevButtons, g.buttons, sizeof(g.buttons));
+    std::memcpy(g.prevAxes, g.axes, sizeof(g.axes));
+}
 
 // Sets one button's held state. `pad` must be 0; an out-of-range pad or button is ignored.
 void aver_fw_input_set_gamepad_button(int32_t pad, int32_t button, int32_t down) {
@@ -1146,9 +1174,11 @@ struct ActionDef {
 };
 std::vector<ActionDef>& actionDefs() { static std::vector<ActionDef> v; return v; }
 
-// One binding: an action, a source, and (for AVER_FW_ACTION_SRC_KEY) the framework key it reads.
-// `priority` is this binding's context tier -- see aver_fw_action_bind's own header comment for why
-// a plain int stands in for EnhancedInput.cs's InputMappingContext object.
+// One binding: an action, a source, and the slot it reads -- an AVER_FW_KEY_* for AVER_FW_ACTION_SRC_
+// KEY, an AVER_FW_GAMEPAD_* button or AVER_FW_GAMEPAD_AXIS_* axis for the two GAMEPAD_* sources,
+// unused for the MOUSE_* sources (framework_abi.h's own aver_fw_action_bind comment says so). `priority`
+// is this binding's context tier -- see aver_fw_action_bind's own header comment for why a plain int
+// stands in for EnhancedInput.cs's InputMappingContext object.
 struct ActionBinding {
     int32_t action;
     int32_t source;
@@ -1181,6 +1211,7 @@ bool actionKeyConsumedByHigherPriority(int32_t key, int32_t priority) {
 void actionAccumulate(int32_t action, bool useCurrent, float out[3]) {
     out[0] = out[1] = out[2] = 0.0f;
     const InputState& s = inputState();
+    const GamepadState& g = gamepadState();
     const std::vector<ActionBinding>& bindings = actionBindings();
     for (usize i = 0; i < bindings.size(); ++i) {
         const ActionBinding& b = bindings[i];
@@ -1205,6 +1236,22 @@ void actionAccumulate(int32_t action, bool useCurrent, float out[3]) {
                 break;
             case AVER_FW_ACTION_SRC_MOUSE_WHEEL:
                 v = (useCurrent ? s.mouse[2] : s.prevMouse[2]) * b.scale;
+                break;
+            case AVER_FW_ACTION_SRC_GAMEPAD_BUTTON: {
+                // Same 0/1-times-scale shape as KEY just above, reading GamepadState's own cur/prev
+                // pair instead of InputState's -- but NOT run through actionKeyConsumedByHigherPriority:
+                // that check is scoped to AVER_FW_ACTION_SRC_KEY bindings only (its own name says so),
+                // and this change does not widen it to a second physical-input space. A context stack
+                // that binds the same gamepad button at two priorities gets both, the same as it always
+                // has for two MOUSE_* bindings sharing a channel.
+                const bool down = useCurrent ? g.buttons[b.key] != 0 : g.prevButtons[b.key] != 0;
+                v = down ? b.scale : 0.0f;
+                break;
+            }
+            case AVER_FW_ACTION_SRC_GAMEPAD_AXIS:
+                // Same shape as the MOUSE_* cases above: the raw axis value times scale, no dead zone
+                // (that only ever gates held/pressed/released, via actionActive below).
+                v = (useCurrent ? g.axes[b.key] : g.prevAxes[b.key]) * b.scale;
                 break;
             default:
                 break;
@@ -1257,8 +1304,12 @@ int32_t aver_fw_action_register(const char* name, int32_t valueType) {
 void aver_fw_action_bind(int32_t action, int32_t source, int32_t key, float scale,
                          int32_t component, int32_t contextPriority) {
     if (!actionHandleValid(action)) return;
-    if (source < AVER_FW_ACTION_SRC_KEY || source > AVER_FW_ACTION_SRC_MOUSE_WHEEL) return;
+    if (source < AVER_FW_ACTION_SRC_KEY || source > AVER_FW_ACTION_SRC_GAMEPAD_AXIS) return;
     if (source == AVER_FW_ACTION_SRC_KEY && (key < 0 || key >= AVER_FW_KEY_COUNT)) return;
+    if (source == AVER_FW_ACTION_SRC_GAMEPAD_BUTTON &&
+        (key < 0 || key >= AVER_FW_GAMEPAD_BUTTON_COUNT)) return;
+    if (source == AVER_FW_ACTION_SRC_GAMEPAD_AXIS &&
+        (key < 0 || key >= AVER_FW_GAMEPAD_AXIS_COUNT)) return;
     actionBindings().push_back(ActionBinding{action, source, key, scale, component, contextPriority});
 }
 

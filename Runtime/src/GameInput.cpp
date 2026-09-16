@@ -18,6 +18,7 @@
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/InputKeys.hpp"
 #include "aver/platform/InputState.hpp"
+#include "aver/platform/Gamepad.hpp"
 
 #include <string>
 
@@ -29,6 +30,15 @@ namespace {
 // most. Pulled into this namespace by name so every call site below reads exactly as it did.
 using aver::fw::frameworkKeyFromVk;
 using aver::fw::frameworkKeyName;
+
+// GamepadState's arrays are laid out in the ABI's own documented order (Gamepad.hpp's own comment
+// spells the order out without including this header) precisely so the loops below can walk it
+// index-for-index instead of a name-by-name switch. If either side's count ever drifts the mismatch
+// would silently under- or over-publish rather than fail to compile, which is worse -- so pin it here.
+static_assert(GamepadState::kButtonCount == static_cast<usize>(AVER_FW_GAMEPAD_BUTTON_COUNT),
+              "GamepadState::buttons and AVER_FW_GAMEPAD_* have drifted apart");
+static_assert(GamepadState::kAxisCount == static_cast<usize>(AVER_FW_GAMEPAD_AXIS_COUNT),
+              "GamepadState::axes and AVER_FW_GAMEPAD_AXIS_* have drifted apart");
 
 } // namespace
 
@@ -92,6 +102,18 @@ void publishInput(const InputState& in, bool focused, std::string* echo) {
     } else {
         aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
     }
+
+    // ---- GAMEPAD, published pad 0 only -- the ABI itself accepts nothing else (framework_abi.h:
+    // "pad is fixed at 0 for every call"). Polled unconditionally, the same as the keyboard loop
+    // above reads `in` unconditionally: only the PUBLISHED value is gated on `focused`, so
+    // Aver.Platform's own hotplug/re-probe throttle (Gamepad.hpp) keeps ticking across an
+    // unfocused stretch instead of resetting cold the moment focus returns.
+    GamepadState pad{};
+    pollGamepads(&pad, 1);
+    for (i32 b = 0; b < AVER_FW_GAMEPAD_BUTTON_COUNT; ++b)
+        aver_fw_input_set_gamepad_button(0, b, (focused && pad.buttons[b]) ? 1 : 0);
+    for (i32 a = 0; a < AVER_FW_GAMEPAD_AXIS_COUNT; ++a)
+        aver_fw_input_set_gamepad_axis(0, a, focused ? pad.axes[a] : 0.0f);
 
     if (echo) *echo = focused ? (names.empty() ? "(none)" : names) : std::string();
 }
