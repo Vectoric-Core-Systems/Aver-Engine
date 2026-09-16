@@ -135,7 +135,7 @@ A few are more clearly stale and worth a look regardless:
   `assetEditors_.anyDirty()` and raises an "Unsaved changes" modal before exiting; the call site's own
   comment narrates this exact bug being closed. A single dirty editor's own tab-close is still silent
   (logs `AVER_WARN` and drops the edit) — only the whole-application exit path was wired.
-- `modules/runtime.game/include/aver/game/GameLevel.hpp:55` — `pcgFields()`: the list is populated
+- `Runtime/include/aver/game/GameLevel.hpp:55` — `pcgFields()`: the list is populated
   and never read as a list. (The singular `pcgField(name)` beside it *is* live — the sky uses it.)
 
 ---

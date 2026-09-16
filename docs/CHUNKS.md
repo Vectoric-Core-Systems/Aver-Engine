@@ -96,7 +96,7 @@ nothing observable.
 
 ### B9 — There are two diverging copies of the level load path.
 
-`modules/runtime.game/src/GameLevel.cpp:37-175` (game) and `sandbox/src/SandboxApp.cpp:5464-5561`
+`Runtime/src/GameLevel.cpp:37-175` (game) and `sandbox/src/SandboxApp.cpp:5464-5561`
 (editor) are independent implementations of the same thing, and they already disagree: the editor
 applies `SUN`/`SKY` at load (`:5551`) and drives the cloud layer from a `PCGVOLUME` named `"Sky"`
 (`:5497-5506`); the game applies only `FOG` and defers sky to `GameApp` (`GameLevel.cpp:87-95`). Each

@@ -124,7 +124,7 @@ endif()
 #
 # THE MACRO IS A CAPABILITY, NOT A TAB, and it was named after the tab until 0.5.1 -- which is how
 # the game runtime came to be excluded from the audio device without anyone noticing. The same
-# block now exists in modules/runtime.game/CMakeLists.txt; the two must stay in step, and
+# block now exists in Runtime/CMakeLists.txt; the two must stay in step, and
 # verify-game.ps1 is where that belongs to be asserted rather than remembered.
 if(TARGET Aver.Sound)
   target_link_libraries(Sandbox PRIVATE Aver.Sound)
@@ -163,7 +163,7 @@ target_link_libraries(Sandbox PRIVATE Aver.Render.ActorPreview)
 # missed site away from a rest-pose shadow beside a posed character.
 #
 # WHY THIS LINE IS STILL HERE, since the old reason was wrong: Aver.Runtime.Game already PUBLIC-links
-# Aver.Render.Skin (modules/runtime.game/CMakeLists.txt:55), so removing this would not stop the
+# Aver.Render.Skin (Runtime/CMakeLists.txt:61), so removing this would not stop the
 # module compiling. It is here because the EDITOR ITSELF uses SkinningPass directly, in
 # AnimEditor.cpp and SkinDrawTest.cpp -- an ordinary link dependency, not a keep-alive.
 #
@@ -449,7 +449,7 @@ if(MSVC)
   set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
   # WIN32 above sets /SUBSYSTEM:WINDOWS, which makes the linker look for WinMain. The entry point
   # this engine generates is main(), so point the CRT's startup at the one that calls it. Identical
-  # to game/CMakeLists.txt, whose comment claimed Sandbox already did this long before it did.
+  # to Runtime/host/CMakeLists.txt, whose comment claimed Sandbox already did this long before it did.
   target_link_options(Sandbox PRIVATE /ENTRY:mainCRTStartup)
 endif()
 

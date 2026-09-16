@@ -8,7 +8,7 @@
 // put editor UI conventions into the engine's dependency graph".
 //
 // WHAT CHANGED. That reasoning held while these were an editor concern. They are not: this is the
-// .ocworld ROTATION CONTRACT, and modules/runtime.game/src/GameLevel.cpp had already been forced to
+// .ocworld ROTATION CONTRACT, and Runtime/src/GameLevel.cpp had already been forced to
 // carry its own byte-identical copy of quatFromEulerDeg in order to read a level the editor wrote.
 // A second copy inside the engine is the evidence that the engine owns it.
 //

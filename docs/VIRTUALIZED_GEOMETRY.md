@@ -956,7 +956,7 @@ full-mesh raycast.
    - Verify the clustered mesh renders identically in both contexts.
 
 **Done when:** The landscape editor can reference a clustered `.ocmesh`, and the mesh renders
-correctly in both the editor (`Sandbox.exe`) and the runtime (`AverGame.exe`) at multiple LOD
+correctly in both the editor (`Sandbox.exe`) and the runtime (`AverEngineRuntime.exe`) at multiple LOD
 levels without visible seams.
 
 ---

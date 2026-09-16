@@ -1,5 +1,5 @@
-// AverGame.exe -- the standalone game runtime. The second aver::Application in the tree, and the
-// first one that is not an editor.
+// AverEngineRuntime.exe ("Aver Engine Runtime") -- the standalone runtime. The second aver::Application
+// in the tree, and the first one that is not an editor. Named AverGame.exe until 2026-09-16.
 //
 // Deliberately tiny. Everything is in Aver.Runtime.Game so that the editor can eventually CALL the
 // same code rather than keep its own copy of it; an executable that accumulates logic is how
@@ -7,8 +7,8 @@
 #include "aver/game/GameApp.hpp"
 #include "aver/runtime/EntryPoint.hpp"
 
-// AverSR (3.3 C, contract C2-12): THE ONLY TRANSLATION UNIT IN AverGame.exe ALLOWED TO INCLUDE
-// aver/sr/* OR NAME sr::Quality. game/CMakeLists.txt links Aver.Render.Sr to the AverGame EXECUTABLE
+// AverSR (3.3 C, contract C2-12): THE ONLY TRANSLATION UNIT IN AverEngineRuntime.exe ALLOWED TO INCLUDE
+// aver/sr/* OR NAME sr::Quality. Runtime/host/CMakeLists.txt links Aver.Render.Sr to the AverEngineRuntime EXECUTABLE
 // target alone, never to Aver.Runtime.Game (see that file's own `if(TARGET Aver.Render.Sr)` block),
 // so GameApp.hpp/.cpp cannot see these headers even if something in them wanted to -- the module
 // boundary render.voxi and runtime.game must respect (Scalability.hpp's own header comment:
@@ -19,7 +19,7 @@
 // AVER_MODULE_VOXI IS ALSO REQUIRED FOR THE CROSS-CHECK BELOW, and deliberately narrows the guard
 // past what 3.2's own text says ("under AVER_MODULE_SR"): the ladder numbering being checked
 // (aver::voxi::ladder::kAverSrOff..kAverSrPerformance) is declared in a render.voxi header, reachable
-// only when Aver.Render.Voxi is linked (modules/runtime.game/CMakeLists.txt's own `if(TARGET
+// only when Aver.Render.Voxi is linked (Runtime/CMakeLists.txt's own `if(TARGET
 // Aver.Render.Voxi)` block) -- an AVER_MODULE_SR=1, AVER_MODULE_VOXI=0 tree is not a configuration
 // this engine ships (AverSR scales what Voxi renders; there is no other renderer), but nesting the
 // guard is what keeps that hypothetical tree CONFIGURING at all rather than failing to find the

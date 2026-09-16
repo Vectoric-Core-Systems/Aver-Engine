@@ -1,6 +1,6 @@
 # The concrete Dear ImGui implementation of Aver.RHI.D3D12's IUiBackend seam (see that module's own
 # include/aver/rhi/d3d12/UiBackend.hpp). A SEPARATE module, and the entire point of it existing: only
-# Sandbox links this one, so AverGame.exe -- which links Aver.RHI.D3D12 through Aver.Runtime in every
+# Sandbox links this one, so AverEngineRuntime.exe -- which links Aver.RHI.D3D12 through Aver.Runtime in every
 # AVER_ENABLE_UI=ON tree -- never sees Dear ImGui, no matter how AVER_ENABLE_UI is set.
 aver_add_module(Aver.RHI.D3D12.ImGui
   SOURCES

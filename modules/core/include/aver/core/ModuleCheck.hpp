@@ -5,7 +5,7 @@
 //
 // CORE PROVIDES THE MECHANISM AND NOT THE FACTS, and that distinction is the whole design.
 // AVER_MODULE_* are PUBLIC compile definitions on the module targets themselves, so they reach a
-// translation unit ONLY through what that TU actually links -- modules/runtime.game/CMakeLists.txt
+// translation unit ONLY through what that TU actually links -- Runtime/CMakeLists.txt
 // records being bitten by exactly this, where every `#if AVER_MODULE_*` in GameApp.cpp silently
 // evaluated false because the link line was missing. Core is built first and links none of the
 // optional modules, so a list of DAG facts written HERE would see every macro undefined and check

@@ -1,5 +1,8 @@
 # Lifting the game half out of SandboxApp
 
+> **WHERE IT LIVES NOW (2026-09-16):** the library and the restored standalone host moved to `Runtime/`;
+> the executable is `AverEngineRuntime.exe` ("Aver Engine Runtime"). Paths below are as they were.
+>
 > **STATUS: HISTORY, 2026-08-17. THIS DOCUMENT DESCRIBES COMPLETED WORK THAT HAS BEEN REMOVED.**
 > The plan was executed in commits C1–C11 and lifted the game rendering half from `SandboxApp.cpp`
 > to `modules/runtime.game`, creating `AverGame.exe`. That executable and the staging scripts have

@@ -1,4 +1,10 @@
-# Aver.Runtime.Game -- the game half of what currently lives inside SandboxApp.
+# Aver.Runtime.Game -- the runtime library, in Runtime/ (was modules/runtime.game until 2026-09-16).
+#
+# Two hosts are meant to share it: the standalone AverEngineRuntime.exe (Runtime/host) and, as its own
+# private copy inside SandboxApp is retired subsystem by subsystem, the editor. What follows is how the
+# library began, when it was still only a copy.
+#
+# The game half of what currently lives inside SandboxApp.
 #
 # Sandbox.exe IS the editor: it is the only aver::Application in the tree, and roughly two thousand
 # lines of what a GAME needs are interleaved with dockspaces and inspector panels inside it. This
@@ -10,7 +16,7 @@
 # refusal. Aver.RHI.D3D12 no longer links imgui at all, in any configuration (see its own
 # CMakeLists.txt and include/aver/rhi/d3d12/UiBackend.hpp) -- the concrete Dear ImGui implementation
 # lives in the separate Aver.RHI.D3D12.ImGui module, which only Sandbox links. An AVER_ENABLE_UI=ON
-# tree's AverGame.exe is therefore clean regardless of this switch.
+# tree's AverEngineRuntime.exe is therefore clean regardless of this switch.
 #
 # VERIFIED BY BYTE-SCANNING THE BINARY, not by dumpbin /imports and not inferred from the CMake edit.
 # The distinction matters and cost a review round to pin down: imgui is a STATIC library, so neither
@@ -18,7 +24,7 @@
 # dumpbin /imports answers a different question and would have passed either way. Scanning the built
 # files for the symbol/string names themselves is what actually settles it. From one
 # AVER_ENABLE_UI=ON tree: Sandbox.exe has ImGui_ImplDX12_Init x3, ImGui_ImplWin32_Init x2,
-# "Dear ImGui" x6 and "docking" x30; AverGame.exe has zero of each, and its single case-insensitive
+# "Dear ImGui" x6 and "docking" x30; AverGame.exe (the runtime's name then) has zero of each, and its single case-insensitive
 # "imgui" hit is the embedded PDB path naming the build directory, not code.
 aver_add_module(Aver.Runtime.Game
   SOURCES
@@ -120,3 +126,9 @@ endif()
 if(TARGET Aver.Formats.Particles)
   target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Formats.Particles)
 endif()
+
+# The IDE groups the library with its host rather than under modules/, where aver_add_module puts it.
+set_target_properties(Aver.Runtime.Game PROPERTIES FOLDER "Runtime")
+
+# The standalone host, AverEngineRuntime.exe.
+add_subdirectory(host)

@@ -95,7 +95,7 @@ $pkg = (Resolve-Path -LiteralPath $Package).Path
 # then spawns a reporter that is not in the package. Nothing fails, nothing logs, and the player sees
 # the process disappear. A missing file that only matters after a crash will not be noticed by
 # testing the happy path, so it has to be asserted here.
-foreach ($required in @('AverGame.exe', 'AverCrashReporter.exe', 'game.json', 'Game.ocproject', 'THIRD-PARTY-NOTICES.txt')) {
+foreach ($required in @('AverEngineRuntime.exe', 'AverCrashReporter.exe', 'game.json', 'Game.ocproject', 'THIRD-PARTY-NOTICES.txt')) {
     if (-not (Test-Path -LiteralPath (Join-Path $pkg $required))) { Fail "the package has no $required" }
 }
 
@@ -113,7 +113,7 @@ if (Test-Path -LiteralPath $gameJsonPath) {
         # reasoning that a UI tree links ImGui into everything it builds. The ImGui/RHI split
         # (c71e3fc) ended that: Aver.RHI.D3D12 never links imgui, the concrete implementation lives
         # in the separate Aver.RHI.D3D12.ImGui module, and only Sandbox links it -- so an
-        # AVER_ENABLE_UI=ON tree produces a clean AverGame.exe. stage-game.ps1 already proves that
+        # AVER_ENABLE_UI=ON tree produces a clean AverEngineRuntime.exe. stage-game.ps1 already proves that
         # per package by scanning the actual staged binary for ImGui markers, which is a real check
         # where this one was an inference. Kept as a note, because "which tree was this staged from"
         # is still worth seeing in the log.
@@ -154,16 +154,16 @@ $scratch = Join-Path $env:TEMP ("aver-game-verify-" + [guid]::NewGuid().ToString
 Note "copying package to $scratch"
 Copy-Item -LiteralPath $pkg -Destination $scratch -Recurse -Force
 
-$exe = Join-Path $scratch 'AverGame.exe'
+$exe = Join-Path $scratch 'AverEngineRuntime.exe'
 if (-not (Test-Path -LiteralPath $exe)) {
-    Fail 'AverGame.exe is missing from the scratch copy'
+    Fail 'AverEngineRuntime.exe is missing from the scratch copy'
 } else {
     $args = @('--frames', "$Frames", '--trace-opens')
     if (-not $Windowed) { $args += '--headless' }
 
     # cwd = C:\, deliberately. See the description: it is the working directory rather than the copy
     # that makes this a real isolation test.
-    Note "running: AverGame.exe $($args -join ' ')   (cwd = C:\)"
+    Note "running: AverEngineRuntime.exe $($args -join ' ')   (cwd = C:\)"
     $proc = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory 'C:\' `
                           -NoNewWindow -Wait -PassThru `
                           -RedirectStandardOutput (Join-Path $scratch 'run.out') `
@@ -277,7 +277,7 @@ if (-not $SkipDivergence) {
         # editor must not be left drawing a gizmo over a selection it made on load, which spawns
         # nothing but keeps the two runs honestly comparable in every other respect too.
         $censusEditor = Get-Census $editorExe @('--no-vsync', '--no-editor-chrome')
-        $censusGame   = Get-Census (Join-Path $scratch 'AverGame.exe') @()
+        $censusGame   = Get-Census (Join-Path $scratch 'AverEngineRuntime.exe') @()
 
         if (-not $censusEditor) {
             Fail 'the editor printed no [Census] line -- --scene-census is not wired, so divergence was not checked'

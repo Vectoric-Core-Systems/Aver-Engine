@@ -3,7 +3,7 @@
 //
 // THIS IS A FILE-FORMAT CONTRACT, NOT AN EDITOR CONVENTION, which is why it lives here and not in
 // the editor. It was in two places at once -- sandbox/src/EditorEuler.hpp and a file-static copy in
-// modules/runtime.game/src/GameLevel.cpp -- because the game genuinely needs it to read a level the
+// Runtime/src/GameLevel.cpp -- because the game genuinely needs it to read a level the
 // editor wrote. That duplication was the evidence that it belongs in the engine; both copies now
 // resolve here, and EditorEuler.hpp is a re-export so every editor call site is unchanged.
 //

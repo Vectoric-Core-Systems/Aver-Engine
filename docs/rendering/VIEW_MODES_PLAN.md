@@ -548,7 +548,7 @@ that tint is deliberately neutralised to white before the draw, so a real materi
 reaches it:
 
 ```cpp
-// modules/runtime.game/src/GameRender.cpp:127-133
+// Runtime/src/GameRender.cpp:127-133
 if (authored) {
     // An AUTHORED material supplies its own colour and its own metal/rough through the
     // binding set below, so the per-draw values are neutralised to 1 rather than left as

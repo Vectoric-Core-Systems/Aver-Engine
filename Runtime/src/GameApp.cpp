@@ -12,7 +12,7 @@
 
 // --screenshot (captureScreenshotIfDue). A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative to
 // sandbox/src/SandboxApp.cpp's own is fine -- tests/formats/CMakeLists.txt's MakeFoliage target
-// already establishes the precedent: AverGame.exe and Sandbox.exe are separate binaries, so there is
+// already establishes the precedent: AverEngineRuntime.exe and Sandbox.exe are separate binaries, so there is
 // no duplicate symbol to collide, unlike modules/platform/src/Image.cpp's STB_IMAGE_IMPLEMENTATION,
 // which every module ultimately links into BOTH executables and therefore may only be defined once.
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -366,7 +366,7 @@ bool isOcproject(const char* p) {
 // Scalability.hpp's own header comment), so the level's name is typed out locally rather than
 // borrowed from aver::sr::qualityName's identical table. This is NOT a second source of truth for the
 // NUMBERING itself: `level` is the quality ladder's own kAverSrOff..kAverSrPerformance
-// (QualityLadder.hpp, 3.2), and game/src/GameMain.cpp's own static_asserts (3.2) are what actually
+// (QualityLadder.hpp, 3.2), and Runtime/host/RuntimeMain.cpp's own static_asserts (3.2) are what actually
 // cross-check that numbering against aver::sr::Quality's, under AVER_MODULE_SR -- this function only
 // has to spell the same four words sr::qualityName already does.
 const char* averSrLevelName(u32 level) {
@@ -840,7 +840,7 @@ void GameApp::spawnParticleTestContent(rhi::IDevice& device) {
     // STANDALONE BY DESIGN, matching sandbox/src/SandboxApp.cpp's own --particle-test: no project and
     // no Game.ocproject are required. registerBuiltins is normally openProject's job, run only once a
     // project's content dir resolves (see openProject's own AVER_MODULE_SCENE block) -- a bare
-    // `AverGame.exe --particle-test` never opens one, so this guarantees the builtin unit cube this
+    // `AverEngineRuntime.exe --particle-test` never opens one, so this guarantees the builtin unit cube this
     // test draws through exists regardless. Guarded on the lookup rather than called unconditionally,
     // so a run THAT does have a project (e.g. `--project <path> --particle-test`) does not create a
     // second, orphaned GPU mesh behind the one openProject already made.
@@ -960,7 +960,7 @@ void GameApp::spawnParticleTestContent(rhi::IDevice& device) {
 
 void GameApp::openProject(Engine& e) {
     // A PACKAGED GAME IS LAUNCHED WITH NO ARGUMENTS. stage-game.ps1 writes Game.ocproject beside
-    // AverGame.exe, so when nothing was named on the command line, look there -- and look beside the
+    // AverEngineRuntime.exe, so when nothing was named on the command line, look there -- and look beside the
     // EXECUTABLE, never in the working directory. A player's shortcut, a store client and a
     // double-click from Explorer all set cwd to somewhere unrelated, and verify-game.ps1
     // deliberately runs the package with cwd = C:\ for exactly that reason.
@@ -1754,7 +1754,7 @@ void GameApp::onInit(Engine& e) {
             cfg_.averSrArg, -1, project_.averSr, voxi::autoAverSrLevel(vx.settings(), vx.deviceInfo()));
 
         // NULL WHEN THE SR MODULE IS NOT LINKED into this build, and that is the legal default --
-        // averSrInstaller_ is set only from game/src/GameMain.cpp under its own AVER_MODULE_SR guard,
+        // averSrInstaller_ is set only from Runtime/host/RuntimeMain.cpp under its own AVER_MODULE_SR guard,
         // the sole translation unit in this executable allowed to name sr::anything (setAverSrInstaller's
         // own comment). A resolved level with no installer present stays at native scale below: the
         // game must still BUILD AND RUN with the SR module absent, not merely compile with it

@@ -9,7 +9,7 @@
  *
  * WHY IT IS NOT EditorPrefs. sandbox/src/EditorPrefs.cpp already does exactly this shape and is
  * `namespace aver::editor` inside the editor executable -- `grep -rn "EditorPrefs"
- * modules/runtime.game` returns nothing. A shipped game could not reach it, which is why the engine
+ * Runtime` returns nothing. A shipped game could not reach it, which is why the engine
  * had nowhere at all to put a chosen setting.
  *
  * A SHARED LIBRARY WITH A PLAIN C SEAM, like Aver.Physics, because the C# layer P/Invokes straight

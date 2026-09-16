@@ -14,7 +14,7 @@
 
     LAYOUT. Chosen so that no path-derivation code in the engine has to change:
 
-        <out>\AverGame.exe, the engine DLLs, dxcompiler/dxil/nethost, the VC++ runtime
+        <out>\AverEngineRuntime.exe, the engine DLLs, dxcompiler/dxil/nethost, the VC++ runtime
         <out>\Scripting\          bridge + contract assemblies
         <out>\Game.ocproject      rewritten manifest, CONTENT Content
         <out>\Content\            the project's content, filtered
@@ -104,16 +104,16 @@ foreach ($k in @('AVER_MODULE_SCENE','AVER_MODULE_FRAMEWORK','AVER_MODULE_PBR','
 # Aver.RHI.D3D12 used to link imgui PUBLIC and Aver.Runtime linked that backend PUBLIC in turn (the
 # ImGui/RHI split closed that: see modules/rhi.d3d12/CMakeLists.txt and
 # include/aver/rhi/d3d12/UiBackend.hpp). A tree configured AVER_ENABLE_UI=ON is no longer evidence of
-# anything about AverGame.exe by itself -- only Sandbox links the concrete ImGui backend now, in every
+# anything about AverEngineRuntime.exe by itself -- only Sandbox links the concrete ImGui backend now, in every
 # configuration. Refusing to stage from such a tree today would be refusing a perfectly good package
 # on a premise that stopped being true.
 #
-# What replaces it is refusal 8d, far below: a scan of the ACTUAL STAGED AverGame.exe for ImGui
+# What replaces it is refusal 8d, far below: a scan of the ACTUAL STAGED AverEngineRuntime.exe for ImGui
 # evidence, which is the real thing this script ever needed to guarantee. Kept as a check on the
 # binary rather than removed outright -- belt-and-braces against a future regression of the coupling
 # this file used to work around, caught with real evidence instead of a policy on a config flag.
 if (-not $options['AVER_BUILD_GAME']) {
-    Fail "this tree is configured AVER_BUILD_GAME=OFF, so it contains no AverGame.exe to stage."
+    Fail "this tree is configured AVER_BUILD_GAME=OFF, so it contains no AverEngineRuntime.exe to stage."
 }
 if ($Config -eq 'Debug' -and -not $AllowDebugCrt) {
     Fail ('refusing to stage a Debug build: it imports the debug CRT, which ships with Visual ' +
@@ -442,7 +442,7 @@ $staged = Get-ChildItem -LiteralPath $outFull -Recurse -File
 $game = [ordered]@{
     schemaVersion = 1
     name          = $gameName
-    entryPoint    = 'AverGame.exe'
+    entryPoint    = 'AverEngineRuntime.exe'
     project       = 'Game.ocproject'
     startMap      = $startMap
     window        = [ordered]@{ width = 1280; height = 720 }
@@ -541,11 +541,11 @@ foreach ($miss in ($unresolved.Keys | Sort-Object)) {
 }
 if ($unresolved.Count -eq 0) { Note 'import closure OK' }
 
-# 8c. AverGame.exe must actually be there. It is the entry point game.json names.
-$gameExe = Join-Path $outFull 'AverGame.exe'
-if (-not (Test-Path -LiteralPath $gameExe)) { Fail 'AverGame.exe is not in the package' }
+# 8c. AverEngineRuntime.exe must actually be there. It is the entry point game.json names.
+$gameExe = Join-Path $outFull 'AverEngineRuntime.exe'
+if (-not (Test-Path -LiteralPath $gameExe)) { Fail 'AverEngineRuntime.exe is not in the package' }
 
-# 8d. AverGame.exe must not contain Dear ImGui. THIS is what makes refusal 1's old blanket
+# 8d. AverEngineRuntime.exe must not contain Dear ImGui. THIS is what makes refusal 1's old blanket
 #     AVER_ENABLE_UI=ON rejection unnecessary rather than merely relaxed: it checks the actual staged
 #     artifact instead of a config flag that used to (but no longer does) imply the same thing.
 #
@@ -554,7 +554,7 @@ if (-not (Test-Path -LiteralPath $gameExe)) { Fail 'AverGame.exe is not in the p
 #     DLL dependencies. The only real evidence for a STATICALLY linked dependency is inside the
 #     binary's own bytes, so this is a plain string search, not an import-table check: every marker
 #     below is a symbol or literal that can only exist in this .exe if ImGui code was compiled into
-#     it. Grounded in an actual scan of a built AverGame.exe from an AVER_ENABLE_UI=ON tree, not
+#     it. Grounded in an actual scan of a built AverGame.exe (the runtime's name then) from an AVER_ENABLE_UI=ON tree, not
 #     assumed -- see the imgui-split work that added this check for the dumpbin/strings output that
 #     picked these specific markers.
 if (Test-Path -LiteralPath $gameExe) {
@@ -562,10 +562,10 @@ if (Test-Path -LiteralPath $gameExe) {
     $imguiMarkers = @('ImGui_ImplDX12_Init', 'ImGui_ImplWin32_Init', 'ImGui_ImplDX12_RenderDrawData', 'Dear ImGui')
     $found = @($imguiMarkers | Where-Object { $exeText.Contains($_) })
     if ($found.Count -gt 0) {
-        Fail ("AverGame.exe contains Dear ImGui evidence (" + ($found -join ', ') + ") -- the RHI/UI " +
+        Fail ("AverEngineRuntime.exe contains Dear ImGui evidence (" + ($found -join ', ') + ") -- the RHI/UI " +
               "split is not clean in this build tree. A shipped game must never link the editor's UI toolkit.")
     } else {
-        Note "AverGame.exe: no Dear ImGui evidence found (checked $($imguiMarkers.Count) markers) -- clean"
+        Note "AverEngineRuntime.exe: no Dear ImGui evidence found (checked $($imguiMarkers.Count) markers) -- clean"
     }
 }
 

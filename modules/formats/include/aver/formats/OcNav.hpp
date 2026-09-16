@@ -13,7 +13,7 @@
 //
 // BAKED IN THE EDITOR, NEVER AT RUNTIME. The bake raycasts the physics world, and terrain collision
 // exists only in the editor (SandboxApp::rebuildLandscapeCollision; grep add_heightfield over
-// modules/runtime.game finds nothing). So the bake happens in the one place the ground is actually
+// Runtime finds nothing). So the bake happens in the one place the ground is actually
 // there, and ships its answer as an asset. It is also far too slow for a frame: aver_phys_raycast
 // resolves its hit by linear scan over every body (PhysicsWorld.cpp:565), so a bake is
 // O(cells x bodies).

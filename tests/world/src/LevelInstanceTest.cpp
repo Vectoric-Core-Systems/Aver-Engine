@@ -1,6 +1,6 @@
 // Aver.World: turning parsed .ocworld placements into entities. Exit code = failure count.
 //
-// WHY THIS EXISTS. The placement loop lived in two places -- modules/runtime.game/src/GameLevel.cpp
+// WHY THIS EXISTS. The placement loop lived in two places -- Runtime/src/GameLevel.cpp
 // and sandbox/src/SandboxApp.cpp -- and NEITHER was covered by a test: there is no .ocworld anywhere
 // in this repository, every real level lives in an out-of-tree project, and the only thing that ever
 // exercised either copy was a human opening the editor. The two had already drifted apart by the

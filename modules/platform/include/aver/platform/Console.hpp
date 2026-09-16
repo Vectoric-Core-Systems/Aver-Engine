@@ -7,7 +7,7 @@ namespace aver::platform {
 // WHY THIS EXISTS. Sandbox.exe used to be a console-subsystem program, so Windows gave it a console
 // window of its own whenever it was launched from Explorer, a shortcut or the launcher -- a black
 // rectangle that opened beside the editor and sat there for the whole session. It is linked
-// /SUBSYSTEM:WINDOWS now, exactly like AverGame.exe and AverCrashReporter.exe, so that window is
+// /SUBSYSTEM:WINDOWS now, exactly like AverEngineRuntime.exe and AverCrashReporter.exe, so that window is
 // never created at all: not hidden a few milliseconds in, not flashed on the way past, never made.
 //
 // THAT ALONE WOULD HAVE COST THE MEASUREMENT TOOLING ITS OUTPUT, which is why this function is the

@@ -181,7 +181,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // preset) along the way, so this one include is every settings-separation header this file needs.
 #include "aver/voxi/ProjectRenderApply.hpp"
 // NrdDenoiser.hpp, for Denoiser::available() alone -- the DeviceInfo::nrdSupported computation just
-// below is R1's other mirror site (GameApp::attachVoxi, modules/runtime.game/src/GameApp.cpp, is the
+// below is R1's other mirror site (GameApp::attachVoxi, Runtime/src/GameApp.cpp, is the
 // first; same expression, `backend() == D3D12 && available()`). Aver.Render.Voxi.Renderer links
 // Aver.Render.NRD PUBLIC (modules/render.voxi/CMakeLists.txt), and this file already links against
 // the former for VoxiRenderer.hpp above, so the include needs no extra guard.
@@ -13395,7 +13395,7 @@ private:
     f32 landCreateSpacingCm_ = 100.0f;
 
     // --no-editor-chrome: suppress everything the editor draws ON TOP of the scene, so a capture
-    // can be compared against AverGame.exe's. Run-scoped and never persisted -- see the flag's own
+    // can be compared against AverEngineRuntime.exe's. Run-scoped and never persisted -- see the flag's own
     // comment in the argv loop for why it is not routed through showGrid_.
     bool noEditorChrome_ = false;
 
@@ -28856,7 +28856,7 @@ Application* createApplication(int argc, char** argv) {
         // navmesh overlay, no gizmo, no sculpt cursor, no viewport icons.
         //
         // IT EXISTS SO TWO HOSTS CAN BE COMPARED. scripts/verify-game.ps1 opens the same project and
-        // level in Sandbox.exe and AverGame.exe and diffs their probe codes, which is the check whose
+        // level in Sandbox.exe and AverEngineRuntime.exe and diffs their probe codes, which is the check whose
         // absence got the packaged game deleted in the first place ("a second host rendered a
         // different subset of the scene"). Without this the diff would be dominated by the grid the
         // game correctly does not draw, and would prove nothing about the scene.
@@ -28866,7 +28866,7 @@ Application* createApplication(int argc, char** argv) {
         // like. This is a run-scoped override the draw sites read alongside their own flags.
         if (!std::strcmp(argv[i],"--no-editor-chrome")) { noEditorChrome=true; continue; }
         // --scene-census: print one canonical line describing what the loaded level put in
-        // the world. AverGame.exe accepts the identical flag and prints the identical format,
+        // the world. AverEngineRuntime.exe accepts the identical flag and prints the identical format,
         // and scripts/verify-game.ps1 compares the two -- the divergence check whose absence
         // is why the packaged game was deleted. See world/SceneCensus.hpp for why a census
         // rather than a frame comparison.

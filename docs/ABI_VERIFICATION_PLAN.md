@@ -154,7 +154,7 @@ RHI backend is compiled in — that library never names Scene, Framework, Physic
 `Engine.cpp` cannot call any of their symbols even if it wanted to. The composition root already has the
 vocabulary for this: `SandboxApp.cpp` gates roughly twenty other features on `#if AVER_MODULE_X`
 throughout its own source (confirmed at lines 63, 78, 95, 99, 124, 132, 136, 139, 140, 153, 164, 172,
-183, 186, 201, 216, 263, 658, 704, and more), and `modules/runtime.game/src/GameApp.cpp:18-54` uses the
+183, 186, 201, 216, 263, 658, 704, and more), and `Runtime/src/GameApp.cpp:18-54` uses the
 identical `#if AVER_MODULE_SCENE` / `#if AVER_MODULE_PHYSICS` / `#if AVER_MODULE_FRAMEWORK` pattern for
 its own includes. Extending that same list with one more line per module — a call to that module's
 report function, guarded by the macro already guarding everything else about it — is additive to a

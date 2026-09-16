@@ -12,7 +12,7 @@
 //
 // NO COUPLING: modules/particles never includes this header and never opens a file (see
 // modules/particles/README.md's own statement of that rule). A composition root
-// (sandbox/src/SandboxApp.cpp, modules/runtime.game/src/GameApp.cpp) calls loadOcparticle(), then
+// (sandbox/src/SandboxApp.cpp, Runtime/src/GameApp.cpp) calls loadOcparticle(), then
 // hands the result to particles::particleEffects().set(id, effect); the particle module only ever
 // sees the resolved id, never a path. This header is therefore its own target
 // (Aver.Formats.Particles, see this directory's CMakeLists.txt) rather than living inside

@@ -4,7 +4,7 @@
 // convention (docs/SCRIPTING_API.md, docs/ARCHITECTURE.md, README): Content/Materials/*.cs is
 // SOURCE, avermatc compiles it to Binaries/Materials/*.ocmat, and a NAME is looked up under
 // Binaries first, then Content/Materials, then a content-relative path -- see
-// GameContent::materialForSurface (modules/runtime.game/src/GameContent.cpp) for the runtime's own
+// GameContent::materialForSurface (Runtime/src/GameContent.cpp) for the runtime's own
 // copy of this same order, which this file must keep matching without ever including it: the
 // runtime is Aver.RuntimeGame and this is Sandbox, and nothing here should make the editor need it.
 //

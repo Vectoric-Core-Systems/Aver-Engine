@@ -199,7 +199,7 @@ Auto then uses the ladder value at the higher of its GI and RT tiers.
 4. `RENDER.AVERSR` in the project manifest.
 5. Auto — the table above, computed from the Overall rung (or Custom's GI/RT tiers).
 
-The packaged game (`AverGame.exe`) walks the same chain minus step 3: there is no Display
+The packaged game (`AverEngineRuntime.exe`) walks the same chain minus step 3: there is no Display
 preference outside the editor, so a manifest value or Auto is all it has.
 
 AverSR deliberately stays outside Custom detection — it lives at the module boundary above

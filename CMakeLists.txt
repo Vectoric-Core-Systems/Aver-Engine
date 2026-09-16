@@ -57,10 +57,10 @@ option(AVER_RHI_D3D12  "DirectX 12 backend (primary)" ON)
 option(AVER_RHI_D3D11  "DirectX 11 backend"           ON)
 option(AVER_RHI_VULKAN "Vulkan backend (headers vendored; no SDK required)" ON)
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
-# The game-runtime LIBRARY (Aver.Runtime.Game) and the tests that exercise it. There is no longer a
-# standalone AverGame.exe or a packaged-game staging path: the editor is how a project is run, and the
-# runtime lives on as a library because tests/game drives it directly.
-option(AVER_BUILD_GAME "Build the game runtime library (Aver.Runtime.Game)" ON)
+# The runtime in Runtime/: the Aver.Runtime.Game library, the standalone AverEngineRuntime.exe that
+# packaged games run ("Aver Engine Runtime"), and the tests that exercise the library. The option keeps
+# its old name on purpose -- renaming it would silently invalidate every existing CMake cache that set it.
+option(AVER_BUILD_GAME "Build the runtime (Aver.Runtime.Game + AverEngineRuntime.exe)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
 # CTest, so the suites are runnable by ONE command from a terminal or a build server.
 #
@@ -451,30 +451,19 @@ endif()
 # entity" from existing once in the editor and once in the game runtime.
 add_subdirectory(modules/world)
 add_subdirectory(modules/runtime)
-# After modules/runtime: it links Aver.Runtime, and this is a plain subdirectory order dependency.
+# THE RUNTIME: Runtime/ holds the Aver.Runtime.Game library and, under Runtime/host, the standalone
+# AverEngineRuntime.exe (was modules/runtime.game and game/AverGame.exe until 2026-09-16). See
+# Runtime/host/CMakeLists.txt for the executable's history and the divergence gate it ships with.
+#
+# ORDER: after modules/runtime, which the library links, and after modules/render.sr, which the host's
+# if(TARGET Aver.Render.Sr) must already be able to see. BEFORE sandbox, because the editor is to link
+# this library as its private copy of the runtime is retired.
 if(AVER_BUILD_GAME)
-  add_subdirectory(modules/runtime.game)
+  add_subdirectory(Runtime)
 endif()
 
 if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
-endif()
-
-# THE STANDALONE GAME EXECUTABLE, restored -- with the check whose absence is why it was removed.
-#
-# `game/` (AverGame.exe) and the packaged-game staging path went in b262c73 for a stated reason, and
-# it was a real one: a second host "rendered a different subset of the scene than the editor", and
-# nothing in the tree could notice. The runtime itself never left -- Aver.Runtime.Game kept being
-# built and kept growing, and GameApp::onInit is a SUPERSET of the editor's applyProject -- so what
-# was deleted was ~30 lines of glue plus three scripts, and roughly 3,500 lines of game host sat
-# compiled and unlinked for nineteen days.
-#
-# WHAT IS DIFFERENT THIS TIME: scripts/verify-game.ps1 now runs a DIVERGENCE gate. It opens the same
-# project and level in both hosts under --frames and compares their probe codes, so "the game draws
-# what the editor draws" is a check that fails rather than a claim nobody can test. Restoring the
-# executable without that would be restoring the problem.
-if(AVER_BUILD_GAME)
-  add_subdirectory(game)
 endif()
 
 # THE MODULE DAG CHECK, here rather than inside aver_add_module.

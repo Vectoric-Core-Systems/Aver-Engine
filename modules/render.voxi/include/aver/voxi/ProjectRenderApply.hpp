@@ -10,7 +10,7 @@
 
 // THE ONE PLACE A .ocproject's RENDER.* KEYS BECOME A voxi::Settings, SHARED BY BOTH HOSTS. Before
 // this header existed, the editor's applyProjectVoxiSettings (sandbox/src/SandboxApp.cpp) and the
-// game's applyProjectRenderSettings (modules/runtime.game/src/GameApp.cpp) each carried their own
+// game's applyProjectRenderSettings (Runtime/src/GameApp.cpp) each carried their own
 // copy of the same tier/knob apply logic, and the game's copy was the one that had drifted: it never
 // seeded the volume before init (N2), never derived an absent knob back to its tier on reopen (N6),
 // and applied everything in ONE setSettings call instead of two (so a manifest naming both a tier and

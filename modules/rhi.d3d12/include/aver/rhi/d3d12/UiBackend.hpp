@@ -9,7 +9,7 @@
 // links. Before this existed, Aver.RHI.D3D12 linked `imgui` PUBLIC (see this module's own
 // CMakeLists.txt history), so AverGame.exe got Dear ImGui compiled into it whenever a tree was
 // configured AVER_ENABLE_UI=ON, purely because it links Aver.RHI.D3D12 through Aver.Runtime -- see
-// modules/runtime.game/CMakeLists.txt's own header comment for the defect this closes.
+// Runtime/CMakeLists.txt's own header comment for the defect this closes.
 //
 // DELIBERATELY D3D12-TYPED, NOT A GENERIC "UI ABSTRACTION LAYER". ImGui_ImplDX12_RenderDrawData
 // needs a raw ID3D12GraphicsCommandList*, and ImGui_ImplDX12_Init needs an ID3D12Device*/

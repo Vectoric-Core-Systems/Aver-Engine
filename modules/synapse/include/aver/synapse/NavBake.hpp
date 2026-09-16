@@ -9,7 +9,7 @@
 //
 // BAKING IS AN EDITOR COMMAND, NEVER A RUNTIME COST. That is a decision, not an accident: terrain
 // collision in this engine is editor-only (SandboxApp::rebuildLandscapeCollision has no counterpart
-// in modules/runtime.game), so the one place the landscape body exists is the one place the bake
+// in Runtime), so the one place the landscape body exists is the one place the bake
 // can see the ground. The result ships as an asset.
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcNav.hpp"

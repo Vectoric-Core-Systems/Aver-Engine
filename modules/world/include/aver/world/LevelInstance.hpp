@@ -1,7 +1,7 @@
 // Turning parsed .ocworld placements into live scene entities -- ONCE, for both hosts.
 //
-// WHY THIS EXISTS. Until this module, the same loop lived twice: modules/runtime.game/src/GameLevel.cpp
-// and sandbox/src/SandboxApp.cpp. That was deliberate at the time -- modules/runtime.game/CMakeLists.txt
+// WHY THIS EXISTS. Until this module, the same loop lived twice: Runtime/src/GameLevel.cpp
+// and sandbox/src/SandboxApp.cpp. That was deliberate at the time -- Runtime/CMakeLists.txt
 // says so in its own header: "The lift is a COPY: sandbox/src/SandboxApp.cpp is not edited by it, so
 // the editor cannot regress. De-duplication is a later slice, proven by the gates staying identical."
 // This is that slice, and that is the bar it is held to.

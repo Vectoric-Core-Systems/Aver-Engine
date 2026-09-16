@@ -15,7 +15,7 @@
 // with a PARAM-shape error, or (before Compile() was fixed to skip exec-only nodes) worse. This
 // file is still the single seam between "compiled graph" and "driven every frame", by design, so
 // event-driven graphs are taught here rather than by inventing a second host: GameApp (see
-// modules/runtime.game/src/GameApp.cpp) discovers a project's .ocgraph files and calls the SAME
+// Runtime/src/GameApp.cpp) discovers a project's .ocgraph files and calls the SAME
 // ScriptHost::graphLoad/graphTick entity-scoped API SandboxApp's graph-driven drone already uses,
 // just with a synthetic id standing in for "the project" rather than a real scene entity -- see
 // GameApp.cpp's own comment on why that is safe. No native or Aver.Scripting.Bridge change was
@@ -731,7 +731,7 @@ public class GraphHost
     }
 
     // Success-path diagnostic, deliberately distinct from the LoadError family's Console.Error use
-    // above: this is not a failure, so it goes to stdout. A shipped AverGame.exe is a WIN32-subsystem
+    // above: this is not a failure, so it goes to stdout. A shipped AverEngineRuntime.exe is a WIN32-subsystem
     // process with no console of its own, but .NET's Console class still writes to whatever stdout
     // handle the process inherited -- which is exactly the redirected/piped handle a headless
     // `--frames N` capture (or any other launcher that redirects output) provides, so this is not

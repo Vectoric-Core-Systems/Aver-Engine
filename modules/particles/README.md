@@ -35,7 +35,7 @@ consumer of every OTHER format. This module never includes that header and never
 
 Both composition roots walk their project's content root for `.ocparticle` files and call
 `particleEffects().set(id, effect)` themselves -- `sandbox/src/SandboxApp.cpp`'s
-`loadProjectParticleEffects()` and `modules/runtime.game/src/GameContent.cpp`'s
+`loadProjectParticleEffects()` and `Runtime/src/GameContent.cpp`'s
 `GameContent::loadProjectParticleEffects()`, both keyed on `fnv1a64(relative path)`, the SAME id
 space `CMeshRenderer::mesh`/`CAnimator::clip` already use. Neither composition root's UI or asset
 pipeline is visible from here; this module only ever asks `find(id)`.

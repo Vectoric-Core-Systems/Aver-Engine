@@ -1,5 +1,10 @@
 # Packaging an Aver project into a shippable game
 
+> **RENAMED 2026-09-16.** The runtime moved to `Runtime/`: the library that was `modules/runtime.game`
+> is `Runtime/` (target still `Aver.Runtime.Game`), and the executable that was `game/AverGame.exe` is
+> `Runtime/host` -> **`AverEngineRuntime.exe`**, shown as "Aver Engine Runtime". The design record below
+> keeps the names it was written with; the commands and the notices table use the current ones.
+>
 > **STATUS: LIVE AGAIN, 2026-09-05, WITH THE CHECK THAT WAS MISSING.** Removed 2026-08-17
 > (`b262c73`), restored today. `AverGame.exe` (`game/`), `scripts/stage-game.ps1`,
 > `scripts/verify-game.ps1`, `scripts/game.allowlist` and the editor's **Package Project** item all
@@ -188,7 +193,7 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 
 | Binary | Origin | Licence | Ships? |
 |---|---|---|---|
-| `AverGame.exe` | ours | `LICENSE.md` | yes |
+| `AverEngineRuntime.exe` | ours | `LICENSE.md` | yes |
 | `Aver.Scene/Framework/Physics/Render.PBR/Render.Voxi/UI.Abi .dll` | ours | ours | yes — load-time imports of the exe |
 | *statically linked:* Jolt Physics | `modules/physics.jolt/LICENSE` | **MIT** | yes; **notice required** |
 | *statically linked:* stb | `third_party/stb/LICENSE.txt` | **MIT / public domain** | yes; **notice required** |
@@ -290,8 +295,8 @@ Three assertions, none of which needs a recorded baseline.
 
 2. **It drew something — as a relation, not a number.** Run the *same* package twice at the *same* width and height:
    ```
-   AverGame.exe --frames 60 --width 1600 --height 900 --probe-rel 0.5 0.5 --screenshot a.png
-   AverGame.exe --frames 60 --width 1600 --height 900 --probe-rel 0.5 0.5 --no-world --screenshot b.png
+   AverEngineRuntime.exe --frames 60 --width 1600 --height 900 --probe-rel 0.5 0.5 --screenshot a.png
+   AverEngineRuntime.exe --frames 60 --width 1600 --height 900 --probe-rel 0.5 0.5 --no-world --screenshot b.png
    ```
    and assert the two probe codes **differ**. A probe equal to the clear colour proves nothing; a probe that *changes when the world is removed* proves geometry reached that pixel. No baseline, no recorded value, nothing to go stale. `--no-world` is a new flag on `GameApp` that skips `loadStartMap` and the world draw.
 

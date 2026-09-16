@@ -18,7 +18,7 @@
 // AVER_MODULE_TRIFACTOR=OFF (the tree's default -- see modules/trifactor/CMakeLists.txt on why it
 // is off by default). AVER_MODULE_TRIFACTOR reaches this translation unit only through the link
 // interface (tests/formats/CMakeLists.txt's `if(TARGET Aver.Trifactor)` block), the same mechanism
-// modules/runtime.game/src/GameContent.cpp uses for AVER_MODULE_PBR/AVER_MODULE_SCENE.
+// Runtime/src/GameContent.cpp uses for AVER_MODULE_PBR/AVER_MODULE_SCENE.
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterBuilder.hpp"
 #endif

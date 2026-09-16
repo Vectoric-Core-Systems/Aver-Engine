@@ -7,7 +7,7 @@
 // call aver_phys_raycast.
 //
 // WHY THE EDITOR AND NOT THE RUNTIME: terrain collision in this engine is editor-only
-// (SandboxApp::rebuildLandscapeCollision has no counterpart in modules/runtime.game), so the one
+// (SandboxApp::rebuildLandscapeCollision has no counterpart in Runtime), so the one
 // process where the landscape body exists is the one process that can see the ground. The bake ships
 // its result as an asset; the runtime only ever loads one.
 #include "aver/formats/OcNav.hpp"

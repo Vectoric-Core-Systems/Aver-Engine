@@ -374,7 +374,7 @@ These ship. Each is listed in the release notes; the triggering input is here.
 - **The Voxi voxel-grid resolution control does nothing after startup.**
 - **A legacy `.ocmap` `DEFORM` placement is shown as a small static box**, there being no
   deformable-cage system to draw it. It round-trips faithfully.
-- **`modules/runtime.game` is a diverged twin** of the sandbox's camera and scene walk. Nothing
+- **`Runtime` is a diverged twin** of the sandbox's camera and scene walk. Nothing
   instantiates it, so it received neither this release's owner-hide fix nor the earlier
   culling-starves-render-features fix. Dead code that looks live.
 
@@ -459,7 +459,7 @@ functions unreachable from any test. `EditorEulerTest` now sweeps **3601 pitches
 worst `|dot|` is 1.000000.
 
 ### 2. The game runtime rendered every frame with the previous frame's camera — HIGH
-`modules/runtime.game/src/GameApp.cpp:580`
+`Runtime/src/GameApp.cpp:580`
 
 `Engine::frameStep` runs `onUpdate → beginFrame → onRender → endFrame`, and `beginFrame` takes the
 **one and only** snapshot of `PerFrameCB` into the GPU-visible buffer. `GameApp` called `pushFrame`

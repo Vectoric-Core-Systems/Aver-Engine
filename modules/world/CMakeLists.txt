@@ -33,7 +33,7 @@ aver_add_module(Aver.World
     Aver.Render.Pcg
 )
 
-# The optional half of the link interface, mirroring modules/runtime.game/CMakeLists.txt.
+# The optional half of the link interface, mirroring Runtime/CMakeLists.txt.
 #
 # WHY if(TARGET ...) AND NOT if(AVER_MODULE_...): an unconditional `Aver.Scene` is a hard configure
 # error in a tree built with AVER_MODULE_SCENE=OFF, because the target does not exist. Testing the
@@ -43,7 +43,7 @@ aver_add_module(Aver.World
 # definitions on the module targets themselves, and they reach a translation unit ONLY through the
 # link interface. Without these lines every `#if AVER_MODULE_*` in LevelInstance.cpp would be false
 # however the tree was configured -- so the whole file would compile to nothing and the only symptom
-# would be an empty world. modules/runtime.game hit exactly this and records it.
+# would be an empty world. Runtime hit exactly this and records it.
 if(TARGET Aver.Scene)
   target_link_libraries(Aver.World PUBLIC Aver.Scene)
 endif()

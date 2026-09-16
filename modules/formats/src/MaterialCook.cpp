@@ -11,7 +11,7 @@ namespace aver::fmt {
 namespace {
 
 // THE BUILT-IN LOOKS, and this is the THIRD copy of this list in the tree. The other two are
-// modules/runtime.game/src/GameContent.cpp's `look(...)` table and sandbox/src/SandboxApp.cpp's,
+// Runtime/src/GameContent.cpp's `look(...)` table and sandbox/src/SandboxApp.cpp's,
 // which that file's own comment already says must be kept in step with each other. A fourth
 // dependency edge is not available: Aver.Formats.Material cannot depend on runtime.game, which
 // depends on it.

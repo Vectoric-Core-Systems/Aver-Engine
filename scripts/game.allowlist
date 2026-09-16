@@ -15,12 +15,12 @@
 
 [bin]
 # The game runtime. NOT Sandbox.exe: that is the editor, and it is the single most important thing
-# this file leaves out.
-AverGame.exe
+# this file leaves out. "Aver Engine Runtime" in Task Manager (Runtime/host/AverEngineRuntime.rc).
+AverEngineRuntime.exe
 
 # The crash reporter, and its absence here was a real hole rather than a judgement call.
 #
-# game/src/GameMain.cpp calls crash::install() as the FIRST statement of main(), exactly as the
+# Runtime/host/RuntimeMain.cpp calls crash::install() as the FIRST statement of main(), exactly as the
 # editor does. On a crash it writes the whole folder -- minidump, CrashContext.runtime-xml with a
 # symbolicated stack, and the log ring -- and then spawns AverCrashReporter.exe to show it. That exe
 # was never staged, so a shipped game did all of that work and then launched a file that was not
@@ -39,10 +39,14 @@ Aver.Scene.dll        ?AVER_MODULE_SCENE
 Aver.Framework.dll    ?AVER_MODULE_FRAMEWORK
 Aver.Physics.dll      ?AVER_MODULE_PHYSICS
 
-# DELIBERATELY ABSENT: Aver.Audio.Abi.dll. It is staged by payload.allowlist and has ZERO callers --
-# the managed Aver.Audio its own CMakeLists describes does not exist in scripting/csharp/, no
-# DllImport names it, and it appears in no import table. Shipping it to players would be shipping a
-# file that does nothing. The first packaged game is SILENT and says so out loud.
+# The audio seam. THIS LINE WAS A "DELIBERATELY ABSENT" NOTE, and the note went stale: it said the DLL
+# had zero callers, no DllImport named it and it sat in no import table. All three stopped being true
+# -- Runtime/CMakeLists.txt links Aver.Audio.Abi into the runtime, GameApp.cpp calls aver_audio_init(),
+# and scripting/csharp/Aver.Framework/Audio.cs P/Invokes it -- while the exclusion stayed, so a package
+# built from a tree with the seam would name a DLL in its import table that staging refused to copy.
+# Unconditional, like payload.allowlist's entry: the top-level CMakeLists adds modules/audio.abi in
+# every edition.
+Aver.Audio.Abi.dll
 
 # Runtime redistributables. HLSL is compiled on the fly, so the shader compiler ships; dxil.dll is
 # the signing library without which drivers reject the compiled shaders.

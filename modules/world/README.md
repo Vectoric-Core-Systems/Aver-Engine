@@ -38,8 +38,8 @@ env, spawn, streaming; wires Scene↔Render↔Physics.
 become one: if asking "which chunk is this in" needed an `#if`, every caller would grow one. Its test
 links `Aver.Core` and nothing else, which is what keeps that true.
 
-Both existed **twice** before this module did, once in `modules/runtime.game/src/GameLevel.cpp` and
-once in `sandbox/src/SandboxApp.cpp`. That was deliberate at the time — `modules/runtime.game`'s own
+Both existed **twice** before this module did, once in `Runtime/src/GameLevel.cpp` and
+once in `sandbox/src/SandboxApp.cpp`. That was deliberate at the time — `Runtime`'s own
 CMakeLists says so: *"The lift is a COPY … De-duplication is a later slice, proven by the gates
 staying identical."* This module is that slice.
 

@@ -39,7 +39,7 @@ that would begin to address it.
 
 Baking is an **editor command, never a runtime cost** (Build ▸ Bake Navigation, or `--bake-nav`).
 That is not only about performance. Terrain collision is editor-only —
-`SandboxApp::rebuildLandscapeCollision` exists and `grep add_heightfield modules/runtime.game/src`
+`SandboxApp::rebuildLandscapeCollision` exists and `grep add_heightfield Runtime/src`
 finds nothing — so the bake happens in the one process where the ground it samples actually exists,
 and ships its answer as an asset.
 

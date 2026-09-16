@@ -1,7 +1,7 @@
 // Win32 virtual key <-> AVER_FW_KEY_*, in ONE place.
 //
 // WHY THIS IS A HEADER AND NOT A STATIC IN SOMEBODY'S .cpp. This table lived in an anonymous
-// namespace inside modules/runtime.game/src/GameInput.cpp, where exactly one host could reach it.
+// namespace inside Runtime/src/GameInput.cpp, where exactly one host could reach it.
 // The editor -- which is the only way a project actually runs (there is no standalone game
 // executable; see sandbox/CMakeLists.txt) -- could not, so when the editor started publishing input
 // from the same OS event stream it would have had to write the same mapping out a second time.

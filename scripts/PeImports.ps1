@@ -1,8 +1,9 @@
 # Shared PE import-table helpers, dot-sourced by stage-payload.ps1.
 #
-# ONE CALLER TODAY, NOT TWO. This was split out when stage-game.ps1 existed alongside it and both
-# staging scripts needed the same PE parser; the packaged-game path was removed with AverGame.exe, so
-# stage-payload.ps1 is the only caller now. Kept as its own file rather than folded back in: the
+# TWO CALLERS: stage-payload.ps1 and stage-game.ps1. This was split out when both staging scripts first
+# needed the same PE parser. The packaged-game path was later removed with AverGame.exe, which left
+# stage-payload.ps1 as the only caller for a while; it came back, and the runtime is now
+# AverEngineRuntime.exe in Runtime/. Kept as its own file rather than folded back in: the
 # helpers below are the fiddliest part of staging, they are worth testing and reading on their own,
 # and a second consumer (an edition-specific stager, a verifier that wants the same answers) is a
 # likelier future than never needing them again.

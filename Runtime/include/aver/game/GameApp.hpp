@@ -36,7 +36,9 @@ struct GameConfig {
     // NAMED CONSTANTS, so config() can tell "the caller asked for 1280" apart from "nobody said".
     // Without that distinction a project's WINDOW.SIZE could never win, because the field is never
     // empty -- it always holds something.
-    static constexpr const char* kDefaultTitle = "Aver Game";
+    // "Aver Engine Runtime", the executable's own name (Runtime/host/AverEngineRuntime.rc). A project
+    // that states a WINDOW.TITLE or a NAME replaces it in config(), so a shipped game shows the game.
+    static constexpr const char* kDefaultTitle = "Aver Engine Runtime";
     static constexpr u32 kDefaultWidth  = 1280;
     static constexpr u32 kDefaultHeight = 720;
 
@@ -61,7 +63,7 @@ struct GameConfig {
     bool sceneCensus = false;
     // --stats [seconds]: periodically log the per-pass GPU breakdown a shipped game has ALWAYS been
     // paying to collect and never had any way to look at. D3D12Device::initGpuTiming runs
-    // unconditionally, not behind a build flag or a CLI switch, so every AverGame.exe ever shipped
+    // unconditionally, not behind a build flag or a CLI switch, so every AverEngineRuntime.exe ever shipped
     // has been timestamping every pass and throwing the numbers away -- the editor was the only host
     // with a reader (its console's `frametime`), and a packaged game cannot include the editor.
     //
@@ -94,7 +96,7 @@ struct GameConfig {
     // are plain RHI calls, not an editor feature, so a --frames run can write a PNG here the same way.
     // Empty = no screenshot requested (the default, and the only behaviour before this field existed).
     std::string screenshotPath;
-    // --no-vsync (M7): AverGame's own measurement parity with SandboxApp.cpp's identical flag. False
+    // --no-vsync (M7): the runtime's own measurement parity with SandboxApp.cpp's identical flag. False
     // (DEFAULT) leaves vsync exactly as the backend opened it -- a shipped game syncs to the display
     // the way a player expects. True disables it once, the instant a device exists, the same
     // vsyncCanDisable()/setVSync(false) pair the editor uses; a display path that cannot tear (see
@@ -139,14 +141,14 @@ class GameApp final : public Application {
 public:
     explicit GameApp(GameConfig cfg);
 
-    // AverSR (3.3 C, contract C2-12): the composition root (game/src/GameMain.cpp, the one
+    // AverSR (3.3 C, contract C2-12): the composition root (Runtime/host/RuntimeMain.cpp, the one
     // translation unit in this executable allowed to name sr::anything -- see its own header comment)
     // hands this a function that builds a concrete aver::sr::SpatialUpscaler against a device and
     // reports the render scale for a resolved level. GameApp itself never includes aver/sr/* and
     // never names sr::Quality, matching the module boundary render.voxi and runtime.game must both
     // respect (Scalability.hpp's own header comment: "render.voxi must never include render.sr").
     // Called once by createApplication, before Engine::run ever calls onInit. LEFT NULL is the legal
-    // default for an AverGame.exe built with the SR module absent: onInit's apply step (below) still
+    // default for an AverEngineRuntime.exe built with the SR module absent: onInit's apply step (below) still
     // resolves a level through resolveAverSrLevel, it simply has nothing to install it with, and the
     // game renders at native resolution exactly as it always did -- the SR module being absent from a
     // build must never be a build failure or a run failure.
@@ -231,7 +233,7 @@ private:
 
     // VISUAL SCRIPTING PHASE 2: a packaged game running any C# at all -- graphs included -- needs the
     // in-process CLR host bootstrapped somewhere, and nothing did that for AverGame.exe before this
-    // (grep the tree: Aver.Scripting.Host was linked by modules/runtime.game/CMakeLists.txt but never
+    // (grep the tree: Aver.Scripting.Host was linked by Runtime/CMakeLists.txt but never
     // constructed by anything in it -- only sandbox/src/SandboxApp.cpp, the editor, ever stood up a
     // ScriptHost). initScripting starts it; discoverProjectGraphs and tickProjectGraphs are the
     // graph-specific pieces built on top of it. See GameApp.cpp's onInit/onUpdate for where each is
@@ -386,7 +388,7 @@ private:
     // capture requested near the end of a run is not re-requested every remaining frame.
     bool screenshotDone_ = false;
     // OUTSIDE the scene guard, and it was inside it. Aver.Render.Pcg is linked UNCONDITIONALLY
-    // (modules/runtime.game/CMakeLists.txt), there is no AVER_MODULE_PCG switch, and this header
+    // (Runtime/CMakeLists.txt), there is no AVER_MODULE_PCG switch, and this header
     // already includes aver/pcg/PcgVolume.hpp outside every guard -- so the members had no business
     // being scene-conditional. GameApp.cpp agreed with the CMake rather than with the header:
     // attachPcgTest, checkPcgVolume and the onShutdown cleanup are all correctly unguarded, so with
