@@ -8,6 +8,7 @@
 
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
+#  include "aver/voxi/FrameBudget.hpp"
 #endif
 #if AVER_MODULE_SCENE
 #  include "aver/render/SkinnedScene.hpp"
@@ -62,6 +63,10 @@ struct GameConfig {
     std::string backend;    // empty = the compiled-in default order
     // The .ocproject to open. A packaged game passes Game.ocproject; empty means no world.
     std::string projectPath;
+    // A bare .ocworld/.ocmap argument: the level to open instead of the project's STARTMAP, falling
+    // back to STARTMAP when the file does not exist. Same as the editor's bare level argument
+    // (openMapPath_), including finding the owning .ocproject when none was named. Empty = STARTMAP.
+    std::string levelPath;
     // Logs the held-key set on every change. Proves the ImGui-free input path without a debugger.
     bool inputEcho = false;
     // Logs every path the engine opens, so verify-game.ps1 can assert none is outside the package.
@@ -439,6 +444,10 @@ private:
     // onShutdown rather than being a local or a unique_ptr handed away.
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_ = false;
+    // The frame-budget controller's own state (FrameBudget.hpp) -- one instance for this app's
+    // whole run, ticked once a frame from onUpdate and seeded from project_.frameBudgetMs the moment
+    // openProject knows it. Mirrors SandboxApp.hpp's own frameBudget* member group.
+    voxi::FrameBudgetState frameBudget_;
 #endif
 #if AVER_MODULE_SCENE
     // OWNED, unlike voxiRenderer_ which is a member by value -- SkinnedScene is created only if

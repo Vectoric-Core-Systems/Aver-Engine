@@ -34,9 +34,14 @@ public:
     // OcWorldData placements and spawn, then goes through the same pipeline.
     void load(const std::string& path, GameContent& content);
 
-    // Loads the project's start map. A missing start map is INFO, not an error: a fresh project has
-    // a manifest naming a map nobody has authored yet, and refusing to start would be wrong.
-    void loadStartMap(const fmt::ProjectDesc& project, GameContent& content);
+    // Loads the project's start map, unless `overridePath` names a level to open instead -- the
+    // editor's loadStartMap/openMapPath_ precedence: the override is checked first, even with no valid
+    // project, used exactly as given, and a file that does not exist falls back to the start map.
+    //
+    // A missing start map is INFO, not an error: a fresh project has a manifest naming a map nobody
+    // has authored yet, and refusing to start would be wrong.
+    void loadStartMap(const fmt::ProjectDesc& project, GameContent& content,
+                       const std::string& overridePath = std::string());
 
     // Destroys the level's entities and its physics bodies.
     void unload();

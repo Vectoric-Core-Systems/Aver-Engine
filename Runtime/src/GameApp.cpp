@@ -378,6 +378,34 @@ bool isOcproject(const char* p) {
     return true;
 }
 
+// True for a path ending in ".ocworld" or ".ocmap", case-insensitively -- the editor's isLevelFile
+// (sandbox/src/SandboxMain.cpp). The extension only decides whether to try: GameLevel::load tells a
+// legacy .ocmap from OCWORLD content by what the file contains.
+bool isLevelFile(const char* p) {
+    const std::string_view s(p);
+    const auto endsWithCI = [&](std::string_view ext) {
+        return s.size() > ext.size() && equalsAsciiCI(s.substr(s.size() - ext.size()), ext);
+    };
+    return endsWithCI(".ocworld") || endsWithCI(".ocmap");
+}
+
+// The .ocproject that owns `mapPath`, found by walking up at most eight directories, or empty -- the
+// editor's ownerProjectOf (sandbox/src/SandboxMain.cpp). A level's placements name content relative
+// to its project, so a level opened without one resolves none of them.
+std::string ownerProjectOf(const std::string& mapPath) {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::path(mapPath).parent_path();
+    for (int up = 0; up < 8 && !dir.empty(); ++up) {
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+            if (!it->is_directory(ec) && isOcproject(it->path().string().c_str()))
+                return it->path().string();
+        const std::filesystem::path parent = dir.parent_path();
+        if (parent == dir) break;
+        dir = parent;
+    }
+    return {};
+}
+
 #if AVER_MODULE_VOXI
 // [AverSR] log naming (3.3 C). The line's shape is C2-10's fixed "[AverSR] {level} ({source}): scene
 // {}x{} -> present {}x{}" -- these two functions supply the two words. This file must not include
@@ -485,7 +513,17 @@ GameConfig parseArgs(int argc, char** argv) {
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
         else if (isOcproject(a))                       { c.projectPath = a; }
+        // A bare level path opens that level instead of the start map -- see GameConfig::levelPath.
+        else if (isLevelFile(a))                       { c.levelPath = a; }
         // Anything else is deliberately ignored: see the header.
+    }
+    // A LEVEL NAMED ON ITS OWN BRINGS ITS PROJECT WITH IT, as in the editor's createApplication. An
+    // explicit .ocproject argument still wins.
+    if (!c.levelPath.empty() && c.projectPath.empty()) {
+        c.projectPath = ownerProjectOf(c.levelPath);
+        if (c.projectPath.empty())
+            AVER_WARN("[Game] '{}' is not inside a project (no .ocproject above it); its "
+                      "placements will not resolve", c.levelPath);
     }
     return c;
 }
@@ -1098,6 +1136,13 @@ void GameApp::openProject(Engine& e) {
     }
     if (path.empty()) {
         AVER_INFO("[Game] no project: pass one on the command line, or ship a Game.ocproject beside the executable");
+#if AVER_MODULE_SCENE
+        // A LEVEL NAMED ON THE COMMAND LINE STILL OPENS WITH NO PROJECT ABOVE IT -- mirrors
+        // SandboxApp::onInit's own "a level with no project above it still opens" branch
+        // (SandboxApp.cpp): its placements won't resolve with no content index to resolve them
+        // against, but the level's shape is better than an empty world.
+        if (!cfg_.levelPath.empty()) level_.loadStartMap(project_, content_, cfg_.levelPath);
+#endif
         return;
     }
 
@@ -1112,6 +1157,15 @@ void GameApp::openProject(Engine& e) {
     if (project_.startMap.empty()) {
         AVER_WARN("[Game] the manifest names no STARTMAP, so there is no level to open");
     }
+#if AVER_MODULE_VOXI
+    // RENDER.FRAMEBUDGETMS, read THIS EARLY and DECOUPLED FROM hasRenderSettings()/voxiAttached_ --
+    // mirrors SandboxApp::applyProject's own frameBudgetMs_ mirror (SandboxProject.cpp), which runs
+    // before that function's hasRenderSettings() guard for the identical reason PHYSICS.GRAVITY and
+    // AUDIO.MASTER are applied outside it further down: a project stating only RENDER.FRAMEBUDGETMS
+    // and no other RENDER.* key must still get the controller. <= 0 (the manifest's own default)
+    // leaves frameBudget_ off, matching FrameBudgetState::budgetMs's own comment.
+    frameBudget_.budgetMs = project_.frameBudgetMs;
+#endif
     // ORDER IS LOAD-BEARING, and it is the same order applyProject uses: the index must precede
     // the meshes because the mesh walk resolves through it, and the meshes must precede any level
     // because a CMeshRenderer's mesh id is resolved through the mesh table.
@@ -1127,7 +1181,7 @@ void GameApp::openProject(Engine& e) {
     // is CPU-only data (particles DECIDED 2) -- so it runs whether or not e.device() succeeded above.
     content_.loadProjectParticleEffects();
 #endif
-    level_.loadStartMap(project_, content_);
+    level_.loadStartMap(project_, content_, cfg_.levelPath);
 #if AVER_MODULE_SYNAPSE_SCENE
     // OPTIONAL, and silently so: most levels have no baked navigation, loadOcNav's own failure path
     // leaves gameNav_ default-constructed (empty, OcNavData::valid() == false), and
@@ -1165,6 +1219,26 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Apply the project's render settings to Voxi
     applyProjectRenderSettings();
+#if AVER_MODULE_PHYSICS
+    // PHYSICS.GRAVITY / PHYSICS.FIXEDSTEP FROM THE MANIFEST. The editor applies these inside
+    // applyProjectRenderSettings (SandboxProject.cpp), behind that function's AVER_MODULE_VOXI,
+    // hasRenderSettings() and voxiAttached_ guards, so a project with no RENDER.* key never gets them
+    // there. That coupling is not copied: this runs unconditionally, like the AUDIO.* block below.
+    //
+    // GUARDED ON READINESS, same as the editor: a failed aver_phys_init() leaves the world absent, and
+    // both setters are no-ops before it succeeds.
+    if (aver_phys_ready()) {
+        if (project_.hasGravity)
+            aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
+        // CHECKED, because the setter refuses a step outside (0, 0.5] and says so by returning 0. A
+        // manifest with a nonsense step must not read as applied.
+        if (project_.fixedStep > 0.0f && !aver_phys_set_fixed_step(project_.fixedStep))
+            AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
+                      project_.fixedStep);
+    } else if (project_.hasPhysicsSettings()) {
+        AVER_INFO("[Project] physics settings will apply once the world exists");
+    }
+#endif
 #if AVER_WITH_AUDIO_ABI
     // AUDIO.* FROM THE MANIFEST, the third thing this host read past. SandboxApp applies these when
     // a project opens; here the master and bus volumes stayed at their defaults, so a project that
@@ -2171,6 +2245,17 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 
     scene::World::instance().flush();
 #if AVER_MODULE_SYNAPSE_SCENE
+    // GATED ON PLAYING, mirroring the editor's identical condition (SandboxApp.cpp's own tick site,
+    // guarded #if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK) minus its --spawn-test harness
+    // term (spawnTestClass_), which this runtime has no equivalent of -- a CLI self-test flag has no
+    // place in a shipped game, the same reasoning tickGameplay's own comment gives for dropping it.
+    // An AI agent chasing a goal has nothing meaningful to do while nothing else in the level is
+    // playing. Left ungated when AVER_MODULE_FRAMEWORK is absent (no aver_fw_play_state to gate on),
+    // which is a superset of the editor's own reach: the editor's block does not compile at all
+    // without both modules, so it never had to decide this case.
+#if AVER_MODULE_FRAMEWORK
+    if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+#endif
     // AFTER flush: an agent must path from where physics/anim actually left it this frame, not from
     // last frame's stale transform. gameNav_ may be empty (no baked navigation for this level, or
     // none loaded yet) -- AgentSystem::tick treats that as "wait", not an error; see its own comment.
@@ -2181,6 +2266,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // AFTER perceptionSystem: a behaviour's own "CanSeeTarget"/"HasTarget" conditions read THIS
     // frame's sight state, not last frame's.
     synapse::btSystem().tick(scene::World::instance(), t.dt);
+#if AVER_MODULE_FRAMEWORK
+    }
+#endif
 #endif
 #endif
 
@@ -2197,6 +2285,33 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         AVER_INFO("[Game] physics: {} step(s) taken", physSteps_);
         lastReportedSteps_ = physSteps_;
     }
+
+#if AVER_MODULE_VOXI
+    // FRAME BUDGET: FrameBudget.hpp's shared controller, seeded from project_.frameBudgetMs in
+    // openProject. Called here, right before pushFrame's own per-frame Voxi push, so
+    // voxiRenderer_ already holds whatever this frame's rung produced by the time pushFrame reads
+    // it. Mirrors SandboxApp.cpp's own onUpdate call site (SandboxProject.cpp's frameBudgetTick):
+    // voxiAttached_ gates the whole block there too, and vs is a COPY of the singleton for the same
+    // load-bearing reason that file's own comment gives -- the controller must never write back into
+    // voxi::Renderer::get() itself, or one throttled frame would become the new authored baseline and
+    // quality could only ever ratchet down.
+    //
+    // NEVER ON A BOUNDED (--frames N) run: mirrors frameBudgetTick's own maxFrames_ early-out
+    // (SandboxProject.cpp) minus its --frame-budget force flag, which this runtime has no equivalent
+    // CLI escape hatch for -- an automated capture/gate run must not have its quality retuned mid-run.
+    // The early-out is on the CALLER's side, not FrameBudget.hpp's: the header knows nothing about
+    // what a bounded run is (see its own header comment).
+    if (voxiAttached_) {
+        voxi::Settings vs = voxi::Renderer::get().settings();
+        if (cfg_.maxFrames == 0 && voxi::frameBudgetTick(frameBudget_, t.dt, vs)) {
+            AVER_INFO("[Game] frame budget {:.1f}ms: {:.1f}ms average -> rung {} "
+                      "(GI every {} frame(s), {} cone(s))",
+                      frameBudget_.budgetMs, frameBudget_.avgMs, frameBudget_.rung,
+                      vs.giUpdateInterval, vs.giCones);
+        }
+        voxiRenderer_.setSettings(vs);
+    }
+#endif
 
     // THE LAST THING onUpdate DOES, AND IT HAS TO BE IN onUpdate. Engine::frameStep runs
     //

@@ -277,7 +277,17 @@ void GameLevel::load(const std::string& path, GameContent& content) {
 #endif
 }
 
-void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& content) {
+void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& content,
+                              const std::string& overridePath) {
+    // A LEVEL NAMED ON THE COMMAND LINE OUTRANKS THE PROJECT'S START MAP, as SandboxApp::loadStartMap's
+    // openMapPath_ does: checked before project.valid(), so a level outside any project still opens,
+    // and used as given rather than joined against the content dir.
+    if (!overridePath.empty()) {
+        std::error_code ec;
+        if (std::filesystem::exists(overridePath, ec)) { load(overridePath, content); return; }
+        AVER_ERROR("[Level] '{}' does not exist", overridePath);
+        // Fall back to the start map rather than nothing, exactly like the editor's own fallback.
+    }
     if (!project.valid() || project.startMap.empty()) return;
     const std::string path = project.contentDir() + "\\" + project.startMap;
     std::error_code ec;
