@@ -118,16 +118,16 @@ void SandboxApp::onRender(Engine& e)  {
             if (!fm) return;
 
             // THE SURFACE MATERIAL, resolved through the SAME two steps every other surface in a
-            // level uses (aver_scene_material interns the name, surfaceMaterials_ maps it to a
-            // live handle). Resolved at DRAW time rather than latched at spawn, because a volume
+            // level uses (aver_scene_material interns the name, content_ maps it -- authoredFor --
+            // to a live handle). Resolved at DRAW time rather than latched at spawn, because a volume
             // can be spawned before its project's materials finish loading -- a handle captured too early would be a permanent zero.
             u32 authored = 0;
-#if AVER_MODULE_PBR
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
             if (const auto nm = fluidSurfaceMaterial_.find(h);
                 nm != fluidSurfaceMaterial_.end() && !nm->second.empty()) {
                 const i32 mid = aver_scene_material(0, nm->second.c_str());
-                if (const auto it = surfaceMaterials_.find(mid); it != surfaceMaterials_.end())
-                    authored = it->second;
+                if (const pbr::MaterialHandle authoredHandle = content_.authoredFor(mid))
+                    authored = authoredHandle;
                 else {
                     // ONCE PER NAME, matching the scene loop's own warning for the same mistake: a
                     // WATER record naming a material nobody authored is otherwise silent, and this
@@ -323,8 +323,8 @@ void SandboxApp::onRender(Engine& e)  {
                     const scene::CMeshRenderer* pmr =
                         w.component<scene::CMeshRenderer>(pent, scene::kComponentMeshRenderer);
                     if (!pmr || !(pmr->flags & scene::kMeshRendererVisible) || pmr->mesh == 0) continue;
-                    const auto pit = sceneMeshes_.find(pmr->mesh);
-                    if (pit == sceneMeshes_.end()) continue;
+                    const rhi::MeshHandle pmeshBase = content_.meshFor(pmr->mesh);
+                    if (!pmeshBase) continue;
                     // Skinned: excluded (posed, compute-written buffer -- see the block comment).
                     if (skinnedScene_ && skinnedScene_->drawHandle(pent) != 0) continue;
 #if AVER_MODULE_TRIFACTOR
@@ -373,7 +373,7 @@ void SandboxApp::onRender(Engine& e)  {
                     }
                     if (poutside) continue;
 
-                    rhi::MeshHandle pmesh = pit->second;
+                    rhi::MeshHandle pmesh = pmeshBase;
 #if AVER_MODULE_TRIFACTOR
                     // Discrete per-level LOD: replicated safely (pure function). Same ladder
                     // lookup and chooseLevelCached call the colour walk's own branch makes below.
@@ -406,13 +406,13 @@ void SandboxApp::onRender(Engine& e)  {
                     // split the colour walk uses below, so a mesh this walk excludes here (every
                     // part translucent) is exactly the mesh the colour walk's own `blended` gate
                     // (prepassEligibleBase's per-draw check) would also have excluded.
-                    const i32 pmat = pmr->material ? pmr->material : meshDefaultMaterial(pmr->mesh);
-                    const auto ppit = meshParts_.find(pmr->mesh);
+                    const i32 pmat = pmr->material ? pmr->material : content_.meshDefaultMaterial(pmr->mesh);
+                    const auto* ppit = content_.partsFor(pmr->mesh);
                     aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
                     const u32 pdrawCount = aver::editor::planEntityDraws(
-                        pit->second, pmesh,
-                        ppit != meshParts_.end() ? ppit->second.data() : nullptr,
-                        ppit != meshParts_.end() ? static_cast<u32>(ppit->second.size()) : 0u,
+                        pmeshBase, pmesh,
+                        ppit ? ppit->data() : nullptr,
+                        ppit ? static_cast<u32>(ppit->size()) : 0u,
                         pmat, pdraws, kMaxPlannedDraws);
                     for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
                         const aver::editor::PlannedDraw& pd = pdraws[pdi];
@@ -591,12 +591,12 @@ void SandboxApp::onRender(Engine& e)  {
                 // culling the very first frame an entity is visited, before either pass has corrected bounds.
                 const bool skinned2 = skinnedScene_ && skinnedScene_->drawHandle(e2) != 0;
                 if (!skinned2)
-                    if (const auto bit2 = meshBounds_.find(mr2->mesh); bit2 != meshBounds_.end()) {
+                    if (const auto* bit2 = content_.boundsFor(mr2->mesh)) {
                         auto* mw2 = const_cast<scene::CMeshRenderer*>(mr2);
-                        mw2->aabbMin[0] = bit2->second.first.x;  mw2->aabbMin[1] = bit2->second.first.y;
-                        mw2->aabbMin[2] = bit2->second.first.z;
-                        mw2->aabbMax[0] = bit2->second.second.x; mw2->aabbMax[1] = bit2->second.second.y;
-                        mw2->aabbMax[2] = bit2->second.second.z;
+                        mw2->aabbMin[0] = bit2->first.x;  mw2->aabbMin[1] = bit2->first.y;
+                        mw2->aabbMin[2] = bit2->first.z;
+                        mw2->aabbMax[0] = bit2->second.x; mw2->aabbMax[1] = bit2->second.y;
+                        mw2->aabbMax[2] = bit2->second.z;
                     }
                 const Vec3 lo2{mr2->aabbMin[0], mr2->aabbMin[1], mr2->aabbMin[2]};
                 const Vec3 hi2{mr2->aabbMax[0], mr2->aabbMax[1], mr2->aabbMax[2]};
@@ -896,8 +896,8 @@ void SandboxApp::onRender(Engine& e)  {
             // is-anything-playing test.
             if (ent == playerStart_ && viewportIconsReady_) continue;
 
-            const auto it = sceneMeshes_.find(mr->mesh);
-            if (it == sceneMeshes_.end()) {
+            const rhi::MeshHandle sceneMeshHandle = content_.meshFor(mr->mesh);
+            if (!sceneMeshHandle) {
                 // AN ID THAT RESOLVES TO NOTHING. Said ONCE PER ID rather than per entity: many
                 // entities can name the same missing mesh, and it is the id that identifies the
                 // fault, not the entity that happened to reach it first.
@@ -907,7 +907,7 @@ void SandboxApp::onRender(Engine& e)  {
                 // ids that land here -- there is nothing to translate with. fnv1a64 of the
                 // authored path is what to grep the .ocgraph/.ocmap for.
                 if (undrawnMissingMesh_.insert(mr->mesh).second)
-                    AVER_WARN("[Sandbox] mesh id {} (named by entity {}) is not in sceneMeshes_, "
+                    AVER_WARN("[Sandbox] mesh id {} (named by entity {}) is not in content_'s meshes, "
                               "so every entity naming it draws nothing. Built-in primitives are "
                               "seeded at startup and .ocmesh files are registered by "
                               "loadProjectMeshes from the project's content root -- an id that is "
@@ -941,12 +941,12 @@ void SandboxApp::onRender(Engine& e)  {
             // overwriting with the rest box is exactly the popping this exists to stop.
             const bool skinned = skinnedScene_ && skinnedScene_->drawHandle(ent) != 0;
             if (!skinned)
-                if (const auto bit = meshBounds_.find(mr->mesh); bit != meshBounds_.end()) {
+                if (const auto* bit = content_.boundsFor(mr->mesh)) {
                     auto* mw = const_cast<scene::CMeshRenderer*>(mr);
-                    mw->aabbMin[0] = bit->second.first.x;  mw->aabbMin[1] = bit->second.first.y;
-                    mw->aabbMin[2] = bit->second.first.z;
-                    mw->aabbMax[0] = bit->second.second.x; mw->aabbMax[1] = bit->second.second.y;
-                    mw->aabbMax[2] = bit->second.second.z;
+                    mw->aabbMin[0] = bit->first.x;  mw->aabbMin[1] = bit->first.y;
+                    mw->aabbMin[2] = bit->first.z;
+                    mw->aabbMax[0] = bit->second.x; mw->aabbMax[1] = bit->second.y;
+                    mw->aabbMax[2] = bit->second.z;
                 }
 
             // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box
@@ -1033,7 +1033,7 @@ void SandboxApp::onRender(Engine& e)  {
                 // VoxiRenderer.cpp:1136) -- out of scope for this fix; the SceneSubmission.hpp
                 // pure-function tests pin the rule as-is rather than hiding it.
                 const rhi::MeshHandle chosenMesh = posedHandle(ent);
-                const rhi::MeshHandle baseMeshForCull = chosenMesh ? chosenMesh : it->second;
+                const rhi::MeshHandle baseMeshForCull = chosenMesh ? chosenMesh : sceneMeshHandle;
                 const Vec3 cullCentre = haveWorldBox
                     ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
                     : Vec3{0.0f, 0.0f, 0.0f};
@@ -1062,14 +1062,13 @@ void SandboxApp::onRender(Engine& e)  {
                     // own comment) baked a flat grey into GI on exactly the frames it was
                     // off-screen, and its authored look on the frames it was not, flipping a value
                     // inside giDrawsKey every time it crossed the frustum edge.
-                    const i32 directMat = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
-                    const auto directParts = meshParts_.find(mr->mesh);
+                    const i32 directMat = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
+                    const auto* directParts = content_.partsFor(mr->mesh);
                     aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
                     const u32 pdrawCount = aver::editor::planEntityDraws(
-                        it->second, baseMeshForCull,
-                        directParts != meshParts_.end() ? directParts->second.data() : nullptr,
-                        directParts != meshParts_.end()
-                            ? static_cast<u32>(directParts->second.size()) : 0u,
+                        sceneMeshHandle, baseMeshForCull,
+                        directParts ? directParts->data() : nullptr,
+                        directParts ? static_cast<u32>(directParts->size()) : 0u,
                         directMat, pdraws, kMaxPlannedDraws);
                     emitEntityDraws(e, pdraws, pdrawCount, wm, route, /*prepassEligibleBase=*/false);
                     if (frustumCulled || occlusionCulled) {
@@ -1086,14 +1085,14 @@ void SandboxApp::onRender(Engine& e)  {
                 if (frustumCulled || occlusionCulled) ++culled; else ++ownerHidden;
                 continue;
             }
-            // THE ONE READ everything downstream keys off: surfaceMaterials_, surfaceLooks_,
-            // the PBR binding set -- and, because VoxiRenderer::submitDraw stores whatever
-            // matSet/matConstants it is handed verbatim, the TLAS instance's materialIndex, GI
-            // voxelisation and the ray-driven alpha-mask cutout too. Resolving here is what makes
-            // one fallback reach the renderer that is actually on screen.
-            const i32 mat = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
-            // F2: ONE call replaces the resolution this loop used to run by hand (surfaceMaterials_.
-            // find, MaterialLibrary::desc, isTranslucent, surfaceLooks_.find, the MaterialSystem
+            // THE ONE READ everything downstream keys off: content_'s surfaceMaterials (authoredFor),
+            // content_'s surfaceLooks (lookFor), the PBR binding set -- and, because
+            // VoxiRenderer::submitDraw stores whatever matSet/matConstants it is handed verbatim, the
+            // TLAS instance's materialIndex, GI voxelisation and the ray-driven alpha-mask cutout too.
+            // Resolving here is what makes one fallback reach the renderer that is actually on screen.
+            const i32 mat = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
+            // F2: ONE call replaces the resolution this loop used to run by hand (content_.authoredFor,
+            // MaterialLibrary::desc, isTranslucent, content_.lookFor, the MaterialSystem
             // lookup, the dead-handle warning, the once-per-name missing-material warning) -- see
             // resolveSurface's own comment. Kept in LOCALS, not just read off `rsEntity` at the
             // final dispatch, because the GPU-cluster path below reads col/metallic/roughness/
@@ -1123,7 +1122,7 @@ void SandboxApp::onRender(Engine& e)  {
             // THE SEAM, and it is one line because the design made it one: a skinned entity's
             // posed vertices live in a DIFFERENT MeshHandle sharing this one's index buffer, so
             // substituting the handle reaches every pass at once. Zero means "not skinned", never "not drawn".
-            rhi::MeshHandle mesh = it->second;
+            rhi::MeshHandle mesh = sceneMeshHandle;
             // Set true only by the GPU per-cluster path below (AVER_MODULE_TRIFACTOR only) when it
             // actually dispatches this instance's geometry -- declared unconditionally, like `mesh`
             // above, so the plain drawMesh() call at the end can check it regardless of the module.
@@ -1229,20 +1228,19 @@ void SandboxApp::onRender(Engine& e)  {
                         // hand-written submit() naming only `mesh` -- that used to submit a
                         // multi-material mesh as ONE draw carrying the ENTITY's material, silently
                         // losing the per-part split the raster and direct-cull routes both already
-                        // had. `mesh` still equals `it->second` here (no LOD/skin substitution has
+                        // had. `mesh` still equals `sceneMeshHandle` here (no LOD/skin substitution has
                         // run yet at this point in the walk), so this is exactly F4's "goes through
-                        // planEntityDraws with chosenMesh = it->second" case. submit() still
+                        // planEntityDraws with chosenMesh = sceneMeshHandle" case. submit() still
                         // resolves d.depthMesh through the SAME depthProxyFn_ every ordinary
                         // instance goes through, so depth-only passes draw the cheap proxy with no
                         // new resolution logic.
                         {
-                            const auto clusterParts = meshParts_.find(mr->mesh);
+                            const auto* clusterParts = content_.partsFor(mr->mesh);
                             aver::editor::PlannedDraw cdraws[kMaxPlannedDraws];
                             const u32 cdrawCount = aver::editor::planEntityDraws(
-                                it->second, mesh,
-                                clusterParts != meshParts_.end() ? clusterParts->second.data() : nullptr,
-                                clusterParts != meshParts_.end()
-                                    ? static_cast<u32>(clusterParts->second.size()) : 0u,
+                                sceneMeshHandle, mesh,
+                                clusterParts ? clusterParts->data() : nullptr,
+                                clusterParts ? static_cast<u32>(clusterParts->size()) : 0u,
                                 mat, cdraws, kMaxPlannedDraws);
                             // A DIRECT-ONLY delivery: colour already came from dispatchMeshClusters
                             // just above, so this call exists purely to register the shadow/GI/TLAS
@@ -1543,12 +1541,12 @@ void SandboxApp::onRender(Engine& e)  {
                 // that names several materials draws as several meshes, one per slot; a
                 // substituted handle -- LOD or posed -- keeps today's single draw and the entity's
                 // own material, since the split was cut from the UNSUBSTITUTED geometry).
-                const auto pit = meshParts_.find(mr->mesh);
+                const auto* pit = content_.partsFor(mr->mesh);
                 aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
                 const u32 pdrawCount = aver::editor::planEntityDraws(
-                    it->second, mesh,
-                    pit != meshParts_.end() ? pit->second.data() : nullptr,
-                    pit != meshParts_.end() ? static_cast<u32>(pit->second.size()) : 0u,
+                    sceneMeshHandle, mesh,
+                    pit ? pit->data() : nullptr,
+                    pit ? static_cast<u32>(pit->size()) : 0u,
                     mat, pdraws, kMaxPlannedDraws);
                 emitEntityDraws(e, pdraws, pdrawCount, wm, route, prepassEligibleBase);
             }
@@ -2112,21 +2110,23 @@ void SandboxApp::drawUiDemo() {
 SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
     ResolvedSurface rs;
     aver::editor::SurfaceInputs in;
-#if AVER_MODULE_PBR
-    if (const auto it = surfaceMaterials_.find(mat); it != surfaceMaterials_.end()) rs.authored = it->second;
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+    if (const pbr::MaterialHandle authoredHandle = content_.authoredFor(mat)) rs.authored = authoredHandle;
     in.authored = rs.authored != 0;
     const pbr::MaterialDesc* d = rs.authored ? pbr::MaterialLibrary::get().desc(rs.authored) : nullptr;
     in.authoredLive = d != nullptr;
     in.translucent = d != nullptr && pbr::isTranslucent(*d);
 #endif
-    if (const auto lookIt = surfaceLooks_.find(mat); lookIt != surfaceLooks_.end()) {
+#if AVER_MODULE_SCENE
+    if (const auto* look = content_.lookFor(mat)) {
         in.haveLook = true;
-        in.lookCol[0] = lookIt->second.col[0];
-        in.lookCol[1] = lookIt->second.col[1];
-        in.lookCol[2] = lookIt->second.col[2];
-        in.lookMetallic = lookIt->second.metallic;
-        in.lookRoughness = lookIt->second.roughness;
+        in.lookCol[0] = look->col[0];
+        in.lookCol[1] = look->col[1];
+        in.lookCol[2] = look->col[2];
+        in.lookMetallic = look->metallic;
+        in.lookRoughness = look->roughness;
     }
+#endif
     rs.look = aver::editor::resolveSurfaceLook(in);
     if (rs.look.warnDeadHandle) warnDeadMaterialHandle(mat);
     if (rs.look.usedFallback && mat != 0) {

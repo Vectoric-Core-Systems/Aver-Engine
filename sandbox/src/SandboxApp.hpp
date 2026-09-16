@@ -14,6 +14,8 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/core/Log.hpp"
+// The runtime's content component (Runtime/), which the editor uses rather than keeping its own copy.
+#include "aver/game/GameContent.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -1249,14 +1251,6 @@ public:
 
     void onUpdate(Engine& e, const Timestep& t) override;
 
-#if AVER_MODULE_PBR
-    static pbr::MaterialSystem::ResolvedTexture resolveMaterialTexture(const pbr::TextureRef& ref,
-                                                                       pbr::TextureSlot slot, void* user);
-
-    std::string resolveAssetPath(const pbr::TextureRef& ref) const;
-
-#endif  // AVER_MODULE_PBR -- the material-specific helpers end here.
-
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // ---- particles DECIDED 4: the two halves of particles::ParticleRenderer::GiSeam ----
     // Both static (like resolveMaterialTexture/depthProxyLookup nearby): only read voxiRenderer_'s
@@ -1270,33 +1264,29 @@ public:
                                const void** outCbData, u32* outCbBytes, void* user);
 #endif  // AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 
-    // ---- content and mesh loading: NOT material work, and no longer guarded as if it were ----
-    // Everything from here to releaseProjectMeshes sat inside the AVER_MODULE_PBR block above,
-    // presumably because the content index was first written for `{guid:...}` TEXTURE references. But
-    // putting a MESH in the world is not a material concern: with PBR off, the editor lost its asset index too.
+    // ---- content and mesh loading ----
+    // The content index, the asset resolvers, the mesh registry and the material cache are content_
+    // (aver::game::GameContent), the same component the standalone runtime uses. What stays here is
+    // what only the editor builds on top: pick triangles, triangle counts, the LOD ladder and cluster
+    // data (see onMeshLoaded), the eager material preload for the picker, and the reload wrappers.
 
-    void rebuildContentIndex();
-
-    static std::string resolveAnimAsset(u64 id, void* user);
-
-    // Maps a mesh ObjectId to the handle the scene pass would draw, for aver::render::SkinnedScene --
-    // the SAME table the draw pass uses, deliberately: a skin target built from a different upload
-    // than the one on screen would be a rig skinning geometry nobody can see.
-    // Guarded: its only caller is skinnedScene_->setResolvers(...), itself inside #if AVER_MODULE_SCENE.
-#if AVER_MODULE_SCENE
-    static rhi::MeshHandle resolveSceneMesh(u64 id, void* user);
-#endif
-
-// PBR-ONLY, and stranded outside its guard when the content/mesh helpers moved out of the
-// material block: it returns a pbr::MaterialHandle, so the SIGNATURE needs the module, not just
-// the body. Its callers -- the level loader and loadProjectMaterials -- are both already guarded.
-#if AVER_MODULE_PBR
-    u32 resolveMaterialGraph(const std::string& graphRef);
-
-    pbr::MaterialHandle materialForSurface(const std::string& name);
-#endif  // AVER_MODULE_PBR
-
+    // Uploads the project's meshes through content_, then builds the editor's own per-mesh tables in
+    // onMeshLoaded.
     void loadProjectMeshes(Engine& e);
+#if AVER_MODULE_SCENE
+    // One loadProjectMeshes or registerBuiltins call's worth of what onMeshLoaded needs: the app, the
+    // engine it uploads through, and the LOD ladder totals loadProjectMeshes reports once at the end.
+    struct MeshLoadPass {
+        SandboxApp* app = nullptr;
+        Engine* engine = nullptr;
+        u32 lodCoarserLevels = 0;
+        u32 lodSharedLevels = 0;
+        u64 lodSharedVertexBytesSaved = 0;
+    };
+    // content_'s per-mesh hook: pick geometry, triangle counts, skinned ids, and (Trifactor) the LOD
+    // ladder, depth proxies and cluster data for each mesh content_ uploads. `user` is a MeshLoadPass.
+    static void onMeshLoaded(const game::GameContent::LoadedMesh& mesh, void* user);
+#endif
 
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     void ensureLodMeshPipeline(Engine& e);
@@ -1317,16 +1307,6 @@ public:
     void releaseProjectMaterials();
 #endif
 
-    // DECIDED 3 + slice 5: loads every .ocparticle under the content root into particles::
-    // particleEffects(), keyed by fnv1a64(relative path) -- the SAME id space loadProjectMeshes uses,
-    // so CParticleEmitter::effect resolves like CMeshRenderer::mesh. Recursive, matching
-    // loadProjectMeshes rather than the Content\Materials convention: .ocparticle has no folder rule.
-    // Cleared first, matching anim::animSystem().clear()'s reason: a stale id from a PREVIOUS project
-    // must not resolve once a different project supplies a different file at the same path. Safe for
-    // --particle-test because applyProject() runs BEFORE that block registers its own effects.
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    void loadProjectParticleEffects();
-#endif
 
     void makeMaterialFor(MeshObj& o);
 
@@ -1647,35 +1627,10 @@ private:
 
     void maybeAutosavePrefs(f32 dt);
 
-    // ---- ONE MESH PER MATERIAL, for an asset that names more than one -------------------------
+    // ONE MESH PER MATERIAL: content_ splits a mesh naming several materials at load
+    // (GameContent::buildMeshParts, partsFor) -- split rather than drawn as ranges because the ray
+    // path's BLAS carries one material per instance.
     //
-    // .ocmesh has carried `submeshes` and `materialSlots` since it existed, all three importers
-    // write them, and the format's own header says "the renderer draws a submesh with the material
-    // bound for its slot". Nothing ever read them: scene::CMeshRenderer holds a single `i32
-    // material`, and every draw path issues one drawMesh with one material. Every multi-material
-    // asset in this engine -- OBJ, glTF and USD alike -- rendered flat.
-    //
-    // SPLIT AT LOAD RATHER THAN DRAWN AS RANGES, and that is the whole reason this is tractable.
-    // A range draw would need drawMeshRange through IDevice, IRenderFeature and both backends --
-    // and it would STILL not work in the renderer that is actually on screen, because createBlas()
-    // builds ONE geometry per mesh and the TLAS carries ONE materialIndex per instance.
-    // Per-submesh materials in the ray path would need multi-geometry BLASes, a per-geometry
-    // material table and a CommittedGeometryIndex() lookup in every trace.
-    //
-    // Splitting sidesteps all of it: each part is an ordinary single-material mesh, which is the
-    // case the raster path, the shadow cascade, voxelisation, the TLAS and the GI already handle
-    // correctly. The cost is draw calls and bottom-level structures -- 3 to 7 per tree in Jungle
-    // Ruins, against 1 -- and a single-slot mesh (37 of those 53) is untouched.
-    struct MeshPart {
-        rhi::MeshHandle mesh = 0;
-        i32             material = 0;   // aver_scene_material(0, slot name); 0 = the slot named nothing
-    };
-
-    i32 meshDefaultMaterial(u64 meshId) const;
-
-    void buildMeshParts(Engine& e, u64 id, const fmt::OcMeshData& md,
-                        const std::vector<rhi::MeshVertex>& verts, const std::string& rel);
-
     // drawMeshParts is GONE. F4 (occlusion-fix-plan.md) folded its whole job -- "a mesh that names
     // several materials draws as several meshes, one per slot" -- into planEntityDraws()
     // (SceneSubmission.hpp) plus emitEntityDraws() above, which both the raster and the direct route
@@ -3145,7 +3100,6 @@ private:
     editor::AssetEditorHost assetEditors_;
     bool vsyncOffRequested_ = false;        // --no-vsync, pending a device to apply it to
     bool wantMeshReload_ = false;
-    std::vector<u64> projectMeshIds_;      // what loadProjectMeshes added, so it can be undone
     // Outliner display names. Not scene::World::name(), which holds the asset path.
     std::unordered_map<u32, std::string> entityLabels_;
     std::unordered_map<std::string, int> labelCounts_;
@@ -4037,22 +3991,10 @@ private:
     rhi::TextureHandle uiFontTexture_ = 0;
 
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
-    // The built-in look for a named surface with no material asset behind it.
-    struct SurfaceLook { f32 col[3]; f32 metallic; f32 roughness; };
-    std::unordered_map<i32, SurfaceLook> surfaceLooks_;
-    // fnv1a64(content-relative path) -> absolute path.
-    // OUTSIDE THE PBR GUARD, and it was inside: its original purpose was `{guid:...}` texture
-    // references, a material concern -- but resolveAnimAsset and resolveSceneMesh read it too, and
-    // both put a MESH in the world, which has nothing to do with the material system.
-    std::unordered_map<u64, std::string> contentIndex_;
+    // The project's content index, asset resolvers, mesh registry, built-in meshes and surface looks,
+    // and material cache: the runtime's GameContent, shared with AverEngineRuntime.exe.
+    game::GameContent content_;
 #if AVER_MODULE_PBR
-    rhi::IResourceFactory* textureFactory_ = nullptr;   // cached: the resolver is a static callback
-    // Surface name -> its .ocmat's material. 0 is a cached negative, not a miss to retry.
-    std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
-    // The same answer keyed by the token the scene interns, which is what a CMeshRenderer carries.
-    std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
-    // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
-    std::unordered_map<u64, i32> meshSlot0Material_;
     // mesh id -> its cached outline line mesh (0 = this mesh yields no outline). See
     // selectionOutlineLines; dropped with the project's meshes.
     std::unordered_map<u64, rhi::LineHandle> selOutlineLines_;
@@ -4420,46 +4362,15 @@ private:
     // folder path, the console (see drawConsoleTranscriptTab) treats it as text to seed the input box.
     std::string         drawerStartSub_;
 #if AVER_MODULE_SCENE
-    // fnv1a64(asset path) -> mesh handle, for the scene-render pass.
-    std::unordered_map<u64, rhi::MeshHandle> sceneMeshes_;
+    // Mesh handles, bounds and per-material parts are content_'s (meshFor, boundsFor, partsFor).
     std::unordered_map<u64, std::string>     meshPathById_;   // id -> project-relative path
-
-    // ---- ONE MESH PER MATERIAL, for an asset that names more than one -------------------------
-    //
-    // .ocmesh has carried `submeshes` and `materialSlots` since it existed, all three importers
-    // write them, and the format's own header says "the renderer draws a submesh with the material
-    // bound for its slot". Nothing ever read them: scene::CMeshRenderer holds a single `i32
-    // material`, and every draw path issues one drawMesh with one material. Every multi-material
-    // asset in this engine -- OBJ, glTF and USD alike -- rendered flat.
-    //
-    // SPLIT AT LOAD RATHER THAN DRAWN AS RANGES, and that is the whole reason this is tractable.
-    // A range draw would need drawMeshRange through IDevice, IRenderFeature and both backends --
-    // and it would still not work in the renderer that is actually on screen, because
-    // createBlas() builds ONE geometry per mesh and the TLAS carries ONE materialIndex per
-    // instance. Per-submesh materials in the ray path would need multi-geometry BLASes, a
-    // per-geometry material table and a CommittedGeometryIndex() lookup in every trace.
-    //
-    // Splitting sidesteps all of it: each part is an ordinary single-material mesh, which is the
-    // case the raster path, the shadow cascade, voxelisation, the TLAS and the GI already handle
-    // correctly. The cost is draw calls and bottom-level structures -- 3 to 7 per tree in Jungle
-    // Ruins, against 1 -- and the small plants (37 of 53) have one slot and are untouched.
-    // MeshPart itself is declared further up, beside buildMeshParts: an in-class member function
-    // BODY sees types declared later in the class, but a parameter type in its SIGNATURE does not.
-    //
-    // Only ever populated for a mesh with MORE THAN ONE submesh. Its absence is the fast path, and
-    // is what every existing asset takes.
-    std::unordered_map<u64, std::vector<MeshPart>> meshParts_;
     // THE TWO WAYS THE SCENE WALK DROPS AN ENTITY, each reported once. Keyed differently on purpose:
     // the invisible-bit fault belongs to an ENTITY (its own component is mis-seeded) while an
     // unresolved id belongs to the ID (every entity naming it shares one fault). Never cleared on
     // level unload -- a second report after a reload would be the same fault, not a new one.
     std::unordered_set<u64> undrawnInvisible_;
     std::unordered_set<u64> undrawnMissingMesh_;
-    // Rest bounds per mesh id, in mesh space. Kept beside sceneMeshes_ because CMeshRenderer's own
-    // aabb was hardcoded a UNIT CUBE at every spawn site, never from the asset -- picking a 100cm
-    // character meant hitting a 2cm box at its origin. Skinned entities overwrite theirs per frame.
-    std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
-    // Triangle count per mesh id, same key as sceneMeshes_/meshBounds_. Exists so a resident
+    // Triangle count per mesh id, same key as content_'s meshes. Exists so a resident
     // triangle BUDGET can be reported instead of guessed -- a scattered pine forest's cost is
     // otherwise invisible, and a scatter palette can only be tuned "by looking" without it.
     std::unordered_map<u64, u32> meshTris_;

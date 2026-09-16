@@ -46,7 +46,7 @@ void SandboxApp::applyProject(Engine& e) {
 #if AVER_MODULE_PBR
     loading.stage("Loading materials");
     releaseProjectMaterials();
-    rebuildContentIndex();
+    content_.adopt(project_);
     loadProjectMaterials();
 #endif
 #if AVER_MODULE_SCENE
@@ -56,7 +56,7 @@ void SandboxApp::applyProject(Engine& e) {
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     loading.stage("Loading particle effects");
-    loadProjectParticleEffects();
+    content_.loadProjectParticleEffects();
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     // Moved here from onRender's per-frame call: pipeline/shader creation belongs at a

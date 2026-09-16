@@ -411,6 +411,12 @@ if(TARGET Aver.Landscape.Renderer)
   target_link_libraries(Sandbox PRIVATE Aver.Landscape.Renderer)
 endif()
 
+# The runtime's shared components (Runtime/): the editor's content index, resolvers, mesh registry
+# and material cache are GameContent. Core only -- never Aver.Runtime.Game, whose GameApp.cpp would
+# collide with SandboxApp.cpp at link time. Unconditional: the root adds Runtime/ whenever the
+# editor is built.
+target_link_libraries(Sandbox PRIVATE Aver.Runtime.Game.Core)
+
 # Occlusion (modules/occlusion): brings AVER_MODULE_OCCLUSION=1 through its link interface, which is
 # what lets SandboxApp.cpp guard --occlusion-cull and the culler it drives with `#if
 # AVER_MODULE_OCCLUSION`, same shape as every other optional module linked on this page.

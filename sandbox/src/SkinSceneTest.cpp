@@ -97,7 +97,7 @@ bool SkinSceneTest::setup(Engine& e, const std::string& dir,
     if (!h) { AVER_ERROR("[Skin] scene test: the device refused the rig mesh"); return false; }
 
     // Ids the host will register against the three files. Arbitrary and distinct; what matters is
-    // that the same id reaches sceneMeshes_, contentIndex_ and the components.
+    // that the same id reaches content_'s meshes, content_'s index and the components.
     restMin_ = md.boundsMin;
     restMax_ = md.boundsMax;
     *outMesh = h;

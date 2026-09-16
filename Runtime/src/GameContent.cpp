@@ -763,12 +763,14 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
 
 #endif // AVER_MODULE_PBR
 
-#if AVER_MODULE_PBR && AVER_MODULE_SCENE
+#if AVER_MODULE_SCENE
 i32 GameContent::meshDefaultMaterial(u64 meshId) const {
     const auto it = meshSlot0Material_.find(meshId);
     return it == meshSlot0Material_.end() ? 0 : it->second;
 }
+#endif
 
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
 pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
     const auto it = surfaceMaterials_.find(token);
     return it == surfaceMaterials_.end() ? 0 : it->second;

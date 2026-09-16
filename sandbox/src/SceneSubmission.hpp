@@ -26,7 +26,7 @@
 //
 // SurfaceInputs exists so this header never has to know what pbr::MaterialDesc or pbr::isTranslucent
 // even are: the caller (SandboxApp.cpp's own resolver, still in that file) does the two lookups
-// (surfaceMaterials_.find, MaterialLibrary::desc) and hands the three booleans and the looked-up
+// (content_.authoredFor, MaterialLibrary::desc) and hands the three booleans and the looked-up
 // SurfaceLook fields across as plain data.
 #pragma once
 #include "aver/core/Types.hpp"
@@ -35,12 +35,12 @@ namespace aver::editor {
 
 // What the caller found out about ONE surface token before asking what it should look like.
 struct SurfaceInputs {
-    bool authored = false;      // surfaceMaterials_ has a handle for this token
+    bool authored = false;      // content_.authoredFor has a handle for this token
     bool authoredLive = false;  // MaterialLibrary::desc(handle) is non-null; == authored when PBR is
                                  // compiled out (there is no library to ask, so a handle is trusted
                                  // at face value, matching SandboxApp.cpp:5881's own comment)
     bool translucent = false;   // pbr::isTranslucent(*desc) -- live handles only, meaningless otherwise
-    bool haveLook = false;      // surfaceLooks_.find(token) succeeded
+    bool haveLook = false;      // content_.lookFor(token) succeeded
     f32 lookCol[3] = {0.0f, 0.0f, 0.0f};
     f32 lookMetallic = 0.0f;
     f32 lookRoughness = 0.0f;
@@ -108,10 +108,10 @@ struct PlannedDraw {
 // THE SINGLE COPY of 6360-6365 plus 8297-8299: the "a mesh that names several materials draws as
 // several meshes, one per slot" rule, and its "a substituted handle keeps today's single draw and the
 // entity's own material" exception (6353-6359's own comment -- a LOD level or a posed skin/soft-body
-// copy is DIFFERENT geometry from the one meshParts_ was split from, so the split does not apply to
-// it). `Part` is a template parameter rather than SandboxApp::MeshPart by name so this header never
-// has to declare or forward-declare that type -- it only ever reads two fields off it, exactly the
-// contract SandboxApp's own MeshPart already satisfies (rhi::MeshHandle mesh; i32 material;), and
+// copy is DIFFERENT geometry from the one content_.partsFor was split from, so the split does not apply
+// to it). `Part` is a template parameter rather than game::GameContent::MeshPart by name so this header
+// never has to declare or forward-declare that type -- it only ever reads two fields off it, exactly the
+// contract GameContent's own MeshPart already satisfies (rhi::MeshHandle mesh; i32 material;), and
 // rhi::MeshHandle is a plain u32 (RHIResources.hpp), so writing it into PlannedDraw::mesh needs no
 // rhi:: include either.
 //

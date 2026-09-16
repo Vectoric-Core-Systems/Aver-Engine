@@ -1351,7 +1351,7 @@ void installUpgradeResources() {
 //
 // WHY THIS IS NEEDED AT ALL. avermatc writes whatever string a texture slot was given straight into
 // the generated .ocmat as a `{path:...}` record (OcMat.cpp:320), and the engine honours an ABSOLUTE
-// one unchanged -- resolveAssetPath returns it as-is the moment it starts with a drive letter or a
+// one unchanged -- content_.resolveAssetPath returns it as-is the moment it starts with a drive letter or a
 // separator, and only tries the project's own content root for a relative one. copyProjectTree is a
 // raw recursive filesystem copy and the upgrade chain only ever touches Content\Scripts, so nothing
 // rewrote those records. A copied or migrated project therefore kept loading its textures out of the
@@ -1361,7 +1361,7 @@ void installUpgradeResources() {
 // RELATIVE, NOT REPOINTED, and that is the durable half. Swapping one absolute root for another
 // would fix this copy and leave the next move broken exactly the same way. A path written relative to
 // the project's own content root is correct wherever the folder ends up, which is what
-// resolveAssetPath already expects of a relative record.
+// content_.resolveAssetPath already expects of a relative record.
 //
 // A path that does NOT live under the old project is left alone: a texture deliberately shared from
 // somewhere else on disk is not a stale reference, and rewriting it would break a working setup.

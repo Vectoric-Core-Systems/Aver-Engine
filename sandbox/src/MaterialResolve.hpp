@@ -9,10 +9,11 @@
 // runtime is Aver.RuntimeGame and this is Sandbox, and nothing here should make the editor need it.
 //
 // HEADER-ONLY AND FILESYSTEM-ONLY, matching LevelList.hpp's own precedent in this same directory.
-// SandboxApp.cpp's materialForSurface() and loadProjectMaterials() do more than what lives here --
-// they parse the .ocmat, resolve its material graph and create a live pbr::MaterialHandle, all of
-// which needs Aver.Pbr and cannot run headless. The part that actually decides WHICH FILE WINS --
-// the part a moved-materials bug like this one lives in -- needs neither, so it is pulled out here
+// content_'s materialForSurface() (aver::game::GameContent) and SandboxApp's loadProjectMaterials()
+// do more than what lives here -- they parse the .ocmat, resolve its material graph and create a
+// live pbr::MaterialHandle, all of which needs Aver.Pbr and cannot run headless. The part that
+// actually decides WHICH FILE WINS -- the part a moved-materials bug like this one lives in --
+// needs neither, so it is pulled out here
 // where a test can drive it with nothing but a temp directory, and SandboxApp.cpp calls it rather
 // than keeping a second copy of the same three-candidate order.
 #include <algorithm>

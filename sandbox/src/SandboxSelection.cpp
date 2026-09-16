@@ -263,7 +263,7 @@ void SandboxApp::rebindEdit(EditId id, AvId e) {
 // Puts a whole MaterialDesc back and tells the library it moved.
 //
 // NAME IS PRESERVED FROM THE LIVE DESC, not restored from the snapshot: the name is the material's
-// IDENTITY (surfaceMaterials_ and every .ocmat TEX record key on it), not part of what the panel
+// IDENTITY (content_'s surfaceMaterials_ and every .ocmat TEX record key on it), not part of what the panel
 // edits, and writing a stale one back would rename a material as a side effect of undoing a
 // roughness slider.
 void SandboxApp::applyMaterialDesc(pbr::MaterialHandle h, const pbr::MaterialDesc& want) {

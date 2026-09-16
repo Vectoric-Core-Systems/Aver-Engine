@@ -90,7 +90,7 @@ public:
     // than stalling the one it was opened on.
     //
     // KEYED BY THE ABSOLUTE PATH, not a caller-supplied id -- textures have no id space of their
-    // own the way meshes share one with sceneMeshes_ (see the .ocmesh call site), so there is
+    // own the way meshes share one with content_'s meshes (see the .ocmesh call site), so there is
     // nothing to gain from making the caller compute and remember one. Internally this hashes the
     // path into the same u64 key space request() uses; textureIdForPath() hashes it again to look
     // the entry up, so the two never need to agree on anything but the path string itself.

@@ -607,8 +607,8 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
     return true;
 }
 
-// Content-relative, forward-slashed: the form a level's PLACE record and sceneMeshes_ both key
-// on. Returns the input unchanged when it is not under the content root, which simply means no
+// Content-relative, forward-slashed: the form a level's PLACE record and content_'s meshes both
+// key on. Returns the input unchanged when it is not under the content root, which simply means no
 // level can be naming it.
 // ---- WHO REFERENCES THIS ASSET ------------------------------------------------------------
 //
@@ -707,7 +707,7 @@ std::string SandboxApp::cbRelativeToContent(const std::string& abs) const {
 // Run after a copy or a move, whichever way it went.
 //
 // A MESH RELOAD IS NEEDED FOR BOTH, which is easy to get wrong by assuming only a move matters.
-// sceneMeshes_ is keyed by fnv1a64 of the content-relative path, so a COPY creates a NEW id that
+// content_'s meshes are keyed by fnv1a64 of the content-relative path, so a COPY creates a NEW id that
 // nothing has registered -- its tile would draw the type glyph and dragging it into the level
 // would find no mesh. A move invalidates the old id the same way.
 void SandboxApp::cbAfterMoveOrCopy(const std::vector<std::string>& srcs) {
@@ -741,8 +741,8 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
     cbRewriteHistory(from, dst.string());
 
     // THE SAME ID INVALIDATION A MOVE CAUSES, and rename was the one path that did not say so.
-    // cbAfterMoveOrCopy sets this for move and copy with the reason spelled out: sceneMeshes_ is
-    // keyed by fnv1a64 of the content-relative PATH, so changing the path retires the old id and
+    // cbAfterMoveOrCopy sets this for move and copy with the reason spelled out: content_'s meshes
+    // are keyed by fnv1a64 of the content-relative PATH, so changing the path retires the old id and
     // creates one nothing has registered. A rename does exactly that -- it IS a move within a
     // folder -- yet reloaded nothing, so the renamed mesh kept drawing under its old id until the
     // next project open, and a fresh drag of it found no mesh at all.
@@ -1163,7 +1163,7 @@ void SandboxApp::cbFileOpModals() {
                 // reverse map keeps the two in step by construction: if the keying ever changes,
                 // this breaks loudly at the same line rather than quietly disagreeing.
                 const u64 id = fnv1a64(std::string_view(cbRelativeToContent(sp)));
-                if (sceneMeshes_.find(id) == sceneMeshes_.end()) continue;
+                if (content_.meshFor(id) == 0) continue;
                 const u32 n = w.count();
                 for (u32 i = 0; i < n; ++i) {
                     const scene::Entity ent = w.at(i);
@@ -1906,7 +1906,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
 #if AVER_MODULE_SCENE
                 // A REAL RENDERED THUMBNAIL, for mesh assets only, and only inside the clipper's
                 // visible range, so a folder of thousands never queues more than a screenful.
-                // sceneMeshes_ is looked up, never loaded: loadProjectMeshes() already uploads
+                // content_'s meshes are looked up, never loaded: loadProjectMeshes() already uploads
                 // every .ocmesh on project open, so a miss means "not loaded" (reload), not a
                 // synchronous read that would stall the frame.
                 if (!e.isDir && e.kindExt == ".ocmesh" && thumbnails_.ready()) {
@@ -1916,12 +1916,12 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                                       : std::filesystem::relative(e.path, content, relEc).string();
                     if (!content.empty() && !relEc && !rel.empty()) {
                         for (char& c : rel) if (c == '\\') c = '/';
-                        // The SAME id space sceneMeshes_/contentIndex_ already key on -- see
+                        // The SAME id space content_'s meshes/index already key on -- see
                         // loadProjectMeshes()'s own comment -- so a mesh this browser can already
                         // place in the level is exactly the set this can thumbnail.
                         const u64 meshId = fnv1a64(std::string_view(rel));
-                        if (const auto mit = sceneMeshes_.find(meshId); mit != sceneMeshes_.end()) {
-                            thumbnails_.request(meshId, mit->second);
+                        if (const rhi::MeshHandle meshHandle = content_.meshFor(meshId)) {
+                            thumbnails_.request(meshId, meshHandle);
                             if (const u64 tex = thumbnails_.textureId(meshId)) {
                                 // Whole-texture, square: kThumbnailPx is fixed on both axes, so
                                 // this is blitTile with one tile of one. Nearly fills the preview
@@ -1937,7 +1937,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // branch above. There is nothing to render, so ThumbnailCache decodes and downscales
                 // the image itself instead of driving the preview (see its own header for why it
                 // still shares entries_/the budget/eviction with the mesh path), which is also why
-                // this needs no AVER_MODULE_SCENE guard: it never touches sceneMeshes_.
+                // this needs no AVER_MODULE_SCENE guard: it never touches content_'s meshes.
                 if (!drewThumb && !e.isDir && thumbnails_.ready() && isTextureSource(e.full)) {
                     thumbnails_.requestTexture(e.full);
                     if (const u64 tex = thumbnails_.textureIdForPath(e.full)) {

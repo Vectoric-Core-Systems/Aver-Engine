@@ -370,7 +370,7 @@ void SandboxApp::endSculptStroke() {
 
 // Fills the foliage palette from every .ocfoliage TYPE ASSET under the project's content folder --
 // NOT one entry per loaded mesh, unlike before this format existed (see FoliageSpecies' own
-// comment). A type whose meshPath does not resolve in sceneMeshes_ is skipped with a warning
+// comment). A type whose meshPath does not resolve in content_'s meshes is skipped with a warning
 // rather than added: loadProjectMeshes' own reason for keying its discovery off already-resolved
 // meshes (not a raw filesystem walk) applies here one layer up -- a type naming a mesh that
 // failed to load, or was never imported, cannot be placed without a synchronous reload, so
@@ -398,7 +398,7 @@ void SandboxApp::refreshFoliagePalette() {
             continue;
         }
         const u64 meshId = fnv1a64(std::string_view(type.meshPath));
-        if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) {
+        if (content_.meshFor(meshId) == 0) {
             AVER_WARN("[Foliage] '{}' names mesh '{}', which is not loaded -- skipping",
                       full, type.meshPath);
             continue;
@@ -529,7 +529,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     const FoliageSpecies& sp = *picked;
 
     const u64 meshId = fnv1a64(std::string_view(sp.type.meshPath));
-    if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) return;
+    if (content_.meshFor(meshId) == 0) return;
 
     const f32 sc = sp.type.scaleMin +
                    foliageRand(foliageSeed_) * (sp.type.scaleMax - sp.type.scaleMin);
@@ -579,10 +579,10 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
         // .ocworld PLACE's own `material` field.
         if (!sp.type.material.empty()) {
             mr->material = aver_scene_material(0, sp.type.material.c_str());
-#if AVER_MODULE_PBR
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
             if (mr->material) {
-                const pbr::MaterialHandle h = materialForSurface(sp.type.material);
-                if (h) surfaceMaterials_[mr->material] = h;
+                const pbr::MaterialHandle h = content_.materialForSurface(sp.type.material);
+                if (h) content_.bindSurfaceMaterial(mr->material, h);
             }
 #endif
         }
@@ -765,7 +765,7 @@ void SandboxApp::addPlayerStart(Engine&) {
 
 // Spawns a cube in front of the camera, in whichever world owns the viewport, and selects it.
 // Adds one of the engine's built-in primitives. Cube and sphere are both synthesised at
-// startup (appendBox/appendSphere) and registered in sceneMeshes_/meshBounds_/meshTris_ under
+// startup (appendBox/appendSphere) and registered in content_'s meshes/bounds and meshTris_ under
 // their asset ids, so "Add > Sphere" needed no new asset, no new loader and no new bounds --
 // only for this function to stop hardcoding the cube. It was disabled in the menu for as long
 // as sphere.ocmesh had been a registered built-in.
@@ -807,12 +807,12 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     }
 #endif
     // The placeholder world (no level loaded), which keeps its OWN cube mesh at
-    // kEditorCubeHalf rather than the unit one sceneMeshes_ registers.
+    // kEditorCubeHalf rather than the unit one content_ registers.
     //
     // THE TWO CUBES ARE DIFFERENT SIZES, which is the trap here. cubeMesh_ is appendBox at
-    // half-extent 50 and is drawn at scale 1; sceneMeshes_["Meshes/cube.ocmesh"] is the UNIT
+    // half-extent 50 and is drawn at scale 1; content_'s "Meshes/cube.ocmesh" is the UNIT
     // cube, because .ocworld PLACEG scales are half-extents in cm applied to a unit mesh.
-    // Looking the cube up in sceneMeshes_ here would silently shrink the placeholder cube 50x.
+    // Looking the cube up in content_ here would silently shrink the placeholder cube 50x.
     // So the cube keeps its own handle, and anything else comes from the registry scaled up to
     // match it.
     rhi::MeshHandle mesh = cubeMesh_;
@@ -820,12 +820,12 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     Vec3 scale{1, 1, 1};
     const u64 assetId = fnv1a64(std::string_view(assetPath));
     if (assetId != fnv1a64(std::string_view("Meshes/cube.ocmesh"))) {
-        const auto meshIt = sceneMeshes_.find(assetId);
-        if (meshIt == sceneMeshes_.end()) {
+        const rhi::MeshHandle found = content_.meshFor(assetId);
+        if (!found) {
             AVER_WARN("[Editor] Add: no built-in mesh registered for '{}'", assetPath);
             return;
         }
-        mesh = meshIt->second;
+        mesh = found;
         const auto trisIt = meshTris_.find(assetId);
         tris = trisIt != meshTris_.end() ? trisIt->second : 0;
         scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};   // unit mesh -> cube's size
@@ -896,7 +896,7 @@ Vec3 SandboxApp::dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface) const
             if (!w.valid(ent) || w.destroyPending(ent)) continue;
             const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
             if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
-            if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+            if (content_.meshFor(mr->mesh) == 0) continue;
             Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
             Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
             if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
@@ -969,7 +969,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     if (isParticle) {
         // A drop-to-place entry point for DECIDED 3's format, mirroring the .ocmesh path below
         // rather than growing its own copy of the drop-target/level-active checks. Loaded directly
-        // (not through loadProjectParticleEffects' whole-tree walk) so an effect just authored
+        // (not through content_.loadProjectParticleEffects()'s whole-tree walk) so an effect just authored
         // resolves immediately, the same reasoning the mesh path gives for reloading synchronously.
         particles::ParticleEffect fx;
         std::string err;
@@ -1020,15 +1020,14 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #endif
 
     const u64 meshId = fnv1a64(std::string_view(rel));
-    if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) {
+    if (content_.meshFor(meshId) == 0) {
         // Not loaded yet -- most likely imported moments ago. Reload synchronously (the same
         // release+load pair buildUI() runs for wantMeshReload_) rather than waiting a frame, so
         // the drop the user just made actually lands.
         releaseProjectMeshes(e);
         loadProjectMeshes(e);
     }
-    const auto meshIt = sceneMeshes_.find(meshId);
-    if (meshIt == sceneMeshes_.end()) {
+    if (content_.meshFor(meshId) == 0) {
         cbStatus_ = "Could not resolve '" + rel + "' to a loaded mesh";
         AVER_WARN("[Editor] drop: '{}' (id {}) is not a loaded scene mesh", rel, meshId);
         return;
@@ -1050,13 +1049,13 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 
     // ON TOP OF WHAT IT LANDED ON, not inside it. Applied BEFORE the snap so the snap still
     // quantises the final position rather than a value the lift then knocks off the grid.
-    // A MESH WITH NO KNOWN BOUNDS IS LEFT WHERE IT LANDED. meshBounds_ is filled at load from
+    // A MESH WITH NO KNOWN BOUNDS IS LEFT WHERE IT LANDED. content_'s bounds are filled at load from
     // the .ocmesh's own header, so a miss means nothing measured this mesh -- and inventing a
     // lift for it would move the object for a reason nobody could see.
     f32 lift = 0.0f;
     if (onSurface) {
-        if (const auto bit = meshBounds_.find(meshId); bit != meshBounds_.end())
-            lift = editor::dropRestLift(bit->second.first.z, xf.scale.z);
+        if (const auto* b = content_.boundsFor(meshId))
+            lift = editor::dropRestLift(b->first.z, xf.scale.z);
     }
     xf.position.z += lift;
     if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
@@ -1397,7 +1396,7 @@ void SandboxApp::handleManip(Engine& e) {
                         if (anyChunkWorldOwns(ent)) continue;
                         const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                         if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
-                        if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+                        if (content_.meshFor(mr->mesh) == 0) continue;
                         Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
                         Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
                         if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
@@ -2134,7 +2133,7 @@ void SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             if (anyChunkWorldOwns(ent)) continue;
             const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
             if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
-            if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+            if (content_.meshFor(mr->mesh) == 0) continue;
             Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
             Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
             if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
@@ -2329,7 +2328,7 @@ void SandboxApp::snapSelectionToFloor() {
                 if (anyChunkWorldOwns(ent)) continue;
                 const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
-                if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+                if (content_.meshFor(mr->mesh) == 0) continue;
                 Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
                 Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
                 if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
@@ -2415,7 +2414,7 @@ void SandboxApp::isolateSelection() {
         if (std::find(sel.begin(), sel.end(), ent) != sel.end()) continue;
         auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
         if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
-        if (sceneMeshes_.find(mr->mesh) == sceneMeshes_.end()) continue;
+        if (content_.meshFor(mr->mesh) == 0) continue;
         mr->flags &= ~scene::kMeshRendererVisible;
         editorHidden_.push_back(ent);
     }

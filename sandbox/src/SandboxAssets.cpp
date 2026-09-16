@@ -1,34 +1,12 @@
-// Runtime side: the content index and asset resolvers, and mesh / material / particle loading.
+// Mesh and material loading: the load/release wrappers around aver::game::GameContent (which owns
+// the content index, resolvers, mesh registry and material cache), and the editor-only tables built
+// on top -- pick geometry, the LOD ladder, depth proxies and cluster data.
 // Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
 
 namespace aver {
-#if AVER_MODULE_PBR
-// Returns where an asset reference points on this machine, or empty when it cannot be resolved.
-std::string SandboxApp::resolveAssetPath(const pbr::TextureRef& ref) const {
-    if (!ref.path.empty()) {
-        const std::string& p = ref.path;
-        const bool absolute = p.size() > 1 && (p[1] == ':' || p[0] == '\\' || p[0] == '/');
-        if (absolute) return p;
-        const std::string content = project_.contentDir();
-        if (!content.empty()) {
-            const std::string full = content + "\\" + p;
-            std::error_code ec;
-            if (std::filesystem::exists(full, ec)) return full;
-        }
-        return p;
-    }
-    if (ref.id) {
-        const auto it = contentIndex_.find(ref.id);
-        if (it != contentIndex_.end()) return it->second;
-    }
-    return {};
-}
-
-#endif
-
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 // PIPELINE-BUILD TIME half: giShaderPrelude()/giShaderDefines() are pure functions of the register
 // numbers ParticleRenderer::buildPipelines hands in, so this never dereferences `user` -- it exists
@@ -56,117 +34,9 @@ std::string SandboxApp::resolveAssetPath(const pbr::TextureRef& ref) const {
 
 #endif
 
-// Indexes every asset under the project's content root by fnv1a64 of its content-relative path.
-void SandboxApp::rebuildContentIndex() {
-    contentIndex_.clear();
-    const std::string content = project_.contentDir();
-    if (content.empty()) return;
-    std::error_code ec;
-    if (!std::filesystem::exists(content, ec)) return;
-    for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
-        if (ec) break;
-        if (!it->is_regular_file(ec)) continue;
-        std::string rel = std::filesystem::relative(it->path(), content, ec).string();
-        if (ec || rel.empty()) continue;
-        // FROZEN: the id hashes the forward-slash spelling, matching C# Assets.ObjectIdOf.
-        for (char& c : rel) if (c == '\\') c = '/';
-        contentIndex_[fnv1a64(std::string_view(rel))] = it->path().string();
-    }
-    AVER_INFO("[Content] indexed {} asset(s) under {}", contentIndex_.size(), content);
-    // The anim system does its own file discovery through this, and caches by id -- so a
-    // re-index has to drop what it cached or a moved asset keeps resolving to the old path.
-    // Aver.Anim.Scene is built only under AVER_MODULE_SCENE, so these two calls need their own
-    // guard even though the rest of this function has nothing to do with a material or a scene.
-#if AVER_MODULE_SCENE
-    anim::animSystem().clear();
-    anim::animSystem().setResolver(&SandboxApp::resolveAnimAsset, this);
-#endif
-}
-
-// Maps an asset ObjectId to a path for aver::anim::AnimSystem. A plain function pointer because
-// that is what the system takes: asset discovery is the host's business, not the sampler's.
- std::string SandboxApp::resolveAnimAsset(u64 id, void* user) {
-    auto* self = static_cast<SandboxApp*>(user);
-    if (!self) return {};
-    const auto it = self->contentIndex_.find(id);
-    return it == self->contentIndex_.end() ? std::string() : it->second;
-}
-
-#if AVER_MODULE_SCENE
- rhi::MeshHandle SandboxApp::resolveSceneMesh(u64 id, void* user) {
-    auto* self = static_cast<SandboxApp*>(user);
-    if (!self) return 0;
-    const auto it = self->sceneMeshes_.find(id);
-    return it == self->sceneMeshes_.end() ? 0 : it->second;
-}
-
-#endif
-
-#if AVER_MODULE_PBR
-// Turns an .ocmat's GRAPHREF path into the gMaterialGraphId its constants carry. 0 for a
-// material with no GRAPHREF, and 0 for one whose graph will not load or compile.
-// A broken graph does not take the material down with it: returning 0 falls back to the stock
-// .ocmat factors/maps instead of vanishing the object entirely. Logged either way.
-u32 SandboxApp::resolveMaterialGraph(const std::string& graphRef) {
-    if (graphRef.empty()) return 0;
-    const std::string content = project_.contentDir();
-    if (content.empty()) return 0;
-
-    // CONTENT-RELATIVE, the same convention COMP mesh= uses in .ocgraph and TEX uses in this
-    // very file: a path with the content directory on the front resolves to nothing, silently,
-    // which is a mistake worth not repeating here.
-    std::string path = content + "\\" + graphRef;
-    for (char& c : path) if (c == '/') c = '\\';
-
-    // ALREADY COMPILED? Two materials naming one graph is ordinary -- a stone and a wet stone
-    // sharing a pattern -- and asking the registry first means the graph is read and compiled
-    // once, and both materials get the same id rather than two arms doing the same arithmetic.
-    if (const u32 known = pbr::materialGraphs().idOf(path)) return known;
-
-    fmt::OcGraphData g;
-    std::string err;
-    if (!fmt::loadOcgraph(path, g, &err)) {
-        AVER_ERROR("[MaterialGraph] '{}' could not be read, so the material shades as a stock "
-                   "one: {}", path, err);
-        return 0;
-    }
-    return pbr::materialGraphs().add(path, g.name, g);
-}
-
-// Returns the material a surface token names, loading it on first use. 0 when the project has none.
-pbr::MaterialHandle SandboxApp::materialForSurface(const std::string& name) {
-    if (name.empty()) return 0;
-    const auto cached = materialAssets_.find(name);
-    if (cached != materialAssets_.end()) return cached->second;
-
-    pbr::MaterialHandle h = 0;
-    const std::string content = project_.contentDir();
-    if (!content.empty()) {
-        // Built .ocmat under Binaries wins over a hand-authored one under Content -- see
-        // MaterialResolve.hpp for the full three-candidate order, shared with
-        // loadProjectMaterials() below so the two never drift apart.
-        const std::string path = editor::resolveMaterialPath(project_.binariesDir(), content, name);
-        if (!path.empty()) {
-            pbr::MaterialDesc d;
-            fmt::OcMatExtras extras;
-            std::string err;
-            if (!fmt::loadOcmat(path, d, &extras, &err)) {
-                AVER_WARN("[Material] {}", err);
-            } else {
-                d.graphId = resolveMaterialGraph(extras.graphRef);
-                h = pbr::MaterialLibrary::get().create(d);
-                if (h) AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
-                                 d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
-            }
-        }
-    }
-    materialAssets_.emplace(name, h);
-    return h;
-}
-
-#endif
-
-// Loads every .ocmesh under the project's Content, keyed by fnv1a64 of its forward-slash relative path.
+// Loads every .ocmesh under the project's Content through content_, then builds the editor's own
+// per-mesh tables (pick geometry, triangle counts, skinned ids, LOD ladder, depth proxies, cluster
+// data) in onMeshLoaded as each one uploads.
 void SandboxApp::loadProjectMeshes(Engine& e) {
 #if AVER_MODULE_SCENE
     // W4 (--mesh-heap): the FIRST statement, unconditionally, so every static mesh this call
@@ -180,64 +50,80 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return;
 
-    u32 loaded = 0, failed = 0;
+    // The pass onMeshLoaded accumulates into: this app, this call's engine, and (Trifactor) the
+    // LOD-ladder totals the summary line below reports once, run-wide.
+    MeshLoadPass pass;
+    pass.app = this;
+    pass.engine = &e;
+    content_.setBuildDepthProxies(false);   // the editor builds the whole LOD ladder and its own depth proxies
+    content_.setMeshLoadedHook(&SandboxApp::onMeshLoaded, &pass);
+    content_.loadProjectMeshes(*e.device());
+    content_.setMeshLoadedHook(nullptr, nullptr);
+
 #if AVER_MODULE_TRIFACTOR
-    // W11 (--lod-share-vertices): summed across every mesh's LOD ladder built below, printed once
-    // as the [Mesh] LOD ladders line at the end of this function -- see that line's own comment.
-    u32 lodCoarserLevels = 0;
-    u32 lodSharedLevels = 0;
-    u64 lodSharedVertexBytesSaved = 0;
+    // W11: once per loadProjectMeshes, not per mesh -- the existing lodCount= line on each mesh's
+    // own [Mesh] '...' -> ... line above (unchanged, byte-identical) is what a per-mesh check
+    // sums; this is the run-wide total the flag's own trade (vertex-buffer sharing) is measured
+    // against. Printed even when both counts are 0 (--lod-share-vertices off, or no mesh in this
+    // project has a coarser LOD at all), so its absence in a log is never ambiguous with "the
+    // line was never reached".
+    if (pass.lodCoarserLevels || pass.lodSharedLevels)
+        AVER_INFO("[Mesh] LOD ladders: {} coarser level(s), {} sharing their LOD0 vertex buffer "
+                  "({:.1f} MiB of vertex data not duplicated)",
+                  pass.lodCoarserLevels, pass.lodSharedLevels,
+                  static_cast<f64>(pass.lodSharedVertexBytesSaved) / (1024.0 * 1024.0));
 #endif
-    for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
-        if (ec) break;
-        if (!it->is_regular_file(ec)) continue;
-        const std::string full = it->path().string();
-        if (assetTypeFromPath(full) != AssetType::Mesh) continue;
+#if AVER_MODULE_LANDSCAPE
+    // Rebuilt here rather than lazily on entering Foliage mode: this is the moment the set of
+    // placeable meshes actually changes, and editorModeAvailable() asks whether the palette
+    // is empty every frame the mode dropdown is open.
+    refreshFoliagePalette();
+#endif
+#else
+    (void)e;
+#endif
+}
 
-        std::string rel = std::filesystem::relative(it->path(), dir, ec).string();
-        if (ec) continue;
-        for (char& c : rel) if (c == '\\') c = '/';
+#if AVER_MODULE_SCENE
+// content_'s per-mesh hook. `m.data` is null for a built-in (fired from registerBuiltins), which
+// content_ has already uploaded and recorded (mesh/bounds); a project mesh (m.data non-null) has
+// also already had its mesh/bounds/slot-0-material tables filled and its part split built by
+// content_ by the time this runs. What is built here is what only the editor keeps on top: pick
+// triangles, triangle counts, skinned ids and, under Trifactor, the LOD ladder, depth proxy and
+// cluster data.
+void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user) {
+    auto* pass = static_cast<MeshLoadPass*>(user);
+    if (!pass || !pass->app || !pass->engine) return;
+    SandboxApp& app = *pass->app;
+    Engine& e = *pass->engine;
 
-        fmt::OcMeshData md;
-        std::string why;
-        if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); ++failed; continue; }
+    if (!m.data) {
+        // A BUILT-IN (sphere/cube/drone): only pick geometry and a triangle count are ever asked
+        // of these, and content_ already recorded everything else (its mesh handle and bounds).
+        app.meshTris_[m.id] = static_cast<u32>(m.indices.size() / 3);
+        app.pickGeometry_[m.id] = buildPickGeometry(m.vertices, m.indices);
+        return;
+    }
 
-        std::vector<rhi::MeshVertex> verts(md.vertexCount());
-        for (u32 i = 0; i < md.vertexCount(); ++i) {
-            rhi::MeshVertex& v = verts[i];
-            v.px = md.positions[usize(i)*3+0]; v.py = md.positions[usize(i)*3+1]; v.pz = md.positions[usize(i)*3+2];
-            v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
-            v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
-        }
-        const rhi::MeshHandle h = e.device()->createMesh(verts.data(), (u32)verts.size(),
-                                                        md.indices.data(), (u32)md.indices.size());
-        if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); ++failed; continue; }
+    const u64 id = m.id;
+    const std::string& rel = m.relativePath;
+    const fmt::OcMeshData& md = *m.data;
+    const std::vector<rhi::MeshVertex>& verts = m.vertices;
+    const rhi::MeshHandle h = m.handle;
 
-        const u64 id = fnv1a64(std::string_view(rel));
-        sceneMeshes_[id] = h;
-        // A project mesh can take a built-in's id (its own Meshes/cube.ocmesh, say), and the
-        // built-in's pick triangles, seeded at creation, would then answer for this mesh. Dropped
-        // here so pickGeometryFor reads this file instead.
-        pickGeometry_.erase(id);
-        // The path back from an id: every other map here goes id -> data, so anything wanting to
-        // NAME a loaded mesh (the foliage palette, a future asset picker) had no way to. Populated
-        // here because this is the one place with both halves at once.
-        meshPathById_[id] = rel;
-        meshBounds_[id] = {md.boundsMin, md.boundsMax};
-        meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
-        // SLOT 0 FOR EVERY MESH, split or not. buildMeshParts resolves the slots of a mesh
-        // it actually splits; this covers the one it returns early on, which is the common case
-        // and was the case nothing read. Recorded even for a multi-slot mesh so the entity's own
-        // fallback is its first slot rather than nothing when a split was refused.
-        if (!md.materialSlots.empty() && !md.materialSlots[0].empty())
-            meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
-        buildMeshParts(e, id, md, verts, rel);
-        if (md.hasSkin()) skinnedMeshIds_.insert(id);
-        projectMeshIds_.push_back(id);
-        ++loaded;
-        AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
-                  rel, verts.size(), md.indices.size(), md.lodCount(), md.coarserLods.size(),
-                  md.meshlets.size());
+    // A project mesh can take a built-in's id (its own Meshes/cube.ocmesh, say), and the
+    // built-in's pick triangles, seeded at creation, would then answer for this mesh. Dropped
+    // here so pickGeometryFor reads this file instead.
+    app.pickGeometry_.erase(id);
+    // The path back from an id: every other map here goes id -> data, so anything wanting to
+    // NAME a loaded mesh (the foliage palette, a future asset picker) had no way to. Populated
+    // here because this is the one place with both halves at once.
+    app.meshPathById_[id] = rel;
+    app.meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
+    if (md.hasSkin()) app.skinnedMeshIds_.insert(id);
+    AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
+              rel, verts.size(), md.indices.size(), md.lodCount(), md.coarserLods.size(),
+              md.meshlets.size());
 
 #if AVER_MODULE_TRIFACTOR
         // The Cook wrote coarser LOD levels for this mesh: build one whole-level MeshHandle per
@@ -253,7 +139,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
             ladder.clusters.resize(levels);
 
             ladder.handles.push_back(h);
-            ladder.triCounts.push_back(meshTris_[id]);
+            ladder.triCounts.push_back(app.meshTris_[id]);
             ladder.errorCm.push_back(0.0f);
             trifactor::buildLevelClusterViews(md, 0, ladder.clusters[0]);
 
@@ -265,12 +151,12 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                 // compute-written, e.g. a skin target -- see createMeshSharingVertices' own
                 // comment for the full list) and the caller MUST fall back, exactly as if the flag
                 // were off. Off by default, so this is a no-op call on the common path.
-                rhi::MeshHandle lh = lodShareVertices_
+                rhi::MeshHandle lh = app.lodShareVertices_
                     ? e.device()->createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size())
                     : 0;
                 if (lh) {
-                    ++lodSharedLevels;
-                    lodSharedVertexBytesSaved += static_cast<u64>(verts.size()) * sizeof(rhi::MeshVertex);
+                    ++pass->lodSharedLevels;
+                    pass->lodSharedVertexBytesSaved += static_cast<u64>(verts.size()) * sizeof(rhi::MeshVertex);
                 } else {
                     lh = e.device()->createMesh(verts.data(), (u32)verts.size(),
                                                  lod.indices.data(), (u32)lod.indices.size());
@@ -281,7 +167,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                     ok = false;
                     break;
                 }
-                ++lodCoarserLevels;
+                ++pass->lodCoarserLevels;
                 ladder.handles.push_back(lh);
                 ladder.triCounts.push_back(trifactor::levelTriangleCount(md, lvl));
                 ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
@@ -307,7 +193,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                     // or the proxy silently stops applying to exactly the instances furthest away.
                     for (u32 lvl = 0; lvl < ladder.handles.size(); ++lvl)
                         if (ladder.triCounts[lvl] > ladder.triCounts[pick])
-                            depthProxy_[ladder.handles[lvl]] = ladder.handles[pick];
+                            app.depthProxy_[ladder.handles[lvl]] = ladder.handles[pick];
                     AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, "
                               "{:.1f}cm error)",
                               rel, pick, ladder.triCounts[pick],
@@ -316,7 +202,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                               ladder.errorCm[pick]);
                 }
             }
-            meshLods_[id] = std::move(ladder);
+            app.meshLods_[id] = std::move(ladder);
 
             // Flat, all-levels-at-once cluster data for the per-cluster path. `verts` is copied
             // (not moved) since the LOD-0 MeshHandle `h` was already created from it -- this copy
@@ -330,14 +216,14 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                 trifactor::buildMeshClusterLevelBounds(cd.clusters, cd.levelBounds);
                 for (const trifactor::MeshClusterView& cv : cd.clusters)
                     cd.maxSphereRadius = std::max(cd.maxSphereRadius, cv.sphereRadius);
-                meshClusterData_[id] = std::move(cd);
+                app.meshClusterData_[id] = std::move(cd);
             }
 
             // GPU cluster buffers for --lod-mesh-shader, built only when the flag is on, so a run
             // that never asks for it never pays for the extra upload. Uses buildMeshClusterGpuData,
             // which keeps each meshlet's local vertex/triangle block intact -- what the
             // amplification+mesh shader pair reads -- instead of pre-expanding to global indices.
-            if (lodMeshShaderEnabled_) {
+            if (app.lodMeshShaderEnabled_) {
                 std::vector<trifactor::MeshClusterView> gpuBounds;
                 std::vector<trifactor::GpuMeshletDesc> gpuDesc;
                 std::vector<u32> gpuVerts, gpuTris;
@@ -393,7 +279,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                                 // Voxi's slots (t4/t5, kClusterGiSrvBase..) are NOT populated here
                                 // -- binding them once at upload time is the wrong lifetime for a
                                 // texture that can be resized or recreated at any later frame.
-                                meshClusterGpu_[id] = gpu;
+                                app.meshClusterGpu_[id] = gpu;
                             } else {
                                 AVER_WARN("[LOD-MESH-SHADER] '{}' binding set failed; this mesh falls back to the CPU per-cluster path", rel);
                             }
@@ -405,33 +291,8 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
             }
         }
 #endif
-    }
-    if (loaded || failed)
-        AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
-                  failed ? (", " + std::to_string(failed) + " failed") : "");
-#if AVER_MODULE_TRIFACTOR
-    // W11: once per loadProjectMeshes, not per mesh -- the existing lodCount= line on each mesh's
-    // own [Mesh] '...' -> ... line above (unchanged, byte-identical) is what a per-mesh check
-    // sums; this is the run-wide total the flag's own trade (vertex-buffer sharing) is measured
-    // against. Printed even when both counts are 0 (--lod-share-vertices off, or no mesh in this
-    // project has a coarser LOD at all), so its absence in a log is never ambiguous with "the
-    // line was never reached".
-    if (lodCoarserLevels || lodSharedLevels)
-        AVER_INFO("[Mesh] LOD ladders: {} coarser level(s), {} sharing their LOD0 vertex buffer "
-                  "({:.1f} MiB of vertex data not duplicated)",
-                  lodCoarserLevels, lodSharedLevels,
-                  static_cast<f64>(lodSharedVertexBytesSaved) / (1024.0 * 1024.0));
-#endif
-#if AVER_MODULE_LANDSCAPE
-        // Rebuilt here rather than lazily on entering Foliage mode: this is the moment the set of
-        // placeable meshes actually changes, and editorModeAvailable() asks whether the palette
-        // is empty every frame the mode dropdown is open.
-        refreshFoliagePalette();
-#endif
-#else
-    (void)e;
-#endif
 }
+#endif   // AVER_MODULE_SCENE
 
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
 // Creates the AS+MS+PS pipeline --lod-mesh-shader draws through. Tried EXACTLY ONCE per run
@@ -644,18 +505,11 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
 // Drops the project's meshes from the id table. The built-in primitives survive.
 void SandboxApp::releaseProjectMeshes(Engine& e) {
     (void)e;   // only read under AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR, below
-    // sceneMeshes_ is scene-only; with the module off loadProjectMeshes() never populated it (see
-    // its own #if AVER_MODULE_SCENE above), so there is nothing here to erase from it either.
+    // Mesh/bounds/slot-0-material/part tables are content_'s; content_.releaseProjectMeshes below
+    // drops them there. What stays here are the editor-only tables content_ knows nothing about.
 #if AVER_MODULE_SCENE
-    for (const u64 id : projectMeshIds_) {
-        // The per-material split parts own REAL GPU meshes of their own -- destroyed explicitly
-        // for clusterCutCache_'s reason immediately below, and not merely erased from the map.
-        if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
-            for (const MeshPart& p : pit->second)
-                if (p.mesh) e.device()->destroyMesh(p.mesh);
-            meshParts_.erase(pit);
-        }
-        sceneMeshes_.erase(id); meshTris_.erase(id); meshSlot0Material_.erase(id);
+    for (const u64 id : content_.projectMeshIds()) {
+        meshTris_.erase(id);
         pickGeometry_.erase(id);   // whatever pickGeometryFor cached (loaded or empty) for this id
         if (const auto oit = selOutlineLines_.find(id); oit != selOutlineLines_.end()) {
             if (oit->second) e.device()->destroyLineMesh(oit->second);
@@ -673,8 +527,11 @@ void SandboxApp::releaseProjectMeshes(Engine& e) {
         if (cache.handle) e.device()->destroyMesh(cache.handle);
     clusterCutCache_.clear();
 #endif
+    // false: the editor's mesh reload never destroyed the base handle -- caches keyed by
+    // MeshHandle (depth proxies and LOD ladders above) are not cleared with the meshes, and a
+    // destroyed handle's number can be reused.
+    content_.releaseProjectMeshes(*e.device(), /*destroyBaseHandles=*/false);
 #endif
-    projectMeshIds_.clear();
 }
 
 #if AVER_MODULE_PBR
@@ -685,15 +542,15 @@ void SandboxApp::loadProjectMaterials() {
     const std::string contentMatDir = dir + "\\Materials";
     const std::string binMatDir = project_.binariesDir() + "\\Materials";
 
-    // MaterialResolve.hpp, so this enumeration and materialForSurface()'s own resolution can
-    // never name the two directories differently or disagree on what ".ocmat" means.
+    // MaterialResolve.hpp, so this enumeration and content_.materialForSurface()'s own resolution
+    // can never name the two directories differently or disagree on what ".ocmat" means.
     const std::vector<std::string> stems = editor::projectMaterialStems(project_.binariesDir(), dir);
 
     u32 loaded = 0;
     for (const std::string& stem : stems) {
-        const pbr::MaterialHandle h = materialForSurface(stem);
+        const pbr::MaterialHandle h = content_.materialForSurface(stem);
         if (!h) continue;
-        surfaceMaterials_[aver_scene_material(0, stem.c_str())] = h;
+        content_.bindSurfaceMaterial(aver_scene_material(0, stem.c_str()), h);
         ++loaded;
     }
     if (loaded)
@@ -704,45 +561,9 @@ void SandboxApp::loadProjectMaterials() {
 
 // Destroys every material the project owns. The texture cache behind them survives.
 void SandboxApp::releaseProjectMaterials() {
-    for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
-    materialAssets_.clear();
-    surfaceMaterials_.clear();
-}
-
-#endif
-
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-void SandboxApp::loadProjectParticleEffects() {
-    particles::particleEffects().clear();
-    const std::string dir = project_.contentDir();
-    if (dir.empty()) return;
-    std::error_code ec;
-    if (!std::filesystem::exists(dir, ec)) return;
-
-    u32 loaded = 0, failed = 0;
-    for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
-        if (ec) break;
-        if (!it->is_regular_file(ec)) continue;
-        const std::string full = it->path().string();
-        if (assetTypeFromPath(full) != AssetType::Particle) continue;
-
-        std::string rel = std::filesystem::relative(it->path(), dir, ec).string();
-        if (ec) continue;
-        for (char& c : rel) if (c == '\\') c = '/';
-
-        particles::ParticleEffect fx;
-        std::string err;
-        if (!fmt::loadOcparticle(full, fx, nullptr, &err)) {
-            AVER_WARN("[Particles] {}", err);
-            ++failed;
-            continue;
-        }
-        particles::particleEffects().set(fnv1a64(std::string_view(rel)), fx);
-        ++loaded;
-    }
-    if (loaded || failed)
-        AVER_INFO("[Particles] {} project effect(s) loaded from {}{}", loaded, dir,
-                  failed ? (", " + std::to_string(failed) + " failed") : "");
+    // false: the editor never cleared pbr::materialGraphs(), and its material graph editor
+    // registers graphs there.
+    content_.releaseProjectMaterials(/*clearGraphRegistry=*/false);
 }
 
 #endif
@@ -786,93 +607,5 @@ void SandboxApp::warnDeadMaterialHandle(i32 mat) {
               "placeholder. A stale handle here would otherwise render as a bright mirror.",
               aver_scene_material_name(mat));
 }
-
-#if AVER_MODULE_LANDSCAPE
-// THE MESH'S OWN MATERIAL, for an entity that never named one.
-//
-// WHY THIS EXISTS. .ocmesh carries a materialSlots table and every importer writes it, but until
-// now the ONLY code that read it was buildMeshParts -- whose first line is
-// `if (md.submeshes.size() <= 1) return;`. So a multi-material mesh got its slots resolved and a
-// SINGLE-material one got nothing: CMeshRenderer.material stayed 0, surfaceMaterials_ found
-// nothing to map, and the entity drew with the flat grey fallback. Importing 53 foliage meshes
-// made that obvious -- 37 of them name exactly one material, which is every plant.
-//
-// 0 MEANS "ASK THE MESH", NOT "NO MATERIAL". That is the same rule drawMeshParts already applies
-// one level down (`p.material ? p.material : entityMat`), and it is why this is a fallback rather
-// than something written into CMeshRenderer at placement: the mesh already declares its material,
-// and copying that name into every placement would be a second copy free to drift from it. A
-// non-zero CMeshRenderer.material stays exactly what it has always been -- an override.
-i32 SandboxApp::meshDefaultMaterial(u64 meshId) const {
-    const auto it = meshSlot0Material_.find(meshId);
-    return it == meshSlot0Material_.end() ? 0 : it->second;
-}
-
-// Splits a mesh that names more than one material into one MeshHandle per slot.
-//
-// COMPACTED PER PART, not sharing the parent's vertex array. createMesh COPIES what it is given,
-// so handing all seven parts of a palm the whole vertex buffer would upload that buffer seven
-// times. The remap also gives each part honest bounds, which is what the culler and the GI
-// volume want anyway.
-void SandboxApp::buildMeshParts(Engine& e, u64 id, const fmt::OcMeshData& md,
-                    const std::vector<rhi::MeshVertex>& verts, const std::string& rel) {
-    if (md.submeshes.size() <= 1) return;   // the common case: nothing to split
-
-    std::vector<MeshPart> parts;
-    parts.reserve(md.submeshes.size());
-    std::unordered_map<u32, u32> remap;
-    std::vector<rhi::MeshVertex> pv;
-    std::vector<u32> pi;
-
-    for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
-        if (sm.indexCount == 0) continue;
-        const usize end = usize(sm.indexStart) + sm.indexCount;
-        if (end > md.indices.size()) {
-            AVER_WARN("[Mesh] '{}' submesh '{}' runs past the index buffer; skipped", rel, sm.name);
-            continue;
-        }
-        remap.clear(); pv.clear(); pi.clear();
-        pi.reserve(sm.indexCount);
-        bool bad = false;
-        for (usize k = sm.indexStart; k < end; ++k) {
-            const u32 vi = md.indices[k];
-            if (vi >= verts.size()) { bad = true; break; }
-            const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(pv.size()));
-            if (inserted) pv.push_back(verts[vi]);
-            pi.push_back(it2->second);
-        }
-        if (bad || pv.empty()) {
-            AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
-            continue;
-        }
-
-        MeshPart part;
-        part.mesh = e.device()->createMesh(pv.data(), static_cast<u32>(pv.size()),
-                                           pi.data(), static_cast<u32>(pi.size()));
-        if (!part.mesh) {
-            AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", sm.name, rel);
-            continue;
-        }
-        // THE SLOT NAMES THE MATERIAL, which is the whole point of the format's slot table --
-        // and the cook writes those names as the .ocmat stems it produced, so a name resolves
-        // through exactly the path an authored material does.
-        if (sm.materialSlot < md.materialSlots.size()) {
-            const std::string& slot = md.materialSlots[sm.materialSlot];
-            if (!slot.empty()) part.material = aver_scene_material(0, slot.c_str());
-        }
-        parts.push_back(part);
-    }
-
-    // ONE SURVIVING PART IS NOT A SPLIT. Falling through to the ordinary single-mesh path costs
-    // a draw call less and keeps the entity's own material override meaningful.
-    if (parts.size() <= 1) {
-        for (const MeshPart& p : parts) e.device()->destroyMesh(p.mesh);
-        return;
-    }
-    AVER_INFO("[Mesh] '{}' names {} materials; split into {} part(s) so each draws its own",
-              rel, md.materialSlots.size(), parts.size());
-    meshParts_[id] = std::move(parts);
-}
-
-#endif
 
 } // namespace aver

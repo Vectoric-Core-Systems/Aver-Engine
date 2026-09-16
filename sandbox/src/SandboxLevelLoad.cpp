@@ -149,7 +149,7 @@ void SandboxApp::applyLandscapeSurface(landscape::LandscapeRenderer& r) {
     if (landscapeMaterial_.empty()) return;
     pbr::MaterialSystem& ms = voxiRenderer_.materials();
     if (!ms.ready()) return;
-    const pbr::MaterialHandle h = materialForSurface(landscapeMaterial_);
+    const pbr::MaterialHandle h = content_.materialForSurface(landscapeMaterial_);
     if (!h) return;
     const pbr::MaterialConstants& mc = ms.constants(h);
     r.setSurfaceBinding(ms.bindingSet(h), &mc, sizeof(pbr::MaterialConstants));
@@ -165,7 +165,7 @@ void SandboxApp::applyLandscapeSurface(landscape::LandscapeRenderer& r) {
     // true OF THE SHADER (averSurfaceUV) -- the mesh builder is a second, equally valid consumer
     // that bakes the same number into UVs instead of projecting it.
     // AND IT MUST BE THE REAL MATERIAL'S NUMBER, NOT THE FALLBACK'S: constants() returns
-    // fallbackConstants_ (uvTiling 200) for any handle not yet valid, and materialForSurface() can
+    // fallbackConstants_ (uvTiling 200) for any handle not yet valid, and content_.materialForSurface() can
     // create one on the very frame this runs -- taking the fallback silently would latch the
     // landscape at 200cm looking like a plausible number rather than a bug. Ask the library the
     // same question constants() asks, and retry until it says yes.
@@ -741,10 +741,10 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
 #endif
 
         world::RestoreOptions& restore = cw->streamer().restoreOptions();
-#if AVER_MODULE_PBR
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
         restore.bindMaterial = [this](i32 token, const std::string& surface) {
-            const pbr::MaterialHandle h = materialForSurface(surface);
-            if (h) surfaceMaterials_[token] = h;
+            const pbr::MaterialHandle h = content_.materialForSurface(surface);
+            if (h) content_.bindSurfaceMaterial(token, h);
         };
 #endif
 #if AVER_MODULE_PHYSICS
@@ -904,7 +904,7 @@ void SandboxApp::setDroneEnabled(bool on) {
         mr->aabbMin[0] = mr->aabbMin[1] = -0.78f; mr->aabbMin[2] = -0.22f;
         mr->aabbMax[0] = mr->aabbMax[1] =  0.78f; mr->aabbMax[2] =  0.16f;
         // A sensible built-in look for an unpainted quadcopter chassis: greyish and mostly metal
-        // (the M_Metal entry in the surfaceLooks_ table, above) rather than the flat grey
+        // (the M_Metal entry in content_'s SurfaceLook table) rather than the flat grey
         // 0.80/0.80/0.85 fallback an unset material draws.
         mr->material = aver_scene_material(0, "M_Metal");
     }
@@ -1049,10 +1049,10 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         return true;
     };
 #endif
-#if AVER_MODULE_PBR
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
     opt.bindMaterial = [this](i32 token, const std::string& surface) {
-        const pbr::MaterialHandle h = materialForSurface(surface);
-        if (h) surfaceMaterials_[token] = h;
+        const pbr::MaterialHandle h = content_.materialForSurface(surface);
+        if (h) content_.bindSurfaceMaterial(token, h);
     };
 #endif
     const world::LevelInstance inst = world::instantiate(w, opt);
@@ -1425,8 +1425,7 @@ void SandboxApp::levelBounds(const fmt::OcWorldData& w, Vec3& centre, f32& radiu
         // An asset with no loaded bounds contributes its position only: it occupies no space we
         // can prove, and inventing one would let a single bad line inflate the whole volume.
         Vec3 mlo{0,0,0}, mhi{0,0,0};
-        const auto itB = meshBounds_.find(fnv1a64(std::string_view(p.asset)));
-        if (itB != meshBounds_.end()) { mlo = itB->second.first; mhi = itB->second.second; }
+        if (const auto* b = content_.boundsFor(fnv1a64(std::string_view(p.asset)))) { mlo = b->first; mhi = b->second; }
         const Vec3 mc{(mlo.x+mhi.x)*0.5f, (mlo.y+mhi.y)*0.5f, (mlo.z+mhi.z)*0.5f};
         const Vec3 mh{(mhi.x-mlo.x)*0.5f, (mhi.y-mlo.y)*0.5f, (mhi.z-mlo.z)*0.5f};
         const Quat rot = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),

@@ -104,7 +104,9 @@ public:
     pbr::MaterialHandle authoredFor(i32 token) const;
     // Every bound surface token, for a material picker.
     const std::unordered_map<i32, pbr::MaterialHandle>& surfaceMaterials() const { return surfaceMaterials_; }
+#endif
 
+#if AVER_MODULE_SCENE
     /// The material token this mesh's own materialSlots[0] names, or 0 when it names none.
     ///
     /// THE EDITOR'S RULE, HELD HERE TOO, and it has to be: a fallback the editor honours and the

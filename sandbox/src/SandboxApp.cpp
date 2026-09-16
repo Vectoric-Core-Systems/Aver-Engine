@@ -803,91 +803,21 @@ void SandboxApp::onInit(Engine& e)  {
     // FROZEN: unitCube stays half-extent 1 -- .ocworld PLACEG scales are half-extents in cm applied to it.
     appendBox(gi_v, ci, 0,0,0, kEditorCubeHalf);
     rhi::MeshHandle cube = e.device()->createMesh(gi_v.data(), (u32)gi_v.size(), ci.data(), (u32)ci.size());
-    std::vector<rhi::MeshVertex> uv_; std::vector<u32> ui_;
-    appendBox(uv_, ui_, 0,0,0, 1.0f);
-    rhi::MeshHandle unitCube = e.device()->createMesh(uv_.data(), (u32)uv_.size(), ui_.data(), (u32)ui_.size());
 
 #if AVER_MODULE_SCENE
-    // Built-in primitive meshes, keyed by fnv1a64 of the path a CMeshRenderer names.
-    // Bounds recorded here too: both primitives are radius/half-extent 1, but with meshBounds_
-    // unset every entity using one hit the frustum test's degenerate-box case (which DRAWS rather
-    // than culls it), exempting every primitive-using entity from frustum culling entirely --
-    // found when a five-placement level reported "5 drawn, 0 culled" from every angle.
+    // Built-in primitive meshes (sphere/cube/drone), their bounds, and the named-surface look
+    // table gameplay can ask for all come from content_ now -- GameContent::registerBuiltins
+    // uploads the identical set. The hook below is this editor's own per-mesh follow-up (pick
+    // geometry, triangle counts; see onMeshLoaded), run once per built-in as it uploads.
     {
-        const std::pair<Vec3, Vec3> unitBounds{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
-        std::vector<rhi::MeshVertex> sv; std::vector<u32> si;
-        appendSphere(sv, si, 1.0f, 24, 48);
-        const u64 sphereId = fnv1a64(std::string_view("Meshes/sphere.ocmesh"));
-        const u64 cubeId   = fnv1a64(std::string_view("Meshes/cube.ocmesh"));
-        sceneMeshes_[sphereId] = e.device()->createMesh(sv.data(), (u32)sv.size(), si.data(), (u32)si.size());
-        sceneMeshes_[cubeId]   = unitCube;
-        meshBounds_[sphereId]  = unitBounds;
-        meshBounds_[cubeId]    = unitBounds;
-        meshTris_[sphereId]    = static_cast<u32>(si.size() / 3);
-        meshTris_[cubeId]      = static_cast<u32>(ci.size() / 3);
-        // TRIANGLE-ACCURATE PICKING for the two built-ins, filled here rather than lazily: unlike
-        // a project mesh's OcMeshData, sv/si and uv_/ui_ are already in hand and about to go out of
-        // scope, so deferring this would mean re-deriving a sphere/cube's geometry from nothing
-        // (there is no .ocmesh on disk for either -- pickGeometryFor has no file to lazily load).
-        pickGeometry_[sphereId] = buildPickGeometry(sv, si);
-        pickGeometry_[cubeId]   = buildPickGeometry(uv_, ui_);   // uv_/ui_, matching sceneMeshes_[cubeId] == unitCube
+        MeshLoadPass pass; pass.app = this; pass.engine = &e;
+        content_.setMeshLoadedHook(&SandboxApp::onMeshLoaded, &pass);   // seeds meshTris_ and pickGeometry_ per built-in
+        content_.registerBuiltins(*e.device());
+        content_.setMeshLoadedHook(nullptr, nullptr);
 
-        // Third built-in: the quadcopter appendDrone builds, for the graph-driven drone actor
-        // (setDroneEnabled) that used to spawn as a bare unit cube. Must stay in step with
-        // GameContent.cpp's own copy of this registration (search "droneId").
-        std::vector<rhi::MeshVertex> dv; std::vector<u32> di;
-        appendDrone(dv, di);
-        const u64 droneId = fnv1a64(std::string_view("Meshes/drone.ocmesh"));
-        sceneMeshes_[droneId] = e.device()->createMesh(dv.data(), (u32)dv.size(), di.data(), (u32)di.size());
-        // NOT unitBounds: appendDrone is anisotropic, so the cube/sphere's -1..1 box would be ~6x
-        // too tall and silently defeat the frustum cull above (loose, not missing, this time).
-        // Padded a few thousandths beyond the generator's exact numbers (X/Y tip reach 0.765685,
-        // top 0.154, skid bottom -0.218) -- a bound must never be tighter than the geometry it describes.
-        meshBounds_[droneId] = {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}};
-        meshTris_[droneId]   = static_cast<u32>(di.size() / 3);
-        pickGeometry_[droneId] = buildPickGeometry(dv, di);
-
-        // Kept so a dev check can build geometry of its own without re-uploading a cube.
-        unitCubeMesh_ = unitCube;
-        // Reported so the bounds above are observable, not just written -- the editor frames the
-        // camera on the whole level at load, so a headless run can never show a primitive being
-        // culled; without this line the only way to tell the bounds exist is to read the source.
-        AVER_INFO("[Mesh] {} built-in primitive(s), {} with bounds", sceneMeshes_.size(), meshBounds_.size());
-    }
-
-    // The named surfaces gameplay can ask for.
-    {
-        auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
-            surfaceLooks_[aver_scene_material(0, name)] = SurfaceLook{{r, g, b}, metal, rough};
-        };
-        look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);
-        look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
-        // A generic surface in the engine's own default palette (like M_Floor/M_Wall/M_Metal
-        // above) -- common architectural names given a sensible look when no .ocmat defines them.
-        // Added after a scene naming this one fell through to the flat {0.80,0.80,0.85} fallback
-        // and got reported as a lighting bug -- it was unresolved content, identically in both
-        // render paths, the exact failure this table exists to prevent. Keep this table and
-        // GameContent.cpp's copy in step -- they've diverged.
-        look("M_Concrete", 0.55f, 0.54f, 0.51f, 0.00f, 0.88f);
-        look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);
-        look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);
-        look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
-        look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
-        look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
-        // Three more generic surface names, kept for the same reason as the seven above. The old
-        // "demo palette" / M_Foliage rationale is gone (buildDemoScatterPalette was deleted once
-        // levels declared their own SCATTER records) -- these stay as ordinary outdoor vocabulary.
-        look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.0f, 0.85f);
-        look("M_Bark",    0.35f, 0.24f, 0.15f, 0.0f, 0.85f);
-        look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
-        // M_Glass is NOT translucent here, and cannot be: SurfaceLook (`{f32 col[3]; f32 metallic;
-        // f32 roughness;}`) has no alphaMode field, so this table only gives a flat PBR triple when
-        // no .ocmat resolves -- translucency needs an AUTHORED material (the scene loop's `blended`
-        // local reads pbr::MaterialDesc::alphaMode off that only, never off surfaceLooks_).
-        // "M_Glass" with a real .ocmat (BLEND) draws as actual glass; with none
-        // yet, it gets this near-white, near-mirror-smooth OPAQUE placeholder instead of flat grey
-        // -- reading as "probably glass", not "probably unfinished".
-        look("M_Glass",   0.92f, 0.94f, 0.95f, 0.0f, 0.05f);
+        // The built-in unit cube's own handle, kept so a dev check can build geometry of its own
+        // without re-uploading a cube.
+        unitCubeMesh_ = content_.meshFor(fnv1a64(std::string_view("Meshes/cube.ocmesh")));
     }
 #endif
 
@@ -945,7 +875,7 @@ void SandboxApp::onInit(Engine& e)  {
     // below: features run prePass in registration order and Voxi reads vertex buffers in its.
     skinnedScene_ = std::make_unique<aver::render::SkinnedScene>();
     if (skinnedScene_->init(*e.device())) {
-        skinnedScene_->setResolvers(&SandboxApp::resolveAnimAsset, &SandboxApp::resolveSceneMesh, this);
+        skinnedScene_->setResolvers(&game::GameContent::resolveAnimAsset, &game::GameContent::resolveSceneMesh, &content_);
         e.device()->addRenderFeature(skinnedScene_.get());
     } else {
         skinnedScene_.reset();   // init already said why; skinned entities draw at rest
@@ -955,7 +885,7 @@ void SandboxApp::onInit(Engine& e)  {
     // reused rather than adding a third pair, so both features agree on one resolver convention.
     softBodyScene_ = std::make_unique<aver::render::SoftBodyScene>();
     if (softBodyScene_->init(*e.device())) {
-        softBodyScene_->setResolvers(&SandboxApp::resolveSceneMesh, &SandboxApp::resolveAnimAsset, this);
+        softBodyScene_->setResolvers(&game::GameContent::resolveSceneMesh, &game::GameContent::resolveAnimAsset, &content_);
         e.device()->addRenderFeature(softBodyScene_.get());
     } else {
         softBodyScene_.reset();   // init said why; soft entities draw their authored mesh
@@ -975,20 +905,21 @@ void SandboxApp::onInit(Engine& e)  {
         u64 meshId = 0, skelId = 0, clipId = 0;
         u32 meshHandle = 0;
         if (skinScene_->setup(e, skinSceneDir_, &meshId, &skelId, &clipId, &meshHandle)) {
-            // The draw pass looks the entity's mesh up in sceneMeshes_, and SkinnedScene
+            // The draw pass looks the entity's mesh up in content_'s meshes, and SkinnedScene
             // resolves through the SAME table. Registering here is what makes a spawned
             // entity actually reach a draw call without a project having been opened.
-            sceneMeshes_[meshId] = meshHandle;
-            skinScene_->restBounds(meshBounds_[meshId].first, meshBounds_[meshId].second);
-            // The three ids the entities name, pointed at the cooked files. contentIndex_ is
+            std::pair<Vec3, Vec3> bounds;
+            skinScene_->restBounds(bounds.first, bounds.second);
+            content_.registerMesh(meshId, meshHandle, bounds);
+            // The three ids the entities name, pointed at the cooked files. content_'s index is
             // what AnimSystem and SkinnedScene both resolve through, so registering here is
             // what makes the rig reachable without a project.
             std::string d = skinSceneDir_;
             while (!d.empty() && (d.back() == 92 || d.back() == '/')) d.pop_back();
-            contentIndex_[meshId] = d + "/Rig.ocmesh";
-            contentIndex_[skelId] = d + "/Rig.ocskel";
-            contentIndex_[clipId] = d + "/Rig_Bend.ocanim";
-            anim::animSystem().setResolver(&SandboxApp::resolveAnimAsset, this);
+            content_.indexAsset(meshId, d + "/Rig.ocmesh");
+            content_.indexAsset(skelId, d + "/Rig.ocskel");
+            content_.indexAsset(clipId, d + "/Rig_Bend.ocanim");
+            anim::animSystem().setResolver(&game::GameContent::resolveAnimAsset, &content_);
             objects_.clear();   // nothing unrelated on screen; the probes classify by colour
             sel_ = -1;
         } else {
@@ -1418,8 +1349,8 @@ void SandboxApp::onInit(Engine& e)  {
             }
 #endif
 #if AVER_MODULE_PBR
-            textureFactory_ = e.device()->resources();
-            voxiRenderer_.materials().setTextureResolver(&SandboxApp::resolveMaterialTexture, this);
+            content_.setTextureFactory(e.device()->resources());
+            voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
 #endif
             // Installed unconditionally, even in a build with no Trifactor: depthProxy_ is then
             // simply empty, every lookup answers 0, and every pass draws what it drew before.
@@ -2947,60 +2878,6 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     e.device()->setPostProcess(post_);
 }
 
-#if AVER_MODULE_PBR
-// Uploads the texture a material reference names and returns its handle. 0 keeps the slot's fallback.
- pbr::MaterialSystem::ResolvedTexture SandboxApp::resolveMaterialTexture(const pbr::TextureRef& ref,
-                                                                   pbr::TextureSlot slot, void* user) {
-    auto* self = static_cast<SandboxApp*>(user);
-    if (!self || !self->textureFactory_) return {};
-
-    const std::string path = self->resolveAssetPath(ref);
-    if (path.empty()) {
-        AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps "
-                  "its fallback", ref.id, pbr::MaterialLibrary::textureSlotName(slot));
-        return {};
-    }
-
-    // The slot decides the colour space, never the filename.
-    assets::TextureUsage usage = assets::TextureUsage::Data;
-    // THE LAYER-1 SLOTS BELONG HERE TOO, and their absence was a decode bug rather than an omission
-    // of principle. MaterialSystem::colourClass classifies Layer1BaseColor as 'c' (sRGB) and
-    // Layer1Normal as 'n', and its own comment says "KEEP THIS IN STEP WITH THOSE TWO SWITCHES" --
-    // this being one of them. It drifted: everything not named fell through to Data, so a
-    // slope-blended material's SECOND base-colour layer was uploaded LINEAR when its pixels are sRGB.
-    //
-    // WHAT THAT LOOKS LIKE is why it went unnoticed: decoding sRGB texels as linear does not corrupt
-    // them, it LIFTS the midtones and flattens the contrast -- the layer reads pale and washed out
-    // beside the layer 0 it blends against, which reads as a lighting or blending problem rather than
-    // as a colour-space one. Layer1Normal had the matching fault the other way: routed to Data it lost
-    // the normal-map-aware mip generation that NormalMap selects.
-    switch (slot) {
-        case pbr::TextureSlot::BaseColor:
-        case pbr::TextureSlot::Layer1BaseColor:
-        case pbr::TextureSlot::Emissive:      usage = assets::TextureUsage::Colour;    break;
-        case pbr::TextureSlot::Normal:
-        case pbr::TextureSlot::Layer1Normal:  usage = assets::TextureUsage::NormalMap; break;
-        default:                              usage = assets::TextureUsage::Data;      break;
-    }
-
-    std::string err;
-    assets::TextureUploadInfo info;
-    const rhi::TextureHandle h = assets::uploadTexture(*self->textureFactory_, path, usage, &err, &info);
-    if (!h) {
-        AVER_WARN("[Material] {} â€” slot '{}' keeps its fallback", err,
-                  pbr::MaterialLibrary::textureSlotName(slot));
-        return {};
-    }
-    AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
-              info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
-    pbr::MaterialSystem::ResolvedTexture out;
-    out.handle = h;
-    for (int c = 0; c < 3; ++c) out.averageLinear[c] = info.averageLinear[c];
-    return out;
-}
-
-#endif
-
 // Tears the editor down: MCP, prefs, physics, UI textures, materials, render features, scripts.
 // The process exit code. Non-zero when a test mode that was ASKED FOR did not pass.
 // Only modes the command line requested are judged: an ordinary session must exit 0, a test never
@@ -3131,7 +3008,7 @@ editor::shutdownAnimEditors();
 #endif
 #if AVER_MODULE_PBR
     releaseProjectMaterials();
-    textureFactory_ = nullptr;
+    content_.setTextureFactory(nullptr);
 #endif
 #if AVER_MODULE_SR
     // DETACH FROM THE DEVICE FIRST, THEN DESTROY. The old comment said resetting the unique_ptrs

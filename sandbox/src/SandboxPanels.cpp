@@ -123,7 +123,7 @@ bool SandboxApp::assignMeshId(scene::Entity ent, u64 meshId) {
 
 // MATERIAL IDENTITY IS AN INTERNED NAME TOKEN, not a path hash, and getting that wrong is silent:
 // an fnv1a64 written into mr->material resolves to nothing, or by coincidence to an unrelated
-// surface. surfaceMaterials_ is keyed on the token aver_scene_material() interns, so the picker
+// surface. content_'s surface materials are keyed on the token aver_scene_material() interns, so the picker
 // carries tokens and this writes one straight through.
 bool SandboxApp::assignMaterialToken(scene::Entity ent, i32 token) {
     scene::World& w = scene::World::instance();
@@ -196,7 +196,7 @@ std::string SandboxApp::saveMaterialSource(const std::string& name, const pbr::M
 // check, the texture slots and Save to C# -- was reachable from exactly one call site: the
 // editor's PLACEHOLDER objects. A real scene entity's Details offered Transform and Mesh
 // and nothing else, which docs/EDITOR.md:276 states outright. The material was always one
-// lookup away (surfaceMaterials_ maps the token a CMeshRenderer carries to exactly this
+// lookup away (content_'s surface materials map the token a CMeshRenderer carries to exactly this
 // handle); only the signature stood in the way.
 void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
 #if AVER_MODULE_PBR
@@ -1407,7 +1407,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             }
 
             // THE MATERIAL, which a scene entity's Details has never offered. The scene stores a
-            // NAME TOKEN, not a material handle -- surfaceMaterials_ is the map between them,
+            // NAME TOKEN, not a material handle -- content_'s surface materials map between them,
             // populated when the project's .ocmat files load -- so this is the one lookup that
             // stood between the panel and the entities anybody actually edits.
             //
@@ -1420,7 +1420,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 // THE SAME FALLBACK THE DRAW USES. This panel reads mr->material directly, so
                 // without this it would report "(none)" for an entity the renderer is happily
                 // drawing with the mesh's own material -- a panel disagreeing with the picture.
-                const i32 shown = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
+                const i32 shown = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
                 const char* surfaceName = aver_scene_material_name(shown);
 
                 // A MATERIAL COULD NOT BE ASSIGNED AT ALL BEFORE THIS -- not by picker, and not
@@ -1430,12 +1430,12 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 if (ImGui::Button("Change Material...")) ImGui::OpenPopup("##pickMaterial");
                 uiReg_.track("details.material.pick");
                 {
-                    // TOKENS, NOT PATH HASHES. surfaceMaterials_ is keyed on the interned name
-                    // token, which is what mr->material holds; an fnv1a64 here would resolve to
-                    // nothing or, worse, to an unrelated surface by coincidence.
+                    // TOKENS, NOT PATH HASHES. content_'s surface materials map is keyed on the
+                    // interned name token, which is what mr->material holds; an fnv1a64 here would
+                    // resolve to nothing or, worse, to an unrelated surface by coincidence.
                     std::vector<AssetChoice> cands;
-                    cands.reserve(surfaceMaterials_.size());
-                    for (const auto& kv : surfaceMaterials_) {
+                    cands.reserve(content_.surfaceMaterials().size());
+                    for (const auto& kv : content_.surfaceMaterials()) {
                         if (!kv.second) continue;   // interned but no .ocmat loaded behind it
                         // `matName`, not `nm`: this Details branch's own entity-name `nm` (set
                         // above, from selEntity_) is still in scope here, and this shadowed it
@@ -1467,15 +1467,15 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         }
                     }
                 }
-                const auto it = surfaceMaterials_.find(shown);
-                if (it == surfaceMaterials_.end() || !it->second) {
+                const pbr::MaterialHandle authored = content_.authoredFor(shown);
+                if (!authored) {
                     ImGui::TextDisabled("Surface '%s' has no .ocmat loaded.",
                                         surfaceName && *surfaceName ? surfaceName : "(none)");
                     ImGui::TextDisabled("Drawing with the flat fallback; author one under Content\\Materials.");
                 } else {
                     ImGui::TextDisabled("Surface  %s", surfaceName && *surfaceName ? surfaceName : "(unnamed)");
                     ImGui::TextDisabled("Shared: editing this changes every entity using it.");
-                    materialPanel(it->second);
+                    materialPanel(authored);
                 }
             }
 #endif
@@ -1493,7 +1493,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 }
                 ImGui::TextDisabled("effect id 0x%llx", (unsigned long long)pe->effect);
                 // Drop a .ocparticle from the Content Browser directly onto this row to point this
-                // emitter at it -- the SAME id space loadProjectParticleEffects() populates, so a
+                // emitter at it -- the SAME id space content_.loadProjectParticleEffects() populates, so a
                 // freshly authored effect resolves the moment it lands here.
                 // THROUGH THE SHARED HELPER NOW. The resolve/validate/hash/assign/mark/log
                 // sequence used to be written out here, and the picker below would have been a
@@ -1529,18 +1529,18 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     // unlike a mesh, an effect is resolved when it is ASSIGNED (so a freshly
                     // authored one works the moment it lands), so listing only already-loaded
                     // effects would hide exactly the file the author just made.
-                    // contentIndex_ MAPS id -> ABSOLUTE path, not relative, and an earlier draft of
-                    // this comment said relative. Its KEY is fnv1a64 of the project-relative
+                    // content_.index() MAPS id -> ABSOLUTE path, not relative, and an earlier draft
+                    // of this comment said relative. Its KEY is fnv1a64 of the project-relative
                     // spelling -- the same id space pe->effect holds, so the listed id is the
                     // effect id and needs no hashing here -- but its VALUE is
-                    // `it->path().string()` straight off the directory iterator
-                    // (rebuildContentIndex). The two halves genuinely disagree, which is why the
+                    // `it->path().string()` straight off the directory iterator (content_.adopt()).
+                    // The two halves genuinely disagree, which is why the
                     // label has to be derived rather than used as-is.
                     //
                     // LABELLED RELATIVE, so this popup reads like the Mesh and Material ones a few
                     // rows above instead of showing the developer's whole local directory tree.
                     std::vector<AssetChoice> cands;
-                    for (const auto& kv : contentIndex_) {
+                    for (const auto& kv : content_.index()) {
                         if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
                         cands.push_back({cbRelativeToContent(kv.second), kv.first});
                     }
@@ -1552,15 +1552,15 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         // the identical resolve/validate the drop does -- including the extension
                         // check and the project-relative normalisation. Writing pe->effect here
                         // would be the second implementation this extraction exists to avoid.
-                        // PASSED STRAIGHT THROUGH, because contentIndex_'s value is ALREADY
+                        // PASSED STRAIGHT THROUGH, because content_.pathFor()'s value is ALREADY
                         // absolute. The previous line joined it onto contentDir() first, which
                         // happened to produce the right answer only because std::filesystem's
                         // operator/ DISCARDS the left side when the right is absolute -- correct
                         // by accident, and silently wrong the day that map starts storing
                         // relative paths, which its own key spelling suggests it should.
-                        const auto pit = contentIndex_.find(picked);
-                        if (pit != contentIndex_.end())
-                            assignParticleEffect(selEntity_, pit->second);
+                        const std::string path = content_.pathFor(picked);
+                        if (!path.empty())
+                            assignParticleEffect(selEntity_, path);
                     }
                 }
                 ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
