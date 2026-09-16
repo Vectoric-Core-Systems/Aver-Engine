@@ -550,10 +550,13 @@ void VoxiRenderer::shutdown() {
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
     giHistValid_ = false;
+    giHistPrimed_ = false;
     giVisHistValid_ = false;
+    giVisHistPrimed_ = false;
     rtShadowHistW_ = rtShadowHistH_ = 0;
     rtHistWriteIdx_ = 0;
     rtHistValid_ = false;
+    rtHistPrimed_ = false;
 
     // Acceleration structures are released with the factory itself: only the handles are dropped.
     blas_.clear();
@@ -3496,10 +3499,13 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
         giReservoirElemCapacity_ = 0;
         giHistValid_ = false;
+        giHistPrimed_ = false;
         giVisHistValid_ = false;
+        giVisHistPrimed_ = false;
         rtShadowHistW_ = rtShadowHistH_ = 0;
         rtHistWriteIdx_ = 0;
         rtHistValid_ = false;
+        rtHistPrimed_ = false;
         // Idempotent by construction: called from both onRenderTargetsChanged and setSettings, and
         // the handles are zeroed above, so a second call finds nothing left to destroy. Not an
         // error -- "allocated nothing because nothing needs it" is success.
@@ -3536,7 +3542,9 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     for (rhi::TextureHandle& t : giVisHist_)     { if (t) res_->destroyTexture(t); t = 0; }
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     giHistValid_ = false;   // same reason rtHistValid_ two lines below is cleared: a stale resolution
+    giHistPrimed_ = false;   // the pair below is about to be destroyed and recreated in ShaderResource
     giVisHistValid_ = false;   // ditto, for the sixth pair's own previous-frame contents
+    giVisHistPrimed_ = false;   // ditto: recreated fresh in ShaderResource, so no read side is primed
     // THE FOURTH ONE, AND IT WAS MISSING HERE WHILE BEING PRESENT IN THE OTHER TWO TEARDOWNS --
     // exactly the shape of leak the comment at the top of shutdown() records this function having
     // had before, and for the same reason: the release paths are three separate lists and adding a
@@ -3548,6 +3556,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // breaking its own documented "0 is the answer at a tier with no ray" contract.
     if (rtAoHitDist_) { res_->destroyTexture(rtAoHitDist_); rtAoHitDist_ = 0; }
     rtHistValid_ = false;   // the old contents, if any, belonged to a resolution that no longer exists
+    rtHistPrimed_ = false;   // the pairs are about to be recreated below, fresh in ShaderResource
 
     rhi::TextureDesc d;
     d.dim    = rhi::TextureDim::Tex2D;
@@ -3967,14 +3976,17 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     const u32 writeIdx = rtHistWriteIdx_;
     const u32 readIdx  = 1 - writeIdx;
 
-    // The write texture rests as ShaderResource between frames; make it writable. The read texture,
-    // if it holds a real previous frame, is still sitting in UnorderedAccess from when IT was last
-    // frame's write target -- flip it back to readable. Both pairs share writeIdx/readIdx: they
-    // always swap together (see the member comment in VoxiRenderer.hpp).
+    // The write texture rests as ShaderResource between frames; make it writable. The read texture
+    // is still sitting in UnorderedAccess from when IT was last frame's write target, whenever that
+    // happened on some earlier ACTIVE frame since the pair was (re)created -- flip it back to
+    // readable regardless of whether its contents are trusted (rtHistPrimed_ tracks the resource
+    // state; rtHistValid_, below, answers the separate question of whether to feed it to the
+    // shader). Both pairs share writeIdx/readIdx: they always swap together (see the member comment
+    // in VoxiRenderer.hpp).
     ctx.textureBarrier(rtShadowHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     ctx.textureBarrier(rtReflHist_[writeIdx],   rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     if (rtAoHist_[writeIdx]) ctx.textureBarrier(rtAoHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
-    if (rtHistValid_) {
+    if (rtHistPrimed_) {
         ctx.textureBarrier(rtShadowHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
         ctx.textureBarrier(rtReflHist_[readIdx],   rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
         if (rtAoHist_[readIdx]) ctx.textureBarrier(rtAoHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
@@ -4012,7 +4024,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         giSurfNrmHist_[writeIdx] && giSurfNrmHist_[readIdx]) {
         ctx.textureBarrier(giSurfPosHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
         ctx.textureBarrier(giSurfNrmHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
-        if (giHistValid_) {
+        if (giHistPrimed_) {
             ctx.textureBarrier(giSurfPosHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
             ctx.textureBarrier(giSurfNrmHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
         }
@@ -4053,11 +4065,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         if (giVisHist_[writeIdx] && giVisHist_[readIdx]) {
             ctx.textureBarrier(giVisHist_[writeIdx], rhi::ResourceState::ShaderResource,
                                rhi::ResourceState::UnorderedAccess);
-            // THE READ SIDE IS GATED ON giVisHistValid_, NOT giHistValid_ -- the two pairs' validity
-            // can disagree (giVisHistWanted() is a narrower condition that can start or stop wanting
-            // this pair on a frame the fourth/fifth pair's own validity is untouched by), the same
-            // reason giHistValid_ itself is not shared with rtHistValid_.
-            if (giVisHistValid_)
+            // THE READ SIDE IS GATED ON giVisHistPrimed_, NOT giHistPrimed_ -- the two pairs' primed
+            // state can disagree (giVisHistWanted() is a narrower condition that can start or stop
+            // wanting this pair on a frame the fourth/fifth pair's own state is untouched by), the
+            // same reason giHistValid_ itself is not shared with rtHistValid_.
+            if (giVisHistPrimed_)
                 ctx.textureBarrier(giVisHist_[readIdx], rhi::ResourceState::UnorderedAccess,
                                    rhi::ResourceState::ShaderResource);
             res_->setUav(bindings_, 10, giVisHist_[writeIdx], 0);
@@ -4514,20 +4526,23 @@ void VoxiRenderer::endShadowHistory() {
     std::memcpy(prevSceneViewport_, curSceneViewport_, sizeof(curSceneViewport_));
     rtHistWriteIdx_ = 1 - rtHistWriteIdx_;
     rtHistValid_ = true;
+    rtHistPrimed_ = true;   // the write side just bound above now sits in UnorderedAccess as the read side
     // giHistValid_ becomes true only once beginShadowHistory actually bound and wrote the
     // giSurfPosHist_/giSurfNrmHist_ pair THIS frame (cb_.giRestirParams.x, mirrored here rather
     // than re-derived from giRestirWanted()
     // so a frame where the textures failed to bind for some other reason does not falsely claim a
     // written previous frame next time).
-    if (cb_.giRestirParams[0] > 0.5f) giHistValid_ = true;
+    if (cb_.giRestirParams[0] > 0.5f) { giHistValid_ = true; giHistPrimed_ = true; }
     // U1/2.11: the sixth pair's own validity, mirrored from the SAME word beginShadowHistory's giSurf
     // block already recomputed once it knew the pair was actually bound (bit 4 of ambientParams.w --
     // see givis::packAmbientW's own bit table). The giRestirParams[0] test is the identical defensive
     // shape giHistValid_'s own line just above already takes -- bit 4 can only be set inside the very
     // same nested block that also sets giRestirParams[0] to 1.0, so the two tests agree by
     // construction, and pairing them costs nothing while keeping this line readable next to its twin.
-    if (cb_.giRestirParams[0] > 0.5f && (static_cast<u32>(cb_.ambientParams[3]) & 4u))
+    if (cb_.giRestirParams[0] > 0.5f && (static_cast<u32>(cb_.ambientParams[3]) & 4u)) {
         giVisHistValid_ = true;
+        giVisHistPrimed_ = true;
+    }
 }
 
 // Picks between a pipeline and its G-buffer twin -- see the header's own comment on the "Gbuf"

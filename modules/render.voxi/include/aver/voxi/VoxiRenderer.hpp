@@ -1706,6 +1706,11 @@ private:
     // unrelated cycle, so trusting either shared flag here would feed giVisReconstruct a "previous
     // frame" that never actually existed for THIS pair.
     bool giVisHistValid_ = false;
+    // True once giVisHist_'s read side has been left in UnorderedAccess by a write on some earlier
+    // active frame since the pair was (re)created -- RESOURCE STATE, not content trust like
+    // giVisHistValid_ above. Cleared only where the pair itself is destroyed, never by a validity
+    // reset (setSettings, resetGiHistory, the skipped-frame branch) that leaves the textures alone.
+    bool giVisHistPrimed_ = false;
     // Latched so an allocation failure (the pair is small, but a device can already be out of memory
     // by the time this frame's create runs) warns once rather than every frame it keeps failing --
     // same idiom as giAccumRecreateFailedLogged_/nrdWarnedMsaa_ elsewhere in this class. Cleared on
@@ -1738,12 +1743,23 @@ private:
     // resampling a "previous frame" that never actually existed. Its own flag closes exactly that
     // gap and no other.
     bool giHistValid_ = false;
+    // True once giSurfPosHist_/giSurfNrmHist_'s read side has been left in UnorderedAccess by a
+    // write on some earlier active frame since the pair was (re)created -- RESOURCE STATE, not
+    // content trust like giHistValid_ above. Cleared only where the pair itself is destroyed, never
+    // by a validity reset that leaves the textures alone.
+    bool giHistPrimed_ = false;
 
     u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
     u32  rtHistWriteIdx_ = 0;
     // False right after creation or a resize: the textures hold no real previous frame yet, and
     // cb_.rtParams.w must say so rather than let the shader blend against garbage.
     bool rtHistValid_ = false;
+    // True once rtShadowHist_/rtReflHist_/rtAoHist_'s read side has been left in UnorderedAccess by
+    // a write on some earlier active frame since the pairs were (re)created -- RESOURCE STATE, not
+    // content trust like rtHistValid_ above. Cleared only where the pairs themselves are destroyed,
+    // never by a validity reset (setSettings, resetRtHistory/resetAoHistory, the skipped-frame
+    // branch) that leaves the textures alone.
+    bool rtHistPrimed_ = false;
     // THE SUN THE HISTORY WAS ACCUMULATED UNDER. The temporal denoiser blends up to 90% of the
     // previous frame's visibility, and its only validity test is GEOMETRIC -- a screen-space
     // reprojection plus a depth match. Nothing in it knows the light can move. So with a still
