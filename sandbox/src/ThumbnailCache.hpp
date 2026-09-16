@@ -19,6 +19,14 @@
 // at 1024x1024 and is driven by whichever editor tab is active; borrowing it would fight those tabs
 // for the draw list every frame, and a whole-resource copy would force every cached thumbnail to be
 // 1024x1024 -- 4 MB each, which is not a cache. This one is small and owned.
+//
+// TEXTURE ASSETS DO NOT GO THROUGH ANY OF THE ABOVE. There is nothing to render -- the pixels
+// already exist on disk -- so requestTexture() decodes and downscales them on the CPU and uploads
+// the result directly via createTexture's initialData, with no ActorPreview, no CopyPass, and no
+// inFlight_ handshake between the two. It shares everything else with the mesh path on purpose:
+// the same entries_ map, the same kMaxThumbnails budget and LRU eviction, and the same release on
+// shutdown/project-switch/device-loss, so a browser mixing meshes and textures is one budget, not
+// two caches that don't know about each other.
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
@@ -74,8 +82,26 @@ public:
     // "this failed".
     u64 textureId(u64 assetId) const;
 
-    // Drives the queue: picks at most ONE pending request and points the preview at it. Called once
-    // per frame by the host, BEFORE the render features run.
+    // Asks for a thumbnail of the image at `absPath`, decoding and downscaling it if it is not
+    // cached yet. Cheap and idempotent like request() -- call it for every visible tile, every
+    // frame -- EXCEPT that decoding is not free the way touching an already-uploaded mesh is:
+    // update() below draws from this request's queue at the same one-per-frame pace request()'s
+    // queue drains at, so a folder full of visible 4K textures fills in over multiple frames rather
+    // than stalling the one it was opened on.
+    //
+    // KEYED BY THE ABSOLUTE PATH, not a caller-supplied id -- textures have no id space of their
+    // own the way meshes share one with sceneMeshes_ (see the .ocmesh call site), so there is
+    // nothing to gain from making the caller compute and remember one. Internally this hashes the
+    // path into the same u64 key space request() uses; textureIdForPath() hashes it again to look
+    // the entry up, so the two never need to agree on anything but the path string itself.
+    void requestTexture(const std::string& absPath);
+
+    // The ImGui texture id for a finished texture thumbnail, or 0 -- same contract as textureId().
+    u64 textureIdForPath(const std::string& absPath) const;
+
+    // Drives both queues: picks at most ONE pending mesh request and points the preview at it, and
+    // separately decodes at most ONE pending texture request. Called once per frame by the host,
+    // BEFORE the render features run.
     void update();
 
     // The feature that performs the copy. Registered by init(); exposed so the host can unregister
@@ -102,7 +128,21 @@ private:
         // browser telling us anything new: request() runs for every visible tile every frame, so a
         // tile scrolled out of view simply stops updating this and drifts to the back of the queue.
         u64  lastSeen = 0;
+        // TEXTURE ENTRIES ONLY: the source file's last-write-time, as an opaque comparable value
+        // (std::filesystem::file_time_type::rep, not a wall-clock unit) -- 0 both means "never
+        // stamped" and "the stat failed", which is safe to conflate because either way there is
+        // nothing trustworthy to compare against and requestTexture() re-decodes rather than guess.
+        // A mesh entry never touches this; ready() alone is what a mesh checks.
+        u64  srcMtime = 0;
+        // TEXTURE ENTRIES ONLY: the frame srcMtime was last compared against the file, so a visible
+        // tile stats its file about once a second rather than every frame (kMtimeRecheckFrames).
+        u64  mtimeCheckFrame = 0;
     };
+
+    // How often a READY texture thumbnail re-checks its file's write time. A gallery full of textures
+    // would otherwise stat every visible file every frame -- thousands of filesystem calls a second on
+    // a large folder, to notice an edit that a second's delay loses nothing on.
+    static constexpr u64 kMtimeRecheckFrames = 60;
 
     // ATTEMPTS BEFORE GIVING UP ON ONE ASSET. Bounded rather than unbounded so a genuinely broken
     // asset costs a handful of frames and one log line instead of re-queueing forever; generous
@@ -125,6 +165,11 @@ private:
     // The asset the preview was pointed at this frame, and therefore the one the copy must write
     // into. Zero when the preview was not driven this frame and no copy should happen at all.
     u64 inFlight_ = 0;
+    // Texture thumbnails awaiting a decode, keyed the same way pending_ is but carrying a path
+    // instead of a mesh handle. Separate from pending_/inFlight_ because a texture never touches
+    // the preview or CopyPass -- it is decoded and uploaded to completion inside update() itself,
+    // so there is no cross-frame handoff for it to wait on.
+    std::vector<std::pair<u64, std::string>> texPending_;
     // Ticked once per update(). Only ever compared against itself, so wrap is not a concern at one
     // increment per frame.
     u64 frame_ = 0;
@@ -134,6 +179,12 @@ private:
     // nothing evictable -- every resident entry was touched this frame, which means the visible tile
     // count genuinely exceeds the budget and dropping the request is the only honest answer.
     bool evictColdest(u64 protectId);
+
+    // The two halves of update(), split out so neither queue's early-out ("nothing pending") can
+    // skip the other -- a frame with a texture to decode but no mesh to render must still decode it,
+    // and the old single-body shape returned out of the whole function the moment pending_ was empty.
+    void updateMeshPending();
+    void updateTexturePending();
 };
 
 } // namespace aver::editor

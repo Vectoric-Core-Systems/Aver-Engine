@@ -1933,6 +1933,20 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                     }
                 }
 #endif
+                // A REAL DECODED THUMBNAIL, for texture files -- the CPU-side twin of the mesh
+                // branch above. There is nothing to render, so ThumbnailCache decodes and downscales
+                // the image itself instead of driving the preview (see its own header for why it
+                // still shares entries_/the budget/eviction with the mesh path), which is also why
+                // this needs no AVER_MODULE_SCENE guard: it never touches sceneMeshes_.
+                if (!drewThumb && !e.isDir && thumbnails_.ready() && isTextureSource(e.full)) {
+                    thumbnails_.requestTexture(e.full);
+                    if (const u64 tex = thumbnails_.textureIdForPath(e.full)) {
+                        // Same whole-texture blit as the mesh branch: the cache always letterboxes
+                        // into a kThumbnailPx square, so the aspect here is always 1.0 too.
+                        blitTile(dl, tex, iconCentre, prevH*0.92f, 1.0f, 0, 1);
+                        drewThumb = true;
+                    }
+                }
                 if (!drewThumb)
                     drawEntryIcon(dl, iconCentre, prevH*0.58f, e.isDir, e.tile, e.module, e.kindExt,
                                   e.graphFamily);
