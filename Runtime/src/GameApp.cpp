@@ -1123,7 +1123,31 @@ void GameApp::spawnParticleTestContent(rhi::IDevice& device) {
 }
 #endif
 
+void GameApp::installLevelHooks(Engine& e) {
+#if AVER_MODULE_SCENE
+    GameLevel::LoadHooks hooks;
+#  if AVER_MODULE_LANDSCAPE
+    hooks.beforePlacements = [this, &e](const std::string& path, const fmt::OcWorldData& w) {
+        pbr::MaterialSystem* ms = nullptr;
+#    if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        if (voxiAttached_) ms = &voxiRenderer_.materials();
+#    endif
+        landscape_.loadForLevel(e.device(), project_.contentDir(), path, w, &content_, ms);
+    };
+    hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
+    // The editor's unloadLevel ends by unloading the terrain, so a level with none clears the last.
+    hooks.afterUnload = [this, &e] { landscape_.unload(e.device()); };
+#  else
+    (void)e;
+#  endif
+    level_.setLoadHooks(std::move(hooks));
+#else
+    (void)e;
+#endif
+}
+
 void GameApp::openProject(Engine& e) {
+    installLevelHooks(e);
     // A PACKAGED GAME IS LAUNCHED WITH NO ARGUMENTS. stage-game.ps1 writes Game.ocproject beside
     // AverEngineRuntime.exe, so when nothing was named on the command line, look there -- and look beside the
     // EXECUTABLE, never in the working directory. A player's shortcut, a store client and a
@@ -2352,6 +2376,15 @@ void GameApp::onRender(Engine& e) {
         pbr::MaterialSystem* ms = nullptr;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         if (voxiAttached_) ms = &voxiRenderer_.materials();
+#endif
+#if AVER_MODULE_LANDSCAPE
+        // THE TERRAIN, BEFORE THE ENTITIES, as in the editor's onRender. The LOD scale uses the window
+        // height: a game's view is the whole backbuffer, as in viewAspect.
+        if (landscape_.loaded()) {
+            landscape_.updateRingTiles(dev, eye_.x, eye_.y, &content_, ms);
+            const u32 viewH = e.window() ? e.window()->height() : cfg_.height;
+            landscape_.draw(*dev, eye_, viewProj_, static_cast<f32>(viewH), &content_, ms);
+        }
 #endif
         // OWNER-HIDE: hides the possessed first-person pawn's own body mesh from the raster pass --
         // mirrors SandboxRender.cpp's owner-hide check (kMeshRendererHiddenFromOwner, ancestor walk

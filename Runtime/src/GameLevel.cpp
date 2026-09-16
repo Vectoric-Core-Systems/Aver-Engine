@@ -92,9 +92,14 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         if (!loadLegacyOcmap(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
     } else if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
 
+    // TERRAIN (AND WATER) FIRST, THEN THE THINGS THAT STAND ON IT, the editor's loadLevel order: a
+    // `snap` placement asks the ground how high it is. See LoadHooks.
+    if (!legacy && hooks_.beforePlacements) hooks_.beforePlacements(path, w);
+
     // The placement loop is aver::world::instantiate now, shared with the editor. What is left here
     // is the part that is genuinely the GAME's: which material cache to bind into, and what to keep.
     world::InstantiateOptions opt;
+    if (!legacy) opt.groundHeightAt = hooks_.groundHeightAt;
 #if AVER_MODULE_PBR
     // Bind the authored material, if the project has one for this surface token. Done at load rather
     // than per draw because materialForSurface stats up to three paths on a miss and caches the
@@ -308,11 +313,8 @@ void GameLevel::spawnClassPlacements() {
     // the same moment for it), so there is no later moment to promote a preview into. BeginPlay/
     // OnStart fire immediately, at this call.
     //
-    // NO GROUND SNAP HERE, UNLIKE THE EDITOR'S OWN LEVEL LOAD: `snap` support needs
-    // InstantiateOptions::groundHeightAt, a landscape query this file's own load() never wires up for
-    // the game runtime today (grep this file -- opt.groundHeightAt is never assigned here, only in
-    // SandboxApp.cpp) -- a PRE-EXISTING gap for every ordinary mesh placement too, not something this
-    // slice introduces or narrows.
+    // A `snap` class placement asks the same ground query load() hands world::instantiate, as the
+    // editor's spawnClassPlacements does.
     for (const fmt::OcWorldPlacement& p : classPlacements_) {
         const int32_t c = aver_fw_class_find(p.className.c_str());
         if (c == 0) {
@@ -320,7 +322,10 @@ void GameLevel::spawnClassPlacements() {
             continue;
         }
 
-        const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+        f64 pz = p.z;
+        f64 gz = 0.0;
+        if (p.snapToGround && hooks_.groundHeightAt && hooks_.groundHeightAt(p.x, p.y, gz)) pz = gz + p.z;
+        const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
         const Quat rot     = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
                                                            static_cast<f32>(p.pitch),
                                                            static_cast<f32>(p.yaw)});
@@ -382,6 +387,7 @@ void GameLevel::unload() {
     pcgFields_.clear();
     levelPath_.clear();
     levelName_.clear();
+    if (hooks_.afterUnload) hooks_.afterUnload();
 }
 #endif // AVER_MODULE_SCENE
 

@@ -31,6 +31,7 @@ aver_add_module(Aver.Runtime.Game
     src/GameApp.cpp
     src/GameContent.cpp
     src/GameLevel.cpp
+    src/GameLandscape.cpp
     src/GameRender.cpp
     src/GameInput.cpp
   DEPS
@@ -67,6 +68,11 @@ target_link_libraries(Aver.Runtime.Game PUBLIC Aver.World)
 # Aver.Framework -- Aver.Save deliberately takes function pointers instead of the framework.
 if(TARGET Aver.Save)
   target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Save)
+endif()
+# Terrain (GameLandscape.cpp). The .Renderer target PUBLIC-links Aver.Landscape, which carries
+# AVER_MODULE_LANDSCAPE=1 -- the same single link sandbox/CMakeLists.txt uses.
+if(TARGET Aver.Landscape.Renderer)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Landscape.Renderer)
 endif()
 
 if(TARGET Aver.Render.PBR)

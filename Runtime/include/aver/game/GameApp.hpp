@@ -27,6 +27,9 @@
 #endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
+#if AVER_MODULE_LANDSCAPE
+#  include "aver/game/GameLandscape.hpp"
+#endif
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
 
@@ -217,6 +220,8 @@ private:
     // game with no world is a diagnosable state, and a process that dies before its first frame
     // tells the player nothing.
     void openProject(Engine&);
+    // Gives level_ the work the editor does around a level load (terrain today), before the first load.
+    void installLevelHooks(Engine&);
 
     // Initialises and registers the Voxi renderer. Also what makes pbr::MaterialSystem exist:
     // it is a MEMBER of VoxiRenderer and is initialised only inside VoxiRenderer::init, so a game
@@ -526,6 +531,11 @@ private:
     fmt::ProjectDesc project_;
     GameContent content_;
     GameLevel level_;
+#if AVER_MODULE_LANDSCAPE
+    // The level's terrain, loaded and unloaded with the level through level_'s LoadHooks (see
+    // installLevelHooks) and drawn in onRender before the entities, as in the editor.
+    GameLandscape landscape_;
+#endif
     u64 frames_ = 0;
     // Seconds since the last --stats dump. See GameConfig::statsIntervalSec.
     f32 statsTimer_ = 0.0f;

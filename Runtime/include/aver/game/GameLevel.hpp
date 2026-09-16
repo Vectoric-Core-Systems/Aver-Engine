@@ -5,6 +5,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/pcg/PcgVolume.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,21 @@ class GameContent;
 class GameLevel {
 public:
 #if AVER_MODULE_SCENE
+    // What the host does around a level load, as hooks, so this class needs neither a device nor the
+    // terrain and water classes. The editor does the same work inline in SandboxApp::loadLevel and
+    // unloadLevel.
+    struct LoadHooks {
+        // After an OCWORLD file parses and before any placement is instantiated: where the editor
+        // applies the level's water and loads its terrain, so a `snap` placement finds the ground.
+        // Not called for a legacy .ocmap, whose editor load does neither.
+        std::function<void(const std::string& path, const fmt::OcWorldData& w)> beforePlacements;
+        // The ground height at a world XY, for `snap` mesh placements and class placements alike.
+        std::function<bool(f64 worldXCm, f64 worldYCm, f64& outGroundZCm)> groundHeightAt;
+        // At the end of unload(), for whatever beforePlacements created.
+        std::function<void()> afterUnload;
+    };
+    void setLoadHooks(LoadHooks hooks) { hooks_ = std::move(hooks); }
+
     // Loads a .ocworld/.ocmap. Unloads whatever was loaded first. Dispatches on
     // fmt::levelFileIsLegacyOcmap, as the editor's loadLevel does: a legacy .ocmap is translated into
     // OcWorldData placements and spawn, then goes through the same pipeline.
@@ -123,6 +139,8 @@ private:
 
     // The level's SPAWN record, captured by load(). See spawn()'s own comment above.
     SpawnPoint spawn_{};
+
+    LoadHooks hooks_;
 
 #  if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
