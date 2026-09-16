@@ -176,6 +176,13 @@ private:
 #if AVER_MODULE_PBR
     rhi::IResourceFactory* textureFactory_ = nullptr;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
+
+    // Turns an .ocmat's GRAPHREF path into the id materialForSurface() stores in
+    // MaterialDesc::graphId. Ported from SandboxApp::resolveMaterialGraph
+    // (sandbox/src/SandboxAssets.cpp): same content-relative resolution, same cache-by-compiled-path
+    // through pbr::materialGraphs().idOf(), same compile-on-miss through fmt::loadOcgraph() +
+    // pbr::materialGraphs().add(), same 0 (stock shading) fallback on any failure.
+    u32 resolveMaterialGraph(const std::string& graphRef) const;
 #endif
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
     std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;

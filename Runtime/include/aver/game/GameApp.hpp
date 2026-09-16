@@ -29,6 +29,13 @@
 #include <memory>
 #include <string>
 
+namespace aver {
+// Forward-declared rather than included: GameApp only ever stores a bare, borrowed pointer (set
+// once in onInit from Engine::window(), mirroring SandboxApp.hpp's own `window_` member) for the
+// HWND that mouse capture needs -- see GameApp::setMouseCaptured's own comment.
+class Window;
+}
+
 namespace aver::game {
 
 // Everything GameApp needs that comes off the command line or out of game.json.
@@ -103,6 +110,14 @@ struct GameConfig {
     // rhi::IDevice::vsyncCanDisable's own comment) logs a warning and is left synced rather than
     // silently ignored.
     bool vsyncOff = false;
+    // --no-mouse-capture: the editor's own OS mouse capture (ClipCursor + hidden cursor + re-centre
+    // every frame -- see GameApp::setMouseCaptured) is ported into the shipped game and engages
+    // automatically once a session is playing and the window is foreground. It NEVER engages on a
+    // bounded (--frames N) run regardless of this flag, mirroring SandboxApp.cpp's own "interactive"
+    // gate (maxFrames_ == 0): an automated capture/gate run has no business hijacking the machine's
+    // cursor. This flag additionally disables it on an open-ended (--frames 0, the default) run, for
+    // anyone driving the window with their own mouse automation and needing the OS cursor left alone.
+    bool noMouseCapture = false;
     // --cam-wobble DEG PERIOD (M7): the SAME measurement-only yaw swing SandboxApp.cpp's own
     // --cam-wobble drives -- see its setCamWobble's comment for why a sine that returns to zero,
     // driven off the frame counter and never the clock. 0 (DEFAULT, either field) is no motion, so
@@ -280,9 +295,35 @@ private:
     // "no-graph project is unaffected" shape discoverProjectGraphs already established for graphs.
     void beginPlayIfGameModeDeclared();
 
+    // Places the possessed pawn at the level's authored Player Start / SPAWN record. Mirrors
+    // SandboxPlay.cpp's placePawnAtPlayerStart -- minus the PlayerStart MARKER lookup half of
+    // playerStartTransform, which a shipped game has no equivalent of (see GameLevel::spawn()'s own
+    // comment): the raw SPAWN record GameLevel::load already captured is the whole answer here.
+    // Called from beginPlayIfGameModeDeclared(), AFTER aver_fw_begin_play succeeds -- same ordering
+    // reason as the editor's own call site: the pawn does not exist until then. Returns false (pawn
+    // left wherever the GameMode's own spawn logic put it) when the level declares no SPAWN record.
+    bool placePawnAtSpawn();
+
     // Drives the camera from the possessed pawn. Must run AFTER World::flush and BEFORE the view
     // matrix is built, or the camera trails the pawn by one frame.
     void drivePlayCamera();
+
+    // ---- OS mouse capture, mirroring SandboxPlay.cpp's setMouseCaptured/warpToAnchor/
+    // pollCapturedMouse almost verbatim (ClipCursor + hidden cursor + re-centre every frame, deltas
+    // measured from the re-centre rather than from WM_MOUSEMOVE, refusing to warp a background
+    // window). Absent from the Runtime before this: mouse-look stopped turning the instant the OS
+    // cursor reached the window edge. See GameConfig::noMouseCapture for the bounded-run gate.
+
+    // Gives the mouse to the game (hides the cursor, confines it, re-centres it) or hands it back.
+    // A no-op when `on` already matches the current state, matching ShowCursor's own paired-call
+    // contract (SandboxPlay.cpp's own comment: "ShowCursor is a counter, so each call is paired").
+    void setMouseCaptured(bool on);
+    // Parks the cursor at the window's centre, remembers where that was, and confines it there.
+    // Refuses to move a background window's cursor -- see its own definition's comment.
+    void warpToAnchor();
+    // Measures one frame of captured mouse movement into captureDx_/captureDy_, then re-centres for
+    // the next. Zeroes both and returns immediately when not currently captured.
+    void pollCapturedMouse();
 
     // Pushes the camera, sky, fog and post settings to the device for this frame.
     void pushFrame(Engine&);
@@ -317,11 +358,32 @@ private:
     GameConfig cfg_;
     InputState input_;
 
+    // Borrowed from the engine in onInit, for the HWND mouse capture needs -- mirrors
+    // SandboxApp.hpp's own `window_` member (same comment there: "borrowed from the engine in
+    // onInit, for the HWND").
+    Window* window_ = nullptr;
+
+    // --- mouse capture (mirrors SandboxApp.hpp's own mouseCaptured_/captureAnchorX_/Y_/
+    // captureDx_/Dy_) --- the cursor is hidden, confined and re-centred every frame while captured.
+    bool mouseCaptured_ = false;
+    i32  captureAnchorX_ = 0, captureAnchorY_ = 0;
+    f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
+
     // --- camera ---
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
     f32  yaw_ = 0.0f, pitch_ = 0.0f;
     Mat4 invVP_, viewProj_;
     Vec3 eye_{0, 0, 0};
+
+#if AVER_MODULE_SCENE
+    // The possessed pawn, WHEN THE VIEW IS FIRST-PERSON -- set every call by drivePlayCamera()
+    // (reset to kInvalidEntity unconditionally first, mirroring SandboxPlay.cpp's own
+    // firstPersonPawn_: a value left over from a previous call is not merely wrong but dangerous).
+    // Read once a frame in onRender to build DrawWorldOptions::ownerHideRoot, so an entity flagged
+    // kMeshRendererHiddenFromOwner under the pawn is skipped in the raster pass -- without this a
+    // first-person character's own body renders in front of the camera.
+    scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
+#endif
 
     // --- environment ---
     rhi::SkyAtmosphere sky_;

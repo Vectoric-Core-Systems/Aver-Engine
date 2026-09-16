@@ -84,6 +84,20 @@ public:
     bool placementBounds(Vec3& lo, Vec3& hi, f32& radius) const;
 
     bool hasSky() const { return env_.hasSky; }
+
+    // The level's authored Player Start / SPAWN record, captured once by load(). Mirrors
+    // SandboxViewport.cpp's playerStartTransform() -- specifically its SECOND branch, the raw SPAWN
+    // record -- minus the FIRST branch, which prefers a live PlayerStart marker entity: a shipped
+    // game has no such marker (see this class's own header comment on what a game does not carry
+    // over from the editor), so the SPAWN record IS the whole answer here. `valid` is false when the
+    // level declares none at all, the same "caller decides the fallback" contract placementBounds()
+    // above already uses -- GameApp::placePawnAtSpawn() leaves the pawn wherever the GameMode put it.
+    struct SpawnPoint {
+        Vec3 position{};
+        f32 yawDeg = 0.0f;
+        bool valid = false;
+    };
+    const SpawnPoint& spawn() const { return spawn_; }
 #endif
 
 private:
@@ -99,6 +113,9 @@ private:
     // placements, which is a real case (an empty start map) and not a zero-sized world.
     bool hasBounds_ = false;
     Vec3 boundsLo_{}, boundsHi_{};
+
+    // The level's SPAWN record, captured by load(). See spawn()'s own comment above.
+    SpawnPoint spawn_{};
 
 #  if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;

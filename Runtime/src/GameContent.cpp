@@ -17,7 +17,9 @@
 
 #if AVER_MODULE_PBR
 #  include "aver/assets/TextureUpload.hpp"
+#  include "aver/formats/OcGraph.hpp"
 #  include "aver/formats/OcMat.hpp"
+#  include "aver/pbr/MaterialGraphRegistry.hpp"
 #endif
 
 #if AVER_MODULE_SCENE
@@ -569,6 +571,38 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     return out;
 }
 
+// Turns an .ocmat's GRAPHREF path into the gMaterialGraphId its constants carry. 0 for a material
+// with no GRAPHREF, and 0 for one whose graph will not load or compile. Ported from
+// SandboxApp::resolveMaterialGraph (sandbox/src/SandboxAssets.cpp).
+//
+// A broken graph does not take the material down with it: returning 0 falls back to the stock
+// .ocmat factors/maps instead of vanishing the object entirely. Logged either way.
+u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
+    if (graphRef.empty()) return 0;
+    const std::string content = project_.contentDir();
+    if (content.empty()) return 0;
+
+    // CONTENT-RELATIVE, the same convention COMP mesh= uses in .ocgraph and TEX uses in
+    // materialForSurface's candidate paths: a path with the content directory on the front resolves
+    // to nothing, silently, which is a mistake worth not repeating here.
+    std::string path = content + "\\" + graphRef;
+    for (char& c : path) if (c == '/') c = '\\';
+
+    // ALREADY COMPILED? Two materials naming one graph is ordinary -- a stone and a wet stone
+    // sharing a pattern -- and asking the registry first means the graph is read and compiled once,
+    // and both materials get the same id rather than two arms doing the same arithmetic.
+    if (const u32 known = pbr::materialGraphs().idOf(path)) return known;
+
+    fmt::OcGraphData g;
+    std::string err;
+    if (!fmt::loadOcgraph(path, g, &err)) {
+        AVER_ERROR("[MaterialGraph] '{}' could not be read, so the material shades as a stock "
+                   "one: {}", path, err);
+        return 0;
+    }
+    return pbr::materialGraphs().add(path, g.name, g);
+}
+
 pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     if (name.empty()) return 0;
     const auto cached = materialAssets_.find(name);
@@ -594,8 +628,10 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
             // A parse failure BREAKS rather than falling through to the next candidate: a corrupt
             // built material must not be silently replaced by a stale hand-authored one.
             if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
+            d.graphId = resolveMaterialGraph(extras.graphRef);
             h = pbr::MaterialLibrary::get().create(d);
-            if (h) AVER_INFO("[Material] '{}' loaded from {}", d.name, path);
+            if (h) AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
+                              d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
             break;
         }
     }
@@ -607,6 +643,11 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
 
 void GameContent::releaseProjectMaterials() {
     materialAssets_.clear();
+    // resolveMaterialGraph() caches into this process-wide registry by compiled path (its own
+    // idOf()), so a project close has to forget the graphs too -- otherwise a differently-authored
+    // project reusing the same content-relative GRAPHREF path would inherit stale ids (or a reload
+    // of the SAME project would just leak entries forever, since idOf() never expires them itself).
+    pbr::materialGraphs().clear();
 #if AVER_MODULE_SCENE
     surfaceMaterials_.clear();
 #endif

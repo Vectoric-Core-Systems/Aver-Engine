@@ -42,7 +42,8 @@ static_assert(GamepadState::kAxisCount == static_cast<usize>(AVER_FW_GAMEPAD_AXI
 
 } // namespace
 
-void publishInput(const InputState& in, bool focused, std::string* echo) {
+void publishInput(const InputState& in, bool focused, bool captured, f32 capturedDx, f32 capturedDy,
+                   std::string* echo) {
     aver_fw_input_new_frame();
 
     // Collected into a dense array indexed by FRAMEWORK key, not published as the VK loop walks.
@@ -97,8 +98,13 @@ void publishInput(const InputState& in, bool focused, std::string* echo) {
     // every WM_MOUSEMOVE in the frame rather than keeping the last, which matters at high poll
     // rates where a frame holds a dozen of them. Zeroed when unfocused for the same reason as the
     // keys -- a stale delta would spin the camera on the frame focus returns.
+    //
+    // CAPTURED REPLACES THE SOURCE, NOT THE GATE: `captured` only ever matters inside the `focused`
+    // branch (see this function's own header comment for why) -- the wheel still comes from `in`
+    // either way, since capture confines and hides the cursor but has no opinion about the wheel.
     if (focused) {
-        aver_fw_input_set_mouse(static_cast<f32>(in.mouseDX()), static_cast<f32>(in.mouseDY()), in.wheel());
+        aver_fw_input_set_mouse(captured ? capturedDx : static_cast<f32>(in.mouseDX()),
+                                 captured ? capturedDy : static_cast<f32>(in.mouseDY()), in.wheel());
     } else {
         aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
     }

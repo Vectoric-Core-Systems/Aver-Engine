@@ -4,6 +4,12 @@
 // latch, no selection outline, no grid, no gizmo, no skin-scene-test recolour, no objects_
 // placeholder pass, and no capture/gate harness. Those are the editor looking at a world; this is a
 // game showing one.
+//
+// What IS here, since SandboxRender.cpp's F4 fix ("unified direct route", SceneSubmission.hpp): a
+// frustum-culled or DrawWorldOptions::ownerHideRoot-hidden entity is not dropped, it is handed
+// straight to DrawWorldOptions::voxiRenderer (when one is attached) so shadows, GI voxelisation and
+// the RT TLAS never depend on what the raster camera can see. Only the raster drawMesh() call is
+// skipped for it.
 #include "aver/game/GameRender.hpp"
 
 #if AVER_MODULE_SCENE
@@ -15,6 +21,9 @@
 #  include "aver/pbr/MaterialSystem.hpp"
 #endif
 #include "aver/render/SkinnedScene.hpp"
+#if AVER_MODULE_VOXI
+#  include "aver/voxi/VoxiRenderer.hpp"
+#endif
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
 #include "GameMath.hpp"
@@ -25,9 +34,10 @@
 namespace aver::game {
 
 void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
-               pbr::MaterialSystem* materials, render::SkinnedScene* skinning) {
+               pbr::MaterialSystem* materials, render::SkinnedScene* skinning,
+               const DrawWorldOptions& options) {
     scene::World& w = scene::World::instance();
-    int drawn = 0, culled = 0;
+    int drawn = 0, culled = 0, ownerHidden = 0;
 
     // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so a clip
     // coordinate is a dot with a COLUMN, and each plane is a sum or difference of two columns.
@@ -72,9 +82,33 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             mw->aabbMax[0] = b->second.x; mw->aabbMax[1] = b->second.y; mw->aabbMax[2] = b->second.z;
         }
 
+        // ---- OWNER HIDE, DECIDED BEFORE THE CULL ----
+        // Mirrors SandboxRender.cpp:920-937's ancestor walk against firstPersonPawn_: an entity both
+        // frustum-culled and owner-hidden must still carry hiddenFromOwner=true on its direct-route
+        // delivery below, or it would be primary-visible again in ray-driven mode the moment it comes
+        // back on screen (the 0d3bcf1 regression SceneSubmission.hpp's chooseRoute was written to
+        // pin a test against). ANCESTOR WALK, NOT A DIRECT-PARENT COMPARE: a COMP tree can nest, so
+        // "this mesh's owner" may be several hops above `ent`. World::setParent already refuses a
+        // cycle, so this walk is guaranteed to reach kInvalidEntity and stop.
+        bool ownerHiddenHere = false;
+        if ((mr->flags & scene::kMeshRendererHiddenFromOwner) &&
+            options.ownerHideRoot != scene::kInvalidEntity) {
+            for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
+                if (anc == options.ownerHideRoot) { ownerHiddenHere = true; break; }
+            }
+        }
+
         // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box is DRAWN
         // rather than culled: an entity whose bounds were never filled in must not vanish, and being
         // conservative costs a draw call where being wrong costs a character.
+        //
+        // THE VERDICT IS STORED, NOT ACTED ON HERE. Frustum-culled and owner-hidden used to `continue`
+        // straight past every draw call below, which means past the ONLY thing that reaches Voxi's
+        // submitDraw() too -- an off-screen shadow caster's shadow vanished the instant it left the
+        // frustum, and an owner-hidden mesh's shadow never existed at all. SandboxRender.cpp's F4 fix
+        // (SceneSubmission.hpp, "unified direct route") routes a culled/hidden entity to Voxi directly
+        // instead of dropping it; see the route decision a few lines down.
+        bool frustumCulled = false;
         {
             const Vec3 lo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
             const Vec3 hi{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
@@ -97,9 +131,15 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                                 + pl[pi][3];
                     if (d < 0.0f) outside = true;
                 }
-                if (outside) { ++culled; continue; }
+                frustumCulled = outside;
             }
         }
+        // THE ONE PLACE that decides who delivers this entity -- raster's drawMesh() or Voxi's direct
+        // submit() -- mirroring SceneSubmission.hpp's chooseRoute() (ported rather than included: this
+        // library must not include a sandbox/ header). No occlusion culling exists in this walk (that
+        // machinery is editor-only, see this file's own header comment), so chooseRoute's occlusionCulled
+        // input is always false here.
+        const bool raster = !frustumCulled && !ownerHiddenHere;
 
         // Colour: the named-surface look, or a neutral default. The authored-material half
         // (surfaceMaterials_ and MaterialSystem) is C8's; until then a level's M_* surfaces already
@@ -168,13 +208,21 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             }
         }
 
+        // Resolved once per entity, regardless of which route delivers it: the raster route feeds
+        // these to device.setDrawBinding's STICKY state below, the direct route feeds the SAME values
+        // straight to voxiRenderer->submit()'s drawBinding/drawConstants/drawConstantBytes -- one
+        // resolve, like SceneSubmission.hpp's deliver() reading a single ResolvedSurface for both.
+        rhi::BindingSetHandle matSet = 0;
+        const void* matConstants = nullptr;
+        u32 matBytes = 0;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         // Guarded on ready(): binding a descriptor table the material system has not built is not a
         // wrong colour on this renderer, it is a GPU hang. This project has already lost a session
         // to an unbound root CBV that presented as "slow geometry shaders".
         if (materials && materials->ready()) {
-            device.setDrawBinding(materials->bindingSet(authored), &materials->constants(authored),
-                                  sizeof(pbr::MaterialConstants));
+            matSet = materials->bindingSet(authored);
+            matConstants = &materials->constants(authored);
+            matBytes = sizeof(pbr::MaterialConstants);
         }
 #else
         (void)materials;
@@ -188,32 +236,61 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             if (const rhi::MeshHandle sk = skinning->drawHandle(ent)) drawHandle = sk;
         }
 
-        // STICKY on the device (RHI.hpp's setDrawBlended comment), so it is set on EVERY draw here,
-        // not only when true. Skipping the false case would leave a translucent entity's flag set
-        // for whatever opaque entity this walk visits next -- that next mesh would silently take the
-        // blended path too: no ray-traced shadow, no GI bounce, no shadow-cascade write, and drawn
-        // through scenePipeline(..., blended=true) instead of the ordinary opaque pipeline, purely
-        // because it happened to be drawn after a pane of glass.
-        //
-        // NO DEPTH-PREPASS GUARD NEEDED HERE, and that is a fact about this file rather than about
-        // translucency: drawWorld never calls setNextDrawPrepassed or drawMeshDepthPrepass at all --
-        // this is the packaged-game walk, not SandboxApp.cpp's editor loop with its `prepassEligible`
-        // exclusion list (SandboxApp.cpp, search "depth prepass phase"). setDrawBlended's own
-        // contract already guarantees a blended draw is "never depth-prepassed" regardless, because
-        // the device captures it at the very top of drawMesh, before the same submitDraw loop a
-        // prepass would also have to be skipped ahead of. If a depth-prepass walk is ever added to
-        // this file, it must exclude exactly the entities `blended` is true for here, the same way
-        // SandboxApp.cpp's prepassEligible excludes skinned and GPU-cluster-dispatched ones -- stated
-        // here so that addition does not have to rediscover it.
-        device.setDrawBlended(blended);
-        device.drawMesh(drawHandle, &wm.m[0][0], col, metallic, roughness);
-        ++drawn;
+        if (raster) {
+            if (matBytes) device.setDrawBinding(matSet, matConstants, matBytes);
+
+            // STICKY on the device (RHI.hpp's setDrawBlended comment), so it is set on EVERY draw
+            // here, not only when true. Skipping the false case would leave a translucent entity's
+            // flag set for whatever opaque entity this walk visits next -- that next mesh would
+            // silently take the blended path too: no ray-traced shadow, no GI bounce, no shadow-
+            // cascade write, and drawn through scenePipeline(..., blended=true) instead of the
+            // ordinary opaque pipeline, purely because it happened to be drawn after a pane of glass.
+            //
+            // NO DEPTH-PREPASS GUARD NEEDED HERE, and that is a fact about this file rather than about
+            // translucency: drawWorld never calls setNextDrawPrepassed or drawMeshDepthPrepass at all
+            // -- this is the packaged-game walk, not SandboxApp.cpp's editor loop with its
+            // `prepassEligible` exclusion list (SandboxApp.cpp, search "depth prepass phase").
+            // setDrawBlended's own contract already guarantees a blended draw is "never depth-
+            // prepassed" regardless, because the device captures it at the very top of drawMesh,
+            // before the same submitDraw loop a prepass would also have to be skipped ahead of. If a
+            // depth-prepass walk is ever added to this file, it must exclude exactly the entities
+            // `blended` is true for here, the same way SandboxApp.cpp's prepassEligible excludes
+            // skinned and GPU-cluster-dispatched ones -- stated here so that addition does not have to
+            // rediscover it.
+            device.setDrawBlended(blended);
+            device.drawMesh(drawHandle, &wm.m[0][0], col, metallic, roughness);
+            ++drawn;
+        } else {
+#if AVER_MODULE_VOXI
+            // THE UNIFIED DIRECT ROUTE: frustum-culled or owner-hidden, handed straight to Voxi so
+            // shadows, GI voxelisation and the RT TLAS never depend on what the raster camera can see
+            // -- mirrors emitEntityDraws' else-branch (SandboxRender.cpp:2195-2226) calling
+            // voxiRenderer_.submit() with the SAME mesh/look/translucency this entity would have drawn
+            // with on the raster route, plus ownerHiddenHere so a possessed pawn's own body stays out
+            // of ray-driven primary visibility (voxi.hlsl's AVER_RT_MASK_OWNER_HIDDEN lane) while still
+            // casting a shadow and bouncing light, exactly like the raster walk always did for it.
+            // options.voxiRenderer null (no Voxi feature attached) reproduces this walk's pre-existing
+            // behaviour exactly: the entity is skipped and casts nothing while culled or hidden.
+            if (options.voxiRenderer) {
+                options.voxiRenderer->submit(drawHandle, &wm.m[0][0], col, metallic, roughness,
+                                             matSet, matConstants, matBytes,
+                                             /*translucent=*/blended, ownerHiddenHere);
+            }
+#endif
+            // Priority matches SandboxRender.cpp:1086's counting convention: a frustum-culled-AND-
+            // owner-hidden entity counts as culled, never as owner-hidden, even though its direct-route
+            // delivery above always carried hiddenFromOwner=true regardless -- a counting convention
+            // only, not a correctness question (chosen above, unconditionally).
+            if (frustumCulled) ++culled; else ++ownerHidden;
+        }
     }
 
-    if (drawn != stats.lastDrawn || culled != stats.lastCulled) {
-        AVER_INFO("[Game] scene-render: {} drawn, {} frustum-culled", drawn, culled);
+    if (drawn != stats.lastDrawn || culled != stats.lastCulled || ownerHidden != stats.lastOwnerHidden) {
+        AVER_INFO("[Game] scene-render: {} drawn, {} frustum-culled, {} owner-hidden",
+                  drawn, culled, ownerHidden);
         stats.lastDrawn = drawn;
         stats.lastCulled = culled;
+        stats.lastOwnerHidden = ownerHidden;
     }
 }
 

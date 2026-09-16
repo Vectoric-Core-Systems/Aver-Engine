@@ -73,6 +73,15 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // added to the format reaches the runtime with nothing else edited. See GameLevel::env().
     env_ = w;
 
+    // THE LEVEL'S PLAYER START / SPAWN RECORD -- hasSpawn/spawnX/Y/Z/spawnYaw live on OcWorldData
+    // itself, not on the OcWorldEnv base env_ just sliced off above, so they need their own capture.
+    // Mirrors SandboxViewport.cpp's playerStartTransform()'s second branch (the raw SPAWN record,
+    // read when no PlayerStart marker entity exists) -- a shipped game never has a marker to prefer,
+    // so this alone is what GameApp::placePawnAtSpawn() needs. See SpawnPoint's own comment.
+    spawn_.valid = w.hasSpawn;
+    spawn_.position = Vec3{static_cast<f32>(w.spawnX), static_cast<f32>(w.spawnY), static_cast<f32>(w.spawnZ)};
+    spawn_.yawDeg = static_cast<f32>(w.spawnYaw);
+
     // ---- the level's declared density fields ----
     //
     // Resolved here, once, rather than every time something samples one: turning an authored record
@@ -298,6 +307,7 @@ void GameLevel::unload() {
 #endif
     env_ = fmt::OcWorldEnv{};
     hasBounds_ = false;
+    spawn_ = SpawnPoint{};
     pcgFields_.clear();
     levelPath_.clear();
     levelName_.clear();

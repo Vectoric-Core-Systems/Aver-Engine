@@ -81,6 +81,22 @@
 #  include "aver/framework/framework_abi.h"
 #  include "aver/framework/framework_hooks.h"
 #endif
+// The .ocworld rotation encoding (roll/pitch/yaw degrees -> quaternion), for placePawnAtSpawn's
+// yaw. Header-only and Core-only (see its own header comment) -- pulling it in costs nothing extra
+// the way including all of aver/world/LevelInstance.hpp (already GameLevel.cpp's route to the same
+// function) would.
+#include "aver/world/LevelTransform.hpp"
+
+// windows.h was nested inside AVER_MODULE_SCENE in the editor's own copy of this comment
+// (SandboxApp.hpp), but the Win32 calls that need it here (setMouseCaptured, warpToAnchor,
+// pollCapturedMouse) are gated on _WIN32 alone, with no scene dependency -- so this stays outside
+// every module guard for the same reason.
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include <cmath>
 #include <vector>
@@ -434,6 +450,8 @@ GameConfig parseArgs(int argc, char** argv) {
         // --no-vsync (M7): measurement parity with SandboxApp.cpp's identical flag -- see
         // GameConfig::vsyncOff for where and how it is applied.
         else if (std::strcmp(a, "--no-vsync") == 0) { c.vsyncOff = true; }
+        // --no-mouse-capture: see GameConfig::noMouseCapture's own comment.
+        else if (std::strcmp(a, "--no-mouse-capture") == 0) { c.noMouseCapture = true; }
         // --cam-wobble DEG PERIOD (M7): the SAME measurement-only yaw swing SandboxApp.cpp's own
         // --cam-wobble drives -- see GameConfig::camWobbleDeg/camWobblePeriod. Both values are
         // consumed only when BOTH are present (i+2<argc): a lone --cam-wobble with nothing after it,
@@ -568,6 +586,12 @@ void GameApp::tickGameplay(f32 dt) {
 
 void GameApp::drivePlayCamera() {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+    // Reset every call, unconditionally, ahead of every early return below -- mirrors
+    // SandboxPlay.cpp's own drivePlayCamera: a value left over from a previous call is not merely
+    // wrong but dangerous (a stale entity handle from an ended session feeding
+    // DrawWorldOptions::ownerHideRoot in onRender).
+    firstPersonPawn_ = scene::kInvalidEntity;
+
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
     const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
     if (pawn == 0) return;
@@ -577,6 +601,12 @@ void GameApp::drivePlayCamera() {
 
     int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
     aver_fw_view(&mode, &eye, &boom);
+
+    // ONLY FIRST PERSON HIDES ANYTHING. Set from `ent` (the pawn itself), not the view node below --
+    // mirrors SandboxPlay.cpp's own comment: a body mesh's CMeshRenderer hangs off the pawn's own
+    // entity or an ancestor chain that ends there, never off the camera transform, so owner-hide has
+    // to compare against the same entity the hierarchy roots at.
+    firstPersonPawn_ = (mode == AVER_FW_VIEW_FIRST_PERSON) ? ent : scene::kInvalidEntity;
 
     // Prefer the view node; fall back to the pawn if it has not published one.
     const int32_t viewId = aver_fw_view_entity();
@@ -604,6 +634,84 @@ void GameApp::drivePlayCamera() {
     // camForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
     yaw_   = std::atan2(look.y, look.x);
     pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
+#endif
+}
+
+// Gives the mouse to the game or hands it back. Mirrors SandboxPlay.cpp's
+// SandboxApp::setMouseCaptured verbatim; ShowCursor is a counter, so each call is paired.
+void GameApp::setMouseCaptured(bool on) {
+#if defined(_WIN32)
+    if (on == mouseCaptured_) return;
+    mouseCaptured_ = on;
+    if (on) {
+        ShowCursor(FALSE);
+        warpToAnchor();
+    } else {
+        ShowCursor(TRUE);
+        ClipCursor(nullptr);
+    }
+    AVER_INFO("[Game] mouse {} the game", on ? "captured by" : "released from");
+#else
+    mouseCaptured_ = on;
+#endif
+}
+
+// Parks the cursor at the centre of the window, remembers where that was, and confines it there.
+// Mirrors SandboxPlay.cpp's SandboxApp::warpToAnchor verbatim.
+void GameApp::warpToAnchor() {
+#if defined(_WIN32)
+    HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+    if (!hwnd) return;
+    // A WINDOW THAT IS NOT FOREGROUND HAS NO BUSINESS MOVING THE POINTER: SetCursorPos/ClipCursor
+    // below are global and would drag the cursor to this window's centre while the user works
+    // elsewhere. Windows ignores ClipCursor from a background window anyway, so only the cursor
+    // theft is lost. Anchoring to where the pointer actually IS keeps the delta honest on refocus.
+    if (::GetForegroundWindow() != hwnd) {
+        POINT q{};
+        if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
+        return;
+    }
+    RECT rc{};
+    if (!GetClientRect(hwnd, &rc)) return;
+    POINT c{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+    ClientToScreen(hwnd, &c);
+    captureAnchorX_ = c.x; captureAnchorY_ = c.y;
+    SetCursorPos(c.x, c.y);
+    RECT screen{};
+    POINT tl{ rc.left, rc.top }, br{ rc.right, rc.bottom };
+    ClientToScreen(hwnd, &tl); ClientToScreen(hwnd, &br);
+    screen.left = tl.x; screen.top = tl.y; screen.right = br.x; screen.bottom = br.y;
+    ClipCursor(&screen);
+#endif
+}
+
+// Measures one frame of captured mouse movement, then re-centres for the next. Mirrors
+// SandboxPlay.cpp's SandboxApp::pollCapturedMouse verbatim.
+void GameApp::pollCapturedMouse() {
+    captureDx_ = captureDy_ = 0.0f;
+#if defined(_WIN32)
+    if (!mouseCaptured_) return;
+    HWND fg = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+    // A STALE ANCHOR IS A VIEW SNAP, and losing focus is how the anchor goes stale: Windows drops
+    // ClipCursor confinement the moment a window stops being foreground, and nothing re-captures on
+    // the way back (setMouseCaptured() no-ops if the state hasn't changed), so the next
+    // GetCursorPos() would measure against a pre-alt-tab anchor and hand the framework one
+    // enormous delta -- the camera whips round exactly once, the frame focus returns.
+    // RE-ANCHOR AND REPORT ZERO: one frame of no look input on refocus is imperceptible; a spin
+    // is not.
+    // ANCHOR TO WHERE THE CURSOR IS, NOT warpToAnchor(): that calls SetCursorPos, and dragging the
+    // pointer to this window's centre every frame while the user works elsewhere is a worse bug --
+    // it would also steal the cursor during a bounded --frames run with a play session up.
+    if (fg && ::GetForegroundWindow() != fg) {
+        POINT q{};
+        if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
+        return;
+    }
+    POINT p{};
+    if (!GetCursorPos(&p)) return;
+    captureDx_ = static_cast<f32>(p.x - captureAnchorX_);
+    captureDy_ = static_cast<f32>(p.y - captureAnchorY_);
+    warpToAnchor();
 #endif
 }
 
@@ -1022,7 +1130,19 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Apply the level's sun and sky settings
     applyLevelSky();
-    fitGiVolumeToLevel();
+    // RENDER.GIVOLUME, WHEN THE MANIFEST AUTHORS ONE, WINS OVER THE AUTO-FIT BELOW. Mirrors the
+    // editor's own precedence exactly: SandboxProject.cpp's applyProjectVoxiSettings seeds
+    // giCenter_/giExtent_ from the manifest, and SandboxLevelLoad.cpp's loadLevel guards its own fit
+    // call with precisely this condition (`project_.giExtent <= 0.0f`). Before this fix,
+    // fitGiVolumeToLevel() ran UNCONDITIONALLY here and silently discarded any hand-authored GI
+    // volume on every launch -- see docs/RUNTIME-DEDUP.md's C4 slice ("Authored GI-volume guard").
+    if (project_.hasGiVolume) {
+        giCenter_ = Vec3{project_.giCenter[0], project_.giCenter[1], project_.giCenter[2]};
+        giExtent_ = project_.giExtent;
+        AVER_INFO("[Voxi] GI volume from the manifest: centre[{:.0f} {:.0f} {:.0f}] extent {:.0f}cm",
+                  giCenter_.x, giCenter_.y, giCenter_.z, giExtent_);
+    }
+    if (project_.giExtent <= 0.0f) fitGiVolumeToLevel();
 #endif
     // Apply the project's render settings to Voxi
     applyProjectRenderSettings();
@@ -1332,6 +1452,12 @@ void GameApp::beginPlayIfGameModeDeclared() {
     if (aver_fw_begin_play(instanceClass, modeClass)) {
         AVER_INFO("[Game] play session begun automatically (GameMode class {}) -- a shipped game has no "
                   "editor Play button, so booting it IS beginning play", modeClass);
+        // AFTER begin_play, not before -- the pawn this moves does not exist until the GameMode has
+        // spawned and possessed it (same ordering SandboxPlay.cpp's startPlay() uses for its own
+        // placePawnAtPlayerStart call). NO FALLBACK HERE, deliberately, matching the editor's own
+        // real-GameMode path: a project's pawn spawns where its GameMode chooses; silently
+        // relocating it would override a decision the project made every time the game boots.
+        placePawnAtSpawn();
     } else {
         // Only reachable if something upstream already called aver_fw_begin_play (it refuses a second
         // session) or the class failed validClass() despite being found, which aver_fw_find_class_with_
@@ -1341,6 +1467,30 @@ void GameApp::beginPlayIfGameModeDeclared() {
         AVER_WARN("[Game] aver_fw_begin_play declined for GameMode class {} -- the framework stays in "
                   "EDITOR state; the world still renders, nothing in it plays", modeClass);
     }
+#endif
+}
+
+// PLAYER START / SPAWN PLACEMENT. Mirrors SandboxPlay.cpp's SandboxApp::placePawnAtPlayerStart
+// almost verbatim -- minus the PlayerStart MARKER lookup half of that function's own
+// playerStartTransform() call, which has no runtime equivalent (GameLevel::spawn()'s own comment: a
+// shipped game has no visible, selectable marker to prefer, only the raw SPAWN record). Called from
+// beginPlayIfGameModeDeclared(), AFTER aver_fw_begin_play succeeds.
+bool GameApp::placePawnAtSpawn() {
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    const GameLevel::SpawnPoint& sp = level_.spawn();
+    if (!sp.valid) return false;
+    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+    if (!pn) return false;
+    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+    scene::World& w = scene::World::instance();
+    if (!w.valid(pe)) return false;
+    w.setLocalPosition(pe, sp.position);
+    w.setLocalRotation(pe, world::quatFromEulerDeg(Vec3{0.0f, 0.0f, sp.yawDeg}));
+    AVER_INFO("[Game] pawn placed at the level's Player Start ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
+              sp.position.x, sp.position.y, sp.position.z, sp.yawDeg);
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -1658,6 +1808,10 @@ void GameApp::onInit(Engine& e) {
     // with no ImGui anywhere. SandboxApp cannot do this -- its input path is inside
     // `#if AVER_WITH_IMGUI` and reads ImGui::IsKeyDown -- which is why a game executable was not
     // merely unwritten but unbuildable.
+    // Borrowed for the rest of this object's life -- see the member's own comment (why setMouseCaptured/
+    // warpToAnchor/pollCapturedMouse need the HWND) -- rather than re-asking e.window() from onUpdate,
+    // mirroring SandboxApp's own window_ member the same way.
+    window_ = e.window();
     if (Window* w = e.window()) {
         w->setEventCallback(&onWindowEvent, &input_);
         AVER_INFO("[Game] input bound to the window event stream ({}x{})", w->width(), w->height());
@@ -1914,10 +2068,31 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
     // Input is READ here, never rolled here. See onRender for why.
 #if AVER_MODULE_FRAMEWORK
+    // MOUSE CAPTURE: decided and polled BEFORE publishInput reads it, the same order
+    // SandboxPlay.cpp's own onUpdate uses (setMouseCaptured -> pollCapturedMouse -> pushInput).
+    // Capture engages only while a session is actually playing AND the OS says this window is
+    // foreground -- a background window has no business hiding or confining the player's cursor.
+    // NEVER on a bounded (--frames N) run, and never at all with --no-mouse-capture -- see
+    // GameConfig::noMouseCapture's own comment for why (mirrors SandboxApp.cpp's own "interactive"
+    // gate, which exists for exactly this reason: an automated capture/gate run must not have its
+    // cursor hijacked).
+    {
+        bool wantCapture = false;
+#if defined(_WIN32)
+        if (window_ && cfg_.maxFrames == 0 && !cfg_.noMouseCapture &&
+            aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+            HWND hwnd = static_cast<HWND>(window_->nativeHandle());
+            wantCapture = hwnd && ::GetForegroundWindow() == hwnd;
+        }
+#endif
+        setMouseCaptured(wantCapture);
+        pollCapturedMouse();
+    }
     // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last
     // frame's. Publishing after the tick would give every input one frame of latency, which is the
     // kind of thing that gets blamed on the display.
-    publishInput(input_, e.window() != nullptr, cfg_.inputEcho ? &echoHeld_ : nullptr);
+    publishInput(input_, e.window() != nullptr, mouseCaptured_, captureDx_, captureDy_,
+                 cfg_.inputEcho ? &echoHeld_ : nullptr);
     if (cfg_.inputEcho && echoHeld_ != echoLast_) {
         AVER_INFO("[Game] input: {}", echoHeld_);
         echoLast_ = echoHeld_;
@@ -2021,7 +2196,19 @@ void GameApp::onRender(Engine& e) {
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         if (voxiAttached_) ms = &voxiRenderer_.materials();
 #endif
-        drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get());
+        // OWNER-HIDE: hides the possessed first-person pawn's own body mesh from the raster pass --
+        // mirrors SandboxRender.cpp's owner-hide check (kMeshRendererHiddenFromOwner, ancestor walk
+        // against firstPersonPawn_). firstPersonPawn_ is set every frame by drivePlayCamera() and is
+        // kInvalidEntity whenever no session is first-person, which drawWorld treats as "off" --
+        // the same no-op DrawWorldOptions{} already was before this field existed.
+        DrawWorldOptions opts;
+        opts.ownerHideRoot = firstPersonPawn_;
+#if AVER_MODULE_VOXI
+        // Culled and owner-hidden entities still reach Voxi through this, so an off-screen caster keeps its
+        // shadow and GI -- the editor's direct route (see drawWorld). Null without Voxi: nothing to feed.
+        if (voxiAttached_) opts.voxiRenderer = &voxiRenderer_;
+#endif
+        drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get(), opts);
     }
 #endif
     captureScreenshotIfDue(e);
@@ -2064,6 +2251,11 @@ void GameApp::captureScreenshotIfDue(Engine& e) {
 }
 
 void GameApp::onShutdown(Engine& e) {
+    // RELEASE THE CURSOR FIRST, before anything else even has a chance to fail or early-out --
+    // mirrors SandboxApp.cpp's own onShutdown call to setMouseCaptured(false). An OS cursor left
+    // hidden and clipped because the game exited mid-capture (a crash, or a player closing the
+    // window while playing) is a machine-wide annoyance that outlives this process.
+    setMouseCaptured(false);
     // EXACT REVERSE REGISTRATION ORDER. The device holds bare pointers to every render feature, so
     // a feature that outlives its removal is a dangling call and one removed out of order can be
     // torn down while another still references it. voxiRenderer_ is a MEMBER held by value for

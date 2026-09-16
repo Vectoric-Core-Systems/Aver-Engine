@@ -35,7 +35,7 @@ static Event key(i32 vk, bool down) {
 // Publishes and returns the echo string, the same one --input-echo logs.
 static std::string publish(const InputState& in, bool focused = true) {
     std::string echo;
-    game::publishInput(in, focused, &echo);
+    game::publishInput(in, focused, /*captured=*/false, 0.0f, 0.0f, &echo);
     return echo;
 }
 
