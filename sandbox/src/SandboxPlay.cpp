@@ -69,17 +69,11 @@ void SandboxApp::restorePlayWorld() {
 #if AVER_MODULE_FLUIDS
     // AND THE FLUID, WHICH A TRANSFORM CANNOT PUT BACK: a soft body's shape lives in its
     // vertices, not an entity transform, so a pool left sloshing by a session stayed sloshing
-    // through Stop. Re-settling means building it again from the descriptor the level authored.
-    // THROUGH THE DEFERRED PATH, NOT BY CALLING spawn() HERE: fluidScene_.spawn() is only safe
-    // from onUpdate's drain, and this runs from a toolbar button -- despawning and re-arming the
-    // want lets the existing safe path rebuild it next frame.
-    if (fluidHandle_) {
-        fluidScene_.despawn(fluidHandle_);
-        fluidHandle_ = 0;
-        fluidWantPending_ = true;
+    // through Stop. Re-settling means building it again from the descriptor the level authored,
+    // through the deferred drain rather than by spawning here.
+    if (water_.respawnLevelVolume())
         AVER_INFO("[Sandbox] Stop: the simulated fluid is being re-settled from its authored "
                   "volume; it rebuilds on the next frame");
-    }
 #endif
     playWorldSnapshot_.clear();
     playWorldCaptured_ = false;
@@ -458,77 +452,6 @@ Vec3 SandboxApp::camForward() const {
     return 1;
 }
 
-#endif
-
-#if AVER_MODULE_SCRIPTING
-#if AVER_FLUIDS_SIMULATED
-// Answers the framework's relayed fluid-spawn request -- unlike animCurve above, this can't
-// answer in one line: fluidScene_.spawn() is only safe from onUpdate's drain (FluidScene isn't
-// ready() until render features come up, and this relay can land on either side of that in the
-// frame). So this QUEUES onto fluidGraphQueue_; onUpdate's drain does the real spawn() call.
-// iterations is NOT clamped here -- aver_phys_softbody_create's own ABI entry already clamps it,
-// and duplicating the clamp would be a second place for the two to disagree.
- i32 SandboxApp::fluidSpawnProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
-                              f32 compliance, f32 damping, i32 iterations, f32 pressure,
-                              const char* name, void* user) {
-    auto* self = static_cast<SandboxApp*>(user);
-    if (!self) return 0;
-    fluids::FluidVolumeDesc desc;
-    desc.centreCm[0] = cx; desc.centreCm[1] = cy; desc.centreCm[2] = cz;
-    desc.halfExtentCm[0] = hx; desc.halfExtentCm[1] = hy; desc.halfExtentCm[2] = hz;
-    desc.compliance = compliance;
-    desc.damping    = damping;
-    desc.iterations = static_cast<u32>(iterations);
-    desc.pressure   = pressure;
-    self->fluidGraphQueue_.push_back({desc, name && *name ? name : "unnamed"});
-    return 1;
-}
-
-// Answers the framework's material-layer relay -- the same queue-and-drain shape as
-// fluidSpawnProvider above, plus building desc.material from whichever of
-// materialPreset/densityKgM3/viscosityPaS was given.
-// A NON-EMPTY PRESET WINS, resolved via fluids::fluidPhysicsMaterialPreset (the one native call
-// site that can see FluidPhysicsMaterial's real numbers); an unrecognised name falls through to
-// leaving desc.material unset rather than a silently-wrong default.
-// density/viscosity are read INDEPENDENTLY when there is no preset: either alone still builds a
-// material against the other field's struct default.
-// THE PRECEDENCE CHECK IS DELIBERATELY NOT HERE: fluids::fluidResolvePhysicsMaterial is the one
-// place that decides if a hand-set damping conflicts, so it can't be forgotten for the OTHER path
-// (a WATER record) that never reaches this function.
- i32 SandboxApp::fluidSpawnMaterialProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
-                                      f32 compliance, f32 damping, i32 iterations, f32 pressure,
-                                      f32 densityKgM3, f32 viscosityPaS, const char* materialPreset,
-                                      const char* name, void* user) {
-    auto* self = static_cast<SandboxApp*>(user);
-    if (!self) return 0;
-    fluids::FluidVolumeDesc desc;
-    desc.centreCm[0] = cx; desc.centreCm[1] = cy; desc.centreCm[2] = cz;
-    desc.halfExtentCm[0] = hx; desc.halfExtentCm[1] = hy; desc.halfExtentCm[2] = hz;
-    desc.compliance = compliance;
-    desc.damping    = damping;
-    desc.iterations = static_cast<u32>(iterations);
-    desc.pressure   = pressure;
-
-    const std::string label = name && *name ? name : "unnamed";
-    if (materialPreset && *materialPreset) {
-        if (auto mat = fluids::fluidPhysicsMaterialPreset(materialPreset)) {
-            desc.material = *mat;
-        } else {
-            AVER_WARN("[Fluid] '{}' names unknown material preset '{}'; no material applied",
-                      label, materialPreset);
-        }
-    } else if (densityKgM3 > 0.0f || viscosityPaS > 0.0f) {
-        fluids::FluidPhysicsMaterial mat;   // struct defaults are water's own numbers
-        if (densityKgM3  > 0.0f) mat.densityKgM3  = densityKgM3;
-        if (viscosityPaS > 0.0f) mat.viscosityPaS = viscosityPaS;
-        desc.material = mat;
-    }
-
-    self->fluidGraphQueue_.push_back({desc, label});
-    return 1;
-}
-
-#endif
 #endif
 
 #if AVER_MODULE_SCRIPTING

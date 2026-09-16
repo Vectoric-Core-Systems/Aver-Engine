@@ -102,85 +102,16 @@ void SandboxApp::onRender(Engine& e)  {
     // WHY BEING IN THE TLAS IS LOAD-BEARING: averVolumeThickness traces to the volume's own back
     // face for a real path length; a surface outside the structure has none, so the absorption
     // that makes water read as water needs this.
-// AVER_FLUIDS_SIMULATED, not AVER_MODULE_FLUIDS: fluidScene_ only exists under the narrower define
-// (fluids AND physics), so the wider guard would build against an undeclared member. The registration
-// and the update() drain carry this same guard for the same reason.
-#if AVER_FLUIDS_SIMULATED
+    // NOT GATED ON hideEditorScene: a fluid volume is authored level content, not an editor
+    // placeholder, so it stays visible through Play like the landscape below. Material
+    // resolution, the fallback look and per-volume placement now live in GameWater::draw.
+#if AVER_MODULE_FLUIDS
     {
-        // NOT GATED ON hideEditorScene: that gate is what made this block draw nothing the first
-        // time -- copying the objects_ loop's guard hid the water exactly when it mattered. A
-        // fluid volume is authored level content, not an editor placeholder; it stays visible
-        // through Play like the landscape below.
-        // Every live volume, drawn in handle order and NOT sorted here -- the device captures
-        // blended draws and replays them sorted back-to-front itself (D3D12Device::endFrame).
-        const auto drawOneFluid = [&](fluids::FluidHandle h) {
-            const rhi::MeshHandle fm = fluidScene_.drawHandle(h);
-            if (!fm) return;
-
-            // THE SURFACE MATERIAL, resolved through the SAME two steps every other surface in a
-            // level uses (aver_scene_material interns the name, content_ maps it -- authoredFor --
-            // to a live handle). Resolved at DRAW time rather than latched at spawn, because a volume
-            // can be spawned before its project's materials finish loading -- a handle captured too early would be a permanent zero.
-            u32 authored = 0;
-#if AVER_MODULE_PBR && AVER_MODULE_SCENE
-            if (const auto nm = fluidSurfaceMaterial_.find(h);
-                nm != fluidSurfaceMaterial_.end() && !nm->second.empty()) {
-                const i32 mid = aver_scene_material(0, nm->second.c_str());
-                if (const pbr::MaterialHandle authoredHandle = content_.authoredFor(mid))
-                    authored = authoredHandle;
-                else {
-                    // ONCE PER NAME, matching the scene loop's own warning for the same mistake: a
-                    // WATER record naming a material nobody authored is otherwise silent, and this
-                    // exact silence -- PTTest naming M_Concrete with no .ocmat -- cost a multi-day investigation.
-                    static std::unordered_set<std::string> s_warned;
-                    if (s_warned.insert(nm->second).second)
-                        AVER_WARN("[Water] volume {} names surface material '{}' but no .ocmat by "
-                                  "that name was loaded; drawing the fallback look", h, nm->second);
-                }
-            }
-#endif
-            // Neutralised to 1.0 where a material carries the value, as the scene loop does.
-            // THE FALLBACK LOOK, for a WATER record naming no .ocmat. ALPHA is load-bearing:
-            // averBuildSurface computes `s.alpha = gBaseColor.a * a.opacity`, so at 1.0 this
-            // would put an opaque lid over the pool -- the "tinted plastic" outcome above warns
-            // against. Roughness 0.10 (smooth), metallic 0 (dielectric).
-            f32 col[4]   = {0.35f, 0.55f, 0.62f, 0.35f};
-            f32 metallic = 0.0f, roughness = 0.10f;
-            bool blended = true;
-#if AVER_MODULE_PBR
-            if (authored) {
-                col[0] = col[1] = col[2] = 1.0f;
-                metallic = roughness = 1.0f;
-                if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
-                    blended = pbr::isTranslucent(*d);
-            }
-#endif
+        pbr::MaterialSystem* fluidMaterials = nullptr;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
-            // setDrawBinding is STICKY, so it is stated before every draw rather than set once.
-            if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
-                e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
-                                           sizeof(pbr::MaterialConstants));
+        fluidMaterials = &voxiRenderer_.materials();
 #endif
-            // BLENDED EVEN WITH NO AUTHORED MATERIAL: `blended` starts true, and only an authored
-            // OPAQUE material turns it off -- water with no .ocmat must composite over the pool
-            // floor, not draw as a solid lid. An author wanting opaque water can say so in the .ocmat.
-            e.device()->setDrawBlended(blended);
-
-            // A REAL TRANSLATION, NOT IDENTITY: the buffer is mesh-LOCAL about the volume's
-            // centre, so this matrix places it AND gives the blended flush something true to sort
-            // by -- D3D12Device orders blended draws back-to-front on world[12..14], so an
-            // identity matrix claims to sit at the world ORIGIN and can composite on the wrong side of a glass pane it is plainly in front of.
-            f32 origin[3] = {0.0f, 0.0f, 0.0f};
-            fluidScene_.volumeOrigin(h, origin);
-            Mat4 fw = Mat4::identity();
-            fw.m[3][0] = origin[0];
-            fw.m[3][1] = origin[1];
-            fw.m[3][2] = origin[2];
-            e.device()->drawMesh(fm, &fw.m[0][0], col, metallic, roughness);
-        };
-
-        if (fluidHandle_) drawOneFluid(fluidHandle_);
-        for (const fluids::FluidHandle h : fluidGraphHandles_) drawOneFluid(h);
+        water_.draw(*e.device(), content_, fluidMaterials);
     }
 #endif
 

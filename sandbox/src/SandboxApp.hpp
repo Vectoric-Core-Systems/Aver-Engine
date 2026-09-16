@@ -17,6 +17,7 @@
 // The runtime's content component (Runtime/), which the editor uses rather than keeping its own copy.
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
+#include "aver/game/GameWater.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -209,18 +210,11 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // modules/fluids/CMakeLists.txt and modules/render.softbody/CMakeLists.txt) -- so each gets its own
 // guard keyed on the module that actually owns it, matching the guards their own use sites below
 // already use (AVER_MODULE_RENDER_SOFTBODY && AVER_MODULE_SCENE at softBodyScene_, AVER_FLUIDS_
-// SIMULATED at fluidScene_/FluidScene.hpp). b6881c49 nested all four headers inside
+// SIMULATED inside GameWater.hpp). b6881c49 nested all four headers inside
 // `AVER_MODULE_PARTICLES && AVER_MODULE_SCENE` above, so a particles-off tree dropped these headers
 // too while the members and calls they declare stayed compiled in -- ~40 errors with particles off.
 #if AVER_MODULE_RENDER_SOFTBODY && AVER_MODULE_SCENE
 #include "aver/render/SoftBodyScene.hpp"
-#endif
-#if AVER_MODULE_FLUIDS
-#if AVER_FLUIDS_SIMULATED
-#include "aver/fluids/FluidScene.hpp"
-#endif
-#include "aver/fluids/WaterRenderer.hpp"
-#include "aver/fluids/Underwater.hpp"
 #endif
 
 #if AVER_MODULE_PBR
@@ -1692,10 +1686,6 @@ private:
     // Binaries\Scripts, else <exe>\Scripts.
 #if AVER_MODULE_SCRIPTING
     std::string resolveScriptsDir() const;
-#endif
-
-#if AVER_MODULE_FLUIDS
-    void applyLevelWater(Engine& eng);
 #endif
 
 #if AVER_MODULE_VOXI
@@ -3726,7 +3716,7 @@ private:
     // Water is an INDEPENDENT module from Particles (see the include-block comment near the top of
     // this file for the full story) -- b6881c49 nested this whole group inside
     // `AVER_MODULE_PARTICLES && AVER_MODULE_SCENE` above, so a particles-off, fluids-on tree declared
-    // none of these members while setWater()/applyLevelWater() (guarded correctly, on AVER_MODULE_
+    // none of these members while setWater() (guarded correctly, on AVER_MODULE_
     // FLUIDS alone) still used them -- undeclared-identifier errors, not a missing-header ones, which
     // is why this half of the bug survived fixing only the includes.
     //
@@ -3734,9 +3724,8 @@ private:
     // nothing, whereas a water plane is an infinite sheet that would appear in every level ever
     // opened. --water <heightCm> is the opt-in.
 #if AVER_MODULE_FLUIDS
-    fluids::WaterRenderer waterRenderer_;
-    fluids::UnderwaterFogTuning waterFog_{};
-    bool  waterAttached_ = false;
+    // The level's analytic surface and simulated volumes, shared with the runtime.
+    game::GameWater water_;
 #endif
     // These two stay OUTSIDE the guard: the flag is parsed either way, so a build without the
     // module can say "this build has no water" rather than silently ignoring --water.
@@ -3744,17 +3733,6 @@ private:
     f32   waterHeightCm_ = 0.0f;
 #if AVER_MODULE_SCRIPTING
     static i32 animCurve(i32 entity, i64 nameHash, f32* outValue, void*);
-
-#if AVER_FLUIDS_SIMULATED
-    static i32 fluidSpawnProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
-                                  f32 compliance, f32 damping, i32 iterations, f32 pressure,
-                                  const char* name, void* user);
-
-    static i32 fluidSpawnMaterialProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
-                                          f32 compliance, f32 damping, i32 iterations, f32 pressure,
-                                          f32 densityKgM3, f32 viscosityPaS, const char* materialPreset,
-                                          const char* name, void* user);
-#endif
 
 #if AVER_MODULE_SYNAPSE_SCENE
     static i32 synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void*);
@@ -3915,46 +3893,12 @@ private:
     // from what the file actually said, overwriting only what the editor genuinely owns, fixes all of
     // those at once -- and any field added to the format later, which enumerating them would not.
 #if AVER_FLUIDS_SIMULATED
-    // The simulated half of water, kept beside the analytic renderer rather than inside it: a WATER
-    // record is either a Gerstner surface or a soft body, never both, and which one a level gets is
-    // decided in applyLevelWater.
-    fluids::FluidScene fluidScene_;
-
     // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
     // viewportIconsReady_ is the ONE flag the render walk consults to decide whether to skip the
     // Player Start's cube, false unless the feature AND its texture both came up -- every failure path lands on the same behaviour, drawing the cube as before.
     editor::ViewportIconRenderer viewportIcons_;
     bool viewportIconsReady_ = false;
     editor::ViewportIconRenderer::IconHandle playerStartIcon_ = editor::ViewportIconRenderer::kNoIcon;
-    fluids::FluidHandle fluidHandle_ = 0;
-    // What a level ASKED for, and whether that ask is still outstanding. applyLevelWater fills these
-    // three and returns; the drain in onUpdate is what actually spawns. The name rides along only so
-    // the log line naming the water can be written where the spawn succeeds or fails.
-    fluids::FluidVolumeDesc fluidWantDesc_{};
-    std::string fluidWantName_;
-    bool fluidWantPending_ = false;
-    // GRAPH-AUTHORED FLUID REQUESTS -- fluidSpawnProvider fills this from aver_fw_fluid_spawn,
-    // drained at the identical point fluidWantPending_ is, for the identical readiness reason. A
-    // VECTOR, not a single slot like fluidWantDesc_: nothing stops a class graph declaring several
-    // `COMP ... Fluid` children, so a second request before the drain must not overwrite the first.
-    struct FluidGraphRequest { fluids::FluidVolumeDesc desc; std::string label; };
-    std::vector<FluidGraphRequest> fluidGraphQueue_;
-    // Every handle the queue above has ever produced, so unloadLevel can despawn all of them --
-    // the same reason fluidHandle_ is despawned there, generalised from one slot to many.
-    std::vector<fluids::FluidHandle> fluidGraphHandles_;
-    // WHICH .ocmat EACH LIVE VOLUME'S SURFACE USES, by NAME rather than a resolved
-    // pbr::MaterialHandle: applyLevelWater latches a spawn the onUpdate drain performs later, possibly
-    // before materials finish loading, so a handle resolved at latch time could be a permanent zero.
-    // The draw site resolves the name every frame instead, one hash lookup, never stale.
-    std::unordered_map<fluids::FluidHandle, std::string> fluidSurfaceMaterial_;
-    // Latched alongside fluidWantDesc_ by applyLevelWater, moved into the map above once the drain
-    // has a handle to key it by.
-    std::string fluidWantSurfaceMaterial_;
-    // The player's world position last frame, and whether that reading is trustworthy: there is no
-    // direct read of the character's own physics velocity, so it's recovered by finite difference.
-    // Invalidated whenever a frame has no controlled pawn, so a repossession can't manufacture a spike.
-    Vec3 fluidPrevPlayerPosCm_{};
-    bool fluidPrevPlayerValid_ = false;
 #endif
     fmt::OcWorldData levelHeader_;
     // Whether each level entity's placement said `nocollide`. There is NO component for this: it is

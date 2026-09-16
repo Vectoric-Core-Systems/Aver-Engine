@@ -467,9 +467,9 @@ void SandboxApp::buildSimulateModePanel() {
 // way -- no menu item, no Add entry, no Outliner row, nothing in Details. The Add menu offers
 // Cube, Player Start and Sphere, with Plane and Point Light greyed out.
 //
-// ONE RECORD, because WaterRenderer holds one level and one wave set; applyLevelWater already
-// warns when a file declares more and renders the first. Offering a list here would let someone
-// author a second surface the renderer then silently ignores.
+// ONE RECORD, because WaterRenderer holds one level and one wave set; GameWater::applyLevel
+// already warns when a file declares more and renders the first. Offering a list here would let
+// someone author a second surface the renderer then silently ignores.
 void SandboxApp::buildWaterPanel(Engine& e) {
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
     ImGui::TextDisabled("WATER");
@@ -484,7 +484,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
             wp.levelCm = std::floor(camPos_.z / 10.0f) * 10.0f - 100.0;
             wp.infinite = true;
             levelHeader_.waters.assign(1, std::move(wp));
-            applyLevelWater(e);
+            water_.applyLevel(*e.device(), levelHeader_);
             setUpgradeStatus("Added water");
         }
         uiReg_.track("water.add");
@@ -535,8 +535,8 @@ void SandboxApp::buildWaterPanel(Engine& e) {
     }
     // SIMULATE IS SHOWN BUT REFUSED WHEN INFINITE, which is the one pairing the format can carry
     // and nothing can honour -- a simulated volume is a closed shell and needs a size.
-    // applyLevelWater says the same thing in a warning; saying it here stops the author reaching
-    // a state that only complains later.
+    // GameWater::applyLevel says the same thing in a warning; saying it here stops the author
+    // reaching a state that only complains later.
     ImGui::BeginDisabled(wp.infinite);
     if (ImGui::Checkbox("Simulate", &wp.simulate)) changed = true;
     ImGui::EndDisabled();
@@ -551,9 +551,9 @@ void SandboxApp::buildWaterPanel(Engine& e) {
     }
     uiReg_.track("water.remove");
 
-    // RE-APPLIED ON EVERY EDIT, so the viewport agrees with the numbers. applyLevelWater is
+    // RE-APPLIED ON EVERY EDIT, so the viewport agrees with the numbers. GameWater::applyLevel is
     // idempotent for the analytic path -- it rebuilds the surface from the record it is handed.
-    if (changed) applyLevelWater(e);
+    if (changed) water_.applyLevel(*e.device(), levelHeader_);
     ImGui::Separator();
 #else
     (void)e;

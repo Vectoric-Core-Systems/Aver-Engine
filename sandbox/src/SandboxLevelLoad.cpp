@@ -353,217 +353,6 @@ void SandboxApp::updateLandscapeRingTiles(rhi::IDevice* device, f32 cameraXCm, f
 
 #endif
 
-#if AVER_MODULE_FLUIDS
-// Turns a level's WATER/WAVE records into an actual surface, and into the buoyancy plane under it.
-// A LEVEL BEATS THE COMMAND LINE: --water was never authoring, just a switch to look at water at
-// all, and a level with no WATER record behaves as before.
-// IT ALSO BRINGS THE RENDERER UP, which startup only did when --water was given: a pool should not
-// need a CLI flag to appear.
-void SandboxApp::applyLevelWater(Engine& eng) {
-    if (levelHeader_.waters.empty()) return;
-
-    const fmt::OcWaterPlacement& wp = levelHeader_.waters.front();
-
-    // ONE SURFACE DRAWN, and said out loud rather than discovered: WaterRenderer holds a single
-    // level and wave set, so a second WATER record has nowhere to go until the renderer can hold
-    // more than one. The format allows several; this consumer does not yet.
-    // BEFORE the simulate branch below, which returns: warning after it meant a level whose first
-    // record was simulated got no warning about its second record at all.
-    if (levelHeader_.waters.size() > 1)
-        AVER_WARN("[Water] the level declares {} WATER records; only '{}' is rendered",
-                  levelHeader_.waters.size(), wp.name.empty() ? "unnamed" : wp.name);
-
-#if AVER_FLUIDS_SIMULATED
-    // A SIMULATED RECORD IS NOT A GERSTNER SURFACE, and taking both paths would draw two waters
-    // in the same hole fighting over the same depth. So this returns rather than falling
-    // through: the soft body IS the water for this record.
-    if (wp.simulate) {
-        if (wp.infinite) {
-            // The one pairing the format carries but nothing can honour: a simulated volume is a
-            // closed shell needing a size, an endless ocean has none to give it. Refused here
-            // rather than in the parser: the format's job is to carry what was written.
-            AVER_WARN("[Water] '{}' asks to be simulated but declares no bounds; a simulated "
-                      "volume needs a size, so it is left analytic",
-                      wp.name.empty() ? "unnamed" : wp.name);
-        } else {
-            // NO DESPAWN HERE any more. loadLevel always runs unloadLevel first, and that is
-            // where teardown lives now -- it is the one site every path that ends a level goes
-            // through, including File > New Level, which never calls this function at all.
-            fluids::FluidVolumeDesc fd;
-            // The shell fills the authored footprint, hanging BELOW the surface line rather than
-            // straddling it: the body's centre is half its depth under `level`. Depth is the
-            // shallower of a sensible pool depth and the footprint, so a puddle never gets a shell deeper than it is wide.
-            const f32 halfX = static_cast<f32>(wp.boundsMax[0] - wp.boundsMin[0]) * 0.5f;
-            const f32 halfY = static_cast<f32>(wp.boundsMax[1] - wp.boundsMin[1]) * 0.5f;
-            const f32 halfZ = std::min(60.0f, std::min(halfX, halfY));
-            fd.centreCm[0] = static_cast<f32>(wp.boundsMin[0] + wp.boundsMax[0]) * 0.5f;
-            fd.centreCm[1] = static_cast<f32>(wp.boundsMin[1] + wp.boundsMax[1]) * 0.5f;
-            fd.centreCm[2] = static_cast<f32>(wp.levelCm) - halfZ;
-            fd.halfExtentCm[0] = halfX;
-            fd.halfExtentCm[1] = halfY;
-            fd.halfExtentCm[2] = halfZ;
-            // OVERRIDES FluidVolumeDesc's own {8,8,4} default HERE, at the one call site that
-            // spawns a player-visible fluid volume, rather than raising the struct's default: a
-            // decorative puddle or a dozen small fountains should not inherit a heavier solver cost
-            // measured for ONE specific 6x4m pool. 14x14 horizontal (~43x29cm cells, was 8x8/~75cm)
-            // is the finer top face WaterPerf's baseline called for; Z stays at the struct's own 4,
-            // per that struct's own reasoning that vertical detail is rarely camera-visible on a
-            // shallow pool. Both frame cost and shell integrity (SoftBodyTest's
-            // testPressureHoldsAShellUp was swept AT 8x8x4, so re-checked by hand here) were
-            // verified before this number was kept.
-            fd.subdivisions[0] = 14;
-            fd.subdivisions[1] = 14;
-
-            // The four solver knobs, applied ONLY when this record actually named one. wp's own
-            // fields default to -1 ("not authored"), and fd's own FluidVolumeDesc defaults are
-            // exactly what a level written before these tokens existed already gets -- so leaving
-            // an unauthored field alone keeps an old .ocmap simulating identically to before.
-            if (wp.compliance >= 0.0) fd.compliance = static_cast<f32>(wp.compliance);
-            if (wp.damping    >= 0.0) fd.damping    = static_cast<f32>(wp.damping);
-            if (wp.iterations >= 0)   fd.iterations = static_cast<u32>(wp.iterations);
-            if (wp.pressure   >= 0.0) fd.pressure   = static_cast<f32>(wp.pressure);
-
-            // THE MATERIAL LAYER, same "applied only when actually named" rule as the four knobs
-            // above: a non-empty preset wins outright; otherwise density/viscosity each apply
-            // independently against FluidPhysicsMaterial's own defaults. Left unset when the
-            // record names none of the three, so an old .ocmap or raw-knobs-only WATER record is
-            // unaffected. The precedence check against a hand-set fd.damping happens in
-            // fluids::fluidResolvePhysicsMaterial, not here.
-            if (!wp.preset.empty()) {
-                if (auto mat = fluids::fluidPhysicsMaterialPreset(wp.preset)) {
-                    fd.material = *mat;
-                } else {
-                    AVER_WARN("[Water] '{}' names unknown material preset '{}'; no material applied",
-                              wp.name.empty() ? "unnamed" : wp.name, wp.preset);
-                }
-            } else if (wp.density >= 0.0 || wp.viscosity >= 0.0) {
-                fluids::FluidPhysicsMaterial mat;   // struct defaults are water's own numbers
-                if (wp.density   >= 0.0) mat.densityKgM3  = static_cast<f32>(wp.density);
-                if (wp.viscosity >= 0.0) mat.viscosityPaS = static_cast<f32>(wp.viscosity);
-                fd.material = mat;
-            }
-
-            // THE SURFACE MATERIAL, a different question entirely from the three lines above and
-            // deliberately not folded in: those decide how the volume MOVES (mass, damping), this
-            // decides how it LOOKS. Carried as a name to the draw site (see fluidSurfaceMaterial_).
-            fluidWantSurfaceMaterial_ = wp.material;
-
-            // LATCHED, NOT SPAWNED -- the fix for every simulated record logging "the fluid body
-            // could not be created" at startup: onInit reaches this function BEFORE render
-            // features come up, and FluidScene::spawn's first line is `if (!ready_) return 0;`.
-            // Deferred rather than reordered, because loadLevel is ALSO reached from File > Open
-            // Level and the project browser, both inside onRender with this frame's command list
-            // already open. A single drain in onUpdate is the only placement correct from all
-            // three. navLoadPending_ and projectRenderPending_ are the same shape for the same reason.
-            fluidWantDesc_    = fd;
-            fluidWantName_    = wp.name;
-            fluidWantPending_ = true;
-            // The buoyancy plane still comes from the authored level: things floating ON a
-            // simulated volume aren't floating on its actual deformed surface (the solver exposes
-            // no query for that), and a flat plane at the authored height is closer than no plane at all.
-            const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
-            const f32 current[3] = {0.0f, 0.0f, 0.0f};
-            aver_phys_set_water_plane(static_cast<f32>(wp.levelCm), normal, 1.0f, 0.5f, 0.05f, current);
-            return;
-        }
-    }
-#endif
-    // The waves belonging to this surface: the ones that name it, plus the ones that name nothing
-    // at all -- which the format defines as meaning the FIRST declared water, and this is it.
-    fluids::GerstnerWave waves[fluids::kMaxGerstnerWaves];
-    size_t n = 0;
-    size_t skipped = 0;
-    for (const fmt::OcGerstnerWave& gw : levelHeader_.waves) {
-        if (!gw.water.empty() && gw.water != wp.name) continue;
-        if (n >= fluids::kMaxGerstnerWaves) { ++skipped; continue; }
-        // The one narrowing from the format's f64 to the runtime's f32, at the boundary, exactly
-        // where OcScatterSpecies' own comment says such a narrowing belongs.
-        waves[n].dirX         = static_cast<f32>(gw.dirX);
-        waves[n].dirZ         = static_cast<f32>(gw.dirZ);
-        waves[n].wavelengthCm = static_cast<f32>(gw.wavelengthCm);
-        waves[n].amplitudeCm  = static_cast<f32>(gw.amplitudeCm);
-        waves[n].steepness    = static_cast<f32>(gw.steepness);
-        ++n;
-    }
-    if (skipped)
-        AVER_WARN("[Water] '{}' declares {} waves; the renderer takes {} and the rest are dropped",
-                  wp.name.empty() ? "unnamed" : wp.name, n + skipped, fluids::kMaxGerstnerWaves);
-
-    if (!waterAttached_) {
-        if (!waterRenderer_.init(*eng.device())) {
-            AVER_ERROR("[Water] the level authored water, but the renderer is unavailable on this device");
-            return;
-        }
-        eng.device()->addRenderFeature(&waterRenderer_);
-        waterAttached_ = true;
-        waterEnabled_ = true;
-    }
-
-    waterRenderer_.setWaterLevelCm(static_cast<f32>(wp.levelCm));
-    // AND THE BOUNDS ACTUALLY REACH THE RENDERER. Without this the record's `bounds` clause was
-    // parsed, logged as "(bounded)" and then dropped -- a pool a few metres across drew water
-    // over the entire level, and the log line read as though it had worked.
-    if (wp.infinite) {
-        waterRenderer_.clearWaterBounds();
-    } else {
-        waterRenderer_.setWaterBoundsCm(static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1]),
-                                        static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1]));
-    }
-    // ZERO WAVES IS A LEGAL ANSWER, not a reason to fall back on the startup swell: a level that
-    // declared a WATER record and no WAVEs asked for still water, and a pool usually wants exactly
-    // that. gerstnerHeightCm's own contract already returns the flat level for an empty set.
-    waterRenderer_.setWaves(waves, n);
-
-    // THE SURFACE RIPPLE SET, different from the Gerstner swell above: the swell displaces
-    // vertices on an analytic ocean, this shapes the NORMAL, read by the material graph and the
-    // caustics, which must agree (IDevice::setWaterWaves).
-    // DERIVED FROM THE AUTHORED WAVES WHERE THERE ARE ANY, else a default sized for a pool.
-    // Non-harmonic wavelengths (37/23/61cm) avoid a visible beat, and each speed is a multiple of
-    // 2*pi/3600 so it crosses gTime's hourly wrap without a jump.
-    {
-        f32 rip[3][4];
-        if (n > 0) {
-            for (u32 i = 0; i < 3; ++i) {
-                const fluids::GerstnerWave& g = waves[i < n ? i : n - 1];
-                const f32 len = std::sqrt(g.dirX * g.dirX + g.dirZ * g.dirZ);
-                const f32 k = 6.2831853f / (g.wavelengthCm > 1.0f ? g.wavelengthCm : 1.0f);
-                rip[i][0] = len > 1e-4f ? g.dirX / len : 1.0f;
-                rip[i][1] = len > 1e-4f ? g.dirZ / len : 0.0f;
-                rip[i][2] = k;
-                // Deep-water dispersion, snapped to the hourly wrap: omega = sqrt(g*k).
-                const f32 omega = std::sqrt(981.0f * k);
-                rip[i][3] = std::round(omega / 0.001745329f) * 0.001745329f;
-            }
-        } else {
-            const f32 kk[3] = {0.169816f, 0.273182f, 0.145670f};
-            const f32 ss[3] = {3.740140f, 4.640800f, 2.879793f};
-            const f32 dx[3] = {1.0f, 0.0f, 0.7071068f};
-            const f32 dy[3] = {0.0f, 1.0f, 0.7071068f};
-            for (u32 i = 0; i < 3; ++i) {
-                rip[i][0] = dx[i]; rip[i][1] = dy[i]; rip[i][2] = kk[i]; rip[i][3] = ss[i];
-            }
-        }
-        eng.device()->setWaterWaves(rip, 3, 0.055f);
-    }
-
-    waterHeightCm_ = static_cast<f32>(wp.levelCm);
-
-    // The same single number for both, for the reason the startup path states: two independent
-    // heights would drift, reading as broken buoyancy rather than a mismatch. Physics-guarded for
-    // the same reason: a level may author water in a build with no solver to float anything.
-#if AVER_MODULE_PHYSICS
-    const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
-    const f32 current[3] = {0.0f, 0.0f, 0.0f};
-    aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal, 1.0f, 0.5f, 0.05f, current);
-#endif
-
-    AVER_INFO("[Water] level surface '{}' at z = {} cm with {} wave(s){}",
-              wp.name.empty() ? "unnamed" : wp.name, wp.levelCm, n,
-              wp.infinite ? "" : " (bounded)");
-}
-
-#endif
-
 #if AVER_MODULE_SCENE
 #if AVER_MODULE_SCENE
 // True when any resident density field owns `e`. The World Outliner and the save path both use
@@ -1004,10 +793,9 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
                       levelPcgVolumes_.size());
 
 #if AVER_MODULE_FLUIDS
-        // AND THE LEVEL'S OWN WATER, if it authored any. Placed here rather than beside the PCGVOLUME
-        // carry above because this is the first point at which levelHeader_ holds the WATER/WAVE
-        // records the file declared.
-        applyLevelWater(eng);
+        // AND THE LEVEL'S OWN WATER, if it authored any: its WATER/WAVE records, before the
+        // placements, as the runtime applies them.
+        water_.applyLevel(*eng.device(), w);
 #endif
 
         // AND NOW THE SKY FIELD ACTUALLY REACHES THE CLOUD LAYER, as it already did in the packaged
@@ -1474,30 +1262,10 @@ void SandboxApp::unloadLevel(Engine& eng) {
     for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
     levelBodies_.clear();
 #endif
-#if AVER_FLUIDS_SIMULATED
-    // THE ONLY teardown site for a simulated volume, belonging here rather than in
-    // applyLevelWater: this runs on every path that ends a level (including File > New Level,
-    // which never calls applyLevelWater), so without it a simulated pool outlived its level.
-    // NOT folded into the levelBodies_ loop: the volume's body is never pushed there, and removing
-    // it directly would double-free once FluidScene::retire removes it too.
-    if (fluidHandle_) {
-        fluidSurfaceMaterial_.erase(fluidHandle_);
-        fluidScene_.despawn(fluidHandle_);
-        fluidHandle_ = 0;
-    }
-    // Cleared for the "simulated level -> level with no water" case: applyLevelWater returns
-    // immediately when the new level declares no WATER record, so a latch left standing here
-    // would spawn the OLD level's volume into the new world on the very next frame.
-    fluidWantPending_ = false;
-    // Same reasoning, generalised to every graph-authored volume this level's actors spawned:
-    // none are pushed to levelBodies_ either, and a class outliving its own level's teardown would
-    // go on sloshing in the next one, the same way an un-despawned fluidHandle_ used to.
-    for (const fluids::FluidHandle h : fluidGraphHandles_) {
-        fluidSurfaceMaterial_.erase(h);
-        fluidScene_.despawn(h);
-    }
-    fluidGraphHandles_.clear();
-    fluidGraphQueue_.clear();
+#if AVER_MODULE_FLUIDS
+    // THE ONLY teardown site for what a level spawned: this runs on every path that ends a level,
+    // including File > New Level. The analytic surface is left standing.
+    water_.unload();
 #endif
     hasLevelFog_ = false;
     hasLevelSun_ = false;

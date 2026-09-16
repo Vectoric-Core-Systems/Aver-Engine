@@ -930,16 +930,15 @@ void SandboxApp::onInit(Engine& e)  {
     }
 #endif
 
-#if AVER_FLUIDS_SIMULATED
+#if AVER_MODULE_FLUIDS
     // Registered unconditionally, spawned only if a level asks for it -- an idle feature costs
-    // nothing, and this keeps feature order identical with/without fluid in a level.
-    // On RENDER_FLUID alone: used to sit inside softBodyScene_->init()'s success branch, where a
-    // soft-body failure took fluid down for no reason, and a SCENE-off build left onRender's
-    // RENDER_FLUID-only draw call reading a handle nothing could fill.
-    // Still before Voxi: its acceleration-structure build reads the vertex buffer this feature's
-    // prePass writes; registered after, every ray-traced effect would see the volume one frame stale.
-    if (fluidScene_.init(*e.device())) e.device()->addRenderFeature(&fluidScene_);
+    // nothing, and this keeps feature order identical with/without fluid in a level. Still before
+    // Voxi: its acceleration-structure build reads the vertex buffer this feature's prePass writes;
+    // registered after, every ray-traced effect would see the volume one frame stale.
+    water_.init(*e.device());
+#endif
 
+#if AVER_FLUIDS_SIMULATED
     // The 3D-viewport icon renderer. Registered here because it draws in transparentPass (after
     // every opaque draw and the deferred sky) but must exist before level loading creates a Player
     // Start.
@@ -954,15 +953,6 @@ void SandboxApp::onInit(Engine& e)  {
         // that is invisible because its picture failed to load.
         if (playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) viewportIconsReady_ = false;
     }
-
-    // A graph-authored `COMP ... Fluid` and a plain C# Game.SpawnFluidVolume call both reach
-    // fluidScene_ through this one relay. Installed beside fluidScene_.init(), not with the other
-    // providers further down: those answer a query that means nothing before this registration runs.
-    aver_fw_set_fluid_spawn_provider(&SandboxApp::fluidSpawnProvider, this);
-    // The material-layer relay (framework_abi.h's aver_fw_fluid_spawn_material, MINOR 4), for the
-    // same reason. Both providers push onto the SAME fluidGraphQueue_, so onUpdate's drain didn't
-    // need to change.
-    aver_fw_set_fluid_spawn_material_provider(&SandboxApp::fluidSpawnMaterialProvider, this);
 #endif
 
     // --furnace-test: does the shading model CONSERVE ENERGY? A uniform environment of
@@ -1421,34 +1411,29 @@ void SandboxApp::onInit(Engine& e)  {
     // unaffected and simply has no water, because HLSL is compiled at RUNTIME and can fail on a
     // machine whose build was perfectly green.
     if (waterEnabled_) {
-        if (waterRenderer_.init(*e.device())) {
-            waterRenderer_.setWaterLevelCm(waterHeightCm_);
-            // A default swell rather than a flat mirror: four waves at spread headings, so the
-            // surface reads as water immediately. Wavelengths are deliberately non-multiples of one
-            // another -- harmonic ones re-phase into a visibly repeating tile.
-            fluids::GerstnerWave waves[4];
-            const f32 dirs[4][2] = {{1.0f, 0.15f}, {0.6f, -0.8f}, {-0.3f, 0.95f}, {-0.85f, -0.5f}};
-            const f32 lengths[4] = {1450.0f, 890.0f, 520.0f, 310.0f};
-            const f32 amps[4]    = {34.0f, 19.0f, 9.0f, 4.5f};
-            for (int i = 0; i < 4; ++i) {
-                waves[i].dirX = dirs[i][0];
-                waves[i].dirZ = dirs[i][1];
-                waves[i].wavelengthCm = lengths[i];
-                waves[i].amplitudeCm  = amps[i];
-                waves[i].steepness    = 0.75f;
-            }
-            waterRenderer_.setWaves(waves, 4);
-            e.device()->addRenderFeature(&waterRenderer_);
-            waterAttached_ = true;
-
+        // A default swell rather than a flat mirror: four waves at spread headings, so the
+        // surface reads as water immediately. Wavelengths are deliberately non-multiples of one
+        // another -- harmonic ones re-phase into a visibly repeating tile.
+        fluids::GerstnerWave waves[4];
+        const f32 dirs[4][2] = {{1.0f, 0.15f}, {0.6f, -0.8f}, {-0.3f, 0.95f}, {-0.85f, -0.5f}};
+        const f32 lengths[4] = {1450.0f, 890.0f, 520.0f, 310.0f};
+        const f32 amps[4]    = {34.0f, 19.0f, 9.0f, 4.5f};
+        for (int i = 0; i < 4; ++i) {
+            waves[i].dirX = dirs[i][0];
+            waves[i].dirZ = dirs[i][1];
+            waves[i].wavelengthCm = lengths[i];
+            waves[i].amplitudeCm  = amps[i];
+            waves[i].steepness    = 0.75f;
+        }
+        if (water_.attachSurface(*e.device(), waterHeightCm_, waves, 4)) {
             // The simulated surface is the same number as the rendered one -- two independent
             // heights would look like broken buoyancy rather than a mismatch, so the plane is set
-            // from waterRenderer_'s own level. Guarded on PHYSICS, not just fluids: rendering a
+            // from water_'s own level. Guarded on PHYSICS, not just fluids: rendering a
             // surface and giving things something to float on are different capabilities.
 #if AVER_MODULE_PHYSICS
             const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
             const f32 current[3] = {0.0f, 0.0f, 0.0f};
-            aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal,
+            aver_phys_set_water_plane(water_.waterLevelCm(), normal,
                                       1.0f, 0.5f, 0.05f, current);
 #endif
             AVER_INFO("[Water] surface and buoyancy plane at z = {} cm", waterHeightCm_);
@@ -2375,106 +2360,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, t.dt);
     }
 #endif
-#if AVER_FLUIDS_SIMULATED
-    // The one place a fluid volume is ever spawned: applyLevelWater only latches what the level
-    // asked for (three call sites, two frame phases); this drains it.
-    // A volume spawned here still gets its prePass THIS frame: beginFrame runs seedSkinTargets()
-    // then every feature's prePass, so the seed shell is overwritten before it ever pops at the origin.
-    if (fluidWantPending_) {
-        fluidWantPending_ = false;
-        fluidHandle_ = fluidScene_.spawn(fluidWantDesc_, *e.device());
-        // Keyed by the handle the spawn just produced. Recorded even when empty, so the draw
-        // site's lookup distinguishes "this volume names no material" from "this volume is not
-        // one applyLevelWater latched" without either being a special case.
-        if (fluidHandle_) fluidSurfaceMaterial_[fluidHandle_] = fluidWantSurfaceMaterial_;
-        const char* nm = fluidWantName_.empty() ? "unnamed" : fluidWantName_.c_str();
-        if (fluidHandle_) {
-            AVER_INFO("[Water] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {})",
-                      nm, fluidWantDesc_.halfExtentCm[0] * 2.0f, fluidWantDesc_.halfExtentCm[1] * 2.0f,
-                      fluidWantDesc_.halfExtentCm[2] * 2.0f, fluidWantDesc_.centreCm[0],
-                      fluidWantDesc_.centreCm[1], fluidWantDesc_.centreCm[2]);
-        } else {
-            AVER_ERROR("[Water] '{}' asked to be simulated but the fluid body could not be created", nm);
-        }
-    }
-    // GRAPH-AUTHORED FLUID VOLUMES, drained here for the identical reason fluidWantPending_ is:
-    // fluidSpawnProvider can be invoked before fluidScene_.ready(), so it queues instead of
-    // spawning. Every knob is logged: this is the one path an author can reach WITHOUT going
-    // through OcWorld's own -1-sentinel fields, so nothing upstream already proved these numbers.
-    for (const FluidGraphRequest& req : fluidGraphQueue_) {
-        fluids::FluidHandle h = fluidScene_.spawn(req.desc, *e.device());
-        if (h) {
-            fluidGraphHandles_.push_back(h);
-            AVER_INFO("[Fluid] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {}), "
-                      "compliance={}, damping={}, iterations={}, pressure={}",
-                      req.label, req.desc.halfExtentCm[0] * 2.0f, req.desc.halfExtentCm[1] * 2.0f,
-                      req.desc.halfExtentCm[2] * 2.0f, req.desc.centreCm[0], req.desc.centreCm[1],
-                      req.desc.centreCm[2], req.desc.compliance, req.desc.damping,
-                      req.desc.iterations, req.desc.pressure);
-        } else {
-            AVER_ERROR("[Fluid] '{}' asked to be simulated but the fluid body could not be created",
-                       req.label);
-        }
-    }
-    fluidGraphQueue_.clear();
-    // AFTER the physics step above, and before any prePass: update() reads the solver's current
-    // particle positions, so running before the step draws the previous shape, and after prePass
-    // means the staged bytes aren't copied until the frame after that.
-    // Guarded on RENDER_FLUID alone, matching onRender's draw call: any wider guard here would
-    // produce a build that draws a mesh nothing ever writes to.
-    fluidScene_.update();
-
-#if AVER_MODULE_FRAMEWORK
-    // Fallback for a gap in Jolt's own soft-body update: a fluid volume's own collision pass never
-    // sees the player's capsule (aver_phys_softbody_apply_impulse; SoftBodyTest.cpp measured this
-    // twice). Right after update() reads this frame's solver state, the composition root gets one
-    // more say before it's gone.
-    // AVER_MODULE_FRAMEWORK alone, not PHYSICS on top: CMakeLists already forces
-    // AVER_FLUIDS_SIMULATED off whenever PHYSICS is off. Framework is spelled out because a fluid
-    // volume needs no scene entity, which also drags in AVER_MODULE_SCENE for worldMatrix() below.
-    if (fluidHandle_) {
-        const i32 body = fluidScene_.physicsBody(fluidHandle_);
-        const i32 pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-        if (body && pawn) {
-            const scene::Entity pe = static_cast<scene::Entity>(static_cast<u32>(pawn));
-            const Mat4& wm = scene::World::instance().worldMatrix(pe);
-            const Vec3 playerPos{wm.m[3][0], wm.m[3][1], wm.m[3][2]};
-
-            // Cheap AABB-ish reject BEFORE touching the solver: most frames the player is nowhere
-            // near any given pool, and the impulse ABI walks every particle to answer that the slow
-            // way. The margin is generous on purpose -- only needs to be "definitely not near it".
-            const auto& d = fluidWantDesc_;
-            const f32 marginCm = 200.0f;
-            const bool nearVolume =
-                std::abs(playerPos.x - d.centreCm[0]) < d.halfExtentCm[0] + marginCm &&
-                std::abs(playerPos.y - d.centreCm[1]) < d.halfExtentCm[1] + marginCm &&
-                std::abs(playerPos.z - d.centreCm[2]) < d.halfExtentCm[2] + marginCm;
-
-            if (nearVolume) {
-                // No native handle reaches the character's physics velocity (its Jolt capsule is
-                // owned on the C# side, and aver_phys_set_entity has no reverse lookup). The entity
-                // transform Character.cs writes IS visible, so velocity is recovered by finite
-                // difference across frames -- more honest than the requested Drive velocity.
-                const f32 dt = t.dt;
-                Vec3 vel{0.0f, 0.0f, 0.0f};
-                if (fluidPrevPlayerValid_ && dt > 1.0e-5f)
-                    vel = (playerPos - fluidPrevPlayerPosCm_) * (1.0f / dt);
-
-                // Centred a half-height above the feet (the entity's origin is the character's
-                // FEET) and sized to bracket its default 34cm/180cm capsule without reading either
-                // field back from C# -- roughs out where the capsule is; the per-vertex sphere test decides the rest.
-                const Vec3 centre = playerPos + Vec3{0.0f, 0.0f, 90.0f};
-                const f32 radiusCm = 90.0f;
-                aver_phys_softbody_apply_impulse(body, &centre.x, radiusCm, &vel.x, 0.5f);
-            }
-
-            fluidPrevPlayerPosCm_ = playerPos;
-            fluidPrevPlayerValid_ = true;
-        } else {
-            fluidPrevPlayerValid_ = false;   // no pawn this frame -- next frame's diff would be bogus
-        }
-    }
-#endif
+#if AVER_MODULE_FLUIDS
+    // After the physics step above, before any prePass -- not gated on Play.
+    water_.update(*e.device(), t.dt);
 #endif
 #if AVER_MODULE_SCENE
     // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
@@ -2866,13 +2754,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // the override back in would accumulate every frame spent below the surface, and a level saved
     // from that state would carry underwater fog as its authored weather.
 #if AVER_MODULE_FLUIDS
-    if (waterAttached_) {
-        const rhi::SkyAtmosphere wet =
-            fluids::applyUnderwaterFog(sky_, camPos_.z, waterRenderer_.waterLevelCm(), waterFog_);
-        e.device()->setSkyAtmosphere(wet);
-    } else
-#endif
+    e.device()->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, camPos_.z));
+#else
     e.device()->setSkyAtmosphere(sky_);
+#endif
     // Outside the viewport rect is editor chrome, not sky.
     e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
     e.device()->setPostProcess(post_);
@@ -2962,19 +2847,20 @@ editor::shutdownAnimEditors();
     editor::shutdownParticleEditors();
 #endif
     setMouseCaptured(false);
+#if AVER_MODULE_FLUIDS
+    // BEFORE aver_phys_shutdown below, explicitly rather than leaving it to water_'s own
+    // destructor: that runs after onShutdown returns, when the solver is gone and retiring a live
+    // volume would call into a shut-down physics system.
+    water_.shutdown(e.device());
+#endif
 #if AVER_FLUIDS_SIMULATED
-    // BEFORE aver_phys_shutdown below, explicitly rather than leaving it to ~FluidScene: that
-    // destructor runs after onShutdown returns, when the solver is gone and retiring a live volume
-    // would call into a shut-down physics system. Unreachable while the spawn bug kept the resident map empty; reachable now.
-    e.device()->removeRenderFeature(&fluidScene_);
-    fluidScene_.shutdown();
     if (viewportIconsReady_) {
         e.device()->removeRenderFeature(&viewportIcons_);
         viewportIcons_.shutdown();
         viewportIconsReady_ = false;
     }
 #endif
-    // THE SAME REASON, THE SAME FIX, one member along -- see the FluidScene note above:
+    // THE SAME REASON, THE SAME FIX, one member along -- see the water_ note above:
     // GBufferDebugFeature's destructor calls releaseGpu() after onShutdown returns, by which point
     // the device and its resource factory are gone, so `res_` dangles and the process dies on the
     // way out.

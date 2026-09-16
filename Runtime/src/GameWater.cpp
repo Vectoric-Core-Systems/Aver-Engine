@@ -29,7 +29,7 @@ namespace aver::game {
 void GameWater::init(rhi::IDevice& device) {
 #if AVER_FLUIDS_SIMULATED
     // Registered unconditionally, spawned only if a level or a script asks for one -- an idle
-    // feature costs nothing. Mirrors SandboxApp::onInit's own fluidScene_.init block.
+    // feature costs nothing.
     if (fluidScene_.init(device)) device.addRenderFeature(&fluidScene_);
 
 #if AVER_MODULE_FRAMEWORK
@@ -49,10 +49,9 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     const fmt::OcWaterPlacement& wp = w.waters.front();
 
     // ONE SURFACE DRAWN: WaterRenderer holds a single level and wave set, so a second WATER record
-    // has nowhere to go until the renderer can hold more than one. Mirrors
-    // SandboxApp::applyLevelWater's own "ONE SURFACE DRAWN" comment, BEFORE the simulate branch
-    // below (which returns), so a simulated record's level still gets this warning about its
-    // second record.
+    // has nowhere to go until the renderer can hold more than one. Placed BEFORE the simulate
+    // branch below (which returns), so a simulated record's level still gets this warning about
+    // its second record.
     if (w.waters.size() > 1)
         AVER_WARN("[Water] the level declares {} WATER records; only '{}' is rendered",
                   w.waters.size(), wp.name.empty() ? "unnamed" : wp.name);
@@ -85,7 +84,7 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
             fd.halfExtentCm[2] = halfZ;
             // Overrides FluidVolumeDesc's own {8,8,4} default: 14x14 horizontal is the finer top
             // face a player-visible pool wants; Z stays at the struct's own 4 (vertical detail is
-            // rarely camera-visible on a shallow pool). Mirrors SandboxLevelLoad.cpp's own numbers.
+            // rarely camera-visible on a shallow pool).
             fd.subdivisions[0] = 14;
             fd.subdivisions[1] = 14;
 
@@ -151,33 +150,26 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
         AVER_WARN("[Water] '{}' declares {} waves; the renderer takes {} and the rest are dropped",
                   wp.name.empty() ? "unnamed" : wp.name, n + skipped, fluids::kMaxGerstnerWaves);
 
-    if (!waterAttached_) {
-        if (!waterRenderer_.init(device)) {
-            AVER_ERROR("[Water] the level authored water, but the renderer is unavailable on this device");
-            return;
-        }
-        device.addRenderFeature(&waterRenderer_);
-        waterAttached_ = true;
+    // Zero waves is a legal answer, not a reason to fall back on a default swell -- a level that
+    // declared WATER and no WAVEs asked for still water. gerstnerHeightCm's own contract already
+    // returns the flat level for an empty set.
+    if (!attachSurface(device, static_cast<f32>(wp.levelCm), waves, n)) {
+        AVER_ERROR("[Water] the level authored water, but the renderer is unavailable on this device");
+        return;
     }
 
-    waterRenderer_.setWaterLevelCm(static_cast<f32>(wp.levelCm));
     if (wp.infinite) {
         waterRenderer_.clearWaterBounds();
     } else {
         waterRenderer_.setWaterBoundsCm(static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1]),
                                         static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1]));
     }
-    // Zero waves is a legal answer, not a reason to fall back on a default swell -- a level that
-    // declared WATER and no WAVEs asked for still water. gerstnerHeightCm's own contract already
-    // returns the flat level for an empty set.
-    waterRenderer_.setWaves(waves, n);
 
     // The surface ripple set, different from the Gerstner swell above: the swell displaces
     // vertices on an analytic ocean, this shapes the NORMAL the material graph and caustics read
     // (IDevice::setWaterWaves) -- derived from the authored waves where there are any, else a
-    // default sized for a pool. Mirrors SandboxLevelLoad.cpp's own block verbatim (non-harmonic
-    // wavelengths avoid a visible beat; each speed is a multiple of 2*pi/3600 so it crosses gTime's
-    // hourly wrap without a jump).
+    // default sized for a pool (non-harmonic wavelengths avoid a visible beat; each speed is a
+    // multiple of 2*pi/3600 so it crosses gTime's hourly wrap without a jump).
     {
         f32 rip[3][4];
         if (n > 0) {
@@ -217,6 +209,35 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     AVER_INFO("[Water] level surface '{}' at z = {} cm with {} wave(s){}",
               wp.name.empty() ? "unnamed" : wp.name, wp.levelCm, n,
               wp.infinite ? "" : " (bounded)");
+}
+
+bool GameWater::attachSurface(rhi::IDevice& device, f32 levelCm, const fluids::GerstnerWave* waves,
+                              size_t n) {
+    if (!waterAttached_) {
+        if (!waterRenderer_.init(device)) return false;
+        device.addRenderFeature(&waterRenderer_);
+        waterAttached_ = true;
+    }
+    waterRenderer_.setWaterLevelCm(levelCm);
+    waterRenderer_.setWaves(waves, n);
+    return true;
+}
+
+bool GameWater::respawnLevelVolume() {
+#if AVER_FLUIDS_SIMULATED
+    // The level's own volume only -- a graph-authored one is spawned by its own script/graph node,
+    // not by the level re-loading, so it is left alone here.
+    if (!fluidHandle_) return false;
+    fluidSurfaceMaterial_.erase(fluidHandle_);
+    fluidScene_.despawn(fluidHandle_);
+    fluidHandle_ = 0;
+    // Re-latches the SAME desc/name/surface material applyLevel last set: update()'s drain re-spawns
+    // and re-inserts the surface material for the new handle.
+    fluidWantPending_ = true;
+    return true;
+#else
+    return false;
+#endif
 }
 
 void GameWater::update(rhi::IDevice& device, f32 dt) {
@@ -264,8 +285,7 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
 
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
     // Fallback for a gap in Jolt's own soft-body update: a fluid volume's own collision pass never
-    // sees the player's capsule. Mirrors the AVER_MODULE_FRAMEWORK block right after
-    // fluidScene_.update() in SandboxApp::onUpdate.
+    // sees the player's capsule.
     if (fluidHandle_) {
         const i32 body = fluidScene_.physicsBody(fluidHandle_);
         const i32 pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
@@ -324,7 +344,8 @@ void GameWater::drawOneFluid(rhi::IDevice& device, GameContent& content, pbr::Ma
     // The surface material, resolved at DRAW time rather than latched at spawn: a volume can be
     // spawned before its project's materials finish loading, so a handle captured too early could
     // be a permanent zero.
-    pbr::MaterialHandle authored = 0;
+    // u32, not pbr::MaterialHandle: that alias only exists with AVER_MODULE_PBR on.
+    u32 authored = 0;
 #if AVER_MODULE_PBR
     if (const auto nm = fluidSurfaceMaterial_.find(h);
         nm != fluidSurfaceMaterial_.end() && !nm->second.empty()) {
@@ -387,16 +408,15 @@ void GameWater::draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSy
 
 void GameWater::unload() {
 #if AVER_FLUIDS_SIMULATED
-    // The only teardown site for what a level itself spawned -- mirrors the AVER_FLUIDS_SIMULATED
-    // block in SandboxApp::unloadLevel. Not folded into a generic body list: neither the WATER
-    // record's own volume nor a graph-spawned one is ever pushed to one, and removing either
-    // directly here (rather than through it) would double-free once FluidScene::retire removes it
-    // too.
+    // The only teardown site for what a level itself spawned. Not folded into a generic body
+    // list: neither the WATER record's own volume nor a graph-spawned one is ever pushed to one,
+    // and removing either directly here (rather than through it) would double-free once
+    // FluidScene::retire removes it too.
     //
-    // THE ANALYTIC SURFACE IS LEFT STANDING, as in the editor's unloadLevel: a level with a WATER
-    // record followed by one with none keeps showing the first surface, since applyLevel returns
-    // early and nothing else clears waterRenderer_. Unreachable while the runtime loads one level per
-    // process; a known gap in both hosts.
+    // THE ANALYTIC SURFACE IS LEFT STANDING: a level with a WATER record followed by one with none
+    // keeps showing the first surface, since applyLevel returns early and nothing else clears
+    // waterRenderer_. Unreachable while the runtime loads one level per process; a known gap in
+    // both hosts.
     if (fluidHandle_) {
         fluidSurfaceMaterial_.erase(fluidHandle_);
         fluidScene_.despawn(fluidHandle_);
@@ -424,8 +444,7 @@ void GameWater::shutdown(rhi::IDevice* device) {
     if (device) device->removeRenderFeature(&fluidScene_);
     fluidScene_.shutdown();
 #endif
-    // The editor never unregisters waterRenderer_ before the device goes; done here so no feature
-    // outlives its registration.
+    // Unregistered here so no feature outlives its registration.
     if (waterAttached_) {
         if (device) device->removeRenderFeature(&waterRenderer_);
         waterRenderer_.shutdown();

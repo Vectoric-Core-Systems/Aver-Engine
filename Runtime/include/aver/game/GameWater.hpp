@@ -1,20 +1,22 @@
-// GameWater: level-authored water for the standalone runtime -- the analytic Gerstner surface
-// (WaterRenderer) plus its buoyancy plane, and the simulated soft-body fluid volume (FluidScene)
-// a WATER record may ask for instead. Ported from SandboxApp::applyLevelWater
-// (sandbox/src/SandboxLevelLoad.cpp) and the waterRenderer_/fluidScene_ machinery around it in
-// sandbox/src/SandboxApp.cpp, sandbox/src/SandboxPlay.cpp and sandbox/src/SandboxRender.cpp -- see
-// each method's own comment for which one it mirrors.
+// GameWater: level-authored water -- the analytic Gerstner surface (WaterRenderer) plus its
+// buoyancy plane, and the simulated soft-body fluid volume (FluidScene) a WATER record may ask
+// for instead. Shared by both hosts: GameApp drives it through GameLevel's LoadHooks like
+// GameLandscape, and the editor's SandboxApp drives the same instance through applyLevel plus the
+// editor-only entry points below (attachSurface, respawnLevelVolume) -- see each method's own
+// comment for what it does.
 //
 // Takes a device and the level's OcWorldData as arguments rather than reaching into GameApp for them.
-// GameApp owns one by value and drives it through GameLevel's LoadHooks, like GameLandscape.
+// Each host owns one by value.
 //
 // LEFT OUT, EDITOR-ONLY:
-//   - the Details panel's live water edit (SandboxPanels.cpp) and its re-apply-on-every-edit call
-//     into applyLevelWater -- a shipped game never edits a level while it runs.
+//   - the Details panel's live water edit (SandboxPanels.cpp) -- stays editor-side, re-applying
+//     through applyLevel on every edit.
+//   - the --water CLI flag and its onInit registration -- stays editor-side, bringing a surface up
+//     through attachSurface.
+//   - re-settling a level's water when a play session resets (the editor's Stop) -- goes through
+//     respawnLevelVolume.
 //   - the Player Start-style viewport icon and Outliner entry a spawned volume gets in the editor
 //     (viewportIcons_/playerStartIcon_) -- decoration for a human editing, not gameplay.
-//   - the --water CLI flag and its onInit registration (SandboxApp.cpp's `if (waterEnabled_)`
-//     block): a packaged game has no CLI author surface for water, only a level's own WATER record.
 //   - cbStatus_ notification strings.
 #pragma once
 #include "aver/core/Types.hpp"
@@ -50,43 +52,49 @@ class GameWater {
 public:
     // Registers the simulated fluid scene (FluidScene) and the framework's fluid-spawn relay, so a
     // graph-authored `COMP ... Fluid` or a script's spawn call works even before any level asks for
-    // water. Mirrors SandboxApp::onInit's `if (fluidScene_.init(*e.device())) ...` block
-    // (SandboxApp.cpp, search fluidScene_.init) -- call once, BEFORE any level loads and before
-    // Voxi attaches (Voxi's acceleration-structure build reads the vertex buffer this feature's
-    // prePass writes).
+    // water. Call once, BEFORE any level loads and before Voxi attaches (Voxi's
+    // acceleration-structure build reads the vertex buffer this feature's prePass writes).
     void init(rhi::IDevice& device);
 
     // Turns a level's WATER/WAVE records (`w.waters`/`w.waves`) into a rendered analytic surface +
-    // buoyancy plane, or into a latched simulated-volume spawn request -- mirrors
-    // SandboxApp::applyLevelWater (SandboxLevelLoad.cpp) almost verbatim. A no-op when `w.waters`
-    // is empty. Called as the level loads, before its placements, where the editor calls it.
+    // buoyancy plane, or into a latched simulated-volume spawn request. A no-op when `w.waters` is
+    // empty. Called as the level loads, before its placements.
     void applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w);
+
+    // Brings the analytic surface up if it is not already registered (WaterRenderer::init +
+    // device.addRenderFeature), then sets its level and waves -- for a caller that wants a surface
+    // on screen outside a level's own WATER record (the editor's --water CLI flag). Leaves the
+    // surface's bounds and the ripple set (device.setWaterWaves) untouched. Returns false, logging
+    // nothing, if WaterRenderer::init fails -- the caller logs.
+    bool attachSurface(rhi::IDevice& device, f32 levelCm, const fluids::GerstnerWave* waves, size_t n);
+
+    // Despawns the level-authored simulated volume (fluidHandle_) and re-latches its spawn so
+    // update() spawns it again fresh -- for a host that resets a play session (the editor's Stop).
+    // Graph-authored volumes are untouched. Returns false when no level volume is live.
+    bool respawnLevelVolume();
 
     // Drains a latched spawn request (from applyLevel) and every graph-authored one
     // (aver_fw_fluid_spawn / aver_fw_fluid_spawn_material), steps the simulated volume, and syncs
     // the player's buoyancy impulse against it. Call once per frame, AFTER the physics step and
-    // BEFORE World::flush -- mirrors the AVER_FLUIDS_SIMULATED block in SandboxApp::onUpdate
-    // (SandboxApp.cpp, right after the PrePhysics/Physics/PostPhysics tick groups).
+    // BEFORE World::flush.
     void update(rhi::IDevice& device, f32 dt);
 
     // `sky` with its fog swapped for the underwater look while `cameraZCm` is below the rendered
-    // analytic surface, otherwise `sky` returned unchanged -- mirrors SandboxApp::pushFrame's own
-    // `fluids::applyUnderwaterFog` call, "applied to a copy" so the authored sky itself is never
-    // modified (a level saved mid-dive must not carry underwater fog as its own weather).
+    // analytic surface, otherwise `sky` returned unchanged -- applied to a copy so the authored sky
+    // itself is never modified (a level saved mid-dive must not carry underwater fog as its own
+    // weather).
     rhi::SkyAtmosphere applyUnderwaterFog(const rhi::SkyAtmosphere& sky, f32 cameraZCm) const;
 
-    // Draws every live simulated volume as an ordinary blended mesh -- mirrors
-    // SandboxRender.cpp's drawOneFluid lambda. `materials` may be null, the same contract
-    // GameRender.hpp's drawWorld already uses for a game with no material system (or Voxi not yet
-    // attached): the volume then draws with its fallback look. The analytic surface needs no call
-    // here -- WaterRenderer draws itself through its own transparentPass once registered by
-    // applyLevel/init.
+    // Draws every live simulated volume as an ordinary blended mesh. `materials` may be null, the
+    // same contract GameRender.hpp's drawWorld already uses for a game with no material system (or
+    // Voxi not yet attached): the volume then draws with its fallback look. The analytic surface
+    // needs no call here -- WaterRenderer draws itself through its own transparentPass once
+    // attachSurface (directly, or through applyLevel) has registered it.
     void draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const;
 
     // Despawns what a level itself asked for: the latched analytic/simulated request and every
-    // graph-authored volume -- mirrors the AVER_FLUIDS_SIMULATED block in
-    // SandboxApp::unloadLevel (SandboxLevelLoad.cpp). Like the editor, leaves the analytic
-    // WaterRenderer's registration and last surface in place. Call wherever the level unloads.
+    // graph-authored volume. Leaves the analytic WaterRenderer's registration and last surface in
+    // place. Call wherever the level unloads.
     void unload();
 
     // Unregisters and shuts down every render feature this class owns. `device` may be null,
@@ -108,8 +116,7 @@ private:
 #if AVER_MODULE_FRAMEWORK
     // The framework's fluid-spawn relay (framework_abi.h's aver_fw_set_fluid_spawn_provider /
     // _material_provider) -- a graph-authored `COMP ... Fluid` or a script's Game.SpawnFluidVolume
-    // call reaches fluidGraphQueue_ through these. Mirrors
-    // SandboxApp::fluidSpawnProvider/fluidSpawnMaterialProvider (sandbox/src/SandboxPlay.cpp).
+    // call reaches fluidGraphQueue_ through these.
     static i32 fluidSpawnProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
                                   f32 compliance, f32 damping, i32 iterations, f32 pressure,
                                   const char* name, void* user);
