@@ -81,6 +81,11 @@ public:
     // into a `snap` class placement's own z resolution (`z = groundHeightAt(x,y) + authored z`).
     bool groundHeightAt(f64 worldXCm, f64 worldYCm, f64& outWorldZCm) const;
 
+    // The height chunk-streamed scatter follows: the resident section where it exists, and past its
+    // rim the same continuous noise the ring tiles use -- the editor's heightSource lambda in
+    // setChunkStreamingEnabled. Always answers; only meaningful while loaded().
+    bool scatterHeightAt(f32 worldXCm, f32 worldYCm, f32& outWorldZCm) const;
+
     // ---- the ring: procedural tiles past the authored section's own rim ----
 
     // Keeps a small window of procedural tiles resident around (cameraXCm, cameraYCm), so the

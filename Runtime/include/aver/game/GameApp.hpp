@@ -33,6 +33,7 @@
 #if AVER_MODULE_FLUIDS
 #  include "aver/game/GameWater.hpp"
 #endif
+#include "aver/game/GameStreaming.hpp"
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
 
@@ -101,6 +102,10 @@ struct GameConfig {
     // exits. The only way to check the HLSL against its reference: HLSL compiles at RUNTIME, so a
     // green build says nothing about whether the shader agrees with anything.
     bool pcgVolumeTest = false;
+    // --chunk-stream [N] / --no-chunk-stream: PCG chunk streaming switches on N frames in, 0 = off.
+    // ON BY DEFAULT (5 frames), as in the editor (SandboxApp::chunkStreamAutoFrames_): without it
+    // nothing runs the scatter generator and a level shows only its hand-placed content.
+    int chunkStreamAutoFrames = 5;
     // particles DECIDED 4's A/B toggle -- see sandbox/src/SandboxApp.cpp's setNoParticleGi for the
     // full contract; this is the same flag, just read here instead of set through a member function
     // (GameApp has no other CLI setters -- see parseArgs, which fills this struct directly).
@@ -225,6 +230,9 @@ private:
     void openProject(Engine&);
     // Gives level_ the work the editor does around a level load (water and terrain), before the first load.
     void installLevelHooks(Engine&);
+    // Switches chunk streaming on for the loaded level, with the terrain as its height source when
+    // there is one -- SandboxApp::setChunkStreamingEnabled(true).
+    void enableChunkStreaming();
 
     // Initialises and registers the Voxi renderer. Also what makes pbr::MaterialSystem exist:
     // it is a MEMBER of VoxiRenderer and is initialised only inside VoxiRenderer::init, so a game
@@ -542,6 +550,12 @@ private:
 #if AVER_MODULE_FLUIDS
     // The level's water, through the same hooks as landscape_, plus the fluid volumes scripts spawn.
     GameWater water_;
+#endif
+#if AVER_MODULE_SCENE
+    // PCG scatter streamed around the camera; see GameConfig::chunkStreamAutoFrames.
+    GameStreaming streaming_;
+    // Frames left before streaming switches on; 0 = off or already done.
+    int chunkStreamFramesLeft_ = 0;
 #endif
     u64 frames_ = 0;
     // Seconds since the last --stats dump. See GameConfig::statsIntervalSec.

@@ -96,6 +96,12 @@ bool GameLandscape::groundHeightAt(f64 worldXCm, f64 worldYCm, f64& outWorldZCm)
     return true;
 }
 
+bool GameLandscape::scatterHeightAt(f32 worldXCm, f32 worldYCm, f32& outWorldZCm) const {
+    if (landscape::surfaceHeightAt(landscapeData_, worldXCm, worldYCm, outWorldZCm)) return true;
+    outWorldZCm = landscape::terrainHeightAt(worldXCm, worldYCm, landscapeNoiseParams_);
+    return true;
+}
+
 #if AVER_MODULE_PBR
 void GameLandscape::applySurface(landscape::LandscapeRenderer& r, GameContent& content,
                                   pbr::MaterialSystem& materials) {

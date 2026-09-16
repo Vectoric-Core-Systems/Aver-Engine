@@ -475,6 +475,12 @@ GameConfig parseArgs(int argc, char** argv) {
             else             { c.statsIntervalSec = 5.0f; }
         }
         else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
+        // --chunk-stream [N]: the optional N is taken only when the next argument is not a flag,
+        // as in the editor's parser.
+        else if (std::strcmp(a, "--chunk-stream") == 0) {
+            c.chunkStreamAutoFrames = (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 5;
+        }
+        else if (std::strcmp(a, "--no-chunk-stream") == 0) { c.chunkStreamAutoFrames = 0; }
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
         else if (std::strcmp(a, "--screenshot") == 0)      { c.screenshotPath = valueAfter(argc, argv, i, ""); ++i; }
@@ -528,7 +534,11 @@ GameConfig parseArgs(int argc, char** argv) {
     return c;
 }
 
-GameApp::GameApp(GameConfig cfg) : cfg_(std::move(cfg)) {}
+GameApp::GameApp(GameConfig cfg) : cfg_(std::move(cfg)) {
+#if AVER_MODULE_SCENE
+    chunkStreamFramesLeft_ = cfg_.chunkStreamAutoFrames;
+#endif
+}
 
 BootConfig GameApp::config() const {
     BootConfig b;
@@ -1154,8 +1164,31 @@ void GameApp::installLevelHooks(Engine& e) {
         (void)e;
     };
     level_.setLoadHooks(std::move(hooks));
+#  if AVER_MODULE_LANDSCAPE
+    // New terrain under a live stream restarts it, so scatter regenerates on the new surface --
+    // SandboxApp::applyLandscapeToStreaming.
+    landscape_.setTerrainChangedHook([this] {
+        if (!streaming_.enabled()) return;
+        AVER_INFO("[ChunkWorld] terrain changed under a live stream -- restarting it so scatter "
+                  "re-generates against the new surface");
+        streaming_.disable();
+        enableChunkStreaming();
+    });
+#  endif
 #else
     (void)e;
+#endif
+}
+
+void GameApp::enableChunkStreaming() {
+#if AVER_MODULE_SCENE
+    GameStreaming::HeightQueryFn height;
+#  if AVER_MODULE_LANDSCAPE
+    if (landscape_.loaded())
+        height = [this](f32 x, f32 y, f32& outZ) { return landscape_.scatterHeightAt(x, y, outZ); };
+#  endif
+    streaming_.enable(project_, level_.pcgVolumes(), level_.scatterSpecies(), &content_, std::move(height));
+    streaming_.warnIfCameraOutsideGeneratedBand(camPos_);
 #endif
 }
 
@@ -2295,6 +2328,13 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // place.
     if (skinnedScene_) skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
 
+#if AVER_MODULE_SCENE
+    // CHUNK STREAMING, where the editor ticks it: switched on a few frames in so the level's camera
+    // placement settles first, stepped every frame (Play or not), and its evictions retired by the
+    // flush right below, before AI paths against the world.
+    if (chunkStreamFramesLeft_ > 0 && --chunkStreamFramesLeft_ == 0) enableChunkStreaming();
+    if (streaming_.enabled()) streaming_.tick(camPos_, t.dt);
+#endif
     scene::World::instance().flush();
 #if AVER_MODULE_SYNAPSE_SCENE
     // GATED ON PLAYING, mirroring the editor's identical condition (SandboxApp.cpp's own tick site,
@@ -2538,6 +2578,9 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_SCENE
     skinnedScene_.reset();
+    // Streamed chunks own entities and static bodies too, released here while physics still exists.
+    // The editor leaves its chunk worlds to their destructors, after the physics world is gone.
+    streaming_.disable();
     // Before physics: unloading destroys entities AND removes their static bodies, and removing a
     // body from a shut-down physics world is the wrong order.
     level_.unload();

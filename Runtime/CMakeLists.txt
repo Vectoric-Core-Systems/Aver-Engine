@@ -34,6 +34,7 @@ aver_add_module(Aver.Runtime.Game
     src/GameLandscape.cpp
     src/GameRender.cpp
     src/GameInput.cpp
+    src/GameStreaming.cpp
     src/GameWater.cpp
   DEPS
     Aver.Runtime

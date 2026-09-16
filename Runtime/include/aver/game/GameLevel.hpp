@@ -88,6 +88,10 @@ public:
         Vec3 boundsMin{}, boundsMax{};
     };
     const std::vector<PcgField>& pcgFields() const { return pcgFields_; }
+    // The same records unresolved, for chunk streaming (GameStreaming::enable), which reads fields
+    // pcgFields() drops -- the editor keeps levelPcgVolumes_ and its SCATTER list for the same reason.
+    const std::vector<fmt::OcPcgVolume>& pcgVolumes() const { return pcgVolumes_; }
+    const std::vector<fmt::OcScatterSpecies>& scatterSpecies() const { return scatterSpecies_; }
 
     // The field of that name, or null. By NAME because a level may declare several and picking
     // "the first one" is how the wrong field gets sampled without anything saying so.
@@ -131,6 +135,8 @@ private:
     // The sun, sky, fog and clouds this level declared, copied whole. See env() above.
     fmt::OcWorldEnv env_{};
     std::vector<PcgField> pcgFields_;
+    std::vector<fmt::OcPcgVolume> pcgVolumes_;
+    std::vector<fmt::OcScatterSpecies> scatterSpecies_;
 
     // Placement bounds, accumulated by load(). hasBounds_ stays false for a level with no
     // placements, which is a real case (an empty start map) and not a zero-sized world.

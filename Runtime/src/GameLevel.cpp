@@ -148,6 +148,8 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // Resolved here, once, rather than every time something samples one: turning an authored record
     // into a spec is cheap but it is not free, and a raymarch asking per pixel would pay for it a
     // million times.
+    pcgVolumes_ = w.pcgVolumes;
+    scatterSpecies_ = w.scatterSpecies;
     pcgFields_.clear();
     for (const fmt::OcPcgVolume& v : w.pcgVolumes) {
         PcgField f;
@@ -385,6 +387,8 @@ void GameLevel::unload() {
     hasBounds_ = false;
     spawn_ = SpawnPoint{};
     pcgFields_.clear();
+    pcgVolumes_.clear();
+    scatterSpecies_.clear();
     levelPath_.clear();
     levelName_.clear();
     if (hooks_.afterUnload) hooks_.afterUnload();
