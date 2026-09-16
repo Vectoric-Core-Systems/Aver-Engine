@@ -12,6 +12,8 @@
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #  include "aver/formats/OcWorld.hpp"
+#  include "aver/formats/OcMap.hpp"
+#  include "aver/world/LevelInstance.hpp"
 #endif
 
 namespace aver::game {
@@ -30,6 +32,16 @@ class GameContent;
 class GameLevel {
 public:
 #if AVER_MODULE_SCENE
+    // What one load() built, handed to LoadHooks::afterInstantiate. `world` is the parsed file -- for
+    // a legacy .ocmap, its translation into OcWorldData -- and `instance` the entities and bodies
+    // world::instantiate made from world.placements. `legacy` is the .ocmap's own records, or null.
+    struct LoadedLevel {
+        const std::string& path;
+        const fmt::OcWorldData& world;
+        const world::LevelInstance& instance;
+        const fmt::OcMapData* legacy;
+    };
+
     // What the host does around a level load, as hooks, so this class needs neither a device nor the
     // terrain and water classes. The editor does the same work inline in SandboxApp::loadLevel and
     // unloadLevel.
@@ -42,6 +54,10 @@ public:
         std::function<bool(f64 worldXCm, f64 worldYCm, f64& outGroundZCm)> groundHeightAt;
         // At the end of unload(), for whatever beforePlacements created.
         std::function<void()> afterUnload;
+        // At the end of a load that succeeded, with everything it built -- for a host that keeps
+        // its own record per placed entity (the editor's labels, undo and save bookkeeping).
+        // Called for a legacy .ocmap too, whose original records come in `legacy`.
+        std::function<void(const LoadedLevel& loaded)> afterInstantiate;
     };
     void setLoadHooks(LoadHooks hooks) { hooks_ = std::move(hooks); }
 
@@ -92,6 +108,11 @@ public:
     // pcgFields() drops -- the editor keeps levelPcgVolumes_ and its SCATTER list for the same reason.
     const std::vector<fmt::OcPcgVolume>& pcgVolumes() const { return pcgVolumes_; }
     const std::vector<fmt::OcScatterSpecies>& scatterSpecies() const { return scatterSpecies_; }
+#if AVER_MODULE_FRAMEWORK
+    // The placements load() found with a class name, in file order, for spawnClassPlacements or a
+    // host that spawns them itself.
+    const std::vector<fmt::OcWorldPlacement>& classPlacements() const { return classPlacements_; }
+#endif
 
     // The field of that name, or null. By NAME because a level may declare several and picking
     // "the first one" is how the wrong field gets sampled without anything saying so.

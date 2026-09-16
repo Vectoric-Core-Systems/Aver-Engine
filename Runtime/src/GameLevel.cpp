@@ -38,8 +38,7 @@ namespace {
 // entityLegacyMaterial_ save-round-trip maps: a shipped game never writes a level back out, so
 // nothing here needs to remember which record kind or which numeric SURFACE/material name a
 // placement came from, only where world::instantiate should put it.
-bool loadLegacyOcmap(const std::string& path, fmt::OcWorldData& synth, std::string* err) {
-    fmt::OcMapData m;
+bool loadLegacyOcmap(const std::string& path, fmt::OcMapData& m, fmt::OcWorldData& synth, std::string* err) {
     if (!fmt::loadOcmap(path, m, err)) return false;
 
     synth.name = m.name;
@@ -88,8 +87,9 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // header line while silently dropping every ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM record --
     // the level loaded with no placements and no warning at all.
     const bool legacy = fmt::levelFileIsLegacyOcmap(path);
+    fmt::OcMapData legacyMap;   // the legacy file's own records, handed to afterInstantiate
     if (legacy) {
-        if (!loadLegacyOcmap(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+        if (!loadLegacyOcmap(path, legacyMap, w, &why)) { AVER_WARN("[Level] {}", why); return; }
     } else if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
 
     // TERRAIN (AND WATER) FIRST, THEN THE THINGS THAT STAND ON IT, the editor's loadLevel order: a
@@ -282,6 +282,8 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     AVER_INFO("[Level] {} static physics body(ies) from {} placement(s)",
               levelBodies_.size(), w.placements.size());
 #endif
+    if (hooks_.afterInstantiate)
+        hooks_.afterInstantiate(LoadedLevel{path, w, inst, legacy ? &legacyMap : nullptr});
 }
 
 void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& content,
