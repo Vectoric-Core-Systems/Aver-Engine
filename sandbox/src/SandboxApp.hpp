@@ -2222,8 +2222,6 @@ private:
 
     void beginSculptStroke();
 
-    void growSculptStroke(const landscape::BrushRect& r);
-
     void endSculptStroke();
 
     void refreshFoliagePalette();

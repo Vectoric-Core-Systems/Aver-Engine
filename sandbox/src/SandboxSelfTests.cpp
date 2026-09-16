@@ -109,8 +109,8 @@ void SandboxApp::setDroneGraph(std::string) {}
 
 #endif
 
-// --landscape <path>: an explicit .ocland override. Wins over loadLandscapeForLevel's own
-// convention (the level's path with .ocland swapped in) the next time a level loads -- so a
+// --landscape <path>: an explicit .ocland override. Wins over the level's LANDSCAPE record and the
+// levelname.ocland convention the next time a level loads (handed to GameLandscape::setPathOverride) -- so a
 // --frames capture can prove the LOD-selection path draws real terrain without a level file or a
 // human clicking anything. Unguarded like setChunkStreamAuto/setDroneAuto above.
 void SandboxApp::setLandscapePath(std::string path) { landscapeCliOverride_ = std::move(path); }

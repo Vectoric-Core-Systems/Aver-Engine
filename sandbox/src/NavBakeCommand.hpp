@@ -6,10 +6,8 @@
 // none of the three. bakeNav takes two function pointers; this file is what installs the ones that
 // call aver_phys_raycast.
 //
-// WHY THE EDITOR AND NOT THE RUNTIME: terrain collision in this engine is editor-only
-// (SandboxApp::rebuildLandscapeCollision has no counterpart in Runtime), so the one
-// process where the landscape body exists is the one process that can see the ground. The bake ships
-// its result as an asset; the runtime only ever loads one.
+// WHY THE EDITOR AND NOT THE RUNTIME: baking is authoring. The bake ships its result as an asset,
+// and the runtime only ever loads one.
 #include "aver/formats/OcNav.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/synapse/NavBake.hpp"

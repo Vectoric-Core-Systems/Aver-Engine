@@ -759,8 +759,8 @@ Application* createApplication(int argc, char** argv) {
         // streaming happened without a human clicking the menu.
         // --drone-graph <path> names the .ocgraph the drone runs. Without it the drone spawns and sits still -- honest for an engine that doesn't know any project's scripts.
         if (!std::strcmp(argv[i],"--drone-graph") && i+1<argc) droneGraph = argv[++i];
-        // --landscape <path.ocland> overrides the levelname.ocland convention loadLandscapeForLevel
-        // otherwise derives. Exists so a --frames capture can prove the LOD-selection path draws real
+        // --landscape <path.ocland> overrides the level's LANDSCAPE record and the levelname.ocland
+        // convention (GameLandscape::setPathOverride). Exists so a --frames capture can prove the LOD-selection path draws real
         // terrain without a level file naming one and without a human clicking anything.
         else if (!std::strcmp(argv[i],"--landscape") && i+1<argc) landscapePath = argv[++i];
         else if (!std::strcmp(argv[i],"--chunk-stream")) {

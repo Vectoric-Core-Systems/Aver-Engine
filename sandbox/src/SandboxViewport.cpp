@@ -245,19 +245,11 @@ void SandboxApp::generateLandscapeNoise(Engine& e) {
 }
 
 // Starts a stroke: remembers that nothing has been touched yet. GameLandscape captures the BEFORE
-// samples lazily as the rect grows (see growSculptStroke) rather than up front, because at stroke
-// start the rect is not known -- a drag can wander anywhere.
+// samples lazily as each sculpt tick grows the rect (GameLandscape::sculpt) rather than up front,
+// because at stroke start the rect is not known -- a drag can wander anywhere.
 void SandboxApp::beginSculptStroke() {
     sculpting_ = true;
     landscape_.beginStroke();
-}
-
-// Unions this tick's touched rect into the stroke's, capturing the pre-stroke heights of anything
-// newly covered.
-// THE ORDER MATTERS: this must run BEFORE applyBrush writes, or the "before" it captures is
-// already the "after". brushRect() -- previously computed only inside applyBrush and unused by the editor -- is now called by the editor directly.
-void SandboxApp::growSculptStroke(const landscape::BrushRect& r) {
-    landscape_.growStroke(r);
 }
 
 // Ends a stroke and pushes ONE undo entry for the whole thing.
