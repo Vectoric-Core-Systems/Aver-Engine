@@ -4,22 +4,11 @@
 
 #include "SandboxApp.hpp"
 #include "aver/game/GameCamera.hpp"
+#include "aver/game/GameInput.hpp"
 #include "aver/game/GamePawn.hpp"
-#include "aver/platform/Gamepad.hpp"
 
 namespace aver {
 #if AVER_MODULE_FRAMEWORK
-namespace {
-// GamepadState's arrays are laid out in the ABI's own documented order (Gamepad.hpp's own comment
-// spells the order out without including this header) precisely so pushInput's loops below can walk
-// it index-for-index instead of a name-by-name switch. Pinned here, the same guard
-// Runtime/src/GameInput.cpp carries for its own copy of this same loop -- see that file for why a
-// silent count drift is worse than a compile error.
-static_assert(GamepadState::kButtonCount == static_cast<usize>(AVER_FW_GAMEPAD_BUTTON_COUNT),
-              "GamepadState::buttons and AVER_FW_GAMEPAD_* have drifted apart");
-static_assert(GamepadState::kAxisCount == static_cast<usize>(AVER_FW_GAMEPAD_AXIS_COUNT),
-              "GamepadState::axes and AVER_FW_GAMEPAD_AXIS_* have drifted apart");
-} // namespace
 
 // Starts a play session: finds the user GameMode and optional GameInstance and begins play.
 // WITH NO GAMEMODE, falls back to the drone rather than doing nothing: pressing Play used to log a
@@ -339,20 +328,12 @@ void SandboxApp::pushInput(bool uiActive) {
                                  m ? static_cast<f32>(input_.mouseDY()) : 0.0f,
                                  m ? input_.wheel() : 0.0f);
 
-    // ---- GAMEPAD, published pad 0 only -- the ABI itself accepts nothing else (framework_abi.h:
-    // "pad is fixed at 0 for every call"). Gated on `suppressed`, not `kb`: an ImGui text field
-    // steals a keystroke, never a controller button, so the extra uiWantsKeyboard clause folded
-    // into `kb` has nothing to do with a gamepad -- `suppressed` alone (window unfocused, or the
-    // player released the mouse mid-session) is the whole of when the game does not own this
-    // device. Polled unconditionally, same as input_ is read unconditionally above, so
-    // Aver.Platform's own hotplug/re-probe throttle (Gamepad.hpp) keeps ticking through a
-    // suppressed stretch instead of resetting cold when it ends.
-    GamepadState pad{};
-    pollGamepads(&pad, 1);
-    for (int32_t b = 0; b < AVER_FW_GAMEPAD_BUTTON_COUNT; ++b)
-        aver_fw_input_set_gamepad_button(0, b, (!suppressed && pad.buttons[b]) ? 1 : 0);
-    for (int32_t a = 0; a < AVER_FW_GAMEPAD_AXIS_COUNT; ++a)
-        aver_fw_input_set_gamepad_axis(0, a, !suppressed ? pad.axes[a] : 0.0f);
+    // Gated on `suppressed`, not `kb`: an ImGui text field steals a keystroke, never a controller
+    // button, so the extra uiWantsKeyboard clause folded into `kb` has nothing to do with a
+    // gamepad -- `suppressed` alone (window unfocused, or the player released the mouse
+    // mid-session) is the whole of when the game does not own this device. See
+    // game::publishGamepad's own comment for why it still polls unconditionally.
+    game::publishGamepad(!suppressed);
 #endif
 }
 

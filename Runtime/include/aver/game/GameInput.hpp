@@ -29,6 +29,13 @@ namespace aver::game {
 // the path end to end without a debugger.
 void publishInput(const InputState& in, bool focused, bool captured, f32 capturedDx, f32 capturedDy,
                    std::string* echo = nullptr);
+
+// Publishes pad 0's gamepad state into the framework -- shared by both hosts, which otherwise
+// carried identical copies of this block. `active` gates publication exactly as `focused` gates
+// publishInput's own keyboard/mouse: everything reads released/zeroed when false. Each host passes
+// its own suppression rule (the standalone runtime's `focused`, the editor Play session's
+// `!suppressed`) -- see the definition for why the pad is still polled every frame regardless.
+void publishGamepad(bool active);
 #endif
 
 } // namespace aver::game

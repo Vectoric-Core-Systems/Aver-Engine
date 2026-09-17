@@ -109,19 +109,25 @@ void publishInput(const InputState& in, bool focused, bool captured, f32 capture
         aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
     }
 
-    // ---- GAMEPAD, published pad 0 only -- the ABI itself accepts nothing else (framework_abi.h:
-    // "pad is fixed at 0 for every call"). Polled unconditionally, the same as the keyboard loop
-    // above reads `in` unconditionally: only the PUBLISHED value is gated on `focused`, so
-    // Aver.Platform's own hotplug/re-probe throttle (Gamepad.hpp) keeps ticking across an
-    // unfocused stretch instead of resetting cold the moment focus returns.
+    publishGamepad(focused);
+
+    if (echo) *echo = focused ? (names.empty() ? "(none)" : names) : std::string();
+}
+
+// ---- GAMEPAD, published pad 0 only -- the ABI itself accepts nothing else (framework_abi.h:
+// "pad is fixed at 0 for every call"). Polled unconditionally, the same as publishInput's own
+// keyboard loop reads `in` unconditionally: only the PUBLISHED value is gated on `active`, so
+// Aver.Platform's own hotplug/re-probe throttle (Gamepad.hpp) keeps ticking across an inactive
+// stretch instead of resetting cold the moment it ends. Shared by both hosts -- the standalone
+// runtime calls this with `focused`, the editor's Play session with `!suppressed` -- each passing
+// its own rule for when the game does not own the device.
+void publishGamepad(bool active) {
     GamepadState pad{};
     pollGamepads(&pad, 1);
     for (i32 b = 0; b < AVER_FW_GAMEPAD_BUTTON_COUNT; ++b)
-        aver_fw_input_set_gamepad_button(0, b, (focused && pad.buttons[b]) ? 1 : 0);
+        aver_fw_input_set_gamepad_button(0, b, (active && pad.buttons[b]) ? 1 : 0);
     for (i32 a = 0; a < AVER_FW_GAMEPAD_AXIS_COUNT; ++a)
-        aver_fw_input_set_gamepad_axis(0, a, focused ? pad.axes[a] : 0.0f);
-
-    if (echo) *echo = focused ? (names.empty() ? "(none)" : names) : std::string();
+        aver_fw_input_set_gamepad_axis(0, a, active ? pad.axes[a] : 0.0f);
 }
 
 } // namespace aver::game
