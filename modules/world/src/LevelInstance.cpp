@@ -120,7 +120,12 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         if (mr) {
             mr->mesh = p.objectId;
             mr->material = p.material.empty() ? 0 : aver_scene_material(0, p.material.c_str());
-            mr->flags |= scene::kMeshRendererVisible;
+            // AUTHORED VISIBILITY, not an unconditional seed: addComponent hands back zero-filled
+            // storage (see kMeshRendererHiddenFromOwner's own comment on that, Components.hpp), so
+            // a placement that asked to be hidden must simply not OR the bit in, rather than being
+            // set and then cleared -- the two read the same, but only one matches p.visible being
+            // the single source of truth a save later reads back out of this same bit.
+            if (p.visible) mr->flags |= scene::kMeshRendererVisible;
             if (mr->material && opt.bindMaterial) opt.bindMaterial(mr->material, p.material);
         }
 

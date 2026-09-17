@@ -68,8 +68,10 @@ EntitySnapshot captureEntity(scene::World& world, scene::Entity e);
 // touch-ups afterward, not a general post-processing hook:
 //   - CMeshRenderer: `dirty` is GPU-upload bookkeeping, not editor state, and a byte-for-byte copy of
 //     an entity the renderer had already uploaded would restore dirty=0, and the rebuilt copy would
-//     never reach the GPU. Forcing the visible bit too matches what the hardcoded recreateFrom() this
-//     replaces already did unconditionally.
+//     never reach the GPU. The visible bit is NOT touched -- it is AUTHORED data now (a level saves
+//     it; see OcWorldPlacement::visible), so the byte copy just above is left to stand: Undo of a
+//     delete, Copy/Paste and Duplicate all keep whatever visibility the source actually had, which
+//     is the whole point of a byte-exact restore.
 //   - CParticleEmitter: `seed` is derived, not authored -- ParticleSystem::tick assigns one from the
 //     entity's own handle only while the field reads 0 (see ParticleSystem.cpp's seedFor). A raw copy
 //     carries the SOURCE's already-nonzero seed onto a DIFFERENT entity, and two emitters seeded

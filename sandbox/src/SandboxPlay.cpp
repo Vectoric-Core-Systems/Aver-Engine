@@ -22,8 +22,19 @@ void SandboxApp::capturePlayWorld() {
 #if AVER_MODULE_SCENE
     scene::World& w = scene::World::instance();
     playWorldSnapshot_.reserve(levelEntities_.size());
-    for (const scene::Entity e : levelEntities_)
-        if (w.valid(e)) playWorldSnapshot_.push_back({e, w.localTransform(e)});
+    for (const scene::Entity e : levelEntities_) {
+        if (!w.valid(e)) continue;
+        // THE RAW BIT, deliberately NOT authoredVisible(): this is "what Play found", the exact
+        // same convention localTransform(e) just below follows, and an entity H-hid before Play
+        // began is one whose bit already read clear before anything here ran. Capturing
+        // authoredVisible() instead (true for an H-hidden entity, since editorHidden_ still names
+        // it) would make Stop UN-HIDE it -- Play/Stop touching an H-hide it never promised to
+        // touch, purely as a side effect of what gameplay did or did not do in between.
+        bool vis = true;
+        if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
+            vis = (mr->flags & scene::kMeshRendererVisible) != 0;
+        playWorldSnapshot_.push_back({e, w.localTransform(e), vis});
+    }
     playWorldCaptured_ = true;
     AVER_INFO("[Sandbox] Play: {} level transform(s) recorded; Stop will put them back",
               (u32)playWorldSnapshot_.size());
@@ -52,6 +63,14 @@ void SandboxApp::restorePlayWorld() {
     for (const PlaySavedTransform& t : playWorldSnapshot_) {
         if (!w.valid(t.e)) { ++lost; continue; }
         if (w.setLocalTransform(t.e, t.xf)) ++put;
+        // THE RAW BIT BACK, same convention as the transform just above -- not through
+        // setAuthoredVisible(), which would also touch editorHidden_ and turn an H-hide from
+        // before Play into a permanent, authored one. A graph's Entity.SetVisible call during Play
+        // writes this identical bit directly, so undoing whatever it did is this simple.
+        if (auto* mr = w.component<scene::CMeshRenderer>(t.e, scene::kComponentMeshRenderer)) {
+            if (t.visible) mr->flags |=  scene::kMeshRendererVisible;
+            else           mr->flags &= ~scene::kMeshRendererVisible;
+        }
     }
     if (lost) AVER_INFO("[Sandbox] Stop: {} level transform(s) restored; {} entity/entities were "
                         "destroyed during play and cannot be", put, lost);

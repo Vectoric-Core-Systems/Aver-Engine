@@ -62,7 +62,7 @@ PCGVOLUME name Sky seed 3 cell 1600 octaves 4 floor 0.45 bias 1.6 infinite
 PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 800 800 10 M_Floor
 PLACEG Meshes/cube.ocmesh -1600 -3200 150 0 0 0 20 800 150 M_Wall
 PLACEG Meshes/cube.ocmesh 100 200 300 10 20 30 1 2 3 M_Floor
-PLACEG Meshes/cube.ocmesh 5 5 5 0 0 0 2 2 2 M_Accent nocollide
+PLACEG Meshes/cube.ocmesh 5 5 5 0 0 0 2 2 2 M_Accent nocollide hidden
 PLACEG Meshes/cube.ocmesh 7 8 9 0 0 0 1 1 1
 )";
 
@@ -201,15 +201,21 @@ int main() {
     const auto* mr0 = world.component<scene::CMeshRenderer>(inst.entities[0], scene::kComponentMeshRenderer);
     const auto* mr1 = world.component<scene::CMeshRenderer>(inst.entities[1], scene::kComponentMeshRenderer);
     const auto* mr2 = world.component<scene::CMeshRenderer>(inst.entities[2], scene::kComponentMeshRenderer);
+    const auto* mr3 = world.component<scene::CMeshRenderer>(inst.entities[3], scene::kComponentMeshRenderer);
     const auto* mr4 = world.component<scene::CMeshRenderer>(inst.entities[4], scene::kComponentMeshRenderer);
-    check(mr0 && mr1 && mr2 && mr4, "every placement got a CMeshRenderer");
-    if (!(mr0 && mr1 && mr2 && mr4)) {
+    check(mr0 && mr1 && mr2 && mr3 && mr4, "every placement got a CMeshRenderer");
+    if (!(mr0 && mr1 && mr2 && mr3 && mr4)) {
         AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
         return g_failures ? g_failures : 1;
     }
 
     check((mr0->flags & scene::kMeshRendererVisible) != 0, "the mesh renderer is visible");
     check(mr0->mesh == w.placements[0].objectId, "mesh id is the placement's objectId");
+
+    // `hidden` (placement 3, alongside its own `nocollide`) must NOT set the bit -- instantiate()
+    // used to OR it in unconditionally regardless of what the placement asked for.
+    check((mr3->flags & scene::kMeshRendererVisible) == 0,
+          "a placement authored `hidden` instantiates with the visible bit CLEAR");
 
     check(mr0->material != 0, "an authored surface interns to a non-zero token");
     check(mr0->material == mr2->material, "the same surface name interns to the same token");
@@ -240,6 +246,10 @@ int main() {
     // ---- collide, which has no component and must be read off the placement -----------------------
     check(w.placements[3].collide == false, "nocollide parsed");
     check(w.placements[0].collide == true, "an unmarked placement collides");
+
+    // ---- visible, off the placement too, mirroring collide exactly ---------------------------------
+    check(w.placements[3].visible == false, "hidden parsed");
+    check(w.placements[0].visible == true, "an unmarked placement is visible");
 
     // ---- determinism: a second instantiation of the same data agrees ------------------------------
     // Entity handles differ (the first five are still live), so this compares STATE, which is what a

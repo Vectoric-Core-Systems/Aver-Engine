@@ -423,6 +423,13 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             }
             for (usize i = next; i < t.size(); ++i) {
                 if (equalsCI(t[i], "nocollide")) p.collide = false;
+                // Bare token, beside `nocollide`, parsed the identical way and for the identical
+                // reason -- BEFORE the material fallback, or the word is swallowed as a surface
+                // name. An older reader built before this token existed hits that same fallback:
+                // "hidden" becomes the placement's material (if none was named yet), which is not a
+                // new failure mode -- `nocollide`/`snap`/`class` all read this way on an old build --
+                // just a new way to trigger it.
+                else if (equalsCI(t[i], "hidden")) p.visible = false;
                 // Bare token, beside `nocollide`. BEFORE the material fallback below, or the
                 // word would be swallowed as a surface name -- which is how a trailing bare
                 // token silently becomes a material called "snap".
@@ -770,6 +777,11 @@ std::string writeOcworld(const OcWorldData& w) {
         }
         if (!p.material.empty()) { s += " "; s += p.material; }
         if (!p.collide) s += " nocollide";
+        // Omitted when true, same "no override is the default" rule every optional token here
+        // follows -- a level nobody hid anything in gains no `hidden` tokens and keeps round-
+        // tripping byte-identically. Placed right after `nocollide`, before `snap`, matching the
+        // parser's own read order for the two bare tokens.
+        if (!p.visible) s += " hidden";
         if (p.snapToGround) s += " snap";
         // Omitted when empty, same "no override is the default" rule as GAMEMODE above.
         if (!p.className.empty()) { s += " class "; s += p.className; }

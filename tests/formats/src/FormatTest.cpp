@@ -761,6 +761,64 @@ static void checkOcworldPlacementName() {
     }
 }
 
+// Checks PLACE's `hidden` token: the Details panel's Visible checkbox, saved with the level
+// (owner decision, Unreal-style) rather than the editor's own H/Shift+H/Ctrl+H hide, which stays
+// session-only and never reaches this file. Modelled on `nocollide` right down to the contract:
+// a bare token, absent means visible, and a level written before this field existed round-trips
+// byte-identically.
+static void checkOcworldPlacementHidden() {
+    AVER_INFO("=== .ocworld PLACE hidden token ===");
+    using namespace fmt;
+    std::string err;
+
+    {
+        // A HIDDEN PLACEMENT, beside an ordinary one and beside `nocollide`, `class` and `name` --
+        // all five parsed by the same trailing-token loop, keyword before the material catch-all.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "PLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
+                           "PLACE b.ocmesh 1 0 0 0 0 0 1 M_B nocollide hidden snap class PlayerStart name Spawn\n",
+                           w, &err), "PLACE lines with a hidden token parse");
+        check(w.placements.size() == 2, "and keep both placements");
+        check(w.placements[0].visible, "placement 0 (no `hidden` token) reads visible");
+        check(!w.placements[1].visible, "placement 1 (`hidden`) reads NOT visible");
+        check(!w.placements[1].collide && w.placements[1].snapToGround &&
+              w.placements[1].className == "PlayerStart" && w.placements[1].name == "Spawn",
+              "and every OTHER token on the same line still reads correctly beside it");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("PLACE b.ocmesh 1 0 0 0 0 0 1 M_B nocollide hidden snap class PlayerStart "
+                        "name Spawn") != std::string::npos,
+              "the written text places `hidden` right after `nocollide`, before `snap`, matching "
+              "the order it was read in");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "what the writer produced parses again");
+        check(back.placements[0].visible && !back.placements[1].visible,
+              "with both placements' visibility intact");
+        check(writeOcworld(back) == text, "and a second write reproduces the first byte for byte");
+    }
+    {
+        // A FILE WITH NOTHING HIDDEN IS UNCHANGED -- the exact guarantee `hidden` exists to keep:
+        // a level saved before this field existed must keep round-tripping byte-identically, not
+        // grow a `hidden` token on every placement it never had one on.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME NoneHidden\n"
+                           "PLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
+                           "PLACE b.ocmesh 1 2 3 0 0 0 2 M_B nocollide\n",
+                           w, &err), "a world with no `hidden` tokens parses");
+        check(w.placements[0].visible && w.placements[1].visible,
+              "and every placement reads visible, the struct default");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("hidden") == std::string::npos,
+              "the written text carries no `hidden` token at all");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "it parses again");
+        check(writeOcworld(back) == text,
+              "and a second write is byte-identical -- exactly what an old, nothing-hidden save keeps doing");
+    }
+}
+
 // Checks the SCATTER record: every field, round-trip byte-identity, an unbounded density band's
 // deliberate omission from the written text, and that a line this parser does not understand (a
 // stand-in for a future record) does not disturb SCATTER or anything else already parsed.
@@ -1539,6 +1597,7 @@ int main(int argc, char** argv) {
     checkOcworld();
     checkOcworldNesting();
     checkOcworldPlacementName();
+    checkOcworldPlacementHidden();
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();

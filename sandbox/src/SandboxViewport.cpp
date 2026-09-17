@@ -2284,11 +2284,40 @@ void SandboxApp::nudgeSelection(const Vec3& deltaCm) {
     });
 }
 
+// AUTHORED visibility: what saveLevel writes to the level and what the Details panel's Visible
+// checkbox shows, as distinct from the raw kMeshRendererVisible bit hideSelection/isolateSelection
+// clear below for a SESSION-ONLY hide. An entity currently H-hidden reads its bit clear but is
+// still authored visible -- editorHidden_ is exactly the record of "this bit is off because H did
+// it, not because anyone asked to hide it for real" that lets the two be told apart.
+bool SandboxApp::authoredVisible(scene::Entity e) const {
+    scene::World& w = scene::World::instance();
+    const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    if (!mr) return true;   // no renderer, nothing to hide -- matches OcWorldPlacement::visible's own default
+    if (mr->flags & scene::kMeshRendererVisible) return true;
+    return std::find(editorHidden_.begin(), editorHidden_.end(), e) != editorHidden_.end();
+}
+
+// Sets the AUTHORED bit directly, the Details panel's own write path (and saveLevel's read of it,
+// through this same bit). Removes `e` from editorHidden_ first: a real, authored edit supersedes
+// whatever temporary H-hide state the entity was in, so afterward the bit alone is the truth again
+// -- unchecking Visible on something H hid actually hides it for real, and checking it un-hides it
+// for real, rather than leaving a stale editorHidden_ entry to reassert itself on the next Ctrl+H.
+void SandboxApp::setAuthoredVisible(scene::Entity e, bool v) {
+    scene::World& w = scene::World::instance();
+    auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    if (!mr) return;
+    if (const auto it = std::find(editorHidden_.begin(), editorHidden_.end(), e); it != editorHidden_.end())
+        editorHidden_.erase(it);
+    if (v) mr->flags |=  scene::kMeshRendererVisible;
+    else   mr->flags &= ~scene::kMeshRendererVisible;
+}
+
 // H: session-only visibility, off. Clears CMeshRenderer's own kMeshRendererVisible bit -- the exact
 // flag the Details panel's Visible checkbox writes, so a hidden entity reads identically everywhere
 // else that flag is already consulted (the render loop, pick()'s own eligibility test). NOT an
-// undoable edit and NOT a level edit: levels do not store visibility, so this never calls pushEdit
-// and never has to mark the level unsaved.
+// undoable edit and NOT a level edit -- H is deliberately temporary, not because a level cannot
+// store visibility (it can; see authoredVisible/setAuthoredVisible just above), so this never calls
+// pushEdit and never has to mark the level unsaved.
 void SandboxApp::hideSelection() {
     scene::World& w = scene::World::instance();
     for (const scene::Entity e : selectedEntities()) {

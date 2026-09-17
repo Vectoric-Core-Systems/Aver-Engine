@@ -1343,20 +1343,40 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         }
         if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
             if (ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
-                bool vis = (mr->flags & scene::kMeshRendererVisible) != 0;
+                bool vis = authoredVisible(selEntity_);
                 if (ImGui::Checkbox("Visible", &vis)) {
-                    if (vis) mr->flags |=  scene::kMeshRendererVisible;
-                    else     mr->flags &= ~scene::kMeshRendererVisible;
+                    // APPLIES TO THE WHOLE SELECTION, the same multi-selection rule the Mesh/
+                    // Material pickers just below use -- but UNLIKE them, this one pushes an undo
+                    // entry: Visible is now AUTHORED, level-saved data (owner decision, Unreal-
+                    // style), not session bookkeeping, so a stray click has to be as recoverable as
+                    // a transform edit. One EditCmd for the whole click, restoring every touched
+                    // entity's own previous authored state on Ctrl+Z -- see EditCmd::VisibilityChange.
+                    EditCmd c;
+                    c.kind = EditCmd::Kind::Visibility;
+                    for (const scene::Entity ent : multiSelected) {
+                        if (!w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer)) continue;
+                        const bool before = authoredVisible(ent);
+                        if (before == vis) continue;   // already there: no dead entry for it
+                        setAuthoredVisible(ent, vis);
+                        c.visibility.push_back({editIdFor(ent), before, vis});
+                    }
+                    if (!c.visibility.empty()) pushEdit(std::move(c));
                 }
-                // A SESSION-ONLY HIDE, AND THE TOOLTIP SAYS SO. No placement record carries
-                // visibility (OcWorldPlacement), and both level loaders set kMeshRendererVisible on
-                // every mesh they instantiate, so a hidden mesh comes back visible on reopen whether
-                // or not the level was saved. That is also why this toggle neither pushes an undo
-                // entry nor marks the level unsaved: dirtying the document would prompt a save that
-                // cannot keep the change.
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Hides this mesh for the current session only.\n"
-                                      "Visibility is not saved with the level.");
+                // SAVED WITH THE LEVEL, Unreal-style -- unlike H/Shift+H/Ctrl+H, which stay a
+                // temporary, editor-only hide and never reach the file (see hideSelection's own
+                // comment, SandboxViewport.cpp). The anchor can be checked here (authored visible)
+                // and still read invisible in the viewport right now, if H is the reason why.
+                if (ImGui::IsItemHovered()) {
+                    const bool hHidden = std::find(editorHidden_.begin(), editorHidden_.end(),
+                                                   selEntity_) != editorHidden_.end();
+                    if (hHidden)
+                        ImGui::SetTooltip("Saved with the level.\n"
+                                          "H hides it in the editor only, without changing this.\n"
+                                          "(hidden in editor, Ctrl+H to show)");
+                    else
+                        ImGui::SetTooltip("Saved with the level.\n"
+                                          "H hides it in the editor only, without changing this.");
+                }
                 // THE FIELD IS NOW REASSIGNABLE. It printed this hex id and offered nothing --
                 // no picker, and not even a drop target: the only mesh drag-drop in the editor
                 // lands on the 3D VIEWPORT and SPAWNS A NEW ENTITY, which is a different verb.

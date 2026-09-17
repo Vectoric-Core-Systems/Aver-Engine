@@ -4,8 +4,30 @@
 
 #include "SandboxApp.hpp"
 
+#include <cstring>
+
 namespace aver {
 #if AVER_MODULE_SCENE
+namespace {
+// captureEntity with the snapshot's CMeshRenderer visibility set to AUTHORED, not the raw bit. H
+// clears the bit and records the entity in editorHidden_, but the entity rebuilt by Undo-of-delete,
+// Paste or Duplicate is a new handle that list does not name -- so without this, an object H was
+// only hiding would come back hidden for real, and save that way.
+editor::EntitySnapshot captureAuthored(scene::World& w, scene::Entity e,
+                                       const std::vector<scene::Entity>& editorHidden) {
+    editor::EntitySnapshot s = editor::captureEntity(w, e);
+    if (std::find(editorHidden.begin(), editorHidden.end(), e) == editorHidden.end()) return s;
+    for (editor::EntitySnapshot::Comp& comp : s.components) {
+        if (comp.type != scene::kComponentMeshRenderer || comp.bytes.size() != sizeof(scene::CMeshRenderer)) continue;
+        scene::CMeshRenderer mr;
+        std::memcpy(&mr, comp.bytes.data(), sizeof mr);
+        mr.flags |= scene::kMeshRendererVisible;
+        std::memcpy(comp.bytes.data(), &mr, sizeof mr);
+    }
+    return s;
+}
+} // namespace
+
 // THE INVARIANT IS A VALIDITY TEST, NOT A CHORE FOR FORTY CALL SITES.
 //
 // sel_/selEntity_ are assigned directly in about forty places -- viewport pick, undo, paste,
@@ -338,6 +360,18 @@ void SandboxApp::removeComponentRaw(EditId id, u32 type) {
     scene::World::instance().removeComponent(e, type);
 }
 
+// Visibility's apply: replays every EditCmd::VisibilityChange in one command through
+// setAuthoredVisible, exactly as applyXformTo replays AlsoMoved -- `undoing` picks before/after,
+// the entity itself is found through the EditId indirection so this still works after whatever
+// entity it names has been recreated under a new handle since the command was pushed.
+void SandboxApp::applyVisibilityTo(const EditCmd& c, bool undoing) {
+    for (const EditCmd::VisibilityChange& vc : c.visibility) {
+        const scene::Entity e = entityForEdit(vc.id);
+        if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) continue;
+        setAuthoredVisible(e, undoing ? vc.before : vc.after);
+    }
+}
+
 // Removes one component from the selected entity as one undoable command. Mirrors renameEntity's
 // shape: capture the before-state, apply, push. THE BEFORE-STATE IS THE WHOLE COMPONENT, byte-
 // exact (EntitySnapshot::Comp, the same shape captureEntity's own loop produces), because undo has
@@ -492,7 +526,7 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
         c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
         c.after.scale = loc->xf.scale;
     }
-    c.snap = editor::captureEntity(w, e);
+    c.snap = captureAuthored(w, e, editorHidden_);
     if (const scene::Entity par = w.parent(e); par != scene::kInvalidEntity)
         c.parentId = editIdFor(par);
 #if AVER_MODULE_PHYSICS
@@ -741,7 +775,7 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
         }
         if (const auto lb = entityLabels_.find(static_cast<u32>(d)); lb != entityLabels_.end())
             n.label = lb->second;
-        n.snap = editor::captureEntity(w, d);
+        n.snap = captureAuthored(w, d, editorHidden_);
         // Same two non-component flags the root carries; a subtree restored without them has the
         // identical silent-solidify problem one level down.
         if (const auto ci = entityCollide_.find(static_cast<u32>(d)); ci != entityCollide_.end())
@@ -911,6 +945,7 @@ void SandboxApp::undo() {
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameBefore); break;
         case EditCmd::Kind::RemoveComponent: restoreComponent(c.id, c.removedComponent); break;
+        case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
 #endif
         case EditCmd::Kind::CreateObj:   // undo a create: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
@@ -961,6 +996,7 @@ void SandboxApp::redo() {
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameAfter); break;
         case EditCmd::Kind::RemoveComponent: removeComponentRaw(c.id, c.removedComponent.type); break;
+        case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
 #endif
         case EditCmd::Kind::CreateObj:   // redo a create: put it back
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())

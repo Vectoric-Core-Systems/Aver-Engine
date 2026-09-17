@@ -57,7 +57,16 @@ scene::Entity instantiateEntity(scene::World& world, const EntitySnapshot& snap,
         std::memcpy(dst, c.bytes.data(), c.bytes.size());
         if (c.type == scene::kComponentMeshRenderer) {
             auto* mr = static_cast<scene::CMeshRenderer*>(dst);
-            mr->flags |= scene::kMeshRendererVisible;
+            // dirty=1 ONLY, not flags -- this used to force kMeshRendererVisible on too, which
+            // silently overwrote the memcpy just above the instant it landed. That was fine while
+            // the bit meant nothing outside the session, but it is now AUTHORED data a level saves
+            // (OcWorldPlacement::visible; SandboxApp::authoredVisible/setAuthoredVisible), and the
+            // memcpy already restored it byte-exact: Undo of a delete, Copy/Paste and Duplicate must
+            // all keep whatever visibility the source actually had, not silently un-hide it. dirty
+            // is different in kind -- pure GPU-upload bookkeeping the source's own byte copy would
+            // otherwise carry over stale (possibly already 0, meaning "nothing to upload"), so it
+            // still needs the explicit reseed a fresh entity's own EnsureMeshRenderer/SetVisible path
+            // gives it.
             mr->dirty = 1;
         }
         // VERIFIED, NOT ASSUMED (particles slice 5's own instruction) -- and an adversarial re-check

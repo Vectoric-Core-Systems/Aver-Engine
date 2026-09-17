@@ -25,6 +25,16 @@ struct OcWorldPlacement {
     f64 sx = 1, sy = 1, sz = 1;            // non-uniform scale (a PLACE sets all three equal)
     bool collide = true;                   // whether the world builds a static body for it
 
+    // AUTHORED visibility -- the Details panel's Visible checkbox, SAVED WITH THE LEVEL and
+    // honoured by a packaged game, Unreal-style. NOT the editor's H/Shift+H/Ctrl+H hide: that is
+    // deliberately session-only and never reaches this field or this file (see SandboxApp's
+    // authoredVisible/setAuthoredVisible and editorHidden_).
+    //
+    // DEFAULTS TRUE, mirroring scene::CMeshRenderer::flags' own kMeshRendererVisible default, so a
+    // level written before this field existed has every placement visible -- exactly what it meant
+    // before an author could turn a mesh off at all.
+    bool visible = true;
+
     // `snap`: sit on the ground, with `z` read as an offset ABOVE it rather than an absolute
     // height. A bare token, matching PLACE's own `nocollide` and PCGVOLUME's `infinite` -- it is a
     // statement about what the placement IS, not a value it carries.

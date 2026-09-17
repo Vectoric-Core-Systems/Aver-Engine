@@ -1964,7 +1964,7 @@ private:
     // captures every component via EntitySnapshot -- see EditorEntitySnapshot.hpp for what it
     // deliberately omits (hierarchy; CName's internal blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility };
         Kind kind = Kind::Transform;
         // WHICH EDIT THIS IS, monotonically. Identifies the document's state so a save can record
         // "clean as of here" -- see levelHasUnsavedEdits. Never reused, so undo and redo move the
@@ -1996,6 +1996,18 @@ private:
         // doing at the time.
         struct AlsoMoved { EditId id = 0; Transform beforeLocal, afterLocal; };
         std::vector<AlsoMoved> alsoMoved;
+
+        // VISIBILITY payload: every selected entity's AUTHORED-visible flag, before and after one
+        // click on the Details panel's Visible checkbox -- the identical "one gesture, N entities,
+        // a before/after pair per entity" shape AlsoMoved just above already uses for a multi-
+        // selection drag, reused here rather than invented fresh. `before`/`after` are what
+        // authoredVisible() returned for that entity; undo/redo replay them through
+        // setAuthoredVisible(), which also drops the entity from editorHidden_ -- so undoing a
+        // Visible edit on something that happened to be H-hidden at the time makes it visible
+        // again rather than quietly reinstating a session-only hide the checkbox never promised
+        // to preserve.
+        struct VisibilityChange { EditId id = 0; bool before = true; bool after = true; };
+        std::vector<VisibilityChange> visibility;
         std::string label;        // outliner display name; editor-owned bookkeeping, not World's
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
@@ -2128,6 +2140,12 @@ private:
     // panel's Remove Component handler. False when the entity is gone or does not carry `type`,
     // matching World::removeComponent's own refusal so a stale click is a silent no-op.
     bool removeComponentFromSelection(u32 type);
+
+    // Visibility's apply: `undoing` picks which side of each EditCmd::VisibilityChange pair to
+    // write, mirroring applyXformTo's own `undoing` parameter for the identical reason -- one
+    // click on the Visible checkbox is one gesture across the whole selection, so Ctrl+Z must
+    // undo all of it or none of it.
+    void applyVisibilityTo(const EditCmd& c, bool undoing);
 #endif
 
     void pushEdit(EditCmd c);
@@ -2403,8 +2421,20 @@ private:
     void snapSelectionToFloor();
     // Arrow keys / PageUp / PageDown: move by the move-snap step (or 10 cm with snapping off).
     void nudgeSelection(const Vec3& deltaCm);
+
+    // AUTHORED visibility: what the Details panel's Visible checkbox shows and what saveLevel
+    // writes to the level (OcWorldPlacement::visible), as distinct from H/Shift+H/Ctrl+H's
+    // SESSION-ONLY hide just below. True when kMeshRendererVisible is set OR the entity is in
+    // editorHidden_ -- an entity H hid is still authored visible, so it saves, and reopens, that way.
+    bool authoredVisible(scene::Entity e) const;
+    // Sets the bit directly and drops `e` from editorHidden_: an authored edit supersedes whatever
+    // temporary H-hide state the entity was in, so the bit alone is the truth again afterward.
+    void setAuthoredVisible(scene::Entity e, bool v);
+
     // H hides the selection, Shift+H hides everything else, Ctrl+H brings back everything these hid.
-    // SESSION-ONLY, like the Details panel's Visible checkbox: levels do not store visibility.
+    // SESSION-ONLY like every H verb here -- not because a level cannot store visibility (it can;
+    // see authoredVisible/setAuthoredVisible just above) but because H is deliberately temporary,
+    // the same role Unreal's own H plays beside a real, saved Visible checkbox.
     void hideSelection();
     void isolateSelection();
     void unhideAll();
@@ -4042,12 +4072,17 @@ private:
     // reloading and losing your edits.
     // A TRANSFORM SNAPSHOT, NOT A RELOAD: reloading would also throw away every unsaved edit made
     // before Play, a worse and silent bug. Restoring from memory keeps the editor's own state untouched.
-    // TRANSFORMS AND SPAWNED ENTITIES, deliberately, not a full component snapshot: those two cover
-    // what physics and gameplay actually change; the honest subset, so nobody reads Stop as a
-    // guarantee it doesn't make.
+    // TRANSFORMS, VISIBILITY AND SPAWNED ENTITIES, deliberately, not a full component snapshot:
+    // those three cover what physics and gameplay actually change; the honest subset, so nobody
+    // reads Stop as a guarantee it doesn't make. Visibility joined the set once it became AUTHORED,
+    // saved data rather than throwaway session state -- a graph can legitimately call
+    // Entity.SetVisible during Play (the identical kMeshRendererVisible bit the Details panel's
+    // Visible checkbox now saves with the level), and without this Stop left that toggle standing:
+    // hide a prop from a trigger, press Stop, and the editor's own saved state came back changed by
+    // whatever the last session happened to do to it.
     // True while Play runs on the ENGINE's default GameMode because the project declared none.
     bool defaultPawnPlay_ = false;
-    struct PlaySavedTransform { scene::Entity e; Transform xf; };
+    struct PlaySavedTransform { scene::Entity e; Transform xf; bool visible = true; };
     std::vector<PlaySavedTransform> playWorldSnapshot_;
     // Every entity alive when Play began. Anything alive at Stop that is NOT in here was created
     // during play and is taken back down.

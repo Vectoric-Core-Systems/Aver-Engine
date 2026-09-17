@@ -51,8 +51,9 @@ int main() {
     if (mr) {
         mr->mesh = 0xABCDEF0011223344ull;
         mr->material = 7;
-        mr->flags = 0;          // deliberately NOT visible, and deliberately NOT dirty --
-        mr->dirty = 0;          // instantiateEntity must force both back on (see its own comment)
+        mr->flags = 0;          // deliberately NOT visible -- instantiateEntity must now PRESERVE
+        mr->dirty = 0;          // this (authored visibility), while still forcing dirty back on --
+                                 // see instantiateEntity's own comment on why the two differ
         mr->aabbMin[0] = -3.0f; mr->aabbMin[1] = -4.0f; mr->aabbMin[2] = -5.0f;
         mr->aabbMax[0] =  3.0f; mr->aabbMax[1] =  4.0f; mr->aabbMax[2] =  5.0f;
     }
@@ -103,8 +104,9 @@ int main() {
         check(rMr->mesh == 0xABCDEF0011223344ull, "CMeshRenderer.mesh round-tripped byte-exact");
         check(rMr->material == 7, "CMeshRenderer.material round-tripped byte-exact");
         check(rMr->aabbMin[0] == -3.0f && rMr->aabbMax[2] == 5.0f, "CMeshRenderer AABB round-tripped byte-exact");
-        check((rMr->flags & kMeshRendererVisible) != 0,
-              "instantiateEntity forces the visible bit even though the source had it cleared");
+        check((rMr->flags & kMeshRendererVisible) == 0,
+              "instantiateEntity PRESERVES the captured visible bit (authored visibility) rather "
+              "than forcing it on");
         check(rMr->dirty == 1,
               "instantiateEntity forces dirty=1 (GPU-upload bookkeeping) even though the source had it cleared");
     }

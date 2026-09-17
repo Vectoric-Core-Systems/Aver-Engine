@@ -490,6 +490,11 @@ bool SandboxApp::saveLevel(const std::string& path) {
         // Entities created in the editor are absent from the map and keep the true default.
         const auto collideIt = entityCollide_.find(static_cast<u32>(e));
         p.collide = collideIt == entityCollide_.end() ? true : collideIt->second;
+        // `hidden`: the Details panel's Visible checkbox, saved with the level (owner decision,
+        // Unreal-style). AUTHORED, not the raw kMeshRendererVisible bit -- an entity H is
+        // currently hiding must still write visible, or Ctrl+H's own claim of being temporary
+        // would be false the moment anyone saved with it on. See authoredVisible's own comment.
+        p.visible = authoredVisible(e);
         // A SNAPPED PLACEMENT KEEPS ITS OFFSET, not the resolved world height. See the load site
         // for why writing loc->xf.position.z here bakes the terrain into the level.
         //
