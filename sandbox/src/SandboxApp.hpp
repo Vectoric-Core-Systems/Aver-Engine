@@ -2565,7 +2565,10 @@ private:
     const aver::editor::PickGeometry& pickGeometryFor(u64 meshId);
 #endif
 
-    void pick(Engine& e, const ImGuiIO& io);
+    // Returns true when the click landed on something (an entity or a placeholder object),
+    // including the Ctrl-toggle path; false on a Ctrl-click MISS, which leaves
+    // sel_/selEntity_/the multi-selection untouched. See its own definition for why.
+    bool pick(Engine& e, const ImGuiIO& io);
 
     bool dropButton(const char* label);
 

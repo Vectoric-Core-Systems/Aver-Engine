@@ -1229,8 +1229,14 @@ void SandboxApp::handleManip(Engine& e) {
                 const scene::Entity prevEnt = selEntity_;
 #endif
                 const bool hadSel = anySelected();
-                pick(e, io);
-                const bool sameTarget = hadSel && anySelected() && sel_ == prevSel
+                const bool pickHit = pick(e, io);
+                // PICKHIT GATES THE DRAG, not just sel_/selEntity_ matching prevSel/prevEnt: a
+                // Ctrl-click MISS now leaves the selection exactly where it was (pick()'s own
+                // tail), so sel_==prevSel/selEntity_==prevEnt would otherwise be trivially true on
+                // a miss too, and Ctrl-clicking empty space next to a selected object would grab
+                // and drag it. Requiring pickHit means only a click that actually landed back on
+                // the already-selected thing counts as a grab.
+                const bool sameTarget = pickHit && hadSel && anySelected() && sel_ == prevSel
 #if AVER_MODULE_SCENE
                                         && selEntity_ == prevEnt
 #endif
@@ -1243,11 +1249,14 @@ void SandboxApp::handleManip(Engine& e) {
 #if AVER_MODULE_SCENE
                 // MARQUEE ARMS ON A MISS, Select tool only (the brief above is about picking an
                 // OBJECT; Move/Rotate/Scale keep their old "click empty space, deselect" meaning
-                // unchanged). pick() just cleared the selection above (or left it cleared under
-                // Ctrl -- see pick()'s own tail), so arming here costs a click on empty space
-                // nothing it did not already do; a release with no further movement below the
-                // threshold reads as that exact same click, per marqueeActive_ staying false.
-                else if (tool_ == Tool::Select && !anySelected()) {
+                // unchanged). Two misses arm it: a plain click that cleared the selection (pick()
+                // just did that above, so arming here costs a click on empty space nothing it did
+                // not already do), and a Ctrl-click miss, which pick() left the selection alone
+                // for -- arming that one is what makes Ctrl+drag from empty space ADD the catch to
+                // an existing selection instead of only working when nothing was selected yet. A
+                // release with no further movement below the threshold reads as that exact same
+                // click, per marqueeActive_ staying false.
+                else if (tool_ == Tool::Select && !pickHit && (!anySelected() || io.KeyCtrl)) {
                     marqueeArmed_ = true; marqueeActive_ = false;
                     marqueeX0_ = marqueeX1_ = mx; marqueeY0_ = marqueeY1_ = my;
                 }
@@ -1973,7 +1982,7 @@ const aver::editor::PickGeometry& SandboxApp::pickGeometryFor(u64 meshId) {
 // id, or a project .ocmesh that would not load -- both fall back to the bounding-box test instead,
 // keeping the ORIGINAL ab3bca81 rule: t > 0.0f, so an object whose bounds enclose the camera is not
 // auto-selected by every click (it stays reachable from the Outliner).
-void SandboxApp::pick(Engine& e, const ImGuiIO& io) {
+bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     (void)e;
     Vec3 ro, rd;
     viewportRay(io.MousePos.x, io.MousePos.y, ro, rd);
@@ -2064,15 +2073,25 @@ void SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     // has (outlinerOrder_, what multiRange walks) and a 3D view does not -- "every entity between
     // these two" is not a question a viewport can answer. Adding it here would mean inventing an
     // order, and an order the user cannot see is worse than no gesture.
+    //
+    // A CTRL-CLICK MISS -- nothing under the cursor in either world -- is its own case and
+    // returns FALSE without touching sel_/selEntity_/the multi-selection at all: it is what lets
+    // the caller arm the Select-tool marquee ADDITIVELY (Ctrl+drag from empty space, catching
+    // more without first losing what is already selected) instead of the Ctrl behaving like a
+    // plain miss and clearing everything first. A miss that still landed on a placeholder object
+    // (best != -1) is not "empty space" -- placeholders never joined the scene multi-select set,
+    // so that falls through to the plain-click assignment below exactly as it always has.
 #if AVER_MODULE_SCENE
     const bool extend = ImGui::GetIO().KeyCtrl;
     if (extend && bestEnt != kInvalidId) {
         multiToggle(static_cast<scene::Entity>(bestEnt));
-        return;
+        return true;
     }
+    if (extend && bestEnt == kInvalidId && best == -1) return false;
 #endif
     if (bestEnt != kInvalidId) { sel_ = kSelScene; selEntity_ = bestEnt; }
     else                       { sel_ = best;     selEntity_ = kInvalidId; }
+    return bestEnt != kInvalidId || best != -1;
 }
 
 #endif
