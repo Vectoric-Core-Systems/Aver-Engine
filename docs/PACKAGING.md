@@ -81,7 +81,7 @@ Verified against the tree at `5714ba3`. No engine code changed. Every load-beari
   dxcompiler.dll  dxil.dll  nethost.dll
   MSVCP140.dll  VCRUNTIME140.dll  VCRUNTIME140_1.dll     ← see (e); missing today
   Scripting\                         ← managed bridge + contract assemblies
-  Game.ocproject                     ← rewritten manifest
+  Game.ocproject                     ← rewritten manifest, every source KEY carried through
   Content\                           ← the project's Content, filtered
   Binaries\Materials\  Binaries\Scripts\
   THIRD-PARTY-NOTICES.txt
@@ -91,6 +91,8 @@ Verified against the tree at `5714ba3`. No engine code changed. Every load-beari
 **Why this shape and not an archive.** The engine cannot read an archive. `kAvrSubtypePak` exists at `modules/formats/include/aver/formats/Avr1.hpp:30` and has no other occurrence in the tree; the `TOC ` chunk in `docs/formats/FORMAT_SPECS.md` §13 is unimplemented. Worse, `parseAvr1` is hostile to naive embedding: `modules/formats/src/Avr1.cpp:242` requires the header's `FileSize` to equal the passed length *exactly*, `:262` refuses any compressed chunk outright ("no decompressor is built in", and `third_party/` contains only `fonts`, `imgui`, `stb`), `:267` copies every chunk into a fresh `std::vector<u8>`, and `:268` xxHash64s every chunk on every load. A pak is a real project, not a packaging detail. Shipping it in the same slice as the first game executable means a black screen has two candidate causes.
 
 **Why this *exact* directory shape.** It is chosen so that no path-derivation code has to change. `ProjectDesc::binariesDir()` is `dir + "\\Binaries"` and `scriptsDir()` is `contentDir() + "\\Scripts"` (`modules/formats/include/aver/formats/OcProject.hpp:41-44`). Put `Game.ocproject` at the package root with `CONTENT Content` and:
+
+**The rewritten manifest carries every KEY value line of the source project through**, in its original order — `stage-game.ps1` used to write only `OCPROJECT`/`NAME`/`CONTENT`/`STARTMAP`, which silently dropped every `RENDER.*`, `PHYSICS.*`, `AUDIO.*`, `WINDOW.*`, `IMPORT.*`, `STREAM.*`, `DRONE.GRAPH` and `INPUT.SCHEME` key the source project stated, so a packaged game opened with none of the render/physics/audio tuning — and no default input scheme — its own project asked for. Only `CONTENT` is rewritten, to the staged folder name; `NAME` and `STARTMAP` are re-emitted from the values the script already parses and validates rather than copied as raw text.
 
 - `materialForSurface()` (`sandbox/src/SandboxApp.cpp:1230`) finds `<out>\Binaries\Materials\M_Wall.ocmat` on its first candidate;
 - `resolveScriptsDir()` (`SandboxApp.cpp:1839`) returns `<out>\Binaries\Scripts`;

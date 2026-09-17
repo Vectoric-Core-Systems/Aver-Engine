@@ -16,7 +16,7 @@
 
         <out>\AverEngineRuntime.exe, the engine DLLs, dxcompiler/dxil/nethost, the VC++ runtime
         <out>\Scripting\          bridge + contract assemblies
-        <out>\Game.ocproject      rewritten manifest, CONTENT Content
+        <out>\Game.ocproject      rewritten manifest -- every source KEY carried through, CONTENT -> Content
         <out>\Content\            the project's content, filtered
         <out>\Binaries\           the project's compiled scripts and materials
         <out>\THIRD-PARTY-NOTICES.txt
@@ -123,8 +123,12 @@ if ($Config -eq 'Debug' -and -not $AllowDebugCrt) {
 # ---------------------------------------------------------------------------------------------
 # 2. The project manifest. OC dialect: `#` comments, `KEY value`, one per line.
 # ---------------------------------------------------------------------------------------------
+# Read once, as raw lines rather than only into the hashtable below: section 6 carries every KEY
+# value line of THIS SAME read through into the staged manifest, in its original order, so it
+# needs the lines verbatim, not just the three keys this section cares about.
+$manifestRawLines = Get-Content -LiteralPath $Project
 $manifest = @{}
-foreach ($raw in Get-Content -LiteralPath $Project) {
+foreach ($raw in $manifestRawLines) {
     $line = $raw.Trim()
     if ($line -eq '' -or $line.StartsWith('#')) { continue }
     if ($line -match '^(\w+)\s+(.*)$') { $manifest[$Matches[1].ToUpper()] = $Matches[2].Trim() }
@@ -133,6 +137,10 @@ $gameName    = if ($manifest.ContainsKey('NAME'))     { $manifest['NAME'] }     
 $contentRel  = if ($manifest.ContainsKey('CONTENT'))  { $manifest['CONTENT'] }  else { 'Content' }
 $startMap    = if ($manifest.ContainsKey('STARTMAP')) { $manifest['STARTMAP'] } else { '' }
 if (-not $startMap) { Fail "the manifest has no STARTMAP, so the packaged game has no level to open." }
+# `\w+` NEVER MATCHES A DOTTED KEY, so this section's own regex stops at the first `.` -- every
+# RENDER.*/PHYSICS.*/AUDIO.*/WINDOW.*/IMPORT.*/STREAM.* key and INPUT.SCHEME is invisible to
+# $manifest above. Harmless HERE, because none of NAME/CONTENT/STARTMAP has a dot. Section 6's own
+# carry-through cannot reuse this pattern for that exact reason -- see it for why.
 
 $contentSrc  = Join-Path $projectDir $contentRel
 $binariesSrc = Join-Path $projectDir 'Binaries'
@@ -423,12 +431,58 @@ if ($wantCrt.Count -gt 0) {
 #
 #    .ocproject CANNOT describe a shipped game -- it has no entry point, no window defaults, no
 #    build id and no icon, and the editor never writes one back. game.json carries what it cannot.
+#
+#    EVERY KEY VALUE LINE OF THE SOURCE MANIFEST CARRIES THROUGH, in its original order. This used
+#    to write only OCPROJECT/NAME/CONTENT/STARTMAP, which silently dropped every RENDER.*,
+#    PHYSICS.*, AUDIO.*, WINDOW.*, IMPORT.*, STREAM.*, DRONE.GRAPH and INPUT.SCHEME key the source
+#    project stated -- a packaged game opened with none of the render/physics/audio tuning, and no
+#    default input scheme, its own project asked for, silently falling back to engine defaults
+#    instead. Only CONTENT is rewritten, to the staged folder name; NAME and STARTMAP are
+#    re-emitted from the values section 2 already parsed and validated (STARTMAP is refused above
+#    when empty) rather than copied as raw text, so a manifest with more than one NAME/STARTMAP
+#    line -- last one wins, the same rule loadOcproject itself applies when it reads the file back
+#    -- lands in the package exactly as this script already logged and checked it, not as
+#    whichever line happened to come first.
+#
+#    THE KEY PATTERN HERE IS `\S+`, NOT section 2's `\w+`. Section 2 only ever needs NAME/CONTENT/
+#    STARTMAP, none of which contains a dot, so its narrower regex was never wrong for its own
+#    purpose. But every SECTION.NAME key in this dialect -- RENDER.GI, INPUT.SCHEME, WINDOW.SIZE,
+#    PHYSICS.GRAVITY, AUDIO.BUS and the rest -- does contain one, and `\w+` stops at the first dot.
+#    Reusing section 2's pattern here would carry through NONE of them: the exact bug this section
+#    exists to fix, just moved one step later.
 # ---------------------------------------------------------------------------------------------
+$carried = New-Object System.Collections.Generic.List[string]
+$sawName = $false; $sawContent = $false; $sawStartMap = $false
+foreach ($raw in $manifestRawLines) {
+    $line = $raw.Trim()
+    if ($line -eq '' -or $line.StartsWith('#')) { continue }
+    if ($line -match '^(\S+)\s+(.*)$') {
+        $key = $Matches[1]
+        $value = $Matches[2].Trim()
+        $keyUpper = $key.ToUpper()
+        if ($keyUpper -eq 'OCPROJECT') {
+            continue   # replaced by this script's own header line below, never duplicated
+        } elseif ($keyUpper -eq 'CONTENT') {
+            $carried.Add("$key Content"); $sawContent = $true
+        } elseif ($keyUpper -eq 'NAME') {
+            $carried.Add("$key $gameName"); $sawName = $true
+        } elseif ($keyUpper -eq 'STARTMAP') {
+            $carried.Add("$key $startMap"); $sawStartMap = $true
+        } else {
+            $carried.Add("$key $value")
+        }
+    }
+}
+# Defensive only -- ProjectScaffold always writes all three, so a real project never reaches this,
+# but a hand-edited manifest missing one of them still produces a loadable package rather than one
+# silently missing NAME, CONTENT or STARTMAP.
+if (-not $sawName)     { $carried.Add("NAME $gameName") }
+if (-not $sawContent)  { $carried.Add("CONTENT Content") }
+if (-not $sawStartMap) { $carried.Add("STARTMAP $startMap") }
+
 $outManifest = "OCPROJECT 1`n" +
                "# Written by scripts/stage-game.ps1. This is a PACKAGED GAME, not an editable project.`n" +
-               "NAME $gameName`n" +
-               "CONTENT Content`n" +
-               "STARTMAP $startMap`n"
+               (($carried -join "`n") + "`n")
 Set-Content -LiteralPath (Join-Path $outFull 'Game.ocproject') -Value $outManifest -Encoding utf8
 
 $commit = ''; $dirty = $false
