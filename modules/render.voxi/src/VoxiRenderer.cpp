@@ -764,7 +764,7 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
 // See the header's own comment for the shape every one of these five shares: flip an existing
 // validity flag, touch no texture/buffer handle, log through AVER_INFO so the bisection survives even
 // if the user closes the editor before reading the console's own scrollback.
-void VoxiRenderer::resetGiHistory() {
+void VoxiRenderer::resetGiHistory(bool quiet) {
     giHistValid_ = false;
     // U1/2.8: the half-resolution visibility pair rides along -- a legacy-bit flip (or any other
     // caller of this command) while giRestirVisibility_ is HalfResolution would otherwise leave
@@ -772,14 +772,14 @@ void VoxiRenderer::resetGiHistory() {
     // false wherever the legacy bit forces "no ray", so nothing refreshes the pair's EMA, and only
     // this flag stops reprojection from trusting it anyway.
     giVisHistValid_ = false;
-    AVER_INFO("[Voxi] GI ReSTIR reservoir history reset by console command (resetgihistory); "
+    if (!quiet) AVER_INFO("[Voxi] GI ReSTIR reservoir history reset by console command (resetgihistory); "
               "next frame uses a fresh candidate only (expect one visibly noisier frame), both "
               "ping-pong slices clean within 2 frames.");
 }
 
-void VoxiRenderer::resetRtHistory() {
+void VoxiRenderer::resetRtHistory(bool quiet) {
     rtHistValid_ = false;
-    AVER_INFO("[Voxi] RT temporal history reset by console command (resetrthistory): shadow, "
+    if (!quiet) AVER_INFO("[Voxi] RT temporal history reset by console command (resetrthistory): shadow, "
               "reflection AND sky-occlusion reprojection are ALL invalidated -- they share one "
               "validity flag today (see rtHistValid_'s own comment, VoxiRenderer.hpp, and "
               "voxi_rt.hlsli's rtReprojectAo gate).");
@@ -801,9 +801,9 @@ void VoxiRenderer::resetAoHistory() {
               "new plumbing).");
 }
 
-void VoxiRenderer::resetNrdHistory() {
+void VoxiRenderer::resetNrdHistory(bool quiet) {
     nrd_.forceHistoryReset();
-    AVER_INFO("[NRD] history reset by console command (resetnrdhistory); REBLUR restarts its own "
+    if (!quiet) AVER_INFO("[NRD] history reset by console command (resetnrdhistory); REBLUR restarts its own "
               "internal temporal accumulation from this frame.");
 }
 

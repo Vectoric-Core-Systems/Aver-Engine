@@ -139,10 +139,12 @@ public:
     // rebuild, because none of these buffers needs one: the shader-side read gate treats the flag
     // going false as "no real previous frame" for one frame, and the WRITE side runs unconditionally
     // every frame regardless, so both ping-pong slices are clean again within two frames.
-    void resetGiHistory();
-    void resetRtHistory();
+    // `quiet` skips the log line: voxi.debugResetHistoryEveryFrame calls these once a frame, where a
+    // line per call would bury the log.
+    void resetGiHistory(bool quiet = false);
+    void resetRtHistory(bool quiet = false);
     void resetAoHistory();   // alias of resetRtHistory today -- see its own body for why
-    void resetNrdHistory();
+    void resetNrdHistory(bool quiet = false);
 
     // The editor's Unlit view mode. Mirrors RhiDevice::setUnlit, which only ever reaches the
     // RASTER path -- ray-driven primary visibility bypasses drawMesh entirely, so it has to be

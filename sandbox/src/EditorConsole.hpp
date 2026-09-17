@@ -380,6 +380,15 @@ inline std::string varTooltipText(const ConsoleVar& v) {
 // reassert makes it live" idiom occlusion.debugForceWaitIdle already uses.
 inline bool& consoleGiPoisonViewSlot() { static bool v = false; return v; }
 
+// voxi.debugResetHistoryEveryFrame's live source of truth -- the same raw-slot idiom as
+// consoleGiPoisonViewSlot() directly above. A BISECTION AID for a temporal artifact, never saved:
+// SandboxApp.cpp's onUpdate resets every history named here once a frame, quietly, beside the
+// one-shot reset* commands. Anything that still lags, smears or fades with a history reset every
+// frame is not carried by that history. Bit 1 = ReSTIR GI reservoirs + GI visibility history,
+// 2 = RT shadow/reflection/sky-occlusion history (this also restarts NRD, which beginShadowHistory
+// resets whenever rtHistValid_ is false), 4 = NRD alone.
+inline u32& consoleResetHistoryEveryFrameSlot() { static u32 v = 0; return v; }
+
 // The NRD legacy-camera A/B switch's live source of truth -- the SAME raw-slot idiom as
 // consoleGiPoisonViewSlot() directly above and for the identical reason: VoxiRenderer::
 // setNrdLegacyCamera is private renderer state (a toggle on an internal camera-factorisation path,
@@ -708,6 +717,22 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiPoisonViewSlot() = on; });
+        }});
+    // See consoleResetHistoryEveryFrameSlot()'s own comment for the raw-slot idiom and the bit table.
+    t.push_back({"voxi.debugResetHistoryEveryFrame", VarType::U32, false,
+        "Bisection aid, never saved: resets the chosen temporal histories EVERY frame, without log "
+        "lines. 1 = ReSTIR GI reservoirs + GI visibility history, 2 = RT shadow/reflection/"
+        "sky-occlusion history (also restarts NRD), 4 = NRD only; add bits to combine, 0 = off. A "
+        "fade or smear that still happens with a history reset every frame is not carried by that "
+        "history. Expect a noisier image while it is on.",
+        []{ return vU32(consoleResetHistoryEveryFrameSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const u32 mask = v.as.u;
+            b.deviceSetters.push_back([mask](rhi::IDevice&){ consoleResetHistoryEveryFrameSlot() = mask; });
+        },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 7) { err = "debugResetHistoryEveryFrame is a mask of 1, 2 and 4 -- 0 to 7"; return false; }
+            return true;
         }});
     // optimisation-wave-2's U1 path-debug view (2.10 I) -- see consoleGiVisPathViewSlot()'s own
     // comment above for the raw-slot idiom and why. Paints F2's resolved path (yellow = no ray,

@@ -2569,6 +2569,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
         if (voxi::Renderer::get().consumeAoHistoryResetRequest())  voxiRenderer_.resetAoHistory();
         if (voxi::Renderer::get().consumeNrdHistoryResetRequest()) voxiRenderer_.resetNrdHistory();
+        // voxi.debugResetHistoryEveryFrame: the same resets, every frame, quietly -- see
+        // editor::consoleResetHistoryEveryFrameSlot()'s own comment.
+        if (const u32 everyFrame = editor::consoleResetHistoryEveryFrameSlot()) {
+            if (everyFrame & 1u) voxiRenderer_.resetGiHistory(/*quiet=*/true);
+            if (everyFrame & 2u) voxiRenderer_.resetRtHistory(/*quiet=*/true);
+            if (everyFrame & 4u) voxiRenderer_.resetNrdHistory(/*quiet=*/true);
+        }
         voxiRenderer_.setVolume(c, giExtent_);
         // WHERE A BAKED VOLUME MAY BE REMEMBERED. Pushed every frame like everything else here,
         // and empty with no project open -- which disables the cache rather than scattering
