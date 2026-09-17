@@ -576,6 +576,28 @@ void SandboxApp::onInit(Engine& e)  {
     // And again for .ocfoliage -- the eighth factory. Unconditional, unlike the particle one just
     // above: see FoliageTypeEditor.hpp/OcFoliage.hpp for why this tab needs no optional module.
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);
+    // And again for .ocinput -- the ninth factory. Unconditional, like the foliage one just above:
+    // see InputSchemeEditor.hpp/OcInput.hpp for why this tab needs no optional module either.
+    assetEditors_.registerFactory(&editor::makeInputSchemeEditor);
+    {
+        // What the tab needs to answer "is this the project's Input Scheme?" and to make it one --
+        // see InputSchemeEditorHooks' own comment (InputSchemeEditor.hpp) for why this is a hooks
+        // struct rather than a project pointer on AssetEditor itself.
+        editor::InputSchemeEditorHooks hooks;
+        hooks.contentDir = [this] { return project_.contentDir(); };
+        hooks.projectInputScheme = [this] { return project_.inputScheme; };
+        hooks.useAsProjectInputScheme = [this](const std::string& contentRelativePath) {
+            if (!project_.valid()) return false;
+            // THE SAME projectDirty_ FLAG Project Settings > Description's own fields set
+            // (SandboxSettings.cpp's "Input Scheme" combo right beside this) -- the actual write
+            // happens on the existing autosave timer (maybeAutosaveProject) or that page's Save
+            // button, not here, so this button behaves exactly like typing a new Start Map there.
+            project_.inputScheme = contentRelativePath;
+            projectDirty_ = true;
+            return true;
+        };
+        editor::setInputSchemeEditorHooks(std::move(hooks));
+    }
     // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
     locateAverDesign();
     {

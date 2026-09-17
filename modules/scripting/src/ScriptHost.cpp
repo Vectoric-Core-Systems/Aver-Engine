@@ -63,6 +63,7 @@ using graph_set_hits_fn = int32_t(__cdecl*)(int32_t on);
 using graph_get_hits_fn = int32_t(__cdecl*)(const char* utf8GraphName, char* out, int32_t cap, float maxAgeSeconds);
 using declare_graph_classes_fn = int32_t(__cdecl*)(const char* utf8ContentDir);
 using tick_graph_class_instances_fn = void(__cdecl*)(float dt);
+using configure_input_fn = int32_t(__cdecl*)(const char* utf8SchemePath, const char* utf8SettingsPath);
 
 // Converts UTF-8 to UTF-16.
 std::wstring widen(const std::string& s) {
@@ -122,6 +123,7 @@ struct ScriptHost::Impl {
     graph_get_hits_fn graphGetHits = nullptr;
     declare_graph_classes_fn      declareGraphClasses    = nullptr;
     tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
+    configure_input_fn configureInput = nullptr;
 };
 
 ScriptHost::ScriptHost() = default;
@@ -271,6 +273,13 @@ bool ScriptHost::init(const HostDesc& desc) {
         impl_->declareGraphClasses = nullptr;
         impl_->tickGraphClassInstances = nullptr;
         AVER_WARN("[Scripting] the bridge exports no graph-class entry points; graph-as-class is unavailable");
+    }
+
+    // INPUT SCHEME is optional too, same reasoning: a bridge built before ConfigureInput existed
+    // still boots, and configureInput() reports -2 (see the header) rather than pretending success.
+    if (!bind(L"ConfigureInput", reinterpret_cast<void**>(&impl_->configureInput))) {
+        impl_->configureInput = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no ConfigureInput; rebindable input schemes are unavailable");
     }
 
     AverScriptHostApi api{};
@@ -457,6 +466,14 @@ void ScriptHost::tickGraphClassInstances(f32 dt) {
     impl_->tickGraphClassInstances(dt);
 }
 
+// Opens the settings store and loads (or, for an empty `schemePath`, unloads) the project's input
+// scheme. See the header for the full return convention; -2 means the staged bridge predates this
+// export rather than that anything failed to parse.
+i32 ScriptHost::configureInput(const std::string& schemePath, const std::string& settingsPath) {
+    if (!ready_ || !impl_ || !impl_->configureInput) return -2;
+    return impl_->configureInput(schemePath.c_str(), settingsPath.c_str());
+}
+
 // Drains the behaviours, unloads the context and closes the host context. Safe twice.
 void ScriptHost::shutdown() {
     if (!impl_) return;
@@ -505,6 +522,7 @@ void ScriptHost::graphNodeHits(const std::string&, f32, std::vector<std::pair<st
 bool ScriptHost::graphClassesAvailable() const { return false; }
 i32  ScriptHost::declareGraphClasses(const std::string&) { return 0; }
 void ScriptHost::tickGraphClassInstances(f32) {}
+i32  ScriptHost::configureInput(const std::string&, const std::string&) { return 0; }
 
 #endif
 

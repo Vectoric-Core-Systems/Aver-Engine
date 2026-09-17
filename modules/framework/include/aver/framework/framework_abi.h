@@ -57,8 +57,16 @@ extern "C" {
  *    (modules/platform's Gamepad.hpp/pollGamepads, published via Runtime/src/GameInput.cpp and
  *    sandbox/src/SandboxPlay.cpp), so a binding actually reads something a player moved. Additive
  *    only, same reason as every entry above: minor 5's own two sources and every other export are
- *    UNCHANGED, so a host built against it still links and runs unchanged against this header. */
-#define AVER_FW_ABI_VERSION_MINOR 6
+ *    UNCHANGED, so a host built against it still links and runs unchanged against this header.
+ * 7: added the INPUT SCHEME section (aver_fw_input_scheme_load/error/context_name/context_priority/
+ *    action_count/action_name/action_type/binding_count/binding/binding_key) -- the C ABI loader
+ *    modules/formats/include/aver/formats/OcInput.hpp's own INTEGRATION NOTE said .ocinput did not
+ *    have yet, exposing that module's existing parser (aver::fmt::parseOcinput) so a C# InputScheme
+ *    loader can turn a parsed .ocinput file into a live InputMappingContext without a second parser
+ *    on the managed side. See that section's own comment for the one-scheme-at-a-time shape. Additive
+ *    only, same reason as every entry above: minor 6's own surface is UNCHANGED, so a host built
+ *    against it still links and runs unchanged against this header. */
+#define AVER_FW_ABI_VERSION_MINOR 7
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -662,6 +670,73 @@ AVER_FW_ABI int32_t aver_fw_fluid_spawn_material(float cx, float cy, float cz,
                                                  float compliance, float damping, int32_t iterations,
                                                  float pressure, float densityKgM3, float viscosityPaS,
                                                  const char* materialPreset, const char* name);
+
+/* ---- INPUT SCHEME, LOADED FROM .ocinput -------------------------------------------------------
+ *
+ * modules/formats/include/aver/formats/OcInput.hpp defines the .ocinput text format -- named input
+ * actions and their default key/mouse/gamepad bindings -- and until now nothing loaded one: that
+ * header's own INTEGRATION NOTE said so plainly ("there is no C ABI export or C# loader for it
+ * yet"). This section is that loader's C surface: the ONE existing C++ parser
+ * (aver::fmt::parseOcinput, via loadOcinput, in OcInput.cpp) exposed here so
+ * scripting/csharp/Aver.Framework/InputScheme.cs can turn a parsed file into a real
+ * InputMappingContext without a second parser on the managed side -- the same division of labour
+ * this ABI already draws for a graph (aver::fmt::parseOcgraph, reached through DeclareGraphClasses)
+ * and, closer still, for the NAMED ACTIONS layer three sections up (EnhancedInput.cs's algorithm,
+ * ported here so something other than a C# script can reach it).
+ *
+ * ONE PARSED SCHEME, NOT A HANDLE TABLE, on the same precedent as the NAMED ACTIONS section having
+ * no context handle: a project names exactly one scheme (OcProject.hpp's own INPUT.SCHEME /
+ * inputScheme field), so this ABI holds one file-static aver::fmt::OcInputData and every getter
+ * below reads out of it. A second load REPLACES the slot outright, success or failure alike -- there
+ * is no "keep the old one if the new one fails to parse" behaviour, matching aver_fw_action_clear_
+ * bindings' own "drop everything, the caller rebuilds" shape a few sections up.
+ *
+ * COUNT THEN INDEX, the same convention aver_fw_graph_var_count/_at use above and for the same
+ * reason stated there: a struct or an array-of-structs crossing this boundary would be the first of
+ * either in this header, and a handful of calls once per load costs nothing worth breaking that for.
+ *
+ * RETURNED STRINGS STAY VALID UNTIL THE NEXT aver_fw_input_scheme_load -- not merely until the next
+ * call, the lifetime every other const char* in this header gets (and which the caller must still
+ * never free). A caller here is expected to hold action and binding-key names across several calls
+ * while it walks a whole scheme, so this section states that wider lifetime explicitly. */
+
+/* Loads and parses a scheme from an .ocinput file, replacing whatever was loaded before -- on
+ * either outcome. 1 when it parsed, 0 when the path was null/empty or the file was missing,
+ * unreadable or malformed (aver_fw_input_scheme_error carries why); either way the previously
+ * loaded scheme is gone, so a caller wanting to fall back to it must have kept its own copy. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_load(const char* utf8Path);
+/* The last load's parse error, or "" after a successful load. */
+AVER_FW_ABI const char* aver_fw_input_scheme_error(void);
+/* The loaded scheme's CONTEXT name, or "" when the file had no CONTEXT record (OcInputData::
+ * contextName's own empty-is-absent convention) or nothing is loaded. */
+AVER_FW_ABI const char* aver_fw_input_scheme_context_name(void);
+/* The loaded scheme's CONTEXT priority, or 0 when absent or nothing is loaded. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_context_priority(void);
+/* How many ACTION records the loaded scheme declares. 0 when nothing is loaded. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_action_count(void);
+/* Action `index`'s name (0..action_count-1, declaration order), or nullptr out of range. */
+AVER_FW_ABI const char* aver_fw_input_scheme_action_name(int32_t index);
+/* Action `index`'s declared value type: 0 digital, 1 axis1d, 2 axis2d -- OcInputValueType's own
+ * order, which is also C# InputValueType's order, so InputScheme.cs's loader reads this straight
+ * into InputAction.Digital/Axis1D/Axis2D with no translation table. -1 out of range. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_action_type(int32_t index);
+/* How many BIND records the loaded scheme declares. 0 when nothing is loaded. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_binding_count(void);
+/* Binding `index`'s fields (0..binding_count-1, declaration order). *outActionIndex is the 0-based
+ * index INTO aver_fw_input_scheme_action_name/_type of the ACTION this binding names -- NOT an
+ * aver_fw_action_register handle; the caller resolves that itself once it has registered the
+ * action. *outSource is an AVER_FW_ACTION_SRC_* value (the NAMED ACTIONS section above), OcInputSource
+ * mapped one for one: Key -> SRC_KEY, MouseX/MouseY -> SRC_MOUSE_X/SRC_MOUSE_Y, MouseWheel ->
+ * SRC_MOUSE_WHEEL, GamepadButton/GamepadAxis -> SRC_GAMEPAD_BUTTON/SRC_GAMEPAD_AXIS. *outScale and
+ * *outComponent are OcInputBinding::scale/component, unchanged. 1 when `index` is in range, 0 (every
+ * output left untouched) otherwise. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_binding(int32_t index, int32_t* outActionIndex,
+                                                     int32_t* outSource, float* outScale,
+                                                     int32_t* outComponent);
+/* Binding `index`'s key/button/axis NAME exactly as written in the file -- OcInputBinding::key.
+ * Meaningful, and non-empty, for AVER_FW_ACTION_SRC_KEY/GAMEPAD_BUTTON/GAMEPAD_AXIS; "" for the
+ * three mouse sources, matching OcInput.hpp's own convention. nullptr out of range. */
+AVER_FW_ABI const char* aver_fw_input_scheme_binding_key(int32_t index);
 
 #ifdef __cplusplus
 } /* extern "C" */

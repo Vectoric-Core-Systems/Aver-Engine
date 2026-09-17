@@ -419,6 +419,25 @@ void SandboxApp::cbCreateFoliageType() {
 #endif
 }
 
+// Writes a starter .ocinput -- an Input Scheme -- and opens it. Same shape as cbCreateFoliageType
+// immediately above: editor::inputSchemeStarterData() and fmt::writeOcinput are both reachable with
+// every module configuration (see OcInput.hpp's own "NO ENGINE DEPENDENCY, DELIBERATELY"), so this
+// is unconditional too. TEXT, through fmt::writeOcinput rather than a POD save* wrapper -- OcInput
+// has none; writeNewFile refuses to touch an existing file, matching cbCreateNodeGraph below.
+void SandboxApp::cbCreateInputScheme() {
+    const std::filesystem::path target = cbFreeAssetPath("NewInputScheme", ".ocinput");
+    if (target.empty()) return;
+    const std::string text = fmt::writeOcinput(editor::inputSchemeStarterData());
+
+    std::string why;
+    if (!editor::writeNewFile(target.string(), text, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new input scheme failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
 // Writes a starter .ocgraph -- an Aver Node visual-scripting graph -- and opens it.
 // The bytes come from editor::graphStarterText rather than being built here, so a test can parse
 // exactly what this writes; it is TEXT, not an OcGraphData through fmt::saveOcgraph, because the
@@ -978,6 +997,8 @@ void SandboxApp::drawContentBrowser() {
 #endif
         if (ImGui::MenuItem("New Foliage Type"))    cbCreateFoliageType();
         uiReg_.track("cb.add.foliageType");
+        if (ImGui::MenuItem("New Input Scheme"))    cbCreateInputScheme();
+        uiReg_.track("cb.add.inputScheme");
         if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
         uiReg_.track("cb.add.material");
         ImGui::EndDisabled();
@@ -1512,6 +1533,10 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocmat",      {ICON_TUNE,       IM_COL32( 64, 192,  64, 255), "Material"}},
         {".ocparticle", {ICON_ADD,        IM_COL32(  0, 200, 180, 255), "Particles"}},
         {".ocfoliage",  {ICON_TERRAIN,    IM_COL32( 60, 200,  90, 255), "Foliage Type"}},
+        // No Unreal equivalent (its Enhanced Input plugin ships its own asset icon this engine has
+        // no license to copy) -- ICON_SETTINGS because binding a key IS a settings choice, the same
+        // reading .fsproj/.csproj already give that icon two rows down, coloured apart from them.
+        {".ocinput",    {ICON_SETTINGS,   IM_COL32(230, 200,  60, 255), "Input Scheme"}},
         {".ocsnd",      {ICON_WAVE,       IM_COL32(  0, 175, 255, 255), "Sound Graph"}},
         {".ocaudio",    {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},

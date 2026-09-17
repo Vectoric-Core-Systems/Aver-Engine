@@ -269,6 +269,12 @@ static int Main()
         // control flow. See NodeHitTests.cs for why the branch and diamond cases are the real tests.
         failures += NodeHitTests.RunAll();
 
+        // Unreal Enhanced Input-style rebinding, graph-side: optional action= on InputAction/
+        // InputActionPressed/InputActionReleased, and the new SaveInputBindings/LoadInputBindings/
+        // ResetInputBindings/RebindAction/GetActionKey/GetPressedKey nodes. See
+        // InputBindingNodeTests.cs's own header for what the "real call" tests can and cannot prove.
+        failures += InputBindingNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

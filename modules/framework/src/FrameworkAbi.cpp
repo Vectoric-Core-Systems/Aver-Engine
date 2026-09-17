@@ -5,6 +5,7 @@
 #include "aver/framework/framework_hooks.h"
 
 #include "aver/core/Log.hpp"
+#include "aver/formats/OcInput.hpp"
 #include "aver/scene/scene_abi.h"
 
 #include "aver/core/Hash.hpp"
@@ -1482,6 +1483,105 @@ int32_t aver_fw_fluid_spawn_material(float cx, float cy, float cz, float hx, flo
     return g_fluidSpawnMaterial(cx, cy, cz, hx, hy, hz, compliance, damping, iterations, pressure,
                                 densityKgM3, viscosityPaS, materialPreset ? materialPreset : "",
                                 name && *name ? name : "unnamed", g_fluidSpawnMaterialUser);
+}
+
+// ---- INPUT SCHEME, LOADED FROM .ocinput --------------------------------------------------------
+// See framework_abi.h's own INPUT SCHEME section for why this exists and what each export means.
+// ONE PARSED SCHEME, FILE-STATIC -- the same "drop everything, caller rebuilds" shape
+// aver_fw_action_clear_bindings uses a few sections up: a load REPLACES this slot outright, on
+// either outcome, never merging with or falling back to whatever was here before.
+fmt::OcInputData& inputScheme() { static fmt::OcInputData s; return s; }
+std::string&      inputSchemeError() { static std::string s; return s; }
+
+// OcInputSource -> AVER_FW_ACTION_SRC_*, one for one -- see aver_fw_input_scheme_binding's own
+// header comment for the mapping.
+int32_t actionSrcFromOcInputSource(fmt::OcInputSource s) {
+    switch (s) {
+        case fmt::OcInputSource::MouseX:         return AVER_FW_ACTION_SRC_MOUSE_X;
+        case fmt::OcInputSource::MouseY:         return AVER_FW_ACTION_SRC_MOUSE_Y;
+        case fmt::OcInputSource::MouseWheel:     return AVER_FW_ACTION_SRC_MOUSE_WHEEL;
+        case fmt::OcInputSource::GamepadButton:  return AVER_FW_ACTION_SRC_GAMEPAD_BUTTON;
+        case fmt::OcInputSource::GamepadAxis:    return AVER_FW_ACTION_SRC_GAMEPAD_AXIS;
+        case fmt::OcInputSource::Key:            default: return AVER_FW_ACTION_SRC_KEY;
+    }
+}
+
+// Loads and parses a scheme, replacing whatever was loaded before on either outcome.
+int32_t aver_fw_input_scheme_load(const char* utf8Path) {
+    if (!utf8Path || !*utf8Path) {
+        inputScheme() = fmt::OcInputData{};
+        inputSchemeError() = "aver_fw_input_scheme_load: empty path";
+        return 0;
+    }
+    fmt::OcInputData parsed;
+    std::string err;
+    if (!fmt::loadOcinput(utf8Path, parsed, &err)) {
+        inputScheme() = fmt::OcInputData{};
+        inputSchemeError() = err;
+        return 0;
+    }
+    inputScheme() = std::move(parsed);
+    inputSchemeError().clear();
+    return 1;
+}
+
+// The last load's parse error, or "" after a successful load.
+const char* aver_fw_input_scheme_error(void) { return inputSchemeError().c_str(); }
+
+// The loaded scheme's CONTEXT name, or "" when absent or nothing is loaded.
+const char* aver_fw_input_scheme_context_name(void) { return inputScheme().contextName.c_str(); }
+// The loaded scheme's CONTEXT priority, or 0 when absent or nothing is loaded.
+int32_t aver_fw_input_scheme_context_priority(void) { return inputScheme().contextPriority; }
+
+// How many ACTION records the loaded scheme declares.
+int32_t aver_fw_input_scheme_action_count(void) {
+    return static_cast<int32_t>(inputScheme().actions.size());
+}
+// Action `index`'s name, or nullptr out of range.
+const char* aver_fw_input_scheme_action_name(int32_t index) {
+    const std::vector<fmt::OcInputAction>& actions = inputScheme().actions;
+    if (index < 0 || static_cast<usize>(index) >= actions.size()) return nullptr;
+    return actions[static_cast<usize>(index)].name.c_str();
+}
+// Action `index`'s declared value type: 0 digital, 1 axis1d, 2 axis2d. -1 out of range.
+int32_t aver_fw_input_scheme_action_type(int32_t index) {
+    const std::vector<fmt::OcInputAction>& actions = inputScheme().actions;
+    if (index < 0 || static_cast<usize>(index) >= actions.size()) return -1;
+    switch (actions[static_cast<usize>(index)].type) {
+        case fmt::OcInputValueType::Digital: return AVER_FW_ACTION_DIGITAL;
+        case fmt::OcInputValueType::Axis1D:  return AVER_FW_ACTION_AXIS1D;
+        case fmt::OcInputValueType::Axis2D:  return AVER_FW_ACTION_AXIS2D;
+    }
+    return -1;
+}
+
+// How many BIND records the loaded scheme declares.
+int32_t aver_fw_input_scheme_binding_count(void) {
+    return static_cast<int32_t>(inputScheme().bindings.size());
+}
+// Binding `index`'s action index, source, scale and component -- see framework_abi.h's own comment
+// for what each output means. 1 in range, 0 (outputs untouched) out of range.
+int32_t aver_fw_input_scheme_binding(int32_t index, int32_t* outActionIndex, int32_t* outSource,
+                                     float* outScale, int32_t* outComponent) {
+    const fmt::OcInputData& d = inputScheme();
+    if (index < 0 || static_cast<usize>(index) >= d.bindings.size()) return 0;
+    const fmt::OcInputBinding& b = d.bindings[static_cast<usize>(index)];
+
+    int32_t actionIndex = -1;
+    for (usize i = 0; i < d.actions.size(); ++i) {
+        if (d.actions[i].name == b.action) { actionIndex = static_cast<int32_t>(i); break; }
+    }
+    if (outActionIndex) *outActionIndex = actionIndex;
+    if (outSource)       *outSource      = actionSrcFromOcInputSource(b.source);
+    if (outScale)         *outScale       = b.scale;
+    if (outComponent)     *outComponent   = b.component;
+    return 1;
+}
+// Binding `index`'s key/button/axis name, "" for a mouse source, nullptr out of range.
+const char* aver_fw_input_scheme_binding_key(int32_t index) {
+    const std::vector<fmt::OcInputBinding>& bindings = inputScheme().bindings;
+    if (index < 0 || static_cast<usize>(index) >= bindings.size()) return nullptr;
+    return bindings[static_cast<usize>(index)].key.c_str();
 }
 
 }  // extern "C"

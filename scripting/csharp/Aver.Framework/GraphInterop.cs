@@ -1302,4 +1302,72 @@ internal static class GraphInterop
         value = v.Value;
         return true;
     }
+
+    // ================================================================== named input actions (rebindable)
+    //
+    // ActionHandleForGraph is how an InputAction/InputActionPressed/InputActionReleased node's OWN
+    // action= attribute (GraphCompiler's EmitInputAction family, contract D) resolves straight to the
+    // native handle aver_fw_action_held/pressed/released/value2 already read -- a graph carrying that
+    // attribute never constructs an InputAction wrapper at all, so this is a SECOND, independent
+    // name->handle cache, not a reuse of InputAction's own s_byHandle (EnhancedInput.cs), which is
+    // keyed by handle and only knows the actions THIS runtime itself declared.
+
+    private static readonly Dictionary<string, int> s_actionHandleByName = new();
+
+    /// <summary>The native handle for a named action, resolving through aver_fw_action_find and
+    /// caching by name. 0 for a name nothing has registered yet -- NEVER CACHED, so a graph asking
+    /// before a scheme or script has registered the action gets the right answer once it finally does,
+    /// rather than being stuck reporting 0 for the rest of the process.</summary>
+    internal static int ActionHandleForGraph(string actionName)
+    {
+        if (string.IsNullOrEmpty(actionName)) return 0;
+        if (s_actionHandleByName.TryGetValue(actionName, out int handle)) return handle;
+        handle = Fw.aver_fw_action_find(actionName);
+        if (handle != 0) s_actionHandleByName[actionName] = handle;
+        return handle;
+    }
+
+    /// <summary>SaveInputBindings' own surface: EnhancedInput.SaveAllBindings(). False when no context
+    /// is pushed at all, otherwise whether the settings store reached disk.</summary>
+    internal static bool SaveInputBindingsForGraph() =>
+        EnhancedInput.ContextCount != 0 && EnhancedInput.SaveAllBindings();
+
+    /// <summary>LoadInputBindings' own surface: EnhancedInput.LoadAllBindings(). LoadBindings itself
+    /// has no failure mode beyond a missing/stale key, which it already tolerates silently
+    /// (InputMappingContext.LoadBindings's own comment) -- so the only false case here is nothing
+    /// pushed to load onto at all.</summary>
+    internal static bool LoadInputBindingsForGraph()
+    {
+        if (EnhancedInput.ContextCount == 0) return false;
+        EnhancedInput.LoadAllBindings();
+        return true;
+    }
+
+    /// <summary>ResetInputBindings' own surface: EnhancedInput.ResetAllBindings(). ResetToDefaults
+    /// cannot itself fail, so this mirrors SaveInputBindingsForGraph/LoadInputBindingsForGraph's own
+    /// "false means nothing to act on" convention rather than inventing a native failure mode
+    /// ResetAllBindings does not have.</summary>
+    internal static bool ResetInputBindingsForGraph()
+    {
+        if (EnhancedInput.ContextCount == 0) return false;
+        EnhancedInput.ResetAllBindings();
+        return true;
+    }
+
+    /// <summary>RebindAction's own surface: EnhancedInput.RebindAction(actionName, slot, key) -- see
+    /// that method's own comment for the per-context slot walk and the source/defined-value checks
+    /// that make it return false.</summary>
+    internal static bool RebindActionForGraph(string actionName, int slot, int key) =>
+        EnhancedInput.RebindAction(actionName, slot, key);
+
+    /// <summary>GetActionKey's own surface: the raw key/button/axis currently bound at
+    /// <paramref name="actionName"/>'s <paramref name="slot"/>-th binding, or -1 when there is no such
+    /// binding at all -- the node's own `bound` pin is a graph-side comparison against -1, the same
+    /// "sentinel the node compares itself" shape JointValueForGraph's own -1 already uses above.</summary>
+    internal static int GetActionKeyForGraph(string actionName, int slot) =>
+        EnhancedInput.TryGetBindingKey(actionName, slot, out int rawKey, out _) ? rawKey : -1;
+
+    /// <summary>GetPressedKey's own surface: Input.FirstKeyPressedThisFrame() -- what a "press any key
+    /// to rebind" menu polls every frame while it waits for the player to press something.</summary>
+    internal static int GetPressedKeyForGraph() => Input.FirstKeyPressedThisFrame();
 }

@@ -153,6 +153,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Unconditional, unlike ParticleEditor.hpp above: .ocfoliage is not gated behind any module -- see
 // OcFoliage.hpp's own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
 #include "FoliageTypeEditor.hpp"
+// Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
+// dependency either.
+#include "InputSchemeEditor.hpp"
 #include "EditorEuler.hpp"
 #include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
@@ -2746,6 +2749,11 @@ private:
     void cbCreateNodeGraph();
 
     void cbCreateBehaviourTree();
+
+    // Writes a starter .ocinput -- an Input Scheme -- and opens it. Same shape as
+    // cbCreateFoliageType immediately above, for the same reason: a format with a working editor
+    // tab that, until now, nothing could bring into existence from inside the editor at all.
+    void cbCreateInputScheme();
 
     std::string cbImportBlockedReason(const std::string& dir) const;
 

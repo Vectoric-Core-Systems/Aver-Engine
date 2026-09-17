@@ -422,6 +422,49 @@ public static class HostBridge
         }
     }
 
+    // ------------------------------------------------------------------ input scheme
+
+    /// <summary>Configures rebindable input for the current project: opens the settings store
+    /// rebinds are saved to/loaded from, then loads (or, with an empty path, unloads) the
+    /// project's .ocinput scheme as a pushed <see cref="InputScheme"/> context. The standalone
+    /// runtime calls it once, right after <see cref="DeclareGraphClasses"/> (GameApp.cpp); the editor
+    /// calls it at every Play start (SandboxPlay.cpp), since a saved .ocinput edit only takes effect
+    /// on a fresh load. Returns the scheme's action count
+    /// (0 with an empty scheme path, meaning "unloaded"), or -1 if the scheme failed to parse.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int ConfigureInput(IntPtr utf8SchemePath, IntPtr utf8SettingsPath)
+    {
+        try
+        {
+            string? settingsPath = Marshal.PtrToStringUTF8(utf8SettingsPath);
+            if (!string.IsNullOrEmpty(settingsPath) && !Settings.Open(settingsPath))
+                Emit((int)Log.Level.Warn,
+                     $"[Scripting] settings store '{settingsPath}' could not be opened - rebinds will not persist");
+
+            string? schemePath = Marshal.PtrToStringUTF8(utf8SchemePath);
+            if (string.IsNullOrEmpty(schemePath))
+            {
+                InputScheme.Unload();
+                return 0;
+            }
+
+            if (!InputScheme.Load(schemePath))
+            {
+                Emit((int)Log.Level.Error,
+                     $"[Scripting] input scheme '{schemePath}' failed to load: {InputScheme.LastError}");
+                return -1;
+            }
+
+            // The host logs the outcome with its own context (GameApp.cpp, SandboxPlay.cpp).
+            return Fw.aver_fw_input_scheme_action_count();
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Scripting] ConfigureInput threw: {Describe(ex)}");
+            return -1;
+        }
+    }
+
     // ------------------------------------------------------------------ graph hosting
 
     // One GraphHost per driven entity. GraphHost.Load compiles the .ocgraph EXACTLY ONCE (see its

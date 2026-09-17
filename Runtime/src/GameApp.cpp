@@ -1177,6 +1177,31 @@ void GameApp::openProject(Engine& e) {
 #endif
 }
 
+#if AVER_MODULE_SCRIPTING
+// The one thing about a project that survives packaging unchanged is its NAME (see
+// stage-game.ps1's own layout comment: a shipped game has no project DIRECTORY of its own to key a
+// per-project settings path by -- the manifest and Binaries sit directly under the install root).
+// Filesystem-reserved characters (Windows' set; '/' and '\\' matter on every platform) become '_';
+// leading/trailing whitespace and dots are trimmed since Windows also rejects a directory name
+// ending in either. An empty result (an unnamed project, or a name that was ALL reserved
+// characters) falls back to "Project" rather than collapsing to userDataDir() itself and colliding
+// with the engine's own default settings.ini.
+static std::string filesystemSafeProjectName(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        const bool reserved = c == '<' || c == '>' || c == ':' || c == '"' || c == '/' ||
+                               c == '\\' || c == '|' || c == '?' || c == '*' ||
+                               static_cast<unsigned char>(c) < 0x20;
+        out += reserved ? '_' : c;
+    }
+    const std::size_t b = out.find_first_not_of(" \t.");
+    const std::size_t e = out.find_last_not_of(" \t.");
+    out = (b == std::string::npos) ? std::string() : out.substr(b, e - b + 1);
+    return out.empty() ? "Project" : out;
+}
+#endif
+
 void GameApp::initScripting() {
 #if AVER_MODULE_SCRIPTING
     // WHERE THIS BELONGS, decided and justified here rather than assumed: the C# side of visual
@@ -1228,6 +1253,41 @@ void GameApp::initScripting() {
         const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
         if (graphClasses > 0)
             AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
+
+        // INPUT SCHEME. Right after declareGraphClasses on purpose: an InputAction/RebindAction/
+        // GetActionKey node resolves its handle through GraphInterop.ActionHandleForGraph the moment
+        // its owning class is bound, so the scheme this project's rebindable actions come from must
+        // already be a pushed context by the time anything can spawn. See ScriptHost::configureInput
+        // and HostBridge.cs's ConfigureInput for the full contract this call reads.
+        {
+            // INPUT.SCHEME is relative to the CONTENT root, exactly like DRONE.GRAPH just above
+            // (SandboxLevelLoad.cpp's own droneRel resolution is the same "project key, not an
+            // assumed filename" shape -- see OcProject.hpp's comment on why).
+            std::string schemePath = project_.inputScheme.empty()
+                ? std::string() : project_.contentDir() + "\\" + project_.inputScheme;
+            if (!schemePath.empty() && !fileExists(schemePath)) {
+                AVER_WARN("[Scripting] INPUT.SCHEME '{}' does not exist -- no input scheme will be loaded",
+                          schemePath);
+                schemePath.clear();
+            }
+
+            const std::string settingsPath =
+                userDataDir() + "\\" + filesystemSafeProjectName(project_.name) + "\\Settings.ini";
+
+            const i32 actions = scripts_.configureInput(schemePath, settingsPath);
+            if (actions > 0)
+                AVER_INFO("[Scripting] input scheme ready: {} action(s) from '{}', bindings persist to '{}'",
+                          actions, schemePath, settingsPath);
+            else if (actions == 0)
+                AVER_INFO("[Scripting] no input scheme loaded (project has no INPUT.SCHEME, or its file "
+                          "was missing) -- settings store opened at '{}'", settingsPath);
+            else if (actions == -2)
+                AVER_WARN("[Scripting] this build's scripting bridge predates ConfigureInput -- "
+                          "rebindable input is unavailable");
+            else
+                AVER_WARN("[Scripting] input scheme '{}' failed to load (see the [Scripting] error line "
+                          "just above)", schemePath);
+        }
 
         // ANIMATION NOTIFIES, installed here rather than beside the asset resolver in GameContent
         // for one reason: the sink needs the ScriptHost, and that lives on this class. It survives

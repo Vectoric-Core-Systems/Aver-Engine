@@ -7,11 +7,16 @@
 //   OCINPUT 1                                     -- header, required, exactly once, version 1
 //   NAME <text to end of line>                    -- optional authoring label
 //   ACTION <name> digital|axis1|axis2             -- declares one action; OcInputValueType
-//   BIND <action> key <KeyName> [scale <f32>] [component x|y|z]
-//   BIND <action> mousex        [scale <f32>] [component x|y|z]
-//   BIND <action> mousey        [scale <f32>] [component x|y|z]
-//   BIND <action> wheel         [scale <f32>] [component x|y|z]
+//   BIND <action> key <KeyName>                  [scale <f32>] [component x|y|z]
+//   BIND <action> mousex                         [scale <f32>] [component x|y|z]
+//   BIND <action> mousey                         [scale <f32>] [component x|y|z]
+//   BIND <action> wheel                          [scale <f32>] [component x|y|z]
+//   BIND <action> gamepadbutton <ButtonName>     [scale <f32>] [component x|y|z]
+//   BIND <action> gamepadaxis <AxisName>         [scale <f32>] [component x|y|z]
 //                                                  -- one binding, feeding a declared ACTION by name
+//                                                     (<ButtonName>/<AxisName> are members of Input.cs's
+//                                                     GamepadButton/GamepadAxis enums, same opaque-token
+//                                                     treatment as <KeyName> -- see OcInput.hpp)
 //   CONTEXT <name> priority <i32>                 -- optional; this scheme's runtime name + AddContext priority
 //
 // `scale` defaults to 1.0 and `component` to x (0) when omitted -- BindKey's own defaults
@@ -101,10 +106,12 @@ const char* valueTypeWord(OcInputValueType t) {
 }
 const char* sourceWord(OcInputSource s) {
     switch (s) {
-        case OcInputSource::MouseX:     return "mousex";
-        case OcInputSource::MouseY:     return "mousey";
-        case OcInputSource::MouseWheel: return "wheel";
-        case OcInputSource::Key:        default: return "key";
+        case OcInputSource::MouseX:        return "mousex";
+        case OcInputSource::MouseY:        return "mousey";
+        case OcInputSource::MouseWheel:    return "wheel";
+        case OcInputSource::GamepadButton: return "gamepadbutton";
+        case OcInputSource::GamepadAxis:   return "gamepadaxis";
+        case OcInputSource::Key:           default: return "key";
     }
 }
 // 0=X 1=Y 2=Z (OcInputBinding::component's own comment). Any OTHER in-memory value -- reachable only
@@ -125,7 +132,9 @@ const char* componentWord(i32 c) {
 std::string bindLine(const OcInputBinding& b) {
     std::string s = "BIND ";
     s += b.action; s += ' '; s += sourceWord(b.source);
-    if (b.source == OcInputSource::Key) { s += ' '; s += b.key; }
+    // Key, GamepadButton and GamepadAxis all carry a name token; the three mouse sources carry none.
+    if (b.source == OcInputSource::Key || b.source == OcInputSource::GamepadButton ||
+        b.source == OcInputSource::GamepadAxis) { s += ' '; s += b.key; }
     if (b.scale != 1.0f) { s += " scale "; s += num(b.scale); }
     if (b.component != 0) { s += " component "; s += componentWord(b.component); }
     s += '\n';
@@ -221,7 +230,8 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
             out.actions.push_back(std::move(a));
         } else if (equalsCI(key, "BIND")) {
             if (t.size() < 3) {
-                if (err) *err = "BIND requires at least: BIND action key|mousex|mousey|wheel";
+                if (err) *err = "BIND requires at least: BIND action "
+                                 "key|mousex|mousey|wheel|gamepadbutton|gamepadaxis";
                 return false;
             }
             OcInputBinding b;
@@ -238,11 +248,32 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
                 b.source = OcInputSource::Key;
                 b.key = std::string(t[3]);
                 next = 4;
+            } else if (equalsCI(t[2], "gamepadbutton")) {
+                // Same bare-token requirement as key, and for the identical reason: a gamepad-button
+                // binding with no button name would bind nothing.
+                if (t.size() < 4) {
+                    if (err) *err = "BIND gamepadbutton requires a button name: "
+                                     "BIND action gamepadbutton <ButtonName>";
+                    return false;
+                }
+                b.source = OcInputSource::GamepadButton;
+                b.key = std::string(t[3]);
+                next = 4;
+            } else if (equalsCI(t[2], "gamepadaxis")) {
+                if (t.size() < 4) {
+                    if (err) *err = "BIND gamepadaxis requires an axis name: "
+                                     "BIND action gamepadaxis <AxisName>";
+                    return false;
+                }
+                b.source = OcInputSource::GamepadAxis;
+                b.key = std::string(t[3]);
+                next = 4;
             } else if (equalsCI(t[2], "mousex")) { b.source = OcInputSource::MouseX;     next = 3; }
             else if (equalsCI(t[2], "mousey"))   { b.source = OcInputSource::MouseY;     next = 3; }
             else if (equalsCI(t[2], "wheel"))    { b.source = OcInputSource::MouseWheel; next = 3; }
             else {
-                if (err) *err = "unknown BIND source '" + std::string(t[2]) + "' (want key, mousex, mousey or wheel)";
+                if (err) *err = "unknown BIND source '" + std::string(t[2]) +
+                                 "' (want key, mousex, mousey, wheel, gamepadbutton or gamepadaxis)";
                 return false;
             }
             // Everything from `next` on is `keyword value` pairs (scale/component), in either order,

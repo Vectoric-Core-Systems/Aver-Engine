@@ -447,9 +447,15 @@ each is a behaviour change to nodes that change did not otherwise touch.
 | `InputKey` | `key` (in, int), `down` (out, bool) | — | D | Whether a given key code is currently held. |
 | `InputKeyPressed` | `key` (in, int), `triggered` (out, bool) | — | D | True only on the frame the key went **down**. |
 | `InputKeyReleased` | `key` (in, int), `triggered` (out, bool) | — | D | True only on the frame the key came **up**. |
-| `InputAction` | `action` (in, int), `x`/`y` (out, float), `held` (out, bool) | — | D | A NAMED action's current value. `x`/`y` carry the axis components; a digital action reports 1/0 in `x`. |
-| `InputActionPressed` | `action` (in, int), `triggered` (out, bool) | — | D | True only on the frame the action went **down**. |
-| `InputActionReleased` | `action` (in, int), `triggered` (out, bool) | — | D | True only on the frame the action came **up**. |
+| `InputAction` | `action` (in, int), `x`/`y` (out, float), `held` (out, bool) | `action=` (optional) | D | A NAMED action's current value. `x`/`y` carry the axis components; a digital action reports 1/0 in `x`. |
+| `InputActionPressed` | `action` (in, int), `triggered` (out, bool) | `action=` (optional) | D | True only on the frame the action went **down**. |
+| `InputActionReleased` | `action` (in, int), `triggered` (out, bool) | `action=` (optional) | D | True only on the frame the action came **up**. |
+| `SaveInputBindings` | `exec` (in), `then` (out), `success` (out, bool) | — | P | Writes every pushed `EnhancedInput` context's current bindings to `Settings.ini`. |
+| `LoadInputBindings` | `exec` (in), `then` (out), `success` (out, bool) | — | P | Reloads every pushed context's bindings from `Settings.ini`, overwriting any in-memory rebinds. |
+| `ResetInputBindings` | `exec` (in), `then` (out), `success` (out, bool) | — | P | Reverts every pushed context's bindings to its own declared defaults, in memory only (until `SaveInputBindings`). |
+| `RebindAction` | `exec` (in), `slot`/`key` (in, int), `then` (out), `success` (out, bool) | `action=` (**required**) | P | Rebinds `action=<Name>`'s `slot`-th binding to physical `key` (a `Key`/`GamepadButton`/`GamepadAxis` enum int). Only a Key/GamepadButton/GamepadAxis slot is rebindable; `false` when the slot doesn't exist or `key` isn't a defined member of that slot's source enum. |
+| `GetActionKey` | `slot` (in, int), `key` (out, int), `bound` (out, bool) | `action=` (**required**) | D | Which physical key/button/axis is bound to `action=<Name>`'s `slot`-th binding. `key` is `-1` (and `bound` is `false`) when that slot has no binding. |
+| `GetPressedKey` | `key` (out, int), `pressed` (out, bool) | — | D | The lowest-valued key/mouse button down **this frame** -- what a "press a key to bind" rebinding prompt reads. `key` is `-1` (and `pressed` is `false`) when nothing is down. |
 
 `MoveAxis` has no `z` pin — `Input.MoveAxis`'s own Z component is hardcoded `0` in
 `Aver.Framework/Input.cs`, so a pin that could only ever read a compile-time constant would add
@@ -465,6 +471,24 @@ this node needed.
 **PREFER `InputAction` OVER `InputKey` for anything a player should be able to rebind** -- that is the
 whole point of the named layer. `InputKey` remains correct for a genuinely fixed key, and for content
 authored before actions existed; nothing about it changed.
+
+**`action=` IS THE NAMED ALTERNATIVE TO THE `action` PIN**, on `InputAction`/`InputActionPressed`/
+`InputActionReleased` only, and it is optional: give the node an `action=<Name>` NODE-line attribute
+(the same mechanism `class=`/`event=`/`curve=` already use) and the compiler resolves the handle
+itself at runtime (`GraphInterop.ActionHandleForGraph`, a per-name-cached `aver_fw_action_find`) --
+the `action` pin is then ignored entirely. Leave it off and nothing changes: the `action` pin is read
+exactly as it always was. `RebindAction` and `GetActionKey` have no pin fallback at all -- `action=`
+is **required** on both, a compile-time error naming the node when it is missing, the same treatment
+`Spawn`'s `class=` and `SaveGame`/`LoadGame`'s `path=` already get.
+
+**THE REBINDING FAMILY** (`SaveInputBindings`/`LoadInputBindings`/`ResetInputBindings`/`RebindAction`/
+`GetActionKey`/`GetPressedKey`) is what lets a graph-only project (no C# at all) offer Unreal Enhanced
+Input-style rebinding: `GetPressedKey` reads what the player just pressed, `RebindAction` writes it
+onto one action's one binding slot, and `SaveInputBindings`/`LoadInputBindings` persist or discard
+that change. The first four are `P`-path, like `SaveGame`/`LoadGame` beside them -- none of the four
+is safe to run unconditionally on every pull (`SaveInputBindings` writes to disk; the other three
+overwrite every pushed context's live bindings). `GetActionKey`/`GetPressedKey` are pure reads (`D`),
+InputKey's own shape: no exec pins, freely pullable from either compiler.
 
 **`InputKey` answers a STATE and the other two answer an EVENT**, and the output pin names say so:
 `down` versus `triggered`. `down` is true every frame a key is held, which is the wrong answer for

@@ -1,11 +1,11 @@
-// .ocinput format test: named input actions and their key/mouse bindings (see
+// .ocinput format test: named input actions and their key/mouse/gamepad bindings (see
 // modules/formats/include/aver/formats/OcInput.hpp for the grammar and why each field exists).
 // Covers value parsing, round-tripping in memory and on disk, unknown-record and comment
 // preservation through a merge write, strict malformed-input rejection, forward-referenced BIND
-// records, the "commit only on success" contract, and OcProject's new INPUT.SCHEME key -- the same
-// shape tests/formats/src/OcParticleTest.cpp uses for .ocparticle, since this format's strictness
-// contract is explicitly that precedent (see OcInput.hpp's own comment) rather than .ocmat's looser
-// tolerant-default one.
+// records, the two gamepadbutton/gamepadaxis BIND sources, the "commit only on success" contract,
+// and OcProject's new INPUT.SCHEME key -- the same shape tests/formats/src/OcParticleTest.cpp uses
+// for .ocparticle, since this format's strictness contract is explicitly that precedent (see
+// OcInput.hpp's own comment) rather than .ocmat's looser tolerant-default one.
 #include "aver/formats/OcInput.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/core/ErrorCodes.hpp"
@@ -263,6 +263,66 @@ static void testUnknownRecordsAndComments() {
     check(again == rewritten, "the second merge is idempotent -- bit-identical to the first");
 }
 
+// gamepadbutton and gamepadaxis: the two BIND sources added beside key/mousex/mousey/wheel, so a
+// scheme can bind a pad the same way it binds a keyboard. Round-trips byte-identical, same
+// requirement testRoundTripInMemory already states for key.
+static void testGamepadBindings() {
+    AVER_INFO("=== .ocinput: gamepadbutton and gamepadaxis round-trip byte-identically ===");
+    using namespace fmt;
+
+    OcInputData d;
+    d.name = "Pad";
+    d.actions.push_back({"Fire", OcInputValueType::Digital});
+    d.actions.push_back({"Move", OcInputValueType::Axis1D});
+
+    OcInputBinding fire;
+    fire.action = "Fire"; fire.source = OcInputSource::GamepadButton; fire.key = "RightShoulder";
+    OcInputBinding move;
+    move.action = "Move"; move.source = OcInputSource::GamepadAxis; move.key = "LeftTrigger";
+    move.scale = -1.0f; move.component = 2;
+    d.bindings = {fire, move};
+
+    const std::string text1 = writeOcinput(d);
+    check(text1.find("BIND Fire gamepadbutton RightShoulder\n") != std::string::npos,
+          "a gamepadbutton BIND writes its button name, with no scale/component when they hold "
+          "their defaults");
+    check(text1.find("BIND Move gamepadaxis LeftTrigger scale -1 component z\n") != std::string::npos,
+          "a gamepadaxis BIND writes its axis name alongside scale and component");
+
+    OcInputData d2;
+    std::string err;
+    check(parseOcinput(text1, d2, &err), "the written gamepad bindings parse back: " + err);
+    check(d2.bindings.size() == 2, "both gamepad bindings survived the round trip");
+    if (d2.bindings.size() == 2) {
+        check(d2.bindings[0].source == OcInputSource::GamepadButton && d2.bindings[0].key == "RightShoulder",
+              "BIND 0: Fire <- gamepadbutton RightShoulder");
+        check(d2.bindings[1].source == OcInputSource::GamepadAxis && d2.bindings[1].key == "LeftTrigger" &&
+              near(d2.bindings[1].scale, -1.0f) && d2.bindings[1].component == 2,
+              "BIND 1: Move <- gamepadaxis LeftTrigger, scale -1, component z");
+    }
+
+    const std::string text2 = writeOcinput(d2);
+    check(text1 == text2, "second write reproduces the first byte for byte");
+}
+
+// A malformed gamepadbutton/gamepadaxis BIND (no name token) is rejected the same way a bare `key`
+// with no key name already is -- see testMalformedInput's own "BIND key with no key name" case.
+static void testMalformedGamepadBindings() {
+    AVER_INFO("=== .ocinput: malformed gamepad BIND records are rejected ===");
+    fmt::OcInputData d;
+    std::string err;
+
+    check(!fmt::parseOcinput("OCINPUT 1\nACTION Fire digital\nBIND Fire gamepadbutton\n", d, &err),
+          "a gamepadbutton BIND with no button name is rejected");
+    check(!fmt::parseOcinput("OCINPUT 1\nACTION Move axis1\nBIND Move gamepadaxis\n", d, &err),
+          "a gamepadaxis BIND with no axis name is rejected");
+
+    // What must still fail: an unrelated made-up source word is refused exactly as before -- adding
+    // two new sources must not have widened BIND into accepting anything unrecognised.
+    check(!fmt::parseOcinput("OCINPUT 1\nACTION Move axis2\nBIND Move joystick 0\n", d, &err),
+          "an unknown BIND source is still rejected with gamepad sources added");
+}
+
 // Same data, written twice, must produce identical bytes.
 static void testDeterministic() {
     AVER_INFO("=== .ocinput: deterministic output ===");
@@ -427,6 +487,8 @@ int main() {
     testUnknownRecordsAndComments();
     testDeterministic();
     testBindForwardReference();
+    testGamepadBindings();
+    testMalformedGamepadBindings();
     testMalformedInput();
     testCommitOnlyOnSuccess();
     testOcProjectInputScheme();

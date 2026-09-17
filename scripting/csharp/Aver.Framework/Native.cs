@@ -151,6 +151,23 @@ internal static class Fw
         [MarshalAs(UnmanagedType.LPUTF8Str)] string materialPreset,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
+    // INPUT SCHEME, loaded from .ocinput (minor 7, framework_abi.h) -- the C ABI loader for the
+    // format modules/formats/include/aver/formats/OcInput.hpp defines, so InputScheme.cs can build a
+    // live InputMappingContext without a second .ocinput parser on the managed side. ONE PARSED
+    // SCHEME: a load replaces whatever was loaded before, on either outcome -- see framework_abi.h's
+    // own comment. Every string returned here stays valid until the NEXT aver_fw_input_scheme_load,
+    // not just until the next call, unlike every other IntPtr-returning export above.
+    [DllImport(Lib)] internal static extern int  aver_fw_input_scheme_load([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path);
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_input_scheme_error();
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_input_scheme_context_name();
+    [DllImport(Lib)] internal static extern int   aver_fw_input_scheme_context_priority();
+    [DllImport(Lib)] internal static extern int   aver_fw_input_scheme_action_count();
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_input_scheme_action_name(int index);
+    [DllImport(Lib)] internal static extern int   aver_fw_input_scheme_action_type(int index);
+    [DllImport(Lib)] internal static extern int   aver_fw_input_scheme_binding_count();
+    [DllImport(Lib)] internal static extern int   aver_fw_input_scheme_binding(int index, out int outActionIndex, out int outSource, out float outScale, out int outComponent);
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_input_scheme_binding_key(int index);
+
     /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>
     internal static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }

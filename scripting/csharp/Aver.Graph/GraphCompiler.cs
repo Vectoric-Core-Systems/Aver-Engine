@@ -599,6 +599,14 @@ public class GraphCompiler
                 EmitInputActionEdge(node);
                 break;
 
+            case "getactionkey":
+                EmitGetActionKey(node);
+                break;
+
+            case "getpressedkey":
+                EmitGetPressedKey(node);
+                break;
+
             case "raycast":
                 EmitRaycast(node);
                 break;
@@ -656,6 +664,29 @@ public class GraphCompiler
                     "notion of 'when' in a pure-dataflow graph, and Compile()'s topological pass would " +
                     "run it unconditionally on every invocation with no way to gate it. Give this node " +
                     "an ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.");
+
+            case "saveinputbindings":
+            case "loadinputbindings":
+            case "resetinputbindings":
+                // SaveGame/LoadGame's own rebindable-input twin, same refusal for the same reason:
+                // Save writes to disk, Load and Reset both overwrite every pushed context's live
+                // bindings -- none of the three is safe to run unconditionally on every pull.
+                throw new InvalidOperationException(
+                    $"{node.Type} node '{node.Id}' cannot be compiled by Compile() -- it is a side " +
+                    "effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
+                    "topological pass would run it unconditionally on every invocation with no way " +
+                    "to gate it. Give this node an ENTRY-driven exec chain and reach it through " +
+                    "CompileEntryPoint() instead.");
+
+            case "rebindaction":
+                // Side-effecting: mutates one binding, same reason as "setvar" below -- a write with
+                // no notion of "when" in a pure-dataflow graph.
+                throw new InvalidOperationException(
+                    $"RebindAction node '{node.Id}' cannot be compiled by Compile() -- rebinding an " +
+                    "action is a side effect with no notion of 'when' in a pure-dataflow graph, and " +
+                    "Compile()'s topological pass would run it unconditionally on every invocation " +
+                    "with no way to gate it. Give this node an ENTRY-driven exec chain and reach it " +
+                    "through CompileEntryPoint() instead.");
 
             case "getvar":
                 // A pure read (see IsExecCapableVarSideEffectType) -- unlike SetVar, welcome here like GetField.
@@ -1910,7 +1941,7 @@ public class GraphCompiler
 
         // Dup the fresh array: one reference feeds the call (as out2), the other survives in a local
         // to read back afterward -- the call returns void, so there's no other way to reach index 0/1.
-        LoadPin(node.Id, "action");
+        LoadActionHandle(node);
         _il.Emit(OpCodes.Ldc_I4_2);
         _il.Emit(OpCodes.Newarr, typeof(float));
         var arrLocal = _il.DeclareLocal(typeof(float[]));
@@ -1930,7 +1961,7 @@ public class GraphCompiler
 
         // held: a separate ABI call (see doc comment above for why two calls, not one). Optional like
         // EmitGetForward's "success": stored when declared, popped otherwise to balance the stack.
-        LoadPin(node.Id, "action");
+        LoadActionHandle(node);
         _il.Emit(OpCodes.Call, ActionHeldMethod);
         if (_pinLocals.TryGetValue((node.Id, "held"), out var heldLocal)) _il.Emit(OpCodes.Stloc, heldLocal);
         else                                                              _il.Emit(OpCodes.Pop);
@@ -1943,12 +1974,121 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        LoadPin(node.Id, "action");
+        LoadActionHandle(node);
         _il.Emit(OpCodes.Call, node.Type.ToLowerInvariant() == "inputactionreleased"
                                    ? ActionReleasedMethod : ActionPressedMethod);
 
         if (_pinLocals.TryGetValue((node.Id, "triggered"), out var local))
             _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// Loads the action HANDLE an InputAction/InputActionPressed/InputActionReleased node reads --
+    /// shared by the three LoadPin-based emitters above (EmitInputAction, twice, and
+    /// EmitInputActionEdge). See Node.ActionName's own comment for the full trade: when a NODE-line
+    /// `action=` attribute named the action, the handle is resolved by NAME at runtime via
+    /// GraphInterop.ActionHandleForGraph (a cached aver_fw_action_find, idempotent by name), and the
+    /// `action` pin is never read at all; when ActionName is null (every graph authored before this
+    /// attribute existed), this is exactly LoadPin(node.Id, "action") -- unchanged.
+    private void LoadActionHandle(Node node)
+    {
+        if (_il == null) return;
+
+        if (!string.IsNullOrEmpty(node.ActionName))
+        {
+            _il.Emit(OpCodes.Ldstr, node.ActionName);
+            _il.Emit(OpCodes.Call, ActionHandleForGraphMethod);
+            return;
+        }
+
+        LoadPin(node.Id, "action");
+    }
+
+    /// LoadActionHandle's own twin for the exec-chain PULL emitters (EmitPullInputAction and the
+    /// inputactionpressed/inputactionreleased cases in the pull switch below) -- same branch, but
+    /// EmitPullInput(source, "action") in place of LoadPin, for the identical reason EmitPullInput
+    /// exists beside LoadPin at all: the exec compiler never populates `_pinLocals` for a data node.
+    private void PullActionHandle(Node node)
+    {
+        if (_il == null) return;
+
+        if (!string.IsNullOrEmpty(node.ActionName))
+        {
+            _il.Emit(OpCodes.Ldstr, node.ActionName);
+            _il.Emit(OpCodes.Call, ActionHandleForGraphMethod);
+            return;
+        }
+
+        EmitPullInput(node, "action");
+    }
+
+    /// GetActionKey(slot) -> key, bound: which physical key/button/axis is bound to action=<Name>'s
+    /// slot-th binding (GraphInterop.GetActionKeyForGraph, itself EnhancedInput.TryGetBindingKey's own
+    /// per-action slot counting -- walking pushed contexts highest priority first, then each context's
+    /// bindings in order, the same order SaveBindings itself walks). action= is REQUIRED at COMPILE
+    /// time (Node.ActionName) -- unlike InputAction, GetActionKey has no `action` pin to fall back to,
+    /// so an empty attribute here can never read anything, mirroring Spawn's class=/SaveGame's path=.
+    ///
+    /// ONE NATIVE CALL, TWO PINS: GetActionKeyForGraph returns a single int (-1 when the slot has no
+    /// binding), so `key` and `bound` both come from the SAME result rather than two calls -- captured
+    /// into a local once, then re-read for `bound` (`key != -1`, the same Ceq/Ceq "not equal" idiom
+    /// EmitCompare's "notequal" arm uses) so a downstream reader of only one pin still gets it without
+    /// a second call.
+    private void EmitGetActionKey(Node node)
+    {
+        if (_il == null) return;
+        if (string.IsNullOrEmpty(node.ActionName))
+            throw new InvalidOperationException(
+                $"GetActionKey node '{node.Id}' has no action= attribute naming which action to read");
+
+        _il.Emit(OpCodes.Ldstr, node.ActionName);
+        LoadPin(node.Id, "slot");
+        _il.Emit(OpCodes.Call, GetActionKeyMethod);
+
+        var keyRaw = _il.DeclareLocal(typeof(int));
+        _il.Emit(OpCodes.Stloc, keyRaw);
+
+        _il.Emit(OpCodes.Ldloc, keyRaw);
+        if (_pinLocals.TryGetValue((node.Id, "key"), out var keyLocal)) _il.Emit(OpCodes.Stloc, keyLocal);
+        else _il.Emit(OpCodes.Pop);
+
+        if (_pinLocals.TryGetValue((node.Id, "bound"), out var boundLocal))
+        {
+            _il.Emit(OpCodes.Ldloc, keyRaw);
+            _il.Emit(OpCodes.Ldc_I4_M1);
+            _il.Emit(OpCodes.Ceq);
+            _il.Emit(OpCodes.Ldc_I4_0);
+            _il.Emit(OpCodes.Ceq);
+            _il.Emit(OpCodes.Stloc, boundLocal);
+        }
+    }
+
+    /// GetPressedKey() -> key, pressed: the lowest-valued key/mouse-button down THIS FRAME
+    /// (GraphInterop.GetPressedKeyForGraph, itself Input.FirstKeyPressedThisFrame -- -1 when nothing
+    /// is down), the read a rebinding UI's "press a key to bind" prompt needs. No attribute, no pins
+    /// in -- otherwise identical in shape to EmitGetActionKey immediately above, including the single
+    /// call feeding both `key` and the derived `pressed` (`key != -1`).
+    private void EmitGetPressedKey(Node node)
+    {
+        if (_il == null) return;
+
+        _il.Emit(OpCodes.Call, GetPressedKeyMethod);
+
+        var keyRaw = _il.DeclareLocal(typeof(int));
+        _il.Emit(OpCodes.Stloc, keyRaw);
+
+        _il.Emit(OpCodes.Ldloc, keyRaw);
+        if (_pinLocals.TryGetValue((node.Id, "key"), out var keyLocal)) _il.Emit(OpCodes.Stloc, keyLocal);
+        else _il.Emit(OpCodes.Pop);
+
+        if (_pinLocals.TryGetValue((node.Id, "pressed"), out var pressedLocal))
+        {
+            _il.Emit(OpCodes.Ldloc, keyRaw);
+            _il.Emit(OpCodes.Ldc_I4_M1);
+            _il.Emit(OpCodes.Ceq);
+            _il.Emit(OpCodes.Ldc_I4_0);
+            _il.Emit(OpCodes.Ceq);
+            _il.Emit(OpCodes.Stloc, pressedLocal);
+        }
     }
 
     /// Raycast(originX,Y,Z, dirX,Y,Z, maxDist) -> hit, entity, pointX,Y,Z: one native call, five
@@ -2685,6 +2825,8 @@ public class GraphCompiler
                     else if (IsExecCapableSphereCastType(node.Type)) EmitExecSphereCast(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     else if (IsExecCapableSaveLoadType(node.Type)) EmitExecSaveLoad(node);
+                    else if (IsExecCapableInputBindingOpType(node.Type)) EmitExecInputBindingOp(node);
+                    else if (IsExecCapableRebindActionType(node.Type)) EmitExecRebindAction(node);
                     else if (IsExecCapableCreateEntityType(node.Type)) EmitExecCreateEntity(node);
                     else if (IsExecCapableAudioType(node.Type)) EmitExecAudio(node);
                     EmitExecFanOut(node);
@@ -3267,6 +3409,23 @@ public class GraphCompiler
         type.Equals("savegame", StringComparison.OrdinalIgnoreCase) ||
         type.Equals("loadgame", StringComparison.OrdinalIgnoreCase);
 
+    /// SaveInputBindings/LoadInputBindings/ResetInputBindings' own version of IsExecCapableSaveLoadType
+    /// immediately above -- ONE predicate, one emitter (EmitExecInputBindingOp), for the identical "no
+    /// attribute, three near-identical calls" reason SaveGame/LoadGame share one. Refused by the PULL
+    /// compiler entirely, same as SaveGame/LoadGame: Save writes to disk, Load and Reset both overwrite
+    /// every pushed context's live bindings.
+    private static bool IsExecCapableInputBindingOpType(string type) => type.ToLowerInvariant() switch
+    {
+        "saveinputbindings" or "loadinputbindings" or "resetinputbindings" => true,
+        _ => false,
+    };
+
+    /// RebindAction's own version -- action= is REQUIRED (see EmitExecRebindAction), and this is
+    /// refused by the PULL compiler for the same reason SetVar is: mutating one binding is a side
+    /// effect with no notion of "when" in a pure-dataflow graph.
+    private static bool IsExecCapableRebindActionType(string type) =>
+        type.Equals("rebindaction", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, when the exec walk reaches it -- mirrors
     /// EmitSetField's field=/resolver/native-call logic, but pulls "entity"/"value" via EmitPullInput,
     /// not LoadPin/_pinLocals (see the section comment for why). A declared "success" pin captures the
@@ -3525,6 +3684,62 @@ public class GraphCompiler
 
         _il.Emit(OpCodes.Ldstr, node.SavePath);
         _il.Emit(OpCodes.Call, isSave ? SaveGameMethod : LoadGameMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs SaveInputBindings/LoadInputBindings/ResetInputBindings' native call once, when reached --
+    /// the ONE emitter all three share (see IsExecCapableInputBindingOpType), mirroring
+    /// EmitExecSaveLoad's shape exactly except there is no path= attribute and no entity pulled: all
+    /// three act on every pushed EnhancedInput context, not on one file or one thing in the world.
+    private void EmitExecInputBindingOp(Node node)
+    {
+        if (_il == null) return;
+
+        MethodInfo method = node.Type.ToLowerInvariant() switch
+        {
+            "saveinputbindings" => SaveInputBindingsMethod,
+            "loadinputbindings" => LoadInputBindingsMethod,
+            _ => ResetInputBindingsMethod,
+        };
+        _il.Emit(OpCodes.Call, method);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs a RebindAction node's write once, when reached -- mirrors EmitExecSaveLoad's shape (no
+    /// entity pulled; a compile-time-required NODE-line attribute rather than an ordinary pin), but
+    /// action= is required here for a different reason than SaveGame/LoadGame's path=: RebindAction has
+    /// NO PIN AT ALL that could name which action's binding to change -- unlike
+    /// InputAction/InputActionPressed/InputActionReleased, where the attribute is optional and the Int
+    /// `action` pin is the fallback (see Node.ActionName's own comment), there is no fallback here.
+    private void EmitExecRebindAction(Node node)
+    {
+        if (_il == null) return;
+        if (string.IsNullOrEmpty(node.ActionName))
+            throw new InvalidOperationException(
+                $"RebindAction node '{node.Id}' has no action= attribute naming which action to rebind");
+
+        _il.Emit(OpCodes.Ldstr, node.ActionName);
+        EmitPullInput(node, "slot");
+        EmitPullInput(node, "key");
+        _il.Emit(OpCodes.Call, RebindActionMethod);
 
         if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
         {
@@ -3922,7 +4137,8 @@ public class GraphCompiler
         IsExecCapablePrintType(type) || IsExecCapableApiCallType(type) ||
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
         IsExecCapablePhysicsCreateType(type) || IsExecCapableSaveLoadType(type) ||
-        IsExecCapableJointCreateType(type) || IsExecCapableJointOpType(type);
+        IsExecCapableJointCreateType(type) || IsExecCapableJointOpType(type) ||
+        IsExecCapableInputBindingOpType(type) || IsExecCapableRebindActionType(type);
 
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
@@ -4188,9 +4404,13 @@ public class GraphCompiler
             case "inputaction":
                 EmitPullInputAction(source, pinName); return;
             case "inputactionpressed":
-                EmitPullInput(source, "action"); _il.Emit(OpCodes.Call, ActionPressedMethod); return;
+                PullActionHandle(source); _il.Emit(OpCodes.Call, ActionPressedMethod); return;
             case "inputactionreleased":
-                EmitPullInput(source, "action"); _il.Emit(OpCodes.Call, ActionReleasedMethod); return;
+                PullActionHandle(source); _il.Emit(OpCodes.Call, ActionReleasedMethod); return;
+            case "getactionkey":
+                EmitPullGetActionKey(source, pinName); return;
+            case "getpressedkey":
+                EmitPullGetPressedKey(source, pinName); return;
             // GetAnimCurve DOES get a standalone pull path, unlike Raycast/MouseDelta/MoveAxis below:
             // those three must run exactly ONCE however many pins are read, so behaving differently on
             // and off the exec chain would be a trap. A curve read has neither property -- one output,
@@ -4257,14 +4477,14 @@ public class GraphCompiler
 
         if (pinName == "held")
         {
-            EmitPullInput(source, "action");
+            PullActionHandle(source);
             _il.Emit(OpCodes.Call, ActionHeldMethod);
             return;
         }
 
         // x/y: same Newarr + Dup shape EmitInputAction uses -- see that method's own comment for why
         // aver_fw_action_value2's `float[]` out-parameter needs it instead of a plain Ldloca address.
-        EmitPullInput(source, "action");
+        PullActionHandle(source);
         _il.Emit(OpCodes.Ldc_I4_2);
         _il.Emit(OpCodes.Newarr, typeof(float));
         var arrLocal = _il.DeclareLocal(typeof(float[]));
@@ -4275,6 +4495,47 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloc, arrLocal);
         _il.Emit(OpCodes.Ldc_I4, pinName == "x" ? 0 : 1);
         _il.Emit(OpCodes.Ldelem_R4);
+    }
+
+    /// PULL half of EmitGetActionKey -- recomputes per reader rather than caching (EmitPullOutput's
+    /// own "no memoization" contract), so a graph that pulls both `key` and `bound` pays the native
+    /// call TWICE rather than sharing one result the way the topological compiler's local can. Safe
+    /// for the same reason EmitPullInputAction accepts the same cost: GetActionKeyForGraph is a pure,
+    /// idempotent read. `bound` reuses the call result rather than a second native entry point --
+    /// there isn't one -- via the identical Ceq/Ceq "not equal to -1" idiom EmitGetActionKey uses.
+    private void EmitPullGetActionKey(Node source, string pinName)
+    {
+        if (_il == null) return;
+        if (string.IsNullOrEmpty(source.ActionName))
+            throw new InvalidOperationException(
+                $"GetActionKey node '{source.Id}' has no action= attribute naming which action to read");
+
+        _il.Emit(OpCodes.Ldstr, source.ActionName);
+        EmitPullInput(source, "slot");
+        _il.Emit(OpCodes.Call, GetActionKeyMethod);
+
+        if (pinName == "key") return;
+
+        _il.Emit(OpCodes.Ldc_I4_M1);
+        _il.Emit(OpCodes.Ceq);
+        _il.Emit(OpCodes.Ldc_I4_0);
+        _il.Emit(OpCodes.Ceq);
+    }
+
+    /// PULL half of EmitGetPressedKey -- same recompute-per-reader shape as EmitPullGetActionKey
+    /// immediately above, with no attribute and no inputs to pull first.
+    private void EmitPullGetPressedKey(Node source, string pinName)
+    {
+        if (_il == null) return;
+
+        _il.Emit(OpCodes.Call, GetPressedKeyMethod);
+
+        if (pinName == "key") return;
+
+        _il.Emit(OpCodes.Ldc_I4_M1);
+        _il.Emit(OpCodes.Ceq);
+        _il.Emit(OpCodes.Ldc_I4_0);
+        _il.Emit(OpCodes.Ceq);
     }
 
     /// Mirrors EmitDivide's zero-divisor convention (b == 0 yields 0.0, never NaN/Infinity -- see
@@ -4583,6 +4844,12 @@ public class GraphCompiler
     private static readonly MethodInfo ActionReleasedMethod =
         typeof(Fw).GetMethod("aver_fw_action_released", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_action_released was not found by reflection");
+    // LoadActionHandle/PullActionHandle's target when a node names its action by NODE-line attribute
+    // (Node.ActionName) instead of an Int pin -- GraphInterop, not Fw directly, because it caches the
+    // aver_fw_action_find lookup per name (see Node.ActionName's own comment).
+    private static readonly MethodInfo ActionHandleForGraphMethod =
+        typeof(GraphInterop).GetMethod("ActionHandleForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.ActionHandleForGraph was not found by reflection");
     private static readonly MethodInfo RaycastMethod =
         typeof(GraphInterop).GetMethod("RaycastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastForGraph was not found by reflection");
@@ -4911,6 +5178,26 @@ public class GraphCompiler
     private static readonly MethodInfo SaveGameMethod =
         typeof(GraphInterop).GetMethod("SaveGameForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SaveGameForGraph was not found by reflection");
+    // SaveInputBindings/LoadInputBindings/ResetInputBindings/RebindAction/GetActionKey/GetPressedKey --
+    // the rebindable-input family beside SaveGame/LoadGame above, same reflection-by-name treatment.
+    private static readonly MethodInfo SaveInputBindingsMethod =
+        typeof(GraphInterop).GetMethod("SaveInputBindingsForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SaveInputBindingsForGraph was not found by reflection");
+    private static readonly MethodInfo LoadInputBindingsMethod =
+        typeof(GraphInterop).GetMethod("LoadInputBindingsForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LoadInputBindingsForGraph was not found by reflection");
+    private static readonly MethodInfo ResetInputBindingsMethod =
+        typeof(GraphInterop).GetMethod("ResetInputBindingsForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.ResetInputBindingsForGraph was not found by reflection");
+    private static readonly MethodInfo RebindActionMethod =
+        typeof(GraphInterop).GetMethod("RebindActionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RebindActionForGraph was not found by reflection");
+    private static readonly MethodInfo GetActionKeyMethod =
+        typeof(GraphInterop).GetMethod("GetActionKeyForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.GetActionKeyForGraph was not found by reflection");
+    private static readonly MethodInfo GetPressedKeyMethod =
+        typeof(GraphInterop).GetMethod("GetPressedKeyForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.GetPressedKeyForGraph was not found by reflection");
     private static readonly MethodInfo LoadGameMethod =
         typeof(GraphInterop).GetMethod("LoadGameForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LoadGameForGraph was not found by reflection");

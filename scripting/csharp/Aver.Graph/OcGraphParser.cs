@@ -638,6 +638,15 @@ public class OcGraphParser
                     {
                         node.SavePath = v;
                     }
+                    // action= names the declared INPUT ACTION an "inputaction"/"inputactionpressed"/
+                    // "inputactionreleased"/"rebindaction"/"getactionkey" node addresses (see
+                    // Node.ActionName). OPTIONAL on the first three (a plain Int `action` pin remains
+                    // the fallback -- see Node.ActionName's own comment); REQUIRED at COMPILE time on
+                    // the last two, mirroring class=/path='s own required-at-compile-time treatment.
+                    else if (k == "action")
+                    {
+                        node.ActionName = v;
+                    }
                 }
 
                 nodes[nodeId] = node;
@@ -1263,6 +1272,55 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // SaveInputBindings / LoadInputBindings / ResetInputBindings: SaveGame/LoadGame's own
+            // rebindable-input twin -- no entity pin and no attribute at all, same reason: all three
+            // act on EVERY pushed EnhancedInput context, not on one file or one thing in the world.
+            // See GraphCompiler.EmitExecInputBindingOp/IsExecCapableInputBindingOpType.
+            case "saveinputbindings":
+            case "loadinputbindings":
+            case "resetinputbindings":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // RebindAction: changes ONE binding of ONE action, so unlike the three above it needs
+            // inputs -- action= names WHICH action (required at compile time, see Node.ActionName),
+            // `slot` picks which of that action's bindings (the same per-action slot counting
+            // GraphInterop.EnhancedInput.SaveBindings already uses), `key` is the new physical
+            // key/button/axis to bind there. See GraphCompiler.EmitExecRebindAction.
+            case "rebindaction":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "slot", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // GetActionKey / GetPressedKey: InputKey's own pure-data shape (see that case's comment,
+            // below) applied to the rebinding family -- no exec pins, safe to pull from either
+            // compiler since reading a binding or the frame's first pressed key is idempotent.
+            //
+            // GetActionKey answers "what is bound to action=<Name>'s slot-th binding" -- action= is
+            // REQUIRED at compile time (Node.ActionName; no pin fallback exists here, unlike
+            // InputAction). `key` is -1 when that slot has no binding at all (an unbound action, or a
+            // slot past the last one); `bound` is exactly `key != -1`, computed by the compiler rather
+            // than a second native call -- see GraphCompiler.EmitGetActionKey/EmitPullGetActionKey.
+            case "getactionkey":
+                node.Pins.Add(new Pin { Name = "slot", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bound", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // GetPressedKey answers "what is the lowest-valued key/mouse-button down THIS FRAME" --
+            // the read a rebinding UI's "press a key to bind" prompt needs, with no `action=` and no
+            // pins at all going in. `key` is -1 when nothing is down; `pressed` is `key != -1`, the
+            // same derived-not-called-twice shape GetActionKey uses.
+            case "getpressedkey":
+                node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pressed", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             // Conversions: one pin in, one pin out, pure.

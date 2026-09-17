@@ -30,6 +30,8 @@
 #endif
 
 #include "aver/core/Log.hpp"
+#include "aver/formats/OcInput.hpp"       // loadOcinput -- refreshSchemeActionsIfNeeded's action= picker
+#include "aver/formats/OcProject.hpp"     // loadOcproject -- resolves INPUT.SCHEME for the same picker
 #include "aver/platform/FileSystem.hpp"   // writeFileTextAtomic -- see save() below
 #if AVER_WITH_IMGUI
 #  include "aver/runtime/Engine.hpp"
@@ -81,6 +83,31 @@ bool isValidVarType(const std::string& type) {
 // to NODE attributes, rather than a second copy that can drift.
 bool containsWhitespace(const std::string& s) {
     return s.find_first_of(" \t\r\n\v\f") != std::string::npos;
+}
+
+// The .ocproject that owns `graphPath`, found by walking up from it -- the same algorithm
+// aver::ownerProjectOf (sandbox/src/SandboxMain.cpp) uses for a level, duplicated in miniature here
+// rather than called directly: that function lives in the Sandbox executable's entry-point
+// translation unit, which is NOT one of this file's link targets -- GraphEditorLoadSaveTest compiles
+// GraphEditor.cpp + GraphEditorGeometry.cpp only (tests/editor/CMakeLists.txt), so a direct call
+// would link in the real Sandbox app and fail to link in that test. Bounded to eight levels for the
+// identical reason ownerProjectOf's own comment gives: far past any real Content/Maps/... nesting, so
+// a graph with no project can't walk all the way to the drive root looking for one.
+std::string findOwnerProjectForGraph(const std::string& graphPath) {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::path(graphPath).parent_path();
+    for (int up = 0; up < 8 && !dir.empty(); ++up) {
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->is_directory(ec)) continue;
+            std::string ext = it->path().extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".ocproject") return it->path().string();
+        }
+        const std::filesystem::path parent = dir.parent_path();
+        if (parent == dir) break;  // reached the root; parent_path() stops changing
+        dir = parent;
+    }
+    return {};
 }
 
 // The node header label. For all types but GetVar/SetVar this is just the catalog displayName --
@@ -1809,6 +1836,72 @@ void GraphEditor::resetLayout() {
 #endif
 }
 
+// Refreshes schemeActionNames_ from the owning project's INPUT.SCHEME, for the action= attribute
+// picker on InputAction/InputActionPressed/InputActionReleased/RebindAction/GetActionKey. THROTTLED
+// to about once a second (schemeCacheAtSec_) -- called from the details panel every frame it is open,
+// and this editor has no file-watch mechanism to tell it a scheme changed, so it polls, but a stat()
+// call a second is not worth noticing next to a redraw.
+//
+// WHY THIS RE-PARSES FROM DISK RATHER THAN ASKING THE RUNNING GAME: there is no running game here.
+// InputScheme.cs (C#) is what a Play session or a shipped game actually loads a scheme through, and it
+// exists behind the framework ABI (aver_fw_input_scheme_load) this contract's other lanes are adding --
+// but that ABI is a MAIN-THREAD SINGLETON slot ("Returned strings stay valid until the next
+// aver_fw_input_scheme_load"), shared with whatever a live Play session has loaded into it, and this
+// editor's own script host may not even be running (a graph can be opened with no project active at
+// all, e.g. --open-asset with a bare path). Calling through it here would either race a live Play
+// session's own load or require one to exist. Reading and parsing the .ocinput directly with
+// fmt::loadOcinput is the same data the ABI would report, with no such dependency.
+//
+// A SCHEME FILE, NOT THE C# BINDING TABLE: this shows what a rebinding session would START from --
+// the declared actions -- not live rebind state, which only exists once EnhancedInput has pushed a
+// context. The action= combo does not need to distinguish the two; it is a name picker, not a bound-
+// state readout (GetActionKey's own key pin is what answers "is it bound right now").
+void GraphEditor::refreshSchemeActionsIfNeeded() {
+#if AVER_WITH_IMGUI
+    const double now = ImGui::GetTime();
+    if (schemeCacheInited_ && (now - schemeCacheAtSec_) < 1.0) return;
+    schemeCacheAtSec_ = now;
+    schemeCacheInited_ = true;
+
+    const std::string ownerProject = findOwnerProjectForGraph(path_);
+    fmt::ProjectDesc proj;
+    if (ownerProject.empty() || !fmt::loadOcproject(ownerProject, proj, nullptr) || proj.inputScheme.empty()) {
+        schemeFileFound_ = false;
+        schemeActionNames_.clear();
+        schemeResolvedPath_.clear();
+        return;
+    }
+    const std::string schemePath = proj.contentDir() + "\\" + proj.inputScheme;
+
+    std::error_code ec;
+    const auto writeTime = std::filesystem::last_write_time(schemePath, ec);
+    if (ec) {
+        // Named in the manifest but missing/unreadable right now -- e.g. mid-edit in another tool.
+        schemeFileFound_ = false;
+        schemeActionNames_.clear();
+        schemeResolvedPath_.clear();
+        return;
+    }
+    if (schemeFileFound_ && schemeResolvedPath_ == schemePath && writeTime == schemeFileWriteTime_)
+        return; // unchanged since the last successful parse -- nothing to redo
+
+    fmt::OcInputData scheme;
+    if (!fmt::loadOcinput(schemePath, scheme, nullptr)) {
+        schemeFileFound_ = false;
+        schemeActionNames_.clear();
+        schemeResolvedPath_ = schemePath;
+        schemeFileWriteTime_ = writeTime;
+        return;
+    }
+    schemeActionNames_.clear();
+    schemeActionNames_.reserve(scheme.actions.size());
+    for (const fmt::OcInputAction& a : scheme.actions) schemeActionNames_.push_back(a.name);
+    schemeFileFound_ = true;
+    schemeResolvedPath_ = schemePath;
+    schemeFileWriteTime_ = writeTime;
+#endif
+}
+
 // The Event Graph tab: the node canvas and its details column. Lifted out of draw() unchanged when
 // the Viewport tab arrived -- draw() is now the tab bar and nothing else, which is the only way
 // either tab's body stays readable.
@@ -2898,6 +2991,39 @@ void GraphEditor::drawEventGraph(float dpi) {
                     attrEditRowKey_.clear();
                 } else if (ImGui::IsItemDeactivated()) {
                     attrEditRowKey_.clear();
+                }
+
+                // THE ACTION PICKER: a convenience dropdown beside the free-text field above, sourced
+                // from the owning project's INPUT.SCHEME (see refreshSchemeActionsIfNeeded). Reachable
+                // only for InputAction/InputActionPressed/InputActionReleased/RebindAction/
+                // GetActionKey (GraphNodeDefs.hpp), so -- like the var== branch above -- no separate
+                // node-type check is needed. FREE TEXT STAYS THE SOURCE OF TRUTH: the InputText above
+                // already accepts any name, including one a C# script pushed with no scheme behind it
+                // at all, so this is a picker for convenience, not a validator -- an unrecognised name
+                // is flagged below rather than refused. Falls back to the plain InputText row above
+                // with nothing added when no scheme can be found, which is exactly what happens if this
+                // whole block is skipped.
+                if (row.declared && row.key == "action") {
+                    refreshSchemeActionsIfNeeded();
+                    if (schemeFileFound_) {
+                        if (!schemeActionNames_.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::BeginCombo("##actionPick", "", ImGuiComboFlags_NoPreview)) {
+                                for (const std::string& name : schemeActionNames_) {
+                                    if (ImGui::Selectable(name.c_str())) setAttribute(node->id, "action", name);
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Pick a declared action from %s", schemeResolvedPath_.c_str());
+                        }
+                        if (!row.value.empty() &&
+                            std::find(schemeActionNames_.begin(), schemeActionNames_.end(), row.value) ==
+                                schemeActionNames_.end()) {
+                            ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                                "'%s' is not declared in %s.", row.value.c_str(), schemeResolvedPath_.c_str());
+                        }
+                    }
                 }
                 ImGui::PopID();
             }

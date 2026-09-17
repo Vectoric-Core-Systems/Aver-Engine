@@ -51,8 +51,14 @@ enum class OcInputValueType { Digital, Axis1D, Axis2D };
 // BUTTONS are not a separate source here -- InputSource.Key's own doc comment says "A key or mouse
 // button, held = 1", and Input.cs's Key enum carries MouseLeft/MouseRight/MouseMiddle right alongside
 // the keyboard keys (Input.cs:16) -- so `BIND ... key MouseLeft` is how a mouse button is bound, the
-// same as any keyboard key, and OcInputSource needs no fifth value for it.
-enum class OcInputSource { Key, MouseX, MouseY, MouseWheel };
+// same as any keyboard key, and OcInputSource needs no separate value for it.
+//
+// GamepadButton/GamepadAxis were added beside the original four so a scheme can bind a pad the same
+// way it binds a keyboard: `BIND ... gamepadbutton <name>` / `BIND ... gamepadaxis <name>`, where
+// <name> is a member of Input.cs's own GamepadButton/GamepadAxis enum -- the identical "opaque
+// string, validated by the C# loader, not here" treatment this header's own comment already states
+// for a Key name, extended to the two enums Input.cs added beside Key for the gamepad ABI.
+enum class OcInputSource { Key, MouseX, MouseY, MouseWheel, GamepadButton, GamepadAxis };
 
 // One declared action: `ACTION <name> digital|axis1|axis2`. Mirrors InputAction::Name/ValueType
 // (EnhancedInput.cs:37-79) and nothing else on that class -- Raw/Prev/IsHeld/WasPressed/WasReleased
@@ -82,11 +88,12 @@ struct OcInputBinding {
     // be wired to anything is exactly as useless as a wire to nowhere.
     std::string action;
     OcInputSource source = OcInputSource::Key;
-    // The Key enum spelling (e.g. "W", "MouseLeft") -- see the header comment above for why this is
-    // an unvalidated opaque token rather than a checked enum. Meaningful, and required non-empty,
-    // only when source == Key; empty and ignored for the three mouse-axis sources, matching
-    // EnhancedInput.cs's own BindMouseLook/BindMouseWheel (EnhancedInput.cs:122-130), which pass a
-    // filler Key.A that EnhancedInput.Update never reads because it branches on `source`, not `key`
+    // The Key/GamepadButton/GamepadAxis enum spelling (e.g. "W", "MouseLeft", "LeftShoulder",
+    // "LeftTrigger") -- see the header comment above for why this is an unvalidated opaque token
+    // rather than a checked enum. Meaningful, and required non-empty, for Key, GamepadButton and
+    // GamepadAxis; empty and ignored for the three mouse-axis sources, matching EnhancedInput.cs's
+    // own BindMouseLook/BindMouseWheel (EnhancedInput.cs:122-130), which pass a filler Key.A that
+    // EnhancedInput.Update never reads because it branches on `source`, not `key`
     // (EnhancedInput.cs:189-196).
     std::string key;
     // BindKey's own default (EnhancedInput.cs:104). Negative values invert an axis -- see
@@ -147,10 +154,14 @@ bool loadOcinput(const std::string& path, OcInputData& out, std::string* err = n
 // record this format does not model -- is copied through untouched, at its original position. Pass
 // an empty string_view (the default) to produce a fresh file. Round-trips through parseOcinput.
 //
-// INTEGRATION NOTE: nothing in this change reads OcInputData back into a real
-// Aver.Framework.InputMappingContext -- there is no C ABI export or C# loader for it yet (unlike
-// .ocgraph, which HostBridge.DeclareGraphClasses already opens). A caller wanting a scheme LIVE still
-// has to write that loader; this header only makes the data representable and round-trippable.
+// INTEGRATION NOTE: OcInputData now DOES reach a real Aver.Framework.InputMappingContext --
+// modules/framework/include/aver/framework/framework_abi.h's own INPUT SCHEME section
+// (aver_fw_input_scheme_load and its count/index getters) exposes exactly this parser
+// (aver::fmt::parseOcinput, via loadOcinput) across the C ABI, one file-static parsed scheme at a
+// time, and scripting/csharp/Aver.Framework/InputScheme.cs is the C# loader that walks it into a
+// live InputMappingContext (InputAction.Digital/Axis1D/Axis2D, then bindings by key name) and pushes
+// it onto EnhancedInput. This header and OcInput.cpp still only make the data representable and
+// round-trippable -- the ABI section is what makes it LIVE.
 std::string writeOcinput(const OcInputData& d, std::string_view existing = "");
 
 } // namespace aver::fmt

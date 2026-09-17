@@ -10,7 +10,9 @@
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 
 using namespace aver;
@@ -914,6 +916,83 @@ static void testActions() {
     aver_fw_action_clear_bindings();   // leave global state clean for anything that runs after this
 }
 
+// Checks the INPUT SCHEME section (minor 7): loading a real .ocinput file through the C ABI and
+// reading it back via the count-then-index getters, the action-index / AVER_FW_ACTION_SRC_* mapping
+// aver_fw_input_scheme_binding performs (including the two gamepad sources OcInput.hpp's own
+// gamepadbutton/gamepadaxis BIND records add), and the load-failure path (aver_fw_input_scheme_error
+// set, the scheme slot left empty rather than holding whatever loaded before). Exercises real disk
+// I/O, the same way tests/formats/src/OcInputTest.cpp's own file round-trip test does, rather than
+// only asserting through the C++ parser this ABI wraps.
+static void testInputScheme() {
+    AVER_INFO("=== input scheme: load, count-then-index getters, and the failure path ===");
+
+    const std::string dir  = std::getenv("TEMP") ? std::getenv("TEMP") : ".";
+    const std::string path = dir + "/aver-frameworktest-inputscheme.ocinput";
+    {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f << "OCINPUT 1\n"
+             "NAME OnFootDefaults\n"
+             "ACTION Move axis2\n"
+             "ACTION Fire digital\n"
+             "BIND Move key W component y\n"
+             "BIND Move gamepadaxis LeftY scale -1 component y\n"
+             "BIND Fire mousex\n"
+             "CONTEXT OnFoot priority 5\n";
+    }
+
+    check(aver_fw_input_scheme_load(path.c_str()) == 1, "a well-formed .ocinput file loads");
+    check(std::string(aver_fw_input_scheme_error()).empty(), "error is empty after a successful load");
+    check(std::string(aver_fw_input_scheme_context_name()) == "OnFoot", "context_name reads back CONTEXT's name");
+    check(aver_fw_input_scheme_context_priority() == 5, "context_priority reads back CONTEXT's priority");
+
+    check(aver_fw_input_scheme_action_count() == 2, "action_count matches the file's two ACTION records");
+    check(std::string(aver_fw_input_scheme_action_name(0)) == "Move", "action_name(0) is Move, declaration order");
+    check(aver_fw_input_scheme_action_type(0) == AVER_FW_ACTION_AXIS2D, "Move's type is axis2d");
+    check(std::string(aver_fw_input_scheme_action_name(1)) == "Fire", "action_name(1) is Fire");
+    check(aver_fw_input_scheme_action_type(1) == AVER_FW_ACTION_DIGITAL, "Fire's type is digital");
+    check(aver_fw_input_scheme_action_name(2) == nullptr, "action_name is nullptr out of range");
+    check(aver_fw_input_scheme_action_type(2) == -1, "action_type is -1 out of range");
+
+    check(aver_fw_input_scheme_binding_count() == 3, "binding_count matches the file's three BIND records");
+
+    int32_t actionIndex = -1, source = -1, component = -1;
+    float   scale = -1.0f;
+    check(aver_fw_input_scheme_binding(0, &actionIndex, &source, &scale, &component) == 1,
+          "binding(0) is in range");
+    check(actionIndex == 0, "binding 0's action index resolves to Move (index 0), not an action handle");
+    check(source == AVER_FW_ACTION_SRC_KEY, "binding 0's source maps Key -> AVER_FW_ACTION_SRC_KEY");
+    check(scale == 1.0f && component == 1, "binding 0 carries W's default scale and component y");
+    check(std::string(aver_fw_input_scheme_binding_key(0)) == "W", "binding_key(0) is the key name W");
+
+    check(aver_fw_input_scheme_binding(1, &actionIndex, &source, &scale, &component) == 1,
+          "binding(1) is in range");
+    check(actionIndex == 0, "binding 1 also names Move");
+    check(source == AVER_FW_ACTION_SRC_GAMEPAD_AXIS,
+          "binding 1's source maps GamepadAxis -> AVER_FW_ACTION_SRC_GAMEPAD_AXIS");
+    check(scale == -1.0f && component == 1, "binding 1 carries its authored scale -1 and component y");
+    check(std::string(aver_fw_input_scheme_binding_key(1)) == "LeftY", "binding_key(1) is the axis name LeftY");
+
+    check(aver_fw_input_scheme_binding(2, &actionIndex, &source, &scale, &component) == 1,
+          "binding(2) is in range");
+    check(actionIndex == 1, "binding 2 names Fire (index 1)");
+    check(source == AVER_FW_ACTION_SRC_MOUSE_X, "binding 2's source maps MouseX -> AVER_FW_ACTION_SRC_MOUSE_X");
+    check(std::string(aver_fw_input_scheme_binding_key(2)).empty(), "binding_key is empty for a mouse source");
+
+    check(aver_fw_input_scheme_binding(3, &actionIndex, &source, &scale, &component) == 0,
+          "binding index at/past count is out of range");
+    check(aver_fw_input_scheme_binding_key(3) == nullptr, "binding_key is nullptr out of range");
+
+    // ---- the failure path: a missing file replaces the slot with nothing, and sets the error ----
+    check(aver_fw_input_scheme_load((dir + "/aver-frameworktest-inputscheme-missing.ocinput").c_str()) == 0,
+          "loading a missing file fails");
+    check(!std::string(aver_fw_input_scheme_error()).empty(), "...and error is set");
+    check(aver_fw_input_scheme_action_count() == 0, "...and the scheme slot is left empty, not the previous scheme");
+    check(std::string(aver_fw_input_scheme_context_name()).empty(), "...context_name is empty too");
+
+    check(aver_fw_input_scheme_load(nullptr) == 0, "a null path is rejected, not a crash");
+    check(aver_fw_input_scheme_load("") == 0, "an empty path is rejected");
+}
+
 // Runs every framework test. Returns the failure count as the exit code.
 int main() {
     AVER_INFO("Aver.Framework test");
@@ -934,6 +1013,7 @@ int main() {
     testRawVk();
     testGamepad();
     testActions();
+    testInputScheme();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

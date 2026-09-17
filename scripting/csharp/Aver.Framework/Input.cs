@@ -99,4 +99,26 @@ public static class Input
     /// stick/trigger reading is meant to cross exactly as read.</summary>
     public static float GetGamepadAxis(GamepadAxis axis, int pad = 0) =>
         Fw.aver_fw_input_gamepad_axis(pad, (int)axis);
+
+    // Sorted once, not per call: Key's own values are fixed at compile time (see the enum's own
+    // comment on why it can never be renumbered), so there is nothing to recompute on a second call.
+    private static readonly Key[] s_keysByValue = SortedKeys();
+    private static Key[] SortedKeys()
+    {
+        var v = (Key[])Enum.GetValues(typeof(Key));
+        Array.Sort(v);
+        return v;
+    }
+
+    /// <summary>The LOWEST <see cref="Key"/> value whose GetKeyDown is true this frame, mouse buttons
+    /// included -- MouseLeft/MouseRight/MouseMiddle are ordinary members of this same enum (see its own
+    /// comment), so a "press any button to rebind" prompt needs only this one call, not a separate
+    /// mouse poll beside it. -1 when nothing was pressed this frame. This is what a rebind menu's
+    /// GetPressedKey polls every frame while it waits for the player to press something.</summary>
+    public static int FirstKeyPressedThisFrame()
+    {
+        foreach (Key k in s_keysByValue)
+            if (GetKeyDown(k)) return (int)k;
+        return -1;
+    }
 }

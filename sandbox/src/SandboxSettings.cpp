@@ -793,6 +793,53 @@ void SandboxApp::buildProjectSettings() {
             uiReg_.track("project.startMap");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Relative to the content root, e.g. Maps/Default.ocmap");
+
+            // A COMBO, not free text like Start map above: INPUT.SCHEME names a scheme by
+            // CONTENT-RELATIVE PATH (OcProject.hpp's own comment on the field), and a typo here
+            // fails SILENTLY at runtime -- no context is ever pushed -- rather than refusing to
+            // open the way a bad Start Map at least tries to load and errors. Scanned fresh each
+            // time the combo opens, refreshFoliagePalette's own recursive_directory_iterator
+            // pattern (SandboxViewport.cpp), sized for the same kind of project: a handful of
+            // .ocinput files, never thousands.
+            {
+                const std::string curLabel = project_.inputScheme.empty() ? "None" : project_.inputScheme;
+                if (ImGui::BeginCombo("Input Scheme", curLabel.c_str())) {
+                    if (ImGui::Selectable("None", project_.inputScheme.empty())) {
+                        project_.inputScheme.clear();
+                        projectDirty_ = true;
+                    }
+                    const std::string dir = project_.contentDir();
+                    std::error_code ec;
+                    if (!dir.empty() && std::filesystem::exists(dir, ec)) {
+                        std::vector<std::string> choices;
+                        for (std::filesystem::recursive_directory_iterator it(dir, ec), end;
+                             it != end; it.increment(ec)) {
+                            if (ec) break;
+                            if (!it->is_regular_file(ec)) continue;
+                            std::string ext = it->path().extension().string();
+                            std::transform(ext.begin(), ext.end(), ext.begin(),
+                                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            if (ext != ".ocinput") continue;
+                            std::error_code relEc;
+                            std::string rel = std::filesystem::relative(it->path(), dir, relEc).string();
+                            if (relEc || rel.empty()) continue;
+                            for (char& c : rel) if (c == '\\') c = '/';
+                            choices.push_back(std::move(rel));
+                        }
+                        std::sort(choices.begin(), choices.end());
+                        for (const std::string& c : choices)
+                            if (ImGui::Selectable(c.c_str(), c == project_.inputScheme)) {
+                                project_.inputScheme = c;
+                                projectDirty_ = true;
+                            }
+                    }
+                    ImGui::EndCombo();
+                }
+                uiReg_.track("project.inputScheme");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("The .ocinput scheme EnhancedInput pushes as this "
+                                       "project's default bindings.");
+            }
             ImGui::PopItemWidth();
 
             // READ-ONLY ON PURPOSE, both of them. ENGINE is what the project needs at least, not

@@ -49,6 +49,20 @@ public:
     // Drives OnShutdown, unloads the context and closes the host context. Safe called twice.
     void shutdown();
 
+    // INPUT SCHEME: opens the settings store rebinds are saved to/loaded from, then loads (or, with
+    // an empty `schemePath`, unloads) the project's .ocinput scheme as a pushed InputMappingContext
+    // (see HostBridge.cs's ConfigureInput). Each composition root calls this once, right after
+    // declareGraphClasses; the editor calls it again at every Play start, since a saved .ocinput
+    // edit only takes effect on a fresh load.
+    //
+    // Returns the scheme's action count (0 for an empty `schemePath`, meaning "unloaded"), -1 when
+    // the scheme failed to parse, or -2 when the staged bridge predates this export -- bound
+    // OPTIONALLY, the same graceful-degradation rule every group below follows: a bridge built
+    // before ConfigureInput existed still boots and simply cannot do this. The non-scripting stub
+    // (no CLR host at all, e.g. off Win32) returns 0 instead, matching "no scheme" rather than a
+    // real failure.
+    i32 configureInput(const std::string& schemePath, const std::string& settingsPath);
+
     // Graph hosting: GraphLoad/GraphTick/GraphUnload, bound OPTIONALLY at init time exactly like the
     // HUD three -- a bridge built before these existed still boots; graphAvailable() is false and
     // every call below is a documented no-op/false rather than a crash.

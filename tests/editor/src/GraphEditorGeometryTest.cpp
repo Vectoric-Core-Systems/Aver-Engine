@@ -95,6 +95,16 @@ static void testNodeCatalog() {
         check(findGraphNodeDesc(t) != nullptr, std::string("catalog has flow type '") + t + "'");
     }
 
+    // The rebindable-input vocabulary (OWNER DECISION, 2026-09-17): six node types letting a graph
+    // save/load/reset the pushed input-context bindings, rebind one action's key, and read a key back
+    // -- with no C# required. Proving each is present, the same purpose incoming[]/vec3Fields[]/flow[]
+    // above serve for their own slices.
+    const char* inputScheme[] = {"SaveInputBindings", "LoadInputBindings", "ResetInputBindings",
+                                  "RebindAction", "GetActionKey", "GetPressedKey"};
+    for (const char* t : inputScheme) {
+        check(findGraphNodeDesc(t) != nullptr, std::string("catalog has input-scheme type '") + t + "'");
+    }
+
     check(findGraphNodeDesc("NoSuchNodeType") == nullptr, "unknown type resolves to nullptr");
 
     // Case-insensitive lookup, since the fixture file uses "ConstFloat" and GraphCompiler.cs's switch
@@ -804,12 +814,17 @@ static void testNodeAttributeCatalog() {
     AVER_INFO("=== node attribute catalog (GraphNodeDesc::attributes) ===");
 
     // The six types an earlier task brief named (param=/field=/field=/field=/field=/class=), plus
-    // GetVar/SetVar's own var= -- graph-local persistent variables, added later.
+    // GetVar/SetVar's own var= -- graph-local persistent variables, added later -- and the rebindable-
+    // input vocabulary's own action= (OWNER DECISION, 2026-09-17): optional on InputAction/
+    // InputActionPressed/InputActionReleased, required (by the C# compiler, not this table -- see
+    // GraphNodeDefs.hpp's own comment on RebindAction) on RebindAction/GetActionKey.
     struct Expect { const char* type; const char* key; };
     const Expect expected[] = {
         {"Param", "param"}, {"GetField", "field"}, {"SetField", "field"},
         {"GetFieldVec3", "field"}, {"SetFieldVec3", "field"}, {"Spawn", "class"},
         {"GetVar", "var"}, {"SetVar", "var"},
+        {"InputAction", "action"}, {"InputActionPressed", "action"}, {"InputActionReleased", "action"},
+        {"RebindAction", "action"}, {"GetActionKey", "action"},
     };
     for (const auto& e : expected) {
         const GraphNodeDesc* d = findGraphNodeDesc(e.type);

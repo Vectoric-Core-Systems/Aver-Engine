@@ -423,4 +423,129 @@ public static class EnhancedInput
             }
         }
     }
+
+    // ---- rebind-menu operations, covering every pushed context at once -----------------------------
+    //
+    // These four cover a WHOLE rebind session -- Save/Load/Reset across every layer in one call --
+    // rather than making a caller loop s_layers itself, which it cannot do anyway (s_layers is
+    // private, per this file's own design). They are deliberately indifferent to WHICH kind of context
+    // each layer is: a hand-written InputMappingContext subclass and an InputScheme-loaded one
+    // (InputScheme.cs) are both just entries in s_layers by the time anything gets here, so a rebind
+    // menu wired to these four needs no special case for a graph-only project's scheme context.
+    //
+    /// <summary>Writes every pushed context's bindings to <see cref="Settings"/>, then flushes the
+    /// store to disk -- the trailing <see cref="Settings.Flush"/> call a caller looping
+    /// <see cref="InputMappingContext.SaveBindings"/> itself would otherwise have to remember, made
+    /// exactly once for the whole stack rather than once per context. Returns the flush's result.</summary>
+    public static bool SaveAllBindings()
+    {
+        for (int i = 0; i < s_layers.Count; i++) s_layers[i].Context.SaveBindings();
+        return Settings.Flush();
+    }
+
+    /// <summary>Reads every pushed context's bindings back from <see cref="Settings"/>, then re-pushes
+    /// the whole stack ONCE so the native action-binding table picks up every context's change
+    /// together -- not once per context, which is what a caller looping LoadBindings()+AddContext()
+    /// itself would otherwise pay for every layer.</summary>
+    public static void LoadAllBindings()
+    {
+        for (int i = 0; i < s_layers.Count; i++) s_layers[i].Context.LoadBindings();
+        Rebind();
+    }
+
+    /// <summary>Restores every pushed context to the bindings its own constructor set up, in memory
+    /// only -- see <see cref="InputMappingContext.ResetToDefaults"/>'s own comment for why this does
+    /// not touch <see cref="Settings"/> or persist by itself; a caller wanting the reset to stick calls
+    /// <see cref="SaveAllBindings"/> afterwards. Re-pushes the whole stack once, the same as
+    /// <see cref="LoadAllBindings"/>.</summary>
+    public static void ResetAllBindings()
+    {
+        for (int i = 0; i < s_layers.Count; i++) s_layers[i].Context.ResetToDefaults();
+        Rebind();
+    }
+
+    // A slot is rebindable only when it has exactly one key/button/axis to replace -- the three
+    // mouse-axis sources (MouseX/MouseY/MouseWheel) bind to "the mouse", not to a value a rebind menu
+    // could offer a list of alternatives for, so RebindAction refuses them the same way it refuses a
+    // slot that does not exist.
+    private static bool IsRebindableSource(InputSource source) =>
+        source is InputSource.Key or InputSource.GamepadButton or InputSource.GamepadAxis;
+
+    // The SAME Enum.IsDefined guard TryParseRawKey (above) applies when reading a saved binding back
+    // off Settings -- a caller handing RebindAction a rawKey it typed by hand (or read off a graph's
+    // GetPressedKey) gets the identical protection against an undefined enum value silently taking up
+    // residence in a binding.
+    private static bool IsDefinedRawKey(InputSource source, int rawKey) => source switch
+    {
+        InputSource.GamepadButton => Enum.IsDefined(typeof(GamepadButton), rawKey),
+        InputSource.GamepadAxis   => Enum.IsDefined(typeof(GamepadAxis), rawKey),
+        _                         => Enum.IsDefined(typeof(Key), rawKey),
+    };
+
+    /// <summary>Rebinds the <paramref name="slot"/>-th binding of <paramref name="actionName"/>,
+    /// walking pushed contexts HIGHEST PRIORITY FIRST and, within each context, its bindings in the
+    /// order <see cref="InputMappingContext.SaveBindings"/> would number them -- the slot count RESETS
+    /// at each context, the same as SaveBindings's own per-context <c>slotByAction</c> dictionary does,
+    /// so a slot this method rebinds is the exact slot a save/load round-trip would persist under that
+    /// context's own settings key. The first context that has <paramref name="slot"/> bindings for this
+    /// action wins; a context with FEWER matching bindings than <paramref name="slot"/> is skipped
+    /// entirely, not partially counted into the next one.
+    ///
+    /// False, with nothing changed, when: no pushed context has that many bindings for this action; the
+    /// slot found is not <see cref="InputSource.Key"/>, <see cref="InputSource.GamepadButton"/> or
+    /// <see cref="InputSource.GamepadAxis"/> (see <see cref="IsRebindableSource"/>); or
+    /// <paramref name="rawKey"/> is not a defined member of whichever enum that slot's own Source
+    /// names. Source/Scale/Component are kept exactly as they were -- only the raw key changes -- and
+    /// the whole stack is re-pushed once on success so the rebind takes effect immediately.</summary>
+    public static bool RebindAction(string actionName, int slot, int rawKey)
+    {
+        if (string.IsNullOrEmpty(actionName) || slot < 0) return false;
+        for (int li = 0; li < s_layers.Count; li++)
+        {
+            List<InputBinding> bindings = s_layers[li].Context.Bindings;
+            int seen = 0;
+            for (int bi = 0; bi < bindings.Count; bi++)
+            {
+                InputBinding b = bindings[bi];
+                if (b.Action.Name != actionName) continue;
+                if (seen != slot) { seen++; continue; }
+
+                if (!IsRebindableSource(b.Source) || !IsDefinedRawKey(b.Source, rawKey)) return false;
+
+                bindings[bi] = new InputBinding(b.Action, b.Source, rawKey, b.Scale, b.Component);
+                Rebind();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The <paramref name="slot"/>-th binding of <paramref name="actionName"/>'s CURRENT
+    /// Source and raw key, using the identical per-context slot walk <see cref="RebindAction"/> uses
+    /// (see its own comment). False, with both out parameters left at their defaults, when no pushed
+    /// context has that many bindings for this action -- reports whatever source and key are actually
+    /// there, including a non-rebindable mouse-axis slot, so a caller that only wants to DISPLAY the
+    /// current binding is not filtered the way <see cref="RebindAction"/> filters what it will
+    /// change.</summary>
+    public static bool TryGetBindingKey(string actionName, int slot, out int rawKey, out InputSource source)
+    {
+        rawKey = -1;
+        source = default;
+        if (string.IsNullOrEmpty(actionName) || slot < 0) return false;
+        for (int li = 0; li < s_layers.Count; li++)
+        {
+            List<InputBinding> bindings = s_layers[li].Context.Bindings;
+            int seen = 0;
+            for (int bi = 0; bi < bindings.Count; bi++)
+            {
+                InputBinding b = bindings[bi];
+                if (b.Action.Name != actionName) continue;
+                if (seen != slot) { seen++; continue; }
+                rawKey = b.RawKey;
+                source = b.Source;
+                return true;
+            }
+        }
+        return false;
+    }
 }

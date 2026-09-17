@@ -573,13 +573,59 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    redundantly pull the same way GetForward's six-output read already is) but widens InputKey's
     //    single `down` bool into the float2 + held an action (digital, 1D or 2D axis alike) can carry.
     //    InputActionPressed/Released are InputKeyPressed/Released's exact twins, one level up. --
+    // action= (OWNER DECISION, 2026-09-17): when present, the handle comes from
+    // GraphInterop.ActionHandleForGraph(name) instead of the `action` pin below, which is then
+    // ignored -- see GraphCompiler.cs's EmitInputAction for the compiled difference. OPTIONAL, unlike
+    // RebindAction/GetActionKey's own action= further down: a graph authored before this existed still
+    // wires the pin by hand and keeps compiling unchanged.
     t.push_back({"InputAction", "Input Action", "Input", {
         pin("action", "int", false),
-        pin("x", "float", true), pin("y", "float", true), pin("held", "bool", true)}});
+        pin("x", "float", true), pin("y", "float", true), pin("held", "bool", true)}, {attr("action", "Action")}});
     t.push_back({"InputActionPressed", "Input Action Pressed", "Input", {
-        pin("action", "int", false), pin("triggered", "bool", true)}});
+        pin("action", "int", false), pin("triggered", "bool", true)}, {attr("action", "Action")}});
     t.push_back({"InputActionReleased", "Input Action Released", "Input", {
-        pin("action", "int", false), pin("triggered", "bool", true)}});
+        pin("action", "int", false), pin("triggered", "bool", true)}, {attr("action", "Action")}});
+    // -- REBINDABLE INPUT: SaveInputBindings/LoadInputBindings/ResetInputBindings/RebindAction/
+    //    GetActionKey/GetPressedKey -- the Unreal-Enhanced-Input-style vocabulary a project with no C#
+    //    at all can still ship a rebinding menu from (OWNER DECISION, 2026-09-17; see Aver.Framework
+    //    EnhancedInput.SaveAllBindings/LoadAllBindings/ResetAllBindings/RebindAction/TryGetBindingKey
+    //    and GraphInterop's *ForGraph wrappers around them). Every one of these reads or writes the
+    //    SAME pushed-context bindings InputAction/InputActionPressed/InputActionReleased above already
+    //    read from -- there is no separate "graph-owned" binding table, so a rebind made here is
+    //    visible to those three on the very next frame, scheme-loaded context included (InputScheme.cs
+    //    pushes the loaded .ocinput through the identical EnhancedInput.AddContext path).
+    //
+    //    `action=` NAMES THE ACTION, not a handle -- unlike InputAction's own `action` PIN above, which
+    //    predates a name-by-attribute mechanism existing at all (see that node's own comment). These
+    //    six are all new, so there is no legacy int-pin shape to preserve, and a rebinding UI is
+    //    exactly the case where an author wants to type "Jump" once rather than look up a handle.
+    //
+    //    SAVE/LOAD/RESET ARE EXEC-ONLY, matching SaveGame/LoadGame's own shape above -- they act on the
+    //    whole pushed-context stack, not one action, so there is nothing for a data pin to name.
+    t.push_back({"SaveInputBindings", "Save Input Bindings", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"LoadInputBindings", "Load Input Bindings", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"ResetInputBindings", "Reset Input Bindings", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // RebindAction's action= is REQUIRED, not optional like InputAction's -- a rebind naming no action
+    // is not a lesser version of this node, it is not this node, so GraphCompiler.cs's EmitRebindAction
+    // refuses to compile one missing it, by name. Declared here exactly like every optional attribute
+    // above regardless: this table only says WHICH key=value rows the details panel shows, not which
+    // are required -- that distinction lives in the compiler's own error, not a second flag here.
+    t.push_back({"RebindAction", "Rebind Action", "Input", {
+        pin("exec", "exec", false), pin("slot", "int", false), pin("key", "int", false),
+        pin("then", "exec", true), pin("success", "bool", true)}, {attr("action", "Action")}});
+    // GetActionKey: pure data, like InputAction above -- reading the current binding has no side effect
+    // and costs nothing to redo on every pull. `key` is -1 when the slot names no binding (out of
+    // range, or the action/slot pair was never bound at all).
+    t.push_back({"GetActionKey", "Get Action Key", "Input", {
+        pin("slot", "int", false), pin("key", "int", true), pin("bound", "bool", true)}, {attr("action", "Action")}});
+    // GetPressedKey: which key was pressed THIS FRAME, for a "press any key to rebind" capture step --
+    // the one thing no other node here can answer, since every InputKey* node above takes a key rather
+    // than finding one. -1 when nothing was pressed this frame.
+    t.push_back({"GetPressedKey", "Get Pressed Key", "Input", {
+        pin("key", "int", true), pin("pressed", "bool", true)}});
     // -- Select: pick one of two values by a bool. Pure data, no exec pins. In the PULL compiler BOTH
     //    arms are computed regardless of cond -- see GraphCompiler.EmitSelect, which explains why
     //    that is correct and not a missing short-circuit. --

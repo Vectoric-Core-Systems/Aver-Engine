@@ -40,6 +40,7 @@
 #include "aver/formats/OcGraph.hpp"
 
 #include <cstdint>
+#include <filesystem>   // schemeFileWriteTime_ -- see its own comment below
 #include <functional>
 #include <memory>
 #include <string>
@@ -656,6 +657,23 @@ private:
     // in-flight edit buffer it never asked for.
     std::string varEditRowKey_;
     char varEditBuf_[256] = {};
+
+    // ---- input-scheme action cache -- the action= attribute picker on InputAction/InputActionPressed/
+    // InputActionReleased/RebindAction/GetActionKey (GraphNodeDefs.hpp). Resolved from the OPEN
+    // GRAPH'S OWN FILE PATH (path_ above) by walking up to the owning .ocproject, reading its
+    // INPUT.SCHEME, and parsing that .ocinput with fmt::loadOcinput -- see refreshSchemeActionsIfNeeded
+    // in the .cpp for the full contract, including why this does NOT go through the framework ABI a
+    // running game uses (this editor has no live C# runtime to ask). THROTTLED, not read every frame:
+    // schemeCacheAtSec_/schemeCacheInited_ gate a re-check to about once a second, and even then a
+    // re-check only re-parses when the scheme file's own write time (schemeFileWriteTime_) has moved,
+    // so editing a dozen action= rows in one session costs one stat() call per second, not one parse.
+    std::vector<std::string> schemeActionNames_;
+    bool schemeFileFound_ = false;      // a scheme was resolved AND parsed at the last refresh
+    std::string schemeResolvedPath_;    // its absolute path, for the picker's tooltip / warning text
+    std::filesystem::file_time_type schemeFileWriteTime_{};
+    double schemeCacheAtSec_ = -1000.0; // ImGui::GetTime() at the last refresh
+    bool schemeCacheInited_ = false;    // false until the first refresh, so that one is never throttled
+    void refreshSchemeActionsIfNeeded();
 
     // One-shot: frame the whole graph on the first draw that knows how big the canvas is. Set at
     // load. NOT done in loadFromDisk itself, because the viewport size is an ImGui fact that does

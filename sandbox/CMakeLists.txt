@@ -53,6 +53,7 @@ add_executable(Sandbox WIN32
   src/SoundEditor.cpp
   src/ParticleEditor.cpp
   src/FoliageTypeEditor.cpp
+  src/InputSchemeEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
   src/PhysicsSceneSync.cpp

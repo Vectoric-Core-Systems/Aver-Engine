@@ -211,6 +211,29 @@ public class Node
     // how strongly it is worn is runtime data a graph may compute, so weight rides a float PIN.
     // Null for every other node type.
     public string? RigPath { get; set; }
+
+    // Which declared INPUT ACTION an "inputaction"/"inputactionpressed"/"inputactionreleased" node
+    // names, e.g. "Jump" -- and, on "rebindaction"/"getactionkey", the action those two REQUIRE (see
+    // each node's own doc comment in OcGraphParser.AddDefaultPins). Set from the NODE line's
+    // "action=<name>" attribute -- the same generic key=value mechanism ClassName/EventName/CurveName
+    // already use, and for the identical reason: PinType has no String member, so an author-chosen
+    // action name has no pin it could arrive on.
+    //
+    // OPTIONAL ON InputAction/InputActionPressed/InputActionReleased, UNLIKE EVERYWHERE ELSE THIS
+    // FAMILY OF ATTRIBUTES IS USED. Those three nodes predate this attribute and already have a
+    // working (if unrebindable-by-name) route to the same data: a plain Int `action` pin carrying the
+    // handle `aver_fw_action_register`/`_find` returned. When ActionName is set the compiler resolves
+    // the handle itself, at runtime, via GraphInterop.ActionHandleForGraph(ActionName), and the
+    // `action` pin is ignored entirely; when it is null (every graph authored before this attribute
+    // existed), nothing changes -- the pin is read exactly as it always was. See
+    // GraphCompiler.LoadActionHandle/PullActionHandle for where that branch happens.
+    //
+    // REQUIRED on RebindAction and GetActionKey, where there is no pin fallback at all: neither node
+    // has an `action` pin to fall back to (RebindAction's inputs are `slot`/`key`; GetActionKey's is
+    // `slot`), so an empty ActionName here can never do anything useful. GraphCompiler's
+    // EmitExecRebindAction/EmitGetActionKey/EmitPullGetActionKey require it non-empty at COMPILE time,
+    // mirroring Spawn's class= and SaveGame/LoadGame's path=.
+    public string? ActionName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current
