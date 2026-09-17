@@ -119,6 +119,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.denoiser = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.RESTIRVISIBILITY")) {
             if (t.size() > 1) out.restirVisibility = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.RESTIRREUSE")) {
+            if (t.size() > 1) out.restirReuse = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.REFRACTIONMODE")) {
             if (t.size() > 1) out.refractionMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.REFRACTIONSTRENGTH")) {
@@ -292,6 +294,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
         "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
         "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
+        "RENDER.RESTIRREUSE",
         "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
@@ -358,6 +361,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.GIMODE", d.giMode);
     appendKey(owned, "RENDER.DENOISER", d.denoiser);
     appendKey(owned, "RENDER.RESTIRVISIBILITY", d.restirVisibility);
+    appendKey(owned, "RENDER.RESTIRREUSE", d.restirReuse);
     appendKey(owned, "RENDER.REFRACTIONMODE", d.refractionMode);
     appendKey(owned, "RENDER.REFRACTIONSTRENGTH", d.refractionStrength);
     appendKey(owned, "RENDER.REFRACTIONEDGEFADE", d.refractionEdgeFade);

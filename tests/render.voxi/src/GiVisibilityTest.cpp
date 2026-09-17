@@ -211,7 +211,7 @@ int main() {
                                             "frame (0u - 1u) & 3u");
     }
 
-    // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView) ----
+    // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView, reuse) ----
     {
         int checked = 0, failures = 0;
         for (u32 mode = 0; mode <= 3u; ++mode)
@@ -219,19 +219,38 @@ int main() {
                 for (int hv = 0; hv < 2; ++hv)
                     for (int bc = 0; bc < 2; ++bc)
                         for (int br = 0; br < 2; ++br)
-                            for (int pv = 0; pv < 2; ++pv) {
-                                const bool histBound = hb != 0, histValid = hv != 0, cone = bc != 0,
-                                           replay = br != 0, path = pv != 0;
-                                const u32 w = packAmbientW(mode, histBound, histValid, cone, replay, path);
-                                ++checked;
-                                const u32 want = (mode & 3u) | (histBound ? 4u : 0u) | (histValid ? 8u : 0u) |
-                                                 (cone ? 16u : 0u) | (replay ? 32u : 0u) | (path ? 64u : 0u);
-                                if (w != want) ++failures;
-                            }
-        check(checked == 4 * 2 * 2 * 2 * 2 * 2 && failures == 0,
+                            for (int pv = 0; pv < 2; ++pv)
+                                for (u32 reuse = 0; reuse <= 3u; ++reuse) {
+                                    const bool histBound = hb != 0, histValid = hv != 0, cone = bc != 0,
+                                               replay = br != 0, path = pv != 0;
+                                    const u32 w = packAmbientW(mode, histBound, histValid, cone, replay,
+                                                                path, reuse);
+                                    ++checked;
+                                    const u32 want = (mode & 3u) | (histBound ? 4u : 0u) | (histValid ? 8u : 0u) |
+                                                     (cone ? 16u : 0u) | (replay ? 32u : 0u) | (path ? 64u : 0u) |
+                                                     ((reuse & 3u) << 7);
+                                    if (w != want) ++failures;
+                                }
+        check(checked == 4 * 2 * 2 * 2 * 2 * 2 * 4 && failures == 0,
               "packAmbientW round-trips every (mode 0..3, histBound, histValid, blendedCone, "
-              "blendedReplay, pathView) combination against 2.9's own bit table exactly -- " +
+              "blendedReplay, pathView, reuse 0..3) combination against 2.9's own bit table exactly "
+              "(reuse swept through its full 2-bit range, not just 0..2, to prove the field's own & "
+              "3u mask rather than the caller's clamp is what keeps bits 7-8 in range) -- " +
               std::to_string(failures) + " of " + std::to_string(checked) + " combinations disagreed");
+
+        // Bits 7-8 must not disturb bits 0-6: fixing every OTHER argument and sweeping reuse alone
+        // must leave the low seven bits (mode | histBound | histValid | blendedCone | blendedReplay
+        // | pathView) exactly as packAmbientW(..., reuse=0) produced them.
+        const u32 base = packAmbientW(3u, true, true, true, true, true, 0u) & 0x7Fu;
+        int lowBitsChecked = 0, lowBitsFailures = 0;
+        for (u32 reuse = 0; reuse <= 3u; ++reuse) {
+            const u32 w = packAmbientW(3u, true, true, true, true, true, reuse);
+            ++lowBitsChecked;
+            if ((w & 0x7Fu) != base) ++lowBitsFailures;
+        }
+        check(lowBitsChecked == 4 && lowBitsFailures == 0,
+              "sweeping reuse 0..3 alone never changes bits 0-6 of packAmbientW's result -- " +
+              std::to_string(lowBitsFailures) + " of " + std::to_string(lowBitsChecked) + " disagreed");
     }
 
     // ---- 3. reconstructWeight: rejection tests, and the bilinear partition of unity ----

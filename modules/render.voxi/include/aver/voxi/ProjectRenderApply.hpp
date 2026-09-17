@@ -103,6 +103,11 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     if (project.giMode   >= 0) s.giMode   = static_cast<u32>(project.giMode);
     if (project.denoiser  >= 0) s.denoiser = project.denoiser != 0;
 
+    // RENDER.RESTIRREUSE: NOT tier-derived, like giMode/denoiser just above -- no N6 else-branch, so
+    // an absent key leaves s.giRestirReuse exactly as it already was (the engine's own default, 1
+    // Settled, on a fresh Settings{}).
+    if (project.restirReuse >= 0) s.giRestirReuse = static_cast<u32>(project.restirReuse);
+
     // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
     // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
     // giRestirVisibility happened to already be live at.
@@ -230,10 +235,12 @@ inline void captureClamped(int& manifestField, u32 requestedField, u32 liveField
 // THE FIVE DEVICE-CLAMPED FIELDS (the three tier enums, meshShaders, msaa) use captureClamped's rule.
 //
 // EVERYTHING ELSE keeps today's unconditional write-requested behaviour: giIntensity, giMaxDistance,
-// layeredBsdf, giMode, denoiser, refractionStrength, refractionEdgeFade. giMode and denoiser now
-// round-trip the stored REQUEST rather than a clamped value -- Lane 1 removed setSettings' own giMode
-// clamp (Voxi.cpp), and denoiser was never clamped to begin with, so `requested.giMode`/
-// `requested.denoiser` already ARE the honest ask in both cases.
+// layeredBsdf, giMode, denoiser, giRestirReuse, refractionStrength, refractionEdgeFade. giMode and
+// denoiser now round-trip the stored REQUEST rather than a clamped value -- Lane 1 removed
+// setSettings' own giMode clamp (Voxi.cpp), and denoiser was never clamped to begin with, so
+// `requested.giMode`/`requested.denoiser` already ARE the honest ask in both cases. giRestirReuse is
+// the identical shape: NOT tier-derived, so it never goes through captureKnob's follow-the-tier rule
+// the way giRestirVisibility (also GI-group, but tier-derived) does a few lines above.
 inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& requested,
                                  const Settings& live, const DeviceInfo& d, u32 overallFollowMask) {
     using detail::captureKnob;
@@ -284,6 +291,7 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
     project.giMode             = static_cast<int>(requested.giMode);
     project.denoiser           = requested.denoiser ? 1 : 0;
+    project.restirReuse        = static_cast<int>(requested.giRestirReuse);
     project.refractionStrength = requested.refractionStrength;
     project.refractionEdgeFade = requested.refractionEdgeFade;
 }

@@ -111,7 +111,8 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // own to gate on and no history textures of the kind gAverHistoryWrite protects.
     //
     // gAmbientParams.w NOW CARRIES U1's GI-VISIBILITY MODE (bits 0-1, 4, 8) and W6/M5's own
-    // blended-history bits (16, 32) plus the giVisPathView debug bit (64) -- see voxi.hlsl's own
+    // blended-history bits (16, 32), the giVisPathView debug bit (64) and giRestirReuse (bits 7-8,
+    // values 128/256) -- see voxi.hlsl's own
     // gAmbientParams comment (the field this cbuffer mirrors byte-for-byte) for the full bit table.
     // NOTHING IN THIS PRELUDE READS ANY OF THEM: coneTracedIndirect below has no candidate ray, no
     // reused sample and no blended-replay concept of its own -- U1 and W6/M5 are both entirely

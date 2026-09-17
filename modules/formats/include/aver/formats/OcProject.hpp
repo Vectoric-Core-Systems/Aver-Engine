@@ -92,6 +92,12 @@ struct ProjectDesc {
     // TEN tier-derived GI/RT/PT knobs ProjectRenderApply.hpp's N6 rule covers: absent follows whatever
     // the GI tier's own ladder rung says, not whatever value happened to already be live.
     int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full
+    // RENDER.RESTIRREUSE: which side of ReSTIR GI's under-motion spatial-reuse discount the renderer
+    // always uses -- see voxi::Settings::giRestirReuse, which owns the explanation (the fade the
+    // discount causes, and why forcing one side removes it). NOT one of the tier-derived GI/RT/PT
+    // knobs ProjectRenderApply.hpp's N6 rule covers -- a plain project knob, absent means the
+    // engine's own default (1, Settled), same as RENDER.GIMODE/RENDER.DENOISER just above.
+    int restirReuse        = -1; // RENDER.RESTIRREUSE       0=Adaptive 1=Settled (default) 2=Bright
     int refractionMode     = -1; // RENDER.REFRACTIONMODE   0=Off 1=Screen-space 2=Ray-traced
     f32 refractionStrength = -1.0f; // RENDER.REFRACTIONSTRENGTH  bend scale
     f32 refractionEdgeFade = -1.0f; // RENDER.REFRACTIONEDGEFADE  hides the screen-space miss at edges
@@ -171,7 +177,7 @@ struct ProjectDesc {
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
-               refractionMode >= 0 || refractionStrength >= 0.0f ||
+               restirReuse >= 0 || refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||

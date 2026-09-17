@@ -1696,6 +1696,48 @@ void SandboxApp::buildRenderingSettings(int page) {
             }
         }
 
+        // THE OWNER-REPORTED FADE: ReSTIR GI's spatio-temporal combine discounts its own spatial
+        // reuse while the camera moves (fewer taps, a narrower radius -- voxi_restir.hlsli), and a
+        // reservoir keeps its sample for up to 30 frames, so the discount does not switch off the
+        // instant the camera stops -- the image relaxes from the moving-camera look to the resting
+        // one over about a second, reading as ReSTIR indirect starting bright and fading darker
+        // whenever the camera moves or turns. This combo picks which side of that discount the
+        // renderer always uses, so there is nothing left to relax between.
+        //
+        // SHOWS er.giRestirReuse.REQUESTED, for giRestirVisibility's own reason immediately above:
+        // effective always equals requested for this field too (RenderSettingsResolver.hpp), so
+        // inertness is shown by greying the control below, never by the combo silently jumping to a
+        // different choice.
+        const bool reuseGreyed = greysControl(er.giRestirReuse.reason);
+        ImGui::BeginDisabled(reuseGreyed);
+        int reuse = static_cast<int>(er.giRestirReuse.requested);
+        if (ImGui::Combo("ReSTIR reuse while moving", &reuse,
+            "Adaptive (fades after the camera moves)\0Settled (no fade)\0Bright (no fade, noisier)\0")) {
+            s.giRestirReuse = static_cast<u32>(reuse); changed = true;
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("project.gi.restirReuse");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("The spatio-temporal combine discounts spatial reuse under motion --\n"
+                              "fewer taps, a narrower radius -- so a moving neighbourhood does not\n"
+                              "blend samples that never converge. Reservoirs persist for up to 30\n"
+                              "frames, so stopping the camera does not switch the look instantly:\n"
+                              "the image relaxes from the moving estimate to the resting one over\n"
+                              "about a second, which is the fade this combo removes.\n\n"
+                              "Adaptive       today's behaviour: sharper (less noise) at rest,\n"
+                              "               coarser while moving, with the fade above between them\n"
+                              "Settled        always the at-rest reuse -- no fade, at the cost of up\n"
+                              "               to one extra spatial-reuse sample per pixel while the\n"
+                              "               camera moves\n"
+                              "Bright         always the moving-camera reuse -- no fade, at the cost\n"
+                              "               of more noise once the camera is at rest\n\n"
+                              "Round-trips as RENDER.RESTIRREUSE.");
+        if (reuseGreyed) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]",
+                               disableReasonText(er.giRestirReuse.reason));
+        }
+
         // THE DENOISER SITS HERE, UNDER THE ESTIMATOR IT FILTERS, because it is only reachable from
         // this page's own choices: it denoises the ReSTIR radiance above and the sky occlusion the
         // ray-tracing page turns on, and it is the ONLY thing in the engine that asks for the

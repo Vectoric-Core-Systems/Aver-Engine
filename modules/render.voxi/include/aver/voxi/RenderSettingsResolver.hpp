@@ -164,6 +164,12 @@ struct Resolution {
     // U1: gated on giMode's OWN resolution, not on a fresh hardware/tier check -- see resolve()'s own
     // comment on this field for why effective == requested always, unlike every FieldResolution above.
     FieldResolution giRestirVisibility;
+    // giRestirReuse is NOT tier-derived (Settings::giRestirReuse's own comment) and asks no prerequisite
+    // of its own -- this entry exists only so the Settings page can grey its combo on the identical
+    // condition giRestirVisibility's does (both are inert without ReSTIR GI running), computed the
+    // same way for the same reason: see resolve()'s own comment on this field, right beside
+    // giRestirVisibility's.
+    FieldResolution giRestirReuse;
     DisableReason rtSubControls = DisableReason::None;
     DisableReason ptSubControls = DisableReason::None;
     bool denoiserGBufferWanted = false;
@@ -223,6 +229,17 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     // failed prerequisite would read "No ray (over-bright)" while no ReSTIR runs at all; inertness is carried by
     // `reason` alone. Do not "fix" this to match the file's general rule (the comment at :169).
     r.giRestirVisibility.effective = r.giRestirVisibility.requested;
+
+    // ---- giRestirReuse: identical gating to giRestirVisibility just above, same reason ----
+    // Not a fresh prerequisite of its own -- it is inert on exactly the same condition (ReSTIR GI
+    // itself not running), so it reuses giMode's resolution the same way giRestirVisibility does, and
+    // effective == requested always for the identical reason: forcing it to 0 (Adaptive) on a failed
+    // prerequisite would read as a real choice rather than as "nothing is running to apply this to".
+    r.giRestirReuse.requested = s.giRestirReuse > 2u ? 2u : s.giRestirReuse;
+    r.giRestirReuse.reason = (r.giMode.reason != DisableReason::None)
+                                  ? r.giMode.reason
+                                  : (s.giMode == 0 ? DisableReason::RequiresRestirGi : DisableReason::None);
+    r.giRestirReuse.effective = r.giRestirReuse.requested;
 
     // ---- rtRenderMode = 1 (ray-driven primary visibility): RT hardware, RT tier not Off ----
     r.rtRenderMode.requested = s.rtRenderMode;
