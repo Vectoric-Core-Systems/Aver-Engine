@@ -1182,14 +1182,11 @@ private:
         // setBlendedGiCone -- a blended fragment's indirect diffuse takes the voxel cone gather
         // instead of ReSTIR; bit 32 (& 32u) says the backend replays translucent draws blended THIS
         // frame (D3D12 only -- see setBlendedGiCone's own header comment for why Vulkan never sets
-        // it); bit 64 (& 64u) is setGiVisPathView's debug view; bits 7-8 (>> 7 & 3u) are
-        // Settings::giRestirReuse (0 Adaptive, 1 Settled, 2 Bright) -- see that field's own comment
-        // for the under-motion fade this overrides and giVisReconstruct's neighbour
-        // giRestirIndirect for where the override is applied to motionT. Single writer:
-        // beginShadowHistory, which publishes it twice -- once unconditionally near the top of the
-        // function (histBound/histValid false, the same F5 reasoning giRestirParams.w's own comment
-        // below gives for why giMode 0 needs a live value too) and again inside the giSurf block
-        // once it actually knows whether the sixth pair bound and holds a valid previous frame.
+        // it); bit 64 (& 64u) is setGiVisPathView's debug view. Single writer: beginShadowHistory,
+        // which publishes it twice -- once unconditionally near the top of the function (histBound/
+        // histValid false, the same F5 reasoning giRestirParams.w's own comment below gives for why
+        // giMode 0 needs a live value too) and again inside the giSurf block once it actually knows
+        // whether the sixth pair bound and holds a valid previous frame.
         //
         // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
@@ -1726,12 +1723,6 @@ private:
     // that somehow renders a frame before its first setSettings call behaves as Medium would rather
     // than as NoRay (0), which is what an un-initialised u32 read as before this field existed.
     u32 giRestirVisibility_ = 2;
-    // Settings::giRestirReuse, cached at setSettings the same way giRestirVisibility_ just above is.
-    // 1 (Settled) matches the struct default Voxi.hpp gives it, for the identical reason
-    // giRestirVisibility_'s own default matches Quality::Medium's rung: a renderer that somehow
-    // renders a frame before its first setSettings call behaves as Settled would, not as Adaptive
-    // (0), which is what an un-initialised u32 read as before this field existed.
-    u32 giRestirReuse_ = 1;
     // voxi.blendedGiCone's live backing store -- see setBlendedGiCone's own comment.
     bool blendedGiCone_ = false;
     // voxi.giVisPathView's live backing store -- see setGiVisPathView's own comment.

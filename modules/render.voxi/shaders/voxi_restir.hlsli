@@ -1022,12 +1022,6 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const uint visMode   = (uint)gAmbientParams.w & 3u;
     const bool halfBound = visMode == 2u && ((uint)gAmbientParams.w & 4u) != 0u;
     const bool tracedPx  = !halfBound || giVisTracedPixel(pixelPos, frameIdx);
-    // Settings::giRestirReuse (0 Adaptive, 1 Settled, 2 Bright), packed the same way `visMode` above
-    // is (givis::packAmbientW), just shifted up to bits 7-8 instead of sitting at 0-1 -- decoded here,
-    // once, alongside visMode rather than beside the motion-discount lerp it actually overrides
-    // further down, so every AVER_GI_VIS_* / gAmbientParams.w bit this function reads comes from one
-    // decode block.
-    const uint reuseMode = ((uint)gAmbientParams.w >> 7) & 3u;
     // NOT a ternary: HLSL's conditional operator only supports numeric scalar/vector/matrix results,
     // never a struct (DXC: "conditional operator only supports results with numeric scalar, vector,
     // or matrix types") -- GiVisRecon is a struct, so `halfBound ? giVisReconstruct(...) : (GiVisRecon)0`
@@ -1226,19 +1220,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // result under a different name rather than reusing nothing. 1 tap at an 8px radius is the
         // smallest neighbourhood that still counts as spatial reuse rather than a disguised no-op.
         const float motionPx = length(screenSpaceMotion.xy);
-        float motionT  = saturate(motionPx / 32.0);
-        // ---- voxi.giRestirReuse: PIN THE DISCOUNT ABOVE INSTEAD OF LETTING IT TRACK MOTION ----
-        // WHY THIS EXISTS: the discount above is exactly why a moving camera and a still one read
-        // differently, and a reservoir's own sample survives up to maxReservoirAge (30 frames)
-        // below -- so the instant the camera stops, motionT here drops back to 0 but the RESERVOIRS
-        // already resampled under a moving motionT keep arriving for up to thirty more frames,
-        // which is the fade this override exists to remove: reuseMode 1 (Settled) forces motionT to
-        // 0 so every frame, moving or still, resamples with the SAME (at-rest) numSamples/
-        // samplingRadius below and there is nothing left to relax between; reuseMode 2 (Bright)
-        // forces motionT to 1, the opposite pin, holding the moving-camera reuse (and its brighter
-        // look) even at rest. reuseMode 0 (Adaptive) leaves the measured discount above untouched.
-        if (reuseMode == 1u) motionT = 0.0;
-        else if (reuseMode == 2u) motionT = 1.0;
+        const float motionT  = saturate(motionPx / 32.0);
         stparams.numSamples     = (uint)round(lerp(2.0, 1.0, motionT));
         stparams.samplingRadius = lerp(32.0, 8.0, motionT);
         // ---- U1 (2.10 C): RECONSTRUCTED FORCES TEMPORAL-ONLY, AFTER THE MOTION DISCOUNT ABOVE, NOT

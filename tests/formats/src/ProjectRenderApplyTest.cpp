@@ -572,94 +572,6 @@ static void testRestirVisibilityAndAverSrRoundTrip() {
           "RENDER.AVERSR appears exactly once after a rewrite, not duplicated");
 }
 
-// RENDER.RESTIRREUSE: NOT tier-derived (Settings::giRestirReuse's own comment) -- unlike
-// RESTIRVISIBILITY just above, an absent key leaves the field exactly as `s` already held it
-// (giMode/denoiser's own shape, not the N6 ten's follow-the-tier reset). Covers apply (absent keeps
-// whatever was live, a stated value overwrites it for every legal value), capture (written
-// unconditionally, like denoiser -- no captureKnob follow-the-tier rule, since it never follows a
-// tier to begin with), hasRenderSettings (0 alone trips it, the same "not just >= 0 as a truthy
-// check" edge RESTIRVISIBILITY/AVERSR's own test already proved), and the manifest round-trip (write
-// only when stated, parse back, no duplicate on a rewrite, absent writes nothing at all).
-static void testRestirReuseAppliesCapturesAndRoundTrips() {
-    AVER_INFO("=== RESTIRREUSE: not tier-derived -- absent keeps default, applies, captures, round-trips ===");
-
-    // Apply: absent leaves Settings::giRestirReuse exactly as it already was, not reset to any
-    // ladder value -- there is none for this field.
-    {
-        voxi::Settings s{};
-        s.giRestirReuse = 2;   // whatever was already live -- a previous project's pin, still set
-        fmt::ProjectDesc p;    // p.restirReuse == -1, absent
-        voxi::applyManifestTiers(p, s);
-        voxi::applyManifestKnobs(p, s);
-        check(s.giRestirReuse == 2, "an absent RESTIRREUSE leaves Settings::giRestirReuse untouched");
-    }
-    // Apply: a stated value overwrites it, for every legal value (0 Adaptive, 1 Settled, 2 Bright).
-    {
-        for (u32 v = 0; v <= 2; ++v) {
-            voxi::Settings s{};
-            fmt::ProjectDesc p;
-            p.restirReuse = static_cast<int>(v);
-            voxi::applyManifestTiers(p, s);
-            voxi::applyManifestKnobs(p, s);
-            check(s.giRestirReuse == v,
-                  "RENDER.RESTIRREUSE " + std::to_string(v) + " -> Settings::giRestirReuse");
-        }
-    }
-
-    // Capture: written unconditionally, the same shape as denoiser/giMode.
-    {
-        const voxi::DeviceInfo d = fullyCapableDevice();
-        voxi::Settings live{};
-        live.giRestirReuse = 1;
-        voxi::Settings requested = live;
-        requested.giRestirReuse = 0;   // an edit, at an unchanged tier
-
-        fmt::ProjectDesc p;
-        p.restirReuse = -1;
-        voxi::captureVoxiSettings(p, requested, live, d, 0);
-        check(p.restirReuse == 0, "an edited giRestirReuse 0 is captured as 0, unconditionally");
-    }
-
-    // hasRenderSettings: 0 is a legitimate stated value (Adaptive), not "absent".
-    {
-        fmt::ProjectDesc p;
-        p.restirReuse = 0;
-        check(p.hasRenderSettings(), "RESTIRREUSE 0 alone is enough to trip hasRenderSettings");
-    }
-
-    // Round-trip: write only when stated, parse back, no duplicate on a rewrite against a manifest
-    // that already states it -- isOwnedKey's own failure mode (OcProject.cpp's comment) -- and no
-    // line at all when absent.
-    {
-        fmt::ProjectDesc p;
-        p.name        = "RestirReuseRoundTrip";
-        p.restirReuse = 2;
-
-        const std::string first = fmt::writeOcproject(p, "");
-        check(first.find("RENDER.RESTIRREUSE 2") != std::string::npos, "RENDER.RESTIRREUSE 2 is written");
-
-        fmt::ProjectDesc reparsed;
-        std::string err;
-        check(fmt::parseOcproject(first, reparsed, &err), "the written manifest parses back: " + err);
-        check(reparsed.restirReuse == 2, "RESTIRREUSE round-trips through parse");
-
-        const std::string second = fmt::writeOcproject(reparsed, first);
-        auto countOccurrences = [](const std::string& haystack, const std::string& needle) {
-            int n = 0;
-            for (usize pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + 1)) ++n;
-            return n;
-        };
-        check(countOccurrences(second, "RENDER.RESTIRREUSE") == 1,
-              "RENDER.RESTIRREUSE appears exactly once after a rewrite, not duplicated");
-
-        fmt::ProjectDesc absent;
-        absent.name = "NoRestirReuse";
-        const std::string third = fmt::writeOcproject(absent, "");
-        check(third.find("RENDER.RESTIRREUSE") == std::string::npos,
-              "RENDER.RESTIRREUSE is not written at all when absent (-1)");
-    }
-}
-
 int main() {
     testEveryKeyReachesSettings();
     testN6AbsentDerivedKnobResetsToLadder();
@@ -679,7 +591,6 @@ int main() {
     testHasRenderSettingsSeesGiModeAndDenoiser();
     testHasRenderSettingsSeesRestirVisibilityAndAverSr();
     testRestirVisibilityAndAverSrRoundTrip();
-    testRestirReuseAppliesCapturesAndRoundTrips();
 
     AVER_INFO("==================================================");
     AVER_INFO("ProjectRenderApply tests done: {} failure(s)", g_failures);

@@ -72,26 +72,19 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 // bit  8   `histValid`   -- t16 holds a real previous frame, not just-created/resized storage;
 // bit 16   `blendedCone` -- W6/M5: blended-replay fragments take the cone gather instead of ReSTIR;
 // bit 32   `blendedReplay` -- the backend replayed translucent draws blended this frame (D3D12 only);
-// bit 64   `pathView`    -- voxi.giVisPathView, the F2-path debug view (2.10 I);
-// bits 7-8 `reuse` (giRestirReuse, 0..2, ALSO the caller's responsibility to have already clamped --
-//          values 128 and 256, the two bit positions above pathView's 64, because it is a two-bit
-//          FIELD like `mode` rather than a single flag: 0
-//          Adaptive (the motion discount runs unmodified), 1 Settled (forces motionT to 0), 2 Bright
-//          (forces motionT to 1) -- see Settings::giRestirReuse for the fade this exists to remove
-//          and voxi_restir.hlsli's own decode block for where it is applied).
-// Seven arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
+// bit 64   `pathView`    -- voxi.giVisPathView, the F2-path debug view (2.10 I).
+// Six arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
 // beginShadowHistory, both the unconditional write before the shadow-history early return and the
-// recomputed write inside the giSurf block, 2.11) states its seven inputs by name, so a reordered bit
+// recomputed write inside the giSurf block, 2.11) states its six inputs by name, so a reordered bit
 // in this function is the only place that has to change, not every caller.
 constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blendedCone,
-                            bool blendedReplay, bool pathView, u32 reuse) {
+                            bool blendedReplay, bool pathView) {
     u32 w = mode & 3u;
     if (histBound)     w |= 4u;
     if (histValid)      w |= 8u;
     if (blendedCone)    w |= 16u;
     if (blendedReplay)  w |= 32u;
     if (pathView)       w |= 64u;
-    w |= (reuse & 3u) << 7;
     return w;
 }
 

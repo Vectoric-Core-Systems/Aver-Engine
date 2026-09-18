@@ -473,42 +473,6 @@ struct Settings {
     // rule would be wrong for this one).
     enum class RestirVisibility : u32 { NoRay = 0, Reconstructed = 1, HalfResolution = 2, Full = 3 };
     u32 giRestirVisibility = 2;   // must equal ladder::giRestirVisibility(Quality::Medium)
-
-    // ---- ReSTIR GI REUSE WHILE THE CAMERA MOVES: which side of the motion discount to keep ----
-    //
-    // WHY THIS EXISTS: voxi_restir.hlsli's spatio-temporal combine discounts spatial reuse under
-    // motion -- motionT (screen-space reprojection distance / 32px, saturated) lerps numSamples from
-    // 2 down to 1 and samplingRadius from 32px down to 8px as the camera moves faster. That is what
-    // makes a MOVING camera read differently from a STILL one, and because a reservoir's own sample
-    // persists for up to maxReservoirAge (30 frames, voxi_restir.hlsli), the camera stopping does not
-    // switch the look instantly -- the image relaxes from the moving estimate to the resting one over
-    // about a second, which reads as ReSTIR indirect starting bright and fading darker whenever the
-    // camera moves or turns. This field decides which side of the discount is ALWAYS in effect, so
-    // there is nothing left to relax between.
-    //
-    // NOT TIER-DERIVED -- a plain project knob, the same shape as giMode/denoiser above, not a rung
-    // on globalIllumination's own ladder: setSettings never recomputes this from a tier change
-    // (Voxi.cpp only range-clamps it, same as giMode), and captureVoxiSettings writes it
-    // unconditionally rather than through captureKnob's four-step follow-the-tier rule
-    // (ProjectRenderApply.hpp).
-    //
-    // 0 = Adaptive: today's behaviour, byte-identical -- motionT follows the real reprojection
-    // distance every frame, so the estimator is genuinely less noisy at rest and coarser while
-    // moving, with the fade between the two described above whenever the camera starts or stops.
-    // 1 = Settled (DEFAULT): motionT is forced to 0 every frame -- the estimator always runs the
-    // at-rest reuse (2 samples, 32px radius), so the image looks the same moving or still, at the
-    // settled look's own noise level, and there is no fade to see.
-    // 2 = Bright: motionT is forced to 1 every frame -- the opposite fix. The estimator always runs
-    // the moving-camera reuse (1 sample, 8px radius), holding the brighter look Adaptive only shows
-    // while actually moving, at the cost of more noise once the camera is at rest.
-    //
-    // RECONSTRUCTED STILL WINS REGARDLESS OF THIS FIELD: voxi_restir.hlsli applies this override to
-    // motionT before the motion-discount lerp, and f3Path == 1u's own `stparams.numSamples = 0u`
-    // (Settings::giRestirVisibility == Reconstructed) is written after both, so neither Settled nor
-    // Bright can undo it -- the same "applied after, so it always wins" ordering that field's own
-    // comment in voxi_restir.hlsli already documents against the motion discount itself.
-    u32 giRestirReuse = 1;   // RENDER.RESTIRREUSE  0=Adaptive 1=Settled (default) 2=Bright
-
     // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
     //
     // Off by default, and ON IS A REAL COST the user is choosing rather than one a denoiser helped

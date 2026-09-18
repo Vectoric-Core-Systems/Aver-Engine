@@ -113,12 +113,6 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          protect history from in the first place.
     //   bit 64 voxi.giVisPathView (2.10 I): paints giRestirIndirect's own F2 path colour in place of
     //          shading, suppressed while the poison view (gGiRestirParams.w) above is also on.
-    //   bits 7-8 (>> 7 & 3u) Settings::giRestirReuse (0..2, clamped): overrides the spatio-temporal
-    //          combine's own motion discount (giRestirIndirect, voxi_restir.hlsli) rather than
-    //          selecting a path the way `mode` above does -- 0 Adaptive (discount runs unmodified),
-    //          1 Settled (forces motionT to 0, the at-rest reuse always), 2 Bright (forces motionT to
-    //          1, the moving-camera reuse always). Exists to remove the fade a moving camera's
-    //          reservoirs otherwise leave behind for up to maxReservoirAge frames after it stops.
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is

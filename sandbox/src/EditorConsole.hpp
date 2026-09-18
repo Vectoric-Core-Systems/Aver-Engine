@@ -675,24 +675,6 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 3) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution) or 3 (full) -- values above 3 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
             return true;
         }});
-    // Which side of the spatio-temporal combine's own under-motion spatial-reuse discount the
-    // renderer always uses -- see Settings::giRestirReuse for the fade this removes (a moving
-    // camera's reservoirs relax to the resting look over up to maxReservoirAge frames once it
-    // stops) and why this is NOT a tier-derived dial the way giRestirVisibility just above is.
-    //
-    // READS THE RAW STORED FIELD, for the identical reason voxi.giRestirVisibility just above does:
-    // RenderSettingsResolver.hpp's Resolution::giRestirReuse.effective deliberately equals requested
-    // always, so the raw field already reports the same number resolve() would.
-    t.push_back({"voxi.giRestirReuse", VarType::U32, false,
-        "0 Adaptive (today's motion-discount behaviour), 1 Settled (default -- forces the at-rest "
-        "reuse always, removing the fade), 2 Bright (forces the moving-camera reuse always, noisier "
-        "at rest). Only applies when voxi.giMode resolves to 1.",
-        []{ return vU32(Renderer::get().settings().giRestirReuse); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirReuse = n; }); },
-        [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.u > 2) { err = "giRestirReuse must be 0 (Adaptive), 1 (Settled) or 2 (Bright) -- values above 2 are clamped to 2 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
-            return true;
-        }});
     // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
     // idiom rather than an ordinary dialSetters entry. SEVEN of the eight colours below are giMode 1
     // (ReSTIR) only: those guards live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never

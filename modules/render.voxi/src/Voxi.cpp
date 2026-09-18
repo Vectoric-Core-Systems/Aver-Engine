@@ -202,11 +202,6 @@ void Renderer::setSettings(const Settings& s) {
     // to remove. Unlike giMode/rtRenderMode just above, whose typos clamp to "nothing changed" (0), a
     // typo here clamps to the tier's own safest answer instead.
     n.giRestirVisibility = n.giRestirVisibility > 3u ? 3u : n.giRestirVisibility;
-    // NOT TIER-DERIVED (see Settings::giRestirReuse's own comment) -- only range-clamped here, same
-    // as giMode/rtRenderMode just above. Unlike giRestirVisibility's own ternary immediately above,
-    // there is no "safe corrected" end to steer a typo toward -- Adaptive/Settled/Bright are three
-    // legitimate choices, not a legacy path and its fix -- so a plain std::clamp is enough.
-    n.giRestirReuse      = std::clamp(n.giRestirReuse, 0u, 2u);
     // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
     // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);

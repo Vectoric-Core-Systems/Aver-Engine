@@ -566,56 +566,6 @@ int main() {
               "giRestirVisibility 9 (garbage) clamps to 3 (Full), never to 0 (NoRay)");
     }
 
-    std::printf("[INFO ] === giRestirReuse prerequisites, through resolve() -- mirrors giRestirVisibility ===\n");
-    // NOT tier-derived (Settings::giRestirReuse's own comment), so unlike giRestirVisibility above
-    // this gets no ladder-following / Overall-Quality / Renderer-singleton-tier-change coverage --
-    // there is no ladder function for it and setSettings never re-derives it from a tier change. What
-    // it DOES share with giRestirVisibility is the resolver's gating, added only so the Settings page
-    // can grey both combos on the identical condition -- that is what these mirror.
-    {
-        Settings s{};
-        s.globalIllumination = Quality::Medium;
-        s.rayTracing = Quality::Medium;
-        s.giMode = 0;
-        s.giRestirReuse = 2;
-        const Resolution r = resolve(s, fullDevice());
-        check(r.giRestirReuse.reason == DisableReason::RequiresRestirGi,
-              "giRestirReuse.reason is RequiresRestirGi when giMode is 0, with RT/GI tiers otherwise fine");
-        check(r.giRestirReuse.effective == r.giRestirReuse.requested,
-              "giRestirReuse.effective == requested even while inert");
-    }
-    {
-        Settings s{};
-        s.globalIllumination = Quality::Medium;
-        s.rayTracing = Quality::Off;
-        s.giMode = 1;
-        s.giRestirReuse = 1;
-        const Resolution r = resolve(s, fullDevice());
-        check(r.giRestirReuse.reason == DisableReason::RequiresRayTracingEnabled,
-              "giRestirReuse inherits giMode's own reason (RequiresRayTracingEnabled) when RT tier is Off");
-        check(r.giRestirReuse.effective == r.giRestirReuse.requested,
-              "giRestirReuse.effective == requested here too");
-    }
-    {
-        Settings s{};
-        s.globalIllumination = Quality::Medium;
-        s.rayTracing = Quality::Medium;
-        s.giMode = 1;
-        s.giRestirReuse = 1;
-        const Resolution r = resolve(s, fullDevice());
-        check(r.giRestirReuse.reason == DisableReason::None,
-              "giRestirReuse has no reason once giMode itself resolves to ReSTIR with every prerequisite met");
-        check(r.giRestirReuse.effective == 1,
-              "giRestirReuse.effective passes an in-range request (Settled, 1) straight through");
-    }
-    {
-        Settings s{};
-        s.giRestirReuse = 99;
-        const Resolution r = resolve(s, fullDevice());
-        check(r.giRestirReuse.requested == 2,
-              "resolve() clamps an out-of-range giRestirReuse (99) to 2 on its own, independent of Voxi.cpp's clamp");
-    }
-
     std::printf("[INFO ] === U2: ladder::averSrLevel / overallAverSrLevel / autoAverSrLevel ===\n");
     {
         for (u32 t = 1; t <= 4; ++t) {
