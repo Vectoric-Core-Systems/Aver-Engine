@@ -1182,11 +1182,15 @@ private:
         // setBlendedGiCone -- a blended fragment's indirect diffuse takes the voxel cone gather
         // instead of ReSTIR; bit 32 (& 32u) says the backend replays translucent draws blended THIS
         // frame (D3D12 only -- see setBlendedGiCone's own header comment for why Vulkan never sets
-        // it); bit 64 (& 64u) is setGiVisPathView's debug view. Single writer: beginShadowHistory,
-        // which publishes it twice -- once unconditionally near the top of the function (histBound/
-        // histValid false, the same F5 reasoning giRestirParams.w's own comment below gives for why
-        // giMode 0 needs a live value too) and again inside the giSurf block once it actually knows
-        // whether the sixth pair bound and holds a valid previous frame.
+        // it); bit 64 (& 64u) is setGiVisPathView's debug view; bits 7-11 (>> 7 & 31u) are
+        // Settings::giRestirMovingAge (0..31, clamped) -- the moving-camera ReSTIR reservoir-age cap
+        // that replaces the existing 30-frame maxReservoirAge while the camera moves (see that
+        // field's own comment in Voxi.hpp for the fade this exists to remove and giRestirIndirect's
+        // own decode block, voxi_restir.hlsli, for where the override is applied). Single writer:
+        // beginShadowHistory, which publishes it twice -- once unconditionally near the top of the
+        // function (histBound/histValid false, the same F5 reasoning giRestirParams.w's own comment
+        // below gives for why giMode 0 needs a live value too) and again inside the giSurf block
+        // once it actually knows whether the sixth pair bound and holds a valid previous frame.
         //
         // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
@@ -1723,6 +1727,12 @@ private:
     // that somehow renders a frame before its first setSettings call behaves as Medium would rather
     // than as NoRay (0), which is what an un-initialised u32 read as before this field existed.
     u32 giRestirVisibility_ = 2;
+    // Settings::giRestirMovingAge, cached at setSettings the same way giRestirVisibility_ just above
+    // is. 3 matches the struct default Voxi.hpp gives it, for the identical reason
+    // giRestirVisibility_'s own default matches Quality::Medium's rung: a renderer that somehow
+    // renders a frame before its first setSettings call behaves as the shipped default would, not as
+    // legacy (0), which is what an un-initialised u32 read as before this field existed.
+    u32 giRestirMovingAge_ = 3;
     // voxi.blendedGiCone's live backing store -- see setBlendedGiCone's own comment.
     bool blendedGiCone_ = false;
     // voxi.giVisPathView's live backing store -- see setGiVisPathView's own comment.

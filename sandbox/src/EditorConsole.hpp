@@ -675,6 +675,32 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 3) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution) or 3 (full) -- values above 3 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
             return true;
         }});
+    // How many frames a ReSTIR GI reservoir may keep one sample while the camera moves at or past
+    // the motion knee -- see Settings::giRestirMovingAge's own comment (Voxi.hpp) for the fade this
+    // exists to remove (a moving camera's reservoirs keep stale, often brighter reprojected radiance
+    // for up to the existing 30-frame cap after the camera stops) and for why 3dbc9a42's own attempt
+    // at this fade (pinning the spatial-reuse motion discount) was reverted in 8daed7f1 instead of
+    // kept: the fade was identical with that pin in every position, so it was never the cause.
+    //
+    // AN ORDINARY dialSetters ENTRY, like voxi.giSkyOcclusionRays above -- not the raw-slot idiom
+    // consoleGiPoisonViewSlot() below uses, because this IS a Settings field (Settings::
+    // giRestirMovingAge), reaches the shader through setSettings/beginShadowHistory exactly like
+    // every other dial in this block, and has no per-frame console-only override to arbitrate with.
+    //
+    // NOT TIER-DERIVED -- Voxi.hpp's own comment on the field says so and Voxi.cpp's setSettings only
+    // range-clamps it (to [0,31], the five bits givis::packAmbientW packs it into), the same shape
+    // voxi.giRestirVisibility above already has for the identical reason.
+    t.push_back({"voxi.giRestirMovingAge", VarType::U32, false,
+        "The most frames a ReSTIR GI reservoir may keep one sample while the camera moves at or past "
+        "the motion knee; the at-rest cap stays the engine's existing 30. 0 means legacy -- always "
+        "30, the fade included. Default 3. Only applies when voxi.giMode resolves to 1 (engine "
+        "clamps to [0,31]).",
+        []{ return vU32(Renderer::get().settings().giRestirMovingAge); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirMovingAge = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 31) { err = "giRestirMovingAge must be 0 (legacy, always 30) through 31 -- values above 31 are clamped to 31 by the engine (it only has five packed bits to live in), but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
+            return true;
+        }});
     // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
     // idiom rather than an ordinary dialSetters entry. SEVEN of the eight colours below are giMode 1
     // (ReSTIR) only: those guards live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never

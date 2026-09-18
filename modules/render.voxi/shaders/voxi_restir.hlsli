@@ -1022,6 +1022,12 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const uint visMode   = (uint)gAmbientParams.w & 3u;
     const bool halfBound = visMode == 2u && ((uint)gAmbientParams.w & 4u) != 0u;
     const bool tracedPx  = !halfBound || giVisTracedPixel(pixelPos, frameIdx);
+    // Settings::giRestirMovingAge (0..31, moving-camera ReSTIR reservoir-age cap; 0 = legacy, always
+    // the fixed 30 below), packed the same way `visMode` above is (givis::packAmbientW), just
+    // shifted up to bits 7-11 instead of sitting at bits 0-1 -- decoded here, once, alongside visMode
+    // rather than beside the `stparams.maxReservoirAge = 30` line it actually overrides further down,
+    // so every AVER_GI_VIS_* / gAmbientParams.w bit this function reads comes from one decode block.
+    const uint movingAge = ((uint)gAmbientParams.w >> 7) & 31u;
     // NOT a ternary: HLSL's conditional operator only supports numeric scalar/vector/matrix results,
     // never a struct (DXC: "conditional operator only supports results with numeric scalar, vector,
     // or matrix types") -- GiVisRecon is a struct, so `halfBound ? giVisReconstruct(...) : (GiVisRecon)0`
@@ -1221,6 +1227,43 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // smallest neighbourhood that still counts as spatial reuse rather than a disguised no-op.
         const float motionPx = length(screenSpaceMotion.xy);
         const float motionT  = saturate(motionPx / 32.0);
+        // ---- voxi.giRestirMovingAge: SHORTEN THE RESERVOIR'S OWN AGE CAP WHILE MOVING ----
+        //
+        // MUST SIT HERE, AFTER motionT JUST ABOVE, NOT BESIDE THE `= 30` THIS OVERRIDES (this same
+        // block, a few lines up): the override lerps toward movingAge BY motionT, so it needs
+        // motionT's own verdict on how much the camera moved this frame, and motionT does not exist
+        // until the discount immediately above computes it. Written after rather than folded into
+        // that computation because it overrides a DIFFERENT stparams field (maxReservoirAge, not
+        // numSamples/samplingRadius) for a different reason -- see below.
+        //
+        // WHAT THIS FIXES, and why it is not the same fix 3dbc9a42 tried and 8daed7f1 reverted: that
+        // change pinned motionT itself, on the hypothesis that the numSamples/samplingRadius discount
+        // above was what made a moving camera read differently from a still one. The owner checked
+        // all three pins by hand and the fade was identical in each, so that hypothesis is refuted.
+        // What DOES remove the fade (voxi.debugResetHistoryEveryFrame 1, c08c76d2) is invalidating
+        // the ReSTIR reservoir history every frame -- so the carrier is the RESERVOIR ITSELF, not the
+        // combine's per-frame sample count or radius. A reservoir keeps its STORED RADIANCE for as
+        // long as it survives reuse, up to maxReservoirAge (30, immediately above in this same
+        // block) -- about 0.85s at 35fps, matching the observed fade length. While the camera moves,
+        // a reservoir gets reprojected across surfaces that were not its origin and keeps whatever
+        // radiance it arrived with, often brighter than the surface it has landed on would resample
+        // on its own; only once it ages past the cap does a freshly-resampled, correctly-lit value
+        // replace it, which is why the image visibly darkens for up to a second after the camera
+        // stops rather than settling at once.
+        //
+        // LERP, NOT A HARD SWITCH: reusing motionT (rather than a separate step function) means the
+        // cap itself relaxes smoothly between resting (30) and fully moving (movingAge) exactly as
+        // the camera's own motion does, with no new threshold to tune.
+        //
+        // 0 MEANS LEGACY: skip the override entirely, leaving the 30 above byte-identical to every
+        // image this renderer produced before Settings::giRestirMovingAge existed (see that field's
+        // own comment in Voxi.hpp for the full evidence this is built on).
+        //
+        // CLAMPED TO AT LEAST 1: maxReservoirAge is the age RTXDI_GISpatioTemporalResampling compares
+        // a reservoir's OWN AGE against before discarding it, and 0 would not mean "reuse cautiously", it
+        // would mean a reservoir can never survive a single frame -- a different, untested code path.
+        if (movingAge != 0u)
+            stparams.maxReservoirAge = max(1u, (uint)round(lerp(30.0, (float)movingAge, motionT)));
         stparams.numSamples     = (uint)round(lerp(2.0, 1.0, motionT));
         stparams.samplingRadius = lerp(32.0, 8.0, motionT);
         // ---- U1 (2.10 C): RECONSTRUCTED FORCES TEMPORAL-ONLY, AFTER THE MOTION DISCOUNT ABOVE, NOT

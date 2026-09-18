@@ -202,6 +202,12 @@ void Renderer::setSettings(const Settings& s) {
     // to remove. Unlike giMode/rtRenderMode just above, whose typos clamp to "nothing changed" (0), a
     // typo here clamps to the tier's own safest answer instead.
     n.giRestirVisibility = n.giRestirVisibility > 3u ? 3u : n.giRestirVisibility;
+    // Settings::giRestirMovingAge's own comment has the fade this exists to cap. Unlike
+    // giRestirVisibility's typo-safety ternary immediately above, there is no "wrong" end of the
+    // range here -- 0 (legacy, always 30) through 31 are all legitimate choices -- so a plain
+    // std::clamp is enough, same idiom as giCones/giSkyOcclusionTile above. 31, not a rounder number,
+    // because givis::packAmbientW packs this into exactly five bits (bits 7-11).
+    n.giRestirMovingAge  = std::clamp(n.giRestirMovingAge, 0u, 31u);
     // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
     // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);

@@ -113,6 +113,17 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          protect history from in the first place.
     //   bit 64 voxi.giVisPathView (2.10 I): paints giRestirIndirect's own F2 path colour in place of
     //          shading, suppressed while the poison view (gGiRestirParams.w) above is also on.
+    //   bits 7-11 (>> 7 & 31u) Settings::giRestirMovingAge (0..31, clamped): the moving-camera
+    //          ReSTIR reservoir-age cap, decoded by giRestirIndirect (voxi_restir.hlsli) alongside
+    //          visMode and applied to stparams.maxReservoirAge AFTER the motion discount below it is
+    //          computed, not beside this decode. 0 means legacy -- always the existing 30-frame cap,
+    //          byte-identical to every image this renderer produced before this field existed. Exists
+    //          to remove a fade left behind by a moving camera's reservoirs keeping stale, often
+    //          brighter reprojected radiance for up to the full 30-frame cap after the camera stops
+    //          (see Settings::giRestirMovingAge's own comment for the evidence this is built on --
+    //          NOT the spatial-reuse motion discount 3dbc9a42 targeted and 8daed7f1 reverted, which
+    //          freed these five bits; a moving-vs-still discount and a moving-vs-still RESERVOIR AGE
+    //          are two different things and only the second one measured out as the actual carrier).
     float4   gAmbientParams;
     // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is

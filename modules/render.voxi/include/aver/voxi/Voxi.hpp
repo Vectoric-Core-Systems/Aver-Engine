@@ -473,6 +473,52 @@ struct Settings {
     // rule would be wrong for this one).
     enum class RestirVisibility : u32 { NoRay = 0, Reconstructed = 1, HalfResolution = 2, Full = 3 };
     u32 giRestirVisibility = 2;   // must equal ladder::giRestirVisibility(Quality::Medium)
+
+    // ---- ReSTIR GI RESERVOIR AGE WHILE THE CAMERA MOVES: cap the fade at its source ----
+    //
+    // WHAT THE FADE ACTUALLY WAS. 3dbc9a42 blamed the spatio-temporal combine's own spatial-reuse
+    // motion discount (2 taps/32px still, 1 tap/8px moving) and was reverted (8daed7f1) once the
+    // owner checked all three settings that pinned it and found the fade identical in every one --
+    // the discount was never the carrier. c08c76d2's `voxi.debugResetHistoryEveryFrame 1`, which
+    // invalidates the ReSTIR reservoir AND the GI visibility history every frame, DOES remove it, and
+    // Full visibility (which does not use the half-res visibility history at all) fades too -- so the
+    // carrier is the RESERVOIR HISTORY itself, specifically the RADIANCE a surviving reservoir keeps.
+    // RTXDI's spatio-temporal resampling keeps a reservoir's stored radiance across frames as long as
+    // it survives reuse, up to stparams.maxReservoirAge (voxi_restir.hlsli, 30 frames, ~0.85s at
+    // 35fps -- matching the observed fade length). While the camera moves, samples get reprojected
+    // across surfaces that were not their origin and keep whatever radiance they arrived with, often
+    // brighter than the surface they have landed on would resample on its own; only once the
+    // reservoir ages past its cap does a fresh, correctly-lit sample replace it, which is why the
+    // image visibly darkens over about a second after the camera stops rather than settling at once.
+    //
+    // THE FIX: shorten the cap WHILE MOVING, so a wrongly-reprojected sample cannot survive long
+    // enough to be visible for a full second once the camera stops. It does nothing to a still
+    // image -- the at-rest cap stays the existing 30 -- and everything to a moving one, where a
+    // sample now ages out in a handful of frames instead of thirty.
+    //
+    // 0 MEANS LEGACY: always 30, byte-identical to every image this renderer has ever produced, fade
+    // included -- the same "0 is the escape hatch back to old behaviour" shape giRadianceCeiling's
+    // sibling fields use elsewhere in this struct. 3 (DEFAULT) is a guess at "short enough to not
+    // read as a fade, long enough that a moving reservoir still gets a few frames of reuse before
+    // being forced to resample" -- NOT YET MEASURED against the owner's own eye, which is why the
+    // console variable exists (voxi.giRestirMovingAge) rather than only this compiled-in default.
+    //
+    // CLAMPED TO [0,31] IN Voxi.cpp's setSettings, ALONGSIDE THE OTHER CLAMPS -- not the tier's own
+    // typo-safety idiom (giRestirVisibility just above), because every value in range is a
+    // legitimate choice, not a legacy path and its fix. 31 rather than a rounder number because the
+    // packed field below (givis::packAmbientW) gives it exactly five bits.
+    //
+    // NOT TIER-DERIVED, same shape as giRestirVisibility's own now-reverted sibling giRestirReuse
+    // was: setSettings never recomputes this from a globalIllumination tier change, only clamps it.
+    // A still image should not get a different reservoir-age cap just because the project asked for
+    // more voxel cones.
+    //
+    // PLUMBING: packed into gAmbientParams.w bits 7-11 by givis::packAmbientW -- the same five bits
+    // 3dbc9a42's now-reverted giRestirReuse used for its own two-bit field at bits 7-8, freed by
+    // 8daed7f1. voxi_restir.hlsli decodes it, and only overrides stparams.maxReservoirAge when the
+    // decoded value is non-zero (see that decode's own comment for why the override must sit AFTER
+    // motionT is computed rather than beside visMode's decode above it).
+    u32 giRestirMovingAge = 3;   // voxi.giRestirMovingAge, console-only for now; 0 = legacy (always 30)
     // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
     //
     // Off by default, and ON IS A REAL COST the user is choosing rather than one a denoiser helped

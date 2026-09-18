@@ -72,19 +72,27 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 // bit  8   `histValid`   -- t16 holds a real previous frame, not just-created/resized storage;
 // bit 16   `blendedCone` -- W6/M5: blended-replay fragments take the cone gather instead of ReSTIR;
 // bit 32   `blendedReplay` -- the backend replayed translucent draws blended this frame (D3D12 only);
-// bit 64   `pathView`    -- voxi.giVisPathView, the F2-path debug view (2.10 I).
-// Six arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
+// bit 64   `pathView`    -- voxi.giVisPathView, the F2-path debug view (2.10 I);
+// bits 7-11 `movingAge`  -- Settings::giRestirMovingAge (0..31, caller's responsibility to have
+//          already clamped, same contract as `mode` above) -- the moving-camera ReSTIR reservoir-age
+//          cap that replaces stparams.maxReservoirAge while the camera is in motion, 0 meaning
+//          "legacy, always 30" (see that field's own comment for the fade this exists to remove).
+//          FIVE bits, not the two 3dbc9a42's reverted giRestirReuse briefly claimed at this same
+//          offset (8daed7f1 freed them again): giRestirReuse pinned a boolean-ish 0..2 selector,
+//          this carries a frame COUNT up to 31, so it needs the room.
+// Seven arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
 // beginShadowHistory, both the unconditional write before the shadow-history early return and the
-// recomputed write inside the giSurf block, 2.11) states its six inputs by name, so a reordered bit
+// recomputed write inside the giSurf block, 2.11) states its seven inputs by name, so a reordered bit
 // in this function is the only place that has to change, not every caller.
 constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blendedCone,
-                            bool blendedReplay, bool pathView) {
+                            bool blendedReplay, bool pathView, u32 movingAge) {
     u32 w = mode & 3u;
     if (histBound)     w |= 4u;
     if (histValid)      w |= 8u;
     if (blendedCone)    w |= 16u;
     if (blendedReplay)  w |= 32u;
     if (pathView)       w |= 64u;
+    w |= (movingAge & 31u) << 7;
     return w;
 }
 

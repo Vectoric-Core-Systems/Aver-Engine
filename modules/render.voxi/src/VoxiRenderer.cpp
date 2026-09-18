@@ -617,6 +617,11 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // bit table). std::min rather than a ternary, matching the idiom setGiUpdateInterval/
     // setShadowRays above already use for their own clamps.
     giRestirVisibility_ = std::min(s.giRestirVisibility, 3u);
+    // Clamped defensively for the identical reason giRestirVisibility_ just above is -- Voxi.cpp's
+    // setSettings already range-clamps Settings::giRestirMovingAge to [0,31], and std::min repeats
+    // that ceiling here so this member can never disagree with givis::packAmbientW's own `& 31u`
+    // mask of it even if a caller reached this field some other way than the clamped setSettings.
+    giRestirMovingAge_ = std::min(s.giRestirMovingAge, 31u);
     ptBounces_       = s.ptBounces;
     // LATCHED, not assigned. The pipelines this decides the shape of are built once; a later change
     // would leave the member disagreeing with the shaders actually compiled, which is worse than
@@ -3930,7 +3935,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // with voxi.hlsl/voxi_restir.hlsli/voxi_gi.hlsli's own gAmbientParams.w decode.
     const u32 ambW = givis::packAmbientW(giRestirVisibility_, /*histBound=*/false, /*histValid=*/false,
                                          blendedGiCone_, dev_ && dev_->backend() == rhi::Backend::D3D12,
-                                         giVisPathView_);
+                                         giVisPathView_, giRestirMovingAge_);
     cb_.ambientParams[3] = static_cast<f32>(ambW);
     if (!shadowHistoryActive()) {
         // ---- F3: A SKIPPED FRAME MUST NOT LEAVE THE VALIDITY FLAGS TRUSTING FROZEN STATE ----
@@ -4077,13 +4082,13 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             // Recomputed with histBound = true and histValid = giVisHistValid_, now that both are
             // actually known -- overwrites the FALSE/FALSE word this function published near the top,
             // before shadowHistoryActive() was even known true. Every other component of ambW (mode,
-            // blendedGiCone_, the D3D12-only blended-replay bit, giVisPathView_) is unchanged from
-            // that first write, so this is not a second source of truth for them, only the two bits
-            // that could not be known until now.
+            // blendedGiCone_, the D3D12-only blended-replay bit, giVisPathView_, giRestirMovingAge_)
+            // is unchanged from that first write, so this is not a second source of truth for them,
+            // only the two bits that could not be known until now.
             const u32 ambW2 = givis::packAmbientW(giRestirVisibility_, /*histBound=*/true,
                                                   giVisHistValid_, blendedGiCone_,
                                                   dev_ && dev_->backend() == rhi::Backend::D3D12,
-                                                  giVisPathView_);
+                                                  giVisPathView_, giRestirMovingAge_);
             cb_.ambientParams[3] = static_cast<f32>(ambW2);
         }
     }

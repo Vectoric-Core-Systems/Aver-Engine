@@ -211,7 +211,13 @@ int main() {
                                             "frame (0u - 1u) & 3u");
     }
 
-    // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView) ----
+    // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView, movingAge) ----
+    // movingAge is swept through its FULL five-bit range (0..31), the same range
+    // Settings::giRestirMovingAge's own [0,31] clamp (Voxi.cpp) already restricts callers to -- unlike
+    // the two-bit giRestirReuse field this bit range briefly held (3dbc9a42, reverted in 8daed7f1),
+    // which swept one value past its caller-side clamp to prove the mask alone kept it in range, a
+    // five-bit field's legal range already IS its mask's full range, so there is no "past the clamp"
+    // value left to add.
     {
         int checked = 0, failures = 0;
         for (u32 mode = 0; mode <= 3u; ++mode)
@@ -219,19 +225,37 @@ int main() {
                 for (int hv = 0; hv < 2; ++hv)
                     for (int bc = 0; bc < 2; ++bc)
                         for (int br = 0; br < 2; ++br)
-                            for (int pv = 0; pv < 2; ++pv) {
-                                const bool histBound = hb != 0, histValid = hv != 0, cone = bc != 0,
-                                           replay = br != 0, path = pv != 0;
-                                const u32 w = packAmbientW(mode, histBound, histValid, cone, replay, path);
-                                ++checked;
-                                const u32 want = (mode & 3u) | (histBound ? 4u : 0u) | (histValid ? 8u : 0u) |
-                                                 (cone ? 16u : 0u) | (replay ? 32u : 0u) | (path ? 64u : 0u);
-                                if (w != want) ++failures;
-                            }
-        check(checked == 4 * 2 * 2 * 2 * 2 * 2 && failures == 0,
+                            for (int pv = 0; pv < 2; ++pv)
+                                for (u32 movingAge = 0; movingAge <= 31u; ++movingAge) {
+                                    const bool histBound = hb != 0, histValid = hv != 0, cone = bc != 0,
+                                               replay = br != 0, path = pv != 0;
+                                    const u32 w = packAmbientW(mode, histBound, histValid, cone, replay,
+                                                                path, movingAge);
+                                    ++checked;
+                                    const u32 want = (mode & 3u) | (histBound ? 4u : 0u) | (histValid ? 8u : 0u) |
+                                                     (cone ? 16u : 0u) | (replay ? 32u : 0u) | (path ? 64u : 0u) |
+                                                     ((movingAge & 31u) << 7);
+                                    if (w != want) ++failures;
+                                }
+        check(checked == 4 * 2 * 2 * 2 * 2 * 2 * 32 && failures == 0,
               "packAmbientW round-trips every (mode 0..3, histBound, histValid, blendedCone, "
-              "blendedReplay, pathView) combination against 2.9's own bit table exactly -- " +
-              std::to_string(failures) + " of " + std::to_string(checked) + " combinations disagreed");
+              "blendedReplay, pathView, movingAge 0..31) combination against 2.9's own bit table "
+              "exactly -- " + std::to_string(failures) + " of " + std::to_string(checked) +
+              " combinations disagreed");
+
+        // Bits 7-11 must not disturb bits 0-6: fixing every OTHER argument and sweeping movingAge
+        // alone must leave the low seven bits (mode | histBound | histValid | blendedCone |
+        // blendedReplay | pathView) exactly as packAmbientW(..., movingAge=0) produced them.
+        const u32 base = packAmbientW(3u, true, true, true, true, true, 0u) & 0x7Fu;
+        int lowBitsChecked = 0, lowBitsFailures = 0;
+        for (u32 movingAge = 0; movingAge <= 31u; ++movingAge) {
+            const u32 w = packAmbientW(3u, true, true, true, true, true, movingAge);
+            ++lowBitsChecked;
+            if ((w & 0x7Fu) != base) ++lowBitsFailures;
+        }
+        check(lowBitsChecked == 32 && lowBitsFailures == 0,
+              "sweeping movingAge 0..31 alone never changes bits 0-6 of packAmbientW's result -- " +
+              std::to_string(lowBitsFailures) + " of " + std::to_string(lowBitsChecked) + " disagreed");
     }
 
     // ---- 3. reconstructWeight: rejection tests, and the bilinear partition of unity ----
