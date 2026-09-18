@@ -92,6 +92,16 @@ struct ProjectDesc {
     // TEN tier-derived GI/RT/PT knobs ProjectRenderApply.hpp's N6 rule covers: absent follows whatever
     // the GI tier's own ladder rung says, not whatever value happened to already be live.
     int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full
+    // RENDER.RESTIRHISTORY: RTXDI's stparams.maxHistoryLength -- how much weight a previous-frame
+    // reservoir may carry into the ReSTIR GI combine; see voxi::Settings::giRestirMaxHistory, which
+    // owns the full explanation and the Sponza numbers behind it (674ed667: history 0 measured no
+    // overshoot at rest or moving, 1 -- the old default -- +8%, 8 +104%, all versus settled).
+    //
+    // NOT ONE OF THE TEN TIER-DERIVED KNOBS just above (restirVisibility included): the field has no
+    // ladder rung to fall back to (Voxi.hpp's own comment on giRestirMaxHistory says so outright), so
+    // absent here leaves the engine's default (0) alone regardless of the GI tier -- ProjectRenderApply
+    // .hpp applies it the same way it applies giMode/denoiser, not the way it applies restirVisibility.
+    int restirHistory      = -1; // RENDER.RESTIRHISTORY    ReSTIR GI temporal history weight, frames
     int refractionMode     = -1; // RENDER.REFRACTIONMODE   0=Off 1=Screen-space 2=Ray-traced
     f32 refractionStrength = -1.0f; // RENDER.REFRACTIONSTRENGTH  bend scale
     f32 refractionEdgeFade = -1.0f; // RENDER.REFRACTIONEDGEFADE  hides the screen-space miss at edges
@@ -171,6 +181,7 @@ struct ProjectDesc {
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
+               restirHistory >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||

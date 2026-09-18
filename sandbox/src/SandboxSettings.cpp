@@ -1696,6 +1696,43 @@ void SandboxApp::buildRenderingSettings(int page) {
             }
         }
 
+        // ---- INDIRECT LIGHT HISTORY: RTXDI's stparams.maxHistoryLength, RIGHT UNDER THE VISIBILITY
+        // COMBO ABOVE because it is the OTHER dial over the same estimator's own artefact -- how much
+        // weight a previous-frame reservoir may carry into the ReSTIR GI combine. This is what 674ed667
+        // fixed: the camera-motion brightness fade was this value, not the visibility rays above it.
+        //
+        // GATED THE SAME WAY AS ReSTIR VISIBILITY RAYS, DELIBERATELY: er.giRestirMaxHistory mirrors
+        // er.giRestirVisibility's own RequiresRestirGi reason chain (RenderSettingsResolver.hpp) rather
+        // than computing a fresh one, because both controls are inert for the identical reason -- ReSTIR
+        // GI itself is not running. SHOWS er.giRestirMaxHistory.REQUESTED, not the raw s.giRestirMaxHistory,
+        // for giRestirVisibility's own reason directly above: effective always equals requested for this
+        // field, so the two reads are the same value, but requested is the one the resolver actually
+        // computed and is what stays correct if that ever stops being true.
+        const bool histGreyed = greysControl(er.giRestirMaxHistory.reason);
+        ImGui::BeginDisabled(histGreyed);
+        int hist = static_cast<int>(er.giRestirMaxHistory.requested);
+        if (ImGui::SliderInt("Indirect light history (frames)", &hist, 0, 8)) {
+            s.giRestirMaxHistory = static_cast<u32>(hist); changed = true;
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("project.gi.restirHistory");
+        // THE TOOLTIP BINDS TO THE SLIDER, so it is asked for BEFORE the greyed-reason label below:
+        // IsItemHovered reads the LAST item submitted, and with the label submitted first a disabled
+        // control's tooltip would hang off the label instead of the control it explains.
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("0 (default): each frame's indirect light stands on its own -- no\n"
+                              "bright flash when the camera stops. Higher values let a pixel\n"
+                              "lean on previous frames, which is exactly what caused that flash:\n"
+                              "1 measured about 8%% too bright for roughly 25 frames after the\n"
+                              "camera stopped, 8 about +104%% (Sponza, viewport mean luminance,\n"
+                              "674ed667). The denoiser below already smooths this, so 0 measured\n"
+                              "no noisier than 1 either at rest or in motion.\n\n"
+                              "Round-trips as RENDER.RESTIRHISTORY.");
+        if (histGreyed) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.giRestirMaxHistory.reason));
+        }
+
         // THE DENOISER SITS HERE, UNDER THE ESTIMATOR IT FILTERS, because it is only reachable from
         // this page's own choices: it denoises the ReSTIR radiance above and the sky occlusion the
         // ray-tracing page turns on, and it is the ONLY thing in the engine that asks for the

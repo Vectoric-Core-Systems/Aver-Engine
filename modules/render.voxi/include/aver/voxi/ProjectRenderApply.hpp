@@ -103,6 +103,12 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     if (project.giMode   >= 0) s.giMode   = static_cast<u32>(project.giMode);
     if (project.denoiser  >= 0) s.denoiser = project.denoiser != 0;
 
+    // RENDER.RESTIRHISTORY rides the same plain-knob shape as giMode/denoiser just above, NOT the
+    // tier-derived one below: giRestirMaxHistory has no ladder rung to fall back to (Voxi.hpp's own
+    // comment on the field), so an absent key simply leaves the engine default (0) alone -- no N6
+    // else-branch, no re-derivation on a tier change.
+    if (project.restirHistory >= 0) s.giRestirMaxHistory = static_cast<u32>(project.restirHistory);
+
     // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
     // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
     // giRestirVisibility happened to already be live at.
@@ -230,10 +236,13 @@ inline void captureClamped(int& manifestField, u32 requestedField, u32 liveField
 // THE FIVE DEVICE-CLAMPED FIELDS (the three tier enums, meshShaders, msaa) use captureClamped's rule.
 //
 // EVERYTHING ELSE keeps today's unconditional write-requested behaviour: giIntensity, giMaxDistance,
-// layeredBsdf, giMode, denoiser, refractionStrength, refractionEdgeFade. giMode and denoiser now
-// round-trip the stored REQUEST rather than a clamped value -- Lane 1 removed setSettings' own giMode
-// clamp (Voxi.cpp), and denoiser was never clamped to begin with, so `requested.giMode`/
-// `requested.denoiser` already ARE the honest ask in both cases.
+// layeredBsdf, giMode, denoiser, restirHistory, refractionStrength, refractionEdgeFade. giMode and
+// denoiser now round-trip the stored REQUEST rather than a clamped value -- Lane 1 removed setSettings'
+// own giMode clamp (Voxi.cpp), and denoiser was never clamped to begin with, so `requested.giMode`/
+// `requested.denoiser` already ARE the honest ask in both cases. restirHistory joins them for the
+// identical reason: it is never clamped against a tier or a device, only range-clamped in Voxi.cpp's
+// setSettings, so requested == the honest ask always and there is no tier-change case to distinguish
+// from an explicit edit the way captureKnob's four-step rule exists for.
 inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& requested,
                                  const Settings& live, const DeviceInfo& d, u32 overallFollowMask) {
     using detail::captureKnob;
@@ -284,6 +293,7 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
     project.giMode             = static_cast<int>(requested.giMode);
     project.denoiser           = requested.denoiser ? 1 : 0;
+    project.restirHistory      = static_cast<int>(requested.giRestirMaxHistory);
     project.refractionStrength = requested.refractionStrength;
     project.refractionEdgeFade = requested.refractionEdgeFade;
 }

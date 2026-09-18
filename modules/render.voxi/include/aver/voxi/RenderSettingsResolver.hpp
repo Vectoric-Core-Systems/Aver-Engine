@@ -164,6 +164,10 @@ struct Resolution {
     // U1: gated on giMode's OWN resolution, not on a fresh hardware/tier check -- see resolve()'s own
     // comment on this field for why effective == requested always, unlike every FieldResolution above.
     FieldResolution giRestirVisibility;
+    // Settings::giRestirMaxHistory's own Project Settings control sits directly under ReSTIR
+    // visibility rays and is inert for the identical reason -- see resolve()'s comment on this field
+    // for why it borrows giRestirVisibility's reason chain rather than computing one of its own.
+    FieldResolution giRestirMaxHistory;
     DisableReason rtSubControls = DisableReason::None;
     DisableReason ptSubControls = DisableReason::None;
     bool denoiserGBufferWanted = false;
@@ -223,6 +227,21 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     // failed prerequisite would read "No ray (over-bright)" while no ReSTIR runs at all; inertness is carried by
     // `reason` alone. Do not "fix" this to match the file's general rule (the comment at :169).
     r.giRestirVisibility.effective = r.giRestirVisibility.requested;
+
+    // ---- giRestirMaxHistory: same prerequisite as giRestirVisibility just above, not a fresh check --
+    // both controls sit on the same page under the same estimator and are meaningless unless ReSTIR GI
+    // itself is running. UNLIKE giRestirVisibility, this field is NOT tier-derived (Voxi.hpp's own
+    // comment on Settings::giRestirMaxHistory), so there is no ladder rung to clamp `requested` against
+    // here either -- it is a plain pass-through of whatever setSettings' own [0,31] range-clamp left in
+    // place, exactly the same shape as giRestirVisibility's own requested/effective split.
+    r.giRestirMaxHistory.requested = s.giRestirMaxHistory;
+    r.giRestirMaxHistory.reason = (r.giMode.reason != DisableReason::None)
+                                       ? r.giMode.reason
+                                       : (s.giMode == 0 ? DisableReason::RequiresRestirGi : DisableReason::None);
+    // effective == requested ALWAYS, for giRestirVisibility's own reason (:169's comment): clamping to 0
+    // on a failed prerequisite would read as a live choice rather than an inert one. Inertness is
+    // carried by `reason` alone; do not "fix" this to match the file's general rule.
+    r.giRestirMaxHistory.effective = r.giRestirMaxHistory.requested;
 
     // ---- rtRenderMode = 1 (ray-driven primary visibility): RT hardware, RT tier not Off ----
     r.rtRenderMode.requested = s.rtRenderMode;

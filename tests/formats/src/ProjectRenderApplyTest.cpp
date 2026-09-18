@@ -4,8 +4,11 @@
 // the N6 fix (an absent derived knob resets to its tier's ladder value rather than a stale live one),
 // the R2 regression the two-phase apply exists to avoid (proven THROUGH the live voxi::Renderer
 // singleton, not just the pure helpers), the capture rule's four cases, N5 (a no-RT device's own
-// clamp must not be mistaken for a user's edit), manifestContradictions, and N9 (hasRenderSettings
-// seeing GIMODE/DENOISER). Compiled by the build; NEVER run from this workflow.
+// clamp must not be mistaken for a user's edit), manifestContradictions, N9 (hasRenderSettings
+// seeing GIMODE/DENOISER), and RESTIRHISTORY (giRestirMaxHistory: deliberately NOT one of the
+// tier-derived knobs above -- absent leaves Settings alone rather than following a ladder, and capture
+// is unconditional like giMode/denoiser rather than captureKnob's four-branch rule). Compiled by the
+// build; NEVER run from this workflow.
 #include "aver/voxi/ProjectRenderApply.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -88,6 +91,7 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.giUpdateInterval == b.giUpdateInterval &&
            a.giMode == b.giMode &&
            a.denoiser == b.denoiser &&
+           a.giRestirMaxHistory == b.giRestirMaxHistory &&
            near(a.reblurDiffusePrepassBlurRadius, b.reblurDiffusePrepassBlurRadius) &&
            a.reblurMaxAccumulatedFrameNum == b.reblurMaxAccumulatedFrameNum &&
            a.reblurMaxStabilizedFrameNum == b.reblurMaxStabilizedFrameNum &&
@@ -572,6 +576,140 @@ static void testRestirVisibilityAndAverSrRoundTrip() {
           "RENDER.AVERSR appears exactly once after a rewrite, not duplicated");
 }
 
+// ---- RENDER.RESTIRHISTORY (Settings::giRestirMaxHistory) -- deliberately NOT tier-derived ---------
+//
+// Four properties, mirroring the RESTIRVISIBILITY cases above but adapted to a PLAIN knob's shape
+// (giMode/denoiser's own shape, not restirVisibility's captureKnob/N6 one): an absent key leaves
+// Settings alone rather than following a ladder rung, every legal value applies, capture is
+// unconditional, and the manifest round-trips cleanly (written once, no duplicate on rewrite, no line
+// when absent).
+
+// The mirror image of testN6RestirVisibilityFollowsTier (above): where an absent RESTIRVISIBILITY
+// resets to the tier's ladder value even across a tier CHANGE, an absent RESTIRHISTORY must leave
+// whatever was already live in Settings untouched -- proven with a real GI tier change in the same
+// apply specifically because that is the one case a tier-derived knob would react to and this field,
+// having no ladder rung at all (Voxi.hpp's own comment on giRestirMaxHistory), must not.
+static void testRestirHistoryAbsentLeavesSettingsAlone() {
+    AVER_INFO("=== RESTIRHISTORY is NOT tier-derived: absent leaves Settings::giRestirMaxHistory alone ===");
+    voxi::Settings s{};
+    s.globalIllumination = voxi::Quality::Low;
+    s.giRestirMaxHistory = 5;   // stale -- e.g. a previous project's console-set value, still live
+
+    fmt::ProjectDesc p;
+    p.giQuality = static_cast<int>(voxi::Quality::Epic);   // a real GI tier CHANGE, Low -> Epic
+    // p.restirHistory intentionally left at its default (-1, absent)
+
+    voxi::applyManifestTiers(p, s);
+    voxi::applyManifestKnobs(p, s);
+    check(s.giRestirMaxHistory == 5,
+          "an absent RESTIRHISTORY leaves giRestirMaxHistory at 5 even though the GI tier just changed");
+}
+
+// Every value the Project Settings slider offers (0..8) reaches Settings::giRestirMaxHistory verbatim.
+// The engine's own range is [0,31] (Voxi.cpp's setSettings clamp) but the UI never offers above 8 --
+// see SandboxSettings.cpp's own comment on why -- so 0..8 is what this test covers.
+static void testRestirHistoryEveryLegalValueApplies() {
+    AVER_INFO("=== every legal RENDER.RESTIRHISTORY value (0..8) applies to Settings::giRestirMaxHistory ===");
+    for (int v = 0; v <= 8; ++v) {
+        fmt::ProjectDesc p;
+        p.restirHistory = v;
+        voxi::Settings s{};
+        voxi::applyManifestTiers(p, s);
+        voxi::applyManifestKnobs(p, s);
+        check(static_cast<int>(s.giRestirMaxHistory) == v,
+              "RENDER.RESTIRHISTORY " + std::to_string(v) + " -> Settings::giRestirMaxHistory");
+    }
+}
+
+// capture: RESTIRHISTORY writes the requested value UNCONDITIONALLY, the same "EVERYTHING ELSE" rule
+// giMode/denoiser already use (captureVoxiSettings' own comment) -- never captureKnob's four-branch
+// tier-aware rule restirVisibility uses. Proven by re-running the exact three conditions that change
+// captureKnob's answer for giCones/restirVisibility (a GI tier change with the knob unedited, an
+// Overall-follow bit, and nothing edited at all) and showing none of them stop RESTIRHISTORY from
+// landing at the requested value.
+static void testCaptureRestirHistoryIsUnconditional() {
+    AVER_INFO("=== capture: RESTIRHISTORY writes the requested value unconditionally, unlike RESTIRVISIBILITY ===");
+    const voxi::DeviceInfo d = fullyCapableDevice();
+
+    {
+        // A GI tier change, knob itself unedited -- captureKnob would clear a tier-derived pin to -1
+        // here (testCaptureRestirVisibilityTierChangeUneditedKnobFollows, above).
+        voxi::Settings live{};
+        live.globalIllumination = voxi::Quality::Low;
+        live.giRestirMaxHistory = 3;
+        voxi::Settings requested = live;
+        requested.globalIllumination = voxi::Quality::Epic;   // GI Low -> Epic; history left unedited
+
+        fmt::ProjectDesc p;
+        p.restirHistory = -1;
+        voxi::captureVoxiSettings(p, requested, live, d, /*overallFollowMask=*/0);
+        check(p.restirHistory == 3,
+              "a GI tier change with RESTIRHISTORY unedited still writes 3, not -1 the way a tier-derived knob would");
+    }
+    {
+        // An Overall-follow bit on the GI group -- captureKnob forces -1 regardless of value here
+        // (testCaptureRestirVisibilityOverallMaskWins, above).
+        voxi::Settings live{};
+        live.globalIllumination = voxi::Quality::Medium;
+        live.giRestirMaxHistory = 1;
+        voxi::Settings requested = live;
+        requested.giRestirMaxHistory = 4;
+
+        fmt::ProjectDesc p;
+        p.restirHistory = 1;
+        const u32 mask = 1u << static_cast<u32>(voxi::ScalabilityGroup::GlobalIllumination);
+        voxi::captureVoxiSettings(p, requested, live, d, mask);
+        check(p.restirHistory == 4,
+              "the GI group's Overall-follow bit is ignored -- RESTIRHISTORY still captures the requested 4");
+    }
+    {
+        // Nothing edited at all -- captureKnob leaves an existing pin exactly as it was
+        // (testCaptureUneditedKnobLeavesManifestAlone, above, proves this for giCones).
+        voxi::Settings live{};
+        live.giRestirMaxHistory = 0;
+        const voxi::Settings requested = live;
+
+        fmt::ProjectDesc p;
+        p.restirHistory = 6;   // an existing pin from a stale hand-edit
+        voxi::captureVoxiSettings(p, requested, live, d, 0);
+        check(p.restirHistory == 0,
+              "nothing edited: RESTIRHISTORY still writes the (unchanged) requested 0 over the stale pin 6");
+    }
+}
+
+// Round-trip: RENDER.RESTIRHISTORY writes, parses back, does not duplicate on a rewrite against a
+// manifest that already states it (isOwnedKey's own failure mode -- see testRestirVisibilityAndAverSrRoundTrip's
+// comment above for the exact mechanism this guards against), and writes no line at all when absent.
+static void testRestirHistoryRoundTrip() {
+    AVER_INFO("=== round-trip: RENDER.RESTIRHISTORY writes, parses and rewrites cleanly ===");
+    fmt::ProjectDesc p;
+    p.name          = "RoundTrip";
+    p.restirHistory = 4;
+
+    const std::string first = fmt::writeOcproject(p, "");
+    check(first.find("RENDER.RESTIRHISTORY 4") != std::string::npos, "RENDER.RESTIRHISTORY 4 is written");
+
+    fmt::ProjectDesc reparsed;
+    std::string err;
+    check(fmt::parseOcproject(first, reparsed, &err), "the written manifest parses back: " + err);
+    check(reparsed.restirHistory == 4, "RESTIRHISTORY round-trips through parse");
+
+    const std::string second = fmt::writeOcproject(reparsed, first);
+    auto countOccurrences = [](const std::string& haystack, const std::string& needle) {
+        int n = 0;
+        for (usize pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + 1)) ++n;
+        return n;
+    };
+    check(countOccurrences(second, "RENDER.RESTIRHISTORY") == 1,
+          "RENDER.RESTIRHISTORY appears exactly once after a rewrite, not duplicated");
+
+    fmt::ProjectDesc absent;
+    absent.name = "NoHistory";
+    const std::string noLine = fmt::writeOcproject(absent, "");
+    check(noLine.find("RENDER.RESTIRHISTORY") == std::string::npos,
+          "an absent (-1) RESTIRHISTORY writes no RENDER.RESTIRHISTORY line at all");
+}
+
 int main() {
     testEveryKeyReachesSettings();
     testN6AbsentDerivedKnobResetsToLadder();
@@ -591,6 +729,10 @@ int main() {
     testHasRenderSettingsSeesGiModeAndDenoiser();
     testHasRenderSettingsSeesRestirVisibilityAndAverSr();
     testRestirVisibilityAndAverSrRoundTrip();
+    testRestirHistoryAbsentLeavesSettingsAlone();
+    testRestirHistoryEveryLegalValueApplies();
+    testCaptureRestirHistoryIsUnconditional();
+    testRestirHistoryRoundTrip();
 
     AVER_INFO("==================================================");
     AVER_INFO("ProjectRenderApply tests done: {} failure(s)", g_failures);

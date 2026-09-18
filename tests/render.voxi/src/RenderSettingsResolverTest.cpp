@@ -504,6 +504,53 @@ int main() {
     check(std::strcmp(disableReasonText(DisableReason::RequiresRestirGi), "Unavailable.") != 0,
           "disableReasonText(RequiresRestirGi) is its own sentence, not the generic fallback");
 
+    // giRestirMaxHistory's own Project Settings control sits directly under giRestirVisibility's and
+    // borrows its exact reason chain (RenderSettingsResolver.hpp's resolve()) rather than computing a
+    // fresh one -- these three cases mirror the three immediately above, field-for-field, proving the
+    // borrowed chain actually reaches this field. NOT mirrored: the fourth case above (an out-of-range
+    // request clamped to 3) and the whole "follows Overall Quality / groupFollowsLadder / Renderer
+    // tier-change derivation" block below -- both are specific to giRestirVisibility being one of the
+    // TEN TIER-DERIVED knobs (ProjectRenderApply.hpp's N6 rule); giRestirMaxHistory is deliberately NOT
+    // one of them (Voxi.hpp's own comment on the field), so it has no ladder rung to derive from or
+    // clamp against here, only the [0,31] range-clamp Voxi.cpp's setSettings already applied upstream.
+    std::printf("[INFO ] === giRestirMaxHistory prerequisites, through resolve() ===\n");
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Medium;
+        s.giMode = 0;
+        s.giRestirMaxHistory = 5;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirMaxHistory.reason == DisableReason::RequiresRestirGi,
+              "giRestirMaxHistory.reason is RequiresRestirGi when giMode is 0, with RT/GI tiers otherwise fine");
+        check(r.giRestirMaxHistory.effective == r.giRestirMaxHistory.requested,
+              "giRestirMaxHistory.effective == requested even while inert (never clamped to 0 on a failed prerequisite)");
+    }
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Off;
+        s.giMode = 1;
+        s.giRestirMaxHistory = 2;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirMaxHistory.reason == DisableReason::RequiresRayTracingEnabled,
+              "giRestirMaxHistory inherits giMode's own reason (RequiresRayTracingEnabled) when RT tier is Off");
+        check(r.giRestirMaxHistory.effective == r.giRestirMaxHistory.requested,
+              "giRestirMaxHistory.effective == requested here too");
+    }
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Medium;
+        s.giMode = 1;
+        s.giRestirMaxHistory = 0;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirMaxHistory.reason == DisableReason::None,
+              "giRestirMaxHistory has no reason once giMode itself resolves to ReSTIR with every prerequisite met");
+        check(r.giRestirMaxHistory.effective == 0,
+              "giRestirMaxHistory.effective passes an in-range request (0, the camera-motion-fade fix) straight through");
+    }
+
     std::printf("[INFO ] === U1: giRestirVisibility follows Overall Quality and groupFollowsLadder ===\n");
     {
         for (u32 t = 1; t <= 4; ++t) {
