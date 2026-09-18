@@ -416,6 +416,17 @@ void SandboxApp::setCamWobble(f32 degrees, i32 periodFrames) {
     camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
 }
 
+// --cam-wobble-stop N: the frame the wobble above stops at. See its own use site in onUpdate.
+void SandboxApp::setCamWobbleStop(i32 frame) { camWobbleStopFrame_ = frame > 0 ? frame : 0; }
+
+// --set NAME VALUE, repeatable: console variables applied once, on the first frame that has a
+// device. Console syntax is exactly what the drawer's own input takes, so a capture can A/B any
+// dial the console exposes without a new flag per dial -- which is the whole point, since a
+// bisection invents dials faster than argv can grow spellings for them.
+void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>> sets) {
+    consoleSets_ = std::move(sets);
+}
+
 // --mesh-heap default|upload (W4): read at the top of loadProjectMeshes, the first point in the
 // frame a device is guaranteed to exist -- argv parsing happens before Engine::run creates one.
 // false (DEFAULT, "upload") is today's behaviour, untouched by this flag's absence.

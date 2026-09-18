@@ -1573,6 +1573,11 @@ public:
     void setProbe(u32 x, u32 y);                    // --probe X Y
     void setProbeRel(f32 u, f32 v);                 // --probe-rel U V
     void setCamWobble(f32 degrees, i32 periodFrames);
+    // --cam-wobble-stop N: stop the wobble at frame N, so a capture at N+k measures k frames after
+    // the camera stopped. --set NAME VALUE (repeatable): console variables applied on the first
+    // frame with a device, so a capture can A/B any console dial without its own argv spelling.
+    void setCamWobbleStop(i32 frame);
+    void setConsoleSets(std::vector<std::pair<std::string, std::string>> sets);
     void setMeshHeapDefault(bool on);
     void setLodShareVertices(bool on);
     void setCamTranslate(f32 speedCmPerFrame);
@@ -3612,6 +3617,10 @@ private:
     i32  camWobblePeriod_=0;         // ...and its period in FRAMES; sin is 0 at every multiple
     f32  camWobbleBaseYaw_=0.0f;     // the yaw to swing about, latched on the first wobbled frame
     bool camWobbleBased_=false;
+    i32  camWobbleStopFrame_=0;      // --cam-wobble-stop N: wobble only while frame < N; 0 = never stop
+    // --set NAME VALUE pairs, applied once through runConsoleLine on the first frame with a device.
+    std::vector<std::pair<std::string, std::string>> consoleSets_;
+    bool consoleSetsApplied_=false;
     f32  camTranslateSpeed_=0.0f;    // --cam-translate SPEED: forward-flight, cm/frame, 0 = no motion
     // --mesh-heap default|upload (W4): false (DEFAULT) = every new static mesh's vertex/index buffers
     // go on the Upload heap, today's behaviour on every backend. true moves them to the Default heap

@@ -1739,6 +1739,18 @@ void SandboxApp::refreshWindowTitle(Engine& e) {
 
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
+    // --set NAME VALUE: applied once, at frame 5 rather than frame 1. The project's own
+    // RENDER.* apply runs during startup and would overwrite anything staged before it, so a
+    // capture's dials have to land AFTER that -- and a handful of frames costs nothing in a run
+    // long enough to measure a temporal artifact. runConsoleLine is the console's own entry point,
+    // so a --set takes exactly the text the drawer takes, and reports the same errors to the log.
+    if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
+        consoleSetsApplied_ = true;
+        for (const auto& kv : consoleSets_) {
+            AVER_INFO("[Sandbox] --set {} {}", kv.first, kv.second);
+            runConsoleLine(e, "set " + kv.first + " " + kv.second);
+        }
+    }
     // FIRST in the frame, so everything downstream (view matrix, gPrevViewProj reprojection,
     // shadow history) sees one consistent camera. Latched base yaw rather than accumulating onto
     // yaw_: accumulating would drift with floating-point error and never return exactly to the start.
@@ -1753,7 +1765,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // No clear is needed here for the same reason: nothing else draws through this pass.
     voxiRenderer_.setUnlit(unlit_);
 #endif
-    if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0) {
+    // --cam-wobble-stop N: the wobble above runs only while the frame counter is below N, then the
+    // camera simply stays where that last update left it. Measuring an artifact that appears WHILE
+    // the camera moves and decays AFTER it stops needs both halves in one deterministic run: a
+    // capture at frame N+k is then "k frames after motion ended", which no continuous wobble can
+    // express. 0 (the default) leaves --cam-wobble exactly as it was.
+    if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0 &&
+        (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
         const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)camWobblePeriod_;
         yaw_ = camWobbleBaseYaw_ + camWobbleDeg_ * 0.01745329252f * std::sin(phase);

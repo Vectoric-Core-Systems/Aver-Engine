@@ -250,6 +250,16 @@ Application* createApplication(int argc, char** argv) {
     f32 camTranslateArg = 0.0f;
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--cam-translate")) camTranslateArg = (f32)std::atof(argv[i + 1]);
+    // --cam-wobble-stop N and --set NAME VALUE: see their setters' own comments. IN THEIR OWN LOOPS
+    // for the C1061 reason --cam-translate just above states. --set is the only repeatable flag
+    // here, so it collects rather than overwrites: a capture usually pins two or three dials at
+    // once, and a bisection should not need a rebuild to try the next pair.
+    i32 camWobbleStopArg = 0;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--cam-wobble-stop")) camWobbleStopArg = std::atoi(argv[i + 1]);
+    std::vector<std::pair<std::string, std::string>> consoleSetArgs;
+    for (int i = 1; i + 2 < argc; ++i)
+        if (!std::strcmp(argv[i], "--set")) consoleSetArgs.emplace_back(argv[i + 1], argv[i + 2]);
     // --no-occlusion-cull: see SandboxApp::setOcclusionCullForceOff's own comment -- a level whose
     // own manifest records OCCLUSIONCULL 1 (the repro project this exists for) turns culling back on
     // during project/level load no matter what a one-shot CLI setter did at construction, so this
@@ -1396,6 +1406,8 @@ Application* createApplication(int argc, char** argv) {
     }
     app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
+    if (camWobbleStopArg > 0) app->setCamWobbleStop(camWobbleStopArg);
+    if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
