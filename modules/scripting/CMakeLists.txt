@@ -163,6 +163,70 @@ add_custom_target(Aver.Scripting.Bridge DEPENDS ${AVER_BRIDGE_OUTPUTS})
 set_target_properties(Aver.Scripting.Bridge PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Scripting.Bridge)
 
+# ---------------------------------------------------------------------------------------------------
+# WHY THE FOUR COMMANDS BELOW (SampleBehaviour, SampleActor, the F# sample, Aver.Pcg.Apply) ARE
+# CHAINED TOGETHER WITH DEPENDS, SEEN TWICE TODAY AND WRITTEN OFF BOTH TIMES AS A TRANSIENT LOCK:
+#
+#   CSC : error CS2012: Cannot open 'scripting/csharp/Aver.Framework/obj/x64/Release/net10.0/
+#         Aver.Framework.dll' for writing -- the process cannot access the file because it is being
+#         used by another process
+#
+# while Ninja was building bin/ActorScripts/Aver.Framework.SampleActor.dll. Re-running the build
+# always succeeded unchanged, which is exactly the symptom of a real race, not a fluke: the same two
+# commands are not guaranteed to lose the race on every run, only likely to often enough that it shows
+# up "sometimes".
+#
+# THIS IS A DIFFERENT OVERLAP FROM THE ONE THE PCG COMMENT ABOVE ALREADY DESCRIBES. That one is about
+# the STAGED output in bin/Scripting -- an OUTPUT Ninja knows about, refuses to let two commands
+# declare, and the PCG command's own DEPENDS on AVER_BRIDGE_OUTPUTS already orders. This one is about
+# each project's PRIVATE intermediate directory, scripting/csharp/<Project>/obj/<platform>/<config>/
+# net10.0/, which MSBuild creates once PER PROJECT and reuses for every `dotnet build` that has that
+# project anywhere in its ProjectReference closure -- regardless of which top-level .csproj was named
+# on the command line, or which -o directory the final assemblies get copied to. Ninja has no OUTPUT
+# rule pointed at obj/ at all, so nothing stops two commands from writing into it at once.
+#
+# FOUR OF THE EIGHT `dotnet build` COMMANDS IN THIS FILE SHARE PART OF THE BRIDGE'S CLOSURE, AND ALL
+# FOUR BECOME READY THE MOMENT AVER_BRIDGE_OUTPUTS EXISTS:
+#
+#   SampleBehaviour  -> Aver.Scripting
+#   SampleActor      -> Aver.Framework -> Aver.Scripting, Aver.Scene, Aver.Physics
+#   the F# sample    -> Aver.Scripting  (+ Aver.FSharp.Sample, which references nothing of the engine)
+#   Aver.Pcg.Apply   -> Aver.Framework -> Aver.Scripting, Aver.Scene, Aver.Physics  (+ Aver.Pcg)
+#
+# Every one of them lists ${AVER_BRIDGE_OUTPUTS} in DEPENDS and nothing else that touches another
+# sibling, so as soon as the bridge command finishes, Ninja sees all four as unblocked and is free to
+# run them concurrently -- which on a multi-core `ninja` is exactly what makes it schedule two MSBuild
+# invocations into scripting/csharp/Aver.Scripting/obj (or .../Aver.Framework/obj, .../Aver.Scene/obj,
+# .../Aver.Physics/obj) at the same time. One of them wins the write, the other hits CS2012.
+# avermatc and averdesign are NOT part of this: Aver.Materials is a leaf with no ProjectReferences at
+# all, and Aver.Design has none either (its only dependency is a NuGet package), so neither command
+# ever sets foot in an obj/ directory any other command uses, and chaining them in would only cost
+# wall-clock for a collision that cannot happen.
+#
+# THE FIX IS THE SAME IDIOM THE PCG COMMENT ABOVE ALREADY NAMES FOR ITS OWN OVERLAP: an explicit
+# DEPENDS edge from each command onto the previous one's declared OUTPUT, so Ninja serialises the four
+# instead of racing them. The chain below is SampleBehaviour -> SampleActor -> the F# sample ->
+# Aver.Pcg.Apply (which the PCG.Sample command already trails, via its existing DEPENDS on
+# AVER_PCG_OUTPUTS) -- the same bridge-first ordering this file already uses, extended one more step
+# so the siblings that reach back into the bridge's closure never overlap each other either.
+#
+# WHAT IT COSTS, AND WHY PRIVATE INTERMEDIATE DIRECTORIES WERE NOT USED INSTEAD. The straightforward
+# alternative is giving each of the four commands its own -p:BaseIntermediateOutputPath so they never
+# share an obj/ directory and can go back to running in parallel. That trades this build's wall-clock
+# cost for a different one: Aver.Scripting would then compile up to five times over (bridge, the three
+# samples, PCG.Apply), Aver.Framework three times, Aver.Scene and Aver.Physics three times each, each
+# into its own private obj tree -- more disk, more compiler time, and a second place (the private-path
+# overrides) that would have to be kept in step with the ProjectReference closures spelled out above by
+# hand, which is exactly the kind of list this file's other comments (the bridge DEPENDS glob, the
+# AVER_BRIDGE_OUTPUTS closure note) already carry scars from letting go stale. The chain below instead
+# turns what could have been four-way parallel managed compilation into a strictly serial tail once the
+# bridge is done, which is real wall-clock on a cold build -- but all four are small sample/API
+# assemblies, and the native modules plus avermatc/averdesign/nethost still build alongside them, so
+# this tail is not what sets the build's overall length. Given only four commands are ever in
+# contention and none of them is large, paying a short serial tail beats paying it in duplicated
+# compilation and a second hand-maintained closure list every time this file changes.
+# ---------------------------------------------------------------------------------------------------
+
 # A sample behaviour, staged into bin/SampleScripts/ rather than bin/Scripts/ so it is NOT loaded
 # by a default editor run. It exists to prove the boundary end to end (`--scripts SampleScripts`
 # makes a managed OnStart write a line through the engine log), and a demo script that runs
@@ -188,6 +252,14 @@ add_dependencies(Aver.Scripting.Host Aver.Scripting.SampleBehaviour)
 #   Sandbox.exe --headless --frames 5 --scripts ActorScripts --spawn-test AN_TestActor
 # spawns a declared managed actor and ticks it, so OnBeginPlay / OnTick reach the engine log. Depends on
 # the bridge outputs so the run has a bridge that speaks the actor dispatch.
+#
+# ALSO DEPENDS ON ${AVER_SAMPLE_OUT} (the SampleBehaviour command above), and that is ordering, not a
+# real build dependency -- SampleActor never references SampleBehaviour. This project's closure
+# (Aver.Framework -> Aver.Scripting, Aver.Scene, Aver.Physics) shares Aver.Scripting's private obj/
+# directory with SampleBehaviour's closure, and without this edge both commands are ready the instant
+# the bridge finishes and Ninja is free to run them at once -- which is the CS2012 failure the big
+# comment above this section records. See that comment for the full chain and why it stops here rather
+# than at a private intermediate directory per command.
 set(AVER_ACTOR_PROJ ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/Aver.Framework.SampleActor.csproj)
 set(AVER_ACTOR_OUT ${CMAKE_BINARY_DIR}/bin/ActorScripts/Aver.Framework.SampleActor.dll)
 add_custom_command(
@@ -199,6 +271,7 @@ add_custom_command(
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/SphereActor.cs
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/PlayDemo.cs
           ${AVER_BRIDGE_OUTPUTS}
+          ${AVER_SAMPLE_OUT}
   COMMENT "Building the sample actor assembly"
   VERBATIM)
 add_custom_target(Aver.Framework.SampleActor DEPENDS ${AVER_ACTOR_OUT})
@@ -315,6 +388,11 @@ add_dependencies(Aver.Scripting.Host Aver.Design)
 #
 # bin/FSharpScripts/ rather than bin/Scripts/, for the reason the behaviour and actor samples give: a
 # default editor run must not load a demo, and no oracle gate can be made to pick this up.
+#
+# DEPENDS on ${AVER_ACTOR_OUT} below, again for ordering rather than a real reference: this project's
+# closure reaches Aver.Scripting (Private=false, but `dotnet build -o` still has to compile it), which
+# SampleActor's closure also compiles, so without this edge the two would be free to run at once the
+# moment the bridge finishes. See the big comment above the sample-behaviour block for the full chain.
 set(AVER_FSHARP_DIR ${CMAKE_SOURCE_DIR}/scripting/fsharp)
 set(AVER_FSHARP_PROJ ${AVER_FSHARP_DIR}/Aver.Scripting.SampleFSharp/Aver.Scripting.SampleFSharp.csproj)
 set(AVER_FSHARP_OUT_DIR ${CMAKE_BINARY_DIR}/bin/FSharpScripts)
@@ -340,6 +418,7 @@ add_custom_command(
           -o ${AVER_FSHARP_OUT_DIR}
   DEPENDS ${AVER_FSHARP_SOURCES}
           ${AVER_BRIDGE_OUTPUTS}
+          ${AVER_ACTOR_OUT}
   COMMENT "Building the F# round-trip sample (staged to bin/FSharpScripts)"
   VERBATIM)
 add_custom_target(Aver.FSharp.Sample DEPENDS ${AVER_FSHARP_OUTPUTS})
@@ -388,6 +467,14 @@ add_dependencies(Aver.Scripting.Host Aver.FSharp.Sample)
 # must NOT be added to AVER_PCG_OUTPUTS; the ordering edge is the whole mechanism. If this ever needs
 # to be properly separated, the fix is a private staging directory per command plus an explicit copy,
 # not a longer OUTPUT list.
+#
+# THIS COMMAND ALSO GAINS A DEPENDS ON ${AVER_FSHARP_OUTPUTS} (the F# sample, above) BELOW, and that is
+# a second, unrelated ordering: DEPENDS on AVER_BRIDGE_OUTPUTS only orders this command after the
+# bridge, it does not order it against the F# sample, SampleActor or SampleBehaviour, which also depend
+# on nothing but the bridge and were therefore free to run at the same time as this one. This command's
+# closure (Framework -> Scripting, Scene, Physics) shares every one of those obj/ directories with the
+# F# sample and SampleActor, which is the CS2012 failure the big comment above the sample-behaviour
+# block records; this edge is the last link in the chain that comment describes.
 set(AVER_PCG_PROJ ${AVER_CSHARP_DIR}/Aver.Pcg.Apply/Aver.Pcg.Apply.csproj)
 
 file(GLOB AVER_PCG_SOURCES CONFIGURE_DEPENDS
@@ -407,6 +494,7 @@ add_custom_command(
           -o ${AVER_BRIDGE_DIR}
   DEPENDS ${AVER_PCG_SOURCES}
           ${AVER_BRIDGE_OUTPUTS}
+          ${AVER_FSHARP_OUTPUTS}
   COMMENT "Building the PCG API, F# + C# (staged to bin/Scripting)"
   VERBATIM)
 add_custom_target(Aver.Pcg DEPENDS ${AVER_PCG_OUTPUTS})
