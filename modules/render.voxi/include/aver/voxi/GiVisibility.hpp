@@ -80,12 +80,21 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 //          FIVE bits, not the two 3dbc9a42's reverted giRestirReuse briefly claimed at this same
 //          offset (8daed7f1 freed them again): giRestirReuse pinned a boolean-ish 0..2 selector,
 //          this carries a frame COUNT up to 31, so it needs the room.
-// Seven arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
+// bits 12-15 `spatialSamples` -- Settings::giRestirSpatialSamples (0..15, caller's responsibility to
+//          have already clamped, same contract as `movingAge` just below it): overrides
+//          RTXDI_GISpatioTemporalResamplingParameters.numSamples in place of whatever the moving-
+//          camera motion discount would otherwise compute, splitting spatial reuse from temporal
+//          reuse for the fade bisection that field's own comment (Voxi.hpp) is written against. 15
+//          means AUTO -- leave the discount's own count alone, byte-identical to today's image; 0
+//          disables spatial reuse outright (temporal only); 1..8 pin the count. FOUR bits, directly
+//          above movingAge's own five, because 15 needs a sentinel distinct from every real count
+//          0..8 fits comfortably inside one nibble.
+// Eight arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
 // beginShadowHistory, both the unconditional write before the shadow-history early return and the
-// recomputed write inside the giSurf block, 2.11) states its seven inputs by name, so a reordered bit
+// recomputed write inside the giSurf block, 2.11) states its eight inputs by name, so a reordered bit
 // in this function is the only place that has to change, not every caller.
 constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blendedCone,
-                            bool blendedReplay, bool pathView, u32 movingAge) {
+                            bool blendedReplay, bool pathView, u32 movingAge, u32 spatialSamples) {
     u32 w = mode & 3u;
     if (histBound)     w |= 4u;
     if (histValid)      w |= 8u;
@@ -93,6 +102,7 @@ constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blende
     if (blendedReplay)  w |= 32u;
     if (pathView)       w |= 64u;
     w |= (movingAge & 31u) << 7;
+    w |= (spatialSamples & 15u) << 12;
     return w;
 }
 

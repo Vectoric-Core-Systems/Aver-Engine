@@ -1197,7 +1197,7 @@ private:
         // reads fine for a week and then costs an afternoon.
         f32 ambientParams[4] = {};
         // EDITOR VIEW MODES that the ray-driven path has to honour itself. x = unlit (flat
-        // authored albedo, no lighting); z/w spare.
+        // authored albedo, no lighting).
         //
         // A PASS-LEVEL FIELD, not a per-draw one, because a ray hit has no per-draw cbuffer
         // to read: gShadingModel rides in the b1 block that the raster path sets per mesh,
@@ -1211,6 +1211,15 @@ private:
         // documents exactly that all-zero-block window for the cluster-GI binder) behaves exactly as
         // it always has. A repurposed bit, not a new field -- packing/size unchanged, same shape as
         // gGiRestirParams.w below.
+        //
+        // Z AND W ARE NOW ALSO SPENT, NOT SPARE ANY MORE: Settings::giRestirDepthThreshold /
+        // giRestirNormalThreshold (Voxi.hpp) -- RTXDI's own reuse-similarity tolerances
+        // (stparams.depthThreshold/normalThreshold, voxi_restir.hlsli), lifted here from a shader
+        // literal so the still-open moving-camera ReSTIR GI fade bisection can sweep them without a
+        // rebuild. See either field's own comment for that investigation and
+        // Settings::giRestirSpatialSamples (packed into gAmbientParams.w instead) for the sibling
+        // dial this pairs with. Two floats, not two more packed bits, because a reuse tolerance is a
+        // small continuous number, not an enumerable choice like gAmbientParams.w's bitfields.
         f32 viewParams[4] = {};
         // RTXDI ReSTIR GI control -- mirrored as gGiRestirParams. x = 1 while giMode==1 is ACTUALLY
         // running this frame (giRestirWanted(): hardware, tier and giMode all agree) -- NOT a raw
@@ -1728,11 +1737,21 @@ private:
     // than as NoRay (0), which is what an un-initialised u32 read as before this field existed.
     u32 giRestirVisibility_ = 2;
     // Settings::giRestirMovingAge, cached at setSettings the same way giRestirVisibility_ just above
-    // is. 3 matches the struct default Voxi.hpp gives it, for the identical reason
-    // giRestirVisibility_'s own default matches Quality::Medium's rung: a renderer that somehow
-    // renders a frame before its first setSettings call behaves as the shipped default would, not as
-    // legacy (0), which is what an un-initialised u32 read as before this field existed.
-    u32 giRestirMovingAge_ = 3;
+    // is. 0 (LEGACY, ALWAYS 30) matches the struct default Voxi.hpp gives it -- it was 3 (bd6e2045)
+    // until the owner tested that nonzero default by hand and the fade came back unchanged, so it was
+    // reverted to the safe, byte-identical-to-history answer rather than left claiming a fix it never
+    // was (see Voxi.hpp's own comment on the field for the full account). A renderer that somehow
+    // renders a frame before its first setSettings call behaves as the shipped default would, the
+    // same reasoning giRestirVisibility_'s own comment gives for its default.
+    u32 giRestirMovingAge_ = 0;
+    // Settings::giRestirSpatialSamples, cached at setSettings the same way giRestirMovingAge_ just
+    // above is, for the identical defensive reason: Voxi.cpp's setSettings already range-clamps
+    // Settings::giRestirSpatialSamples to [0,15], and std::min repeats that ceiling here so this
+    // member can never disagree with givis::packAmbientW's own `& 15u` mask of it. 15 (AUTO) matches
+    // the struct default Voxi.hpp gives it, so a renderer that somehow renders a frame before its
+    // first setSettings call leaves the motion discount's own numSamples alone rather than forcing
+    // temporal-only reuse on an un-initialised zero.
+    u32 giRestirSpatialSamples_ = 15;
     // voxi.blendedGiCone's live backing store -- see setBlendedGiCone's own comment.
     bool blendedGiCone_ = false;
     // voxi.giVisPathView's live backing store -- see setGiVisPathView's own comment.

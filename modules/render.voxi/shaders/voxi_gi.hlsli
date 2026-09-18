@@ -111,19 +111,24 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // own to gate on and no history textures of the kind gAverHistoryWrite protects.
     //
     // gAmbientParams.w NOW CARRIES U1's GI-VISIBILITY MODE (bits 0-1, 4, 8) and W6/M5's own
-    // blended-history bits (16, 32), the giVisPathView debug bit (64) and the moving-camera ReSTIR
-    // reservoir-age cap (bits 7-11) -- see voxi.hlsl's own gAmbientParams comment (the field this
-    // cbuffer mirrors byte-for-byte) for the full bit table.
+    // blended-history bits (16, 32), the giVisPathView debug bit (64), the moving-camera ReSTIR
+    // reservoir-age cap (bits 7-11) and the ReSTIR spatial-reuse sample-count override (bits 12-15) --
+    // see voxi.hlsl's own gAmbientParams comment (the field this cbuffer mirrors byte-for-byte) for
+    // the full bit table.
     // NOTHING IN THIS PRELUDE READS ANY OF THEM: coneTracedIndirect below has no candidate ray, no
     // reused sample and no blended-replay concept of its own -- U1 and W6/M5 are both entirely
     // voxi.hlsl's PSMainVoxi/PSRayDriven and voxi_restir.hlsli's own concern.
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare. NOTHING IN THIS
+    // Editor view modes the ray-driven path honours itself. x = unlit. NOTHING IN THIS
     // PRELUDE READS x, same as gAmbientParams above it -- declared for size only.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     // y WAS SPARE; NOW the live GI radiance ceiling -- THIS PRELUDE DOES READ IT, via
     // AVER_VOX_MAXRAD above (coneTracedIndirect's own min(..., AVER_VOX_MAXRAD) call).
+    // z/w WERE ALSO SPARE; NOW the RTXDI reuse-similarity tolerances (Settings::
+    // giRestirDepthThreshold/giRestirNormalThreshold) -- see voxi.hlsl's own gViewParams comment (the
+    // field this cbuffer mirrors byte-for-byte) for the full story. NOTHING IN THIS PRELUDE READS
+    // EITHER, same as x: coneTracedIndirect below has no RTXDI reservoir of its own to reuse.
     float4   gViewParams;
     // RTXDI ReSTIR GI control -- mirrors gGiRestirParams in voxi.hlsl and FrameConstants::
     // giRestirParams (VoxiRenderer.hpp), appended at the end for the same reason gViewParams was.

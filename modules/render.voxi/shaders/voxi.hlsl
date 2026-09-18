@@ -116,20 +116,39 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //   bits 7-11 (>> 7 & 31u) Settings::giRestirMovingAge (0..31, clamped): the moving-camera
     //          ReSTIR reservoir-age cap, decoded by giRestirIndirect (voxi_restir.hlsli) alongside
     //          visMode and applied to stparams.maxReservoirAge AFTER the motion discount below it is
-    //          computed, not beside this decode. 0 means legacy -- always the existing 30-frame cap,
-    //          byte-identical to every image this renderer produced before this field existed. Exists
-    //          to remove a fade left behind by a moving camera's reservoirs keeping stale, often
-    //          brighter reprojected radiance for up to the full 30-frame cap after the camera stops
-    //          (see Settings::giRestirMovingAge's own comment for the evidence this is built on --
-    //          NOT the spatial-reuse motion discount 3dbc9a42 targeted and 8daed7f1 reverted, which
-    //          freed these five bits; a moving-vs-still discount and a moving-vs-still RESERVOIR AGE
-    //          are two different things and only the second one measured out as the actual carrier).
+    //          computed, not beside this decode. 0 (THE DEFAULT) means legacy -- always the existing
+    //          30-frame cap, byte-identical to every image this renderer produced before this field
+    //          existed. Was meant to remove a fade left behind by a moving camera's reservoirs keeping
+    //          stale, often brighter reprojected radiance for up to the full 30-frame cap after the
+    //          camera stops -- BUT THE OWNER TESTED A NONZERO DEFAULT (3, bd6e2045) BY HAND AND THE
+    //          FADE CAME BACK UNCHANGED, so this cap was never the carrier either (see
+    //          Settings::giRestirMovingAge's own comment for the full account); the field, its bits
+    //          and the console variable all stay as a legitimate dial, only the silent nonzero default
+    //          is gone. NOT the spatial-reuse motion discount 3dbc9a42 targeted and 8daed7f1 reverted,
+    //          which freed these five bits first -- a moving-vs-still discount, a moving-vs-still
+    //          RESERVOIR AGE, and the spatialSamples/reuse-tolerance split just below are three
+    //          different attempts at the same still-open fade, tried in that order.
+    //   bits 12-15 (>> 12 & 15u) Settings::giRestirSpatialSamples (0..15, clamped): overrides the
+    //          spatial-reuse tap count (stparams.numSamples) the motion discount above would otherwise
+    //          compute, decoded by giRestirIndirect alongside visMode/movingAge and applied AFTER that
+    //          same discount, splitting spatial reuse from temporal reuse to localise the fade neither
+    //          of the two bit ranges above it fixed. 15 means AUTO -- leave the discount alone, byte-
+    //          identical to today's image; 0 disables spatial reuse outright (temporal only); 1..8 pin
+    //          the count. See Settings::giRestirSpatialSamples's own comment (Voxi.hpp) for the
+    //          bisection this is one half of; gViewParams.z/.w below are the other half (the RTXDI
+    //          reuse-similarity tolerances, too continuous a value to pack into bits here).
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare.
+    // Editor view modes the ray-driven path honours itself. x = unlit.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     // y WAS SPARE; NOW the live GI radiance ceiling (Settings::giRadianceCeiling) -- see
     // AVER_VOX_MAXRAD below, which reads this field with a fallback to today's 16.0 literal.
+    // z/w WERE ALSO SPARE; NOW Settings::giRestirDepthThreshold / giRestirNormalThreshold -- RTXDI's
+    // own reuse-similarity tolerances (stparams.depthThreshold/normalThreshold,
+    // voxi_restir.hlsli's giRestirIndirect), lifted out of a shader literal so the moving-camera
+    // ReSTIR GI fade bisection (gAmbientParams.w's own comment above has the state of it) can sweep
+    // them without a rebuild. 0.1 / 0.5 are the DEFAULTS (Voxi.hpp) and reproduce the literals they
+    // replace exactly, so nothing about the image moves until one of them is set to something else.
     float4   gViewParams;
     // RTXDI ReSTIR GI control (Settings::giMode) -- mirrors FrameConstants::giRestirParams, also
     // appended at the end for the same reason gViewParams was. x = 1 while giMode==1 is ACTUALLY

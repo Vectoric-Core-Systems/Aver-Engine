@@ -498,10 +498,15 @@ struct Settings {
     //
     // 0 MEANS LEGACY: always 30, byte-identical to every image this renderer has ever produced, fade
     // included -- the same "0 is the escape hatch back to old behaviour" shape giRadianceCeiling's
-    // sibling fields use elsewhere in this struct. 3 (DEFAULT) is a guess at "short enough to not
-    // read as a fade, long enough that a moving reservoir still gets a few frames of reuse before
-    // being forced to resample" -- NOT YET MEASURED against the owner's own eye, which is why the
-    // console variable exists (voxi.giRestirMovingAge) rather than only this compiled-in default.
+    // sibling fields use elsewhere in this struct. 0 IS NOW THE DEFAULT, AND THAT IS A REVERSAL, NOT
+    // THE ORIGINAL PLAN: bd6e2045 shipped 3 as a guess at "short enough to not read as a fade, long
+    // enough that a moving reservoir still gets a few frames of reuse before being forced to
+    // resample", and the owner tested it by hand -- the fade came back unchanged. So this cap was
+    // never the carrier, and a nonzero default must not keep claiming a fix that measurement refuted.
+    // The field, its packing bits and the console variable all stay exactly as they were: a shorter
+    // cap while moving is still a real, legitimate choice for whoever wants one for its own sake, it
+    // is only the SILENT BEHAVIOUR CHANGE -- shipping a nonzero default before its own hypothesis had
+    // been checked -- that this undoes.
     //
     // CLAMPED TO [0,31] IN Voxi.cpp's setSettings, ALONGSIDE THE OTHER CLAMPS -- not the tier's own
     // typo-safety idiom (giRestirVisibility just above), because every value in range is a
@@ -517,8 +522,72 @@ struct Settings {
     // 3dbc9a42's now-reverted giRestirReuse used for its own two-bit field at bits 7-8, freed by
     // 8daed7f1. voxi_restir.hlsli decodes it, and only overrides stparams.maxReservoirAge when the
     // decoded value is non-zero (see that decode's own comment for why the override must sit AFTER
-    // motionT is computed rather than beside visMode's decode above it).
-    u32 giRestirMovingAge = 3;   // voxi.giRestirMovingAge, console-only for now; 0 = legacy (always 30)
+    // motionT is computed rather than beside visMode's decode above it). giRestirSpatialSamples,
+    // immediately below, takes the four bits directly above this field's own five (bits 12-15).
+    u32 giRestirMovingAge = 0;   // voxi.giRestirMovingAge, console-only for now; 0 = legacy (always 30)
+
+    // ---- BISECTING THE SAME FADE FROM THE OTHER SIDE: SPLIT REUSE APART, THEN TIGHTEN IT ----
+    //
+    // STATE OF THE BISECTION, so the next reader does not have to reconstruct it from commit
+    // messages: ReSTIR GI reads brighter while the camera moves and settles darker over about a
+    // second after it stops. Ruled out by hand: auto-exposure, the NRD denoiser, sky-occlusion rays,
+    // the F2 voxel bounce, voxel rebuild rate, Half vs Full visibility, the spatial-reuse motion
+    // discount (3dbc9a42, reverted 8daed7f1), and -- see giRestirMovingAge just above -- the moving-
+    // camera reservoir-age cap. What DOES remove the fade is voxi.debugResetHistoryEveryFrame 1
+    // (c08c76d2), which clears the ReSTIR reservoir history every frame -- and that disables BOTH
+    // temporal reuse and spatial reuse at once, since RTXDI reads its spatial neighbours out of the
+    // same previous-frame reservoir buffer temporal resampling writes. So the carrier is reuse
+    // itself, and the next question this field and the two thresholds below exist to answer is which
+    // half, and whether the reuse tolerances (voxi_restir.hlsli's RTXDI_IsValidNeighbor test) are
+    // simply too loose to begin with.
+    //
+    // 15 MEANS AUTO: leave the existing motion discount's own numSamples computation
+    // (voxi_restir.hlsli) exactly alone, byte-identical to today's image, fade included. 0 disables
+    // spatial reuse OUTRIGHT -- temporal reuse only, so a fade that survives this setting cannot be
+    // coming from the spatial half. 1..8 pin the tap count regardless of camera motion, overriding
+    // the discount's own lerp(2.0, 1.0, motionT); clamped to 8 downstream because that is the ceiling
+    // the fused temporal+spatial pass was ever stability-tested against (see that lerp's own K*M
+    // margin analysis, voxi_restir.hlsli).
+    //
+    // FOUR BITS, NOT THREE: a real count only needs 0..8, but 15 has to be a value NO real count
+    // will ever collide with, so the packed field needs one more bit than "0..8" alone would.
+    // Directly above giRestirMovingAge's own five bits (12-15, not 7-11) in gAmbientParams.w -- see
+    // givis::packAmbientW (GiVisibility.hpp) for the pack/decode this shares byte-for-byte with
+    // voxi_restir.hlsli.
+    //
+    // DEBUG/TUNING ONLY, LIKE THE TWO THRESHOLDS BELOW: no manifest key, no Settings UI. This is a
+    // bisection tool for one open question, not a shipped quality dial -- console: voxi.giRestirSpatialSamples.
+    u32 giRestirSpatialSamples = 15;
+
+    // THE OTHER HALF OF THE SAME BISECTION: RTXDI's own reuse-similarity tolerances, lifted out of a
+    // shader literal so they can be swept without a rebuild. voxi_restir.hlsli's
+    // RTXDI_IsValidNeighbor test decides whether a temporal or spatial neighbour is similar enough to
+    // this pixel's surface to combine into the result at all, and today's hard-coded numbers are
+    // loose: a normalThreshold of 0.5 accepts a neighbour whose normal disagrees by up to 60 degrees
+    // (acos(0.5)) before rejecting it, which is a lot of surface variation to average indirect
+    // radiance across while the reprojected neighbourhood is itself sliding under camera motion.
+    // Tightening either one is the next thing to try if splitting spatial from temporal
+    // (giRestirSpatialSamples, above) does not by itself localise the fade to one half.
+    //
+    // DEFAULTS MUST REPRODUCE TODAY'S BEHAVIOUR EXACTLY: these two fields REPLACE the literals, they
+    // do not change them -- 0.1f / 0.5f here must equal the numbers voxi_restir.hlsli hard-coded
+    // before either field existed, or a project that never touches this dial would see its ReSTIR GI
+    // image move on the day these fields were merely ADDED.
+    //
+    // FLOATS, NOT PACKED BITS, unlike giRestirSpatialSamples just above: a reuse tolerance is a small
+    // continuous number, not an enumerable choice, so these ride the frame constant buffer's own
+    // spare float slots (FrameConstants::viewParams.z/.w, VoxiRenderer.hpp) instead of
+    // gAmbientParams.w's integer bitfield.
+    //
+    // DEBUG/TUNING ONLY: no manifest key, no Settings UI, same as giRestirSpatialSamples above.
+    // Clamped in Voxi.cpp's setSettings -- [0.001, 1.0] for the depth threshold (0 would accept
+    // nothing, since RTXDI's own test is a strict comparison against it) and [0.0, 0.999] for the
+    // normal threshold (an exact 1.0 would reject every neighbour outright, since the test is
+    // `dot(...) >= normalThreshold` and a dot product only ever reaches exactly 1.0 for an identical
+    // normal). Console: voxi.giRestirDepthThreshold / voxi.giRestirNormalThreshold.
+    f32 giRestirDepthThreshold  = 0.1f;
+    f32 giRestirNormalThreshold = 0.5f;
+
     // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
     //
     // Off by default, and ON IS A REAL COST the user is choosing rather than one a denoiser helped

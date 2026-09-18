@@ -1028,6 +1028,15 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // rather than beside the `stparams.maxReservoirAge = 30` line it actually overrides further down,
     // so every AVER_GI_VIS_* / gAmbientParams.w bit this function reads comes from one decode block.
     const uint movingAge = ((uint)gAmbientParams.w >> 7) & 31u;
+    // Settings::giRestirSpatialSamples (0..15, splits ReSTIR GI's spatial reuse from its temporal
+    // reuse for the still-open moving-camera fade bisection -- see that field's own comment, Voxi.hpp,
+    // for the state of the investigation this is one half of), packed the same way movingAge just
+    // above is (givis::packAmbientW), one nibble higher -- decoded here, alongside visMode and
+    // movingAge, for the identical "one decode block" reason. 15 is the AUTO sentinel: the override
+    // this enables is applied only when the decode below reads something else, after the motion
+    // discount computes its own numSamples (see that override's own comment for why it has to sit
+    // there rather than beside this decode).
+    const uint spatialSamples = ((uint)gAmbientParams.w >> 12) & 15u;
     // NOT a ternary: HLSL's conditional operator only supports numeric scalar/vector/matrix results,
     // never a struct (DXC: "conditional operator only supports results with numeric scalar, vector,
     // or matrix types") -- GiVisRecon is a struct, so `halfBound ? giVisReconstruct(...) : (GiVisRecon)0`
@@ -1108,8 +1117,15 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
 
         RTXDI_RandomSamplerState rng = RTXDI_InitRandomSampler(pixelPos, frameIdx, 1u);
         RTXDI_GISpatioTemporalResamplingParameters stparams = (RTXDI_GISpatioTemporalResamplingParameters)0;
-        stparams.depthThreshold        = 0.1;
-        stparams.normalThreshold       = 0.5;
+        // Settings::giRestirDepthThreshold / giRestirNormalThreshold (Voxi.hpp): RTXDI's own reuse-
+        // similarity tolerances, lifted here from a shader literal so the moving-camera fade bisection
+        // can sweep them without a rebuild -- the other half of the split spatialSamples (decoded
+        // above, applied below) is for. 0.1 / 0.5 were this file's own hard-coded literals before
+        // either field existed and are now that field's compiled-in DEFAULT (Voxi.hpp), not a changed
+        // number -- the engine clamps whatever a caller sets to [0.001, 1.0] / [0.0, 0.999]
+        // (Voxi.cpp) before either ever reaches here, so this line cannot read an out-of-range value.
+        stparams.depthThreshold        = gViewParams.z;
+        stparams.normalThreshold       = gViewParams.w;
         // ---- 1, NOT 8: A YOUNG HISTORY OVERSHOOTS, AND ITS DEPTH BOUGHT NOTHING NRD DID NOT ----
         //
         // RTXDI_CombineGIReservoirs sums M across the fresh, temporal and spatial streams with only a
@@ -1266,6 +1282,23 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
             stparams.maxReservoirAge = max(1u, (uint)round(lerp(30.0, (float)movingAge, motionT)));
         stparams.numSamples     = (uint)round(lerp(2.0, 1.0, motionT));
         stparams.samplingRadius = lerp(32.0, 8.0, motionT);
+        // ---- voxi.giRestirSpatialSamples: OVERRIDE THE MOTION DISCOUNT'S OWN COUNT, FOR THE SAME
+        // FADE BISECTION giRestirDepthThreshold/giRestirNormalThreshold ABOVE ARE FOR ----
+        //
+        // MUST SIT HERE, AFTER THE LERP JUST ABOVE, NOT BESIDE spatialSamples' OWN DECODE (top of this
+        // function): it overrides the exact field that lerp just computed, so it needs the discount's
+        // verdict to already exist before it can replace it -- the same ordering reason movingAge's
+        // own override, a few lines above, sits after motionT rather than beside visMode's decode.
+        //
+        // 15 (AUTO) skips this entirely, leaving the discount's own numSamples untouched -- byte-
+        // identical to today's image. Any other decoded value REPLACES it outright, discount and all:
+        // 0 means no spatial reuse at all (temporal only), isolating whether the fade survives with
+        // the spatial half of this pass disabled completely; 1..8 pins the tap count regardless of
+        // camera motion. min(decoded, 8u) is a second, defensive ceiling on top of Voxi.cpp's own
+        // [0,15] clamp -- 9..14 are reachable bit patterns that are not the 15 sentinel, and 8 is the
+        // same ceiling the K*M margin analysis above already justifies for numSamples itself.
+        if (spatialSamples != 15u)
+            stparams.numSamples = min(spatialSamples, 8u);
         // ---- U1 (2.10 C): RECONSTRUCTED FORCES TEMPORAL-ONLY, AFTER THE MOTION DISCOUNT ABOVE, NOT
         // BEFORE ---- f3Path == 1u means giRestirVisibility selected Reconstructed (or the pixel is
         // in Half's non-traced/no-valid-reconstruction limbo that already collapsed to Reconstructed

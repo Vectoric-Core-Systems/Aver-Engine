@@ -208,6 +208,20 @@ void Renderer::setSettings(const Settings& s) {
     // std::clamp is enough, same idiom as giCones/giSkyOcclusionTile above. 31, not a rounder number,
     // because givis::packAmbientW packs this into exactly five bits (bits 7-11).
     n.giRestirMovingAge  = std::clamp(n.giRestirMovingAge, 0u, 31u);
+    // Settings::giRestirSpatialSamples's own comment has the bisection this splits reuse for. 15
+    // (AUTO) through 0 (temporal only) are all legitimate choices with nothing to typo-guard against,
+    // same idiom as giRestirMovingAge immediately above -- a plain clamp, not a ternary. 15, not a
+    // rounder number, because givis::packAmbientW packs this into exactly four bits (bits 12-15).
+    n.giRestirSpatialSamples = std::clamp(n.giRestirSpatialSamples, 0u, 15u);
+    // The two RTXDI reuse tolerances this same bisection is for (Settings::giRestirDepthThreshold/
+    // giRestirNormalThreshold's own comments have the full story). Lower bound on the depth threshold
+    // is deliberately > 0: RTXDI_IsValidNeighbor's own test is a strict comparison against it, so an
+    // exact 0 would reject every neighbour, not merely a strict one. Upper bound on the normal
+    // threshold stops at 0.999, not 1.0, because that test is `dot(...) >= normalThreshold` and a dot
+    // product only ever reaches exactly 1.0 for a bit-identical normal -- 1.0 here would not mean
+    // "strict", it would mean spatial and temporal reuse both silently stop working.
+    n.giRestirDepthThreshold  = std::clamp(n.giRestirDepthThreshold, 0.001f, 1.0f);
+    n.giRestirNormalThreshold = std::clamp(n.giRestirNormalThreshold, 0.0f, 0.999f);
     // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
     // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);
