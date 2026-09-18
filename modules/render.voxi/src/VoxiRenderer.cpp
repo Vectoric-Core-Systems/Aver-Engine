@@ -618,16 +618,13 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // setShadowRays above already use for their own clamps.
     giRestirVisibility_ = std::min(s.giRestirVisibility, 3u);
     // Clamped defensively for the identical reason giRestirVisibility_ just above is -- Voxi.cpp's
-    // setSettings already range-clamps Settings::giRestirMovingAge to [0,31], and std::min repeats
-    // that ceiling here so this member can never disagree with givis::packAmbientW's own `& 31u`
-    // mask of it even if a caller reached this field some other way than the clamped setSettings.
-    giRestirMovingAge_ = std::min(s.giRestirMovingAge, 31u);
-    // Clamped defensively for the identical reason giRestirMovingAge_ just above is -- Voxi.cpp's
     // setSettings already range-clamps Settings::giRestirSpatialSamples to [0,15], and std::min
     // repeats that ceiling here so this member can never disagree with givis::packAmbientW's own
     // `& 15u` mask of it even if a caller reached this field some other way than the clamped
     // setSettings.
     giRestirSpatialSamples_ = std::min(s.giRestirSpatialSamples, 15u);
+    // Same defensive repeat of Voxi.cpp's own clamps, for the same reason as the three above.
+    giRestirMaxHistory_     = std::min(s.giRestirMaxHistory, 63u);
     ptBounces_       = s.ptBounces;
     // LATCHED, not assigned. The pipelines this decides the shape of are built once; a later change
     // would leave the member disagreeing with the shaders actually compiled, which is worse than
@@ -1128,16 +1125,13 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // viewParams's comment (VoxiRenderer.hpp) for why .y is safe to repurpose. Sent every frame from
     // this already-per-frame block, same as viewParams[0] directly above.
     cb_.viewParams[1] = settings_.giRadianceCeiling;
-    // .z/.w ARE NOW ALSO SPENT -- Settings::giRestirDepthThreshold / giRestirNormalThreshold
-    // (Voxi.hpp), RTXDI's own reuse-similarity tolerances lifted out of voxi_restir.hlsli's
-    // stparams.depthThreshold/normalThreshold literals so they can be swept without a rebuild while
-    // bisecting the moving-camera ReSTIR GI fade (see either field's own comment for that
-    // investigation, and cb_.ambientParams[3] below for the sibling dial, giRestirSpatialSamples,
-    // this pairs with). Defaults (0.1 / 0.5) reproduce the literals they replace exactly, so nothing
-    // about the image moves until one of them is set to something else. Sent every frame from this
-    // same already-per-frame block, same as .x/.y directly above.
-    cb_.viewParams[2] = settings_.giRestirDepthThreshold;
-    cb_.viewParams[3] = settings_.giRestirNormalThreshold;
+    // .z/.w ARE SPARE. Both briefly carried dials while the moving-camera ReSTIR GI fade was
+    // bisected -- RTXDI's two reuse-similarity tolerances, then a boiling-filter strength. Captures
+    // retired all three (the tolerances measured identical to their own defaults; the filter cost
+    // 13% of the settled image's brightness and left the overshoot), so the literals are back in
+    // voxi_restir.hlsli and these two are free again. Written as 0 so a stale value cannot linger.
+    cb_.viewParams[2] = 0.0f;
+    cb_.viewParams[3] = 0.0f;
     // y IS THE COHERENCE TILE EDGE, and it is sent whether or not the rays are on: the shader divides
     // the pixel coordinate by it unconditionally, so a 0 arriving here would be a division by zero in
     // every pixel rather than a disabled feature. max(1) is the identity, not a guard against a
@@ -3951,7 +3945,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // with voxi.hlsl/voxi_restir.hlsli/voxi_gi.hlsli's own gAmbientParams.w decode.
     const u32 ambW = givis::packAmbientW(giRestirVisibility_, /*histBound=*/false, /*histValid=*/false,
                                          blendedGiCone_, dev_ && dev_->backend() == rhi::Backend::D3D12,
-                                         giVisPathView_, giRestirMovingAge_, giRestirSpatialSamples_);
+                                         giVisPathView_, giRestirSpatialSamples_, giRestirMaxHistory_);
     cb_.ambientParams[3] = static_cast<f32>(ambW);
     if (!shadowHistoryActive()) {
         // ---- F3: A SKIPPED FRAME MUST NOT LEAVE THE VALIDITY FLAGS TRUSTING FROZEN STATE ----
@@ -4098,14 +4092,14 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             // Recomputed with histBound = true and histValid = giVisHistValid_, now that both are
             // actually known -- overwrites the FALSE/FALSE word this function published near the top,
             // before shadowHistoryActive() was even known true. Every other component of ambW (mode,
-            // blendedGiCone_, the D3D12-only blended-replay bit, giVisPathView_, giRestirMovingAge_,
-            // giRestirSpatialSamples_) is unchanged from that first write, so this is not a second
+            // blendedGiCone_, the D3D12-only blended-replay bit, giVisPathView_, giRestirSpatialSamples_,
+            // giRestirMaxHistory_) is unchanged from that first write, so this is not a second
             // source of truth for them, only the two bits that could not be known until now.
             const u32 ambW2 = givis::packAmbientW(giRestirVisibility_, /*histBound=*/true,
                                                   giVisHistValid_, blendedGiCone_,
                                                   dev_ && dev_->backend() == rhi::Backend::D3D12,
-                                                  giVisPathView_, giRestirMovingAge_,
-                                                  giRestirSpatialSamples_);
+                                                  giVisPathView_, giRestirSpatialSamples_,
+                                                  giRestirMaxHistory_);
             cb_.ambientParams[3] = static_cast<f32>(ambW2);
         }
     }

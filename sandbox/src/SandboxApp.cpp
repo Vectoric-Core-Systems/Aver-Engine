@@ -1780,7 +1780,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // whatever camForward() is THIS frame (after the wobble update above, so the two compose),
     // so occlusion relationships -- what is in front of what -- change every frame instead of
     // just the screen-space position of the same relationships a pure yaw wobble produces.
-    if (camTranslateSpeed_ != 0.0f) {
+    // --cam-wobble-stop N stops this too, not just the yaw above: "the camera stopped" has to mean
+    // ALL of its motion, or a capture after the stop frame is still translating and measures
+    // nothing about what decays once motion ends.
+    if (camTranslateSpeed_ != 0.0f &&
+        (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         camPos_ += camForward() * camTranslateSpeed_;
     }
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE

@@ -524,7 +524,6 @@ struct Settings {
     // decoded value is non-zero (see that decode's own comment for why the override must sit AFTER
     // motionT is computed rather than beside visMode's decode above it). giRestirSpatialSamples,
     // immediately below, takes the four bits directly above this field's own five (bits 12-15).
-    u32 giRestirMovingAge = 0;   // voxi.giRestirMovingAge, console-only for now; 0 = legacy (always 30)
 
     // ---- BISECTING THE SAME FADE FROM THE OTHER SIDE: SPLIT REUSE APART, THEN TIGHTEN IT ----
     //
@@ -532,8 +531,8 @@ struct Settings {
     // messages: ReSTIR GI reads brighter while the camera moves and settles darker over about a
     // second after it stops. Ruled out by hand: auto-exposure, the NRD denoiser, sky-occlusion rays,
     // the F2 voxel bounce, voxel rebuild rate, Half vs Full visibility, the spatial-reuse motion
-    // discount (3dbc9a42, reverted 8daed7f1), and -- see giRestirMovingAge just above -- the moving-
-    // camera reservoir-age cap. What DOES remove the fade is voxi.debugResetHistoryEveryFrame 1
+    // discount (3dbc9a42, reverted 8daed7f1), the reservoir age and the moving-camera history cap (both
+    // measured WORSE). What removes the fade is giRestirMaxHistory 0, and voxi.debugResetHistoryEveryFrame 1
     // (c08c76d2), which clears the ReSTIR reservoir history every frame -- and that disables BOTH
     // temporal reuse and spatial reuse at once, since RTXDI reads its spatial neighbours out of the
     // same previous-frame reservoir buffer temporal resampling writes. So the carrier is reuse
@@ -551,7 +550,7 @@ struct Settings {
     //
     // FOUR BITS, NOT THREE: a real count only needs 0..8, but 15 has to be a value NO real count
     // will ever collide with, so the packed field needs one more bit than "0..8" alone would.
-    // Directly above giRestirMovingAge's own five bits (12-15, not 7-11) in gAmbientParams.w -- see
+    // Bits 12-15 of gAmbientParams.w -- see
     // givis::packAmbientW (GiVisibility.hpp) for the pack/decode this shares byte-for-byte with
     // voxi_restir.hlsli.
     //
@@ -559,34 +558,49 @@ struct Settings {
     // bisection tool for one open question, not a shipped quality dial -- console: voxi.giRestirSpatialSamples.
     u32 giRestirSpatialSamples = 15;
 
-    // THE OTHER HALF OF THE SAME BISECTION: RTXDI's own reuse-similarity tolerances, lifted out of a
-    // shader literal so they can be swept without a rebuild. voxi_restir.hlsli's
-    // RTXDI_IsValidNeighbor test decides whether a temporal or spatial neighbour is similar enough to
-    // this pixel's surface to combine into the result at all, and today's hard-coded numbers are
-    // loose: a normalThreshold of 0.5 accepts a neighbour whose normal disagrees by up to 60 degrees
-    // (acos(0.5)) before rejecting it, which is a lot of surface variation to average indirect
-    // radiance across while the reprojected neighbourhood is itself sliding under camera motion.
-    // Tightening either one is the next thing to try if splitting spatial from temporal
-    // (giRestirSpatialSamples, above) does not by itself localise the fade to one half.
+    // ---- WHAT THE CAPTURES NARROWED IT TO: THE WEIGHTING WHILE A RESERVOIR IS YOUNG ----
     //
-    // DEFAULTS MUST REPRODUCE TODAY'S BEHAVIOUR EXACTLY: these two fields REPLACE the literals, they
-    // do not change them -- 0.1f / 0.5f here must equal the numbers voxi_restir.hlsli hard-coded
-    // before either field existed, or a project that never touches this dial would see its ReSTIR GI
-    // image move on the day these fields were merely ADDED.
+    // Measured headless on Sponza (camera translating, then stopped at a known frame), viewport
+    // mean luminance at +3 frames after the stop versus settled: baseline 0.0965 -> 0.0892 (+8.2%
+    // too bright, gone by ~+25 frames), tightened reuse tolerances IDENTICAL (+8.2%, so the
+    // neighbour test is innocent), spatial reuse off still +6.9% (so the spatial half is not the
+    // carrier), and the moving-age cap made it WORSE (+24%). The decisive number: reuse switched
+    // off entirely sits at 0.0889, which is the SETTLED value -- so a partially-converged reservoir
+    // reads brighter than BOTH the no-reuse estimate and the converged one. That is a weighting
+    // error while M is small, not stale radiance, and these two dials are the two knobs RTXDI
+    // exposes over that weighting.
     //
-    // FLOATS, NOT PACKED BITS, unlike giRestirSpatialSamples just above: a reuse tolerance is a small
-    // continuous number, not an enumerable choice, so these ride the frame constant buffer's own
-    // spare float slots (FrameConstants::viewParams.z/.w, VoxiRenderer.hpp) instead of
-    // gAmbientParams.w's integer bitfield.
+    // biasCorrection: RTXDI_BIAS_CORRECTION_OFF (0, plain 1/M normalisation), BASIC (1, today's
+    // value and what voxi_restir.hlsli's own RTXDI_GI_ALLOWED_BIAS_CORRECTION compiles) or
+    // RAY_TRACED (2 -- NOT compiled today; selecting it without flipping that #define and writing
+    // the RAB_GetConservativeVisibility the spatial half needs would simply behave as BASIC).
+    // maxHistory: stparams.maxHistoryLength, the cap on how much M a temporal reservoir may carry
+    // into the combine; 1 is today's value (602d1b06 lowered it from 8 to kill the load-time
+    // overshoot, which is this same mechanism seen from a cold start rather than from motion).
+    // Both are console-only bisection dials: no manifest key, no Settings UI, defaults reproduce
+    // today's image exactly. Packed at gAmbientParams.w bits 16-17 and 18-23.
+    // giRestirMaxHistory: RTXDI's stparams.maxHistoryLength -- how much M a previous-frame
+    // reservoir may carry into the combine, i.e. how much weight ReSTIR gives what it already
+    // believes over what it sampled this frame.
     //
-    // DEBUG/TUNING ONLY: no manifest key, no Settings UI, same as giRestirSpatialSamples above.
-    // Clamped in Voxi.cpp's setSettings -- [0.001, 1.0] for the depth threshold (0 would accept
-    // nothing, since RTXDI's own test is a strict comparison against it) and [0.0, 0.999] for the
-    // normal threshold (an exact 1.0 would reject every neighbour outright, since the test is
-    // `dot(...) >= normalThreshold` and a dot product only ever reaches exactly 1.0 for an identical
-    // normal). Console: voxi.giRestirDepthThreshold / voxi.giRestirNormalThreshold.
-    f32 giRestirDepthThreshold  = 0.1f;
-    f32 giRestirNormalThreshold = 0.5f;
+    // DEFAULT 0, AND THAT IS THE CAMERA-MOTION FADE FIX. Measured headless on Sponza (camera
+    // translating, stopped at a known frame, viewport mean at +3 frames after the stop against
+    // settled): 1 -- the old default -- overshoots +8% and decays over ~25 frames, which is the
+    // fade; 8 overshoots +104%; 0 does not overshoot at all. Everything else measured innocent:
+    // the spatial half (+6.9% with it off), the reuse tolerances, the bias-correction mode, the
+    // Jacobian, and the reservoir age (capping it made the overshoot WORSE, +24%, as did capping
+    // history only while moving, +62%) -- every restart re-forms the chain out of single-sample
+    // reservoirs whose RIS weight has enormous variance, and that is what flashes.
+    //
+    // WHAT 0 COSTS, MEASURED RATHER THAN ASSUMED: nothing detectable. Settled brightness is
+    // unchanged (0.0893 against 0.0892), grain and flicker at rest are identical (0.00597/0.00057
+    // against 0.00594/0.00056), and mid-motion both are slightly BETTER while the moving image
+    // sits at the settled brightness instead of 5% above it. NRD is doing the smoothing this
+    // reuse was supposed to provide, which is why removing it is free here.
+    //
+    // 1 RESTORES THE OLD BEHAVIOUR for A/B. Console: voxi.giRestirMaxHistory. Packed at
+    // gAmbientParams.w bits 18-22.
+    u32 giRestirMaxHistory = 0;
 
     // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
     //

@@ -1743,8 +1743,6 @@ private:
     // was (see Voxi.hpp's own comment on the field for the full account). A renderer that somehow
     // renders a frame before its first setSettings call behaves as the shipped default would, the
     // same reasoning giRestirVisibility_'s own comment gives for its default.
-    u32 giRestirMovingAge_ = 0;
-    // Settings::giRestirSpatialSamples, cached at setSettings the same way giRestirMovingAge_ just
     // above is, for the identical defensive reason: Voxi.cpp's setSettings already range-clamps
     // Settings::giRestirSpatialSamples to [0,15], and std::min repeats that ceiling here so this
     // member can never disagree with givis::packAmbientW's own `& 15u` mask of it. 15 (AUTO) matches
@@ -1752,6 +1750,7 @@ private:
     // first setSettings call leaves the motion discount's own numSamples alone rather than forcing
     // temporal-only reuse on an un-initialised zero.
     u32 giRestirSpatialSamples_ = 15;
+    u32 giRestirMaxHistory_ = 1;       // Settings::giRestirMaxHistory, gAmbientParams.w bits 18-23
     // voxi.blendedGiCone's live backing store -- see setBlendedGiCone's own comment.
     bool blendedGiCone_ = false;
     // voxi.giVisPathView's live backing store -- see setGiVisPathView's own comment.

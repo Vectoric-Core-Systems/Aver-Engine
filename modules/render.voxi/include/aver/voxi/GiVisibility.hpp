@@ -94,15 +94,23 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 // recomputed write inside the giSurf block, 2.11) states its eight inputs by name, so a reordered bit
 // in this function is the only place that has to change, not every caller.
 constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blendedCone,
-                            bool blendedReplay, bool pathView, u32 movingAge, u32 spatialSamples) {
+                            bool blendedReplay, bool pathView, u32 spatialSamples, u32 maxHistory) {
     u32 w = mode & 3u;
     if (histBound)     w |= 4u;
     if (histValid)      w |= 8u;
     if (blendedCone)    w |= 16u;
     if (blendedReplay)  w |= 32u;
     if (pathView)       w |= 64u;
-    w |= (movingAge & 31u) << 7;
     w |= (spatialSamples & 15u) << 12;
+    // bits 18-22 `maxHistory`: Settings::giRestirMaxHistory, RTXDI's stparams.maxHistoryLength --
+    // how much M a previous-frame reservoir may carry into the combine, and the one quantity the
+    // camera-motion fade turned out to scale with (0 no overshoot, 1 +8%, 8 +104%, measured).
+    //
+    // WHY 23 IS THE LAST USABLE BIT: this field travels as gAmbientParams.w, a FLOAT, and float32
+    // holds integers exactly only to 2^24. Bit 24 IS that boundary, so a value with bit 24 and any
+    // low bit set is not representable and rounds -- silently corrupting the low fields instead of
+    // failing. Caught when a debug dial briefly sat at bit 24 and its capture read as a no-op.
+    w |= (maxHistory & 31u) << 18;
     return w;
 }
 

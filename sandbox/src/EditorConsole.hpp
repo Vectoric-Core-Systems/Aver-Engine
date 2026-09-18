@@ -675,76 +675,35 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 3) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution) or 3 (full) -- values above 3 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
             return true;
         }});
-    // How many frames a ReSTIR GI reservoir may keep one sample while the camera moves at or past
-    // the motion knee -- see Settings::giRestirMovingAge's own comment (Voxi.hpp) for the fade this
-    // exists to remove (a moving camera's reservoirs keep stale, often brighter reprojected radiance
-    // for up to the existing 30-frame cap after the camera stops) and for why 3dbc9a42's own attempt
-    // at this fade (pinning the spatial-reuse motion discount) was reverted in 8daed7f1 instead of
-    // kept: the fade was identical with that pin in every position, so it was never the cause.
-    //
-    // AN ORDINARY dialSetters ENTRY, like voxi.giSkyOcclusionRays above -- not the raw-slot idiom
-    // consoleGiPoisonViewSlot() below uses, because this IS a Settings field (Settings::
-    // giRestirMovingAge), reaches the shader through setSettings/beginShadowHistory exactly like
-    // every other dial in this block, and has no per-frame console-only override to arbitrate with.
-    //
-    // NOT TIER-DERIVED -- Voxi.hpp's own comment on the field says so and Voxi.cpp's setSettings only
-    // range-clamps it (to [0,31], the five bits givis::packAmbientW packs it into), the same shape
-    // voxi.giRestirVisibility above already has for the identical reason.
-    t.push_back({"voxi.giRestirMovingAge", VarType::U32, false,
-        "The most frames a ReSTIR GI reservoir may keep one sample while the camera moves at or past "
-        "the motion knee; the at-rest cap stays the engine's existing 30. 0 means legacy -- always "
-        "30, the fade included. DEFAULT IS NOW 0: a nonzero default (3, bd6e2045) was tested by the "
-        "owner by hand and the fade came back unchanged, so it did not fix it -- the dial is still "
-        "here as a legitimate choice, only the silent nonzero default is gone. Only applies when "
-        "voxi.giMode resolves to 1 (engine clamps to [0,31]).",
-        []{ return vU32(Renderer::get().settings().giRestirMovingAge); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirMovingAge = n; }); },
+    // THE TWO DIALS THE FADE BISECTION LEFT STANDING. Everything else it added is gone again,
+    // each removed by its own measurement rather than by taste: the moving-camera reservoir-age cap
+    // and the moving-camera history cap both made the overshoot WORSE, the two reuse-similarity
+    // tolerances measured identical to their defaults, the bias-correction mode changed nothing,
+    // the Jacobian dial changed nothing, and a wave-local boiling filter cost 13% of the settled
+    // image's brightness while leaving the overshoot. See Settings::giRestirMaxHistory (Voxi.hpp)
+    // for the full chain and the numbers behind it. Ordinary dialSetters entries, same shape as
+    // voxi.giRestirVisibility above -- real Settings fields, not console-only overrides.
+    t.push_back({"voxi.giRestirMaxHistory", VarType::U32, false,
+        "stparams.maxHistoryLength: how much weight a previous-frame ReSTIR GI reservoir may carry "
+        "into the combine. DEFAULT 0, which is the camera-motion fade fix -- 1 was the old value and "
+        "overshoots ~8% for ~25 frames after the camera stops, 8 overshoots ~104%. 0 measured no "
+        "worse at rest or in motion (same settled brightness, same grain and flicker), because NRD "
+        "is what actually smooths this. Set 1 to get the old behaviour back. Engine clamps to [0,31].",
+        []{ return vU32(Renderer::get().settings().giRestirMaxHistory); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirMaxHistory = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.u > 31) { err = "giRestirMovingAge must be 0 (legacy, always 30) through 31 -- values above 31 are clamped to 31 by the engine (it only has five packed bits to live in), but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
+            if (v.as.u > 31) { err = "giRestirMaxHistory must be 0..31 -- five packed bits is all it has"; return false; }
             return true;
         }});
-    // THE NEXT STEP IN THE SAME BISECTION, NOW THAT THE RESERVOIR-AGE CAP JUST ABOVE HAS BEEN TESTED
-    // AND REFUTED: split ReSTIR GI's spatial reuse from its temporal reuse outright, to find out
-    // whether the fade survives with the spatial half disabled completely. See
-    // Settings::giRestirSpatialSamples's own comment (Voxi.hpp) for the full state of the
-    // investigation this is one half of. AN ORDINARY dialSetters ENTRY, same shape as
-    // voxi.giRestirMovingAge just above -- a real Settings field, not a console-only override.
     t.push_back({"voxi.giRestirSpatialSamples", VarType::U32, false,
         "Overrides the ReSTIR GI spatial-reuse tap count (stparams.numSamples) the moving-camera "
         "motion discount would otherwise compute: 15 = auto (leave the discount alone, today's "
-        "image), 0 = no spatial reuse at all (temporal only), 1..8 pin the count regardless of camera "
-        "motion. Only applies when voxi.giMode resolves to 1 (engine clamps to [0,15]).",
+        "image), 0 = no spatial reuse at all, 1..8 pin the count regardless of camera motion. Only "
+        "applies when voxi.giMode resolves to 1 (engine clamps to [0,15]).",
         []{ return vU32(Renderer::get().settings().giRestirSpatialSamples); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirSpatialSamples = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.u > 15) { err = "giRestirSpatialSamples must be 0 (temporal only) through 15 (auto) -- values above 15 are clamped to 15 by the engine (it only has four packed bits to live in), but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
-            return true;
-        }});
-    // THE OTHER HALF OF THE SAME BISECTION: the RTXDI reuse-similarity tolerances themselves, lifted
-    // out of voxi_restir.hlsli so they can be swept without a rebuild, in case the fade turns out to
-    // be neither half of the temporal/spatial split above but simply too loose a tolerance letting a
-    // dissimilar neighbour reuse in either pass. See Settings::giRestirDepthThreshold /
-    // giRestirNormalThreshold's own comments (Voxi.hpp) for the full writeup. Ordinary dialSetters
-    // entries, same shape as every other dial in this block.
-    t.push_back({"voxi.giRestirDepthThreshold", VarType::F32, false,
-        "RTXDI's reuse depth-similarity tolerance (stparams.depthThreshold, voxi_restir.hlsli); 0.1 "
-        "is today's literal, restated as this dial's default. Only applies when voxi.giMode resolves "
-        "to 1 (engine clamps to [0.001,1.0] -- 0 exactly would reject every neighbour).",
-        []{ return vF32(Renderer::get().settings().giRestirDepthThreshold); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirDepthThreshold = n; }); },
-        [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.f < 0.001f || v.as.f > 1.0f) { err = "giRestirDepthThreshold must be within [0.001,1.0] -- the engine clamps to that range anyway, but this refuses out-of-range values up front so the message names your own mistake, not the substitute"; return false; }
-            return true;
-        }});
-    t.push_back({"voxi.giRestirNormalThreshold", VarType::F32, false,
-        "RTXDI's reuse normal-similarity tolerance (stparams.normalThreshold, voxi_restir.hlsli); 0.5 "
-        "is today's literal (accepts up to 60 degrees of normal disagreement), restated as this "
-        "dial's default. Only applies when voxi.giMode resolves to 1 (engine clamps to [0.0,0.999] -- "
-        "1.0 exactly would reject every neighbour).",
-        []{ return vF32(Renderer::get().settings().giRestirNormalThreshold); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirNormalThreshold = n; }); },
-        [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.f < 0.0f || v.as.f > 0.999f) { err = "giRestirNormalThreshold must be within [0.0,0.999] -- the engine clamps to that range anyway (1.0 exactly would reject every neighbour), but this refuses out-of-range values up front so the message names your own mistake, not the substitute"; return false; }
+            if (v.as.u > 15) { err = "giRestirSpatialSamples must be 0 (no spatial reuse) through 15 (auto) -- four packed bits is all it has"; return false; }
             return true;
         }});
     // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
