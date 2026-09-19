@@ -59,14 +59,32 @@ struct SceneCensus {
 
 #if AVER_MODULE_SCENE
 // Walks the live world. Takes World& rather than reading the singleton itself so a test can drive it.
-inline SceneCensus takeSceneCensus(scene::World& w) {
+//
+// `exclude` IS WHAT KEEPS THIS AN ANSWER ABOUT THE LEVEL. The census asks whether two hosts loaded
+// the same thing, so it must count only what the LEVEL put in the world -- and the editor puts one
+// thing there that the level did not: the Player Start marker, a cube it synthesises from the
+// level's SPAWN record so the spawn point can be seen and dragged. A shipped game has nothing to
+// click, so it creates no marker and reads the SPAWN record directly.
+//
+// That one entity is not a divergence, but the census counted it as three: one extra entity, one
+// extra mesh renderer, one extra material, and a different pairHash. Measured on SkyForge, whose
+// level places 16 things and states a SPAWN: the editor reported 17 entities and 5 materials
+// against the game's 16 and 4. Since most levels state a SPAWN, the gate could not pass on most
+// levels -- and nobody knew, because it had never been run.
+//
+// An entity to skip, rather than a "count editor markers separately" flag: the marker is the
+// editor's own object and only the editor knows which entity it is. kInvalidEntity (the default,
+// and what the game passes) skips nothing.
+inline SceneCensus takeSceneCensus(scene::World& w, scene::Entity exclude = scene::kInvalidEntity) {
     SceneCensus c;
     std::unordered_set<u64> meshes;
     std::unordered_set<std::string> mats;   // NAMES, not tokens -- see pairHash's comment
     c.entities = w.count();
+    if (exclude != scene::kInvalidEntity && w.valid(exclude) && c.entities > 0) --c.entities;
     for (u32 i = 0; i < w.count(); ++i) {
         const scene::Entity e = w.at(i);
         if (!w.valid(e)) continue;
+        if (e == exclude) continue;
         const scene::CMeshRenderer* mr =
             w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
         if (!mr) continue;

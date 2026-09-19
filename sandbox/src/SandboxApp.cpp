@@ -1830,8 +1830,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_SCENE
     if (sceneCensus_ && !sceneCensusDone_ && t.frame >= 2) {
         sceneCensusDone_ = true;
+        // playerStart_ is excluded: the editor synthesises that marker from the level's SPAWN
+        // record and the shipped game does not, so counting it would report a divergence that is
+        // really the editor doing its job. See takeSceneCensus' own comment.
         AVER_INFO("[Census] {}",
-                  world::formatSceneCensus(world::takeSceneCensus(scene::World::instance())));
+                  world::formatSceneCensus(
+                      world::takeSceneCensus(scene::World::instance(), playerStart_)));
     }
 #endif
 #if AVER_MODULE_SCENE
