@@ -140,12 +140,12 @@ void SandboxApp::onRender(Engine& e)  {
     // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
     {
         scene::World& w = scene::World::instance();
-        int drawn = 0, culled = 0, ownerHidden = 0;
-        // 3B's periodic-report extension: how many Draw records the direct route actually
-        // delivered for THIS frame's culled entities, and how many of those entities were
-        // multi-part -- the concrete evidence that a culled tree still yields N draws instead of
-        // collapsing to slot 0's single one.
-        u32 culledDraws = 0, culledMultiPart = 0;
+        // THE THREE COUNTERS ARE THE WALK'S NOW. game::drawWorld fills a SceneDrawStats and the
+        // editor reads it back (`colourStats`, at the call below) to word its own sentence, rather
+        // than incrementing three locals from inside a loop it no longer owns. 3B's per-frame
+        // direct-route tallies -- how many Draw records this frame's culled entities delivered,
+        // and how many of those entities were multi-part -- left with them, into the hook context
+        // the walk's sinks read through (ColourWalk, same call site).
 #if AVER_MODULE_TRIFACTOR
         lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
         lodClusterStats_ = LodClusterStats{};
@@ -180,20 +180,12 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
 #endif
 
-        // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so a
-        // clip coordinate dots with a COLUMN. Derived per frame rather than cached: two dozen adds, and a stale frustum culls things on screen.
-        f32 pl[6][4];
-        {
-            const Mat4& m = viewProj_;
-            for (int i = 0; i < 4; ++i) {
-                pl[0][i] = m.m[i][3] + m.m[i][0];   // left
-                pl[1][i] = m.m[i][3] - m.m[i][0];   // right
-                pl[2][i] = m.m[i][3] + m.m[i][1];   // bottom
-                pl[3][i] = m.m[i][3] - m.m[i][1];   // top
-                pl[4][i] = m.m[i][2];               // near
-                pl[5][i] = m.m[i][3] - m.m[i][2];   // far
-            }
-        }
+        // THE SIX FRUSTUM PLANES ARE NOT DERIVED HERE ANY MORE. Both of this frame's walks are
+        // game::drawWorld, which builds them from the viewProj it is handed, in the same
+        // row-vector convention and with the same two dozen adds (GameRender.cpp). The copy that
+        // stood here had exactly one reader, the entity loop's own cull, and outliving that reader
+        // is how a second spelling of a rule gets left behind to drift -- which is the failure
+        // this whole slice exists to remove, not to relocate.
 #if AVER_MODULE_VOXI
         // ---- depth prepass phase: the COLOUR WALK'S OWN FUNCTION, run a second time ----
         // ONE ScopedGpuStat, not one per draw: the GPU stat tree budgets 64 open spans/frame and
@@ -361,7 +353,6 @@ void SandboxApp::onRender(Engine& e)  {
         // GPU looks exactly like CPU work. Two timers answer it directly: this one, and the
         // streamer's below. On Electric Dreams: 8.2ms walk + 0.7ms streaming inside a 76ms frame -- GPU-bound, so nothing here can matter.
         const auto tWalk0 = std::chrono::steady_clock::now();
-        f64 dispatchMs = 0.0;
 
         const u32 n = w.count();
 
@@ -710,7 +701,10 @@ void SandboxApp::onRender(Engine& e)  {
         };
 #endif
 
-#if AVER_MODULE_VOXI
+        // PROSE, NOT CODE, since the constant it introduces moved down to the decide() sink beside
+        // its only test -- and therefore no longer behind #if AVER_MODULE_VOXI, which would only
+        // hide the account of a decision from the build that cannot make it.
+        //
         // A CASTER THE CAMERA CANNOT SEE STILL CASTS A SHADOW. The frustum/occlusion/owner-hide
         // verdicts below used to skip DRAWING an entity via a bare `continue` past drawMesh() --
         // but drawMesh() is the ONLY thing that reaches the render features (submitDraw() is how
@@ -720,8 +714,8 @@ void SandboxApp::onRender(Engine& e)  {
         // technique here is screen-space -- what FED the world-space cascades and RayQuery was the
         // camera frustum. F4 (occlusion-fix-plan.md) closes this by submitting the entity to the
         // features WITHOUT drawing it -- Voxi applies its own per-cascade cull in LIGHT space, the
-        // cull a shadow caster should have gotten all along -- via the SAME emitEntityDraws() the
-        // visible route uses, from the unified direct-route branch further down this walk. The
+        // cull a shadow caster should have gotten all along -- through the SAME per-draw emitter
+        // the visible route uses, which is game::drawWorld's own now. The
         // lambda that used to live here (submitShadowOnly) is gone: it read a different material
         // (mesh-slot-0's, not each part's own), dropped multi-part splits entirely, and had DRIFTED
         // on the translucency test from the visible path's copy -- see
@@ -735,8 +729,10 @@ void SandboxApp::onRender(Engine& e)  {
         // applied earlier, where it can stop the work, not just the draw. A NEGATIVE radius means
         // the caller had no bounds, so the entity submits regardless, matching the frustum cull's
         // own "must not vanish" rule. For scale: a crate at 5 m subtends ~0.2 rad and is kept; an
-        // ankle-height plant at 100 m subtends ~0.003 rad and is not.
-        constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
+        // ankle-height plant at 100 m subtends ~0.003 rad and is not. The constant itself now sits
+        // in the decide() sink below, beside the one branch that reads it: the direct route is
+        // answered from there, and a threshold a few hundred lines from its only test is a
+        // threshold nobody reads against its own prose.
         // THIS FLOOR IS ASYMMETRIC, AND THAT ASYMMETRY IS THE BUG. It exists only on the direct
         // route: an entity INSIDE the frustum reaches the renderer through drawMesh() with no size
         // test at all, and the moment it rotates outside it may be dropped here instead. So an
@@ -752,7 +748,6 @@ void SandboxApp::onRender(Engine& e)  {
         // the draw goes through; the heuristic survives for the case it was written for, which is a
         // build with no Voxi where this really is only feeding cascades. Applied ONCE PER ENTITY
         // (not per part) at the direct-route branch below, exactly where it applied before.
-#endif
 
         // ONE GPU SPAN AROUND THE WHOLE OPAQUE WALK -- the raster path's counterpart to "Voxi
         // ray-driven primary". Until this existed there was no GPU-timed marker for raster pixel
@@ -770,144 +765,128 @@ void SandboxApp::onRender(Engine& e)  {
         if (rhi::IRenderContext* rctx = e.device()->renderContext())
             rasterScope.emplace(*rctx, "raster scene draws");
 
-        for (u32 oi = 0; oi < n; ++oi) {
+        // ---- the colour walk: THE SAME game::drawWorld, this time in DrawWorldPass::Colour ----
+        // What stood here was the hand-written original BOTH of this frame's walks were copied
+        // from -- the entity iteration, the visible/mesh guards, the asset-bounds write-back, the
+        // frustum cull, the owner-hide ancestor walk, material resolution, the per-part
+        // planEntityDraws split and the raster/direct routing. Every one of those is in
+        // Runtime/src/GameRender.cpp now, and the depth prepass at the top of this function has
+        // already been calling it for a commit. A second spelling of the same rules here could
+        // only ever mean two walks that agree until they do not, which is not hypothetical: the
+        // prepass copy's world-box scope had already drifted far enough to pick a DIFFERENT LOD
+        // level for the same instance, 2.81% of pixels (DrawWorldPass' own comment).
+        //
+        // NOTHING EDITOR-ONLY MOVED, AND NONE OF IT MAY. Aver.Occlusion links into Sandbox alone
+        // and this library has no path tracer, so the hierarchical-Z machinery, Trifactor LOD and
+        // the GPU cluster dispatch, the selection outline, the PlayerStart icon and the
+        // path-traced scene view all stay in this file. They reach the walk through
+        // DrawWorldOptions' hooks instead -- each hook a point where the editor answers a question
+        // the library cannot ask on its own, and every one of them defaulting to the answer the
+        // walk already gave (GameRender.hpp's own contract for the hook set).
+        //
+        // THE OCCLUSION ORDER IS WHY visitOrder EXISTS. occlusionOrder_ puts everything seen last
+        // frame first so buildPyramid() has depth to build from; the pass-1/pass-2 boundary is a
+        // raw index into THAT sequence, which is also why the boundary is fired from onVisit and
+        // cannot be hoisted anywhere earlier -- it is a statement about the command stream.
+
+        // THE FRAME STATE THE HOOKS NEED, and the reason it is a local struct rather than members
+        // on SandboxApp. The sinks have to be CAPTURELESS lambdas to convert to the plain function
+        // pointers DrawWorldOptions takes (GameRender.hpp states why it is function pointers and
+        // not std::function: this is a per-entity path over thousands of entities a frame), so
+        // everything they read arrives through the one `user` pointer. All of it is this frame's
+        // and nothing else's -- the counters start at zero every frame, the occlusion split is
+        // recomputed every frame -- so it belongs on this frame's stack, where its lifetime is
+        // visible, and not on the app, where a value left behind would outlive the walk that wrote
+        // it. A lambda written inside a member function is a local class OF that member function,
+        // so `self` reaches SandboxApp's private members exactly as the code around it does; that
+        // is also what keeps this commit inside one .cpp instead of adding declarations to
+        // SandboxApp.hpp and rebuilding every translation unit that includes it.
+        struct ColourWalk {
+            SandboxApp* self = nullptr;
+            Engine* engine = nullptr;
+            // The occlusion pass-1/pass-2 split, read by onVisit alone. Left false/0 with the
+            // module compiled out, where onVisit is not installed either.
+            bool occlusionRuns = false;
+            u32 pass1Count = 0;
+            // occlusionBuildAndTest is a by-reference closure sitting on this frame's stack and a
+            // function pointer cannot carry one, so it is reached by its own address through a
+            // captureless trampoline -- filled in just below, beside the lambda it points at.
+            void (*buildPyramidNow)(void*) = nullptr;
+            void* buildPyramidUser = nullptr;
+            // 3B's periodic-report extension, formerly two plain locals above this walk: how many
+            // Draw records the direct route actually delivered for THIS frame's culled entities,
+            // and how many of those entities were multi-part -- the concrete evidence that a culled
+            // tree still yields N draws instead of collapsing to slot 0's single one. Counted
+            // through the hooks now because the emission itself is the library's: onDirectDraw
+            // tallies this entity's draws, onEntityDelivered banks them once the walk says the
+            // entity was delivered on the direct route at all.
+            u32 culledDraws = 0;
+            u32 culledMultiPart = 0;
+            u32 entityDirectDraws = 0;
+            bool entityCulled = false;
+            // CPU time inside dispatchMeshClusters, for the scene-walk report below. Accumulated in
+            // decide(), which is where the dispatch now happens.
+            f64 dispatchMs = 0.0;
+        } walk;
+        walk.self = this;
+        walk.engine = &e;
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-            const u32 i = occlusionOrder_.empty() ? oi : occlusionOrder_[oi];
-            if (occlusionRuns && oi == occlusionPass1Count) occlusionBuildAndTest();
-#else
-            const u32 i = oi;
+        walk.occlusionRuns = occlusionRuns;
+        walk.pass1Count = occlusionPass1Count;
+        using OcclusionBuildFn = decltype(occlusionBuildAndTest);
+        walk.buildPyramidUser = const_cast<void*>(static_cast<const void*>(&occlusionBuildAndTest));
+        walk.buildPyramidNow = [](void* p) { (*static_cast<const OcclusionBuildFn*>(p))(); };
+
+        // THE ONE ORDERING REQUIREMENT IN THE WHOLE HOOK SET, and the only reason
+        // DrawWorldVisitFn returns nothing: buildPyramid() reads the depth that pass one's draws
+        // have just written, so it has to be RECORDED at the pass-1/pass-2 boundary IN THE COMMAND
+        // STREAM. A pre-pass over the same entities could compute the same verdicts and still be
+        // wrong, because the pyramid would be built against a different set of draws.
+        auto colourVisit = [](u32 visitIndex, scene::Entity ent, void* user) {
+            ColourWalk& c = *static_cast<ColourWalk*>(user);
+            (void)ent;
+            if (c.occlusionRuns && visitIndex == c.pass1Count && c.buildPyramidNow)
+                c.buildPyramidNow(c.buildPyramidUser);
+        };
 #endif
-            const scene::Entity ent = w.at(i);
-            if (w.destroyPending(ent)) continue;
-            const scene::CMeshRenderer* mr =
-                w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
-            // NO RENDERER, OR NOTHING ASSIGNED, IS THE ORDINARY CASE and says nothing: most
-            // entities in a level carry no mesh at all.
-            if (!mr || mr->mesh == 0) continue;
-            // A MESH IS NAMED AND THE VISIBLE BIT IS CLEAR, which is NOT ordinary -- it is the
-            // zero-fill trap. World::addComponent hands back zeroed storage and
-            // kMeshRendererVisible is positive-sense, so a renderer attached directly is
-            // attached, correct, and invisible; GraphComponentTree.cs:100-103 documents the same
-            // trap on the C# side and dodges it by going through Entity.SetVisible.
-            //
-            // SPLIT OUT OF THE COMPOSITE GUARD PURELY TO SAY SO. This loop used to drop the
-            // entity here with no diagnostic of any kind, which cost a day of bisection: an
-            // entity that cannot draw said nothing at all. ONCE PER ENTITY, because this is a
-            // per-entity per-frame walk and an unthrottled warning floods the log.
-            if (!(mr->flags & scene::kMeshRendererVisible)) {
-                if (undrawnInvisible_.insert(static_cast<u64>(ent)).second)
-                    AVER_WARN("[Sandbox] entity {} names mesh id {} but its kMeshRendererVisible "
-                              "bit is clear, so the scene walk skips it and it draws nothing. A "
-                              "component attached directly arrives zero-filled -- attach through "
-                              "Entity.SetVisible (EnsureMeshRenderer), which seeds the bit.",
-                              static_cast<u64>(ent), mr->mesh);
-                continue;
-            }
+
+        // THE EDITOR'S EVERY ANSWER, IN ONE CALL. decide() runs after the walk has computed this
+        // entity's world box and both of its own verdicts and before it commits to a route, which
+        // is exactly the point the deleted loop made all of these decisions at -- see
+        // EntityDecision for why it is one in/out struct and not a handful of narrower callbacks
+        // (the box is an INPUT: re-deriving it here is the precise mistake that made the prepass
+        // and colour copies choose different LOD levels).
+        auto colourDecide = [](aver::game::EntityDecision& d, void* user) {
+            ColourWalk& c = *static_cast<ColourWalk*>(user);
+            SandboxApp& self = *c.self;
+            // Reset HERE rather than in onVisit: onVisit is only installed when the occlusion
+            // module is in, and these two belong to the direct-route accounting, which is Voxi's.
+            // Nothing can fire onDirectDraw or onEntityDelivered for this entity before this line
+            // runs, so this is the last point that is still early enough.
+            c.entityDirectDraws = 0;
+            c.entityCulled = false;
 
             // ---- THE PLAYER START IS CHROME, AND IT DRAWS AS AN ICON INSTEAD ----
-            // Skipping it HERE, by identity, drops it from the opaque pass, shadow cascade, GI and
-            // RT acceleration structure all at once -- right for a marker: it should not cast a
+            // Skipping it by identity drops it from the opaque pass, shadow cascade, GI and RT
+            // acceleration structure all at once -- right for a marker: it should not cast a
             // shadow, bounce light, or appear in a reflection.
             // NOT BY CLEARING kMeshRendererVisible: ray picking asks the IDENTICAL question, so
             // unsetting the flag would also remove the ability to click the marker. Already
             // special-cased by identity in loadLevel/unloadLevel/addPlayerStart.
             // The icon itself is queued further down, sharing the selection outline's
             // is-anything-playing test.
-            if (ent == playerStart_ && viewportIconsReady_) continue;
+            //
+            // IT IS LATE NOW, AND THAT IS A REAL CHANGE, stated rather than discovered later
+            // (EntityDecision::skip's own contract says decide() cannot un-do what ran before it).
+            // The deleted loop skipped the marker BEFORE the asset-bounds write-back and before
+            // content_.meshFor, so this walk now refreshes the marker's CMeshRenderer aabb from
+            // GameContent::boundsFor and will warn once through onSkipped if its mesh id ever
+            // fails to resolve. Both were already true of the occlusion pre-walk above, which
+            // carries no PlayerStart exception at all, and of the depth-prepass call.
+            if (d.entity == self.playerStart_ && self.viewportIconsReady_) { d.skip = true; return; }
 
-            const rhi::MeshHandle sceneMeshHandle = content_.meshFor(mr->mesh);
-            if (!sceneMeshHandle) {
-                // AN ID THAT RESOLVES TO NOTHING. Said ONCE PER ID rather than per entity: many
-                // entities can name the same missing mesh, and it is the id that identifies the
-                // fault, not the entity that happened to reach it first.
-                //
-                // THE ID IS PRINTED RAW AND THAT IS NOT LAZINESS. meshPathById_ is populated by
-                // loadProjectMeshes only for meshes that LOADED, so it is empty for exactly the
-                // ids that land here -- there is nothing to translate with. fnv1a64 of the
-                // authored path is what to grep the .ocgraph/.ocmap for.
-                if (undrawnMissingMesh_.insert(mr->mesh).second)
-                    AVER_WARN("[Sandbox] mesh id {} (named by entity {}) is not in content_'s meshes, "
-                              "so every entity naming it draws nothing. Built-in primitives are "
-                              "seeded at startup and .ocmesh files are registered by "
-                              "loadProjectMeshes from the project's content root -- an id that is "
-                              "missing was never loaded under the string that was authored.",
-                              mr->mesh, static_cast<u64>(ent));
-                continue;
-            }
-            const Mat4& wm = w.worldMatrix(ent);
-
-            // ---- OWNER HIDE, DECIDED BEFORE THE CULLS ----
-            // Needed by chooseRoute() below regardless of which cull (if any) also applies: an
-            // entity both frustum-culled and owner-hidden must still carry hiddenFromOwner=true on
-            // its one (direct-route) delivery, or it would be primary-visible again once back on
-            // screen -- the 0d3bcf1 regression chooseRoute's own contract pins a test against.
-            // COSTS ESSENTIALLY NOTHING to hoist: the walk runs only for an entity that both
-            // carries the flag and has a first-person viewer to hide from -- in practice one
-            // entity, the possessed pawn's own body.
-            // ANCESTOR WALK, NOT A DIRECT-PARENT COMPARE: a COMP tree can nest, so "this mesh's
-            // owner" may be several hops above `ent`. World::setParent already refuses a cycle, so
-            // this walk is guaranteed to reach kInvalidEntity and stop.
-            bool ownerHiddenHere = false;
-            if ((mr->flags & scene::kMeshRendererHiddenFromOwner) &&
-                firstPersonPawn_ != scene::kInvalidEntity) {
-                for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
-                    if (anc == firstPersonPawn_) { ownerHiddenHere = true; break; }
-                }
-            }
-
-            // A STATIC entity gets its bounds from the asset. A skinned one already had them
-            // written this frame by SkinnedScene from its ACTUAL POSE, so leave those alone --
-            // overwriting with the rest box is exactly the popping this exists to stop.
-            const bool skinned = skinnedScene_ && skinnedScene_->drawHandle(ent) != 0;
-            if (!skinned)
-                if (const auto* bit = content_.boundsFor(mr->mesh)) {
-                    auto* mw = const_cast<scene::CMeshRenderer*>(mr);
-                    mw->aabbMin[0] = bit->first.x;  mw->aabbMin[1] = bit->first.y;
-                    mw->aabbMin[2] = bit->first.z;
-                    mw->aabbMax[0] = bit->second.x; mw->aabbMax[1] = bit->second.y;
-                    mw->aabbMax[2] = bit->second.z;
-                }
-
-            // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box
-            // is drawn rather than culled: an entity whose bounds were never filled in must not
-            // vanish -- being conservative costs a draw call where being wrong costs a character.
-            bool haveWorldBox = false;
-            bool frustumCulled = false;
-            Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
-            {
-                const Vec3 lo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
-                const Vec3 hi{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
-                if (hi.x > lo.x && hi.y > lo.y && hi.z > lo.z) {
-                    for (u32 c = 0; c < 8; ++c) {
-                        const Vec3 p{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
-                        const Vec3 t = xformPoint(wm, p);
-                        wlo.x = std::fmin(wlo.x, t.x); whi.x = std::fmax(whi.x, t.x);
-                        wlo.y = std::fmin(wlo.y, t.y); whi.y = std::fmax(whi.y, t.y);
-                        wlo.z = std::fmin(wlo.z, t.z); whi.z = std::fmax(whi.z, t.z);
-                    }
-                    haveWorldBox = true;
-                    bool outside = false;
-                    for (u32 pi = 0; pi < 6 && !outside; ++pi) {
-                        // The corner FURTHEST along the plane normal. If even that one is behind,
-                        // every corner is, and only then is the box definitely out.
-                        const f32 d = pl[pi][0] * (pl[pi][0] > 0 ? whi.x : wlo.x)
-                                    + pl[pi][1] * (pl[pi][1] > 0 ? whi.y : wlo.y)
-                                    + pl[pi][2] * (pl[pi][2] > 0 ? whi.z : wlo.z)
-                                    + pl[pi][3];
-                        if (d < 0.0f) outside = true;
-                    }
-                    // F4 (occlusion-fix-plan.md): STORE the verdict rather than acting on it here.
-                    // chooseRoute() (aver/game/SceneSubmission.hpp), a few lines down once the
-                    // occlusion verdict is known too, is the ONE place that decides what happens
-                    // next -- a frustum-culled entity and an occlusion-culled one are now handled
-                    // by the exact same code from there on. This used to `continue` right here,
-                    // through the deleted submitShadowOnly lambda.
-                    frustumCulled = outside;
-                }
-            }
-            bool occlusionCulled = false;
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-            // PASS-2 ONLY: `oi < occlusionPass1Count` entities drew unconditionally before
+            // PASS-2 ONLY: `visitIndex < pass1Count` entities drew unconditionally before
             // occlusionBuildAndTest() ran. Everything below has ALREADY been tested against a
             // pyramid buildPyramid() built from every pass-1 draw -- but CORRECTED: that does NOT
             // make occlusionWasVisible(ent) "this frame's own fresh answer". testBatch()'s
@@ -915,148 +894,135 @@ void SandboxApp::onRender(Engine& e)  {
             // -- what actually landed in occlusionVisible_[ent] this frame, inside
             // occlusionBuildAndTest's RESULT APPLICATION, is the raw (motion-dilated) test result
             // ONLY when this frame's camera motion since the last basis AND the readback's own
-            // staleness (IOcclusionCuller::readbackLagIsExactlyOneCall()) both stayed inside what the
-            // trust gate above the box-collection loop is willing to trust; otherwise it is
+            // staleness (IOcclusionCuller::readbackLagIsExactlyOneCall()) both stayed inside what
+            // the trust gate above the box-collection loop is willing to trust; otherwise it is
             // forced to "visible" regardless of what the pyramid says. A box excluded from
             // occlusionBoxes_ (degenerate) was never tested and defaults to visible, same as
-            // haveWorldBox==false for frustum culling above. F8: occlusionRuns (computed once,
-            // above the box-collection pre-walk) replaces occlusionCullEnabled_ && occluder_ here.
-            occlusionCulled = occlusionRuns && oi >= occlusionPass1Count && haveWorldBox &&
-                !occlusionWasVisible(ent);
+            // EntityDecision::haveWorldBox being false does here. `visitIndex` is the position in
+            // occlusionOrder_, which is the sequence the boundary was cut in -- DrawWorldOptions
+            // hands the hooks that index for exactly this reason.
+            d.occlusionCulled = c.occlusionRuns && d.visitIndex >= c.pass1Count && d.haveWorldBox &&
+                                !self.occlusionWasVisible(d.entity);
 #endif
-            // F4: THE ONE PLACE that decides who delivers this entity -- see
-            // aver/game/SceneSubmission.hpp's own top comment for the rule (culling may change WHO
-            // delivers the draws, never WHAT is in them). showCulled sends an otherwise-culled,
-            // non-owner-hidden entity through the raster route too, tinted, for the by-hand
-            // false-cull finder (section 3B).
+            // The by-hand false-cull finder (section 3B): an otherwise-culled, non-owner-hidden
+            // entity draws through the RASTER route anyway, tinted. chooseRoute owns that pairing,
+            // so this is fed to it rather than applied here.
+            d.tint = self.occlusionShowCulled_;
+
+            // ASKED HERE TOO, NOT RESTATED. drawWorld calls the identical chooseRoute() on the
+            // identical four inputs a few lines after this returns (GameRender.cpp), so the two
+            // cannot disagree about a pure function. The editor needs the answer BEFORE it hands
+            // control back, because everything the deleted loop did from this point on sat on one
+            // side or the other of this very `if (!route.raster)`: the angular-size caster floor
+            // below it, Trifactor LOD and the cluster dispatch above it.
             const aver::game::RouteDecision route = aver::game::chooseRoute(
-                frustumCulled, occlusionCulled, ownerHiddenHere, occlusionShowCulled_);
+                d.frustumCulled, d.occlusionCulled, d.ownerHidden, d.tint);
 
             if (!route.raster) {
-#if AVER_MODULE_VOXI
                 // THE UNIFIED DIRECT ROUTE: frustum-culled, occlusion-culled or owner-hidden.
                 // Still submitted to Voxi so shadows, GI voxelisation and the RT TLAS never depend
                 // on what the camera itself can see -- see this walk's own "A CASTER THE CAMERA
-                // CANNOT SEE STILL CASTS A SHADOW" comment above for the full history, and
-                // aver/game/SceneSubmission.hpp's deliver() for the exact
-                // translucent/hiddenFromOwner formula emitEntityDraws() applies below (raster:
-                // hiddenFromOwner always false; direct: route.hiddenFromOwner, which chooseRoute
-                // already set to ownerHiddenHere on EVERY route, including
-                // frustum-culled-AND-owner-hidden -- the 0d3bcf1 fix).
+                // CANNOT SEE STILL CASTS A SHADOW" comment above. The submission itself is the
+                // library's now; what is left here is the two answers it cannot give.
+                //
                 // KNOWN RESIDUAL, STATED RATHER THAN FIXED (occlusion-fix-plan.md F4): this route
                 // never runs LOD/cluster selection, so a posed (skinned/soft-body) entity aside,
                 // it always plans from the BASE mesh and its full part split. A VISIBLE entity
                 // whose LOD or cluster cut substitutes a different, unsplit handle therefore
                 // delivers ONE draw of that handle while the SAME entity, culled, delivers its
                 // base parts -- only live with LOD selection or the CLI cluster paths (LODSELECT
-                // is 0 in PTTest, so dormant here). Closing it means Voxi taking source geometry
-                // independently of the raster LOD choice (the TLAS is keyed on d.mesh,
-                // VoxiRenderer.cpp:1136) -- out of scope for this fix; the
-                // aver/game/SceneSubmission.hpp pure-function tests pin the rule as-is rather than
-                // hiding it.
-                const rhi::MeshHandle chosenMesh = posedHandle(ent);
-                const rhi::MeshHandle baseMeshForCull = chosenMesh ? chosenMesh : sceneMeshHandle;
-                const Vec3 cullCentre = haveWorldBox
+                // is 0 in PTTest, so dormant here).
+                c.entityCulled = d.frustumCulled || d.occlusionCulled;
+#if AVER_MODULE_VOXI
+                // THE SOFT-BODY SEAM: posedHandle() asks skinning first and then a soft-body scene
+                // (nothing forbids CSoftBody on an already-skinned mesh, so asking skinning first
+                // makes the collision deterministic). EntityDecision::chosenMesh arrives holding
+                // skinning's answer alone, because the library has no soft-body scene to ask --
+                // GameRender.hpp names this seam outright -- so filling it in is the host's job.
+                const rhi::MeshHandle posed = self.posedHandle(d.entity);
+                d.chosenMesh = posed ? posed : d.baseMesh;
+
+                const Vec3 wlo = d.worldBoxMin, whi = d.worldBoxMax;
+                const Vec3 cullCentre = d.haveWorldBox
                     ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
                     : Vec3{0.0f, 0.0f, 0.0f};
-                const f32 cullRadius = haveWorldBox
+                const f32 cullRadius = d.haveWorldBox
                     ? 0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
                                         (whi.y - wlo.y) * (whi.y - wlo.y) +
                                         (whi.z - wlo.z) * (whi.z - wlo.z))
                     : -1.0f;
-                // THE ANGULAR-SIZE FLOOR -- see its own comment above (moved here from the deleted
-                // submitShadowOnly lambda) for the full "GATED ON WHETHER ANYONE BUT THE SHADOW
-                // CARES" reasoning. Applied ONCE PER ENTITY, matching its old home exactly.
-                bool angularFloorOk = true;
-                if (!voxiAttached_ && cullRadius >= 0.0f) {
-                    const f32 dx = cullCentre.x - camPos_.x, dy = cullCentre.y - camPos_.y,
-                              dz = cullCentre.z - camPos_.z;
+                // THE ANGULAR-SIZE FLOOR -- see its own comment above this walk for the full
+                // "GATED ON WHETHER ANYONE BUT THE SHADOW CARES" reasoning. Applied ONCE PER
+                // ENTITY, matching its old home exactly.
+                //
+                // emitDirectDraws, NOT skip, AND THE DIFFERENCE IS MEASURED. `skip` counts the
+                // entity nowhere; this drops its Voxi submission while it still counts as culled,
+                // which is what the deleted branch did (its `if (angularFloorOk)` wrapped only the
+                // plan-and-emit, never the `++culled` after it). Getting this the other way round
+                // is the 9.1 -> 64.2 ms/frame that motivated the floor in the first place.
+                constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
+                if (!self.voxiAttached_ && cullRadius >= 0.0f) {
+                    const f32 dx = cullCentre.x - self.camPos_.x, dy = cullCentre.y - self.camPos_.y,
+                              dz = cullCentre.z - self.camPos_.z;
                     const f32 dsq = dx * dx + dy * dy + dz * dz;
                     if (dsq > cullRadius * cullRadius) {
-                        const f32 d = std::sqrt(dsq);
-                        if (2.0f * cullRadius / d < kMinCasterAngle) angularFloorOk = false;
-                    }
-                }
-                if (angularFloorOk) {
-                    // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few dozen lines down
-                    // (`mr->material ? ... : meshDefaultMaterial`) -- passing the raw handle here
-                    // meant a mesh whose material is 0 ("every plant", per meshDefaultMaterial's
-                    // own comment) baked a flat grey into GI on exactly the frames it was
-                    // off-screen, and its authored look on the frames it was not, flipping a value
-                    // inside giDrawsKey every time it crossed the frustum edge.
-                    const i32 directMat = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
-                    const auto* directParts = content_.partsFor(mr->mesh);
-                    aver::game::PlannedDraw pdraws[aver::game::kMaxPlannedDraws];
-                    const u32 pdrawCount = aver::game::planEntityDraws(
-                        sceneMeshHandle, baseMeshForCull,
-                        directParts ? directParts->data() : nullptr,
-                        directParts ? static_cast<u32>(directParts->size()) : 0u,
-                        directMat, pdraws, aver::game::kMaxPlannedDraws);
-                    emitEntityDraws(e, pdraws, pdrawCount, wm, route, /*prepassEligibleBase=*/false);
-                    if (frustumCulled || occlusionCulled) {
-                        culledDraws += pdrawCount;
-                        if (pdrawCount > 1) ++culledMultiPart;
+                        const f32 dd = std::sqrt(dsq);
+                        if (2.0f * cullRadius / dd < kMinCasterAngle) d.emitDirectDraws = false;
                     }
                 }
 #endif
-                // Priority matches the OLD sequential-continue shape exactly (frustum/occlusion
-                // checked before owner-hide used to mean a frustum-culled-AND-owner-hidden entity
-                // was counted as culled, never as owner-hidden, even though route.hiddenFromOwner
-                // -- via ownerHiddenHere above -- was always true regardless): this is a counting
-                // convention only, not a correctness question.
-                if (frustumCulled || occlusionCulled) ++culled; else ++ownerHidden;
-                continue;
+                return;
             }
-            // THE ONE READ everything downstream keys off: content_'s surfaceMaterials (authoredFor),
-            // content_'s surfaceLooks (lookFor), the PBR binding set -- and, because
-            // VoxiRenderer::submitDraw stores whatever matSet/matConstants it is handed verbatim, the
-            // TLAS instance's materialIndex, GI voxelisation and the ray-driven alpha-mask cutout too.
-            // Resolving here is what makes one fallback reach the renderer that is actually on screen.
-            const i32 mat = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
-            // F2: ONE call replaces the resolution this loop used to run by hand (content_.authoredFor,
-            // MaterialLibrary::desc, isTranslucent, content_.lookFor, the MaterialSystem
-            // lookup, the dead-handle warning, the once-per-name missing-material warning) -- see
-            // resolveSurface's own comment. Kept in LOCALS, not just read off `rsEntity` at the
-            // final dispatch, because the GPU-cluster path below reads col/metallic/roughness/
-            // matSet/matConstants through the CONTEXT rather than the device, `blended` gates
-            // whether that path may run at all, and the skin-scene-test override just below
-            // overwrites `col` directly. `matConstantBytes` staying 0 (module compiled out, or the
-            // system not ready) is what tells emitEntityDraws() below not to touch the device's
-            // sticky draw binding at all -- see its own comment on why that must be a branch, not
-            // an unconditional call with zeros.
-            const ResolvedSurface rsEntity = resolveSurface(mat);
+
+            const Mat4& wm = *d.world;
+            const Vec3 wlo = d.worldBoxMin, whi = d.worldBoxMax;
+
+            // THE ENTITY-LEVEL RESOLVE, AND IT IS NOT THE DRAWS'. Each planned draw's own token is
+            // resolved by the library, once per draw, through the same authored > look > fallback
+            // ladder this function calls (aver/game/SceneSubmission.hpp's resolveSurfaceLook). This
+            // one survives for two readers the walk cannot serve. The GPU cluster path below binds
+            // col/metallic/roughness/matSet/matConstants through the CONTEXT rather than the
+            // device -- setDrawBinding records on the DEVICE, which only forwards it from inside
+            // drawMesh(), the very call that path skips -- and gates itself on `blended`. And
+            // resolveSurface()'s own once-per-token warning sets are still filled from here for the
+            // ENTITY's token, which a multi-part mesh whose parts all name their own materials
+            // resolves nowhere else.
+            const SandboxApp::ResolvedSurface rsEntity = self.resolveSurface(d.material);
+
+            // THE SEAM, and it is one line because the design made it one: a posed entity's
+            // vertices live in a DIFFERENT MeshHandle sharing this one's index buffer, so
+            // substituting the handle reaches every pass at once. Zero means "not posed", never
+            // "not drawn".
+            rhi::MeshHandle mesh = d.baseMesh;
+            // Set true only by the GPU per-cluster path below (AVER_MODULE_TRIFACTOR only) when it
+            // actually dispatches this instance's geometry -- declared unconditionally, like `mesh`
+            // above, so EntityDecision::colourAlreadyDrawn can be answered regardless of the module.
+            bool clusterDispatched = false;
+#if AVER_MODULE_TRIFACTOR
             f32 col[4] = {rsEntity.look.col[0], rsEntity.look.col[1], rsEntity.look.col[2],
                           rsEntity.look.col[3]};
             f32 metallic = rsEntity.look.metallic, roughness = rsEntity.look.roughness;
             const bool blended = rsEntity.look.blended;
-            const rhi::BindingSetHandle matSet = rsEntity.matSet;
-            const void* matConstants = rsEntity.matConstants;
-            const u32 matConstantBytes = rsEntity.matBytes;
             // The scene test paints its two entities so a probe can tell which it is looking
-            // at. Only ever active behind --skin-scene-test.
-            if (skinScene_) {
-                if (ent == static_cast<scene::Entity>(skinScene_->subjectEntity()))
+            // at. Only ever active behind --skin-scene-test. IT ONLY EVER REACHED THE CLUSTER
+            // DISPATCH: the per-draw emitter re-derived `col` from each draw's own material and
+            // never saw this override, and the library's resolveDrawLook does the same, so moving
+            // it next to its one reader changes nothing and stops it reading like a scene-wide
+            // recolour that quietly is not one.
+            if (self.skinScene_) {
+                if (d.entity == static_cast<scene::Entity>(self.skinScene_->subjectEntity()))
                     aver::editor::SkinSceneTest::subjectColor(col);
-                else if (ent == static_cast<scene::Entity>(skinScene_->referenceEntity()))
+                else if (d.entity == static_cast<scene::Entity>(self.skinScene_->referenceEntity()))
                     aver::editor::SkinSceneTest::referenceColor(col);
             }
 
-            // THE SEAM, and it is one line because the design made it one: a skinned entity's
-            // posed vertices live in a DIFFERENT MeshHandle sharing this one's index buffer, so
-            // substituting the handle reaches every pass at once. Zero means "not skinned", never "not drawn".
-            rhi::MeshHandle mesh = sceneMeshHandle;
-            // Set true only by the GPU per-cluster path below (AVER_MODULE_TRIFACTOR only) when it
-            // actually dispatches this instance's geometry -- declared unconditionally, like `mesh`
-            // above, so the plain drawMesh() call at the end can check it regardless of the module.
-            bool clusterDispatched = false;
-#if AVER_MODULE_TRIFACTOR
             // Virtualized-geometry LOD selection (trifactor::ClusterAdapt/ClusterSelect), per-
             // LEVEL not per-cluster. Skipped for a skinned entity (its posed handle always wins)
             // and a mesh with no LOD ladder. NO CACHE: chooseLevelCached is a handful of float ops
             // touching no GPU resource, cheap enough to run fresh EVERY frame.
             // GPU per-cluster path (--lod-mesh-shader) wins over everything below when the mesh
             // has GPU cluster buffers AND the pipeline came up on this device: it dispatches the
-            // geometry itself, so `mesh` is never substituted and drawMesh() at the end is skipped
+            // geometry itself, so `mesh` is never substituted and drawMesh() is skipped
             // entirely. Falls through to the CPU per-cluster/per-level paths whenever it doesn't
             // apply (see ensureLodMeshPipeline's degrade comment).
             // ALSO EXCLUDED: a BLENDED instance, for the same reason -- it skips drawMesh() and
@@ -1068,22 +1034,24 @@ void SandboxApp::onRender(Engine& e)  {
             // still take the CPU per-cluster or discrete-LOD path (neither skips drawMesh()), or
             // the unmodified mesh -- every road ends at the ordinary drawMesh() call, the only
             // place that draws glass correctly.
-            if (lodMeshShaderEnabled_ && lodMeshPipelineReady_ && !skinned && haveWorldBox && !blended) {
-                if (const auto git = meshClusterGpu_.find(mr->mesh); git != meshClusterGpu_.end()) {
-                    const MeshClusterGpu& gpu = git->second;
-                    if (rhi::IRenderContext* ctx = e.device()->renderContext(); ctx && gpu.clusterCount) {
+            if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ && !d.skinned &&
+                d.haveWorldBox && !blended) {
+                if (const auto git = self.meshClusterGpu_.find(d.meshId); git != self.meshClusterGpu_.end()) {
+                    const auto& gpu = git->second;
+                    if (rhi::IRenderContext* ctx = c.engine->device()->renderContext();
+                        ctx && gpu.clusterCount) {
                         trifactor::View view;
-                        view.eye = eye_;
-                        view.viewProj = viewProj_;
-                        view.viewportHeightPx = vpH_;
+                        view.eye = self.eye_;
+                        view.viewProj = self.viewProj_;
+                        view.viewportHeightPx = self.vpH_;
                         view.verticalFovRadians = radians(60.0f);
                         const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
                         // ClusterFrameCB (b4): budget CLAMPED above zero here, on the CPU, before
                         // upload -- ASMain does not re-clamp -- and the six frustum planes copied
                         // verbatim from the SAME Frustum::fromViewProj the CPU reference calls.
-                        ClusterFrameCB frameCb;
-                        frameCb.budgetPx = std::max(lodErrorThresholdPx_, trifactor::kMinClusterBudgetPx);
+                        SandboxApp::ClusterFrameCB frameCb;
+                        frameCb.budgetPx = std::max(self.lodErrorThresholdPx_, trifactor::kMinClusterBudgetPx);
                         frameCb.projScale = trifactor::projScale(view);
                         frameCb.worldScale = worldScale;
                         const trifactor::Frustum frustum = trifactor::Frustum::fromViewProj(view.viewProj);
@@ -1104,13 +1072,13 @@ void SandboxApp::onRender(Engine& e)  {
                         // mesh drawn through the GPU cluster path ignored Unlit while every
                         // other path honoured it -- the same mode giving two answers depending
                         // on which pipeline happened to draw the geometry.
-                        const u32 shadingModel = unlit_ ? 1u : 0u;   // AVER_MODEL_UNLIT / STANDARD
+                        const u32 shadingModel = self.unlit_ ? 1u : 0u;   // AVER_MODEL_UNLIT / STANDARD
                         std::memcpy(consts + 24, &shadingModel, sizeof(shadingModel));
                         consts[25] = 0.04f; consts[26] = 1.0f; consts[27] = 0.0f;
                         consts[28] = consts[29] = consts[30] = consts[31] = 0.0f;
 
                         const auto tDis0 = std::chrono::steady_clock::now();
-                        ctx->setPipeline(lodMeshPipeline_);
+                        ctx->setPipeline(self.lodMeshPipeline_);
                         ctx->setBindingSet(gpu.bindingSet, 0);
                         // THE MATERIAL, ON THE CONTEXT -- why the foliage on this path drew black.
                         // setDrawBinding above records the material on the DEVICE, which only
@@ -1119,7 +1087,8 @@ void SandboxApp::onRender(Engine& e)  {
                         // sticky -- Voxi's fallback set, whose metal-rough map is white -- so
                         // metallic came out 1, kdAlbedo came out 0, and the diffuse lobe vanished:
                         // black, even though every value measured correct for a DIFFERENT material.
-                        if (matSet) ctx->setDrawBinding(matSet, matConstants, matConstantBytes);
+                        if (rsEntity.matSet)
+                            ctx->setDrawBinding(rsEntity.matSet, rsEntity.matConstants, rsEntity.matBytes);
                         ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
                         ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
 #if AVER_MODULE_VOXI
@@ -1128,15 +1097,14 @@ void SandboxApp::onRender(Engine& e)  {
                         // can't reuse b4). Bound every draw rather than once per mesh -- a root CBV
                         // pointer set is cheap -- keeping shadowFactor()/coneTracedIndirect() valid
                         // even before Voxi finishes init() (giFrameConstants() returns an all-zero block, degrading the same way Voxi's own checks do).
-                        ctx->setConstantBuffer(kClusterGiFrameRegister, voxiRenderer_.giFrameConstants(),
-                                               voxiRenderer_.giFrameConstantBytes());
+                        ctx->setConstantBuffer(kClusterGiFrameRegister, self.voxiRenderer_.giFrameConstants(),
+                                               self.voxiRenderer_.giFrameConstantBytes());
 #endif
                         ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
-                        dispatchMs += std::chrono::duration<f64, std::milli>(
+                        c.dispatchMs += std::chrono::duration<f64, std::milli>(
                             std::chrono::steady_clock::now() - tDis0).count();
                         clusterDispatched = true;
 
-#if AVER_MODULE_VOXI
                         // DEFECT 2's FIX, in full: this instance's LIT pixels already came from
                         // dispatchMeshClusters above, so drawMesh() is skipped for it -- and
                         // IRenderFeature::submitDraw is called from EXACTLY ONE place in the
@@ -1145,38 +1113,15 @@ void SandboxApp::onRender(Engine& e)  {
                         // this instance never appeared in shadowPass, giShadowPass or
                         // voxelizePass. A tree that casts no shadow is not a cheaper tree, it's wrong.
                         //
-                        // F4 (occlusion-fix-plan.md): goes through planEntityDraws()/
-                        // emitEntityDraws() now, same as every other route, instead of a single
-                        // hand-written submit() naming only `mesh` -- that used to submit a
-                        // multi-material mesh as ONE draw carrying the ENTITY's material, silently
-                        // losing the per-part split the raster and direct-cull routes both already
-                        // had. `mesh` still equals `sceneMeshHandle` here (no LOD/skin substitution has
-                        // run yet at this point in the walk), so this is exactly F4's "goes through
-                        // planEntityDraws with chosenMesh = sceneMeshHandle" case. submit() still
-                        // resolves d.depthMesh through the SAME depthProxyFn_ every ordinary
-                        // instance goes through, so depth-only passes draw the cheap proxy with no
-                        // new resolution logic.
-                        {
-                            const auto* clusterParts = content_.partsFor(mr->mesh);
-                            aver::game::PlannedDraw cdraws[aver::game::kMaxPlannedDraws];
-                            const u32 cdrawCount = aver::game::planEntityDraws(
-                                sceneMeshHandle, mesh,
-                                clusterParts ? clusterParts->data() : nullptr,
-                                clusterParts ? static_cast<u32>(clusterParts->size()) : 0u,
-                                mat, cdraws, aver::game::kMaxPlannedDraws);
-                            // A DIRECT-ONLY delivery: colour already came from dispatchMeshClusters
-                            // just above, so this call exists purely to register the shadow/GI/TLAS
-                            // submission drawMesh() would otherwise have made. Never owner-hidden or
-                            // tinted -- this whole block only ever runs for a route.raster entity
-                            // (the culled branch above already `continue`d before reaching here).
-                            const aver::game::RouteDecision clusterRoute{false, false, false};
-                            emitEntityDraws(e, cdraws, cdrawCount, wm, clusterRoute,
-                                            /*prepassEligibleBase=*/false);
-                        }
-#endif
+                        // ANSWERED, NOT HAND-WRITTEN, NOW: EntityDecision::colourAlreadyDrawn is
+                        // exactly this case, and drawWorld sends such an entity down the direct
+                        // route it would otherwise have taken only when culled -- per planned
+                        // draw, with hiddenFromOwner false (deliver() keys that on route.raster,
+                        // which is true here), which is the same {false,false,false} route the
+                        // deleted call passed by hand.
 
-                        ++lodMeshShaderStats_.instancesTested;
-                        lodMeshShaderStats_.clustersDispatched += gpu.clusterCount;
+                        ++self.lodMeshShaderStats_.instancesTested;
+                        self.lodMeshShaderStats_.clustersDispatched += gpu.clusterCount;
 
                         // Informational counters (LodMeshShaderStats): the SAME CPU reference
                         // over the SAME clusters and budget the GPU dispatch just used, sampled
@@ -1188,27 +1133,28 @@ void SandboxApp::onRender(Engine& e)  {
                         // and since 64 divides --frames 128 evenly, that frame is GUARANTEED to be
                         // this task's own benchmark's last, not a coincidence. A once-per-second
                         // stall for a log line no render pass reads is unacceptable.
-                        if (lodClusterStatsEnabled_ && lodClusterFrame_ % 64 == 0) {
-                            if (const auto cit2 = meshClusterData_.find(mr->mesh); cit2 != meshClusterData_.end()) {
-                                const MeshClusterData& mcd = cit2->second;
+                        if (self.lodClusterStatsEnabled_ && self.lodClusterFrame_ % 64 == 0) {
+                            if (const auto cit2 = self.meshClusterData_.find(d.meshId);
+                                cit2 != self.meshClusterData_.end()) {
+                                const auto& mcd = cit2->second;
                                 bool sampledShortcut = false;
-                                if (const auto lit2 = meshLods_.find(mr->mesh); lit2 != meshLods_.end()) {
-                                    const MeshLodLadder& ladder2 = lit2->second;
+                                if (const auto lit2 = self.meshLods_.find(d.meshId); lit2 != self.meshLods_.end()) {
+                                    const auto& ladder2 = lit2->second;
                                     const Vec3 sphereCenter2 = (wlo + whi) * 0.5f;
                                     const f32 sphereRadius2 = dist(wlo, whi) * 0.5f;
                                     const u32 candidateLevel2 = trifactor::chooseLevelCached(
                                         ladder2.errorCm, sphereCenter2, sphereRadius2,
-                                        lodErrorThresholdPx_, view);
+                                        self.lodErrorThresholdPx_, view);
                                     if (candidateLevel2 < mcd.levelBounds.size() &&
                                         trifactor::provablySingleLevelCut(
                                             mcd.levelBounds, candidateLevel2, sphereCenter2, sphereRadius2,
-                                            mcd.maxSphereRadius * worldScale, lodErrorThresholdPx_, view)) {
-                                        lodMeshShaderStats_.survivors += mcd.levelBounds[candidateLevel2].count;
-                                        lodMeshShaderStats_.trianglesDrawn +=
+                                            mcd.maxSphereRadius * worldScale, self.lodErrorThresholdPx_, view)) {
+                                        self.lodMeshShaderStats_.survivors += mcd.levelBounds[candidateLevel2].count;
+                                        self.lodMeshShaderStats_.trianglesDrawn +=
                                             mcd.levelBounds[candidateLevel2].triangleCount;
-                                        lodMeshShaderStats_.maxDistinctLevelsSeen =
-                                            std::max(lodMeshShaderStats_.maxDistinctLevelsSeen, 1u);
-                                        ++lodMeshShaderStats_.instancesShortcut;
+                                        self.lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                            std::max(self.lodMeshShaderStats_.maxDistinctLevelsSeen, 1u);
+                                        ++self.lodMeshShaderStats_.instancesShortcut;
                                         sampledShortcut = true;
                                     }
                                 }
@@ -1221,12 +1167,12 @@ void SandboxApp::onRender(Engine& e)  {
                                         cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
                                     }
                                     const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
-                                        worldClusters, lodErrorThresholdPx_, view, true);
-                                    lodMeshShaderStats_.survivors += cr.stats.drawn;
-                                    lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
-                                    if (cr.stats.distinctLevels > 1) ++lodMeshShaderStats_.instancesMixedLevels;
-                                    lodMeshShaderStats_.maxDistinctLevelsSeen =
-                                        std::max(lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                                        worldClusters, self.lodErrorThresholdPx_, view, true);
+                                    self.lodMeshShaderStats_.survivors += cr.stats.drawn;
+                                    self.lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                                    if (cr.stats.distinctLevels > 1) ++self.lodMeshShaderStats_.instancesMixedLevels;
+                                    self.lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                        std::max(self.lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
                                 }
                             }
                         }
@@ -1236,13 +1182,13 @@ void SandboxApp::onRender(Engine& e)  {
             // PER-CLUSTER path wins over per-LEVEL when both are enabled: this is what actually
             // mixes LOD levels within one instance's draw; the per-level `else if` below is
             // entirely unchanged, still reachable and reproducing pre-existing behaviour when --lod-per-cluster is off.
-            if (!clusterDispatched && lodPerClusterEnabled_ && !skinned && haveWorldBox) {
-                if (const auto cit = meshClusterData_.find(mr->mesh); cit != meshClusterData_.end()) {
-                    const MeshClusterData& cd = cit->second;
+            if (!clusterDispatched && self.lodPerClusterEnabled_ && !d.skinned && d.haveWorldBox) {
+                if (const auto cit = self.meshClusterData_.find(d.meshId); cit != self.meshClusterData_.end()) {
+                    const auto& cd = cit->second;
                     trifactor::View view;
-                    view.eye = eye_;
-                    view.viewProj = viewProj_;
-                    view.viewportHeightPx = vpH_;
+                    view.eye = self.eye_;
+                    view.viewProj = self.viewProj_;
+                    view.viewportHeightPx = self.vpH_;
                     view.verticalFovRadians = radians(60.0f);
                     const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
@@ -1253,19 +1199,19 @@ void SandboxApp::onRender(Engine& e)  {
                     // copy/transform/scan. Falls through to the real scan when the proof doesn't
                     // hold.
                     bool tookShortcut = false;
-                    if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
-                        const MeshLodLadder& ladder = lit->second;
+                    if (const auto lit = self.meshLods_.find(d.meshId); lit != self.meshLods_.end()) {
+                        const auto& ladder = lit->second;
                         const Vec3 sphereCenter = (wlo + whi) * 0.5f;
                         const f32 sphereRadius = dist(wlo, whi) * 0.5f;
                         const u32 candidateLevel = trifactor::chooseLevelCached(
-                            ladder.errorCm, sphereCenter, sphereRadius, lodErrorThresholdPx_, view);
+                            ladder.errorCm, sphereCenter, sphereRadius, self.lodErrorThresholdPx_, view);
                         if (candidateLevel < ladder.handles.size() &&
                             trifactor::provablySingleLevelCut(
                                 cd.levelBounds, candidateLevel, sphereCenter, sphereRadius,
-                                cd.maxSphereRadius * worldScale, lodErrorThresholdPx_, view)) {
+                                cd.maxSphereRadius * worldScale, self.lodErrorThresholdPx_, view)) {
                             mesh = ladder.handles[candidateLevel];
                             tookShortcut = true;
-                            ++lodClusterStats_.instancesShortcut;
+                            ++self.lodClusterStats_.instancesShortcut;
                         }
                     }
 
@@ -1282,20 +1228,20 @@ void SandboxApp::onRender(Engine& e)  {
                     }
 
                     const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
-                        worldClusters, lodErrorThresholdPx_, view, true /* useFrustum */);
+                        worldClusters, self.lodErrorThresholdPx_, view, true /* useFrustum */);
 
-                    ++lodClusterStats_.instancesTested;
-                    lodClusterStats_.clustersTested += cr.stats.tested;
-                    lodClusterStats_.frustumCulled += cr.stats.frustumCulled;
-                    lodClusterStats_.coneCulled += cr.stats.coneCulled;
-                    lodClusterStats_.lodRejected += cr.stats.lodRejected;
-                    lodClusterStats_.clustersDrawn += cr.stats.drawn;
-                    lodClusterStats_.trianglesDrawn += cr.stats.trianglesAfter;
-                    if (const auto tIt = meshTris_.find(mr->mesh); tIt != meshTris_.end())
-                        lodClusterStats_.trianglesBeforeLod0 += tIt->second;
-                    if (cr.stats.distinctLevels > 1) ++lodClusterStats_.instancesMixedLevels;
-                    lodClusterStats_.maxDistinctLevelsSeen =
-                        std::max(lodClusterStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                    ++self.lodClusterStats_.instancesTested;
+                    self.lodClusterStats_.clustersTested += cr.stats.tested;
+                    self.lodClusterStats_.frustumCulled += cr.stats.frustumCulled;
+                    self.lodClusterStats_.coneCulled += cr.stats.coneCulled;
+                    self.lodClusterStats_.lodRejected += cr.stats.lodRejected;
+                    self.lodClusterStats_.clustersDrawn += cr.stats.drawn;
+                    self.lodClusterStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                    if (const auto tIt = self.meshTris_.find(d.meshId); tIt != self.meshTris_.end())
+                        self.lodClusterStats_.trianglesBeforeLod0 += tIt->second;
+                    if (cr.stats.distinctLevels > 1) ++self.lodClusterStats_.instancesMixedLevels;
+                    self.lodClusterStats_.maxDistinctLevelsSeen =
+                        std::max(self.lodClusterStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
 
                     // Sort for a cheap, order-independent "did the cut change since last frame"
                     // comparison. The cut is expected to be STABLE frame to frame (the camera moves
@@ -1303,8 +1249,8 @@ void SandboxApp::onRender(Engine& e)  {
                     std::vector<u32> selectedIds = cr.drawnIds;
                     std::sort(selectedIds.begin(), selectedIds.end());
 
-                    ClusterCutCache& cache = clusterCutCache_[ent];
-                    cache.lastUsedFrame = lodClusterFrame_;
+                    auto& cache = self.clusterCutCache_[d.entity];
+                    cache.lastUsedFrame = self.lodClusterFrame_;
                     if (selectedIds != cache.selectedIds || cache.handle == 0) {
                         // REBUILD: concatenate every selected cluster's precomputed expanded
                         // GLOBAL index list into ONE fresh index buffer, against the SAME shared
@@ -1322,16 +1268,19 @@ void SandboxApp::onRender(Engine& e)  {
 
                         const auto t0 = std::chrono::steady_clock::now();
                         const rhi::MeshHandle newHandle = assembled.empty() ? 0 :
-                            e.device()->createMesh(cd.verts.data(), (u32)cd.verts.size(),
+                            c.engine->device()->createMesh(cd.verts.data(), (u32)cd.verts.size(),
                                                     assembled.data(), (u32)assembled.size());
                         const auto t1 = std::chrono::steady_clock::now();
-                        lodClusterStats_.rebuildMs +=
+                        self.lodClusterStats_.rebuildMs +=
                             std::chrono::duration<f64, std::milli>(t1 - t0).count();
-                        lodClusterStats_.rebuildIndices += assembled.size();
-                        ++lodClusterStats_.rebuilds;
+                        self.lodClusterStats_.rebuildIndices += assembled.size();
+                        ++self.lodClusterStats_.rebuilds;
 
                         if (newHandle) {
-                            if (cache.handle) { depthProxy_.erase(cache.handle); e.device()->destroyMesh(cache.handle); }
+                            if (cache.handle) {
+                                self.depthProxy_.erase(cache.handle);
+                                c.engine->device()->destroyMesh(cache.handle);
+                            }
                             cache.handle = newHandle;
                             cache.selectedIds = std::move(selectedIds);
                             ++cache.rebuildCount;
@@ -1366,38 +1315,38 @@ void SandboxApp::onRender(Engine& e)  {
                             // handle. `mesh` -- still the pre-cut, SOURCE handle at this point,
                             // exactly what the paragraph above asks for -- is the value that belongs
                             // here.
-                            depthProxy_[newHandle] = mesh;
+                            self.depthProxy_[newHandle] = mesh;
                         }
                         // newHandle == 0 (empty cut this frame, or the device refused): keep
                         // whatever handle the cache already had (fail-safe), or fall through to the
                         // LOD-0 whole-mesh handle `mesh` already holds for the very first frame.
                     } else {
-                        ++lodClusterStats_.cacheHits;
+                        ++self.lodClusterStats_.cacheHits;
                     }
                     if (cache.handle) mesh = cache.handle;
                     }   // !tookShortcut
                 }
-            } else if (!clusterDispatched && lodSelectEnabled_ && !skinned && haveWorldBox) {
-                if (const auto lit = meshLods_.find(mr->mesh); lit != meshLods_.end()) {
-                    const MeshLodLadder& ladder = lit->second;
+            } else if (!clusterDispatched && self.lodSelectEnabled_ && !d.skinned && d.haveWorldBox) {
+                if (const auto lit = self.meshLods_.find(d.meshId); lit != self.meshLods_.end()) {
+                    const auto& ladder = lit->second;
                     const Vec3 sphereCenter = (wlo + whi) * 0.5f;
                     const f32 sphereRadius = dist(wlo, whi) * 0.5f;   // half the box diagonal:
                                                                       // encloses the box exactly, same conservative shape ClusterSelect's own
                                                                       // sphere tests assume.
                     trifactor::View view;
-                    view.eye = eye_;
-                    view.viewProj = viewProj_;
-                    view.viewportHeightPx = vpH_;
+                    view.eye = self.eye_;
+                    view.viewProj = self.viewProj_;
+                    view.viewportHeightPx = self.vpH_;
                     view.verticalFovRadians = radians(60.0f);   // matches the literal at this
                                                                  // frame's own proj build, above
                     const u32 level = trifactor::chooseLevelCached(
-                        ladder.errorCm, sphereCenter, sphereRadius, lodErrorThresholdPx_, view);
+                        ladder.errorCm, sphereCenter, sphereRadius, self.lodErrorThresholdPx_, view);
                     mesh = ladder.handles[level];
 
-                    ++lodStats_.instancesTested;
-                    if (level > 0) ++lodStats_.levelCollapsed;
-                    lodStats_.trianglesBeforeLod0 += ladder.triCounts.front();
-                    lodStats_.trianglesAfterLevel += ladder.triCounts[level];
+                    ++self.lodStats_.instancesTested;
+                    if (level > 0) ++self.lodStats_.levelCollapsed;
+                    self.lodStats_.trianglesBeforeLod0 += ladder.triCounts.front();
+                    self.lodStats_.trianglesAfterLevel += ladder.triCounts[level];
 
                     // Informational cluster-cull telemetry for the CHOSEN level only -- real,
                     // tested, but not subtracted from trianglesAfterLevel: this slice draws the
@@ -1406,7 +1355,7 @@ void SandboxApp::onRender(Engine& e)  {
                     // WORLD space, so a working copy is transformed by this instance's world
                     // matrix first. Radius/axis use a UNIFORM-scale approximation -- fine for an
                     // INFORMATIONAL counter that never reaches the draw call.
-                    if (lodClusterStatsEnabled_ &&
+                    if (self.lodClusterStatsEnabled_ &&
                         level < ladder.clusters.size() && !ladder.clusters[level].empty()) {
                         const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
                         std::vector<trifactor::ClusterView> worldClusters = ladder.clusters[level];
@@ -1419,79 +1368,238 @@ void SandboxApp::onRender(Engine& e)  {
                         const trifactor::SelectionResult sr = trifactor::selectVisibleClustersWithStats(
                             worldClusters, 1e30f /* no LOD collapse: already chosen */, view,
                             true /* useFrustum */);
-                        lodStats_.clustersTested += sr.stats.tested;
-                        lodStats_.frustumCulled += sr.stats.frustumCulled;
-                        lodStats_.coneCulled += sr.stats.coneCulled;
+                        self.lodStats_.clustersTested += sr.stats.tested;
+                        self.lodStats_.frustumCulled += sr.stats.frustumCulled;
+                        self.lodStats_.coneCulled += sr.stats.coneCulled;
                     }
                 }
             }
+#else
+            // Only the GPU cluster path reads the entity-level look, the world matrix and the world
+            // box, and that path is Trifactor's. The resolve itself still runs above, because its
+            // once-per-token warning sets are not optional -- so say these go unread under /W4
+            // (CMakeLists.txt:202) rather than let it report them as locals nobody wanted.
+            (void)rsEntity;
+            (void)wm;
+            (void)wlo; (void)whi;
 #endif
-            // WHICH FEATURE OWNS THIS ENTITY'S VERTICES -- posedHandle() (F4), the SAME helper the
+            // WHICH FEATURE OWNS THIS ENTITY'S VERTICES -- posedHandle(), the SAME helper the
             // direct route above already called, so the seam agrees with itself instead of two
             // near-identical hand-written copies: skinning checked first (nothing forbids
             // CSoftBody on an already-skinned mesh, so asking skinning first makes the collision
             // deterministic), soft body only filling in where it declined.
-            if (const rhi::MeshHandle substituted = posedHandle(ent)) mesh = substituted;
-            // F6/F4: the ENTITY-level half of depth-prepass eligibility. BLENDED IS NO LONGER
-            // CHECKED HERE, unlike the shape this replaces: it is now a PER-DRAW question,
-            // decided inside emitEntityDraws() from each draw's own resolveSurface() result,
-            // because F6 made the depth prepass itself split into parts and skip translucent ones
-            // individually -- a single entity-level check here would be wrong for a mesh with
-            // both an opaque trunk and a translucent leaf part. THE PREPASS IS game::drawWorld NOW
-            // (the DrawWorldPass::DepthPrepass call at the top of this function), which drops a
-            // blended planned draw itself, so the per-draw half of the pairing is the library's and
-            // this line is only the entity half. The three tests below still restate that call's
-            // prepassDecide exclusions -- skinned, GPU cluster dispatch, CPU per-cluster -- and
-            // still have to: an entity the prepass skipped wrote no depth, so asking the
-            // LessEqual/no-write pipeline for it here would test against whatever depth was
-            // already there.
-            bool prepassEligibleBase = false;
+            //
+            // NOT FOR A CLUSTER-DISPATCHED ENTITY, which is not a new exception but the old one
+            // written down. The hand-written submission this replaces was planned from
+            // sceneMeshHandle and said so in as many words ("`mesh` still equals `sceneMeshHandle`
+            // here -- no LOD/skin substitution has run yet at this point in the walk"), because it
+            // ran ABOVE this line. chosenMesh is what planEntityDraws plans from, so handing it a
+            // substituted handle here would collapse a multi-part cluster mesh's per-part split to
+            // one draw the moment a soft body claimed it -- planEntityDraws drops the split for
+            // any handle the split was not cut from.
+            if (!clusterDispatched)
+                if (const rhi::MeshHandle substituted = self.posedHandle(d.entity)) mesh = substituted;
+            d.chosenMesh = mesh;
+            // The GPU per-cluster path already dispatched this instance's geometry, so the raster
+            // drawMesh() must not run for it -- but drawMesh() is also the only path to
+            // IRenderFeature::submitDraw, so the entity takes the direct route instead and still
+            // counts as drawn. See EntityDecision::colourAlreadyDrawn.
+            d.colourAlreadyDrawn = clusterDispatched;
+
 #if AVER_MODULE_VOXI
+            // F6/F4: the ENTITY-level half of depth-prepass eligibility. BLENDED IS NOT CHECKED
+            // HERE: it is a PER-DRAW question, answered inside drawWorld from each planned draw's
+            // own resolved look, because a mesh with an opaque trunk and a translucent leaf part
+            // gets it right per part where one entity-level flag could not -- and because
+            // setNextDrawPrepassed is AUTO-CONSUMED by the very next drawMesh() rather than sticky
+            // (RHI.hpp), so one call before a multi-part loop would cover part 0 alone. The three
+            // tests below restate the prepass call's own prepassDecide exclusions -- skinned, GPU
+            // cluster dispatch, CPU per-cluster -- and still have to: an entity that walk skipped
+            // wrote no depth, so asking the LessEqual/no-write pipeline for it here would test
+            // against whatever depth was already there.
             {
-                prepassEligibleBase = e.device()->depthPrepassEnabled() && !clusterDispatched && !skinned;
+                bool eligible =
+                    c.engine->device()->depthPrepassEnabled() && !clusterDispatched && !d.skinned;
 #if AVER_MODULE_TRIFACTOR
-                if (prepassEligibleBase && lodMeshShaderEnabled_ && lodMeshPipelineReady_ &&
-                    meshClusterGpu_.count(mr->mesh)) prepassEligibleBase = false;
-                if (prepassEligibleBase && lodPerClusterEnabled_ && meshClusterData_.count(mr->mesh))
-                    prepassEligibleBase = false;
+                if (eligible && self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ &&
+                    self.meshClusterGpu_.count(d.meshId)) eligible = false;
+                if (eligible && self.lodPerClusterEnabled_ && self.meshClusterData_.count(d.meshId))
+                    eligible = false;
 #endif
+                d.prepassEligible = eligible;
             }
 #endif
-            // The GPU per-cluster path already dispatched this instance's geometry -- drawing
-            // again here would double-draw. setDrawBinding/setDrawBlended/setNextDrawPrepassed are
-            // now all set PER DRAW, inside emitEntityDraws() below (F3) -- not here beforehand --
-            // since a multi-part mesh's parts can each carry a different material/blend/prepass
-            // answer, the same reason drawMeshParts used to override this loop's own
-            // setDrawBlended(blended) call per part.
-            if (!clusterDispatched) {
-                // F4: THE ONE PLACE 6360-6365/8297-8299's old duplication used to live -- see
-                // planEntityDraws' own comment (aver/game/SceneSubmission.hpp) for the exact rule
-                // (a mesh that names several materials draws as several meshes, one per slot; a
-                // substituted handle -- LOD or posed -- keeps today's single draw and the entity's
-                // own material, since the split was cut from the UNSUBSTITUTED geometry).
-                const auto* pit = content_.partsFor(mr->mesh);
-                aver::game::PlannedDraw pdraws[aver::game::kMaxPlannedDraws];
-                const u32 pdrawCount = aver::game::planEntityDraws(
-                    sceneMeshHandle, mesh,
-                    pit ? pit->data() : nullptr,
-                    pit ? static_cast<u32>(pit->size()) : 0u,
-                    mat, pdraws, aver::game::kMaxPlannedDraws);
-                emitEntityDraws(e, pdraws, pdrawCount, wm, route, prepassEligibleBase);
+        };
+
+        // ONCE PER ENTITY THE WALK ACTUALLY DELIVERED, on either route. `raster` is what separates
+        // the two claims, and the editor needs the second one: an entity delivered on the DIRECT
+        // route was culled or owner-hidden, so it reached Voxi's shadow/GI/TLAS submission and
+        // nothing else. Latching the selection outline off "delivered" alone would start outlining
+        // off-screen objects.
+        auto colourDelivered = [](scene::Entity ent, u64 meshId, rhi::MeshHandle chosenMesh,
+                                  const Mat4& world, bool raster, void* user) {
+            ColourWalk& c = *static_cast<ColourWalk*>(user);
+            SandboxApp& self = *c.self;
+            if (!raster) {
+                // 3B's per-frame evidence that a culled multi-part entity still yields N draws
+                // instead of collapsing to slot 0's single one. Banked HERE, not in onDirectDraw,
+                // because "was this entity culled or merely owner-hidden" is a per-ENTITY question
+                // and the draws carry no answer to it. Never reached for an entity the
+                // angular-size floor held back (drawWorld does not fire this for one), which is the
+                // same accounting the deleted branch's `if (angularFloorOk)` wrapper produced.
+                if (c.entityCulled) {
+                    c.culledDraws += c.entityDirectDraws;
+                    if (c.entityDirectDraws > 1) ++c.culledMultiPart;
+                }
+                return;
             }
             // EVERY SELECTED ENTITY, NOT ONLY THE ANCHOR. This kept one Mat4 and one mesh id,
             // so a multi-selection was highlighted in the Outliner tree and invisible in the 3D
             // view -- which is where the objects are. Selecting five props and dragging them
             // showed an outline on one of the five.
-            if (sel_ == kSelScene && (ent == selEntity_ || multiIsSelected(ent))) {
-                selectionOutline_ = wm; selectionMesh_ = mesh; selectionMeshId_ = mr->mesh;
-                hasSelection_ = true;
+            if (self.sel_ == SandboxApp::kSelScene &&
+                (ent == self.selEntity_ || self.multiIsSelected(ent))) {
+                self.selectionOutline_ = world;
+                self.selectionMesh_ = chosenMesh;
+                self.selectionMeshId_ = meshId;
+                self.hasSelection_ = true;
                 // The anchor stays in the scalars above (other code reads them); the rest
                 // accumulate here. Cleared with hasSelection_ at the draw site, so a stale
                 // entry cannot outlive the frame that produced it.
-                selectionOutlines_.push_back({wm, mr->mesh});
+                self.selectionOutlines_.push_back({world, meshId});
             }
-            ++drawn;
+        };
+
+#if AVER_MODULE_VOXI
+        // ONCE PER DRAW ON THE DIRECT ROUTE, immediately after the Voxi submit it made. THE PATH
+        // TRACER NEEDS THE SAME OFF-SCREEN GEOMETRY AND THIS IS ITS ONLY WAY IN: PtSceneView::
+        // submitDraw is otherwise reached only through drawMesh(), which this route exists to skip,
+        // so before it was fed from here the path-traced view traced a scene holding only what the
+        // camera could see (and no cluster-dispatched instance at all): no roof overhead, no wall
+        // behind the camera. Measured on PTTest NewSponza: Voxi's TLAS held 400 instances while the
+        // path tracer "re-armed on 154", with 73 entities frustum-culled.
+        //
+        // A SEPARATE SINK FROM options.voxiRenderer, deliberately, and this is gotcha 3: the two
+        // are independent in drawWorld, so the path tracer still gets fed on a frame where no Voxi
+        // feature is attached. Gating one feature's delivery on another's presence is how the path
+        // tracer went blind in the first place.
+        //
+        // Owner-hidden draws stay out: PtSceneView has no owner-hidden mask lane, so it would paint
+        // the owner's own body over the camera, and the raster route never hands it those either.
+        auto colourDirect = [](rhi::MeshHandle mesh, const f32 world[16], const f32 col[4],
+                               f32 metallic, f32 roughness, rhi::BindingSetHandle matSet,
+                               const void* matConstants, u32 matBytes, bool translucent,
+                               bool hiddenFromOwner, void* user) {
+            ColourWalk& c = *static_cast<ColourWalk*>(user);
+            ++c.entityDirectDraws;
+            if (c.self->ptSceneView_ && !hiddenFromOwner)
+                c.self->ptSceneView_->submitDraw(mesh, world, col, metallic, roughness, matSet,
+                                                 matConstants, matBytes, translucent);
+        };
+#endif
+
+        // THE EDITOR'S SENTENCE, THROUGH THE EDITOR'S OWN THROTTLES -- the same arrangement the
+        // depth-prepass call above already uses, and for the same reason. drawWorld owns the "once
+        // per material token, ever" bookkeeping (GameRender.hpp's SurfaceWarning) because two hosts
+        // keeping two sets is how the counts drift; the wording is the host's, and the library's
+        // default says "[Game]" and names no editor directory. Re-running resolveSurface() is what
+        // keeps the line byte-identical to the one this walk printed before the move: it reaches
+        // whichever of warnDeadMaterialHandle and the missing-.ocmat warning its own ladder decides
+        // on, filling the SAME function-local static sets, so `kind` goes unread and the duplicated
+        // resolve costs one lookup per token per process.
+        auto colourWarn = [](i32 mat, aver::game::SurfaceWarning kind, void* user) {
+            (void)kind;
+            (void)static_cast<ColourWalk*>(user)->self->resolveSurface(mat);
+        };
+
+        // THE TWO DIAGNOSTICS THIS WALK WOULD OTHERWISE LOSE. Each of these checks cost a day of
+        // bisection before it said anything at all, so the library reports the drop and the editor
+        // writes the sentence -- see DrawSkipReason. Not throttled on the library's side because
+        // the two reasons want different keys, which is exactly the split these two sets already
+        // keep.
+        auto colourSkipped = [](scene::Entity ent, u64 meshId, aver::game::DrawSkipReason reason,
+                                void* user) {
+            SandboxApp& self = *static_cast<ColourWalk*>(user)->self;
+            if (reason == aver::game::DrawSkipReason::NotVisible) {
+                // A MESH IS NAMED AND THE VISIBLE BIT IS CLEAR, which is NOT ordinary -- it is the
+                // zero-fill trap. World::addComponent hands back zeroed storage and
+                // kMeshRendererVisible is positive-sense, so a renderer attached directly is
+                // attached, correct, and invisible; GraphComponentTree.cs:100-103 documents the
+                // same trap on the C# side and dodges it by going through Entity.SetVisible.
+                // ONCE PER ENTITY, because this is a per-entity per-frame walk and an unthrottled
+                // warning floods the log.
+                if (self.undrawnInvisible_.insert(static_cast<u64>(ent)).second)
+                    AVER_WARN("[Sandbox] entity {} names mesh id {} but its kMeshRendererVisible "
+                              "bit is clear, so the scene walk skips it and it draws nothing. A "
+                              "component attached directly arrives zero-filled -- attach through "
+                              "Entity.SetVisible (EnsureMeshRenderer), which seeds the bit.",
+                              static_cast<u64>(ent), meshId);
+                return;
+            }
+            // AN ID THAT RESOLVES TO NOTHING. Said ONCE PER ID rather than per entity: many
+            // entities can name the same missing mesh, and it is the id that identifies the
+            // fault, not the entity that happened to reach it first.
+            //
+            // THE ID IS PRINTED RAW AND THAT IS NOT LAZINESS. meshPathById_ is populated by
+            // loadProjectMeshes only for meshes that LOADED, so it is empty for exactly the
+            // ids that land here -- there is nothing to translate with. fnv1a64 of the
+            // authored path is what to grep the .ocgraph/.ocmap for.
+            if (self.undrawnMissingMesh_.insert(meshId).second)
+                AVER_WARN("[Sandbox] mesh id {} (named by entity {}) is not in content_'s meshes, "
+                          "so every entity naming it draws nothing. Built-in primitives are "
+                          "seeded at startup and .ocmesh files are registered by "
+                          "loadProjectMeshes from the project's content root -- an id that is "
+                          "missing was never loaded under the string that was authored.",
+                          meshId, static_cast<u64>(ent));
+        };
+
+        aver::game::DrawWorldOptions copt;
+        // The possessed first-person pawn, so the ancestor walk this used to run by hand runs
+        // inside drawWorld instead. A COMP tree can nest, so the pawn's body may be several hops
+        // below it; World::setParent already refuses a cycle, so that walk terminates.
+        copt.ownerHideRoot = firstPersonPawn_;
+        // The editor's "[Sandbox] scene-render: N spawned CMeshRenderer entities drawn, ..." line
+        // below is worded differently from the library's on purpose -- it names a concept ("spawned
+        // CMeshRenderer entities") a packaged game has no vocabulary for and its "culled"
+        // deliberately covers occlusion as well as the frustum. SceneDrawStats' own comment states
+        // why the two sentences cannot be unified; this is the switch it describes.
+        copt.suppressLog = true;
+        copt.decide = colourDecide;
+        copt.onEntityDelivered = colourDelivered;
+        copt.onSurfaceWarn = colourWarn;
+        copt.onSkipped = colourSkipped;
+        copt.user = &walk;
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+        copt.onVisit = colourVisit;
+        // EMPTY MEANS "NO REORDERING", exactly as the deleted loop's `occlusionOrder_.empty() ? oi
+        // : occlusionOrder_[oi]` meant it -- occlusionOrder_ is resized to n when culling runs and
+        // cleared when it idles, so a null order here is world order, which is what that ternary
+        // fell back to.
+        if (!occlusionOrder_.empty()) {
+            copt.visitOrder = occlusionOrder_.data();
+            copt.visitOrderCount = static_cast<u32>(occlusionOrder_.size());
         }
+#endif
+#if AVER_MODULE_VOXI
+        copt.voxiRenderer = &voxiRenderer_;
+        copt.onDirectDraw = colourDirect;
+#endif
+        pbr::MaterialSystem* colourMaterials = nullptr;
+        // BOTH MODULES, not just PBR: the system lives on voxiRenderer_, which is itself declared
+        // only under AVER_MODULE_VOXI (SandboxApp.hpp:3760). It is the same MaterialSystem
+        // resolveSurface() binds out of, so each part's descriptor table and constants reach
+        // drawMesh() exactly as they did when this file emitted the draw itself.
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        colourMaterials = &voxiRenderer_.materials();
+#endif
+        // THIS FRAME'S OWN, not a member: SceneDrawStats' `last*` trio is maintained even under
+        // suppressLog, but it is updated before the caller gets control back, so it cannot answer
+        // "did this change since last frame" for anyone but drawWorld itself -- which is exactly
+        // why SandboxApp keeps lastSceneDrawn_/lastSceneCulled_/lastSceneOwnerHidden_ of its own
+        // and compares against those below (SceneDrawStats' own comment says so outright).
+        aver::game::SceneDrawStats colourStats;
+        aver::game::drawWorld(*e.device(), viewProj_, content_, colourStats, colourMaterials,
+                              skinnedScene_.get(), copt);
         // Closes "raster scene draws" HERE, at the end of the draw walk, rather than letting it
         // run to the end of the enclosing block -- the occlusion reporting and pass-2 fallback
         // below are not scene shading and do not belong in the number.
@@ -1521,7 +1629,7 @@ void SandboxApp::onRender(Engine& e)  {
             // entity still yields N draws here, never one collapsed to slot 0's material.
             AVER_INFO("[Occlusion] this frame: {} entities culled (frustum or occlusion) delivered "
                       "as {} draws ({} multi-part)",
-                      culled, culledDraws, culledMultiPart);
+                      colourStats.culled, walk.culledDraws, walk.culledMultiPart);
             // Folded into the same cadence rather than its own: a staleness-detector trip is
             // rare enough that a separate periodic line would mostly print zero, and this way it
             // rides the report a reader is already watching.
@@ -1558,9 +1666,11 @@ void SandboxApp::onRender(Engine& e)  {
             if ((sceneWalkReports_ & (sceneWalkReports_ + 1)) == 0) {
                 AVER_INFO("[Sandbox] scene walk {:.1f}ms -- {:.1f}ms in cluster dispatch across {} "
                           "drawn ({:.1f}us each), {:.1f}ms in the rest over {} entities",
-                          walkMs, dispatchMs, drawn,
-                          drawn ? dispatchMs * 1000.0 / static_cast<f64>(drawn) : 0.0,
-                          walkMs - dispatchMs, n);
+                          walkMs, walk.dispatchMs, colourStats.drawn,
+                          colourStats.drawn
+                              ? walk.dispatchMs * 1000.0 / static_cast<f64>(colourStats.drawn)
+                              : 0.0,
+                          walkMs - walk.dispatchMs, n);
 #if AVER_MODULE_VOXI
                 // M2(c): the CPU cost of Voxi's acceleration-structure per-draw loop on its last
                 // rebuild (VoxiRenderer::lastAccelBuildCpuMs, C-2), printed at the SAME widening
@@ -1575,17 +1685,25 @@ void SandboxApp::onRender(Engine& e)  {
             }
             ++sceneWalkReports_;
         }
-        if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_ || ownerHidden != lastSceneOwnerHidden_) {
+        // READ BACK OUT OF SceneDrawStats, not counted here: DrawWorldOptions::suppressLog above
+        // stops the library writing its own "[Game] scene-render:" line precisely so the editor can
+        // write this one from the same three numbers. The comparison is against SandboxApp's own
+        // previous-frame copies, not colourStats' `last*` trio, because drawWorld updates that trio
+        // before returning and so cannot answer "did this change since last frame" for anyone but
+        // itself (SceneDrawStats' own comment).
+        if (colourStats.drawn != lastSceneDrawn_ || colourStats.culled != lastSceneCulled_ ||
+            colourStats.ownerHidden != lastSceneOwnerHidden_) {
             // F4 (occlusion-fix-plan.md): `culled` now counts an occlusion-culled entity too, not
             // only a frustum-culled one -- previously the occlusion branch incremented no counter
             // at all, so occlusion's own contribution was invisible here. Relabelled from
             // "frustum-culled" to plain "culled" to match; see chooseRoute()'s own priority
             // ordering for which counter an entity that is BOTH culled and owner-hidden lands in.
             AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} culled, {} owner-hidden",
-                      drawn, drawn == 1 ? "y" : "ies", culled, ownerHidden);
-            lastSceneDrawn_ = drawn;
-            lastSceneCulled_ = culled;
-            lastSceneOwnerHidden_ = ownerHidden;
+                      colourStats.drawn, colourStats.drawn == 1 ? "y" : "ies", colourStats.culled,
+                      colourStats.ownerHidden);
+            lastSceneDrawn_ = colourStats.drawn;
+            lastSceneCulled_ = colourStats.culled;
+            lastSceneOwnerHidden_ = colourStats.ownerHidden;
         }
 #if AVER_MODULE_TRIFACTOR
         // Greppable per the brief's requirement: `[LOD-SELECT]`, only when something in the tuple
@@ -2076,86 +2194,6 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
     }
 #endif
     return rs;
-}
-
-// F3: THE ONE EMITTER. For every planned draw, resolveSurface() once and hand the result to
-// whichever route actually delivers it -- raster's drawMesh() or Voxi's direct submit() -- so
-// both produce the SAME Draw record for the same material (translucent = look.blended on both;
-// hiddenFromOwner = false on raster, route.hiddenFromOwner on direct -- see
-// aver/game/SceneSubmission.hpp's deliver(), which this hand-writes rather than calls, to keep
-// col/metallic/roughness and the translucent/hiddenFromOwner decision reading from the exact same
-// ResolvedSurface in one place).
-//
-// prepassEligibleBase is the ENTITY-level half of the depth-prepass eligibility test (formerly
-// 6323-6341's shape, minus the blended check, which F6 made a PER-PART question): with the depth
-// prepass -- game::drawWorld in DrawWorldPass::DepthPrepass, called at the top of onRender --
-// writing one drawMeshDepthPrepass per part and skipping translucent ones individually, a single
-// setNextDrawPrepassed(true) call before a multi-part loop would only cover draw 0 -- the flag is
-// AUTO-CONSUMED by the very next drawMesh(), not sticky (RHI.hpp's own comment on
-// setNextDrawPrepassed) -- silently asking the LessEqual/no-write pipeline for parts the prepass
-// never wrote depth for. Deciding it per draw, right here, is what keeps this loop in lockstep
-// with that call at the per-part granularity. `(void)` up front because a non-VOXI build
-// never reads it below (the whole prepass feature is VOXI-only) and an unreferenced-parameter
-// warning on a build that never fires it would be a strange place for /W4 to complain.
-void SandboxApp::emitEntityDraws(Engine& e, const aver::game::PlannedDraw* draws, u32 n, const Mat4& wm,
-                    const aver::game::RouteDecision& route, bool prepassEligibleBase) {
-    (void)prepassEligibleBase;
-    for (u32 i = 0; i < n; ++i) {
-        const aver::game::PlannedDraw& d = draws[i];
-        if (!d.mesh) continue;
-        const ResolvedSurface rs = resolveSurface(d.material);
-        f32 col[4] = {rs.look.col[0], rs.look.col[1], rs.look.col[2], rs.look.col[3]};
-        // occlusion.showCulled: (1, 0.15, 1) knocks the green channel down so a false cull reads
-        // as an obvious magenta tint. A BRANCH, not a multiply that silently becomes identity at
-        // 1.0 when the debug view is off -- see EditorConsole.hpp's own doc comment on the cost
-        // this is supposed to be ("one bool test per culled entity").
-        if (route.tint) col[1] *= 0.15f;
-        if (route.raster) {
-            // Only when a live MaterialSystem actually resolved something -- calling this with
-            // rs.matBytes == 0 (module compiled out, or the system not ready yet) would STOMP
-            // whatever binding a previous draw left sticky (RHI.hpp's own "sticky until changed"
-            // contract on setDrawBinding), which is not what "nothing to bind" ever meant before.
-            if (rs.matBytes) e.device()->setDrawBinding(rs.matSet, rs.matConstants, rs.matBytes);
-            e.device()->setDrawBlended(rs.look.blended);
-#if AVER_MODULE_VOXI
-            if (prepassEligibleBase && !rs.look.blended) e.device()->setNextDrawPrepassed(true);
-#endif
-            e.device()->drawMesh(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness);
-        }
-#if AVER_MODULE_VOXI
-        else {
-            // THE UNIFIED DIRECT ROUTE: frustum-culled, occlusion-culled or owner-hidden, still
-            // handed to Voxi so shadows/GI/the RT TLAS never depend on what the camera itself can
-            // see -- see the call site's own comment for the "shadows are screen-space" history
-            // this closes.
-            //
-            // F5: translucent = rs.look.blended, the SAME value the raster branch just above feeds
-            // setDrawBlended() -- glass leaving the frustum now joins the translucent lane exactly
-            // like visible glass, matching VoxiRenderer::submitDraw's own opaque/blended split
-            // (VoxiRenderer.cpp:861-880, read-only citation, not edited by this lane) and the "10b"
-            // contract that glass DOES cast an attenuated shadow now (VoxiRenderer.cpp:4603-4615,
-            // read-only citation) -- the stale comment this replaces (formerly 5556-5566, deleted
-            // with submitShadowOnly) claimed the opposite, a contract that no longer existed. The
-            // exclusion from voxelisation/cascades/the GI shadow map is unchanged: submit() still
-            // reads this same `translucent` flag to route into the non-opaque TLAS lane.
-            voxiRenderer_.submit(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
-                                 rs.matSet, rs.matConstants, rs.matBytes,
-                                 /*translucent=*/rs.look.blended, route.hiddenFromOwner);
-            // THE PATH TRACER NEEDS THE SAME OFF-SCREEN GEOMETRY, AND THIS IS ITS ONLY WAY IN.
-            // PtSceneView::submitDraw is otherwise reached only through drawMesh(), which this
-            // branch exists to skip -- so the path-traced view traced a scene holding only what
-            // the camera could see (and no cluster-dispatched instance at all): no roof overhead,
-            // no wall behind the camera. Measured on PTTest NewSponza: Voxi's TLAS held 400
-            // instances while the path tracer "re-armed on 154", with 73 entities frustum-culled.
-            // Owner-hidden draws stay out: PtSceneView has no owner-hidden mask lane, so it would
-            // paint the owner's own body over the camera, and the raster route never hands it
-            // those either.
-            if (ptSceneView_ && !route.hiddenFromOwner)
-                ptSceneView_->submitDraw(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
-                                         rs.matSet, rs.matConstants, rs.matBytes, rs.look.blended);
-        }
-#endif
-    }
 }
 
 #if AVER_MODULE_SCENE

@@ -1474,8 +1474,9 @@ public:
 
     // F2: THE ONE RESOLVER. Every one of the three copies this closes (the entity loop's own steps,
     // formerly 5862-5935; the deleted submitShadowOnly lambda's, formerly 5546-5605; drawMeshParts'
-    // own, formerly 8299-8330 -- drawMeshParts itself is gone too, subsumed by planEntityDraws +
-    // emitEntityDraws below) ran surfaceMaterials_.find, MaterialLibrary::desc, isTranslucent,
+    // own, formerly 8299-8330 -- drawMeshParts itself is gone too, subsumed by planEntityDraws plus
+    // the per-draw emitter game::drawWorld now owns) ran surfaceMaterials_.find,
+    // MaterialLibrary::desc, isTranslucent,
     // surfaceLooks_.find and the MaterialSystem lookup BY HAND, and the third of those had already
     // drifted from the other two -- it never checked liveness, so a dead handle there baked in the
     // bright-white-mirror identity as final (see resolveSurfaceLook's own comment in
@@ -1492,10 +1493,15 @@ public:
         u32 matBytes = 0;
     };
 
+    // STILL HERE THOUGH game::drawWorld RESOLVES EVERY DRAW ITSELF, because two readers this
+    // library cannot serve remain: the GPU cluster mesh-shader path binds the entity's material
+    // through the RENDER CONTEXT rather than the device (setDrawBinding records on the device and
+    // is only forwarded from inside drawMesh(), the one call that path skips) and gates itself on
+    // the resolved look's `blended`, and DrawWorldOptions::onSurfaceWarn re-runs this so the
+    // editor's own once-per-token sentences keep naming editor directories. What the two resolvers
+    // SHARE is the decision -- both call aver::game::resolveSurfaceLook -- which is the half that
+    // had actually drifted.
     ResolvedSurface resolveSurface(i32 mat);
-
-    void emitEntityDraws(Engine& e, const aver::game::PlannedDraw* draws, u32 n, const Mat4& wm,
-                        const aver::game::RouteDecision& route, bool prepassEligibleBase);
 
 #if AVER_MODULE_SCENE
     rhi::MeshHandle posedHandle(scene::Entity ent);
@@ -1637,8 +1643,8 @@ private:
     //
     // drawMeshParts is GONE. F4 (occlusion-fix-plan.md) folded its whole job -- "a mesh that names
     // several materials draws as several meshes, one per slot" -- into planEntityDraws()
-    // (aver/game/SceneSubmission.hpp) plus emitEntityDraws() above, which both the raster and the
-    // direct route now call the SAME way, so the split can never drift between them the way this
+    // (aver/game/SceneSubmission.hpp) plus the per-draw emitter inside game::drawWorld, which both
+    // the raster and the direct route reach the SAME way, so the split can never drift the way this
     // function's own copy of the resolution rule once had (it never checked material-handle
     // liveness, unlike the entity loop's copy -- see resolveSurface's own comment for the
     // bright-white-mirror failure that gap could have produced). Its lone call site (formerly
