@@ -2,6 +2,12 @@
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
+// rhi::MeshHandle and rhi::BindingSetHandle appear BY VALUE in the hook signatures below, and an
+// alias cannot be forward-declared the way the rhi::IDevice reference in drawWorld's own signature
+// is (RHIResources.hpp:13 spells both as plain u32). This is a leaf header over
+// aver/core/Types.hpp, and this library already exposes the much larger aver/rhi/RHI.hpp through
+// GameContent.hpp, so it costs nothing new.
+#include "aver/rhi/RHIResources.hpp"
 #include "aver/scene/Entity.hpp"
 
 namespace aver::rhi { class IDevice; }
@@ -13,20 +19,266 @@ namespace aver::game {
 
 class GameContent;
 
-// Draw counters, kept across frames so the log line fires on CHANGE rather than every frame. Start
-// at -1 so the first frame always reports, including a first frame that drew nothing -- "0 drawn"
-// is the single most useful line when a world fails to appear, and a counter starting at 0 would
-// swallow it.
+// Draw counters.
+//
+// The `last*` trio is kept across frames so the log line fires on CHANGE rather than every frame.
+// It starts at -1 so the first frame always reports, including a first frame that drew nothing --
+// "0 drawn" is the single most useful line when a world fails to appear, and a counter starting at
+// 0 would swallow it.
+//
+// The unprefixed trio is THIS FRAME's own answer, and it exists because the two hosts that run this
+// walk print DIFFERENTLY WORDED lines from the same three numbers: the shipped game's "[Game]
+// scene-render: N drawn, N frustum-culled, N owner-hidden" (GameRender.cpp) against the editor's
+// "[Sandbox] scene-render: N spawned CMeshRenderer entities drawn, N culled, N owner-hidden"
+// (SandboxRender.cpp:1552, which also says "entity" in the singular). Neither sentence is a
+// candidate for unification -- the editor's names a concept ("spawned CMeshRenderer entities") that
+// a packaged game has no vocabulary for, and its "culled" deliberately covers occlusion as well as
+// the frustum -- so a host that wants to keep its own wording sets DrawWorldOptions::suppressLog and
+// reads these three instead of parsing a line it did not want written.
+//
+// A SUPPRESSING HOST KEEPS ITS OWN PREVIOUS-FRAME COPY. `last*` is still maintained under
+// suppressLog, but it is updated before the caller gets control back, so it cannot answer "did this
+// change since last frame" for anyone but drawWorld itself -- which is exactly why SandboxApp
+// already holds lastSceneDrawn_/lastSceneCulled_/lastSceneOwnerHidden_ of its own.
+//
+// The depth-prepass pass writes NONE of these. See DrawWorldPass::DepthPrepass.
 struct SceneDrawStats {
+    int drawn = 0;
+    int culled = 0;
+    int ownerHidden = 0;
+
     int lastDrawn = -1;
     int lastCulled = -1;
     int lastOwnerHidden = -1;
 };
 
 #if AVER_MODULE_SCENE
-// Widens drawWorld's cull/owner-hide behaviour without widening its required arguments -- every
-// field here defaults to "off", so a default-constructed DrawWorldOptions reproduces the walk this
-// struct was added to change not one bit.
+
+// Which of the two walks over the same entities this call is performing.
+//
+// The editor runs a SECOND, EARLIER walk for its depth prepass (SandboxRender.cpp:192), duplicated
+// line for line from its colour walk, and that duplication has already cost a real bug: the
+// world-space box was scoped differently in the two copies, so LOD selection fed the same function
+// different inputs and could pick a DIFFERENT LEVEL per walk -- the prepass wrote depth for one
+// mesh while colour drew another, and every fragment behind the wrong depth was silently dropped.
+// Measured at 2.81% of pixels differing, falling to 0.04% (noise) with --no-lod-select
+// (SandboxRender.cpp:234-242). One function called twice cannot drift from itself.
+//
+// Colour is what drawWorld has always done and is the default.
+//
+// DepthPrepass emits device.drawMeshDepthPrepass() instead of device.drawMesh(), skips any planned
+// draw whose resolved material is translucent (glass must never write opaque depth -- see the
+// blended exclusion at SandboxRender.cpp's own prepass walk), never takes the direct route, never
+// fires onEntityDelivered/onDirectDraw, and TOUCHES NO COUNTER IN SceneDrawStats. The counters and
+// the log line belong to the frame, not to the pass: a host calling this function twice per frame
+// must not see its entity count doubled or its log line fire twice.
+//
+// SKIPPING IS THE HOST'S JOB IN THIS PASS, which is why EntityDecision carries `pass`: the editor
+// excludes skinned entities (posed vertices are compute-written), the GPU cluster mesh-shader path
+// (no depth-only twin) and the CPU per-cluster path from its prepass, and every one of those
+// exclusions is about machinery this library does not have. It answers them from decide().
+enum class DrawWorldPass : u8 { Colour, DepthPrepass };
+
+// Which once-per-material warning the walk is throttling. THE TEXT IS THE HOST'S, the throttle is
+// the library's: the editor's wording names editor-only directories ("no .ocmat under
+// Binaries/Materials or Content/Materials", SandboxRender.cpp's resolveSurface) and speaks about a
+// library the material editor writes through, neither of which a packaged game has any business
+// claiming -- the same split GameTick.hpp states outright (":19") and GameCamera.hpp uses for its
+// aspect (":11"). What must NOT be duplicated is the "once per material token, ever" bookkeeping,
+// because two hosts keeping two sets is how the counts drift.
+enum class SurfaceWarning : u8 {
+    // An authored handle content.authoredFor still returns that pbr::MaterialLibrary no longer
+    // resolves. Taken at face value it would have drawn as a bright white mirror.
+    DeadMaterialHandle,
+    // Neither an authored .ocmat nor a built-in SurfaceLook claimed this surface: it is about to
+    // draw the flat 0.80/0.80/0.85 gray fallback. Only ever reported for a NON-ZERO token -- token
+    // 0 is "this entity named no material", which every untextured placeholder legitimately is.
+    UnresolvedSurface,
+};
+
+// Why the walk dropped an entity before it could reach either delivery route.
+//
+// These exist because the editor's copies of the same two checks each cost a day of bisection
+// before they said anything at all (SandboxRender.cpp:772 and :802 carry the accounts). Losing
+// those diagnostics to a library that drops entities in silence would be worse than the duplication
+// they replace, so the walk reports them and the host writes the sentence.
+enum class DrawSkipReason : u8 {
+    // A mesh is named and kMeshRendererVisible is clear -- the zero-fill trap. World::addComponent
+    // hands back zeroed storage and the visible bit is positive-sense, so a renderer attached
+    // directly is attached, correct, and invisible.
+    NotVisible,
+    // The mesh id resolves to no handle in GameContent. Worth reporting per ID rather than per
+    // entity: many entities can name the same missing mesh, and it is the id that identifies the
+    // fault, not whichever entity reached it first.
+    MeshNotLoaded,
+};
+
+// ONE in/out struct per entity, handed to DrawWorldOptions::decide after the walk has computed this
+// entity's world-space bounds and its frustum/owner-hide verdict and before it commits to a route.
+//
+// THE BOX IS AN INPUT, NOT SOMETHING THE HOST RECOMPUTES. That is the whole reason this is a struct
+// rather than a handful of narrower callbacks: SandboxRender.cpp:234-242 records what happens when
+// two walks derive "the same" bounds separately -- one fed LOD selection a sphere built from LOCAL
+// aabbMin/aabbMax against a world-space eye while the other built it from the world-space corners,
+// and the two picked different LOD levels for the same instance. A host that needs the box for LOD,
+// for an occlusion query or for a caster-size floor must be handed the one the cull already used.
+//
+// `haveWorldBox` false means the entity's bounds were degenerate and no world box was computed --
+// the walk draws it rather than culling it ("must not vanish"), and a host must guard its own box
+// readers the same way or it reintroduces the divergence above by a different route.
+struct EntityDecision {
+    // ---------------------------------------------------------------- in
+    DrawWorldPass pass = DrawWorldPass::Colour;
+    scene::Entity entity = scene::kInvalidEntity;
+    // Position in the VISIT order, not the world order: this is `oi`, the loop counter, so it still
+    // means something when DrawWorldOptions::visitOrder has reordered the walk.
+    u32 visitIndex = 0;
+    u64 meshId = 0;              // CMeshRenderer::mesh, the content-hash asset id
+    i32 material = 0;            // the entity's own fallback token, 0 already resolved through
+                                 // GameContent::meshDefaultMaterial
+    const Mat4* world = nullptr; // World::worldMatrix(entity); never null, valid for this call only
+    Vec3 worldBoxMin{};          // world-space extent of the entity's box, meaningless unless
+    Vec3 worldBoxMax{};          // haveWorldBox
+    bool haveWorldBox = false;
+    bool skinned = false;        // SkinnedScene claimed this entity (its bounds are its POSED ones)
+    bool frustumCulled = false;
+    bool ownerHidden = false;
+    rhi::MeshHandle baseMesh = 0;   // GameContent::meshFor(meshId), the unsubstituted geometry the
+                                    // per-material split was cut from
+    rhi::MeshHandle posedMesh = 0;  // SkinnedScene's substituted handle, or 0
+
+    // ---------------------------------------------------------------- out
+    // Each field arrives holding THE WALK'S OWN ANSWER, so a decide() that returns without touching
+    // anything is exactly a decide() that was never installed.
+
+    // Drop this entity entirely: no draw on either route, and no counter incremented. The editor's
+    // PlayerStart marker is this case -- it draws as an icon instead, and skipping it by identity
+    // keeps it out of the opaque pass, the shadow cascade, GI and the RT acceleration structure at
+    // once (SandboxRender.cpp:781).
+    //
+    // IT IS LATE. decide() runs AFTER the walk has written this entity's asset bounds back into its
+    // CMeshRenderer and computed the world box, so `skip` cannot un-do that write. A host whose
+    // skip must precede it needs a check of its own ahead of the call, not this flag.
+    bool skip = false;
+    // The host's own occlusion verdict, joined with frustumCulled by chooseRoute. Hierarchical-Z
+    // occlusion culling is editor-only machinery (Aver.Occlusion is linked into Sandbox alone), so
+    // this library has no way to answer it and no business trying.
+    bool occlusionCulled = false;
+    // Ask for the occlusion.showCulled debug tint: the culled entity draws through the RASTER route
+    // anyway, with its green channel knocked down to 0.15 so a false cull reads as obvious magenta.
+    // Fed straight to chooseRoute's `showCulled`, so it is honoured exactly where chooseRoute
+    // honours it -- a culled, NON-owner-hidden entity -- and changes nothing anywhere else. A mesh
+    // hidden from its own owner is not a "culled" entity in the sense this debug view is for.
+    bool tint = false;
+    // Which geometry this entity actually draws. Pre-filled with posedMesh when skinning claimed
+    // the entity and baseMesh otherwise -- the substitution this walk has always made.
+    //
+    // THE SOFT-BODY SEAM IS HERE. The editor's posedHandle (SandboxRender.cpp:2132) asks skinning
+    // first and then a soft-body scene, deterministically in that order because nothing forbids
+    // CSoftBody on an already-skinned mesh; this library has no soft-body scene to ask. A host with
+    // one fills in where posedMesh came back 0. planEntityDraws then decides on its own whether the
+    // per-material split still applies, by comparing this against baseMesh.
+    rhi::MeshHandle chosenMesh = 0;
+    // This entity's lit pixels have ALREADY been produced by something the host dispatched itself,
+    // so device.drawMesh() must not run for it -- but its shadow/GI/TLAS submission still must.
+    // The editor's GPU cluster mesh-shader path is this case: dispatchMeshClusters() draws the
+    // geometry, and skipping drawMesh() also skips IRenderFeature::submitDraw, which is the ONLY
+    // way geometry reaches Voxi (SandboxRender.cpp:1146 synthesises a direct-only route for exactly
+    // this). The entity still counts as drawn.
+    bool colourAlreadyDrawn = false;
+    // Emit this entity's DIRECT-route draws at all. False delivers nothing to the VoxiRenderer and
+    // fires no onDirectDraw, while the entity is still counted as culled or owner-hidden exactly as
+    // it would have been -- which is what separates it from `skip`, whose entity is counted nowhere.
+    //
+    // IT EXISTS FOR THE ANGULAR-SIZE FLOOR and, so far, nothing else. Submitting EVERY culled entity
+    // to Voxi was measured at +64ms/frame in ElectricDreams -- 5,884 of 6,617 entities culled, mostly
+    // scatter plants, taking a full TLAS rebuild from 759 to 6,571 instances and 9.1ms to 64.2ms --
+    // so the editor drops a caster too small to fill a shadow texel before the WORK, not merely
+    // before the draw (SandboxRender.cpp:713's kMinCasterAngle, applied at :951). That floor is a
+    // heuristic about SHADOWS, applied per entity, and asymmetric by construction: an entity inside
+    // the frustum reaches the renderer with no size test at all. A library with no cascade of its
+    // own to protect has no business making that trade, so it is the host's answer, and the default
+    // is the honest one, which is to submit.
+    bool emitDirectDraws = true;
+    // The ENTITY-level half of depth-prepass eligibility, for the COLOUR pass: true means a
+    // DepthPrepass call already wrote this entity's depth, so each of its opaque draws may ask for
+    // the LessEqual/no-write pipeline. Per-draw translucency is still the walk's own answer -- a
+    // mesh with an opaque trunk and a translucent leaf part gets it right per part, which a single
+    // entity-level flag could not (SandboxRender.cpp:1419 keeps the same split for the same
+    // reason). Left false here means "nobody prepassed this", which is what a host with no prepass
+    // walk should say and what this library has always assumed.
+    bool prepassEligible = false;
+};
+
+// FUNCTION POINTERS, NOT std::function, throughout: this is a per-entity path over thousands of
+// entities per frame, and the idiom is already this library's -- GameContent::setMeshLoadedHook(fn,
+// void*) (GameContent.hpp:154) and GameApp::setAverSrInstaller (GameApp.hpp:192) both take one.
+// GameLevel::LoadHooks uses std::function because it fires a handful of times per LEVEL LOAD; that
+// is the distinction, not a disagreement.
+
+// Fired at the TOP of each iteration, before any component lookup and before any filtering -- ahead
+// of the destroy-pending test, the visible-bit test and the mesh lookup, so it fires for EVERY
+// visited index whatever becomes of it.
+//
+// IT EXISTS FOR ONE ORDERING REQUIREMENT AND CANNOT BE HOISTED. The editor's occlusion walk splits
+// into two passes at a raw index into the unfiltered visit order, and must record buildPyramid() at
+// exactly that point IN THE COMMAND STREAM -- it builds the pyramid from the depth that pass 1's
+// draws have just written (SandboxRender.cpp:750). Moving that call into a pre-pass, or firing it
+// after this entity's filtering, would build the pyramid against the wrong set of draws. It is a
+// statement about WHEN, not about data, which is why it returns nothing.
+using DrawWorldVisitFn = void (*)(u32 visitIndex, scene::Entity entity, void* user);
+
+// See EntityDecision.
+using DrawWorldDecideFn = void (*)(EntityDecision& decision, void* user);
+
+// Once per entity the COLOUR pass actually delivered, on either route, after its draws are emitted.
+// The editor captures its selection-outline transform and mesh here, for every selected entity
+// rather than only the anchor (SandboxRender.cpp:1459). `chosenMesh` is the substituted handle the
+// draws actually used, not the base one -- an outline traced from the base handle while the entity
+// rendered a posed or LOD copy would draw the wrong silhouette.
+//
+// `raster` SAYS WHICH ROUTE, because "delivered" and "on screen" are not the same claim and the
+// editor's use needs the second one: an entity delivered on the direct route was culled or
+// owner-hidden, so it reached Voxi's shadow/GI/TLAS submission and nothing else. Never fired for an
+// entity the walk skipped, nor for one whose direct draws EntityDecision::emitDirectDraws
+// suppressed, nor at all in the depth-prepass pass.
+using DrawWorldEntityDeliveredFn = void (*)(scene::Entity entity, u64 meshId,
+                                            rhi::MeshHandle chosenMesh, const Mat4& world,
+                                            bool raster, void* user);
+
+// Once per draw on the DIRECT route, immediately after the Voxi submit that draw made (or in its
+// place, when no VoxiRenderer is attached). Arguments mirror VoxiRenderer::submit's own order.
+//
+// The editor forwards these to its path-traced scene view, whose submitDraw is otherwise reached
+// only through drawMesh() -- the very call the direct route exists to skip -- so without this the
+// path tracer traced a scene holding only what the camera could see: no roof overhead, no wall
+// behind it (SandboxRender.cpp:2121 carries the measurement). THIS LIBRARY LINKS NO PATH TRACER AND
+// NEVER WILL, which is the whole reason this is a sink rather than a second submit call.
+//
+// `col` is the FINAL colour, tint already applied. It, `world` and `matConstants` all point at
+// storage that lives only for the duration of this call.
+using DrawWorldDirectDrawFn = void (*)(rhi::MeshHandle mesh, const f32 world[16], const f32 col[4],
+                                       f32 metallic, f32 roughness, rhi::BindingSetHandle matSet,
+                                       const void* matConstants, u32 matBytes, bool translucent,
+                                       bool hiddenFromOwner, void* user);
+
+// Once per material token per process, for each warning kind -- the library owns that throttle, the
+// host owns the sentence. See SurfaceWarning. Null leaves the walk printing its own "[Game]" lines,
+// which is what it has always done.
+using DrawWorldSurfaceWarnFn = void (*)(i32 material, SurfaceWarning kind, void* user);
+
+// Every entity the walk dropped before either route, with the reason. NOT throttled here: the two
+// reasons want different keys (per entity for NotVisible, per mesh id for MeshNotLoaded) and only
+// the host knows which of its own sets it is filling. Null drops them in silence, exactly as this
+// walk always has.
+using DrawWorldSkippedFn = void (*)(scene::Entity entity, u64 meshId, DrawSkipReason reason,
+                                    void* user);
+
+// Widens drawWorld's cull/owner-hide behaviour, and now its whole per-entity route, without widening
+// its required arguments -- EVERY field here defaults to the behaviour that already exists, so a
+// default-constructed DrawWorldOptions reproduces the walk this struct was added to change not one
+// bit. That property is what the hook set is verified against: with every pointer null, the walk
+// below must emit the identical command stream it emitted before the hooks existed.
 struct DrawWorldOptions {
     // The possessed first-person pawn. Entities flagged kMeshRendererHiddenFromOwner under it (ancestor walk) are not drawn
     // in the raster pass. scene::kInvalidEntity = no owner-hide.
@@ -42,6 +294,38 @@ struct DrawWorldOptions {
     // game with no Voxi feature, or a caller that has not attached one yet) reproduces today's
     // behaviour exactly: a culled or owner-hidden entity is skipped and casts no shadow while it is.
     voxi::VoxiRenderer* voxiRenderer = nullptr;
+
+    // Which walk this is. See DrawWorldPass.
+    DrawWorldPass pass = DrawWorldPass::Colour;
+
+    // The order to visit entities in: an array of indices into scene::World's own order, and its
+    // length. Null means 0..World::count()-1, which is the order this walk has always used.
+    //
+    // The editor's occlusion culler REORDERS its walk so that everything it saw last frame draws
+    // first and everything else draws after the pyramid is built (SandboxRender.cpp's
+    // occlusionOrder_), and the pass-1/pass-2 boundary it fires buildPyramid at is an index into
+    // THIS order. An order the walk re-derived, or filtered, would put that boundary somewhere else.
+    // An out-of-range index is skipped rather than handed to World::at.
+    const u32* visitOrder = nullptr;
+    u32 visitOrderCount = 0;
+
+    // Do not print the "[Game] scene-render:" line at all. SceneDrawStats' counts are still
+    // written, so a host that words its own sentence gets the numbers without the library also
+    // writing one it did not want -- see SceneDrawStats' own comment for why the two sentences
+    // cannot be unified.
+    bool suppressLog = false;
+
+    // The per-entity sinks. See each type for what it exists to serve.
+    DrawWorldVisitFn onVisit = nullptr;
+    DrawWorldDecideFn decide = nullptr;
+    DrawWorldEntityDeliveredFn onEntityDelivered = nullptr;
+    DrawWorldDirectDrawFn onDirectDraw = nullptr;
+    DrawWorldSurfaceWarnFn onSurfaceWarn = nullptr;
+    DrawWorldSkippedFn onSkipped = nullptr;
+
+    // ONE user pointer for all six, the same shape GameContent::setMeshLoadedHook uses. Every sink
+    // here belongs to the one host driving the walk; a per-hook pointer would only invite two.
+    void* user = nullptr;
 };
 
 // Draws every live entity carrying a visible CMeshRenderer whose mesh resolves.
