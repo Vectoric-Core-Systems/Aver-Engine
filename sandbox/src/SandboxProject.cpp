@@ -335,156 +335,80 @@ void SandboxApp::applyProjectRenderSettings() {
     // (applyProjectVoxiSettings(), already applied above) resolved to BEFORE any flag gets a say.
     const u32  manifestRtRenderMode  = vx.settings().rtRenderMode;
     const bool manifestPathTracingOn = vx.settings().pathTracing != voxi::Quality::Off;
-    // ---- PHASE A (N7): TIER FLAGS AND FORCE-OFFS, COMMITTED ALONE, FIRST ----
-    // THE BUG THIS SPLIT FIXES. A tier flag (--gi/--rt/--pt) and a knob flag for THAT SAME tier
-    // (e.g. --rt-rays) used to land in one merged setSettings call below. take()'s own "ignore an
-    // override already equal to the live value" rule reads the knob against the OLD tier's live
-    // value -- so an explicit --rt-rays 4 that happened to equal the OLD tier's own rtShadowRays
-    // looked like a no-op to take(), was never marked overridden, and rode into that one
-    // setSettings() call still at its pre-flag value. setSettings' own tier-derivation then saw
-    // the tier change AND an "untouched" knob in the SAME call and rederived the knob to the NEW
-    // tier's ladder rung, silently discarding the 4 the flag asked for: PTTest (RENDER.RAYTRACING
-    // 4, RENDER.RTSHADOWRAYS 4) opened with `--rt 1 --rt-rays 4` lost the explicit 4 to Low's
-    // derived 1, with nothing logged, purely because the coincidence made the flag look unchanged.
-    // Committing the tier ALONE here means Phase B below reads back settings that already carry
-    // the NEW tier's derived knobs, so its take() calls compare each flag against those -- the
-    // same coincidence can no longer hide an override.
+    // ---- THE OVERRIDES THEMSELVES: ONE STRUCT, ONE SHARED TWO-PHASE APPLY (N7) ----
+    // Twenty `*Override_` members used to be read one at a time here, inline, across two hand-rolled
+    // blocks. They are now voxi::RenderCliOverrides and voxi::applyCliOverrides
+    // (ProjectRenderApply.hpp, beside the manifest apply this function already calls through
+    // applyProjectVoxiSettings). ONLY THE APPLY MOVED: SandboxMain.cpp's flag table still owns which
+    // spelling fills which member, and this block is the one place those members are handed over.
+    //
+    // FILLING THE STRUCT IS NOT A REFORMATTING OF THE SENTINELS. -1, 0 and -1.0f each still mean
+    // "flag not given" for exactly the members they always did -- see RenderCliOverrides' own field
+    // comments, which name the flag each one carries, and its sentinel paragraph for why the three
+    // cannot be unified (msaa/rt-rays/rt-pixels-per-ray/gi-update-interval must keep 0-means-absent;
+    // the rest must keep -1 so that 0 stays an expressible ask).
+    //
+    // BRACED, like the two blocks it replaces: `k` below is a scratch copy of the settings mid-apply
+    // and nothing after this point may read it -- everything downstream (the A2 conflict check, the
+    // contradiction report, voxiRenderer_.setSettings) deliberately asks vx.settings() for the
+    // committed, device-clamped truth instead.
     {
-        auto k = vx.settings();
-        bool overridden = false;
-        const auto take = [&](int ov, u32& dst, const char* name) {
-            if (ov < 0 || static_cast<u32>(ov) == dst) return;
-            AVER_INFO("[Sandbox] {}: the command line asked for {} and the project manifest for "
-                      "{}; the command line wins", name, ov, dst);
-            dst = static_cast<u32>(ov);
-            overridden = true;
-        };
-        // THE TIER KNOBS TOO: `--gi 2` against RENDER.GI 4 was still silently discarded an hour
-        // after the "rule" was supposedly closed. A rule with five of nine cases is not a rule.
-        // These three used to carry a 0-means-absent sentinel, so --gi 0/--rt 0/--pt 0 could not be
-        // expressed either; they now use -1 like every other override here. `--pt 0` in particular
-        // had to work before a raster-versus-ray-driven measurement could mean anything.
-        take(giOverride_, reinterpret_cast<u32&>(k.globalIllumination), "--gi");
-        take(rtOverride_, reinterpret_cast<u32&>(k.rayTracing),         "--rt");
-        take(ptOverride_, reinterpret_cast<u32&>(k.pathTracing),        "--pt");
-        // THE THIRD INSTANCE, predicted above: --no-gi/--no-rt are BOOLEANS, not the -1-sentinel
-        // integers `take` understands, so closing the rule for integers left these two behind.
-        // Measured cost: on RENDER.RAYTRACING 4, `--no-rt` was silently discarded and an A/B built
-        // on it said ray tracing cost -0.3ms (appeared FASTER to turn on) when the real answer was
-        // 6.7ms. A silently-failing override manufactures a wrong conclusion, confidently.
-        // MOVED UP INTO THIS SAME PHASE (N7): forceOff changes a TIER exactly like take(giOverride_,
-        // ...) above does, so it belongs beside the other tier changes, committed before any knob
-        // flag is ever compared against what follows from it.
-        const auto forceOff = [&](bool want, voxi::Quality& dst, const char* name) {
-            if (!want || dst == voxi::Quality::Off) return;
-            AVER_INFO("[Sandbox] {}: the command line asked for Off and the project manifest for "
-                      "{}; the command line wins", name, static_cast<int>(dst));
-            dst = voxi::Quality::Off;
-            overridden = true;
-        };
-        forceOff(giForceOff_, k.globalIllumination, "--no-gi");
-        forceOff(rtForceOff_, k.rayTracing,         "--no-rt");
-        // COMMIT THE TIERS ALONE. Phase B below re-reads vx.settings() fresh, so whatever
-        // setSettings just derived from a tier change here (rtShadowRays, giUpdateInterval, and
-        // the rest of the nine tier-derived knobs) is what Phase B's take() calls are compared
-        // against -- not the pre-flag values this block started from.
-        if (overridden) vx.setSettings(k);
-    }
+        voxi::RenderCliOverrides cli;
+        cli.globalIllumination = giOverride_;
+        cli.rayTracing         = rtOverride_;
+        cli.pathTracing        = ptOverride_;
+        cli.giForceOff         = giForceOff_;
+        cli.rtForceOff         = rtForceOff_;
+        cli.rtRenderMode       = rtRenderModeOverride_;
+        cli.refractionMode     = refractionOverride_;
+        cli.rtShadowDenoise    = rtShadowDenoiseOverride_;
+        cli.ptBounces          = ptBouncesOverride_;
+        cli.layeredBsdf        = layeredBsdfOverride_;
+        cli.msaa               = msaaOverride_;
+        cli.rtShadowRays       = rtRaysOverride_;
+        cli.giSkyOcclusionRays = giSkyOccRaysOverride_;
+        cli.giSkyOcclusionTile = giSkyOccTileOverride_;
+        cli.giIntensity        = giIntensityOverride_;
+        cli.rtPixelsPerRayTile = rtPixelsPerRayOverride_;
+        cli.giUpdateInterval   = giUpdateIntervalOverride_;
+        cli.giMode             = giModeOverride_;
+        cli.giRestirVisibility = restirVisibilityOverride_;
+        cli.denoiser           = denoiserOverride_;
 
-    // ---- PHASE B (N7): EVERY KNOB FLAG, AGAINST THE POST-TIER SETTINGS ----
-    // Read AFTER Phase A's commit, deliberately -- see that phase's own comment for why. THIS
-    // CALL TRULY HAS NO TIER CHANGES IN IT (an earlier version of this comment claimed that for
-    // the single merged call above and was wrong -- the tier takes used to live in this same
-    // block): nothing below ever touches k.globalIllumination/rayTracing/pathTracing again, so
-    // setSettings' own change-gated derivation sees no tier change here and leaves every knob this
-    // block writes exactly as written.
-    {
-        auto k = vx.settings();
-        bool overridden = false;
-        const auto take = [&](int ov, u32& dst, const char* name) {
-            if (ov < 0 || static_cast<u32>(ov) == dst) return;
-            AVER_INFO("[Sandbox] {}: the command line asked for {} and the project manifest for "
-                      "{}; the command line wins", name, ov, dst);
-            dst = static_cast<u32>(ov);
-            overridden = true;
+        // THE SENTENCE IS THIS HOST'S, THE DECISION IS THE HEADER'S. "[Sandbox]" is the editor's
+        // tag and the shipped game's is "[Game]", so the shared apply hands back a CliOverrideNote
+        // and this lambda words it -- the same division startPhysics/startAudio (GameTick.hpp) draw
+        // with their hostTag. The wording of all three sentences is unchanged from when this block
+        // printed them itself, "[Project]" on the --gi-intensity line included: a collapse that is
+        // allowed to reword a diagnostic is a collapse that can quietly change what a log search
+        // finds.
+        const auto logOverride = [](const voxi::CliOverrideNote& n) {
+            switch (n.kind) {
+            case voxi::CliOverrideKind::Take:
+                AVER_INFO("[Sandbox] {}: the command line asked for {} and the project manifest "
+                          "for {}; the command line wins", n.flag, n.asked, n.found);
+                break;
+            case voxi::CliOverrideKind::ForceOff:
+                AVER_INFO("[Sandbox] {}: the command line asked for Off and the project manifest "
+                          "for {}; the command line wins", n.flag, static_cast<int>(n.found));
+                break;
+            case voxi::CliOverrideKind::GiIntensity:
+                AVER_INFO("[Project] {} {} outranks the recorded {}", n.flag, n.askedF, n.foundF);
+                break;
+            }
         };
-        // Wired in from the start rather than after it bites: this is the third knob-shaped
-        // feature added since that rule was written, and the previous two both had to be fixed
-        // afterwards (--pt-scene in e2830db, --no-rt/--no-gi in fac36a3).
-        take(rtRenderModeOverride_,    k.rtRenderMode,       "--rt-render-mode");
-        take(refractionOverride_,      k.refractionMode,     "--refraction");
-        take(rtShadowDenoiseOverride_, k.rtShadowDenoise,    "--rt-shadow-denoise");
-        take(ptBouncesOverride_,       k.ptBounces,          "--pt-bounces");
-        take(layeredBsdfOverride_,     reinterpret_cast<u32&>(k.layeredBsdf), "--layered-bsdf");
-        // --msaa WAS THE NINTH CASE, and it was still missing. The block above says outright
-        // that "a rule with five of nine cases is not a rule" -- this is the one that was left.
-        // It is applied at startup (msaaOverride_ is read where settings are first built) and
-        // then SILENTLY OVERWRITTEN by RENDER.MSAA when the project opens, so `--msaa 1` against
-        // a manifest saying 2 measured the manifest and said nothing. Found while trying to
-        // price MSAA in ray-driven mode, where the pass is one fullscreen triangle and gains
-        // nothing from multisampling -- a measurement that would have been quietly meaningless.
-        if (msaaOverride_ > 0)           take(msaaOverride_, reinterpret_cast<u32&>(k.msaa), "--msaa");
-        if (rtRaysOverride_ > 0)         take(rtRaysOverride_,        k.rtShadowRays,      "--rt-rays");
-        // WIRED IN WITH THE FLAG, not after it bites -- the block above records four separate
-        // occasions where a knob was added and this list was not updated, each one silently
-        // letting a manifest outrank the command line and each one corrupting a measurement
-        // before anyone noticed. No `if` guard: take() already treats a negative as absent, and
-        // this override's sentinel IS -1 precisely so that 0 stays expressible.
-        take(giSkyOccRaysOverride_,      k.giSkyOcclusionRays, "--gi-sky-occlusion-rays");
-        take(giSkyOccTileOverride_,      k.giSkyOcclusionTile, "--gi-sky-occlusion-tile");
-        // --gi-intensity F, the multiplier on the cone-traced bounce (gVoxelParams.y). Another
-        // slider with no command-line twin, so "is the bounce strong enough" could not be swept
-        // -- and that is the question behind "the bounce lighting isn't working". Applied here,
-        // last, so it outranks RENDER.GIINTENSITY from the manifest like every other flag.
-        if (giIntensityOverride_ >= 0.0f) {
-            if (k.giIntensity != giIntensityOverride_)
-                AVER_INFO("[Project] --gi-intensity {} outranks the recorded {}",
-                          giIntensityOverride_, k.giIntensity);
-            k.giIntensity = giIntensityOverride_;
-            // `overridden` GATES THE PUSH AT THE BOTTOM OF THIS BLOCK -- `if (overridden)
-            // vx.setSettings(k)` -- and take() sets it for you. Writing k directly without this
-            // line makes the whole override a no-op whenever no OTHER flag happens to be
-            // present, and it fails exactly the way this block's own comments describe: the log
-            // says the flag outranked the manifest, and nothing changes.
-            //
-            // THE FIFTH INSTANCE OF THE BUG THIS BLOCK DOCUMENTS, and it was written here, in
-            // this commit, directly underneath four paragraphs warning about it. It survived
-            // review and was caught only by a measurement: --gi-intensity 0, 2 and 4 produced
-            // three byte-identical images. The log line above is what makes that debuggable --
-            // a flag that claims to have won and then loses is the shape being guarded against.
-            overridden = true;
-        }
-        if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
-        // THE FOURTH INSTANCE OF THE SAME BUG CLASS, closed. --gi-update-interval had no
-        // manifest key AND no entry here, while giUpdateInterval IS tier-derived inside
-        // setSettings -- so opening a project whose RENDER.GI differed from the live tier
-        // silently re-derived over the flag with nothing logged. The three fixes before this one
-        // each closed a subset and left this behind; the rule is that a flag exists so a human
-        // at the keyboard can override recorded state, which means it is applied LAST and a
-        // disagreement is said out loud.
-        if (giUpdateIntervalOverride_ > 0) take(giUpdateIntervalOverride_, k.giUpdateInterval, "--gi-update-interval");
-        // --gi-mode HAS a manifest key (RENDER.GIMODE) and, until this line, no entry here -- the
-        // same gap the paragraph above just closed for --gi-update-interval, on the flag this task
-        // exists to add. Concretely: PTTest.ocproject records GIMODE 1, so without this take(),
-        // `--gi-mode 0` opening that project would be silently re-outranked by the recorded 1 and
-        // an A/B meant to compare voxel cones against RTXDI ReSTIR would compare ReSTIR to itself
-        // and report the two estimators as identical.
-        if (giModeOverride_ >= 0) take(giModeOverride_, k.giMode, "--gi-mode");
-        // --restir-visibility HAS a manifest key (RENDER.RESTIRVISIBILITY) and, without this line,
-        // no entry here -- the identical gap the paragraph above just closed for --gi-mode, on
-        // optimisation-wave-2's own U1 flag. Beside --gi-mode rather than in its own block: both
-        // read the RESTIR estimator's own behaviour and a by-hand A/B against a manifest that
-        // already pins one needs the flag to win the same way --gi-mode's does.
-        if (restirVisibilityOverride_ >= 0) take(restirVisibilityOverride_, k.giRestirVisibility, "--restir-visibility");
-        // take() on a bool field needs an lvalue of the field's own type, so the flag is staged
-        // through a u32 and assigned back -- RENDER.DENOISER must not outrank a human who just
-        // typed --denoiser, which is the whole point of this pass.
-        if (denoiserOverride_ >= 0) {
-            u32 den = k.denoiser ? 1u : 0u;
-            take(static_cast<u32>(denoiserOverride_ != 0), den, "--denoiser");
-            k.denoiser = den != 0;
-        }
-        if (overridden) vx.setSettings(k);
+
+        // TWO PHASES, NEVER ONE: the tier flags and force-offs committed ALONE, then every knob
+        // flag against the settings that commit derived. applyCliTiers' own comment carries the
+        // `--rt 1 --rt-rays 4` case a merged call silently loses; ProjectRenderApplyTest.cpp's
+        // testN7CliPhaseOrderThroughTheSingleton fails if the two are ever merged back together.
+        // `k` and the Settings the lambda pushes and reads back are one object, exactly as
+        // applyProjectVoxiSettings' own two-phase call above needs.
+        voxi::Settings k = vx.settings();
+        voxi::applyCliOverrides(cli, k, logOverride, [&]() {
+            vx.setSettings(k);
+            k = vx.settings();
+        });
     }
 
     // A2: A SELF-CONTRADICTORY MANIFEST NEVER SAID SO. RENDER.RTRENDERMODE 1 (ray-driven primary

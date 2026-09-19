@@ -9,6 +9,14 @@
 // tier-derived knobs above -- absent leaves Settings alone rather than following a ladder, and capture
 // is unconditional like giMode/denoiser rather than captureKnob's four-branch rule). Compiled by the
 // build; NEVER run from this workflow.
+//
+// AND THE COMMAND-LINE HALF (N7), added when the editor's twenty `*Override_` members collapsed into
+// RenderCliOverrides and applyCliOverrides: every flag reaching the Settings field it names, all three
+// "flag not given" sentinels (-1, 0, -1.0f) staying distinct, --no-gi/--no-rt behaving as the Phase A
+// tier changes they are, and -- the one that made the collapse safe to attempt --
+// testN7CliPhaseOrderThroughTheSingleton, which FAILS if Phase A and Phase B are ever merged into a
+// single setSettings call. Rewriting precedence logic that has already regressed four times needs a
+// net under it, and that test is the net.
 #include "aver/voxi/ProjectRenderApply.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -321,6 +329,243 @@ static void testR2RegressionThroughTheSingleton() {
     check(vx.settings().giCones == 13,
           "...but the single commit's own change-gated derivation overwrites it with Epic's 13 -- "
           "the exact regression two-phase (above) avoids");
+}
+
+// ---- applyCliOverrides: the command-line half (N7) ----
+
+// A log sink that only counts, which is all these tests need from it: the sentences themselves are
+// the HOST's (ProjectRenderApply.hpp hands back a CliOverrideNote and SandboxProject.cpp words it),
+// but WHETHER a note was produced is the shared header's own decision and is exactly the thing the
+// N7 race corrupts -- a knob that "looks unchanged" to take() logs nothing and applies nothing, so a
+// note count is a direct read of whether the override was seen at all.
+struct NoteCounter {
+    u32 total = 0;
+    u32 takes = 0;
+    u32 forceOffs = 0;
+    u32 giIntensities = 0;
+
+    void operator()(const voxi::CliOverrideNote& n) {
+        ++total;
+        switch (n.kind) {
+            case voxi::CliOverrideKind::Take:        ++takes; break;
+            case voxi::CliOverrideKind::ForceOff:    ++forceOffs; break;
+            case voxi::CliOverrideKind::GiIntensity: ++giIntensities; break;
+        }
+    }
+};
+
+// EVERY RenderCliOverrides FIELD REACHES THE Settings FIELD IT NAMES. The collapse that created this
+// struct turned twenty separately-read `*Override_` members into twenty struct fields assigned at one
+// call site, and a single mistyped line there (cli.rtShadowDenoise = ptBouncesOverride_) would be
+// invisible: both are ints, both have the same sentinel, and the result is a flag that quietly drives
+// the wrong knob. This is the wiring check for that.
+//
+// PURE, no singleton: applyCliTiers/applyCliKnobs mutate a Settings& and nothing else, so with no
+// setSettings in between there is no derivation to confuse the reading -- each assertion is "the flag
+// wrote this field", full stop.
+//
+// --restir-visibility AND --rt-render-mode ARE ASKED FOR AT 0 ON PURPOSE. Both carry the
+// -1-means-absent sentinel precisely so that 0 stays an expressible ask, and a collapse that "tidied"
+// them onto the 0-means-absent convention the other four flags use would leave both unusable at
+// their most interesting value -- `--rt-render-mode 0` is the flag that exists so a ray-driven build
+// can be compared against the rasteriser at all.
+static void testCliEveryFlagReachesItsField() {
+    AVER_INFO("=== CLI: every RenderCliOverrides field reaches the Settings field it names ===");
+
+    voxi::RenderCliOverrides cli;
+    cli.globalIllumination = static_cast<int>(voxi::Quality::Epic);
+    cli.rayTracing         = static_cast<int>(voxi::Quality::Low);
+    cli.pathTracing        = static_cast<int>(voxi::Quality::High);
+    cli.rtRenderMode       = 0;
+    cli.refractionMode     = 2;
+    cli.rtShadowDenoise    = 5;
+    cli.ptBounces          = 6;
+    cli.layeredBsdf        = static_cast<int>(voxi::Quality::Medium);
+    cli.msaa               = static_cast<int>(voxi::Msaa::X8);
+    cli.rtShadowRays       = 7;
+    cli.giSkyOcclusionRays = 3;
+    cli.giSkyOcclusionTile = 4;
+    cli.giIntensity        = 2.5f;
+    cli.rtPixelsPerRayTile = 2;
+    cli.giUpdateInterval   = 5;
+    cli.giMode             = 1;
+    cli.giRestirVisibility = 0;
+    cli.denoiser           = 1;
+
+    NoteCounter notes;
+    voxi::Settings s{};
+    check(voxi::applyCliTiers(cli, s, notes), "Phase A reports that it changed something");
+    check(voxi::applyCliKnobs(cli, s, notes), "Phase B reports that it changed something");
+
+    check(s.globalIllumination == voxi::Quality::Epic, "--gi reaches Settings::globalIllumination");
+    check(s.rayTracing == voxi::Quality::Low,          "--rt reaches Settings::rayTracing");
+    check(s.pathTracing == voxi::Quality::High,        "--pt reaches Settings::pathTracing");
+    check(s.rtRenderMode == 0,        "--rt-render-mode 0 reaches Settings::rtRenderMode (0 is an ask)");
+    check(s.refractionMode == 2,      "--refraction reaches Settings::refractionMode");
+    check(s.rtShadowDenoise == 5,     "--rt-shadow-denoise reaches Settings::rtShadowDenoise");
+    check(s.ptBounces == 6,           "--pt-bounces reaches Settings::ptBounces");
+    check(s.layeredBsdf == voxi::Quality::Medium, "--layered-bsdf reaches Settings::layeredBsdf");
+    check(s.msaa == voxi::Msaa::X8,   "--msaa reaches Settings::msaa");
+    check(s.rtShadowRays == 7,        "--rt-rays reaches Settings::rtShadowRays");
+    check(s.giSkyOcclusionRays == 3,  "--gi-sky-occlusion-rays reaches Settings::giSkyOcclusionRays");
+    check(s.giSkyOcclusionTile == 4,  "--gi-sky-occlusion-tile reaches Settings::giSkyOcclusionTile");
+    check(near(s.giIntensity, 2.5f),  "--gi-intensity reaches Settings::giIntensity");
+    check(s.rtPixelsPerRayTile == 2,  "--rt-pixels-per-ray reaches Settings::rtPixelsPerRayTile");
+    check(s.giUpdateInterval == 5,    "--gi-update-interval reaches Settings::giUpdateInterval");
+    check(s.giMode == 1,              "--gi-mode reaches Settings::giMode");
+    check(s.giRestirVisibility == 0,  "--restir-visibility 0 reaches Settings::giRestirVisibility (0 is an ask)");
+    check(s.denoiser,                 "--denoiser reaches Settings::denoiser");
+
+    // The tiers are Phase A's ONLY business and layeredBsdf is deliberately not one of them (it is a
+    // knob to setSettings' derivation, which is what decides the split). Three notes from Phase A and
+    // fifteen from Phase B accounts for every field set above, with nothing double-applied.
+    check(notes.total == 18 && notes.takes == 17 && notes.giIntensities == 1 && notes.forceOffs == 0,
+          "one note per flag that won: 3 tier takes, 14 knob takes, 1 --gi-intensity, 0 force-offs");
+}
+
+// ABSENT IS ABSENT, AND THE THREE SENTINELS ARE NOT INTERCHANGEABLE. A default-constructed
+// RenderCliOverrides means "no render flag was typed" and must leave a fully non-default Settings
+// byte-identical -- and both phases must SAY so by returning false, because that bool is what gates
+// vx.setSettings() at the call site. A phase that returned true on an empty command line would push
+// a redundant commit through the renderer on every project open.
+//
+// THE FOUR 0-MEANS-ABSENT FLAGS ARE THE POINT of the second half: msaa, rtShadowRays,
+// rtPixelsPerRayTile and giUpdateInterval default to 0, and 0 is NOT a request -- "zero samples",
+// "zero rays", "a zero-pixel tile", "revoxelise every zero frames". take() only treats a NEGATIVE as
+// absent, so if applyCliKnobs' `> 0` guards were ever dropped in favour of "take() handles it", each
+// of these four would write a 0 nobody asked for into a running renderer.
+static void testCliAbsentOverridesLeaveSettingsAlone() {
+    AVER_INFO("=== CLI: a default RenderCliOverrides leaves Settings untouched (all three sentinels) ===");
+
+    voxi::Settings s{};
+    s.msaa               = voxi::Msaa::X8;
+    s.globalIllumination = voxi::Quality::Epic;
+    s.rayTracing         = voxi::Quality::High;
+    s.pathTracing        = voxi::Quality::Low;
+    s.layeredBsdf        = voxi::Quality::Medium;
+    s.rtShadowRays       = 7;
+    s.rtPixelsPerRayTile = 3;
+    s.giUpdateInterval   = 5;
+    s.giMode             = 1;
+    s.giRestirVisibility = 4;
+    s.giIntensity        = 3.25f;
+    s.denoiser           = true;
+    const voxi::Settings before = s;
+
+    NoteCounter notes;
+    const voxi::RenderCliOverrides none{};
+    check(!voxi::applyCliTiers(none, s, notes), "Phase A reports no change, so the caller skips its commit");
+    check(!voxi::applyCliKnobs(none, s, notes), "Phase B reports no change, so the caller skips its commit");
+    check(notes.total == 0, "an empty command line prints nothing");
+    check(settingsEqual(s, before), "an empty command line leaves every Settings field exactly as it was");
+    // settingsEqual predates giRestirVisibility and does not compare it (see its own comment for what
+    // "unchanged" means there), so --restir-visibility's absent case is asserted by name.
+    check(s.giRestirVisibility == 4, "...giRestirVisibility included, which settingsEqual does not cover");
+
+    // The four 0-sentinel flags, stated at their own absent value against a Settings that is nowhere
+    // near 0 -- msaa X8, 7 rays, a 3-pixel tile, a 5-frame interval. Each must survive.
+    voxi::RenderCliOverrides zeros;
+    zeros.msaa               = 0;
+    zeros.rtShadowRays       = 0;
+    zeros.rtPixelsPerRayTile = 0;
+    zeros.giUpdateInterval   = 0;
+    check(!voxi::applyCliKnobs(zeros, s, notes), "0 in the four 0-means-absent flags is not a request");
+    check(s.msaa == voxi::Msaa::X8 && s.rtShadowRays == 7 && s.rtPixelsPerRayTile == 3 &&
+              s.giUpdateInterval == 5,
+          "...and none of msaa/rtShadowRays/rtPixelsPerRayTile/giUpdateInterval was zeroed");
+    check(notes.total == 0, "...and nothing claimed to have outranked anything");
+}
+
+// --no-gi/--no-rt ARE BOOLEANS, NOT -1-SENTINEL INTEGERS, which is exactly why they were left behind
+// when the flag-outranks-manifest rule was "closed" for integers -- the third instance of that defect
+// in SandboxProject.cpp's own record. They belong to Phase A because forcing a tier Off IS a tier
+// change, and a tier change has to be committed before any knob flag is compared against what follows
+// from it.
+static void testCliForceOffIsAPhaseATierChange() {
+    AVER_INFO("=== CLI: --no-gi/--no-rt are Phase A tier changes, and are inert when already Off ===");
+
+    voxi::RenderCliOverrides cli;
+    cli.giForceOff = true;
+    cli.rtForceOff = true;
+
+    NoteCounter notes;
+    voxi::Settings s{};
+    s.globalIllumination = voxi::Quality::Epic;
+    s.rayTracing         = voxi::Quality::High;
+    check(voxi::applyCliTiers(cli, s, notes), "Phase A reports the force-offs changed something");
+    check(s.globalIllumination == voxi::Quality::Off, "--no-gi forced GI Off");
+    check(s.rayTracing == voxi::Quality::Off,         "--no-rt forced RT Off");
+    check(notes.forceOffs == 2 && notes.takes == 0,
+          "both force-offs said so out loud, and neither was mistaken for an integer take");
+
+    // ALREADY OFF IS NOT A CHANGE: `s` is untouched, so the caller must not be told to commit. Run
+    // straight on, with `s` still at Off from above.
+    NoteCounter again;
+    check(!voxi::applyCliTiers(cli, s, again), "--no-gi/--no-rt against an already-Off tier is inert");
+    check(again.total == 0, "...and prints nothing, rather than claiming to have won");
+}
+
+// N7, THROUGH THE LIVE SINGLETON: the command-line twin of testR2RegressionThroughTheSingleton above,
+// and THE REASON COLLAPSING THIS APPLY WAS SAFE TO ATTEMPT AT ALL. Live RT Epic, rtShadowRays 8 (Epic's
+// own ladder rung); the command line says `--rt 1 --rt-rays 8` -- explicitly asking for the SAME ray
+// count Epic already had.
+//
+// THIS TEST FAILS IF THE TWO PHASES ARE EVER MERGED. take()'s "ignore an override already equal to the
+// live value" rule reads --rt-rays 8 against the OLD tier's live 8, so in a merged call it looks like
+// a no-op, is never marked overridden, and rides into the single setSettings() still at 8 -- at which
+// point setSettings sees rayTracing change Epic -> Low with rtShadowRays "untouched" and rederives it
+// to Low's rung of 1, silently discarding the 8 a human typed. The second half below proves that,
+// rather than asserting it in a comment: it runs the merged version and watches the 8 turn into a 1.
+//
+// PTTest carried the real instance (RENDER.RAYTRACING 4, RENDER.RTSHADOWRAYS 4 opened with
+// `--rt 1 --rt-rays 4`); the numbers here are Epic's 8 because ladder::rtShadowRays makes Low and
+// Medium both 1, so Epic is the rung that keeps this race visible if the ladder is retuned.
+static void testN7CliPhaseOrderThroughTheSingleton() {
+    AVER_INFO("=== N7: the two-phase CLI apply keeps --rt-rays 8 against --rt 1 ===");
+    voxi::Renderer& vx = voxi::Renderer::get();
+    vx.setDeviceInfo(fullyCapableDevice());
+
+    voxi::Settings seed{};
+    seed.rayTracing   = voxi::Quality::Epic;
+    seed.rtShadowRays = 8;                     // Epic's own ladder rung, stated rather than derived
+    vx.setSettings(seed);
+    const voxi::Settings live = vx.settings();
+    check(live.rayTracing == voxi::Quality::Epic && live.rtShadowRays == 8,
+          "singleton seeded at RT Epic, rtShadowRays 8");
+
+    voxi::RenderCliOverrides cli;
+    cli.rayTracing   = static_cast<int>(voxi::Quality::Low);   // --rt 1
+    cli.rtShadowRays = 8;                                       // --rt-rays 8, explicit
+
+    NoteCounter notes;
+    voxi::Settings s = vx.settings();
+    voxi::applyCliOverrides(cli, s, notes, [&]() {
+        vx.setSettings(s);
+        s = vx.settings();
+    });
+    check(s.rayTracing == voxi::Quality::Low, "two-phase: --rt 1 took the tier to Low");
+    check(s.rtShadowRays == 8,
+          "two-phase: --rt-rays 8 survives even though Low's ladder rung is 1");
+    check(vx.settings().rtShadowRays == 8, "...and the singleton itself agrees");
+    check(notes.total == 2,
+          "both flags were SEEN: Phase B compared --rt-rays against Low's derived 1, not Epic's 8");
+
+    // A MERGED SINGLE COMMIT WOULD HAVE GIVEN 1 -- proven, not merely asserted: reset the singleton to
+    // the same pre-flag live state, run both phases into ONE buffer without committing in between,
+    // and commit once.
+    vx.setSettings(live);
+    NoteCounter mergedNotes;
+    voxi::Settings merged = vx.settings();
+    voxi::applyCliTiers(cli, merged, mergedNotes);
+    voxi::applyCliKnobs(cli, merged, mergedNotes);
+    check(mergedNotes.total == 1,
+          "merged: --rt-rays 8 read against the OLD tier's live 8 looks like a no-op and logs nothing");
+    check(merged.rtShadowRays == 8,
+          "merged: the buffer still reads 8, but only because nothing ever wrote it");
+    vx.setSettings(merged);
+    check(vx.settings().rtShadowRays == 1,
+          "...and the single commit's own tier-derivation replaces it with Low's 1 -- the exact "
+          "regression the Phase A/B split exists to avoid");
 }
 
 // ---- captureVoxiSettings ----
@@ -717,6 +962,10 @@ int main() {
     testEmptyManifestLeavesSettingsUnchanged();
     testR2RegressionThroughTheSingleton();
     testR2RestirVisibilityRaceThroughTheSingleton();
+    testCliEveryFlagReachesItsField();
+    testCliAbsentOverridesLeaveSettingsAlone();
+    testCliForceOffIsAPhaseATierChange();
+    testN7CliPhaseOrderThroughTheSingleton();
     testCaptureTierChangeUneditedKnobFollows();
     testCaptureOverallMaskWins();
     testCaptureUneditedKnobLeavesManifestAlone();
