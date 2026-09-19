@@ -167,6 +167,40 @@ struct ProjectDesc {
     f32  giCenter[3] = {0, 0, 0};
     f32  giExtent    = 0.0f;    // cm, half-edge of the cube
 
+    // ---- THE CAMERA'S POST CHAIN, WHICH A PROJECT COULD NOT AUTHOR AT ALL ----------------------
+    //
+    // docs/RUNTIME-DEDUP.md records the gap as an owner decision in one line: "A project cannot
+    // author exposure/bloom/tonemap, so a shipped game uses compiled defaults." Every one of these
+    // was settable from a command line (--bloom, --exposure, --auto-exposure at
+    // sandbox/src/SandboxMain.cpp:986-988, --tonemap at :419) and from the editor's own Post panel,
+    // and by nothing the FILE could hold -- so a packaged game rendered with rhi::PostSettings'
+    // compiled defaults (exposure 1, bloom 0.06, auto-exposure on, tonemap 2; RHI.hpp:146-217)
+    // whatever the author had spent the afternoon looking at in the editor. Same shape as the "four
+    // things the UI could set and the file could not hold" above, one step worse: there the setting
+    // came back wrong on the next open, here it came back wrong in the SHIPPED GAME.
+    //
+    // A NEGATIVE SENTINEL IS MANDATORY FOR THE TWO FLOATS, not merely conventional. Zero is a legal
+    // authored value for both -- bloom 0 is precisely how an author says "no bloom", and it is a
+    // meaningful thing to say because zero intensity builds no pyramid and records no pass at all
+    // (RHI.hpp:151-152), so it is a performance choice as well as a look. The usual "0 means the
+    // manifest never said" shortcut would make the one interesting value unwritable, for the same
+    // reason AUDIO.* below carries a presence flag rather than a sentinel: a project that ships with
+    // its music muted has to be able to say so. -1 means the manifest was silent and the compiled
+    // default stands; 0 means the author said zero, and it must come back a zero.
+    f32 postExposure     = -1.0f; // RENDER.EXPOSURE      linear pre-tonemap multiplier; < 0 = unstated
+    f32 postBloom        = -1.0f; // RENDER.BLOOM         bloom intensity; 0 = no bloom pass at all
+    int postAutoExposure = -1;    // RENDER.AUTOEXPOSURE  0/1; when on it overrides EXPOSURE per frame
+    // RENDER.TONEMAP: a genuine SELECTOR rather than a fourth exposure knob, which is the only
+    // reason it earns a key of its own -- rhi::PostSettings::tonemap (RHI.hpp:217) chooses between
+    // the per-channel Narkowicz/Hill approximation (0), the same curve applied between the ACES
+    // matrices (1), and acesLumaTonemap (2, the default). The choice is visible rather than
+    // academic: measured on PTTest Sponza at exposure 8, mode 1 holds chroma 1.41 where mode 2 holds
+    // 3.09 at the same brightness (the numbers and the "colours are washed out" report they came
+    // from are recorded at RHI.hpp:196-216). 0 is also the mode every recorded gate baseline in
+    // scripts/ was measured through, so a project that exists to reproduce one has to be able to say
+    // so in the file rather than on a command line nobody will remember to pass.
+    int postTonemap      = -1;    // RENDER.TONEMAP  0/1/2; -1 keeps PostSettings' own default (2)
+
     // True when the manifest stated at least one RENDER.* key.
     //
     // GIMODE AND DENOISER WERE MISSING (N9), and a manifest stating only those two keys was invisible
@@ -186,6 +220,8 @@ struct ProjectDesc {
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
+               postExposure >= 0.0f || postBloom >= 0.0f ||
+               postAutoExposure >= 0 || postTonemap >= 0 ||
                !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0;
     }
 

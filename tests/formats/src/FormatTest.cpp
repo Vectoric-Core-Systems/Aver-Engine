@@ -220,6 +220,70 @@ static void checkOcproject() {
         check(writeOcproject(b4, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
     }
     {
+        // ---- THE POST CHAIN, which the file could not hold at all ----------------------------
+        //
+        // docs/RUNTIME-DEDUP.md records the gap as an owner decision in one line: "A project cannot
+        // author exposure/bloom/tonemap, so a shipped game uses compiled defaults." A packaged game
+        // therefore rendered with rhi::PostSettings' compiled numbers no matter what the author had
+        // set in the editor, because the only other channels were command-line flags no shipped
+        // build passes. These four keys are that missing channel.
+        ProjectDesc p;
+        check(parseOcproject("OCPROJECT 1\nNAME P\n"
+                             "RENDER.EXPOSURE 2.5\nRENDER.BLOOM 0.25\n"
+                             "RENDER.AUTOEXPOSURE 0\nRENDER.TONEMAP 1\n", p, &err),
+              "the four post keys parse");
+        check(std::fabs(p.postExposure - 2.5f) < 1e-6f, "the exposure survives");
+        check(std::fabs(p.postBloom - 0.25f) < 1e-6f, "and the bloom intensity");
+        check(p.postAutoExposure == 0, "auto-exposure OFF is a stated value, not an absence");
+        check(p.postTonemap == 1, "and the tone curve is a selector rather than another knob");
+        check(p.hasRenderSettings(), "and hasRenderSettings grew with them");
+
+        const std::string w = writeOcproject(p, "");
+        ProjectDesc b;
+        check(parseOcproject(w, b, &err), "they write and parse back");
+        check(std::fabs(b.postExposure - 2.5f) < 1e-6f && b.postTonemap == 1, "with the same values");
+        check(b.postAutoExposure == 0,
+              "auto-exposure still off -- PostSettings defaults it ON, so a lost 0 turns itself back on");
+        check(writeOcproject(b, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
+
+        // A BLOOM OF EXACTLY ZERO IS THE WHOLE REASON THE SENTINEL IS NEGATIVE. Zero means "no
+        // bloom", which builds no pyramid and records no pass at all (rhi::PostSettings,
+        // RHI.hpp:151-152), so it is a performance decision as much as a look -- and the "0 means
+        // the manifest never said" rule the integer keys could have used would have made it the one
+        // value this format could not express. Asserted on a manifest whose ONLY render key is that
+        // zero, because that is the case where an unstated-vs-stated mix-up has nothing else to
+        // hide behind.
+        ProjectDesc z;
+        check(parseOcproject("OCPROJECT 1\nNAME Z\nRENDER.BLOOM 0\n", z, &err),
+              "a manifest whose only render key is a zero bloom parses");
+        check(z.postBloom == 0.0f, "the zero is READ as a zero, not as 'unstated'");
+        check(z.hasRenderSettings(), "and RENDER.BLOOM 0 alone counts as stating render settings");
+        const std::string zw = writeOcproject(z, "");
+        check(zw.find("RENDER.BLOOM 0\n") != std::string::npos,
+              "the zero is WRITTEN rather than skipped as if it were the sentinel");
+        ProjectDesc zb;
+        check(parseOcproject(zw, zb, &err), "and parses back");
+        check(zb.postBloom == 0.0f, "still exactly zero after a full round trip");
+        check(writeOcproject(zb, zw) == zw, "byte-stable second write");
+
+        // AND SILENCE STAYS SILENT. An absent key leaves the sentinel and writes no line at all, so
+        // saving a project cannot give it a post chain it never authored -- the same property the
+        // audio mix is checked for below, and the one that keeps every manifest written before
+        // these keys existed meaning exactly what it meant.
+        ProjectDesc none;
+        check(parseOcproject("OCPROJECT 1\nNAME N\n", none, &err), "a manifest with no post keys parses");
+        check(none.postExposure < 0.0f && none.postBloom < 0.0f &&
+              none.postAutoExposure == -1 && none.postTonemap == -1,
+              "every post field sits at its 'not stated' sentinel");
+        check(!none.hasRenderSettings(), "and the manifest states no render settings at all");
+        const std::string nw = writeOcproject(none, "");
+        check(nw.find("RENDER.EXPOSURE") == std::string::npos &&
+              nw.find("RENDER.BLOOM") == std::string::npos &&
+              nw.find("RENDER.AUTOEXPOSURE") == std::string::npos &&
+              nw.find("RENDER.TONEMAP") == std::string::npos,
+              "and writing it back adds no post line -- the compiled defaults stay the answer");
+    }
+    {
         // GRAVITY POINTS DOWN, which is exactly why it needs a presence flag and not appendKey's
         // "negative means unstated" rule. A sentinel here would make the only value anybody would
         // ever write unwritable.
@@ -346,6 +410,14 @@ static void checkOcproject() {
     // duplicating. They are exactly the two newest render settings.
     rs.backend = "vulkan";
     rs.frameBudgetMs = 16.7f;
+    // THE POST KEYS JOIN THE DUPLICATION SWEEP, with bloom at a deliberate ZERO: that is the value
+    // appendKey emits where every other unset key is skipped, so it is the one that would prove a
+    // missing isOwnedKey entry by growing a second copy on every save while still reading back
+    // correctly. A value the writer never emits cannot be caught duplicating itself.
+    rs.postExposure = 2.0f;
+    rs.postBloom = 0.0f;
+    rs.postAutoExposure = 0;
+    rs.postTonemap = 0;
     check(rs.hasRenderSettings(), "a desc stating render settings says so");
 
     const std::string once = writeOcproject(rs, "");
@@ -363,7 +435,9 @@ static void checkOcproject() {
                              "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
                              "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
                              "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES",
-                             "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS"}) {
+                             "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS",
+                             "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE",
+                             "RENDER.TONEMAP"}) {
         check(countKey(thrice, key) == 1,
               std::string("after three saves, ") + key + " appears exactly once");
     }
@@ -375,6 +449,8 @@ static void checkOcproject() {
     check(rb.rtShadowDenoise == 0 && rb.rtShadowRays == 1,
           "alongside the RT keys that predate them");
     check(rb.backend == "vulkan", "and the backend the author chose survives three saves");
+    check(rb.postBloom == 0.0f && rb.postAutoExposure == 0,
+          "and a zero bloom with auto-exposure off survives three saves AS ZEROS, not as 'unstated'");
 
     // THE SYMPTOM A USER ACTUALLY SEES, which counting alone does not describe: a CHANGED value
     // reverting. An unowned duplicate is not merely untidy -- the writer splices its owned block in

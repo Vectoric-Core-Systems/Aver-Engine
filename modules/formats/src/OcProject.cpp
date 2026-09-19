@@ -158,6 +158,19 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
                 out.giExtent = static_cast<f32>(parseF64(t[4]));
                 out.hasGiVolume = true;
             }
+        } else if (equalsCI(key, "RENDER.EXPOSURE")) {
+            // -1.0 ON A MALFORMED VALUE, not parseF64's own 0.0 default, and the difference is not
+            // cosmetic for this pair: zero is a legal authored exposure and a legal authored bloom,
+            // so falling back to 0 would turn "RENDER.BLOOM banana" into a black-and-bloomless frame
+            // the author never asked for. Unreadable and absent mean the same thing here -- leave
+            // rhi::PostSettings' compiled default alone -- which is what -1 says.
+            if (t.size() > 1) out.postExposure = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.BLOOM")) {
+            if (t.size() > 1) out.postBloom = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.AUTOEXPOSURE")) {
+            if (t.size() > 1) out.postAutoExposure = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.TONEMAP")) {
+            if (t.size() > 1) out.postTonemap = parseI32(t[1], -1);
         } else if (equalsCI(key, "WINDOW.TITLE")) {
             out.windowTitle = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "WINDOW.SIZE")) {
@@ -305,6 +318,7 @@ bool isOwnedKey(std::string_view line) {
         // line win. Changing the renderer appeared to work and reverted on reload.
         "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
+        "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE", "RENDER.TONEMAP",
         "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
         "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",
         "IMPORT.MAXTEXTURE",
@@ -385,6 +399,15 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
                       static_cast<double>(d.giCenter[2]), static_cast<double>(d.giExtent));
         owned += b;
     }
+
+    // THE POST CHAIN. appendKey's f32 overload is exactly the right rule for these two: it skips a
+    // NEGATIVE value, which is the sentinel, and emits a zero, which is an author saying "no bloom".
+    // Had the sentinel been 0 instead, this line could not have told the two apart and a project
+    // would have been unable to state the one bloom value anybody deliberately sets.
+    appendKey(owned, "RENDER.EXPOSURE", d.postExposure);
+    appendKey(owned, "RENDER.BLOOM", d.postBloom);
+    appendKey(owned, "RENDER.AUTOEXPOSURE", d.postAutoExposure);
+    appendKey(owned, "RENDER.TONEMAP", d.postTonemap);
 
     // WINDOW.* -- how a shipped game presents itself. TITLE is prose, so it is written directly
     // rather than through appendKey, which is numeric.
