@@ -269,7 +269,7 @@ static void testR2RestirVisibilityRaceThroughTheSingleton() {
 // own comment makes: Settings{}'s defaults already equal ladder(Medium)/ladder(Off) per group (Lane
 // 1's static_asserts, QualityLadder.hpp), so N6's unconditional reset lands on the same values.
 static void testEmptyManifestLeavesSettingsUnchanged() {
-    AVER_INFO("=== ProjectDesc{} (empty manifest) leaves Settings{} completely unchanged ===");
+    AVER_INFO("=== ProjectDesc{{}} (empty manifest) leaves Settings{{}} completely unchanged ===");
     fmt::ProjectDesc empty;
     check(!empty.hasRenderSettings(), "a default-constructed ProjectDesc states no RENDER.* key");
 
