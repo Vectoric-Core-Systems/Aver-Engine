@@ -184,6 +184,13 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "IdeIntegration.hpp"
 #include "RuntimeLaunch.hpp"
 #include "ShellIntegration.hpp"
+// What git says about the open project. A PURE header (its own top comment says why, and
+// tests/editor's RevisionControlTest compiles it with neither this file nor ImGui in sight): it
+// declares the decisions -- what porcelain v2's bytes mean -- and the four I/O entry points that
+// RevisionControl.cpp defines. Everything ImGui and every process spawn in this feature is at the
+// call sites below, which is the same division InputOwnership.hpp and aver/game/SceneSubmission.hpp
+// already impose on their halves.
+#include "RevisionControl.hpp"
 
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"
@@ -332,6 +339,7 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 #include "stb_image_write.h"
 
 #include <algorithm>
+#include <atomic>       // the revision-control workers' done flag; not left to ToolsMenu.hpp's include
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -2658,6 +2666,32 @@ private:
     void buildUI(Engine& e);
 
 #if AVER_WITH_IMGUI
+    // ---- Revision control: the editor-facing half of RevisionControl.hpp --------------------
+    //
+    // NOTHING HERE SPAWNS A PROCESS. revisionControlRefresh() and revisionControlSelect() hand the
+    // question to a worker and return; the rest read only what a finished worker latched. See the
+    // RcStatusQuery block down among the members for why that is structural rather than polite.
+    //
+    // Reaps whatever finished, and starts a refresh when the panel or the Content Browser is on
+    // screen and the latched answer has gone stale. Called once a frame from buildUI.
+    void revisionControlTick();
+    // `force` is the Refresh button: it asks again even when the last answer was "no git here",
+    // which the timer deliberately does not retry.
+    void revisionControlRefresh(bool force);
+    // Starts the history + diff query for one repo-relative path (git's own spelling, straight out
+    // of editor::FileEntry::path -- never a path this editor assembled).
+    void revisionControlSelect(const std::string& repoRelativePath);
+    void buildRevisionControlPanel();
+    // An absolute editor path as git would name it: repo-relative, forward slashes, empty when the
+    // path is outside the repository (or when no repository is known yet).
+    std::string rcKeyFor(const std::string& absolute) const;
+    // What the Content Browser should mark this entry with. False means git had nothing to say
+    // about it, which for a tracked file means it matches HEAD and the index.
+    bool rcMarkFor(const std::string& absolute, bool isDir, editor::FileStatus& out) const;
+    // The badge colour, shared by the gallery, the list and the panel's own file table so one
+    // status cannot read as two different colours in two views of the same repository.
+    static ImU32 rcStatusColour(editor::FileStatus s);
+
     void drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax);
 
     static void logLineStyle(LogLevel l, ImVec4& text, ImVec4& row, bool& filled);
@@ -4289,6 +4323,78 @@ private:
     // which), never because two kinds interpret it the same way: the content browser treats it as a
     // folder path, the console (see drawConsoleTranscriptTab) treats it as text to seed the input box.
     std::string         drawerStartSub_;
+    // ---- Revision control: what git said, latched off the frame thread -----------------------
+    //
+    // THE FRAME NEVER SPAWNS git, AND THAT IS STRUCTURAL. runCaptured (ProcessRun.hpp) waits on its
+    // child with WaitForSingleObject(INFINITE) -- no deadline, by its own comment -- so a single
+    // call from inside a draw would freeze the editor for as long as git takes, and git over a cold
+    // index, a huge tree or a network drive takes as long as it takes. So every query runs on a
+    // worker and the draw code reads only what a FINISHED worker left behind. A missing git, or a
+    // slow one, costs the frame nothing at all.
+    //
+    // THE WORKER IS DETACHED, NOT JOINED, which is the one place this differs from ToolsMenu's
+    // compile thread deliberately. That one is joined because its result MUST be reaped -- the
+    // assembly swap happens there. A status refresh has no such obligation: if the editor is
+    // closing, the answer is worthless, and joining on the way out would make closing the editor
+    // WAIT ON exactly the slow git this shape exists to stay clear of. It is safe because the
+    // worker captures its job by shared_ptr and never `this`: a worker still running when
+    // SandboxApp is gone writes into memory it co-owns and then exits.
+    //
+    // gitAvailable() IS ASKED ONLY FROM THE WORKER. It is a magic static, so the FIRST caller pays
+    // for a `git version` child process -- calling it from a draw to decide whether to grey a
+    // button out would put the one blocking spawn this design forbids into the frame, once, on
+    // whichever frame first opened the panel.
+    struct RcStatusQuery {
+        std::atomic<bool> done{false};
+        std::string dir;                  // the project directory asked about; checked on reap
+        std::string root;                 // git's spelling of the toplevel; empty = not a repository
+        editor::RepoStatus status;
+        std::string why;                  // git could not be asked; EMPTY for "not a repository"
+        bool gitPresent = false;
+    };
+    // One path's history and one side's diff, fetched together: the panel shows both for the row
+    // that was clicked, and two workers for one click would let the two halves disagree about
+    // which file is on screen.
+    struct RcFileQuery {
+        std::atomic<bool> done{false};
+        std::string root;                 // the repository asked; checked on reap
+        std::string path;                 // repo-relative, git's spelling
+        std::vector<editor::LogEntry> log;
+        std::string logWhy;
+        // SPLIT ON THE WORKER, not in the draw. The viewer clips to what is visible, but splitting
+        // a megabyte of diff into lines every frame would be the frame cost this whole mechanism
+        // was built to avoid, just moved from a process spawn to a string walk.
+        std::vector<std::string> diff;
+        std::string diffWhy;
+        bool wantDiff = false;            // false for a file the viewer has nothing to say about
+    };
+    std::shared_ptr<RcStatusQuery> rcStatusJob_;
+    std::shared_ptr<RcFileQuery>   rcFileJob_;
+    bool                showRevisionControl_ = false;   // Window > Revision Control
+    std::string         rcProjectDir_;        // the project the latched answer describes
+    std::string         rcRoot_;              // repository root, git's spelling
+    // rcRoot_ lower-cased with forward slashes and no trailing separator: what rcKeyFor compares
+    // an editor path against. Precomputed at latch time because the Content Browser asks it once
+    // per visible card per frame, and Windows paths differ in case without differing at all.
+    std::string         rcRootKey_;
+    editor::RepoStatus  rcStatus_;
+    std::string         rcWhy_;
+    bool                rcAnswered_ = false;  // a query has completed for rcProjectDir_ at least once
+    bool                rcGitPresent_ = false;
+    f64                 rcRefreshedAt_ = -1.0;  // ImGui::GetTime() of the last LATCH; -1 = never
+    // The badge table: one entry per changed path, sorted by path so both the exact-file lookup and
+    // a folder's prefix range are a binary search rather than a walk of the whole list.
+    std::vector<std::pair<std::string, editor::FileStatus>> rcMarks_;
+    // The row the panel is showing history and a diff for.
+    std::string         rcSelected_;
+    std::vector<editor::LogEntry> rcLog_;
+    std::vector<std::string>      rcDiff_;
+    std::string         rcLogWhy_, rcDiffWhy_;
+    bool                rcSelectedDiffable_ = false;   // a text asset the diff viewer can show
+    // Which of the selected path's two diffs is on screen. A file can have BOTH -- staged as added
+    // and then edited again is one path with two different answers (see FileEntry's own comment) --
+    // so this is a choice the panel has to offer rather than derive.
+    editor::DiffSide    rcDiffSide_ = editor::DiffSide::Worktree;
 #if AVER_MODULE_SCENE
     // Mesh handles, bounds and per-material parts are content_'s (meshFor, boundsFor, partsFor).
     std::unordered_map<u64, std::string>     meshPathById_;   // id -> project-relative path

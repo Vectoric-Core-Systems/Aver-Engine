@@ -1834,6 +1834,22 @@ void SandboxApp::cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clea
     return name;
 }
 
+// THE REVISION-CONTROL CORNER MARK, shared by the gallery and the list so one status cannot be a
+// dot in one view and something else in the other.
+//
+// A DARK BACKING RING, not a bare dot. The mark lands on whatever the card is showing -- a pale
+// rendered thumbnail, a dark empty card, a coloured type plate -- and a flat dot disappears into
+// roughly half of those. The ring gives it an edge against all of them for one extra circle.
+//
+// COLOUR IS NOT THE ONLY CARRIER: a conflict gets a second ring as well as the loudest hue, and
+// every mark has a tooltip naming the status in words (see the call sites). Six statuses told apart
+// by hue alone would be unreadable for a good share of the people using this editor.
+static void rcStatusDot(ImDrawList* dl, ImVec2 c, f32 r, ImU32 col, bool conflicted) {
+    dl->AddCircleFilled(c, r + 1.0f, IM_COL32(14, 15, 18, 200));
+    dl->AddCircleFilled(c, r, col);
+    if (conflicted) dl->AddCircle(c, r + 2.5f, col, 0, ImMax(1.0f, r * 0.35f));
+}
+
 // Draws the gallery view: a wrapped, row-clipped grid of icon tiles.
 void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
     const f32 tile   = cbTileSize_ * dpi_;
@@ -1876,6 +1892,13 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 }
                 ImGui::PopStyleColor(3);
                 const bool hot = ImGui::IsItemHovered();
+                // WHAT GIT SAYS ABOUT THIS ENTRY, read from the latch SandboxShell.cpp's
+                // revisionControlTick() maintains. A lookup in a sorted vector, never a process:
+                // this runs once per visible card per frame, and the one thing it must not do is
+                // ask git anything. Empty answer = git has nothing to say, which for a tracked
+                // file means it matches HEAD and the index.
+                editor::FileStatus rcSt = editor::FileStatus::Unmodified;
+                const bool rcHas = rcMarkFor(e.full, e.isDir, rcSt);
                 // EVERY ENTRY IS DRAGGABLE, folders included. This used to be gated on "placeable
                 // in the viewport", which is the right question for the VIEWPORT and the wrong one
                 // for the browser: a folder could not be dragged at all, and a selection holding
@@ -1898,7 +1921,18 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // A FOLDER TILE ACCEPTS A DROP. Registered right after the Selectable so it binds
                 // to that widget's rect -- the full card -- rather than to whatever is drawn next.
                 if (e.isDir) cbFolderDropTarget(e.full);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
+                if (ImGui::IsItemHovered()) {
+                    // THE STATUS IN WORDS, beside the name. The dot below is a glance; this is the
+                    // answer, and it is what makes the mark usable without telling six colours
+                    // apart. A FOLDER'S mark is a summary of what is under it, so it says so
+                    // rather than reading as a claim about the folder itself.
+                    if (rcHas)
+                        ImGui::SetTooltip("%s\ngit: %s%s", e.name.c_str(),
+                                          e.isDir ? "something under here is " : "",
+                                          editor::statusName(rcSt));
+                    else
+                        ImGui::SetTooltip("%s", e.name.c_str());
+                }
                 cbItemContextMenu(e.full, e.name, e.isDir);
                 // ---- the card ----
                 // Unreal's tile, in three pieces that make it readable at a glance: a panel so the
@@ -1983,6 +2017,32 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 const ImVec4 clip(o.x, o.y + tile, o.x + cellW, o.y + cellH);
                 dl->AddText(nullptr, 0.0f, ImVec2(tx, ty), ImGui::GetColorU32(ImGuiCol_Text),
                             label.c_str(), nullptr, wrap, &clip);
+
+                // ---- the revision-control mark ----
+                //
+                // TOP-LEFT, AND SIZED SO IT CANNOT REACH THE ICON. drawEntryIcon fits its glyph in
+                // a prevH*0.58 box about the preview's centre, so the icon's left edge sits about
+                // 0.21*cellW in from the card. The dot's outer edge is 2 dp + 2r, which stays
+                // short of that at BOTH ends of the zoom slider's 56..168 dp range -- that is what
+                // the 0.075 factor and the 7 dp cap are between them for, and the cap is the half
+                // that binds (above roughly 93 dp a proportional dot would start to grow into the
+                // icon). Drawn LAST so nothing painted afterwards can bury it, the same reason the
+                // card is painted over the Selectable rather than under it.
+                //
+                // THE 3 dp FLOOR IS A GUARD, NOT A SIZE THE SLIDER CAN REACH: cbTileSize_ is also
+                // read straight out of editor.ini (contentBrowser.tileSize), which nothing clamps
+                // to the slider's range, and a dot derived from a stored tile size of 10 would be
+                // one pixel. At every size the slider itself offers, the proportional value wins.
+                //
+                // It does overlap the top-left corner of a RENDERED THUMBNAIL, which is the one
+                // place it cannot be kept clear. That corner is the letterboxed background of a
+                // centred render, not part of the asset.
+                if (rcHas) {
+                    const f32 dotR = ImMin(ImMax(cellW * 0.075f, 3.0f * dpi_), 7.0f * dpi_);
+                    const f32 inset = 2.0f * dpi_ + dotR;
+                    rcStatusDot(dl, ImVec2(o.x + inset, o.y + inset), dotR, rcStatusColour(rcSt),
+                                rcSt == editor::FileStatus::Conflicted);
+                }
                 ImGui::PopID();
             }
         }
@@ -2057,6 +2117,11 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             const DirEntry& e = *shown[i];
             ImGui::PushID(i);
             const ImVec2 o = ImGui::GetCursorScreenPos();
+            // The row's trailing edge, taken BEFORE the widgets move the cursor: the mark is drawn
+            // right-aligned there. See its own comment below for why it is not on the icon.
+            const f32 rowRight = o.x + ImGui::GetContentRegionAvail().x;
+            editor::FileStatus rcSt = editor::FileStatus::Unmodified;
+            const bool rcHas = rcMarkFor(e.full, e.isDir, rcSt);
             ImGui::Dummy(ImVec2(h * 0.78f, h));
             ImGui::SameLine();
             drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module,
@@ -2070,6 +2135,9 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
                     cbOpenEntry(e.full, e.isDir);
                 }
             }
+            if (rcHas && ImGui::IsItemHovered())
+                ImGui::SetTooltip("git: %s%s", e.isDir ? "something under here is " : "",
+                                  editor::statusName(rcSt));
             // ONE PAYLOAD, THE WHOLE SELECTION -- see the gallery's note: folders drag too, and a
             // second SetDragDropPayload would overwrite the first, which is exactly how viewport
             // drops broke. The viewport keeps the placeable files from this payload itself.
@@ -2081,6 +2149,24 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             }
             if (e.isDir) cbFolderDropTarget(e.full);
             cbItemContextMenu(e.full, e.name, e.isDir);
+            // ---- the revision-control mark ----
+            //
+            // RIGHT-ALIGNED IN THE ROW, NOT ON THE ICON, which is the opposite of the gallery's
+            // answer because the row is the opposite shape. A list icon is about one text line
+            // across, so a corner badge would cover a quarter of the picture it is meant to
+            // annotate -- the rule that keeps the gallery's dot clear of the tile icon bites
+            // hardest exactly where the icon is smallest. The row's trailing edge is free space a
+            // list has and a card does not, and there is no gutter to use instead: the leading
+            // Dummy is the icon's own box and the glyph fills it.
+            //
+            // THE TRADE, stated rather than hidden: a name long enough to reach the drawer's right
+            // edge runs under the dot, which is drawn over it. The alternative was reserving a
+            // column's worth of width from every row for a mark most rows do not have.
+            if (rcHas) {
+                const f32 dotR = ImMin(ImMax(h * 0.20f, 3.0f * dpi_), 6.0f * dpi_);
+                rcStatusDot(dl, ImVec2(rowRight - dotR - 2.0f * dpi_, o.y + h * 0.5f), dotR,
+                            rcStatusColour(rcSt), rcSt == editor::FileStatus::Conflicted);
+            }
             ImGui::PopID();
         }
     }

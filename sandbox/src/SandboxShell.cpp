@@ -204,6 +204,608 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
 
 #endif
 
+// ---- Revision control: the editor-facing half ------------------------------------------------
+//
+// THE DIVISION, WHICH IS THE POINT AND NOT A STYLE CHOICE. RevisionControl.hpp decides what git's
+// bytes MEAN and carries a headless unit test for it; RevisionControl.cpp owns every process spawn.
+// This file owns every ImGui call, every log line, and the one thing neither of those can have an
+// opinion about: WHEN to ask. Nothing below parses a byte of git's output, and nothing below starts
+// a process on the frame thread.
+//
+// NOTHING HERE CAN LOSE WORK, AND THAT IS ENFORCED A LAYER DOWN rather than promised here: the only
+// git this editor can run is isReadOnlyGitSubcommand()'s list (RevisionControl.hpp), which has no
+// commit, checkout, restore, reset, clean, stash, revert, push or pull on it. So there is no
+// Discard button, no Revert, no Sync -- not because they were left for later tidiness, but because
+// a button whose verb loses work needs the user to have said yes to THAT SPECIFIC THING first.
+// WHEN THOSE ARRIVE THEY HANG OFF A CONFIRMATION MODAL, and this file already has the shape to copy:
+// drawLaunchRuntimePrompt below. Note what it does -- it names what is at stake ("this level has
+// unsaved changes"), it offers the non-destructive way out first, it STAYS OPEN when the safe path
+// fails rather than proceeding anyway, and the action is reached only through a button the user
+// pressed inside it. A revert or a discard belongs behind exactly that, with its own entry point in
+// RevisionControl.cpp, and NOT by widening the read-only list (see the list's own comment).
+#if AVER_WITH_IMGUI
+namespace {
+
+// Which paths the diff viewer has something to show for.
+//
+// IT LIVES HERE, NOT IN RevisionControl.hpp, on purpose. That header's entire vocabulary is what
+// git said; ".ocworld" is a fact about THIS editor's asset formats, and teaching it to the parser
+// would make RevisionControlTest -- whose claim is that it links Aver.Core and nothing else -- the
+// owner of the editor's format table.
+//
+// EVERYTHING ELSE A PROJECT HOLDS IS A BINARY CONTAINER OR AN IMAGE. .ocmesh, .ocbeam, .ocbt,
+// .ocaudio and the rest are AVR1 files; a unified diff of those is a wall of escaped bytes that
+// tells a reader nothing, which is why the panel says so in words instead of showing an empty pane.
+bool isDiffableAsset(std::string_view path) {
+    const usize dot = path.rfind('.');
+    if (dot == std::string_view::npos) return false;
+    std::string ext(path.substr(dot));
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == ".ocworld" || ext == ".ocmat" || ext == ".ocgraph" || ext == ".cs";
+}
+
+// A path with its separators and case flattened, for comparing an editor path against git's.
+// Windows hands this editor "C:\Users\...\Content" and git prints "C:/Users/.../Content" for the
+// same directory, and either may differ in case from the other without naming a different file.
+std::string flattenedPath(std::string_view s) {
+    std::string out(s);
+    for (char& c : out) {
+        if (c == '\\') c = '/';
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    while (!out.empty() && out.back() == '/') out.pop_back();
+    return out;
+}
+
+// How far back the per-file history goes. A panel, not a history browser: fifty touches is more
+// than anybody scrolls in a docked pane, and `git log` over a whole repository's history is the
+// one read here whose cost grows with the project's age rather than with its size.
+constexpr int kRcLogCount = 50;
+
+// How loudly a status should speak for a FOLDER that contains it. Only the ordering matters.
+int folderRank(editor::FileStatus s) {
+    switch (s) {
+        case editor::FileStatus::Conflicted: return 3;
+        case editor::FileStatus::Untracked:  return 1;
+        case editor::FileStatus::Ignored:    return 0;
+        default:                             return 2;   // any tracked change
+    }
+}
+
+} // namespace
+
+// Reaps whatever a worker finished, and decides whether to ask again. Once a frame, from buildUI.
+void SandboxApp::revisionControlTick() {
+    // THE PROJECT CHANGED UNDER THE LATCH. Everything held here describes a repository that is no
+    // longer open, and badges drawn from it would mark the new project's files with the old
+    // project's changes -- wrong in the one direction that matters, since a mark says "this differs
+    // from what is committed".
+    if (rcProjectDir_ != project_.dir) {
+        rcProjectDir_ = project_.dir;
+        rcRoot_.clear();
+        rcRootKey_.clear();
+        rcStatus_ = editor::RepoStatus{};
+        rcWhy_.clear();
+        rcMarks_.clear();
+        rcAnswered_ = false;
+        rcGitPresent_ = false;
+        rcRefreshedAt_ = -1.0;
+        rcSelected_.clear();
+        rcSelectedDiffable_ = false;
+        rcLog_.clear();
+        rcDiff_.clear();
+        rcLogWhy_.clear();
+        rcDiffWhy_.clear();
+        // The in-flight jobs are DROPPED, not cancelled: a detached worker cannot be recalled, and
+        // its shared_ptr keeps its own result alive until it finishes writing and exits. Releasing
+        // the handle here is what stops the answer for the old project being latched for the new
+        // one -- the reaps below would otherwise take it, since the worker knows nothing about a
+        // project having been closed.
+        rcStatusJob_.reset();
+        rcFileJob_.reset();
+    }
+
+    if (rcStatusJob_ && rcStatusJob_->done.load(std::memory_order_acquire)) {
+        const std::shared_ptr<RcStatusQuery> job = rcStatusJob_;
+        rcStatusJob_.reset();
+        // Stale by a project switch that happened while it ran. Dropped without a word: the user
+        // did nothing wrong and there is nothing to report.
+        if (job->dir == project_.dir) {
+            rcGitPresent_ = job->gitPresent;
+            rcRoot_ = job->root;
+            rcRootKey_ = flattenedPath(job->root);
+            rcStatus_ = job->status;
+            rcWhy_ = job->why;
+            rcAnswered_ = true;
+            rcRefreshedAt_ = ImGui::GetTime();
+
+            // THE BADGE TABLE, built once per answer rather than per card per frame.
+            //
+            // ONE STATUS PER PATH, out of the two git reports. The worktree side wins because it is
+            // what is on disk in front of the user; a path whose only difference is staged (edited,
+            // added, then left alone) shows the staged answer instead, which is the only one it
+            // has. A conflict outranks both -- FileEntry::conflicted() is the state where being
+            // told the wrong thing costs an edit.
+            rcMarks_.clear();
+            rcMarks_.reserve(rcStatus_.files.size());
+            for (const editor::FileEntry& f : rcStatus_.files) {
+                if (f.ignored()) continue;   // not asked for, and not a change if it arrived anyway
+                editor::FileStatus s = f.conflicted()  ? editor::FileStatus::Conflicted
+                                     : f.unstaged != editor::FileStatus::Unmodified ? f.unstaged
+                                                                                    : f.staged;
+                if (s == editor::FileStatus::Unmodified) continue;
+                rcMarks_.emplace_back(f.path, s);
+            }
+            std::sort(rcMarks_.begin(), rcMarks_.end(),
+                      [](const std::pair<std::string, editor::FileStatus>& a,
+                         const std::pair<std::string, editor::FileStatus>& b) {
+                          return a.first < b.first;
+                      });
+        }
+    }
+
+    if (rcFileJob_ && rcFileJob_->done.load(std::memory_order_acquire)) {
+        const std::shared_ptr<RcFileQuery> job = rcFileJob_;
+        rcFileJob_.reset();
+        // Latched only when it is still the row on screen: clicking a second file before the first
+        // answer arrives must not put one file's history above another file's diff.
+        if (job->root == rcRoot_ && job->path == rcSelected_) {
+            rcLog_ = std::move(job->log);
+            rcLogWhy_ = std::move(job->logWhy);
+            rcDiff_ = std::move(job->diff);
+            rcDiffWhy_ = std::move(job->diffWhy);
+        }
+    }
+
+    // ASKED ONLY WHILE SOMETHING IS SHOWING THE ANSWER. A timer that runs whenever the editor is
+    // open would spawn a git process every few seconds for the whole session to keep a panel nobody
+    // has opened up to date.
+    if (!showRevisionControl_ && drawer_ != Drawer::Content) return;
+    // TWO ANSWERS THE TIMER MUST NOT RETRY, both settled facts rather than slow ones: git is not
+    // installed, and this project is not in a repository. Neither changes while the editor watches,
+    // and re-asking every few seconds would be a process spawn per tick forever. The Refresh button
+    // asks again, because the user is the one who knows they just installed git or ran `git init`.
+    if (rcAnswered_ && (!rcGitPresent_ || rcRoot_.empty())) return;
+
+    constexpr f64 kRcAutoRefreshSec = 4.0;
+    const f64 now = ImGui::GetTime();
+    // MEASURED FROM THE LAST LATCH, not from the last start: on a repository where status takes
+    // longer than the interval, starting from the launch time would queue a new refresh the moment
+    // the previous one landed and leave a git running permanently.
+    if (rcRefreshedAt_ < 0.0 || now - rcRefreshedAt_ >= kRcAutoRefreshSec) revisionControlRefresh(false);
+}
+
+// Hands `git status` to a worker. Returns immediately, always.
+void SandboxApp::revisionControlRefresh(bool force) {
+    if (rcStatusJob_) return;            // one in flight answers everyone waiting
+    if (!project_.valid() || project_.dir.empty()) return;
+    if (!force && rcAnswered_ && !rcGitPresent_) return;
+
+    auto job = std::make_shared<RcStatusQuery>();
+    job->dir = project_.dir;
+    // THE ROOT IS RESOLVED ONCE AND THEN REUSED. rev-parse is a second process for an answer that
+    // cannot change while a project stays open, so only the first refresh for a project pays for
+    // it -- and Refresh re-resolves, because that is the button someone presses after `git init`.
+    const std::string knownRoot = (force || rcProjectDir_ != job->dir) ? std::string() : rcRoot_;
+    rcProjectDir_ = job->dir;
+    rcStatusJob_ = job;
+
+    // CAPTURES THE JOB AND ONE STRING BY VALUE, never `this` and never a reference into SandboxApp.
+    // That is what makes detaching safe: nothing this thread touches can be destroyed out from
+    // under it, whatever the editor does next.
+    //
+    // AND IT MUST NOT LOG. AVER_* on a worker reaches logSink, which writes into SandboxApp's own
+    // logLines_ -- a reach back into the editor that the capture rule above exists to forbid. The
+    // calls below reach exactly one AVER_* in RevisionControl.cpp, runGit's refusal, and that one
+    // fires only when a call site asks for a subcommand off the read-only list: a programming
+    // error, not a runtime state, and unreachable from here. Everything else comes back in the
+    // job's `why` and is reported from the frame thread. An AVER_* added to this lambda would
+    // quietly undo the argument.
+    std::thread([job, knownRoot] {
+        job->gitPresent = editor::gitAvailable();
+        if (!job->gitPresent) {
+            job->why = "git was not found -- is it installed and on PATH?";
+        } else {
+            job->root = knownRoot.empty() ? editor::gitRepositoryRoot(job->dir, &job->why) : knownRoot;
+            // An EMPTY root with an empty `why` is the ordinary "this project is not under revision
+            // control" answer, which is not a failure and must not be shown as one.
+            if (!job->root.empty()) job->status = editor::gitStatus(job->root, false, &job->why);
+        }
+        job->done.store(true, std::memory_order_release);
+    }).detach();
+}
+
+// Hands one path's history and diff to a worker. Same rules as the refresh above.
+void SandboxApp::revisionControlSelect(const std::string& repoRelativePath) {
+    rcSelected_ = repoRelativePath;
+    rcLog_.clear();
+    rcDiff_.clear();
+    rcLogWhy_.clear();
+    rcDiffWhy_.clear();
+    rcSelectedDiffable_ = isDiffableAsset(repoRelativePath);
+    if (rcRoot_.empty() || repoRelativePath.empty()) return;
+    // A second click while the first query runs: the old job is released rather than waited on, and
+    // its answer is discarded on reap because the path no longer matches.
+    auto job = std::make_shared<RcFileQuery>();
+    job->root = rcRoot_;
+    job->path = repoRelativePath;
+    job->wantDiff = rcSelectedDiffable_;
+    const editor::DiffSide side = rcDiffSide_;
+    // NO HISTORY TO ASK FOR before the first commit -- git exits non-zero with "does not have any
+    // commits yet", which RevisionControl.cpp would hand back as an error string. RepoStatus says
+    // so outright, so the panel checks instead of reporting a defect that is a normal new repo.
+    const bool haveCommits = !rcStatus_.initialCommit;
+    rcFileJob_ = job;
+
+    std::thread([job, side, haveCommits] {
+        if (haveCommits) job->log = editor::gitLog(job->root, kRcLogCount, job->path, &job->logWhy);
+        if (!job->wantDiff) { job->done.store(true, std::memory_order_release); return; }
+        std::string text = editor::gitDiff(job->root, job->path, side, &job->diffWhy);
+        // Split here, on the worker, for the reason RcFileQuery::diff's own comment gives.
+        usize start = 0;
+        while (start <= text.size()) {
+            usize nl = text.find('\n', start);
+            if (nl == std::string::npos) {
+                if (start < text.size()) job->diff.emplace_back(text.substr(start));
+                break;
+            }
+            usize end = nl;
+            if (end > start && text[end - 1] == '\r') --end;   // a git that writes CRLF
+            job->diff.emplace_back(text.substr(start, end - start));
+            start = nl + 1;
+        }
+        job->done.store(true, std::memory_order_release);
+    }).detach();
+}
+
+// An editor path as git would name it. Empty means "git has nothing to say about this", which
+// covers both "outside the repository" and "no repository known yet".
+std::string SandboxApp::rcKeyFor(const std::string& absolute) const {
+    if (rcRootKey_.empty() || absolute.size() <= rcRootKey_.size()) return {};
+    const std::string flat = flattenedPath(absolute);
+    if (flat.size() <= rcRootKey_.size()) return {};
+    if (flat.compare(0, rcRootKey_.size(), rcRootKey_) != 0) return {};
+    // THE SEPARATOR CHECK IS NOT PEDANTRY: without it a sibling directory whose name merely starts
+    // with the root's -- "MyGame" and "MyGameOld" beside each other -- would be read as living
+    // inside it, and every file under the second would be marked with the first's statuses.
+    if (flat[rcRootKey_.size()] != '/') return {};
+
+    // The ORIGINAL case is kept: git records the case the filesystem gave it, and rcMarks_ holds
+    // git's spelling. Only the comparison above is case-insensitive.
+    std::string key = absolute.substr(rcRootKey_.size() + 1);
+    for (char& c : key) if (c == '\\') c = '/';
+    return key;
+}
+
+// What to mark a Content Browser entry with.
+bool SandboxApp::rcMarkFor(const std::string& absolute, bool isDir, editor::FileStatus& out) const {
+    if (rcMarks_.empty()) return false;
+    const std::string key = rcKeyFor(absolute);
+    if (key.empty()) return false;
+
+    const auto byPath = [](const std::pair<std::string, editor::FileStatus>& e,
+                           const std::string& k) { return e.first < k; };
+    if (!isDir) {
+        const auto it = std::lower_bound(rcMarks_.begin(), rcMarks_.end(), key, byPath);
+        if (it == rcMarks_.end() || it->first != key) return false;
+        out = it->second;
+        return true;
+    }
+
+    // A FOLDER'S MARK IS A SUMMARY, and the panel is where the detail lives. Saying "Modified"
+    // for a folder holding one added and one deleted file is the honest reading of a single
+    // corner dot; picking one of the two children's statuses to show instead would be a specific
+    // claim about a specific file that the folder is not making.
+    //
+    // UNTRACKED ONLY WHEN NOTHING TRACKED CHANGED, so a brand-new folder of imported assets reads
+    // as new rather than as edited. git collapses such a folder to ONE record ending in '/' (the
+    // default --untracked-files=normal, which gitStatus asks for deliberately), and that record is
+    // inside this same prefix range, so it needs no special case.
+    const std::string prefix = key + "/";
+    int best = 0;
+    for (auto it = std::lower_bound(rcMarks_.begin(), rcMarks_.end(), prefix, byPath);
+         it != rcMarks_.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
+        const int rank = folderRank(it->second);
+        if (rank > best) best = rank;
+        if (best == 3) break;   // a conflict is the loudest thing a folder can say; stop looking
+    }
+    if (best == 0) return false;
+    out = best == 3 ? editor::FileStatus::Conflicted
+        : best == 1 ? editor::FileStatus::Untracked
+                    : editor::FileStatus::Modified;
+    return true;
+}
+
+// ONE TABLE FOR EVERY VIEW. The gallery, the list and the panel all read this, so a status cannot
+// be amber in one place and green in another for the same file.
+//
+// COLOUR IS NEVER THE ONLY CARRIER. Every badge has a tooltip carrying statusName(), and the panel
+// prints git's own two letters beside each row -- a reader who cannot separate the amber from the
+// green still gets the answer in words.
+ImU32 SandboxApp::rcStatusColour(editor::FileStatus s) {
+    switch (s) {
+        case editor::FileStatus::Modified:   return IM_COL32(230, 170,  60, 255);
+        case editor::FileStatus::Added:      return IM_COL32( 98, 200, 110, 255);
+        case editor::FileStatus::Deleted:    return IM_COL32(226,  92,  80, 255);
+        case editor::FileStatus::Renamed:    return IM_COL32(120, 170, 240, 255);
+        case editor::FileStatus::Untracked:  return IM_COL32(150, 156, 168, 255);
+        case editor::FileStatus::Conflicted: return IM_COL32(240,  70, 150, 255);
+        case editor::FileStatus::Ignored:    return IM_COL32(110, 114, 122, 255);
+        case editor::FileStatus::Unmodified: break;
+    }
+    return IM_COL32(150, 156, 168, 255);
+}
+
+// Window > Revision Control: what git says about the open project, and nothing that can change it.
+void SandboxApp::buildRevisionControlPanel() {
+    if (!showRevisionControl_) return;
+    ImGui::SetNextWindowSize(ImVec2(680.0f * dpi_, 480.0f * dpi_), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Revision Control", &showRevisionControl_)) { ImGui::End(); return; }
+
+    if (!project_.valid()) {
+        ImGui::TextWrapped("Open a project first. This panel reports on the repository the "
+                           "PROJECT lives in, which is not the same tree as the editor's own.");
+        ImGui::End();
+        return;
+    }
+
+    const bool busy = rcStatusJob_ != nullptr;
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button(ICON_REFRESH " Refresh")) revisionControlRefresh(true);
+    ImGui::EndDisabled();
+    uiReg_.track("revisionControl.refresh");
+    ImGui::SameLine();
+    if (busy) {
+        ImGui::TextDisabled("asking git...");
+    } else if (rcRefreshedAt_ >= 0.0) {
+        ImGui::TextDisabled("as of %.0fs ago", ImGui::GetTime() - rcRefreshedAt_);
+    } else {
+        ImGui::TextDisabled("not asked yet");
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("git runs on a worker thread, never in a frame.\n"
+                          "A slow or missing git costs the editor nothing.");
+    ImGui::Separator();
+
+    // THE THREE "nothing to show" STATES ARE THREE DIFFERENT SENTENCES. Collapsing them into one
+    // empty list is how a panel tells somebody their work is untracked when git simply is not
+    // installed.
+    if (!rcAnswered_) {
+        ImGui::TextWrapped("Waiting for the first answer from git.");
+        ImGui::End();
+        return;
+    }
+    if (!rcGitPresent_) {
+        ImGui::TextWrapped("git was not found. Install it, or put it on PATH, then press Refresh.");
+        if (!rcWhy_.empty()) ImGui::TextDisabled("%s", rcWhy_.c_str());
+        ImGui::End();
+        return;
+    }
+    if (rcRoot_.empty()) {
+        ImGui::TextWrapped("'%s' is not inside a git repository.", project_.name.c_str());
+        ImGui::TextDisabled("That is a normal way to use the editor. Run `git init` in the project "
+                            "folder and press Refresh if you want history for it.");
+        // A REAL FAILURE, when there is one. gitRepositoryRoot leaves this empty for "not a
+        // repository" precisely so the two cannot be shown as the same thing.
+        if (!rcWhy_.empty()) ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcWhy_.c_str());
+        ImGui::End();
+        return;
+    }
+
+    // ---- the branch line ----
+    if (rcStatus_.detached) {
+        // NOT GIVEN AN INVENTED NAME. git says `(detached)` where the branch goes, and a UI that
+        // fills that in tells somebody they are on a branch they are not on.
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), ICON_WARNING " detached HEAD");
+        if (!rcStatus_.headOid.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("at %.10s", rcStatus_.headOid.c_str());
+        }
+    } else {
+        ImGui::Text("%s", rcStatus_.branch.empty() ? "(no branch)" : rcStatus_.branch.c_str());
+    }
+    if (rcStatus_.initialCommit) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(no commits yet)");
+    }
+    if (rcStatus_.hasUpstream) {
+        ImGui::SameLine();
+        // BOTH COUNTS ARE POSITIVE (RepoStatus says so outright: git writes behind as `-3` and the
+        // parser stores 3), so the words carry the direction and nothing here ever renders the
+        // nonsense "-3 behind". Level with the upstream is its own line rather than "0 ahead, 0
+        // behind", which reads like a problem.
+        if (rcStatus_.ahead == 0 && rcStatus_.behind == 0)
+            ImGui::TextDisabled("= %s", rcStatus_.upstream.c_str());
+        else
+            ImGui::TextDisabled("%d ahead, %d behind %s", rcStatus_.ahead, rcStatus_.behind,
+                                rcStatus_.upstream.c_str());
+    } else {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(tracks nothing)");
+    }
+    ImGui::TextDisabled("%s", rcRoot_.c_str());
+    if (rcStatus_.hasConflicts())
+        ImGui::TextColored(ImVec4(0.94f, 0.27f, 0.59f, 1.0f),
+                           ICON_WARNING " This working tree has unresolved conflicts.");
+    ImGui::Separator();
+
+    // ---- the changed files ----
+    const f32 listH = ImGui::GetContentRegionAvail().y * 0.42f;
+    if (rcStatus_.clean()) {
+        ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "Nothing changed. The working tree is clean.");
+    } else if (ImGui::BeginTable("##rcFiles", 3,
+                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                 ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable,
+                                 ImVec2(0.0f, listH))) {
+        ImGui::TableSetupColumn("XY",     ImGuiTableColumnFlags_WidthFixed, 34.0f * dpi_);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 96.0f * dpi_);
+        ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        for (const editor::FileEntry& f : rcStatus_.files) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            // GIT'S OWN TWO LETTERS, VERBATIM, and this is the column that earns FileEntry keeping
+            // them: FileStatus::Conflicted cannot tell "both modified" (UU) from "deleted by us"
+            // (DU), and those are different sentences to put in front of somebody.
+            const char xy[3] = {f.x, f.y, '\0'};
+            ImGui::TextUnformatted(xy);
+
+            ImGui::TableSetColumnIndex(1);
+            const editor::FileStatus shown = f.conflicted() ? editor::FileStatus::Conflicted
+                                           : f.unstaged != editor::FileStatus::Unmodified ? f.unstaged
+                                                                                          : f.staged;
+            ImGui::PushStyleColor(ImGuiCol_Text, rcStatusColour(shown));
+            ImGui::TextUnformatted(editor::statusName(shown));
+            ImGui::PopStyleColor();
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::PushID(f.path.c_str());
+            if (ImGui::Selectable(f.path.c_str(), rcSelected_ == f.path,
+                                  ImGuiSelectableFlags_SpanAllColumns))
+                revisionControlSelect(f.path);
+            ImGui::PopID();
+            // WHERE IT CAME FROM, for a rename or a copy. This is the field porcelain v1 cannot
+            // give safely and the whole reason RevisionControl.hpp asks for v2 with -z.
+            if (!f.oldPath.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled(f.copied ? "(copied from %s, %d%%)" : "(was %s, %d%%)",
+                                    f.oldPath.c_str(), static_cast<int>(f.similarity));
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Separator();
+    if (rcSelected_.empty()) {
+        ImGui::TextDisabled("Pick a file above for its history and its diff.");
+        ImGui::End();
+        return;
+    }
+    ImGui::TextUnformatted(rcSelected_.c_str());
+
+    if (ImGui::BeginTabBar("##rcDetail")) {
+        if (ImGui::BeginTabItem("History")) {
+            if (rcStatus_.initialCommit) {
+                ImGui::TextDisabled("This repository has no commits yet, so nothing has a history.");
+            } else if (rcFileJob_) {
+                ImGui::TextDisabled("asking git...");
+            } else if (!rcLogWhy_.empty()) {
+                ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcLogWhy_.c_str());
+            } else if (rcLog_.empty()) {
+                // A FILE GIT HAS NEVER SEEN, which is the ordinary answer for anything untracked --
+                // not a failure, and not the same thing as a log that could not be read.
+                ImGui::TextDisabled("No commits touch this path yet.");
+            } else if (ImGui::BeginTable("##rcLog", 3,
+                                         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                         ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable)) {
+                ImGui::TableSetupColumn("Commit", ImGuiTableColumnFlags_WidthFixed, 78.0f * dpi_);
+                ImGui::TableSetupColumn("When",   ImGuiTableColumnFlags_WidthFixed, 96.0f * dpi_);
+                ImGui::TableSetupColumn("Subject", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableHeadersRow();
+                for (const editor::LogEntry& c : rcLog_) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(c.shortOid.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    // THE DATE IS PRINTED AS GIT WROTE IT, clipped to the day. %aI is strict
+                    // ISO-8601 and its first ten characters are the calendar date in every
+                    // timezone git can emit -- reformatting it here would mean parsing a timestamp
+                    // to display it, which is a second place for the format to be got wrong.
+                    ImGui::Text("%.10s", c.date.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(c.subject.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s\n%s <%s>\n%s", c.oid.c_str(), c.author.c_str(),
+                                          c.email.c_str(), c.date.c_str());
+                }
+                ImGui::EndTable();
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Diff")) {
+            if (!rcSelectedDiffable_) {
+                // SAID IN WORDS RATHER THAN SHOWN AS AN EMPTY PANE. An empty diff view and "this
+                // file has no text to diff" look identical and mean opposite things.
+                ImGui::TextWrapped("No diff for this file. The viewer covers the text formats "
+                                   "(.ocworld, .ocmat, .ocgraph, .cs); everything else a project "
+                                   "holds is a binary container or an image, and a unified diff of "
+                                   "those bytes would say nothing.");
+                ImGui::TextDisabled("Its status and its history above still apply.");
+            } else {
+                // BOTH SIDES ARE OFFERED because a path can genuinely have two different diffs at
+                // once -- staged as added and then edited again -- and a viewer showing only one
+                // of them silently hides half of what changed.
+                //
+                // THE TWO RadioButton CALLS ARE BOTH MADE, then their results combined. Writing
+                // this as `if (a() || b())` would let a click on the first one short-circuit the
+                // second out of the frame entirely -- an ImGui widget that is not called is not
+                // drawn, so the Staged button would vanish on the frame Worktree was picked.
+                int side = rcDiffSide_ == editor::DiffSide::Worktree ? 0 : 1;
+                bool sideChanged = ImGui::RadioButton("Worktree", &side, 0);
+                ImGui::SameLine();
+                sideChanged = ImGui::RadioButton("Staged", &side, 1) || sideChanged;
+                if (sideChanged) {
+                    rcDiffSide_ = side == 0 ? editor::DiffSide::Worktree : editor::DiffSide::Index;
+                    revisionControlSelect(rcSelected_);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled(side == 0 ? "(the index vs the file on disk)"
+                                              : "(HEAD vs the index)");
+                if (rcFileJob_) {
+                    ImGui::TextDisabled("asking git...");
+                } else if (!rcDiffWhy_.empty()) {
+                    ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcDiffWhy_.c_str());
+                } else if (rcDiff_.empty()) {
+                    ImGui::TextDisabled("Nothing differs on this side.");
+                } else {
+                    // BeginChild's return value is NOT a gate for EndChild. It says whether the
+                    // child's contents are worth submitting, not whether the child was opened, and
+                    // EndChild must be called either way -- the same rule as the Begin/End above,
+                    // which is why that one calls End on the failing branch too. Written as an
+                    // unconditional pair so an `else if` chain cannot grow a path that skips it.
+                    ImGui::BeginChild("##rcDiffText", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
+                                      ImGuiWindowFlags_HorizontalScrollbar);
+                    // CLIPPED, not drawn whole: a diff is as long as the change is, and a
+                    // thousand-line one would otherwise cost a thousand AddText calls a frame for
+                    // the thirty lines on screen.
+                    ImGuiListClipper clip;
+                    clip.Begin(static_cast<int>(rcDiff_.size()));
+                    while (clip.Step()) {
+                        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                            const std::string& line = rcDiff_[static_cast<usize>(i)];
+                            // The first character is what unified diff means by the line, with one
+                            // trap: "+++"/"---" are the FILE HEADERS, not an added and a removed
+                            // line, and colouring them as such paints the header green and red.
+                            ImVec4 col(0.86f, 0.87f, 0.89f, 1.0f);
+                            if (line.starts_with("+++") || line.starts_with("---"))
+                                col = ImVec4(0.62f, 0.64f, 0.68f, 1.0f);
+                            else if (line.starts_with("@@"))
+                                col = ImVec4(0.47f, 0.67f, 0.94f, 1.0f);
+                            else if (!line.empty() && line[0] == '+')
+                                col = ImVec4(0.38f, 0.78f, 0.43f, 1.0f);
+                            else if (!line.empty() && line[0] == '-')
+                                col = ImVec4(0.89f, 0.36f, 0.31f, 1.0f);
+                            else if (line.starts_with("diff ") || line.starts_with("index "))
+                                col = ImVec4(0.62f, 0.64f, 0.68f, 1.0f);
+                            ImGui::TextColored(col, "%s", line.c_str());
+                        }
+                    }
+                    clip.End();
+                    ImGui::EndChild();
+                }
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+}
+#endif  // AVER_WITH_IMGUI -- the whole revision-control UI half
+
 // True when the HUD preview may draw: a tab published a rect and no session is playing.
 bool SandboxApp::hudPreviewActive() const {
 #if AVER_MODULE_SCRIPTING && AVER_MODULE_FRAMEWORK
@@ -908,6 +1510,11 @@ void SandboxApp::buildUI(Engine& e) {
         return;
     }
 
+    // BEFORE ANYTHING DRAWS, so the Content Browser's badges and the panel read the same latch on
+    // the same frame rather than one of them trailing the other by one. It reaps finished workers
+    // and may start one; it never waits on git, and never spawns a process itself.
+    revisionControlTick();
+
     // Drawer shortcuts: Ctrl+Space toggles the Content Browser, ` toggles the Console, Escape
     // closes an open drawer. All three gate on the SAME !WantTextInput guard, so ` cannot OPEN the
     // console while another text field has focus, and once the console's own input line has
@@ -1135,6 +1742,16 @@ void SandboxApp::buildUI(Engine& e) {
             }
             ImGui::Separator();
 #endif
+            // OUTSIDE the AVER_MODULE_SCENE block above, unlike the GPU Profiler and References
+            // items: what git says about the project's files has nothing to do with whether this
+            // build has an ECS compiled in.
+            ImGui::MenuItem("Revision Control", nullptr, &showRevisionControl_);
+            uiReg_.track("window.revisionControl");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
+                                  "each file's history and diff. It READS the repository and cannot\n"
+                                  "alter one -- there is no commit, revert or push here.");
+            ImGui::Separator();
             ImGui::BeginDisabled(gameUi_ == nullptr);
             if (ImGui::MenuItem("Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
             uiReg_.track("window.gameUiDemo");
@@ -1521,6 +2138,7 @@ void SandboxApp::buildUI(Engine& e) {
     buildWorldSettings();
     buildProfilerPanel(e);
     buildReferencesPanel();
+    buildRevisionControlPanel();
 #if AVER_MODULE_SCENE
 #if AVER_WITH_IMGUI
     buildChunkStreamingPanel();
