@@ -533,3 +533,24 @@ add_executable(SceneSubmissionTest src/SceneSubmissionTest.cpp)
 target_include_directories(SceneSubmissionTest PRIVATE ${CMAKE_SOURCE_DIR}/Runtime/include)
 target_link_libraries(SceneSubmissionTest PRIVATE Aver.Core)
 set_target_properties(SceneSubmissionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RevisionControlTest -- the git status parser in sandbox/src/RevisionControl.hpp: porcelain v2's
+# header records (branch, upstream, ahead/behind, detached, initial commit), its four entry types
+# (ordinary, rename/copy with the origin path that arrives as its own NUL-terminated record,
+# unmerged, untracked/ignored), paths containing spaces, malformed records, the commit-log format,
+# and isReadOnlyGitSubcommand's allow-list.
+#
+# ONE SOURCE FILE AND Aver.Core, which is the entire claim being made. RevisionControl.cpp -- the
+# half that builds command lines and runs git through ProcessRun.hpp -- is deliberately NOT compiled
+# in: it needs <windows.h> and a child process, and it decides nothing. The header it leaves behind
+# reaches for aver/core/Types.hpp and the standard library and nothing else, so the decisions are
+# reachable with no repository on disk, no git installed, no window and no ImGui context. If this
+# target ever needs Aver.Platform, a fixture repository, or AVER_WITH_IMGUI, the parse has stopped
+# being pure and the split has been undone -- the same tripwire InputOwnershipTest sets for itself.
+#
+# THE I/O HALF'S DECLARATIONS ARE IN THAT HEADER TOO and cost this target nothing: a declaration is
+# not a definition, and nothing here calls one, so there is no symbol to resolve at link time.
+add_executable(RevisionControlTest src/RevisionControlTest.cpp)
+target_include_directories(RevisionControlTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(RevisionControlTest PRIVATE Aver.Core)
+set_target_properties(RevisionControlTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

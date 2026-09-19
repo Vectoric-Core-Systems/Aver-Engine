@@ -5,6 +5,7 @@
 
 #include "EditorNotifications.hpp"
 #include "EngineScaffold.hpp"
+#include "ProcessRun.hpp"
 
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
@@ -27,80 +28,9 @@ namespace {
 
 #if defined(_WIN32)
 
-// UTF-8 to UTF-16.
-std::wstring widen(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<usize>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-
-// Child-process bytes to UTF-8, re-reading as the OEM code page when they are not already UTF-8.
-std::string toUtf8(const std::string& raw) {
-    if (raw.empty()) return raw;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, raw.c_str(),
-                            static_cast<int>(raw.size()), nullptr, 0) > 0)
-        return raw;
-
-    const UINT cp = GetOEMCP();
-    const int n = MultiByteToWideChar(cp, 0, raw.c_str(), static_cast<int>(raw.size()), nullptr, 0);
-    if (n <= 0) return raw;
-    std::wstring w(static_cast<usize>(n), L'\0');
-    MultiByteToWideChar(cp, 0, raw.c_str(), static_cast<int>(raw.size()), w.data(), n);
-    const int m = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), n, nullptr, 0, nullptr, nullptr);
-    if (m <= 0) return raw;
-    std::string out(static_cast<usize>(m), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), n, out.data(), m, nullptr, nullptr);
-    return out;
-}
-
-// Runs a command line to completion, capturing stdout and stderr down one pipe into `out`.
-bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::string& out, int& exitCode) {
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = TRUE;
-
-    HANDLE rd = nullptr, wr = nullptr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                             OPEN_EXISTING, 0, nullptr);
-    if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
-
-    STARTUPINFOW si{};
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = wr;
-    si.hStdError = wr;
-    si.hStdInput = nul;
-
-    PROCESS_INFORMATION pi{};
-    std::wstring mutableCmd = cmdline;   // CreateProcessW may write into its command line
-    const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
-                                   CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(),
-                                   &si, &pi);
-    CloseHandle(wr);
-    if (nul) CloseHandle(nul);
-    if (!ok) { CloseHandle(rd); return false; }
-
-    std::string raw;
-    char buf[4096];
-    DWORD got = 0;
-    while (ReadFile(rd, buf, sizeof buf, &got, nullptr) && got > 0) raw.append(buf, got);
-    CloseHandle(rd);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 0;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    out = toUtf8(raw);
-    exitCode = static_cast<int>(code);
-    return true;
-}
+// widen(), toUtf8() and runCaptured() USED TO BE DEFINED HERE. They moved to ProcessRun.hpp, in
+// this same namespace, when RevisionControl.cpp acquired the same need: three pipe hazards nobody
+// gets right twice in a row is not a thing to keep a second copy of. Nothing about them changed.
 
 // True if an executable is on PATH.
 bool findOnPath(const wchar_t* exe) {
@@ -118,7 +48,7 @@ bool shellOpen(const std::string& path) {
 
 #else // !_WIN32
 
-bool runCaptured(const std::wstring&, const std::wstring&, std::string&, int&) { return false; }
+// runCaptured's own non-Windows stub went with it to ProcessRun.hpp.
 bool findOnPath(const wchar_t*) { return false; }
 bool shellOpen(const std::string&) { return false; }
 

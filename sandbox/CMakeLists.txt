@@ -44,6 +44,10 @@ add_executable(Sandbox WIN32
   src/IdeIntegration.cpp
   src/RuntimeLaunch.cpp
   src/ShellIntegration.cpp
+  # The I/O half of git revision control. Its PURE half (src/RevisionControl.hpp) is header-only and
+  # is compiled by tests/editor's RevisionControlTest instead, with neither this target nor a
+  # repository on disk -- see that test's own registration for why the split is worth the two files.
+  src/RevisionControl.cpp
   src/NavBakeCommand.cpp
   src/ToolsMenu.cpp
   src/GraphEditorGeometry.cpp
