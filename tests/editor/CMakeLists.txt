@@ -510,7 +510,7 @@ target_link_libraries(AverSrChoiceTest PRIVATE Aver.Core)
 set_target_properties(AverSrChoiceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # SceneSubmissionTest -- the white-panel investigation's F1 decisions, all of
-# sandbox/src/SceneSubmission.hpp: planEntityDraws' part-split rule (the single copy of
+# Runtime/include/aver/game/SceneSubmission.hpp: planEntityDraws' part-split rule (the single copy of
 # SandboxApp.cpp's former 6360-6365 plus 8297-8299), resolveSurfaceLook's authored/dead-handle/
 # look/fallback chain (the single copy of 5584-5591, 5897-5903 and 8313-8324), chooseRoute's
 # raster/direct/showCulled-tint decision, deliver()'s route-independent draw content (mirroring
@@ -520,7 +520,16 @@ set_target_properties(AverSrChoiceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMA
 # cull verdict must never change WHAT an entity delivers (only WHO delivers it) could be pinned
 # without a window, a device, a project file, or a scene -- SandboxApp.cpp keeps every ImGui call,
 # every pbr:: and rhi:: lookup, and every AVER_WARN; only the decisions moved here.
+#
+# THE HEADER MOVED INTO THE LIBRARY, THIS TEST DID NOT. Runtime/include is on the include path by
+# hand rather than by linking Aver.Runtime.Game.Core, and Aver.Core stays the only link, because that
+# is the whole claim: the header reaches for aver/core/Types.hpp and nothing else, so pinning it
+# needs no device, no RHI and no ImGui. It also stays in tests/editor/ rather than moving to
+# tests/game/, which is added only `if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.Framework)` --
+# a test that links Aver.Core alone would there vanish silently from any tree built with the
+# framework off, which is exactly the tree where a header this pure is most worth still having
+# pinned.
 add_executable(SceneSubmissionTest src/SceneSubmissionTest.cpp)
-target_include_directories(SceneSubmissionTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_include_directories(SceneSubmissionTest PRIVATE ${CMAKE_SOURCE_DIR}/Runtime/include)
 target_link_libraries(SceneSubmissionTest PRIVATE Aver.Core)
 set_target_properties(SceneSubmissionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

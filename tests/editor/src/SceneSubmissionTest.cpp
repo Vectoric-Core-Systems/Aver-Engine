@@ -1,20 +1,26 @@
-// SceneSubmissionTest -- the white-panel fix's F1 decisions, all of SceneSubmission.hpp:
+// SceneSubmissionTest -- the white-panel fix's F1 decisions, all of aver/game/SceneSubmission.hpp:
 // planEntityDraws' part-split rule, resolveSurfaceLook's authored/look/fallback chain, chooseRoute's
 // raster/direct/showCulled-tint decision, deliver()'s route-independent draw content, and F8's
 // occlusionTestShouldRun gate.
 //
 // Header-only and dependency-free, for PtRenderConflictTest.cpp's exact reason (see that file's own
-// top comment, and SceneSubmission.hpp's): no ImGui, no SandboxApp, no pbr::, no rhi::, no
+// top comment, and aver/game/SceneSubmission.hpp's): no ImGui, no SandboxApp, no pbr::, no rhi::, no
 // AVER_WARN, no voxi::Renderer -- every function under test takes plain bools/u32/i32/f32 in and
 // returns plain data out, so the rule that a cull verdict must never change WHAT an entity delivers
 // (only WHO delivers it) is reachable without a window, a device, a project file, or a scene. This is
 // COMPILED, not run, by this lane's own build -- see the task's own verification rule.
-#include "SceneSubmission.hpp"
+//
+// IT STAYS IN tests/editor/ although the header it covers now ships in Aver.Runtime.Game.Core, and
+// that is not an oversight: tests/game/ is added only `if(TARGET Aver.Runtime.Game.Core AND TARGET
+// Aver.Framework)`, so a test whose whole point is that it links Aver.Core ALONE would start
+// silently disappearing from every tree configured with the framework off -- the one configuration
+// in which a decision header this pure is most worth still having pinned.
+#include "aver/game/SceneSubmission.hpp"
 
 #include <cstdio>
 
 using namespace aver;
-using namespace aver::editor;
+using namespace aver::game;
 
 namespace {
 

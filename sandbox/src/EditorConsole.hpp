@@ -1144,7 +1144,7 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
 inline bool& consoleOcclusionForceWaitIdleSlot() { static bool v = true; return v; }
 
 // occlusion.showCulled -- THE FALSE-CULL FINDER, added for the white-panel investigation's by-hand
-// verification instrument (see the plan's section 3B). Every entity SceneSubmission.hpp's
+// verification instrument (see the plan's section 3B). Every entity aver/game/SceneSubmission.hpp's
 // chooseRoute() would otherwise route around drawMesh() -- frustum- or occlusion-culled, but NOT
 // owner-hidden, exactly chooseRoute's own debug case -- is instead sent through the ordinary raster
 // route with its colour tinted magenta, so what culling is skipping becomes VISIBLE instead of merely

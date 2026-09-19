@@ -91,17 +91,21 @@
 #include "MaterialResolve.hpp"
 #include "ClusterMaterialShader.hpp"
 // F1 (occlusion-fix-plan.md): the ONE place the "which route delivers this entity's draws" rule
-// lives -- see that header's own top comment. A pure header, like PtRenderConflict.hpp, so
-// aver::editor::SurfaceLook below is a DIFFERENT type from this file's own (unqualified) SurfaceLook
-// a few thousand lines down (24819) -- always write aver::editor::SurfaceLook in full here; SandboxApp
-// is declared in namespace aver, not aver::editor, so the two never collide as types, but an
-// unqualified `SurfaceLook` inside a SandboxApp member function resolves to the nested one every time
-// (class-scope lookup wins over a namespace one), never to this header's.
-#include "SceneSubmission.hpp"
+// lives -- see that header's own top comment. It is reached through Aver.Runtime.Game.Core's public
+// include dir rather than by a sandbox-local path because BOTH hosts run that rule and the shipped
+// game's walk (Runtime/src/GameRender.cpp) used to keep a hand-copied second statement of it; the
+// editor resolves it the same way it resolves aver/game/GameContent.hpp at line 18. A pure header,
+// like PtRenderConflict.hpp, so aver::game::SurfaceLook below is a DIFFERENT type from this file's
+// own (unqualified) SurfaceLook a few thousand lines down (24819) -- always write
+// aver::game::SurfaceLook in full here; SandboxApp is declared in namespace aver, not aver::game, so
+// the two never collide as types, but an unqualified `SurfaceLook` inside a SandboxApp member
+// function resolves to the nested one every time (class-scope lookup wins over a namespace one),
+// never to this header's.
+#include "aver/game/SceneSubmission.hpp"
 // The pick()'s-eye view of a mesh (positions/normals/indices) and its nearest-hit ray/triangle test --
-// see ViewportPick.hpp's own top comment. A second pure header for the same reason SceneSubmission.hpp
-// is one: pick()'s ray/triangle math is otherwise untestable inside a 29,000-line file with no header
-// of its own.
+// see ViewportPick.hpp's own top comment. A second pure header for the same reason
+// aver/game/SceneSubmission.hpp is one: pick()'s ray/triangle math is otherwise untestable inside a
+// 29,000-line file with no header of its own.
 #include "ViewportPick.hpp"
 
 // The material sampler register on the cluster pipeline (materialShaderDefines() gets the same
@@ -1468,12 +1472,6 @@ public:
     void setFocusReload(int frames); // --reload-scripts [N]
     void warnDeadMaterialHandle(i32 mat);
 
-    // Bounds a caller-supplied PlannedDraw buffer -- see planEntityDraws' own "Capacity truncation"
-    // test case (SceneSubmissionTest.cpp T1). No content in PTTest or JungleRuins comes close (the
-    // plan's own MADR/MHDR parse found 3-7 parts per multi-material tree, the deepest split seen);
-    // 64 is a wide margin over that, not a tuned minimum.
-    static constexpr u32 kMaxPlannedDraws = 64;
-
     // F2: THE ONE RESOLVER. Every one of the three copies this closes (the entity loop's own steps,
     // formerly 5862-5935; the deleted submitShadowOnly lambda's, formerly 5546-5605; drawMeshParts'
     // own, formerly 8299-8330 -- drawMeshParts itself is gone too, subsumed by planEntityDraws +
@@ -1481,13 +1479,13 @@ public:
     // surfaceLooks_.find and the MaterialSystem lookup BY HAND, and the third of those had already
     // drifted from the other two -- it never checked liveness, so a dead handle there baked in the
     // bright-white-mirror identity as final (see resolveSurfaceLook's own comment in
-    // SceneSubmission.hpp for why that is one of the worst possible failure appearances).
+    // aver/game/SceneSubmission.hpp for why that is one of the worst possible failure appearances).
     //
     // `mat` is the material TOKEN, already carrying whatever entity- or part-level
     // meshDefaultMaterial/part-slot fallback the caller resolved -- this never re-derives that
     // fallback itself, only what the token resolves to.
     struct ResolvedSurface {
-        aver::editor::SurfaceLook look;
+        aver::game::SurfaceLook look;
         u32 authored = 0;                    // pbr::MaterialLibrary handle, or 0 (built-in look/fallback)
         rhi::BindingSetHandle matSet = 0;
         const void* matConstants = nullptr;   // a reference into MaterialSystem's own storage (5931's contract)
@@ -1496,8 +1494,8 @@ public:
 
     ResolvedSurface resolveSurface(i32 mat);
 
-    void emitEntityDraws(Engine& e, const aver::editor::PlannedDraw* draws, u32 n, const Mat4& wm,
-                        const aver::editor::RouteDecision& route, bool prepassEligibleBase);
+    void emitEntityDraws(Engine& e, const aver::game::PlannedDraw* draws, u32 n, const Mat4& wm,
+                        const aver::game::RouteDecision& route, bool prepassEligibleBase);
 
 #if AVER_MODULE_SCENE
     rhi::MeshHandle posedHandle(scene::Entity ent);
@@ -1639,11 +1637,12 @@ private:
     //
     // drawMeshParts is GONE. F4 (occlusion-fix-plan.md) folded its whole job -- "a mesh that names
     // several materials draws as several meshes, one per slot" -- into planEntityDraws()
-    // (SceneSubmission.hpp) plus emitEntityDraws() above, which both the raster and the direct route
-    // now call the SAME way, so the split can never drift between them the way this function's own
-    // copy of the resolution rule once had (it never checked material-handle liveness, unlike the
-    // entity loop's copy -- see resolveSurface's own comment for the bright-white-mirror failure that
-    // gap could have produced). Its lone call site (formerly 6360-6363) is replaced accordingly.
+    // (aver/game/SceneSubmission.hpp) plus emitEntityDraws() above, which both the raster and the
+    // direct route now call the SAME way, so the split can never drift between them the way this
+    // function's own copy of the resolution rule once had (it never checked material-handle
+    // liveness, unlike the entity loop's copy -- see resolveSurface's own comment for the
+    // bright-white-mirror failure that gap could have produced). Its lone call site (formerly
+    // 6360-6363) is replaced accordingly.
 
     rhi::LineHandle selectionOutlineLines(Engine& e, u64 meshId);
 

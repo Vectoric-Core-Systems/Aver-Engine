@@ -1801,7 +1801,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // 3B (occlusion-fix-plan.md): occlusion.showCulled / occlusion.cullUnderSuppression, read
     // every frame beside debugForceWaitIdle's own reassertion just above, for the same reason --
     // so a console `set` this frame is live for THIS SAME frame's onRender walk
-    // (chooseRoute()/occlusionTestShouldRun(), SceneSubmission.hpp) rather than one frame late.
+    // (chooseRoute()/occlusionTestShouldRun(), aver/game/SceneSubmission.hpp) rather than one frame
+    // late.
     occlusionShowCulled_ = editor::consoleOcclusionShowCulledSlot();
     occlusionCullUnderSuppression_ = editor::consoleOcclusionCullUnderSuppressionSlot();
 #endif

@@ -16,22 +16,41 @@
 // investigation started from (see the plan's Link 5 for the denoiser mechanism; UNCONFIRMED which
 // exact step crosses the radiance ceiling, but F1-F4 remove every candidate at once by construction).
 //
-// A PURE HEADER, DELIBERATELY, for PtRenderConflict.hpp's exact reason (see that file's own top
-// comment, which this one follows line for line): no ImGui types, no SandboxApp state, no pbr::,
-// no rhi::, no AVER_WARN/AVER_INFO, no globals -- plain values in, plain values out. That is what
-// makes every decision below a headless unit test (tests/editor/src/SceneSubmissionTest.cpp) in a
-// codebase where almost nothing about the editor's rendering walk can otherwise be tested at all.
-// Every ImGui call, every pbr::MaterialLibrary/pbr::isTranslucent lookup, every AVER_WARN, and every
-// rhi:: handle resolution stays at the call site in SandboxApp.cpp; only the DECISIONS move here.
+// WHY IT LIVES IN THE LIBRARY, having been written as a sandbox-local header. TWO hosts run this
+// walk -- the editor (sandbox/src/SandboxRender.cpp) and the shipped game
+// (Runtime/src/GameRender.cpp) -- and while this file sat in sandbox/src the second one could not
+// include it, because Aver.Runtime.Game.Core links no sandbox/ header. So it carried a hand-kept
+// COPY instead, and said so in its own comments ("ported, not included"): its own PlannedDraw, its
+// own kMaxPlannedDraws spelled "Matches SandboxApp::kMaxPlannedDraws", its own planEntityDraws, and
+// an authored > look > fallback ladder that re-derived by hand what resolveSurfaceLook decides
+// below. A rule whose entire purpose is to be stated ONCE cannot be stated twice, and the two
+// statements had already drifted: GameRender.cpp's ladder branched on `if (authored)` alone, with
+// no liveness check, so a dead material handle there baked in the bright-white-mirror identity as
+// the surface's FINAL look -- precisely the step-2 fall-through resolveSurfaceLook exists to
+// guarantee (docs/RUNTIME-DEDUP.md records the same gap from the warnDeadMaterialHandle side).
+// Aver.Runtime.Game.Core exposes Runtime/include PUBLICly (cmake/AvModule.cmake:15) and sandbox
+// already links that target, so the editor reaches this header exactly the way it already reaches
+// aver/game/GameContent.hpp, and the copy can go.
+//
+// A PURE HEADER, DELIBERATELY, for sandbox/src/PtRenderConflict.hpp's exact reason (see that file's
+// own top comment, which this one follows line for line): no ImGui types, no SandboxApp state, no
+// pbr::, no rhi::, no AVER_WARN/AVER_INFO, no globals -- plain values in, plain values out, over
+// aver/core/Types.hpp and nothing else. That is what makes every decision below a headless unit test
+// (tests/editor/src/SceneSubmissionTest.cpp, which links Aver.Core alone) in a codebase where almost
+// nothing about either host's rendering walk can otherwise be tested at all. Purity is not a
+// leftover of the old location either: it is the reason the test needs no device, no RHI and no
+// ImGui, so it survives the move deliberately. Every ImGui call, every pbr::MaterialLibrary/
+// pbr::isTranslucent lookup, every AVER_WARN, and every rhi:: handle resolution stays at the call
+// site in SandboxApp.cpp and GameRender.cpp; only the DECISIONS live here.
 //
 // SurfaceInputs exists so this header never has to know what pbr::MaterialDesc or pbr::isTranslucent
-// even are: the caller (SandboxApp.cpp's own resolver, still in that file) does the two lookups
-// (content_.authoredFor, MaterialLibrary::desc) and hands the three booleans and the looked-up
-// SurfaceLook fields across as plain data.
+// even are: each host's own resolver (SandboxRender.cpp's resolveSurface, GameRender.cpp's walk)
+// does the two lookups (content_.authoredFor, MaterialLibrary::desc) and hands the three booleans
+// and the looked-up SurfaceLook fields across as plain data.
 #pragma once
 #include "aver/core/Types.hpp"
 
-namespace aver::editor {
+namespace aver::game {
 
 // What the caller found out about ONE surface token before asking what it should look like.
 struct SurfaceInputs {
@@ -104,6 +123,17 @@ struct PlannedDraw {
     u32 mesh = 0;
     i32 material = 0;
 };
+
+// Bounds a caller-supplied PlannedDraw buffer -- see planEntityDraws' own "Capacity truncation"
+// test case (SceneSubmissionTest.cpp T1). No content in PTTest or JungleRuins comes close (the
+// plan's own MADR/MHDR parse found 3-7 parts per multi-material tree, the deepest split seen);
+// 64 is a wide margin over that, not a tuned minimum.
+//
+// It sits HERE, next to the struct it bounds, because it too was written down twice: once as
+// SandboxApp::kMaxPlannedDraws and once as a file-static in Runtime/src/GameRender.cpp whose comment
+// could only say "Matches SandboxApp::kMaxPlannedDraws" and hope. A capacity that two hosts must
+// agree on is a decision, and decisions live in this header.
+constexpr u32 kMaxPlannedDraws = 64;
 
 // THE SINGLE COPY of 6360-6365 plus 8297-8299: the "a mesh that names several materials draws as
 // several meshes, one per slot" rule, and its "a substituted handle keeps today's single draw and the
@@ -227,4 +257,4 @@ inline bool occlusionTestShouldRun(bool cullEnabled, bool haveOccluder, bool sce
     return cullEnabled && haveOccluder && (!sceneSuppressed || runUnderSuppression);
 }
 
-} // namespace aver::editor
+} // namespace aver::game

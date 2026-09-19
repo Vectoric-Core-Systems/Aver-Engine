@@ -301,14 +301,14 @@ void SandboxApp::onRender(Engine& e)  {
                     // (prepassEligibleBase's per-draw check) would also have excluded.
                     const i32 pmat = pmr->material ? pmr->material : content_.meshDefaultMaterial(pmr->mesh);
                     const auto* ppit = content_.partsFor(pmr->mesh);
-                    aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
-                    const u32 pdrawCount = aver::editor::planEntityDraws(
+                    aver::game::PlannedDraw pdraws[aver::game::kMaxPlannedDraws];
+                    const u32 pdrawCount = aver::game::planEntityDraws(
                         pmeshBase, pmesh,
                         ppit ? ppit->data() : nullptr,
                         ppit ? static_cast<u32>(ppit->size()) : 0u,
-                        pmat, pdraws, kMaxPlannedDraws);
+                        pmat, pdraws, aver::game::kMaxPlannedDraws);
                     for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
-                        const aver::editor::PlannedDraw& pd = pdraws[pdi];
+                        const aver::game::PlannedDraw& pd = pdraws[pdi];
                         if (!pd.mesh) continue;
                         const ResolvedSurface prs = resolveSurface(pd.material);
                         // TRANSLUCENT: EXCLUDED, per part now, joining skinned/GPU-cluster/
@@ -444,12 +444,12 @@ void SandboxApp::onRender(Engine& e)  {
         // (ray-driven Voxi, Path Tracing, the GI debug raymarch) has claimed the frame and is
         // painting the scene itself, in which case culling saves almost no work -- every culled
         // entity still has to be submitted for primary rays (see occlusionTestShouldRun's own
-        // comment, SceneSubmission.hpp, for the full accounting) -- so it idles unless
+        // comment, aver/game/SceneSubmission.hpp, for the full accounting) -- so it idles unless
         // occlusion.cullUnderSuppression overrides it back on. THE WALK RUNS IN onRender AFTER
         // beginFrame (Engine.cpp's own onUpdate/beginFrame/onRender order), so sceneSuppressed()
         // here is THIS frame's own election result, not a stale one from before the ray-driven
         // pass ran.
-        const bool occlusionRuns = aver::editor::occlusionTestShouldRun(
+        const bool occlusionRuns = aver::game::occlusionTestShouldRun(
             occlusionCullEnabled_, occluder_ != nullptr, e.device()->sceneSuppressed(),
             occlusionCullUnderSuppression_);
         // ONCE PER TRANSITION, not every idle frame -- ray-driven primary visibility is this
@@ -698,8 +698,8 @@ void SandboxApp::onRender(Engine& e)  {
         // visible route uses, from the unified direct-route branch further down this walk. The
         // lambda that used to live here (submitShadowOnly) is gone: it read a different material
         // (mesh-slot-0's, not each part's own), dropped multi-part splits entirely, and had DRIFTED
-        // on the translucency test from the visible path's copy -- see SceneSubmission.hpp's own
-        // top comment for the full history this closes.
+        // on the translucency test from the visible path's copy -- see
+        // aver/game/SceneSubmission.hpp's own top comment for the full history this closes.
         //
         // BOUNDED BY ANGULAR SIZE -- the difference between free and unaffordable: submitting EVERY
         // culled entity was measured at +64ms/frame in ElectricDreams (5,884 of 6,617 entities
@@ -871,11 +871,11 @@ void SandboxApp::onRender(Engine& e)  {
                         if (d < 0.0f) outside = true;
                     }
                     // F4 (occlusion-fix-plan.md): STORE the verdict rather than acting on it here.
-                    // chooseRoute() (SceneSubmission.hpp), a few lines down once the occlusion
-                    // verdict is known too, is the ONE place that decides what happens next -- a
-                    // frustum-culled entity and an occlusion-culled one are now handled by the
-                    // exact same code from there on. This used to `continue` right here, through
-                    // the deleted submitShadowOnly lambda.
+                    // chooseRoute() (aver/game/SceneSubmission.hpp), a few lines down once the
+                    // occlusion verdict is known too, is the ONE place that decides what happens
+                    // next -- a frustum-culled entity and an occlusion-culled one are now handled
+                    // by the exact same code from there on. This used to `continue` right here,
+                    // through the deleted submitShadowOnly lambda.
                     frustumCulled = outside;
                 }
             }
@@ -898,11 +898,12 @@ void SandboxApp::onRender(Engine& e)  {
             occlusionCulled = occlusionRuns && oi >= occlusionPass1Count && haveWorldBox &&
                 !occlusionWasVisible(ent);
 #endif
-            // F4: THE ONE PLACE that decides who delivers this entity -- see SceneSubmission.hpp's
-            // own top comment for the rule (culling may change WHO delivers the draws, never WHAT
-            // is in them). showCulled sends an otherwise-culled, non-owner-hidden entity through
-            // the raster route too, tinted, for the by-hand false-cull finder (section 3B).
-            const aver::editor::RouteDecision route = aver::editor::chooseRoute(
+            // F4: THE ONE PLACE that decides who delivers this entity -- see
+            // aver/game/SceneSubmission.hpp's own top comment for the rule (culling may change WHO
+            // delivers the draws, never WHAT is in them). showCulled sends an otherwise-culled,
+            // non-owner-hidden entity through the raster route too, tinted, for the by-hand
+            // false-cull finder (section 3B).
+            const aver::game::RouteDecision route = aver::game::chooseRoute(
                 frustumCulled, occlusionCulled, ownerHiddenHere, occlusionShowCulled_);
 
             if (!route.raster) {
@@ -911,10 +912,11 @@ void SandboxApp::onRender(Engine& e)  {
                 // Still submitted to Voxi so shadows, GI voxelisation and the RT TLAS never depend
                 // on what the camera itself can see -- see this walk's own "A CASTER THE CAMERA
                 // CANNOT SEE STILL CASTS A SHADOW" comment above for the full history, and
-                // SceneSubmission.hpp's deliver() for the exact translucent/hiddenFromOwner
-                // formula emitEntityDraws() applies below (raster: hiddenFromOwner always false;
-                // direct: route.hiddenFromOwner, which chooseRoute already set to ownerHiddenHere
-                // on EVERY route, including frustum-culled-AND-owner-hidden -- the 0d3bcf1 fix).
+                // aver/game/SceneSubmission.hpp's deliver() for the exact
+                // translucent/hiddenFromOwner formula emitEntityDraws() applies below (raster:
+                // hiddenFromOwner always false; direct: route.hiddenFromOwner, which chooseRoute
+                // already set to ownerHiddenHere on EVERY route, including
+                // frustum-culled-AND-owner-hidden -- the 0d3bcf1 fix).
                 // KNOWN RESIDUAL, STATED RATHER THAN FIXED (occlusion-fix-plan.md F4): this route
                 // never runs LOD/cluster selection, so a posed (skinned/soft-body) entity aside,
                 // it always plans from the BASE mesh and its full part split. A VISIBLE entity
@@ -923,8 +925,9 @@ void SandboxApp::onRender(Engine& e)  {
                 // base parts -- only live with LOD selection or the CLI cluster paths (LODSELECT
                 // is 0 in PTTest, so dormant here). Closing it means Voxi taking source geometry
                 // independently of the raster LOD choice (the TLAS is keyed on d.mesh,
-                // VoxiRenderer.cpp:1136) -- out of scope for this fix; the SceneSubmission.hpp
-                // pure-function tests pin the rule as-is rather than hiding it.
+                // VoxiRenderer.cpp:1136) -- out of scope for this fix; the
+                // aver/game/SceneSubmission.hpp pure-function tests pin the rule as-is rather than
+                // hiding it.
                 const rhi::MeshHandle chosenMesh = posedHandle(ent);
                 const rhi::MeshHandle baseMeshForCull = chosenMesh ? chosenMesh : sceneMeshHandle;
                 const Vec3 cullCentre = haveWorldBox
@@ -957,12 +960,12 @@ void SandboxApp::onRender(Engine& e)  {
                     // inside giDrawsKey every time it crossed the frustum edge.
                     const i32 directMat = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
                     const auto* directParts = content_.partsFor(mr->mesh);
-                    aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
-                    const u32 pdrawCount = aver::editor::planEntityDraws(
+                    aver::game::PlannedDraw pdraws[aver::game::kMaxPlannedDraws];
+                    const u32 pdrawCount = aver::game::planEntityDraws(
                         sceneMeshHandle, baseMeshForCull,
                         directParts ? directParts->data() : nullptr,
                         directParts ? static_cast<u32>(directParts->size()) : 0u,
-                        directMat, pdraws, kMaxPlannedDraws);
+                        directMat, pdraws, aver::game::kMaxPlannedDraws);
                     emitEntityDraws(e, pdraws, pdrawCount, wm, route, /*prepassEligibleBase=*/false);
                     if (frustumCulled || occlusionCulled) {
                         culledDraws += pdrawCount;
@@ -1129,18 +1132,18 @@ void SandboxApp::onRender(Engine& e)  {
                         // new resolution logic.
                         {
                             const auto* clusterParts = content_.partsFor(mr->mesh);
-                            aver::editor::PlannedDraw cdraws[kMaxPlannedDraws];
-                            const u32 cdrawCount = aver::editor::planEntityDraws(
+                            aver::game::PlannedDraw cdraws[aver::game::kMaxPlannedDraws];
+                            const u32 cdrawCount = aver::game::planEntityDraws(
                                 sceneMeshHandle, mesh,
                                 clusterParts ? clusterParts->data() : nullptr,
                                 clusterParts ? static_cast<u32>(clusterParts->size()) : 0u,
-                                mat, cdraws, kMaxPlannedDraws);
+                                mat, cdraws, aver::game::kMaxPlannedDraws);
                             // A DIRECT-ONLY delivery: colour already came from dispatchMeshClusters
                             // just above, so this call exists purely to register the shadow/GI/TLAS
                             // submission drawMesh() would otherwise have made. Never owner-hidden or
                             // tinted -- this whole block only ever runs for a route.raster entity
                             // (the culled branch above already `continue`d before reaching here).
-                            const aver::editor::RouteDecision clusterRoute{false, false, false};
+                            const aver::game::RouteDecision clusterRoute{false, false, false};
                             emitEntityDraws(e, cdraws, cdrawCount, wm, clusterRoute,
                                             /*prepassEligibleBase=*/false);
                         }
@@ -1430,17 +1433,17 @@ void SandboxApp::onRender(Engine& e)  {
             // setDrawBlended(blended) call per part.
             if (!clusterDispatched) {
                 // F4: THE ONE PLACE 6360-6365/8297-8299's old duplication used to live -- see
-                // planEntityDraws' own comment (SceneSubmission.hpp) for the exact rule (a mesh
-                // that names several materials draws as several meshes, one per slot; a
+                // planEntityDraws' own comment (aver/game/SceneSubmission.hpp) for the exact rule
+                // (a mesh that names several materials draws as several meshes, one per slot; a
                 // substituted handle -- LOD or posed -- keeps today's single draw and the entity's
                 // own material, since the split was cut from the UNSUBSTITUTED geometry).
                 const auto* pit = content_.partsFor(mr->mesh);
-                aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
-                const u32 pdrawCount = aver::editor::planEntityDraws(
+                aver::game::PlannedDraw pdraws[aver::game::kMaxPlannedDraws];
+                const u32 pdrawCount = aver::game::planEntityDraws(
                     sceneMeshHandle, mesh,
                     pit ? pit->data() : nullptr,
                     pit ? static_cast<u32>(pit->size()) : 0u,
-                    mat, pdraws, kMaxPlannedDraws);
+                    mat, pdraws, aver::game::kMaxPlannedDraws);
                 emitEntityDraws(e, pdraws, pdrawCount, wm, route, prepassEligibleBase);
             }
             // EVERY SELECTED ENTITY, NOT ONLY THE ANCHOR. This kept one Mat4 and one mesh id,
@@ -2002,7 +2005,7 @@ void SandboxApp::drawUiDemo() {
 
 SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
     ResolvedSurface rs;
-    aver::editor::SurfaceInputs in;
+    aver::game::SurfaceInputs in;
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
     if (const pbr::MaterialHandle authoredHandle = content_.authoredFor(mat)) rs.authored = authoredHandle;
     in.authored = rs.authored != 0;
@@ -2020,7 +2023,7 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
         in.lookRoughness = look->roughness;
     }
 #endif
-    rs.look = aver::editor::resolveSurfaceLook(in);
+    rs.look = aver::game::resolveSurfaceLook(in);
     if (rs.look.warnDeadHandle) warnDeadMaterialHandle(mat);
     if (rs.look.usedFallback && mat != 0) {
         // SAY SO, ONCE PER NAME -- moved verbatim from the entity loop's own copy (formerly
@@ -2046,9 +2049,10 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
 // F3: THE ONE EMITTER. For every planned draw, resolveSurface() once and hand the result to
 // whichever route actually delivers it -- raster's drawMesh() or Voxi's direct submit() -- so
 // both produce the SAME Draw record for the same material (translucent = look.blended on both;
-// hiddenFromOwner = false on raster, route.hiddenFromOwner on direct -- see SceneSubmission.hpp's
-// deliver(), which this hand-writes rather than calls, to keep col/metallic/roughness and the
-// translucent/hiddenFromOwner decision reading from the exact same ResolvedSurface in one place).
+// hiddenFromOwner = false on raster, route.hiddenFromOwner on direct -- see
+// aver/game/SceneSubmission.hpp's deliver(), which this hand-writes rather than calls, to keep
+// col/metallic/roughness and the translucent/hiddenFromOwner decision reading from the exact same
+// ResolvedSurface in one place).
 //
 // prepassEligibleBase is the ENTITY-level half of the depth-prepass eligibility test (formerly
 // 6323-6341's shape, minus the blended check, which F6 made a PER-PART question): with the depth
@@ -2060,11 +2064,11 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
 // walks in lockstep at the new per-part granularity. `(void)` up front because a non-VOXI build
 // never reads it below (the whole prepass feature is VOXI-only) and an unreferenced-parameter
 // warning on a build that never fires it would be a strange place for /W4 to complain.
-void SandboxApp::emitEntityDraws(Engine& e, const aver::editor::PlannedDraw* draws, u32 n, const Mat4& wm,
-                    const aver::editor::RouteDecision& route, bool prepassEligibleBase) {
+void SandboxApp::emitEntityDraws(Engine& e, const aver::game::PlannedDraw* draws, u32 n, const Mat4& wm,
+                    const aver::game::RouteDecision& route, bool prepassEligibleBase) {
     (void)prepassEligibleBase;
     for (u32 i = 0; i < n; ++i) {
-        const aver::editor::PlannedDraw& d = draws[i];
+        const aver::game::PlannedDraw& d = draws[i];
         if (!d.mesh) continue;
         const ResolvedSurface rs = resolveSurface(d.material);
         f32 col[4] = {rs.look.col[0], rs.look.col[1], rs.look.col[2], rs.look.col[3]};

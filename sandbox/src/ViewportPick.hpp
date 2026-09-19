@@ -6,9 +6,11 @@
 // a hit (selection, Ctrl-extend). This header only ever answers "does this ray hit this mesh, and
 // where" -- it does not know what an entity, a component, or a device is.
 //
-// A PURE HEADER, DELIBERATELY, for SceneSubmission.hpp's exact reason (see that file's own top
-// comment): no ImGui types, no SandboxApp state, no rhi::, no fmt::, no AVER_WARN, no globals -- plain
-// values in, a plain bool and a plain f32 out. aver::Vec3 (aver/core/Math.hpp) is the one exception,
+// A PURE HEADER, DELIBERATELY, for aver/game/SceneSubmission.hpp's exact reason (see that file's own
+// top comment; that one has since been promoted out of sandbox/src into Aver.Runtime.Game.Core, but
+// the reasoning it states is why this file is shaped the way it is, and only the path changed): no
+// ImGui types, no SandboxApp state, no rhi::, no fmt::, no AVER_WARN, no globals -- plain values in,
+// a plain bool and a plain f32 out. aver::Vec3 (aver/core/Math.hpp) is the one exception,
 // used because SandboxApp.cpp's own ray already is one and a second, header-local vector type would
 // only add conversions at every call site; Math.hpp is itself header-only inline and pulls in nothing
 // beyond Types.hpp and <cmath>, so it costs this header nothing SandboxApp.cpp was not already paying.
