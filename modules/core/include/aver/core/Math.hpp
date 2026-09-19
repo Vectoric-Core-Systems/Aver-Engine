@@ -219,7 +219,37 @@ struct Mat4 {
         return r;
     }
 
-    // Left-handed look-at view matrix.
+    // Left-handed look-at view matrix, from a DIRECTION rather than a target.
+    //
+    // PREFER THIS WHENEVER THE CALLER ALREADY HAS A DIRECTION, and a camera driven by yaw/pitch
+    // always does. Composing `eye + dir` only to subtract `eye` back off inside lookAtLH is not
+    // free in f32: when the eye is far from the origin and a direction component is small, the
+    // addition ABSORBS it outright. eye.x = -42000 has an f32 ulp of about 0.005, so a dir.x of
+    // 0.0017 -- a look direction a tenth of a degree off vertical -- rounds away to nothing, and
+    // `target - eye` hands back a direction the caller never asked for.
+    //
+    // That is not a rounding nuisance, it is a collapse. Lose both horizontal components and f
+    // becomes exactly (0,0,1), where cross(up, f) is the zero vector, getSafeNormal returns zero,
+    // and s and u come out all-zero -- a view matrix with no basis at all. Measured: an eye at
+    // (-42000, 17000, -900) looking 89.9 degrees up produced exactly that, and it is the reason
+    // CameraFactorTest's cameras 100-103 failed. The window scales with distance from the origin --
+    // about 0.14 degrees of vertical at 420 m out, about 1.4 degrees at 4 km.
+    static Mat4 lookAtDirLH(const Vec3& eye, const Vec3& dir, const Vec3& up) {
+        const Vec3 f = dir.getSafeNormal();
+        const Vec3 s = cross(up, f).getSafeNormal();
+        const Vec3 u = cross(f, s);
+        Mat4 r;
+        r.m[0][0] = s.x; r.m[0][1] = u.x; r.m[0][2] = f.x; r.m[0][3] = 0;
+        r.m[1][0] = s.y; r.m[1][1] = u.y; r.m[1][2] = f.y; r.m[1][3] = 0;
+        r.m[2][0] = s.z; r.m[2][1] = u.z; r.m[2][2] = f.z; r.m[2][3] = 0;
+        r.m[3][0] = -dot(s, eye); r.m[3][1] = -dot(u, eye); r.m[3][2] = -dot(f, eye); r.m[3][3] = 1;
+        return r;
+    }
+
+    // Left-handed look-at view matrix, from a target. Correct for an eye and a target that are
+    // genuinely separate points (a shadow view framing a bounds centre, say). If the caller is
+    // about to write `lookAtLH(p, p + d, up)`, call lookAtDirLH(p, d, up) instead and read that
+    // function's comment for what the round trip through a target costs.
     static Mat4 lookAtLH(const Vec3& eye, const Vec3& target, const Vec3& up) {
         const Vec3 f = (target - eye).getSafeNormal();
         const Vec3 s = cross(up, f).getSafeNormal();

@@ -55,9 +55,9 @@ f32 worstDiff(const f32 a[16], const f32 b[16]) {
     return worst;
 }
 
-// A camera built exactly the way the engine's two call sites do (SandboxApp.cpp, GameApp.cpp):
-// lookAtLH(eye, eye + direction, up) composed with perspectiveLH. `yawDeg`/`pitchDeg` describe the
-// look direction in the engine's own +X-forward, +Z-up, left-handed frame (Math.hpp's own banner
+// A camera built exactly the way the engine's own camera push does (game::pushCamera, the one copy
+// both hosts call): lookAtDirLH(eye, direction, up) composed with perspectiveLH. `yawDeg`/`pitchDeg`
+// describe the look direction in the engine's own +X-forward, +Z-up, left-handed frame (Math.hpp's banner
 // comment): yaw rotates in the XY plane, pitch tilts toward +Z (up).
 struct TestCamera {
     Mat4 view, proj, vp;
@@ -69,7 +69,11 @@ TestCamera buildCamera(Vec3 eye, f32 yawDeg, f32 pitchDeg, f32 fovYDeg, f32 aspe
     const Vec3 dir{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch)};
     TestCamera c;
     c.eye  = eye;
-    c.view = Mat4::lookAtLH(eye, eye + dir, Vec3{0, 0, 1});
+    // lookAtDirLH, matching what pushCamera does. Built as lookAtLH(eye, eye + dir, ...) -- which
+    // is what this test did, and what the engine did -- the far eye below absorbs a near-vertical
+    // dir's horizontal components outright and the view matrix collapses, so four of these cameras
+    // were never the cameras this sweep meant to build. See Mat4::lookAtDirLH's own comment.
+    c.view = Mat4::lookAtDirLH(eye, dir, Vec3{0, 0, 1});
     c.proj = Mat4::perspectiveLH(radians(fovYDeg), aspect, zn, zf);
     c.vp   = c.view * c.proj;
     return c;

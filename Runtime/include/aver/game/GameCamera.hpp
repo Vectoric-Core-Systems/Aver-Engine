@@ -44,7 +44,12 @@ struct CameraMatrices {
 // returns both matrices for the caller's own members. FOV 60 degrees, near/far 2/200000
 // (centimetres).
 inline CameraMatrices pushCamera(rhi::IDevice& device, const Vec3& pos, const Vec3& forward, f32 aspect) {
-    const Mat4 view = Mat4::lookAtLH(pos, pos + forward, Vec3{0, 0, 1});
+    // lookAtDirLH, not lookAtLH(pos, pos + forward, ...): `forward` is already the direction, and
+    // composing a target only for lookAtLH to subtract `pos` back off loses it to f32 absorption
+    // when the camera is far from the origin and looking near-vertically -- far enough out, both
+    // horizontal components round away and the view matrix collapses to no basis at all. See
+    // Mat4::lookAtDirLH's own comment for the measurement.
+    const Mat4 view = Mat4::lookAtDirLH(pos, forward, Vec3{0, 0, 1});
     const Mat4 proj     = Mat4::perspectiveLH(radians(60.0f), aspect, kCameraNearCm, kCameraFarCm);
     const Mat4 viewProj = view * proj;           // row-vector: v * M, so view then proj
     const Mat4 invVP    = viewProj.inverse();
