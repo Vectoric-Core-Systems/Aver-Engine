@@ -3,6 +3,12 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+// game::drawWorld and its hook set: the ONE entity walk both hosts run, which onRender's depth
+// prepass below now calls instead of keeping a second hand-written copy of. Included HERE and not
+// in SandboxApp.hpp on purpose -- no member declaration needs the types (the decide/warn sinks are
+// captureless lambdas local to onRender), and SandboxApp.hpp is included by every sandbox
+// translation unit, so putting it there would rebuild all of them to serve one function.
+#include "aver/game/GameRender.hpp"
 
 namespace aver {
 // Submits the frame: the editor scene, the level world, gizmos, and the overlays.
@@ -189,143 +195,163 @@ void SandboxApp::onRender(Engine& e)  {
             }
         }
 #if AVER_MODULE_VOXI
-        // ---- depth prepass phase: a SEPARATE, EARLIER walk over the SAME entities ----
+        // ---- depth prepass phase: the COLOUR WALK'S OWN FUNCTION, run a second time ----
         // ONE ScopedGpuStat, not one per draw: the GPU stat tree budgets 64 open spans/frame and
         // Electric Dreams submits over a thousand instances -- per-draw markers would blow that
         // AND measure wrong, since a span's time is everything between its two timestamps IN
-        // SUBMISSION ORDER, folding colour time into "depth prepass" if interleaved. One bracket
-        // around a CONTIGUOUS depth-only run is what makes it a real number -- also why the walk
-        // runs twice instead of emitting prepass draws inline in the colour loop.
-        // EXCLUDED: a SKINNED entity (posed vertex buffer is compute-written); the LANDSCAPE (its
-        // own call site); the GPU CLUSTER MESH-SHADER PATH (no depth-only twin). The
-        // CPU-per-cluster path (--lod-per-cluster) is excluded too: its cache (clusterCutCache_) is
-        // rebuilt-or-reused once per frame per entity, and running that decision twice would
-        // duplicate the rebuild or read a cache the colour walk hasn't populated -- not unsafe,
-        // just unneeded for a path this task never enables.
-        // ALSO EXCLUDED (with blended draws): a TRANSLUCENT entity (.ocmat alphaMode BLEND),
-        // checked per-instance in this walk's own material-resolution block (search "TRANSLUCENT:
-        // EXCLUDED"), since it depends on the resolved material, not which LOD/skinning system
-        // claims the geometry.
+        // SUBMISSION ORDER, folding colour time into "depth prepass" if interleaved. The bracket
+        // survives the move because game::drawWorld in DrawWorldPass::DepthPrepass is CONTIGUOUS:
+        // it emits nothing but setDrawBinding and drawMeshDepthPrepass, never takes the direct
+        // route and never touches a counter (GameRender.hpp's DrawWorldPass), so the span still
+        // closes over a depth-only run and the number still means what it meant.
+        //
+        // WHY THIS IS A CALL AND NOT A LOOP. What stood here was a hand-duplicated copy of the
+        // colour walk below -- its own entity iteration, its own planEntityDraws, its own
+        // trifactor::chooseLevelCached -- and that duplication had already cost a real bug: the
+        // world-space box was scoped differently in the two copies, so LOD selection fed the same
+        // function different inputs and could pick a DIFFERENT LEVEL per walk. The prepass wrote
+        // depth for one mesh while colour drew another and every fragment behind the wrong depth
+        // was silently dropped -- fern clumps rendering visibly sparser, 2.81% of pixels differing,
+        // falling to 0.04% (noise) with --no-lod-select. A comment asking two copies to agree only
+        // records that they should; one function called twice cannot disagree with itself.
+        //
+        // EXCLUDED, now ANSWERED rather than restated: a SKINNED entity (posed vertex buffer is
+        // compute-written), the GPU CLUSTER MESH-SHADER PATH (no depth-only twin) and the CPU
+        // per-cluster path (--lod-per-cluster) are all machinery this library does not have, so
+        // they come back through DrawWorldOptions::decide below. The LANDSCAPE is excluded by not
+        // being in this walk at all -- it has its own call site. A TRANSLUCENT planned draw is
+        // excluded INSIDE the library now (GameRender.cpp's depth-only delivery drops a draw whose
+        // resolved look is blended), and that is where it belongs: glass must never write opaque
+        // depth, which is a fact about the material, not about which LOD or skinning system claims
+        // the geometry.
+        //
+        // TWO DEFECTS ARE REPRODUCED HERE ON PURPOSE, so this commit is a refactor and nothing
+        // else -- a behaviour change folded into the same diff could not be judged apart from it.
+        // No DrawWorldOptions::ownerHideRoot is passed, so a possessed first-person pawn's body
+        // writes opaque prepass depth and is then never colour-drawn: a depth hole through the
+        // world at exactly the pixels the body covers. The PlayerStart marker, which the colour
+        // walk skips by identity ("THE PLAYER START IS CHROME"), is likewise prepassed here and
+        // punches the same hole. Both are reachable only with --depth-prepass, which rhi::RHI.hpp
+        // and the D3D12 device both default OFF, so neither can touch an ordinary session. Each
+        // gets its own commit and its own capture.
+        //
+        // ONE THING THIS CALL DOES THAT THE DELETED WALK DID NOT, stated rather than discovered
+        // later: drawWorld refreshes a non-skinned entity's CMeshRenderer aabbMin/aabbMax from
+        // GameContent::boundsFor before it culls, and does it in BOTH passes -- decide() runs after
+        // that write and cannot undo it (EntityDecision::skip's own contract). On every settled
+        // frame this rewrites the identical values the colour walk wrote last frame, so nothing
+        // moves. It differs only on the FIRST frame an asset's bounds exist -- the frame a level
+        // loads, or a streamed mesh arrives -- where the prepass used to cull against last frame's
+        // (or zeroed, hence degenerate, hence "draw it") box while the colour walk culled against
+        // the fresh one. That is the two walks disagreeing for one frame, which is the failure this
+        // commit exists to remove, so it is closed in the direction of agreement, not preserved.
+        //
+        // NO visitOrder EITHER, which is deliberate and not an omission: occlusionOrder_ reorders
+        // the COLOUR walk so that everything seen last frame draws before buildPyramid(), and this
+        // pass has no pyramid to build and no pass-1/pass-2 boundary to sit at. World order is what
+        // the deleted walk used and what drawWorld does with a null order.
         if (e.device()->depthPrepassEnabled()) {
             if (rhi::IRenderContext* pctx = e.device()->renderContext()) {
                 rhi::ScopedGpuStat prepassScope(*pctx, "depth prepass");
-                const u32 pn = w.count();
-                for (u32 pi = 0; pi < pn; ++pi) {
-                    const scene::Entity pent = w.at(pi);
-                    if (w.destroyPending(pent)) continue;
-                    const scene::CMeshRenderer* pmr =
-                        w.component<scene::CMeshRenderer>(pent, scene::kComponentMeshRenderer);
-                    if (!pmr || !(pmr->flags & scene::kMeshRendererVisible) || pmr->mesh == 0) continue;
-                    const rhi::MeshHandle pmeshBase = content_.meshFor(pmr->mesh);
-                    if (!pmeshBase) continue;
-                    // Skinned: excluded (posed, compute-written buffer -- see the block comment).
-                    if (skinnedScene_ && skinnedScene_->drawHandle(pent) != 0) continue;
-#if AVER_MODULE_TRIFACTOR
-                    // GPU cluster mesh-shader path: excluded (see the block comment).
-                    if (lodMeshShaderEnabled_ && lodMeshPipelineReady_ && meshClusterGpu_.count(pmr->mesh)) continue;
-                    // CPU per-cluster path: excluded (see the block comment).
-                    if (lodPerClusterEnabled_ && meshClusterData_.count(pmr->mesh)) continue;
-#endif
-                    const Mat4& pwm = w.worldMatrix(pent);
-                    // The SAME box-cull test the colour walk below runs, mirrored -- must never
-                    // disagree about visibility, or a pixel this walk skips depth for could be
-                    // drawn by the colour walk's prepassed (LessEqual/no-write) pipeline reading
-                    // whatever depth was already there.
-                    // DECLARED OUT HERE, NOT INSIDE THE CULL BLOCK -- that scope was the whole bug:
-                    // the world-space box went out of scope, so LOD selection re-derived a sphere
-                    // from pmr->aabbMin/aabbMax (LOCAL bounds) against the world-space eye, while
-                    // the colour walk did it correctly from wlo/whi -- the two walks fed the SAME
-                    // function different inputs and could pick DIFFERENT LOD levels, so the
-                    // prepass wrote depth for one mesh while colour drew another and every
-                    // fragment behind the wrong depth was silently dropped. Measured as fern
-                    // clumps rendering visibly sparser -- 2.81% of pixels differing, falling to
-                    // 0.04% (noise) with --no-lod-select.
-                    bool poutside = false;
-                    bool pHaveWorldBox = false;
-                    Vec3 plo{1e30f, 1e30f, 1e30f}, phi{-1e30f, -1e30f, -1e30f};
-                    {
-                        const Vec3 lo{pmr->aabbMin[0], pmr->aabbMin[1], pmr->aabbMin[2]};
-                        const Vec3 hi{pmr->aabbMax[0], pmr->aabbMax[1], pmr->aabbMax[2]};
-                        if (hi.x > lo.x && hi.y > lo.y && hi.z > lo.z) {
-                            pHaveWorldBox = true;
-                            for (u32 c = 0; c < 8; ++c) {
-                                const Vec3 cp{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
-                                const Vec3 t = xformPoint(pwm, cp);
-                                plo.x = std::fmin(plo.x, t.x); phi.x = std::fmax(phi.x, t.x);
-                                plo.y = std::fmin(plo.y, t.y); phi.y = std::fmax(phi.y, t.y);
-                                plo.z = std::fmin(plo.z, t.z); phi.z = std::fmax(phi.z, t.z);
-                            }
-                            for (u32 fi = 0; fi < 6 && !poutside; ++fi) {
-                                const f32 d = pl[fi][0] * (pl[fi][0] > 0 ? phi.x : plo.x)
-                                            + pl[fi][1] * (pl[fi][1] > 0 ? phi.y : plo.y)
-                                            + pl[fi][2] * (pl[fi][2] > 0 ? phi.z : plo.z)
-                                            + pl[fi][3];
-                                if (d < 0.0f) poutside = true;
-                            }
-                        }
-                    }
-                    if (poutside) continue;
 
-                    rhi::MeshHandle pmesh = pmeshBase;
+                // CAPTURELESS, so it converts to the plain DrawWorldDecideFn function pointer the
+                // hook set takes (GameRender.hpp states why the sinks are function pointers and not
+                // std::function: this is a per-entity path over thousands of entities a frame). A
+                // lambda written inside a member function is a local class OF that member function
+                // and so reaches SandboxApp's private members through `user`, which is what lets
+                // this commit stay inside one .cpp instead of adding a declaration to SandboxApp.hpp
+                // and rebuilding every translation unit that includes it.
+                auto prepassDecide = [](aver::game::EntityDecision& d, void* user) {
+                    // Its posed vertices live in a compute-written buffer, so the only depth this
+                    // walk could write for it is the REST pose's -- not the one colour draws.
+                    if (d.skinned) { d.skip = true; return; }
 #if AVER_MODULE_TRIFACTOR
-                    // Discrete per-level LOD: replicated safely (pure function). Same ladder
-                    // lookup and chooseLevelCached call the colour walk's own branch makes below.
-                    // GUARDED THE SAME WAY THE COLOUR WALK GUARDS ITS OWN, deliberately, or an
-                    // instance without a usable box takes the ladder here and LOD 0 there -- the same divergence by a different route.
-                    if (lodSelectEnabled_ && pHaveWorldBox) {
-                        if (const auto plit = meshLods_.find(pmr->mesh); plit != meshLods_.end()) {
-                            const MeshLodLadder& ladder = plit->second;
-                            const Vec3 sphereCenter = (plo + phi) * 0.5f;
-                            const f32 sphereRadius = dist(plo, phi) * 0.5f;   // world space, as
-                                                                              // chooseLevelCached
-                                                                              // requires
+                    SandboxApp& self = *static_cast<SandboxApp*>(user);
+                    // dispatchMeshClusters has no depth-only twin to call.
+                    if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ &&
+                        self.meshClusterGpu_.count(d.meshId)) { d.skip = true; return; }
+                    // clusterCutCache_ is rebuilt-or-reused once per frame per entity, and running
+                    // that decision twice would either duplicate the rebuild or read a cache the
+                    // colour walk has not populated yet -- not unsafe, just unneeded for a path
+                    // nothing in this session enables.
+                    if (self.lodPerClusterEnabled_ && self.meshClusterData_.count(d.meshId)) {
+                        d.skip = true; return;
+                    }
+                    // THE CULL HAS ALREADY ANSWERED by the time decide() runs, and a culled entity
+                    // emits no depth at all, so choosing its level would be work for a draw that
+                    // never happens. The deleted walk got this ordering from a `continue` on the
+                    // cull before it reached the ladder; here it is one line, said once.
+                    if (d.frustumCulled) return;
+                    // Discrete per-level LOD, guarded on haveWorldBox exactly the way the colour
+                    // walk guards its own -- an instance without a usable box must take LOD 0 in
+                    // BOTH walks or it is the same divergence by another route. Fed THE BOX THE
+                    // CULL ALREADY USED (EntityDecision's, per its own contract) rather than one
+                    // re-derived here, which is the specific mistake that made the two copies
+                    // choose different levels.
+                    if (self.lodSelectEnabled_ && d.haveWorldBox) {
+                        if (const auto lit = self.meshLods_.find(d.meshId);
+                            lit != self.meshLods_.end()) {
+                            const auto& ladder = lit->second;
+                            const Vec3 sphereCenter = (d.worldBoxMin + d.worldBoxMax) * 0.5f;
+                            const f32 sphereRadius = dist(d.worldBoxMin, d.worldBoxMax) * 0.5f;
                             trifactor::View pview;
-                            pview.eye = eye_;
-                            pview.viewProj = viewProj_;
-                            pview.viewportHeightPx = vpH_;
+                            pview.eye = self.eye_;
+                            pview.viewProj = self.viewProj_;
+                            pview.viewportHeightPx = self.vpH_;
                             pview.verticalFovRadians = radians(60.0f);
                             const u32 plevel = trifactor::chooseLevelCached(
-                                ladder.errorCm, sphereCenter, sphereRadius, lodErrorThresholdPx_, pview);
-                            pmesh = ladder.handles[plevel];
+                                ladder.errorCm, sphereCenter, sphereRadius,
+                                self.lodErrorThresholdPx_, pview);
+                            d.chosenMesh = ladder.handles[plevel];
                         }
                     }
+#else
+                    (void)user;
 #endif
-                    // F6 (occlusion-fix-plan.md): this walk used to read the RAW `pmr->material`
-                    // with no meshDefaultMaterial fallback and no per-part split -- a THIRD copy of
-                    // the material-resolution rule, independently wrong in a way neither the entity
-                    // loop nor (the now-deleted) submitShadowOnly was: a multi-material mesh always
-                    // prepassed as whatever pmr->material happened to be (usually 0, "every plant"),
-                    // never any individual part's own translucency. planEntityDraws() is the SAME
-                    // split the colour walk uses below, so a mesh this walk excludes here (every
-                    // part translucent) is exactly the mesh the colour walk's own `blended` gate
-                    // (prepassEligibleBase's per-draw check) would also have excluded.
-                    const i32 pmat = pmr->material ? pmr->material : content_.meshDefaultMaterial(pmr->mesh);
-                    const auto* ppit = content_.partsFor(pmr->mesh);
-                    aver::game::PlannedDraw pdraws[aver::game::kMaxPlannedDraws];
-                    const u32 pdrawCount = aver::game::planEntityDraws(
-                        pmeshBase, pmesh,
-                        ppit ? ppit->data() : nullptr,
-                        ppit ? static_cast<u32>(ppit->size()) : 0u,
-                        pmat, pdraws, aver::game::kMaxPlannedDraws);
-                    for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
-                        const aver::game::PlannedDraw& pd = pdraws[pdi];
-                        if (!pd.mesh) continue;
-                        const ResolvedSurface prs = resolveSurface(pd.material);
-                        // TRANSLUCENT: EXCLUDED, per part now, joining skinned/GPU-cluster/
-                        // CPU-per-cluster -- but for a DIFFERENT reason: those three are excluded
-                        // because depth is written some OTHER way; glass must not write depth AT
-                        // ALL, EVER (the blended replay in endFrame runs with depth-WRITE off so a
-                        // translucent surface never occludes what's behind it). Pre-writing opaque
-                        // depth for a glass part here would leave that depth unconsumed by the
-                        // colour loop's per-draw prepass gate (which also excludes `blended`) AND
-                        // make every opaque object BEHIND the glass depth-test against a surface
-                        // meant to be see-through, vanishing under it instead of showing through.
-                        if (prs.look.blended) continue;
-                        if (prs.matBytes)
-                            e.device()->setDrawBinding(prs.matSet, prs.matConstants, prs.matBytes);
-                        e.device()->drawMeshDepthPrepass(pd.mesh, &pwm.m[0][0]);
-                    }
-                }
+                };
+
+                // THE EDITOR'S SENTENCE, THROUGH THE EDITOR'S OWN THROTTLES. drawWorld owns the
+                // "once per material token, ever" bookkeeping (GameRender.hpp's SurfaceWarning)
+                // because two hosts keeping two sets is how the counts drift -- but the wording is
+                // the host's, and the library's default says "[Game]" and names no editor
+                // directory. Re-running resolveSurface() is what keeps the line byte-identical to
+                // the one this walk printed before the move: it reaches whichever of
+                // warnDeadMaterialHandle and the missing-.ocmat warning its own ladder decides on,
+                // filling the SAME function-local static sets the colour walk's resolveSurface()
+                // fills, so a token first seen here still warns exactly once for the process rather
+                // than once per walk. `kind` therefore goes unread -- the shared ladder re-derives
+                // it from the same inputs -- and the duplicated resolve costs one lookup per token
+                // per process, because the library's throttle only calls this for a token it has
+                // never seen.
+                auto prepassWarn = [](i32 mat, aver::game::SurfaceWarning kind, void* user) {
+                    (void)kind;
+                    (void)static_cast<SandboxApp*>(user)->resolveSurface(mat);
+                };
+
+                aver::game::DrawWorldOptions popt;
+                popt.pass = aver::game::DrawWorldPass::DepthPrepass;
+                popt.decide = prepassDecide;
+                popt.onSurfaceWarn = prepassWarn;
+                popt.user = this;
+                // NO voxiRenderer AND NO onDirectDraw: the depth pass returns at `!route.raster`
+                // before either sink can be reached, so attaching them would advertise a delivery
+                // that cannot happen. NO onSkipped either -- this walk has never said a word about
+                // an invisible-bit or missing-mesh entity, and the colour walk below still says
+                // both, once each, into sets this call must not reach first.
+                pbr::MaterialSystem* prepassMaterials = nullptr;
+#if AVER_MODULE_PBR
+                // The same MaterialSystem resolveSurface() binds out of, so each part's descriptor
+                // table and constants reach drawMeshDepthPrepass exactly as they did here before.
+                prepassMaterials = &voxiRenderer_.materials();
+#endif
+                // WRITTEN BY NOTHING, and that is the contract rather than an oversight:
+                // DrawWorldPass::DepthPrepass touches no counter and prints no line, because those
+                // three numbers describe a FRAME and this is one half of one. It exists only
+                // because drawWorld takes the reference unconditionally; the editor's own
+                // drawn/culled/owner-hidden are still counted by the colour walk below.
+                aver::game::SceneDrawStats prepassStats;
+                aver::game::drawWorld(*e.device(), viewProj_, content_, prepassStats,
+                                      prepassMaterials, skinnedScene_.get(), popt);
             }
         }
 #endif // AVER_MODULE_VOXI
@@ -1409,10 +1435,16 @@ void SandboxApp::onRender(Engine& e)  {
             // F6/F4: the ENTITY-level half of depth-prepass eligibility. BLENDED IS NO LONGER
             // CHECKED HERE, unlike the shape this replaces: it is now a PER-DRAW question,
             // decided inside emitEntityDraws() from each draw's own resolveSurface() result,
-            // because F6 made the depth-prepass walk itself split into parts and skip translucent
-            // ones individually -- a single entity-level check here would be wrong for a mesh with
-            // both an opaque trunk and a translucent leaf part. Still mirrors the depth-prepass
-            // walk's OTHER exclusions exactly -- skinned, GPU cluster dispatch, CPU per-cluster.
+            // because F6 made the depth prepass itself split into parts and skip translucent ones
+            // individually -- a single entity-level check here would be wrong for a mesh with
+            // both an opaque trunk and a translucent leaf part. THE PREPASS IS game::drawWorld NOW
+            // (the DrawWorldPass::DepthPrepass call at the top of this function), which drops a
+            // blended planned draw itself, so the per-draw half of the pairing is the library's and
+            // this line is only the entity half. The three tests below still restate that call's
+            // prepassDecide exclusions -- skinned, GPU cluster dispatch, CPU per-cluster -- and
+            // still have to: an entity the prepass skipped wrote no depth, so asking the
+            // LessEqual/no-write pipeline for it here would test against whatever depth was
+            // already there.
             bool prepassEligibleBase = false;
 #if AVER_MODULE_VOXI
             {
@@ -2056,12 +2088,13 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
 //
 // prepassEligibleBase is the ENTITY-level half of the depth-prepass eligibility test (formerly
 // 6323-6341's shape, minus the blended check, which F6 made a PER-PART question): with the depth
-// prepass walk now writing one drawMeshDepthPrepass per part and skipping translucent ones
-// individually, a single setNextDrawPrepassed(true) call before a multi-part loop would only
-// cover draw 0 -- the flag is AUTO-CONSUMED by the very next drawMesh(), not sticky (RHI.hpp's own
-// comment on setNextDrawPrepassed) -- silently asking the LessEqual/no-write pipeline for parts
-// the prepass walk never wrote depth for. Deciding it per draw, right here, is what keeps the two
-// walks in lockstep at the new per-part granularity. `(void)` up front because a non-VOXI build
+// prepass -- game::drawWorld in DrawWorldPass::DepthPrepass, called at the top of onRender --
+// writing one drawMeshDepthPrepass per part and skipping translucent ones individually, a single
+// setNextDrawPrepassed(true) call before a multi-part loop would only cover draw 0 -- the flag is
+// AUTO-CONSUMED by the very next drawMesh(), not sticky (RHI.hpp's own comment on
+// setNextDrawPrepassed) -- silently asking the LessEqual/no-write pipeline for parts the prepass
+// never wrote depth for. Deciding it per draw, right here, is what keeps this loop in lockstep
+// with that call at the per-part granularity. `(void)` up front because a non-VOXI build
 // never reads it below (the whole prepass feature is VOXI-only) and an unreferenced-parameter
 // warning on a build that never fires it would be a strange place for /W4 to complain.
 void SandboxApp::emitEntityDraws(Engine& e, const aver::game::PlannedDraw* draws, u32 n, const Mat4& wm,
