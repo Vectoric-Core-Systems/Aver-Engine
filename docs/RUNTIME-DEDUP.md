@@ -685,15 +685,25 @@ struct SkyPushOptions {                       // built once per frame inside pus
 using SkyPushOptionsHook = void(*)(SkyPushOptions&, void* user);
 void setSkyPushOptionsHook(SkyPushOptionsHook fn, void* user);
 
-// GameInput.hpp — widen the single `focused` bool; default-constructed == {focused, false...} == today.
-struct InputPublishPolicy {
-    bool focused = false;
-    bool releasedByUser = false;    // editor's Play mouse-release chord; always false in a shipped game
-    bool uiWantsKeyboard = false;   // ImGui capture; always false with no ImGui
-    bool uiWantsMouse = false;
-    bool mouseCaptured = false;     // OS cursor clipped+hidden this frame (see mouse-capture API below)
-    f32 capturedDx = 0.0f, capturedDy = 0.0f;   // used INSTEAD of in.mouseDX/DY when mouseCaptured
-};
+// GameInput.hpp — widen the single `focused` bool.
+//
+// LANDED 2026-09-20, BUT NOT IN THIS SHAPE. What was proposed here carried the editor's RAW
+// conditions -- releasedByUser, uiWantsKeyboard, uiWantsMouse -- into the library. That is an
+// ImGui-shaped question, and answering it is exactly what sandbox/src/InputOwnership.cpp already
+// does, in a pure header with its own headless test. Passing the raw terms across would have put a
+// second copy of that arbitration inside an ImGui-free bridge, which is the duplication this slice
+// exists to remove. The landed struct carries the RESOLVED answers instead:
+//
+//   struct InputPublishPolicy {
+//       bool focused, keyboardToGame, mouseToGame, gamepadActive, captured;
+//       f32  capturedDx, capturedDy;
+//       bool eaten[AVER_FW_KEY_COUNT];   // slots a host chord is claiming; still published, as releases
+//   };
+//
+// gamepadActive is its own field rather than following the keyboard, for the reason SandboxPlay.cpp
+// already documents: a text field steals a keystroke, never a controller button. `eaten` replaces
+// the proposal's silence about the drawer chords, and an eaten slot is PUBLISHED as a release
+// rather than skipped -- skipping is how a key latches down forever.
 void publishInput(const InputState&, const InputPublishPolicy&, std::string* echo = nullptr);
 
 // GameApp — mouse capture becomes real library code (currently 100% absent from Runtime).

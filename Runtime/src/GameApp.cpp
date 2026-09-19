@@ -2271,11 +2271,28 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // run is not a player" line the capture gate above already draws with cfg_.maxFrames.
     //
     // Losing focus cannot latch a key down: publishInput writes an explicit 0 to every named slot
-    // and every raw VK when its `focused` argument is false, rather than returning early -- see
+    // and every raw VK when its policy's `focused` is false, rather than returning early -- see
     // GameInput.cpp's own comment on that invariant, and InputBridgeTest, which asserts it.
     const bool inputFocused = cfg_.maxFrames > 0 ? (e.window() != nullptr) : foreground;
-    publishInput(input_, inputFocused, mouse_.captured(), mouse_.dx(), mouse_.dy(),
-                 cfg_.inputEcho ? &echoHeld_ : nullptr);
+    InputPublishPolicy inputPolicy;
+    inputPolicy.focused = inputFocused;
+    // ALL THREE DEVICE GATES TAKE THE SAME ANSWER HERE, and that is not laziness -- it is the whole
+    // difference between the two hosts. The editor resolves three separate ownership questions
+    // because it has panels to lose a device to (an ImGui field takes the keyboard, a hovered panel
+    // takes the pointer, and neither takes a controller); a shipped game has nothing to lose them
+    // to, so "is this window in front" answers all three at once. Each one is written out because
+    // the fields default to FALSE: omitting any of these three lines would not leave the device
+    // alone, it would mute it for the whole life of a shipped game.
+    inputPolicy.keyboardToGame = inputFocused;
+    inputPolicy.mouseToGame    = inputFocused;
+    inputPolicy.gamepadActive  = inputFocused;
+    inputPolicy.captured   = mouse_.captured();
+    inputPolicy.capturedDx = mouse_.dx();
+    inputPolicy.capturedDy = mouse_.dy();
+    // inputPolicy.eaten stays all-false: eating a slot is a chord's claim on a key, and the only
+    // chords in the tree belong to the editor's drawer. This host has no UI that can want a key
+    // the game also wants.
+    publishInput(input_, inputPolicy, cfg_.inputEcho ? &echoHeld_ : nullptr);
     if (cfg_.inputEcho && echoHeld_ != echoLast_) {
         AVER_INFO("[Game] input: {}", echoHeld_);
         echoLast_ = echoHeld_;
