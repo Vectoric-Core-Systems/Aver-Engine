@@ -26,7 +26,9 @@ namespace aver::fw {
 // produce a Shift key that never registers. The framework's slot is named LSHIFT but means "shift".
 //
 // MOST OF THE VK RANGE FALLS THROUGH TO -1, and that is a real limitation rather than an oversight:
-// the framework enum has 46 slots and Win32 has 256 codes, so F-keys, the numpad and every OEM key
+// the framework enum has AVER_FW_KEY_COUNT slots -- 50 at this writing, and spelled as the symbol
+// because the last count written out here said 46 and went stale the day the four arrow keys were
+// added -- against Win32's 256 codes, so F-keys, the numpad and every OEM key
 // are simply unreachable by gameplay today. The enum cannot be renumbered to fix it -- the InputKey
 // graph node takes a literal integer, so saved graphs depend on the current numbering -- which is
 // why the raw-VK ABI exists alongside this rather than replacing it.
@@ -49,8 +51,15 @@ inline i32 frameworkKeyFromVk(i32 vk) {
     }
 }
 
-// The framework key a mouse button publishes as. Buttons live at the end of the same enum, which is
-// why InputKey can read a mouse button with no new node -- see GraphNodeDefs' own comment.
+// The framework key a mouse button publishes as, by InputState's 0/1/2 button index. Called by
+// Runtime/src/GameInput.cpp's publishInput, which is the one place in the tree that turns a mouse
+// button into a framework slot -- it spelled the three lines out by hand for a while, beside this
+// table, which is the second-copy-of-one-mapping shape this header's top comment exists to close.
+//
+// Buttons live at the END of the same enum, which is what lets a graph's InputKey node read one
+// with no new node: its `key` pin is a plain int (GraphNodeDefs' InputKey, sandbox/src), and
+// AVER_FW_KEY_MOUSE_LEFT is simply another value of it. That is a fact about the enum's layout
+// rather than anything either side says, so do not move the mouse slots off the tail.
 inline i32 frameworkKeyFromMouseButton(i32 b) {
     switch (b) {
         case 0:  return AVER_FW_KEY_MOUSE_LEFT;

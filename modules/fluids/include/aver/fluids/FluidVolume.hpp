@@ -414,7 +414,9 @@ std::optional<FluidPhysicsMaterial> fluidPhysicsMaterialPreset(std::string_view 
 //
 // THE PRECEDENCE RULE (design brief section 3), enforced HERE, called from FluidScene::spawn AND
 // ONLY FROM THERE -- the one place every fluid request converges regardless of how it was authored:
-// a WATER record via SandboxApp::applyLevelWater's direct construction, a graph's `COMP ... Fluid`
+// a WATER record via game::GameWater::applyLevel's direct construction (Runtime/include/aver/game/
+// GameWater.hpp, shared by both hosts -- it was the editor's own applyLevelWater before the
+// editor/runtime split), a graph's `COMP ... Fluid`
 // line via either of the framework relay's two providers, or any future direct C++ caller of
 // FluidScene::spawn. Nowhere upstream of that one call needs to remember this rule for it to hold.
 //

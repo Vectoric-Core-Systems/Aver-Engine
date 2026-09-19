@@ -54,8 +54,9 @@ extern "C" {
  *    unchanged against this header.
  * 6: added AVER_FW_ACTION_SRC_GAMEPAD_BUTTON / AVER_FW_ACTION_SRC_GAMEPAD_AXIS, so aver_fw_action_bind
  *    can finally bind a named action onto the gamepad ABI minor 5 only shaped -- polling now fills it
- *    (modules/platform's Gamepad.hpp/pollGamepads, published via Runtime/src/GameInput.cpp and
- *    sandbox/src/SandboxPlay.cpp), so a binding actually reads something a player moved. Additive
+ *    (modules/platform's Gamepad.hpp/pollGamepads, published via Runtime/src/GameInput.cpp's
+ *    publishGamepad, which both hosts reach through publishInput), so a binding actually reads
+ *    something a player moved. Additive
  *    only, same reason as every entry above: minor 5's own two sources and every other export are
  *    UNCHANGED, so a host built against it still links and runs unchanged against this header.
  * 7: added the INPUT SCHEME section (aver_fw_input_scheme_load/error/context_name/context_priority/
@@ -479,12 +480,13 @@ AVER_FW_ABI int32_t aver_fw_action_released(int32_t action);
 /* ---- RAW WIN32 VK, ADDITIVE TWIN TO AVER_FW_KEY_* -------------------------------------------------
  *
  * frameworkKeyFromVk (aver/framework/InputKeys.hpp) maps Win32 virtual keys onto the AVER_FW_KEY_*
- * enum above, and that header's own comment says why most of the VK range falls through to -1: "the
- * framework enum has 46 slots and Win32 has 256 codes, so F-keys, the numpad and every OEM key are
- * simply unreachable by gameplay today." The SAME comment gives the reason the enum above cannot
- * just grow to cover them: "The enum cannot be renumbered to fix it -- the InputKey graph node
- * takes a literal integer, so saved graphs depend on the current numbering." A saved .ocgraph's
- * InputKey node stores (say) AVER_FW_KEY_LEFT as whatever plain int that slot currently is; inserting
+ * enum above, and that header's own comment says why most of the VK range falls through to -1: the
+ * framework enum has AVER_FW_KEY_COUNT slots (50) against Win32's 256 codes, "so F-keys, the numpad
+ * and every OEM key are simply unreachable by gameplay today." The SAME comment gives the reason
+ * the enum above cannot just grow to cover them: "The enum cannot be renumbered to fix it -- the
+ * InputKey graph node takes a literal integer, so saved graphs depend on the current numbering."
+ * A saved .ocgraph's InputKey node stores (say)
+ * AVER_FW_KEY_LEFT as whatever plain int that slot currently is; inserting
  * a new named key anywhere but the enum's own tail would silently repoint every saved graph's
  * InputKey node at the WRONG key, with no error at load.
  *
@@ -519,10 +521,13 @@ AVER_FW_ABI int32_t aver_fw_input_vk_released(int32_t vk);
  * ABI.
  *
  * POLLING NOW EXISTS: modules/platform's Gamepad.hpp (pollGamepads) opens the device, and
- * Runtime/src/GameInput.cpp and sandbox/src/SandboxPlay.cpp publish what it reads through
- * aver_fw_input_set_gamepad_button/axis below, once a frame, the same as they already publish keys
- * and mouse state. This section was shipped SHAPE ONLY, with deliberately no polling behind it, back
- * when minor 5 added it (this header's own changelog above) -- minor 6 is this layer's first real
+ * Runtime/src/GameInput.cpp's publishGamepad -- the ONE place in the tree that talks to this
+ * section -- publishes what it reads through aver_fw_input_set_gamepad_button/axis below, once a
+ * frame, the same as it already publishes keys and mouse state. Both hosts reach it there: the
+ * editor calls game::publishInput, which calls publishGamepad from its policy, and sandbox/ makes
+ * no aver_fw_input_set_gamepad_* call of its own. This section was shipped SHAPE ONLY, with
+ * deliberately no polling behind it, back when minor 5 added it (this header's own changelog
+ * above) -- minor 6 is this layer's first real
  * consumer: aver_fw_action_bind's own AVER_FW_ACTION_SRC_GAMEPAD_BUTTON/AXIS (NAMED ACTIONS section
  * above) read pad 0's state back out through this section, exactly as a KEY-sourced binding reads
  * aver_fw_input_key's own state.
@@ -599,9 +604,9 @@ AVER_FW_ABI void aver_fw_clear_sky_clouds(void);
  * composition root links both). Same shape as SAVE/LOAD and ANIMATION CURVES above: a host
  * installs a provider and this forwards.
  *
- * WHY THIS EXISTS: a level's WATER record (SandboxApp::applyLevelWater) and a graph's
- * `COMP <id> Fluid ...` component (Aver.Graph's GraphComponentTree.ApplyKind, "fluid" case, via
- * Aver.Framework's Game.SpawnFluidVolume) both need to hand a fluids::FluidVolumeDesc to
+ * WHY THIS EXISTS: a level's WATER record (game::GameWater::applyLevel, which both hosts run) and
+ * a graph's `COMP <id> Fluid ...` component (Aver.Graph's GraphComponentTree.ApplyKind, "fluid"
+ * case, via Aver.Framework's Game.SpawnFluidVolume) both need to hand a fluids::FluidVolumeDesc to
  * fluids::FluidScene::spawn. This is the one seam a graph component or a plain C# script can
  * cross to ask for that, without either of them linking Aver.Fluids or Aver.Physics directly.
  * `subdivisions` is deliberately NOT a parameter here -- nobody asked for authorable mesh
@@ -609,11 +614,11 @@ AVER_FW_ABI void aver_fw_clear_sky_clouds(void);
  * struct's own default subdivision.
  *
  * QUEUED, NOT SYNCHRONOUS. The return value says a provider accepted the request, not that a
- * volume now simulates. applyLevelWater's own latch hit this exact problem first: FluidScene is
+ * volume now simulates. GameWater::applyLevel's own latch hit this exact problem first: FluidScene is
  * not ready() until after render features come up, and this relay can be reached from points
  * that run before that (an actor bound while a level loads, a script's own OnBeginPlay) just as
  * easily as from ones that run after. A provider is expected to queue the request and drain it
- * at the same frame-safe point applyLevelWater's own request is drained, not spawn from inside
+ * at the same frame-safe point GameWater::applyLevel's own request is drained, not spawn from inside
  * the callback -- whether it actually spawned is reported by the host's own log, not by this
  * call returning.
  *

@@ -88,9 +88,11 @@ inline constexpr u32 kMeshRendererVisible = 0x1;
 // change about EnsureMeshRenderer/SetVisible's explicit `flags = 1` seed for that to stay true; this
 // bit simply never needs seeding.
 //
-// OBEYED BY THE SCENE WALK, NOT BY WHETHER THE MESH DRAWS AT ALL -- see SandboxApp.cpp's own
-// scene-entity pass (the owner-hide check beside its frustum/occlusion culls) and its submitShadowOnly
-// helper, which is also what a culled-but-still-shadow-casting entity already goes through. A mesh
+// OBEYED BY THE SCENE WALK, NOT BY WHETHER THE MESH DRAWS AT ALL -- see game::drawWorld
+// (Runtime/src/GameRender.cpp), the one scene-entity pass BOTH hosts now run: its owner-hide
+// ancestor walk sits beside the frustum/occlusion cull, and its "unified direct route" is what a
+// culled-but-still-shadow-casting entity goes through. (That route replaced the editor's own
+// submitShadowOnly helper, which this comment used to name and which is deleted.) A mesh
 // hidden from its owner is submitted to Voxi's shadow cascades, GI voxelisation and RT geometry table
 // exactly as if it had drawn -- ONLY the rasterised colour draw is skipped -- so a first-person
 // character still throws its own shadow. Losing that would trade this bug for the "shadows are

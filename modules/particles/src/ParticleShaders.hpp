@@ -14,15 +14,16 @@
 namespace aver::particles {
 
 // gViewProj/gCamPos come from rhi::sharedShaderPrelude(), prepended by ParticleRenderer::init -- see
-// RHIShaders.cpp's `cbuffer PerFrame : register(b0)`. STRUCT NAMES ARE PREFIXED
+// its `cbuffer PerFrame` (modules/rhi/shaders/shared_prelude.hlsl:3). STRUCT NAMES ARE PREFIXED
 // (ParticleVSIn/ParticleVSOut), NOT THE GENERIC VSIn/VSOut, because rhi::sharedShaderPrelude() ITSELF
 // already declares a `struct VSIn`/`struct VSOut` pair (the base mesh-draw shader's own -- see
-// modules/rhi/src/RHIShaders.cpp:693-695) as part of the text this file's shader is prepended with.
+// modules/rhi/shaders/shared_prelude.hlsl:874 and :876; they were in RHIShaders.cpp until the
+// shader bodies became files) as part of the text this file's shader is prepended with.
 // Redeclaring those two exact names silently shadowed them for DXC rather than erroring, and
 // ParticleVS ended up compiled against the WRONG struct (the base pipeline's three-float MeshVertex
 // position, with no posZ member at all) -- caught by createShader failing outright with "no member
 // named 'posZ' in 'VSIn'", not by anything at review time. Every other prelude consumer in this
-// engine (VoxOut in VoxiShaders.hpp, for one) already names its own IO structs uniquely for exactly
-// this reason.
+// engine (VoxOut in modules/render.voxi/shaders/voxi.hlsl, for one) already names its own IO
+// structs uniquely for exactly this reason.
 
 } // namespace aver::particles

@@ -100,9 +100,12 @@ inline bool withinSubMillimetre(const Vec3& worldCm) {
 // is 0, so a position one centimetre below the origin would land in chunk 0 alongside +1, and chunk 0
 // would be twice as wide as every other chunk.
 //
-// THE TREE HAS ALREADY BEEN BITTEN BY EXACTLY THIS. PcgVolume.cpp:50-52 truncates where :78-80
-// floors, and PcgShaders.hpp:64-66 admits the two disagree "the moment a volume is centred on the
-// origin". Every negative-coordinate case in ChunkCoordTest exists because of that precedent.
+// THE TREE HAS ALREADY BEEN BITTEN BY EXACTLY THIS. modules/render.pcg: PcgVolume.cpp's
+// sampleDensity truncates (its `static_cast<i32>` of the scaled coordinate, :64-66) where
+// sampleInfinite floors (:92-94), and the shader that has to agree with both admits the two
+// diverge "the moment a volume is centred on the origin" -- modules/render.pcg/shaders/
+// pcg_volume.hlsl:49-51, which is where that text moved when the shader bodies became files.
+// Every negative-coordinate case in ChunkCoordTest exists because of that precedent.
 constexpr i32 floorDiv(i32 a, i32 b) {
     const i32 q = a / b;
     return (a % b != 0 && (a < 0)) ? q - 1 : q;

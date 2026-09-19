@@ -1845,7 +1845,9 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     if (useDefaultHeap) {
         // ONE staging buffer, ONE one-shot submit for both buffers together -- see
         // uploadToDeviceBuffers' own comment for why this has to be synchronous (createMesh runs
-        // mid-frame too: SandboxApp.cpp:6267, :8510) and why a SEPARATE command buffer is what makes
+        // mid-frame too -- the editor calls it from inside its own draw walk, e.g.
+        // sandbox/src/SandboxRender.cpp's colourDecide building a cluster mesh, and from panel
+        // code such as AssetEditor/AnimEditor) and why a SEPARATE command buffer is what makes
         // that legal (vkCmdCopyBuffer inside beginFrame's dynamic-rendering scope is not).
         const VkBuffer dsts[2] = {m.vb, m.ib};
         const void* srcs[2] = {verts, indices};

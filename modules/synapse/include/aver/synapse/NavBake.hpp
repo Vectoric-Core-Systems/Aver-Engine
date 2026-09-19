@@ -7,10 +7,13 @@
 // arithmetic) instead of against a level and a screenshot, and it is the same host-installs-the-
 // function-pointer seam AnimSystem::setResolver and aver_fw_set_anim_curve_provider already use.
 //
-// BAKING IS AN EDITOR COMMAND, NEVER A RUNTIME COST. That is a decision, not an accident: terrain
-// collision in this engine is editor-only (SandboxApp::rebuildLandscapeCollision has no counterpart
-// in Runtime), so the one place the landscape body exists is the one place the bake
-// can see the ground. The result ships as an asset.
+// BAKING IS AN EDITOR COMMAND, NEVER A RUNTIME COST. That is a decision, not an accident -- but
+// NOT for the reason this comment used to give. It said terrain collision was editor-only, and
+// that is false: game::GameLandscape::rebuildCollision (Runtime/src/GameLandscape.cpp) adds the
+// heightfield body from the runtime's own level load, so a shipped game can see the ground too.
+// The real reasons are that the bake is far too slow for a frame (see OcNav.hpp's own note on the
+// per-raycast linear scan) and that the two probes below are installed in exactly one place in the
+// tree, sandbox/src/NavBakeCommand.cpp. The result ships as an asset.
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcNav.hpp"
 

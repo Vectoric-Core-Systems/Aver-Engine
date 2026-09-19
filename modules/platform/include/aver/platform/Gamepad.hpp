@@ -8,9 +8,11 @@ namespace aver {
 // hotplug detection, no dead zone). This is that poller.
 //
 // INDEPENDENT OF THE FRAMEWORK, deliberately, the same way InputState is: no aver_fw_* call and no
-// framework_abi.h include anywhere in this header or Gamepad.cpp. A caller wires this into the ABI at
-// its own call site (Runtime/src/GameInput.cpp's publishInput, sandbox/src/SandboxPlay.cpp's
-// pushInput) -- both already do the equivalent translation for keyboard/mouse.
+// framework_abi.h include anywhere in this header or Gamepad.cpp. A caller wires this into the ABI
+// at its own call site, and there is exactly ONE such site in the tree: Runtime/src/GameInput.cpp's
+// publishGamepad, which does the equivalent translation for keyboard/mouse in the same file. The
+// editor reaches the pad only through that -- it calls game::publishInput, which calls
+// publishGamepad from the policy's gamepadActive -- and includes this header nowhere.
 //
 // buttons[]/axes[] ARE LAID OUT IN THE ABI'S OWN DOCUMENTED ORDER -- AVER_FW_GAMEPAD_* and
 // AVER_FW_GAMEPAD_AXIS_* in framework_abi.h -- so a caller publishes them with one indexed loop

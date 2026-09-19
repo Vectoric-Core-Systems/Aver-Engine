@@ -53,9 +53,9 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy, std::s
     // backgrounded window keeps feeding its pawn, which is the defect GameApp.cpp's own foreground
     // query (and its comment) was added to close. Only the per-device field differs between them:
     // the editor resolves three separate ownership questions (own_.keyboardToGame, own_.mouseToGame
-    // and !suppressed, see sandbox/src/SandboxPlay.cpp:338-390), while this host's caller passes the
-    // same foreground answer to all three, so the standalone runtime behaves exactly as it did when
-    // this function took one `focused` bool.
+    // and !suppressed, filled into the policy at sandbox/src/SandboxPlay.cpp:359-371), while this
+    // host's caller passes the same foreground answer to all three, so the standalone runtime
+    // behaves exactly as it did when this function took one `focused` bool.
     const bool kb  = policy.focused && policy.keyboardToGame;
     const bool m   = policy.focused && policy.mouseToGame;
     const bool pad = policy.focused && policy.gamepadActive;
@@ -87,10 +87,16 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy, std::s
             if (fw >= 0 && in.keyHeld(vk)) held[fw] = true;
         }
     }
+    // THROUGH frameworkKeyFromMouseButton, NOT THE THREE SLOTS BY NAME. The named form was a
+    // second copy of a mapping InputKeys.hpp already holds -- exactly what that header was created
+    // to stop, and its own comment says why a key mapping that disagrees between two hosts is the
+    // worst kind: it builds, and one key then works in the editor and not in a shipped game. The
+    // -1 guard is the table's own "no such button" answer and must not be indexed with.
     if (m) {
-        held[AVER_FW_KEY_MOUSE_LEFT]   = in.mouseHeld(0);
-        held[AVER_FW_KEY_MOUSE_RIGHT]  = in.mouseHeld(1);
-        held[AVER_FW_KEY_MOUSE_MIDDLE] = in.mouseHeld(2);
+        for (i32 b = 0; b < 3; ++b) {
+            const i32 fw = aver::fw::frameworkKeyFromMouseButton(b);
+            if (fw >= 0) held[fw] = in.mouseHeld(b);
+        }
     }
 
     // The raw Win32 VK twin (framework_abi.h's own RAW WIN32 VK section) gets the SAME "unfocused
@@ -154,10 +160,13 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy, std::s
 // "pad is fixed at 0 for every call"). Polled unconditionally, the same as publishInput's own
 // keyboard loop reads `in` unconditionally: only the PUBLISHED value is gated on `active`, so
 // Aver.Platform's own hotplug/re-probe throttle (Gamepad.hpp) keeps ticking across an inactive
-// stretch instead of resetting cold the moment it ends. Shared by both hosts -- publishInput hands
-// it the policy's gamepadActive, which the standalone runtime fills with the same foreground answer
-// it gives the keyboard, while the editor's Play session still calls here directly with
-// `!suppressed` -- each passing its own rule for when the game does not own the device.
+// stretch instead of resetting cold the moment it ends. Shared by both hosts through ONE caller,
+// publishInput, which hands it the policy's gamepadActive: the standalone runtime fills that with
+// the same foreground answer it gives the keyboard, and the editor sets it flatly true and lets
+// policy.focused (= !suppressed) carry the gate -- each still passing its own rule for when the
+// game does not own the device, but through the policy rather than through a second call. The
+// editor's own direct call is gone precisely because two callers a frame would poll the device
+// twice and publish the second answer over the first.
 void publishGamepad(bool active) {
     GamepadState pad{};
     pollGamepads(&pad, 1);

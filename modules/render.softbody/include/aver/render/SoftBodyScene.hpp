@@ -5,8 +5,11 @@
 // SkinnedScene (modules/render.skin) is the model, deliberately and almost line for line, because
 // the problem is the same one: a per-ENTITY set of vertices that differ from the asset's, handed to
 // the ordinary draw by substituting the MeshHandle rather than by teaching the draw path a new
-// stream. That substitution already works -- both renderers do it for every skinned character today
-// (GameRender.cpp:142, SandboxApp.cpp:4168) -- so nothing below this file changes.
+// stream. That substitution already works -- both hosts do it for every skinned character today,
+// and through ONE walk since the editor/runtime split: game::drawWorld asks SkinnedScene for the
+// posed handle (Runtime/src/GameRender.cpp, its `skinning->drawHandle(ent)` line), and the editor
+// fills in the soft-body half of the same seam from its own SandboxApp::posedHandle through
+// EntityDecision::chosenMesh -- so nothing below this file changes.
 //
 // WHAT IS GENUINELY DIFFERENT FROM SKINNING, and it is the whole reason this is a separate feature
 // rather than a flag on that one:

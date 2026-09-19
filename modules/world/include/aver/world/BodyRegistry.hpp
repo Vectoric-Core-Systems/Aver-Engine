@@ -6,16 +6,17 @@
 // their own half-answer:
 //
 //   GameLevel   a parallel std::vector<int32_t> with NO entity association at all
-//               (GameLevel.hpp:74) -- it can remove every body it made, and cannot say which
+//               (GameLevel::levelBodies_) -- it can remove every body it made, and cannot say which
 //               belongs to any particular entity.
-//   SandboxApp  an unordered_map<u32, int32_t> keyed by entity (SandboxApp.cpp:5271) -- the right
-//               shape, in the editor only.
-//   Character   a private C# field on the actor (Character.cs:50).
+//   SandboxApp  an unordered_map<u32, int32_t> keyed by entity (SandboxApp::entityBodies_) -- the
+//               right shape, in the editor only.
+//   Character   a private C# field on the actor (Aver.Framework/Character.cs).
 //
 // So "unload the entities in this chunk and their collision with them" was not expressible: the
 // engine could destroy the entities and had no way to find the bodies they had created. Worse, the
-// two existing teardown paths both call scene::World::destroy DIRECTLY (GameLevel.cpp:197,
-// SandboxApp.cpp:2503), and World::destroy takes the WHOLE SUBTREE -- so a child's body was already
+// two existing teardown paths both call scene::World::destroy DIRECTLY (GameLevel::unload's own
+// entity loop, and SandboxApp::destroyEntity in sandbox/src/SandboxSelection.cpp), and
+// World::destroy takes the WHOLE SUBTREE -- so a child's body was already
 // being leaked today, every time a parent was destroyed.
 //
 // Deliberately NOT a component. A body id is process-local -- it means nothing in another run -- and

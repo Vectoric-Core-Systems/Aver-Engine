@@ -40,19 +40,23 @@ struct InputPublishPolicy {
     // so it passes the same value as `focused`.
     bool keyboardToGame = false;
     // Whether the mouse BUTTONS, the look delta and the wheel belong to the game. Not folded into
-    // keyboardToGame because the editor's two answers genuinely diverge, and in both directions:
-    // resolveInputOwnership (sandbox/src/InputOwnership.cpp:18-20) lets CAPTURE override the panel
-    // flags for the mouse alone -- a hidden, confined cursor has no widget it could be interacting
-    // with -- so a frame where a text field holds the keyboard can still be a frame where the
-    // player is looking around; and a pointer resting on a panel takes the mouse while the keyboard
-    // stays the game's.
+    // keyboardToGame because the editor's two answers genuinely diverge. CAPTURE IS NO LONGER THE
+    // DIFFERENCE: resolveInputOwnership (sandbox/src/InputOwnership.cpp:33 and :37) now gives the
+    // keyboard the same capture override the mouse always had, because a hidden, confined cursor
+    // has no widget either device could be interacting with -- without it a captured Play session
+    // received no keys at all while the mouse worked, which is what --pie-camera-test had been
+    // reporting as "THE VIEW IGNORES W". What still diverges: the mouse additionally demands
+    // !uiWantsMouse, so a pointer resting on a panel takes the mouse while the keyboard stays the
+    // game's; and a live text field (ImGui's WantTextInput) forces the keyboard consumers off on
+    // its own, capture or not, while saying nothing about the mouse.
     bool mouseToGame = false;
     // Whether pad 0 belongs to the game. ITS OWN FIELD RATHER THAN FOLLOWING keyboardToGame, and
     // SandboxPlay.cpp's existing comment on that gate says exactly why: "an ImGui text field steals
-    // a keystroke, never a controller button". That host already gates its pad on the wider
-    // `!suppressed` while the keyboard takes the narrower own_.keyboardToGame
-    // (sandbox/src/SandboxPlay.cpp:390); folding the two together here would mute the controller
-    // every time someone clicked into a text field. The runtime, again, passes `focused`.
+    // a keystroke, never a controller button". That host sets this field flatly true
+    // (sandbox/src/SandboxPlay.cpp:371) and lets policy.focused (= !suppressed, set at :359) carry
+    // the gate, while its keyboard takes the narrower own_.keyboardToGame; folding the two
+    // together here would mute the controller every time someone clicked into a text field. The
+    // runtime, again, passes `focused`.
     bool gamepadActive = false;
     // When true, capturedDx/capturedDy feed the framework's mouse delta INSTEAD OF `in`'s own
     // window-accumulated deltas -- see GameApp::pollCapturedMouse for where those come from and
@@ -98,8 +102,14 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy,
 // Publishes pad 0's gamepad state into the framework -- shared by both hosts, which otherwise
 // carried identical copies of this block. `active` gates publication exactly as the policy's own
 // per-device gates do for publishInput's keyboard and mouse: everything reads released/zeroed when
-// false. publishInput calls this with InputPublishPolicy::gamepadActive; the editor's Play session
-// still calls it directly with its own `!suppressed` -- see the definition for why the pad is
+// false.
+//
+// publishInput IS THE ONLY CALLER, in either host, and passes InputPublishPolicy::gamepadActive.
+// The editor's Play session used to call it a second time directly with its own `!suppressed`;
+// that call is gone (SandboxPlay.cpp's own comment on policy.gamepadActive records why -- leaving
+// it would poll the device twice a frame and publish the second answer over the first). It stays
+// declared here rather than moving into GameInput.cpp's anonymous namespace only because the
+// header is where the gating contract above is stated. See the definition for why the pad is
 // polled every frame regardless.
 void publishGamepad(bool active);
 #endif

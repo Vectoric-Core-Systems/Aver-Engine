@@ -5,7 +5,8 @@
 // bookkeeping; it must never change a mesh, a material, or a translucency flag.
 //
 // THE BUG THIS FIXES. Before this header existed, a culled or owner-hidden entity reached Voxi
-// through a second, hand-written route (SandboxApp.cpp's submitShadowOnly) that read a different
+// through a second, hand-written route (the since-deleted submitShadowOnly lambda in
+// SandboxApp.cpp) that read a different
 // material (mesh-slot-0's, not each part's own), dropped multi-part splits entirely, and diverged on
 // translucency and on the owner-hidden flag. In PTTest, 110 of 142 placed meshes have more than one
 // submesh, so a false cull -- itself caused by a separate viewport-mapping bug this plan's F7 fixes --
@@ -41,7 +42,7 @@
 // leftover of the old location either: it is the reason the test needs no device, no RHI and no
 // ImGui, so it survives the move deliberately. Every ImGui call, every pbr::MaterialLibrary/
 // pbr::isTranslucent lookup, every AVER_WARN, and every rhi:: handle resolution stays at the call
-// site in SandboxApp.cpp and GameRender.cpp; only the DECISIONS live here.
+// site in SandboxRender.cpp and GameRender.cpp; only the DECISIONS live here.
 //
 // SurfaceInputs exists so this header never has to know what pbr::MaterialDesc or pbr::isTranslucent
 // even are: each host's own resolver (SandboxRender.cpp's resolveSurface, GameRender.cpp's walk)
@@ -57,7 +58,8 @@ struct SurfaceInputs {
     bool authored = false;      // content_.authoredFor has a handle for this token
     bool authoredLive = false;  // MaterialLibrary::desc(handle) is non-null; == authored when PBR is
                                  // compiled out (there is no library to ask, so a handle is trusted
-                                 // at face value, matching SandboxApp.cpp:5881's own comment)
+                                 // at face value, matching the entity loop's own comment, formerly
+                                 // SandboxApp.cpp:5881)
     bool translucent = false;   // pbr::isTranslucent(*desc) -- live handles only, meaningless otherwise
     bool haveLook = false;      // content_.lookFor(token) succeeded
     f32 lookCol[3] = {0.0f, 0.0f, 0.0f};
@@ -79,19 +81,23 @@ struct SurfaceLook {
     bool usedFallback = false;
 };
 
-// THE SINGLE COPY of the rule duplicated three times before this header existed -- the entity loop
-// (SandboxApp.cpp:5897-5903), the off-screen-caster lambda submitShadowOnly (5584-5591), and
-// drawMeshParts (8313-8324) all ran this exact if/else chain by hand, and the third copy is missing
-// the liveness check the other two have (a dead handle there baked in the bright-white-mirror
-// identity as the entity's FINAL look -- see 5889-5896's own comment on why that is one of the worst
-// possible failure appearances). Order matters and is preserved exactly:
+// THE SINGLE COPY of the rule duplicated three times before this header existed -- the editor's
+// entity loop (formerly SandboxApp.cpp:5897-5903), the off-screen-caster lambda submitShadowOnly
+// (formerly 5584-5591) and drawMeshParts (formerly 8313-8324) all ran this exact if/else chain by
+// hand, and the third copy was missing the liveness check the other two had (a dead handle there
+// baked in the bright-white-mirror identity as the entity's FINAL look, which is one of the worst
+// possible failure appearances -- it reads as confident lighting rather than as missing content).
+// All three are gone: SandboxApp.hpp's resolveSurface declaration carries the same three "formerly"
+// ranges from the other side, and SandboxApp::resolveSurface is the editor's one remaining caller.
+// Order matters and is preserved exactly:
 //   1. live authored material: the multiplicative identity (1,1,1,1)/1/1, so the material's own
 //      texture/factor pair supplies everything; blended is the material's own alphaMode read.
 //   2. authored but the handle no longer resolves: flag it (the caller warns once per name with
 //      warnDeadMaterialHandle), then FALL THROUGH to the same look-up an unauthored surface gets --
 //      a dead handle must not be trusted, but it also must not go unlit.
 //   3. a named built-in SurfaceLook: its colour/metallic/roughness (SurfaceLook has no alphaMode of
-//      its own, so blended stays false here -- see SandboxApp.cpp:5877's own note).
+//      its own, so blended stays false here -- the entity loop's own note said the same, formerly
+//      SandboxApp.cpp:5877).
 //   4. neither: the flat fallback {0.80, 0.80, 0.85, 1.0}/0/0.5, flagged so the caller can warn once.
 inline SurfaceLook resolveSurfaceLook(const SurfaceInputs& in) {
     SurfaceLook look;
@@ -135,11 +141,12 @@ struct PlannedDraw {
 // agree on is a decision, and decisions live in this header.
 constexpr u32 kMaxPlannedDraws = 64;
 
-// THE SINGLE COPY of 6360-6365 plus 8297-8299: the "a mesh that names several materials draws as
+// THE SINGLE COPY of what was the editor's entity loop plus drawMeshParts (formerly
+// SandboxApp.cpp:6360-6365 and 8297-8299): the "a mesh that names several materials draws as
 // several meshes, one per slot" rule, and its "a substituted handle keeps today's single draw and the
-// entity's own material" exception (6353-6359's own comment -- a LOD level or a posed skin/soft-body
-// copy is DIFFERENT geometry from the one content_.partsFor was split from, so the split does not apply
-// to it). `Part` is a template parameter rather than game::GameContent::MeshPart by name so this header
+// entity's own material" exception (formerly 6353-6359's own comment -- a LOD level or a posed
+// skin/soft-body copy is DIFFERENT geometry from the one content_.partsFor was split from, so the
+// split does not apply to it). `Part` is a template parameter rather than game::GameContent::MeshPart by name so this header
 // never has to declare or forward-declare that type -- it only ever reads two fields off it, exactly the
 // contract GameContent's own MeshPart already satisfies (rhi::MeshHandle mesh; i32 material;), and
 // rhi::MeshHandle is a plain u32 (RHIResources.hpp), so writing it into PlannedDraw::mesh needs no
@@ -213,20 +220,28 @@ struct VoxiDelivery {
     bool hiddenFromOwner = false;
 };
 
-// MIRRORS VoxiRenderer::submitDraw AT VoxiRenderer.cpp:861-880 EXACTLY -- deliberately not edited by
-// this lane, only cited: submitDraw's `blended` parameter is read straight off IRenderFeature's own
-// contract for a raster draw, and everything downstream of it (submit()'s translucent lane, the TLAS
-// non-opaque flag, the exclusion from the cascade/GI shadow map/voxelisation) is driven by that one
-// bool. deliver() reproduces the SAME translucent value for the direct route, so a culled pane of
-// glass and a visible one agree about being translucent -- which submitShadowOnly's old, independent
-// re-implementation of this test (5556-5566, now deleted by lane A) did not always do.
+// MIRRORS VoxiRenderer::submitDraw EXACTLY -- deliberately not edited by this lane, only cited:
+// submitDraw's `blended` parameter is read straight off IRenderFeature's own contract for a raster
+// draw, and everything downstream of it (submit()'s translucent lane, the TLAS non-opaque flag, the
+// exclusion from the cascade/GI shadow map/voxelisation) is driven by that one bool. deliver()
+// reproduces the SAME translucent value for the direct route, so a culled pane of glass and a
+// visible one agree about being translucent -- which submitShadowOnly's old, independent
+// re-implementation of this test (formerly SandboxApp.cpp:5556-5566, deleted by lane A) did not
+// always do.
 //
 // hiddenFromOwner: the raster route never carries it (a raster draw that reached drawMesh() was never
 // owner-hidden in the first place -- chooseRoute's own raster expression already excludes that case,
 // so `false` here is a statement of fact, not a default silently accepted). The direct route passes
 // route.hiddenFromOwner through unchanged, which is what lets voxiRenderer_.submit's own
-// AVER_RT_MASK_OWNER_HIDDEN lane (voxi.hlsl:215-218) keep the mesh out of primary visibility while
+// AVER_RT_MASK_OWNER_HIDDEN lane (defined in voxi.hlsl, and the one opaque query that asks for it
+// rather than for _ALL) keep the mesh out of primary visibility while
 // still letting it cast a shadow and contribute GI, exactly like the raster walk always did.
+//
+// CALLED, NOT MERELY DECLARED, and that is load-bearing rather than incidental: the one caller is
+// game::drawWorld's direct route (Runtime/src/GameRender.cpp), which BOTH hosts run, so there is
+// no second place left for this pair to be written out and drift. It spent a while stated here and
+// hand-written there, which is the two-statements-of-one-rule shape this whole header exists to
+// close.
 inline VoxiDelivery deliver(const PlannedDraw& draw, const SurfaceLook& look,
                              const RouteDecision& route) {
     VoxiDelivery d;

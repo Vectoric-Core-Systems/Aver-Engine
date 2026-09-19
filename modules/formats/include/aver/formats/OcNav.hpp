@@ -11,12 +11,15 @@
 // 2.5D, NOT 3D: exactly one floor per cell. A bridge over a path is not representable, and neither
 // is a second storey. That is a real limit and the reason `NLNK` is reserved below.
 //
-// BAKED IN THE EDITOR, NEVER AT RUNTIME. The bake raycasts the physics world, and terrain collision
-// exists only in the editor (SandboxApp::rebuildLandscapeCollision; grep add_heightfield over
-// Runtime finds nothing). So the bake happens in the one place the ground is actually
-// there, and ships its answer as an asset. It is also far too slow for a frame: aver_phys_raycast
-// resolves its hit by linear scan over every body (PhysicsWorld.cpp:565), so a bake is
-// O(cells x bodies).
+// BAKED IN THE EDITOR, NEVER AT RUNTIME, AND THE REASON IS COST, NOT REACH. This used to say
+// terrain collision existed only in the editor; it does not, and has not since the editor/runtime
+// split: game::GameLandscape::rebuildCollision (Runtime/src/GameLandscape.cpp) calls
+// aver_phys_add_heightfield itself, from the runtime's own level load, so a shipped game's ground
+// IS there. What is editor-only is the BAKE: the two probes synapse::bakeNav needs are installed
+// in one place in the tree (sandbox/src/NavBakeCommand.cpp), and the work is far too slow for a
+// frame -- every successful aver_phys_raycast maps its hit BodyID back to a handle by a linear
+// scan over every body in the world (PhysicsWorld.cpp:608, inside aver_phys_raycast), so a bake is
+// O(cells x bodies). It ships its answer as an asset for that reason, not for want of collision.
 #include "aver/core/Types.hpp"
 
 #include <string>

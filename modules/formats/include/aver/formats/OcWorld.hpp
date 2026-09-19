@@ -309,9 +309,12 @@ struct OcWaterPlacement {
     // the four can use 0 as "the author wrote nothing" without colliding with a value someone might
     // actually write. -1 has no such collision: nothing here is ever legally negative.
     //
-    // The consumer (SandboxApp::applyLevelWater), not this struct, decides what an unauthored field
-    // becomes -- fluids::FluidVolumeDesc's own defaults, exactly what a level written before these
-    // four tokens existed already got. This struct's only job is to carry what was written.
+    // The consumer, not this struct, decides what an unauthored field becomes --
+    // fluids::FluidVolumeDesc's own defaults, exactly what a level written before these four tokens
+    // existed already got. This struct's only job is to carry what was written. That consumer is
+    // game::GameWater::applyLevel (Runtime/include/aver/game/GameWater.hpp), which BOTH hosts run:
+    // it was the editor's own applyLevelWater until the editor/runtime split, so this record is not
+    // an editor-only one and a shipped game reads it too.
     f64 compliance = -1.0;
     f64 damping    = -1.0;
     i32 iterations = -1;

@@ -132,7 +132,9 @@ public:
     // window leaks, and the one none of stepNotifyStates' four (see its own comment) can reach: a
     // reload drops every clock outright, with no clip switch, no destroy and no later tick for any
     // of those four to hang a close off of. Verified safe to fire rather than merely documented
-    // around: BOTH real callers (GameContent::adopt, SandboxApp::rebuildContentIndex) run at
+    // around: the only real caller is game::GameContent::adopt, and BOTH of its call sites
+    // (Runtime/src/GameApp.cpp and sandbox/src/SandboxProject.cpp -- the editor stopped keeping a
+    // rebuildContentIndex of its own when the two hosts converged on one content index) run at
     // PROJECT-OPEN, before the old level's entities are torn down and before a new one is spawned --
     // never at engine or world teardown -- so the sink this reaches is exactly as alive as it is on
     // an ordinary tick, and staying silent here would BE the leak, not a way of avoiding one.

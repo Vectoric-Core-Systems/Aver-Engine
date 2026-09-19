@@ -1,16 +1,20 @@
 // The world draw walk: every live entity carrying a visible CMeshRenderer.
 //
-// Lifted from SandboxApp.cpp:1386-1510. What is NOT here is as deliberate as what is: no selection
+// Lifted from the editor's entity loop (formerly SandboxApp.cpp:1386-1510, before the 2026-09-16
+// split moved it to sandbox/src/SandboxRender.cpp's onRender, which now calls this function
+// instead of carrying a copy). What is NOT here is as deliberate as what is: no selection
 // latch, no selection outline, no grid, no gizmo, no skin-scene-test recolour, no objects_
 // placeholder pass, and no capture/gate harness. Those are the editor looking at a world; this is a
 // game showing one.
 //
 // WHAT THE HOOKS IN DrawWorldOptions ARE FOR, and why they are not that list creeping back in. Two
-// hosts run this walk: the shipped game, through GameApp, and the editor, whose own copy is still
-// inline in SandboxApp::onRender (sandbox/src/SandboxRender.cpp). The editor's is the behaviour
-// reference and carries machinery this library does not have and must not acquire -- a depth
-// prepass, hierarchical-Z occlusion culling (Aver.Occlusion is linked into Sandbox alone), Trifactor
-// LOD and GPU cluster dispatch, selection outlines, a PlayerStart icon and a path-traced scene view.
+// hosts run this walk: the shipped game, through GameApp, and the editor, which calls it TWICE per
+// frame from SandboxApp::onRender (sandbox/src/SandboxRender.cpp) -- once for its depth prepass and
+// once for colour -- rather than carrying the copy of it that used to sit inline there. The
+// editor's is the behaviour reference and carries machinery this library does not have and must
+// not acquire -- hierarchical-Z occlusion culling (Aver.Occlusion is linked into Sandbox alone),
+// Trifactor LOD and GPU cluster dispatch, selection outlines, a PlayerStart icon and a path-traced
+// scene view.
 // The hooks are the seam that lets the editor's walk BE this walk without any of that arriving here:
 // each one is a point where the editor needs to observe or answer something, and every one of them
 // defaults to null, meaning "the answer this walk has always given". A default-constructed
@@ -31,8 +35,8 @@
 // ladder branched on `if (authored)` with no liveness test, so a stale material handle painted the
 // surface as a white metal mirror instead of falling through to its named look. The header lives in
 // this library's own public include directory now (Runtime/include, exposed PUBLICly by
-// cmake/AvModule.cmake:15), so the editor (sandbox/src/SandboxRender.cpp's resolveSurface and
-// emitEntityDraws) and this walk read the identical decisions.
+// cmake/AvModule.cmake:15), so the editor (sandbox/src/SandboxRender.cpp's resolveSurface, and its
+// drawWorld hooks) and this walk read the identical decisions.
 #include "aver/game/GameRender.hpp"
 
 #if AVER_MODULE_SCENE
@@ -91,8 +95,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // resolves each part's OWN token through the exact same ladder the single-material path
     // always used for the entity's. Mirrors SandboxApp::resolveSurface
     // (sandbox/src/SandboxRender.cpp) field for field, down to holding the resolved SurfaceLook
-    // whole instead of unpacking it, and is called once per planned draw the way that file's own
-    // emitEntityDraws() calls resolveSurface() once per draw rather than once per entity.
+    // whole instead of unpacking it, and called ONCE PER PLANNED DRAW rather than once per entity,
+    // which is what the per-material split needs and what the editor's deleted emitEntityDraws did
+    // with its own resolveSurface. SandboxApp::resolveSurface survives for the two readers this
+    // walk cannot serve -- its warning sentences (SandboxRender.cpp's colourWarn) and the
+    // entity-level resolve the GPU cluster path binds through (colourDecide) -- and its own
+    // comment at that call site says so.
     //
     // HOISTED OUT OF THE ENTITY LOOP, where it used to be declared: three delivery paths call it
     // now (raster, direct and depth-only) instead of two, and a closure re-created per entity to be
@@ -205,7 +213,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // it once per launch would be noise that trains a reader to ignore the line that
             // matters. resolveSurfaceLook sets usedFallback for token 0 too -- it has no way to
             // tell "unnamed" from "named and missing" -- so the gate belongs here, at the caller
-            // that knows, which is where SandboxRender.cpp:2028 keeps its own.
+            // that knows, which is where SandboxApp::resolveSurface keeps its own.
             //
             // ONE-SHOT, and function-local (a lambda's local static is exactly as permanent as a
             // plain function's -- initialised once, ever, not once per call). Keyed on the interned
@@ -276,8 +284,8 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // a level carry no mesh at all.
         if (!mr || mr->mesh == 0) continue;
         // SPLIT OUT OF THE COMPOSITE GUARD PURELY SO IT CAN BE REPORTED. The three conditions were
-        // one `||` chain -- no renderer, not visible, no mesh -- and they are the same three, now
-        // ordered as the editor already orders them (SandboxRender.cpp:772). The set of entities
+        // one `||` chain -- no renderer, not visible, no mesh -- and they are the same three, in
+        // the order the editor's own loop used before that loop became this one. The set of entities
         // skipped cannot differ: all three are plain `continue`s with nothing between them to have
         // a side effect, so only WHICH of them a reader is told about changes. A mesh is named and
         // the visible bit is clear is the one worth telling: it is NOT the ordinary case, it is the
@@ -322,7 +330,9 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         }
 
         // ---- OWNER HIDE, DECIDED BEFORE THE CULL ----
-        // Mirrors SandboxRender.cpp:824-830's ancestor walk against firstPersonPawn_: an entity both
+        // THE ONLY ancestor walk now -- the editor's own copy against firstPersonPawn_ went with
+        // its loop, and it feeds this one through DrawWorldOptions::ownerHideRoot instead
+        // (SandboxRender.cpp sets it from firstPersonPawn_ for both passes). An entity both
         // frustum-culled and owner-hidden must still carry hiddenFromOwner=true on its direct-route
         // delivery below, or it would be primary-visible again in ray-driven mode the moment it comes
         // back on screen (the 0d3bcf1 regression SceneSubmission.hpp's chooseRoute was written to
@@ -353,8 +363,9 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // test, its second walk re-derived a sphere from the LOCAL aabbMin/aabbMax against a
         // world-space eye while the first built it from these corners, the two fed the same LOD
         // function different inputs, and they picked different levels for the same instance --
-        // 2.81% of pixels differing, falling to 0.04% (noise) with --no-lod-select
-        // (SandboxRender.cpp:234-242). EntityDecision hands the host THIS box for that reason.
+        // 2.81% of pixels differing, falling to 0.04% (noise) with --no-lod-select (the account
+        // sits on SandboxRender.cpp's depth-prepass phase, which is the call that replaced that
+        // second walk). EntityDecision hands the host THIS box for that reason.
         bool haveWorldBox = false;
         bool frustumCulled = false;
         Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
@@ -437,9 +448,10 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
 
         // ONE MESH THAT NAMES SEVERAL MATERIALS DRAWS AS SEVERAL MESHES, ONE PER SLOT -- the split
         // GameContent::loadProjectMeshes built (mirroring SandboxApp::buildMeshParts), planned by the
-        // shared planEntityDraws(), called with the same `parts ? parts->data() : nullptr, count`
-        // shape SandboxRender.cpp's own three call sites use. An entity with no parts (the common
-        // case) plans to exactly the one draw this loop always issued.
+        // shared planEntityDraws() -- THE ONLY CALL SITE IN EITHER HOST now that the editor's three
+        // went with its loop, which is what makes the split one rule rather than a convention two
+        // walks keep. An entity with no parts (the common case) plans to exactly the one draw this
+        // loop always issued.
         //
         // GameContent::MeshPart satisfies planEntityDraws' `Part` template parameter without the
         // header having to name it: it reads exactly the two fields MeshPart declares
@@ -529,11 +541,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                    (options.voxiRenderer != nullptr || options.onDirectDraw != nullptr)) {
             // THE UNIFIED DIRECT ROUTE: frustum-culled, occlusion-culled or owner-hidden (or shaded
             // already by the host), handed straight to Voxi so shadows, GI voxelisation and the RT
-            // TLAS never depend on what the raster camera can see -- mirrors emitEntityDraws'
-            // else-branch (SandboxRender.cpp:2108) calling voxiRenderer_.submit() with the SAME
-            // mesh/look/translucency this draw would have used on the raster route, plus
-            // hiddenFromOwner so a possessed pawn's own body stays out of ray-driven primary
-            // visibility (voxi.hlsl's AVER_RT_MASK_OWNER_HIDDEN lane) while still casting a shadow
+            // TLAS never depend on what the raster camera can see. This IS that route for both
+            // hosts now -- the editor's own emitEntityDraws else-branch, which called
+            // voxiRenderer_.submit() from its deleted loop, is where the rule came from -- and it
+            // submits with the SAME mesh/look/translucency this draw would have used on the raster
+            // route, plus hiddenFromOwner so a possessed pawn's own body stays out of ray-driven
+            // primary visibility (voxi.hlsl's AVER_RT_MASK_OWNER_HIDDEN lane) while still casting a shadow
             // and bouncing light, exactly like the raster walk always did for it. Per planned draw,
             // not per entity, so a culled multi-material entity's parts reach Voxi with their own
             // materials instead of all borrowing the entity's -- the same split the raster route
@@ -548,39 +561,44 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // Gating that sink on a VoxiRenderer having been attached would make one feature's
             // absence silently disable an unrelated one.
             //
-            // hiddenFromOwner FOLLOWS THE REAL ROUTE, not this branch: deliver()
-            // (aver/game/SceneSubmission.hpp) keys it on route.raster, so an entity that is here
-            // only because the host already shaded it carries false, exactly as the raster draw it
-            // replaces would have.
-            const bool hiddenFromOwner = route.raster ? false : route.hiddenFromOwner;
+            // WHAT EACH DRAW CARRIES IS deliver()'s ANSWER, NOT ONE WRITTEN OUT AGAIN HERE
+            // (aver/game/SceneSubmission.hpp). This pair -- the translucency flag and
+            // hiddenFromOwner -- used to be spelled inline, which left deliver() stating the rule
+            // for a route neither host took it from: the header's whole premise is that a rule
+            // whose purpose is to be stated ONCE cannot be stated twice, and an uncalled function
+            // plus a hand-written copy is exactly twice. Now that the editor runs this walk too,
+            // calling it here makes it the only statement in either host.
+            //
+            // hiddenFromOwner FOLLOWS THE REAL ROUTE, not this branch: deliver() keys it on
+            // route.raster, so an entity that is here only because the host already shaded it
+            // carries false, exactly as the raster draw it replaces would have.
             for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
                 const PlannedDraw& pd = pdraws[pdi];
                 if (!pd.mesh) continue;
                 const auto dl = resolveDrawLook(pd.material);
+                const VoxiDelivery del = deliver(pd, dl.look, route);
                 f32 col[4] = {dl.look.col[0], dl.look.col[1], dl.look.col[2], dl.look.col[3]};
                 if (route.tint) col[1] *= 0.15f;
 #if AVER_MODULE_VOXI
                 if (options.voxiRenderer) {
-                    options.voxiRenderer->submit(pd.mesh, &wm.m[0][0], col, dl.look.metallic,
+                    options.voxiRenderer->submit(del.mesh, &wm.m[0][0], col, dl.look.metallic,
                                                  dl.look.roughness, dl.matSet, dl.matConstants,
-                                                 dl.matBytes, /*translucent=*/dl.look.blended,
-                                                 hiddenFromOwner);
+                                                 dl.matBytes, del.translucent, del.hiddenFromOwner);
                 }
 #endif
                 if (options.onDirectDraw) {
-                    options.onDirectDraw(pd.mesh, &wm.m[0][0], col, dl.look.metallic,
+                    options.onDirectDraw(del.mesh, &wm.m[0][0], col, dl.look.metallic,
                                          dl.look.roughness, dl.matSet, dl.matConstants, dl.matBytes,
-                                         /*translucent=*/dl.look.blended, hiddenFromOwner,
-                                         options.user);
+                                         del.translucent, del.hiddenFromOwner, options.user);
                 }
             }
         }
 
         if (route.raster) {
             // ONCE PER DELIVERED ENTITY, after its draws, with the handle they actually used -- the
-            // editor latches its selection outline here (SandboxRender.cpp:1459), and an outline
-            // drawn from the base handle while the entity rendered a posed or LOD copy would trace
-            // the wrong silhouette.
+            // editor latches its selection outline here (SandboxRender.cpp's colourDelivered), and
+            // an outline drawn from the base handle while the entity rendered a posed or LOD copy
+            // would trace the wrong silhouette.
             if (options.onEntityDelivered)
                 options.onEntityDelivered(ent, mr->mesh, dec.chosenMesh, wm, /*raster=*/true,
                                           options.user);
@@ -592,12 +610,14 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             if (options.onEntityDelivered && dec.emitDirectDraws)
                 options.onEntityDelivered(ent, mr->mesh, dec.chosenMesh, wm, /*raster=*/false,
                                           options.user);
-            // Priority matches SandboxRender.cpp:981's counting convention: a frustum-culled-AND-
-            // owner-hidden entity counts as culled, never as owner-hidden, even though its direct-route
-            // delivery above always carried hiddenFromOwner=true regardless -- a counting convention
-            // only, not a correctness question (chosen above, unconditionally). dec.occlusionCulled
-            // joins the first bucket for the same reason the editor's does: an occlusion-culled
-            // entity is culled, and a counter that ignored it would report the feature as free.
+            // THE COUNTING CONVENTION IS THIS WALK'S, and both hosts' sentences are worded from it:
+            // a frustum-culled-AND-owner-hidden entity counts as culled, never as owner-hidden,
+            // even though its direct-route delivery above always carried hiddenFromOwner=true
+            // regardless -- a counting convention only, not a correctness question (chosen above,
+            // unconditionally). dec.occlusionCulled joins the first bucket because an
+            // occlusion-culled entity is culled, and a counter that ignored it would report the
+            // feature as free; that is why the editor relabelled its line from "frustum-culled" to
+            // plain "culled" when it started reading these three numbers.
             if (frustumCulled || dec.occlusionCulled) ++culled; else ++ownerHidden;
         }
     }
@@ -612,9 +632,9 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         if (drawn != stats.lastDrawn || culled != stats.lastCulled ||
             ownerHidden != stats.lastOwnerHidden) {
             // SUPPRESSED, NOT REWORDED, for a host with its own sentence: the editor's names
-            // "spawned CMeshRenderer entities" and counts occlusion in its "culled"
-            // (SandboxRender.cpp:1552), vocabulary a packaged game has no business borrowing. The
-            // counters above are what such a host reads instead. See SceneDrawStats.
+            // "spawned CMeshRenderer entities" and counts occlusion in its "culled" (it writes it
+            // from colourStats once the walk returns), vocabulary a packaged game has no business
+            // borrowing. The counters above are what such a host reads instead. See SceneDrawStats.
             if (!options.suppressLog) {
                 AVER_INFO("[Game] scene-render: {} drawn, {} frustum-culled, {} owner-hidden",
                           drawn, culled, ownerHidden);

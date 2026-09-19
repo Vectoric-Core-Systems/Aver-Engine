@@ -133,8 +133,9 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
 
     // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolvePhysicsMaterial's own
     // doc comment (FluidVolume.hpp) for why this is the one call every fluid request converges on
-    // regardless of how it was authored: a WATER record via SandboxApp::applyLevelWater's direct
-    // construction, a graph's `COMP ... Fluid` line via either of the framework relay's two
+    // regardless of how it was authored: a WATER record via game::GameWater::applyLevel's direct
+    // construction (shared by both hosts, and formerly the editor's own applyLevelWater), a graph's
+    // `COMP ... Fluid` line via either of the framework relay's two
     // providers, or any future direct caller of this function. A desc that never set `material` is
     // untouched by this (fluidResolvePhysicsMaterial's own early-out), so every caller from before this
     // layer existed spawns identically to before. A desc that DOES set `material` alongside a
