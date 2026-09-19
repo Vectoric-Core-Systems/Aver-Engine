@@ -217,15 +217,16 @@ void SandboxApp::onRender(Engine& e)  {
         // depth, which is a fact about the material, not about which LOD or skinning system claims
         // the geometry.
         //
-        // TWO DEFECTS ARE REPRODUCED HERE ON PURPOSE, so this commit is a refactor and nothing
-        // else -- a behaviour change folded into the same diff could not be judged apart from it.
-        // No DrawWorldOptions::ownerHideRoot is passed, so a possessed first-person pawn's body
-        // writes opaque prepass depth and is then never colour-drawn: a depth hole through the
-        // world at exactly the pixels the body covers. The PlayerStart marker, which the colour
-        // walk skips by identity ("THE PLAYER START IS CHROME"), is likewise prepassed here and
-        // punches the same hole. Both are reachable only with --depth-prepass, which rhi::RHI.hpp
-        // and the D3D12 device both default OFF, so neither can touch an ordinary session. Each
-        // gets its own commit and its own capture.
+        // TWO DEFECTS THIS PASS CARRIED FROM THE DAY IT WAS WRITTEN, both now closed, and both
+        // found only because unifying the two walks forced someone to state what each pass skips.
+        // The walk this replaced tested destroyPending, visible, mesh, skinned, cluster and
+        // frustum -- and never owner-hide, and never the PlayerStart. So a possessed first-person
+        // pawn's body wrote opaque prepass depth that the colour pass then refused to draw, and
+        // every fragment behind it failed the depth test: a hole through the world in the shape of
+        // the character you are playing. The PlayerStart marker, chrome the colour walk skips by
+        // identity, punched the same hole by a second route. Both are answered below, on the same
+        // conditions the colour pass uses. Reachable only with --depth-prepass, which rhi::RHI.hpp
+        // and the D3D12 device both default OFF, which is why neither was ever reported.
         //
         // ONE THING THIS CALL DOES THAT THE DELETED WALK DID NOT, stated rather than discovered
         // later: drawWorld refreshes a non-skinned entity's CMeshRenderer aabbMin/aabbMax from
@@ -257,6 +258,15 @@ void SandboxApp::onRender(Engine& e)  {
                     // Its posed vertices live in a compute-written buffer, so the only depth this
                     // walk could write for it is the REST pose's -- not the one colour draws.
                     if (d.skinned) { d.skip = true; return; }
+                    {
+                        // THE PLAYER START IS CHROME IN BOTH PASSES. The colour walk skips it by
+                        // identity and draws a billboard icon instead, so prepassing it wrote depth
+                        // for a cube that is never drawn -- the same hole the owner-hide root above
+                        // closes, by a second route. Skipped here for the identical reason and on
+                        // the identical condition.
+                        SandboxApp& ps = *static_cast<SandboxApp*>(user);
+                        if (d.entity == ps.playerStart_ && ps.viewportIconsReady_) { d.skip = true; return; }
+                    }
 #if AVER_MODULE_TRIFACTOR
                     SandboxApp& self = *static_cast<SandboxApp*>(user);
                     // dispatchMeshClusters has no depth-only twin to call.
@@ -325,6 +335,14 @@ void SandboxApp::onRender(Engine& e)  {
                 popt.decide = prepassDecide;
                 popt.onSurfaceWarn = prepassWarn;
                 popt.user = this;
+                // THE SAME OWNER-HIDE ROOT THE COLOUR PASS USES. Without it this pass wrote opaque
+                // depth for the possessed pawn's own body, which the colour pass then refused to
+                // draw -- so every fragment behind the body failed the depth test and the world
+                // showed a hole in exactly the shape of the character you are playing. The two
+                // passes have to answer "is this entity drawn" the same way or the prepass is
+                // writing depth for something that never appears, which is the whole failure mode
+                // a depth prepass has.
+                popt.ownerHideRoot = firstPersonPawn_;
                 // NO voxiRenderer AND NO onDirectDraw: the depth pass returns at `!route.raster`
                 // before either sink can be reached, so attaching them would advertise a delivery
                 // that cannot happen. NO onSkipped either -- this walk has never said a word about
