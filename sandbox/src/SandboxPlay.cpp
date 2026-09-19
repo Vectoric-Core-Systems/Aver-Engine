@@ -310,85 +310,112 @@ void SandboxApp::stopPlay() {
     restorePlayWorld();
 }
 
-// Publishes this frame's keyboard and mouse into the framework, for the C# Input class.
-// Suppressed while ImGui wants the input, and the editor's drawer chord wins over gameplay.
+// Publishes this frame's keyboard and mouse into the framework, for the C# Input class -- by
+// filling in the editor's policy and handing it to the SHARED publisher, which is now the only
+// thing in the tree that turns accumulated input into aver_fw_* calls.
+//
+// WHAT USED TO BE HERE was a second implementation of game::publishInput: 47 hand-enumerated
+// ImGui::IsKeyDown reads filling the named AVER_FW_KEY_* slots, sitting beside a loop filling the
+// raw-VK twin from input_. Two different sources for the two halves of the same physical key, in
+// the one host anybody actually plays a project in. That was survivable while nothing read both;
+// the .ocinput scheme system (commit 02bf9fac) reads the raw contract back through EnhancedInput,
+// which made it a second consumer's problem. InputPublishPolicy's own comment in
+// Runtime/include/aver/game/GameInput.hpp is the long version -- those fields exist because of
+// this function.
+//
+// AND IT IS A WIDENING, NOT A NO-OP, which is the one thing about this worth watching for. The 47
+// slots themselves are the same 47 either way -- that hand-written list and frameworkKeyFromVk
+// (aver/framework/InputKeys.hpp) happen to cover the identical set -- but the publisher loops the
+// whole VK table into them instead of naming ImGui keys one by one, and the table is deliberately
+// UNSIDED where the list was not: it maps VK_SHIFT / VK_CONTROL / VK_MENU, because WM_KEYDOWN
+// delivers the unsided code unless the receiver does the extended-key dance, while the list asked
+// ImGui for ImGuiKey_LeftShift / LeftCtrl / LeftAlt specifically. So RIGHT shift, ctrl and alt now
+// reach gameplay through the LSHIFT/LCTRL/LALT slots in the editor, where before they reached
+// nothing, whenever own_.keyboardToGame is true -- and anything added to that table later arrives
+// in both hosts at once rather than in the runtime alone. That is the point of the convergence
+// rather than a side effect of it: a project that behaves differently under Play than it does in a
+// shipped build is the defect this whole slice exists to remove. It is still a behaviour change
+// for anyone playing in the editor with the right-hand modifiers.
 void SandboxApp::pushInput(bool uiActive) {
-    aver_fw_input_new_frame();
-#if AVER_WITH_IMGUI
-    // NEVER RETURN AFTER new_frame(). aver_fw_input_new_frame rolls cur into prev and zeroes the
-    // mouse -- it does NOT clear cur[], so an early return here means "publish LAST frame's answer
-    // forever" while aver_fw_tick keeps running: hold fire, press the release-mouse chord, and the
-    // weapon keeps firing with the mouse untouched.
-    // THE ENGINE ALREADY LEARNED THIS ONCE, on the other host: GameInput.cpp's publishInput says
-    // it in full ("the first version... assumed new_frame clears the key state. IT DOES NOT").
-    // A BOOL, NOT A RETURN, so every set_key call still runs and publishes an explicit release --
-    // suppression folds into the SAME kb/m terms already read, so no slot can be left behind.
-    // READ, NOT RE-DERIVED: own_ was resolved once this frame by resolveInputOwnership.
-    // `suppressed` survives only because the mouse branch below still needs "publish a zero" apart
-    // from "publish the captured delta".
+    // NO aver_fw_input_new_frame() AND NO EARLY RETURN LEFT IN HERE, and both deletions are the
+    // same fact: publishInput calls new_frame itself and then writes EVERY slot -- named, raw VK,
+    // mouse and pad -- with an explicit value whatever the policy decided. new_frame rolls cur
+    // into prev WITHOUT clearing cur[], so any path that skips a slot republishes last frame's
+    // answer for as long as it keeps skipping while aver_fw_tick runs: hold fire, press the
+    // release-mouse chord, and the weapon keeps firing with the mouse untouched.
+    // THE HEADLESS RETURN WENT WITH THE ImGui READS THAT NEEDED IT. It guarded a GetIO() that
+    // would dereference a null GImGui in a run that never called uiInit(); nothing below reads
+    // ImGui outside the chord block, which keeps its own uiActive test. Publishing anyway is also
+    // the more correct answer, not merely a safe one: own_ is left all-false when ownership was
+    // never resolved, and "nothing owns the device" is exactly what a headless run means.
     const bool suppressed = !uiActive || (releasedByUser_ && playSessionActive());
-    // NOT THE EARLY RETURN THE COMMENT ABOVE FORBIDS, and the difference is which condition.
-    // The one that was rightly deleted was the mid-session RELEASE, where cur[] holds live values
-    // that must still be published down or every held key latches forever. uiActive is a
-    // process-lifetime property -- set once in uiInit, cleared in uiShutdown -- so when it is
-    // false nothing here has ever published a 1 and there is nothing to release. Without this,
-    // GetIO() below dereferences a null GImGui in any headless run.
-    if (!uiActive) return;
-    ImGuiIO& io = ImGui::GetIO();
-    const bool kb = own_.keyboardToGame;
-    const bool chordSpace = !suppressed && keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
-    const bool chordEsc   = !suppressed && drawer_ != Drawer::None && keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
-    for (int i = 0; i < 26; ++i) aver_fw_input_set_key(AVER_FW_KEY_A + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_A + i)));
-    for (int i = 0; i < 10; ++i) aver_fw_input_set_key(AVER_FW_KEY_0 + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_0 + i)));
-    aver_fw_input_set_key(AVER_FW_KEY_SPACE,  kb && !chordSpace && ImGui::IsKeyDown(ImGuiKey_Space));
-    aver_fw_input_set_key(AVER_FW_KEY_LSHIFT, kb && ImGui::IsKeyDown(ImGuiKey_LeftShift));
-    aver_fw_input_set_key(AVER_FW_KEY_LCTRL,  kb && !chordSpace && ImGui::IsKeyDown(ImGuiKey_LeftCtrl));
-    aver_fw_input_set_key(AVER_FW_KEY_LALT,   kb && ImGui::IsKeyDown(ImGuiKey_LeftAlt));
-    aver_fw_input_set_key(AVER_FW_KEY_ENTER,  kb && ImGui::IsKeyDown(ImGuiKey_Enter));
-    aver_fw_input_set_key(AVER_FW_KEY_ESCAPE, kb && !chordEsc && ImGui::IsKeyDown(ImGuiKey_Escape));
-    aver_fw_input_set_key(AVER_FW_KEY_TAB,    kb && ImGui::IsKeyDown(ImGuiKey_Tab));
-    aver_fw_input_set_key(AVER_FW_KEY_LEFT,   kb && ImGui::IsKeyDown(ImGuiKey_LeftArrow));
-    aver_fw_input_set_key(AVER_FW_KEY_RIGHT,  kb && ImGui::IsKeyDown(ImGuiKey_RightArrow));
-    aver_fw_input_set_key(AVER_FW_KEY_UP,     kb && ImGui::IsKeyDown(ImGuiKey_UpArrow));
-    aver_fw_input_set_key(AVER_FW_KEY_DOWN,   kb && ImGui::IsKeyDown(ImGuiKey_DownArrow));
-    // ---- THE RAW-VK TWIN, published from the editor's own accumulator ----
-    // The 46-slot AVER_FW_KEY_* enum cannot reach an F-key, numpad or OEM key, and cannot be
-    // renumbered (the InputKey graph node takes a literal integer). aver_fw_input_set_vk is the
-    // additive answer.
-    // IT READS input_, NOT ImGui: ImGui's key enum isn't Win32's, and a 256-entry reverse table
-    // would rot. input_ is fed straight from the Win32 stream, already keyed by virtual key.
-    // Gated on the same own_.keyboardToGame as everything above, publishing UP rather than
-    // leaving anything latched.
-    for (int32_t vk = 0; vk < AVER_FW_VK_COUNT; ++vk)
-        aver_fw_input_set_vk(vk, (kb && input_.keyHeld(vk)) ? 1 : 0);
 
-    // THE RECAPTURE CLICK IS EATEN, and only that one button: suppressing all of `m` would take
-    // mouse LOOK with it, costing the ability to turn until you let go -- a worse bug than the one
-    // being fixed. Cleared the moment the button is released, so a genuine second click fires normally.
-    if (eatRecaptureClick_ && !ImGui::IsMouseDown(0)) eatRecaptureClick_ = false;
-    const bool m = own_.mouseToGame;
-    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && !eatRecaptureClick_ && ImGui::IsMouseDown(0));
-    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
-    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
-    // Suppressed publishes an explicit zero rather than falling through to the captured branch:
-    // new_frame() already zeroes the delta, but saying so here keeps this function's contract one
-    // sentence long -- every slot is written, every frame, whatever the gate decided.
-    if (suppressed) aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
-    else if (mouse_.captured()) aver_fw_input_set_mouse(mouse_.dx(), mouse_.dy(), io.MouseWheel);
-    // THE UNCAPTURED BRANCH IS THE EDITOR'S NORMAL ONE (mouse_.captured() is false outside Play),
-    // so gameplay saw the same frame-late mouse the camera did. input_.mouseDX/DY and
-    // input_.wheel() are the correctly-phased sources during onUpdate -- see the look block.
-    else aver_fw_input_set_mouse(m ? static_cast<f32>(input_.mouseDX()) : 0.0f,
-                                 m ? static_cast<f32>(input_.mouseDY()) : 0.0f,
-                                 m ? input_.wheel() : 0.0f);
+    game::InputPublishPolicy policy;
+    // THE MASTER SWITCH IS `suppressed`, AND THE TWO PER-DEVICE FIELDS BELOW ALREADY CONTAIN IT --
+    // resolveInputOwnership derives both from the identical term (sandbox/src/InputOwnership.cpp:
+    // 15-21). So this is not a second, subtly different gate laid over the keyboard and the mouse;
+    // for them it is a restatement, and what it actually decides on its own is the pad and the
+    // all-slots release.
+    policy.focused        = !suppressed;
+    // READ, NOT RE-DERIVED: own_ was resolved once this frame, before this call, by
+    // resolveInputOwnership -- the whole reason that function exists is that this question used to
+    // have eleven slightly different spellings (sandbox/src/InputOwnership.hpp).
+    policy.keyboardToGame = own_.keyboardToGame;
+    policy.mouseToGame    = own_.mouseToGame;
+    // TRUE, AND NOT own_.keyboardToGame: the pad's gate is `suppressed` alone, which policy.focused
+    // just above already is. An ImGui text field steals a keystroke, never a controller button, so
+    // the uiWantsKeyboard clause folded into own_.keyboardToGame has nothing to say about a
+    // gamepad. publishInput calls publishGamepad itself from this field, which is why the direct
+    // game::publishGamepad(!suppressed) that used to close this function is gone -- leaving it
+    // would poll the device twice a frame and publish the second answer over the first.
+    policy.gamepadActive  = true;
+    policy.captured       = mouse_.captured();
+    policy.capturedDx     = mouse_.dx();
+    policy.capturedDy     = mouse_.dy();
 
-    // Gated on `suppressed`, not `kb`: an ImGui text field steals a keystroke, never a controller
-    // button, so the extra uiWantsKeyboard clause folded into `kb` has nothing to do with a
-    // gamepad -- `suppressed` alone (window unfocused, or the player released the mouse
-    // mid-session) is the whole of when the game does not own this device. See
-    // game::publishGamepad's own comment for why it still polls unconditionally.
-    game::publishGamepad(!suppressed);
+    // THE WHEEL NOW COMES FROM input_ EVEN WHILE THE MOUSE IS CAPTURED, the second behaviour this
+    // rewrite deliberately changes rather than merely relocates. The captured branch that stood
+    // here read io.MouseWheel -- a different source from the uncaptured branch immediately beside
+    // it, and the frame-late one at that, since ImGui merges queued wheel events at NewFrame
+    // and onUpdate runs before it (the fly block's own note, sandbox/src/SandboxApp.cpp:2165-2182,
+    // spells out why every io.MouseWheel read from onUpdate is zero). Capture confines and hides
+    // the cursor and has no opinion at all about the wheel, which is what GameInput.cpp's comment
+    // on policy.captured already states. SCOPE, so nobody has to discover it: the wheel during a
+    // CAPTURED Play session inside the editor, and nothing else -- the fly camera's speed wheel and
+    // --wheel-speed-test read input_ directly and are untouched.
+
+    // THE RECAPTURE CLICK IS EATEN, and only that one button: eating the whole mouse would take
+    // LOOK with it, costing the ability to turn until you let go -- a worse bug than the one being
+    // fixed. CONSUMED AGAINST input_ NOW rather than ImGui::IsMouseDown(0), because the latch has
+    // to be cleared by the same stream that publishes the button; a latch tested against one
+    // source and applied to another can hold a frame past the release, or release a frame early.
+    // Its SET site is still ImGui's click edge (sandbox/src/SandboxApp.cpp:2324-2331), which is
+    // fine while both readers see one Win32 stream (--input-source-test asserts exactly that) but
+    // is the next thing to move.
+    if (eatRecaptureClick_ && !input_.mouseHeld(0)) eatRecaptureClick_ = false;
+    policy.eaten[AVER_FW_KEY_MOUSE_LEFT] = eatRecaptureClick_;
+
+#if AVER_WITH_IMGUI
+    // THE DRAWER CHORDS STAY HERE AND STAY ImGui-SOURCED. keybinds_.pressed takes an ImGuiIO&, and
+    // ImGuiKey and CommandId must not cross into the library -- the same line InputOwnership.hpp
+    // already draws. What crosses is only the RESULT, as framework key ids: the key that opened a
+    // panel must not also make the pawn jump, and publishInput still publishes an explicit release
+    // into an eaten slot rather than skipping it.
+    // uiActive GUARDS THE GetIO() AND NOTHING ELSE now. A run that never called uiInit() has no
+    // ImGui context -- GImGui is null and GetIO() faults on the first member read -- and
+    // `suppressed` is already true there anyway, so there is no chord to resolve either way.
+    if (uiActive) {
+        ImGuiIO& io = ImGui::GetIO();
+        const bool chordSpace = !suppressed && keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
+        const bool chordEsc   = !suppressed && drawer_ != Drawer::None &&
+                                keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
+        policy.eaten[AVER_FW_KEY_SPACE]  = chordSpace;
+        policy.eaten[AVER_FW_KEY_LCTRL]  = chordSpace;
+        policy.eaten[AVER_FW_KEY_ESCAPE] = chordEsc;
+    }
 #endif
+
+    game::publishInput(input_, policy);
 }
 
 // While playing, drives the view camera from the pawn's published view node, falling back to the

@@ -507,6 +507,60 @@ void SandboxApp::maybeSpawnTestActor() {
     }
 }
 
+namespace {
+
+// ---- SYNTHETIC INPUT FOR THE PLAY SELF-TESTS, INTO THE ACCUMULATOR THE PUBLISHER READS --------
+//
+// WHY THESE EXIST AS OF THIS COMMIT. Until SandboxApp::pushInput was folded into
+// game::publishInput, an io.AddKeyEvent / io.AddMouseButtonEvent was enough to reach gameplay,
+// because the editor's publish read ImGui and ImGui's own queue was therefore on the path. It is
+// not any more: the publish reads input_, which is fed from Win32Window::dispatch. This file
+// already recorded the underlying fact next to --input-source-test -- io.AddKeyEvent "injects
+// directly into ImGui's queue, never reaching Win32Window::dispatch()" -- it simply did not matter
+// for the framework half until now. These put the event where the publisher will look for it.
+//
+// TIMING, because it is what makes an injection from HERE land at all. These drivers run from
+// onUpdate AFTER pushInput has already published this frame (sandbox/src/SandboxApp.cpp:2363 for
+// the publish, :2383 onwards for the drivers), and input_.newFrame() at the tail of onRender rolls
+// the press/release edges and zeroes the deltas but LEAVES HELD STATE ALONE (InputState::newFrame,
+// whose own header calls that "the point"). So a synthetic HELD button or key injected here is
+// still held when the NEXT frame's pushInput reads it: one frame of latency, then it stays down
+// until something says otherwise. An EDGE injected here, by contrast, is rolled away before any
+// publish sees it, which is why every caller below asserts a hold rather than a tap.
+#if AVER_WITH_IMGUI
+// Guarded because BOTH its callers are: --recapture-test and --input-stuck-test need own_ resolved,
+// which only happens in a run with a UI context. At /W4 an internal-linkage function nobody calls
+// is C4505, so the guard is what keeps the no-ui row of module-matrix.ps1 quiet.
+void injectMouseButton(InputState& in, i32 button, bool pressed) {
+    Event e;
+    e.type    = EventType::MouseButton;
+    e.button  = button;
+    e.pressed = pressed;
+    // THE POSITION IS WHATEVER THE ACCUMULATOR ALREADY HOLDS, and stating it is not redundant:
+    // InputState::onEvent takes mouseX/mouseY off a BUTTON event as well as off a move
+    // (modules/platform/src/InputState.cpp), so a button left at the default 0,0 would move its
+    // idea of the cursor to the corner and manufacture a large bogus delta out of the next real
+    // WM_MOUSEMOVE. Restating the current position makes this a button event and nothing else.
+    e.mouseX  = in.mouseX();
+    e.mouseY  = in.mouseY();
+    in.onEvent(e);
+}
+#endif
+
+// The keyboard twin, by RAW WIN32 VIRTUAL KEY -- which is what InputState is keyed by, and what
+// frameworkKeyFromVk (aver/framework/InputKeys.hpp) turns back into a named AVER_FW_KEY_* slot
+// inside the publisher. Not an ImGuiKey: the two enums are unrelated, which is the same reason the
+// raw-VK twin has always been published from input_ rather than from ImGui.
+void injectKey(InputState& in, i32 vk, bool pressed) {
+    Event e;
+    e.type    = EventType::Key;
+    e.key     = vk;
+    e.pressed = pressed;
+    in.onEvent(e);
+}
+
+} // namespace
+
 // --pie-camera-test [N]: press Play, touch NOTHING, prove the camera holds perfectly still -- a
 // PIE camera with no input has exactly one correct behaviour, and any drift is a bug, needing no
 // eyes or judgement call.
@@ -549,16 +603,36 @@ void SandboxApp::maybePieCameraTest() {
     }
 
     // ---- phase 3: hold W, and check the camera actually travels. ----
-    // THROUGH ImGui's OWN KEY QUEUE, not by shortcutting to the movement maths: the fly control
-    // asks ImGui::IsKeyDown(ImGuiKey_W), so a private flag would pass while the real key path
-    // stayed broken. AddKeyEvent is re-asserted every frame it should be held, not pressed once.
+    // THROUGH THE REAL KEY PATHS, not by shortcutting to the movement maths: a private flag would
+    // pass while the path a hand actually uses stayed broken. Both are re-asserted every frame the
+    // key should be held, not pressed once.
+    //
+    // BOTH READERS, BECAUSE ONE PHYSICAL W FEEDS BOTH. Which path carries this test's W depends
+    // entirely on the project: with no GameMode the editor's own fly block moves the possessed
+    // default pawn and asks ImGui::IsKeyDown(ImGuiKey_W) (sandbox/src/SandboxApp.cpp:2206-2211),
+    // while with a real GameMode the pawn is moved by gameplay reading the published AVER_FW_KEY_W
+    // slot -- which, since pushInput started calling game::publishInput, comes from input_ and no
+    // longer from ImGui. A real keypress reaches both readers off the one Win32 stream
+    // (--input-source-test below asserts exactly that, "one stream, two readers"), so the
+    // synthetic one has to as well or this test covers whichever project it was last run against.
+    //
+    // THIS IS NOT A FIX FOR THE MOVE PHASE'S CURRENT FAILURE, and must not be read as one. The W
+    // was already reaching the named slot through ImGui before this commit, so "the named slot was
+    // fed from the wrong place" cannot be why the phase reports 0.0 cm travelled; all this does is
+    // keep it reaching that slot now that the slot is fed from input_ instead. The open lead is
+    // the HARNESS, not the publisher: measured 2026-09-19, --input-stuck-test passes on PTTest
+    // unbounded and fails on the same project under --frames 900, and this test prints "THE VIEW
+    // IGNORES W" in exactly those bounded runs. Whatever --frames costs these drivers has not been
+    // pinned to a line, so run this one WITHOUT --frames before believing either result.
     if (pieCamFrame_ >= 50 && pieCamFrame_ < 90) {
         io.AddKeyEvent(ImGuiKey_W, true);
+        injectKey(input_, 'W', true);          // VK_W is the ASCII code; see InputKeys.hpp
         if (pieCamFrame_ == 50) pieCamMoveFrom_ = camPos_;
         return;
     }
     if (pieCamFrame_ == 90) {
         io.AddKeyEvent(ImGuiKey_W, false);
+        injectKey(input_, 'W', false);
         pieCamMoved_    = (camPos_ - pieCamMoveFrom_).size();
         // ALONG THE VIEW, not merely somewhere. A pawn shoved by gravity or by a stray physics
         // impulse would also register distance; only a forward component proves it was W.
@@ -838,7 +912,18 @@ void SandboxApp::maybeRecaptureTest() {
     // ...then click back into the viewport and HOLD. A real click lasts many frames; the bug
     // needs only the frames after the first, once own_ has refreshed with releasedByUser_ false
     // and mouse_.captured() true.
+    //
+    // INTO BOTH READERS, AND NEITHER HALF IS OPTIONAL HERE. The gesture under test is decided on
+    // ImGui's side -- the recapture branch asks ImGui::IsMouseClicked(0) before it clears
+    // releasedByUser_ and arms eatRecaptureClick_ (sandbox/src/SandboxApp.cpp:2324-2331) -- while
+    // the LEAK this test counts is read back off the published AVER_FW_KEY_MOUSE_LEFT slot, which
+    // pushInput now fills from input_ rather than from ImGui. Drop the ImGui half and no recapture
+    // ever happens, so there is nothing to leak from; drop the input_ half and no button is ever
+    // published, so a leak could not show up even if the eat were removed. A real click reaches
+    // both off one Win32 stream, which is what makes injecting into both faithful rather than a
+    // way of making the test agree with itself.
     io.AddMouseButtonEvent(0, true);
+    injectMouseButton(input_, 0, true);
     // The recapture itself takes a frame or two to land -- the button event queues and applies
     // at ImGui's next NewFrame, and the capture block reads it the frame after. The leak is
     // counted only ONCE THE MOUSE IS ACTUALLY BACK, the window the bug lives in.
@@ -864,6 +949,7 @@ void SandboxApp::maybeRecaptureTest() {
         AVER_INFO("[recapture] RESULT: {}",
                   !clean ? "FAIL" : (tookBack ? "PASS" : "PASS (recapture unreachable -- see above)"));
         io.AddMouseButtonEvent(0, false);
+        injectMouseButton(input_, 0, false);   // both readers let go, for the reason both were told
         stopPlay();
         recapFrames_ = 0;
     }
@@ -876,9 +962,21 @@ void SandboxApp::maybeRecaptureTest() {
 // gated on a LEVEL read of MOUSE_LEFT fired forever with the mouse untouched.
 // IT ASSERTS EVERY KEY, NOT THE ONE IT PRESSED: the fix spans ~29 set_key call sites, and a test
 // watching one slot would pass with 28 fixed and the 29th still latching.
-// WHY IT DRIVES ImGui RATHER THAN THE ABI: --play-test's aver_fw_input_set_key writes the state
-// the bug corrupts, so it can't catch this; AddMouseButtonEvent reaches the framework only through
-// pushInput, the function under test.
+// WHY IT DRIVES THE DEVICE STREAM RATHER THAN THE ABI: --play-test's aver_fw_input_set_key writes
+// the very state the bug corrupts, so it cannot catch this; the injection has to enter upstream of
+// pushInput, the function under test, and be carried by it.
+// AND WHY THAT STREAM IS input_ AND NO LONGER ImGui. It was io.AddMouseButtonEvent while pushInput
+// read ImGui; pushInput now hands game::publishInput the editor's policy and that publisher reads
+// InputState, so an ImGui-only click stopped being on the path at all. Re-pointed rather than
+// duplicated here, unlike --recapture-test just above, and the difference is worth stating: this
+// test needs no ImGui-side gesture, and an ImGui-held button is actively in its way -- a held
+// button makes ImGui report WantCaptureMouse, resolveInputOwnership then denies the mouse to the
+// game unless mouse_.captured() overrides it, and setMouseCaptured is skipped in a bounded run
+// (sandbox/src/SandboxApp.cpp:2311 and :2357), which is phase 1 failing on the test's own injection.
+// STILL GUARDED ON AVER_WITH_IMGUI even though nothing in the body touches ImGui any more: own_ is
+// only resolved in a run that has a UI context, and without one the publisher is correctly told
+// that nobody owns the mouse -- phase 1 would report "no input arrived" and prove nothing, which is
+// a worse outcome than not running.
 void SandboxApp::maybeInputStuckTest() {
     if (inputStuckFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
@@ -886,13 +984,13 @@ void SandboxApp::maybeInputStuckTest() {
     if (inputStuckFrame_ == 10) { startPlay(); return; }
     if (inputStuckFrame_ < 11) return;
 
-    ImGuiIO& io = ImGui::GetIO();
-
     // ---- phase 1: hold the button and prove it actually reaches gameplay ----
     // Re-asserted every frame rather than pressed once: the point is that the BUTTON never goes
-    // up, so a test that stopped saying so would be testing the wrong thing.
+    // up, so a test that stopped saying so would be testing the wrong thing. (Re-asserting a hold
+    // is also free -- InputState::onEvent only counts the 0->1 transition as a press, exactly so
+    // Windows' own key auto-repeat cannot read as a fresh tap.)
     if (inputStuckFrame_ < 30) {
-        io.AddMouseButtonEvent(0, true);
+        injectMouseButton(input_, 0, true);
         if (inputStuckFrame_ > 12 && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) inputStuckSawDown_ = true;
         return;
     }
@@ -900,10 +998,10 @@ void SandboxApp::maybeInputStuckTest() {
     // ---- phase 2: release the mouse to the editor, WITHOUT letting the button up ----
     // Exactly what a person does mid-session to go and click something in the Outliner, and the
     // precise moment the old code stopped publishing.
-    if (inputStuckFrame_ == 30) { io.AddMouseButtonEvent(0, true); releasedByUser_ = true; return; }
+    if (inputStuckFrame_ == 30) { injectMouseButton(input_, 0, true); releasedByUser_ = true; return; }
 
     // ---- phase 3: from here on gameplay must see NOTHING held ----
-    io.AddMouseButtonEvent(0, true);   // still physically down; still must not reach the game
+    injectMouseButton(input_, 0, true);   // still physically down; still must not reach the game
     for (int k = 0; k < AVER_FW_KEY_COUNT; ++k) {
         if (aver_fw_input_key(k)) { ++inputStuckLatched_; if (inputStuckFirstKey_ < 0) inputStuckFirstKey_ = k; }
     }
@@ -919,7 +1017,10 @@ void SandboxApp::maybeInputStuckTest() {
                   inputStuckLatched_, inputStuckFrames_, inputStuckFirstKey_,
                   clearOk ? "nothing latched" : "A KEY IS STUCK (pushInput returned without publishing)");
         AVER_INFO("[input-stuck] RESULT: {}", (downOk && clearOk) ? "PASS" : "FAIL");
-        io.AddMouseButtonEvent(0, false);
+        // LET GO BEFORE HANDING THE EDITOR BACK. Held state is the one thing InputState::newFrame
+        // deliberately does not roll, so a synthetic button left down here stays down for the rest
+        // of the process and the next thing to read input_ inherits it.
+        injectMouseButton(input_, 0, false);
         releasedByUser_ = false;
         stopPlay();
         inputStuckFrames_ = 0;
