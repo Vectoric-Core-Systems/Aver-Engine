@@ -138,6 +138,24 @@ int main() {
         check(o.mouseToGame, "captured: gameplay still gets the mouse, because WantCaptureMouse is a stale answer");
     }
 
+    // ---- AND IT OVERRIDES WantCaptureKeyboard TOO, for the identical reason ----
+    //
+    // This one is here because it was NOT true, and the asymmetry cost a captured Play session
+    // every key it should have received while the mouse worked perfectly. The viewport is itself an
+    // ImGui window, so ImGui wants the keyboard during an ordinary session; measured on SkyForge
+    // mid-Play, frame 60 of --pie-camera-test: kbToGame=false, mouseToGame=true, captured=true,
+    // uiWantsKb=true, textInput=false, and W published as 0 with the key physically held in
+    // InputState. --pie-camera-test had been reporting "THE VIEW IGNORES W" the whole time, which
+    // was simply true. With the override the same test travels 231 cm, dot 1.000 along the view.
+    {
+        InputConditions c = editing();
+        c.playing = true;
+        c.mouseCaptured = true;
+        c.uiWantsKeyboard = true;   // stale for the same reason: there is no widget to type into
+        const InputOwnership o = resolveInputOwnership(c);
+        check(o.keyboardToGame, "captured: gameplay still gets the keyboard, or a captured session cannot walk");
+    }
+
     // ---- A TEXT FIELD BEATS EVERYTHING ----
     {
         InputConditions c = editing();

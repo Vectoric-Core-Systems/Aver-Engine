@@ -13,7 +13,24 @@ InputOwnership resolveInputOwnership(const InputConditions& c) {
     // because aver_fw_input_new_frame() rolls cur into prev without clearing cur. The gate decides the
     // VALUE published, never whether to publish at all.
     const bool suppressed = !c.uiActive || (c.releasedByUser && c.playing);
-    o.keyboardToGame = !suppressed && !c.uiWantsKeyboard;
+    // THE KEYBOARD TAKES THE SAME CAPTURE OVERRIDE THE MOUSE DOES, and for the identical reason
+    // spelled out below it: a captured cursor is hidden and confined to this window, so there is no
+    // ImGui widget the user could be interacting with, and WantCaptureKeyboard is then a stale
+    // answer to a question that no longer applies.
+    //
+    // WITHOUT IT, A CAPTURED PLAY SESSION GOT NO KEYS AT ALL while the mouse worked perfectly --
+    // which is precisely as strange as it sounds, and is why --pie-camera-test has always reported
+    // "THE VIEW IGNORES W". Measured on SkyForge, frame 60 of that test, mid-session:
+    //     kbToGame=false mouseToGame=true captured=true uiWantsKb=true textInput=false
+    //     playState=PLAYING fwKeyW=0 rawVkW=0 inputHeldW=true
+    // W held in InputState, the pawn possessed, the mouse captured -- and W published as 0, because
+    // the viewport is itself an ImGui window and ImGui therefore wants the keyboard. The mouse
+    // escaped that only because it already had this clause.
+    //
+    // A TEXT FIELD IS STILL SAFE, and is not what this weakens: WantTextInput is handled on its own
+    // below and forces both keyboard consumers off regardless of capture. That is ImGui's actual
+    // answer to "is the user typing", and it is the one that should win.
+    o.keyboardToGame = !suppressed && (c.mouseCaptured || !c.uiWantsKeyboard);
     // The mouse asks for both flags, and captures override both. Captured means the OS cursor is
     // hidden and confined to this window, so there is no ImGui widget it could be interacting with --
     // WantCaptureMouse is then a stale answer to a question that no longer applies.
