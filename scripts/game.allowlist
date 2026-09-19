@@ -48,6 +48,39 @@ Aver.Physics.dll      ?AVER_MODULE_PHYSICS
 # every edition.
 Aver.Audio.Abi.dll
 
+# The settings seam, missing for the one reason this file's safety net cannot cover.
+#
+# NOTHING NATIVE LINKS IT. Search the CMakeLists files for Aver.Settings and the only consumers are
+# the module itself (modules/settings/CMakeLists.txt:7, SHARED, output into bin) and tests/settings,
+# which a package never contains -- so the name appears in no staged binary's import directory. The
+# only caller is MANAGED: scripting/csharp/Aver.Framework/Native.cs:243 declares
+# `Lib = "Aver.Settings"` and :248-276 import fourteen aver_settings_* entry points through it. A
+# DllImport is a string the CLR resolves at first call, not a PE import-table entry, so refusal 8b
+# -- the import-closure walk that is the only thing standing between this file and a package that
+# names a DLL it did not copy -- is structurally blind to it. stage-game.ps1:592 says as much in its
+# own log line, "managed assemblies have none". That is why this entry argues rather than just
+# naming a file: the next managed-only dependency goes missing exactly the same way, and the check
+# that caught Aver.Audio.Abi above cannot be the one that catches it.
+#
+# WHAT A PLAYER WOULD HAVE SEEN, and why nobody would have looked here. Runtime/src/GameApp.cpp:1314
+# builds a settings path unconditionally -- userDataDir() plus the project name plus Settings.ini --
+# and hands it to configureInput at :1317, so HostBridge.cs:440 calls Settings.Open on EVERY launch
+# of a scripted game. That is the first P/Invoke into the absent DLL. The DllNotFoundException is
+# swallowed by ConfigureInput's own catch (HostBridge.cs:461-464), which returns -1, and
+# GameApp.cpp:1328 reports that as "input scheme '<path>' failed to load". So every rebindable
+# action dies at startup and the message blames the .ocinput file, which is present and correct.
+# The editor takes the same route at Play (sandbox/src/SandboxPlay.cpp:168-169), which is why
+# payload.allowlist grew this entry in the same change.
+#
+# UNCONDITIONAL, and it cannot be otherwise. The top-level CMakeLists.txt:242 adds modules/settings
+# beside core and platform with no switch over it -- "a game with no scene still has settings" --
+# so there is no AVER_MODULE_SETTINGS in CMakeCache.txt to gate on, and stage-game.ps1:320 refuses
+# outright any condition the cache does not mention. Gating it on AVER_MODULE_SCRIPTING, the option
+# that actually decides whether the managed caller ships, would be worse than useless: the DLL is
+# built in every edition regardless, so a scripting-off tree would trip the OFF half of the
+# both-ways check and refuse a package that was fine.
+Aver.Settings.dll
+
 # Runtime redistributables. HLSL is compiled on the fly, so the shader compiler ships; dxil.dll is
 # the signing library without which drivers reject the compiled shaders.
 dxcompiler.dll

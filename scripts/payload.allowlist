@@ -36,14 +36,33 @@ Sandbox.exe
 AverAssetC.exe
 AverCrashReporter.exe
 
-# The C-seam DLLs the editor load-time links. Listed individually rather than as Aver.*.dll on
-# purpose: that glob would also sweep the dead root-level Aver.Scripting.dll (see below), and it
-# would hide which DLLs an edition is supposed to have.
+# The C-seam DLLs. Listed individually rather than as Aver.*.dll on purpose: that glob would also
+# sweep the dead root-level Aver.Scripting.dll (see below), and it would hide which DLLs an edition
+# is supposed to have.
 #
-# Audio and UI are unconditional in the top-level CMakeLists, so they are in every edition. The rest
-# are behind their module option, and an edition built without one must not contain it.
+# Audio, UI and Settings are unconditional in the top-level CMakeLists, so they are in every
+# edition. The rest are behind their module option, and an edition built without one must not
+# contain it.
 Aver.Audio.Abi.dll
 Aver.UI.Abi.dll
+
+# SETTINGS IS NOT ONE THE EDITOR LOAD-TIME LINKS -- it is the exception this block used to claim did
+# not exist, and the reason it was absent from this file entirely.
+#
+# Sandbox.exe names Aver.Settings nowhere: no CMakeLists in the tree links it except the module's
+# own and tests/settings, so it is in no import table and no staged binary would have reported it
+# missing. The caller is managed. scripting/csharp/Aver.Framework/Native.cs:243 declares
+# `Lib = "Aver.Settings"` and :248-276 import fourteen aver_settings_* entry points through it, and
+# the editor reaches them at every Play start: sandbox/src/SandboxPlay.cpp:168-169 hands
+# ScriptHost::configureInput a settings path, which is HostBridge.cs:440's Settings.Open. On a
+# downloaded payload without this DLL that call throws DllNotFoundException, ConfigureInput's catch
+# (HostBridge.cs:461-464) returns -1, and the editor reports it as the input scheme failing to load
+# -- so rebindable input is dead and the diagnostic points at a .ocinput file that is perfectly
+# fine. scripts/game.allowlist carries the same entry and the longer version of this argument.
+#
+# Unconditional because CMakeLists.txt:242 adds modules/settings beside core and platform with no
+# switch over it, so there is no option to gate on and nothing for the both-ways check to assert.
+Aver.Settings.dll
 Aver.Render.PBR.dll   ?AVER_MODULE_PBR
 Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI
 Aver.Scene.dll        ?AVER_MODULE_SCENE
