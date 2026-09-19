@@ -52,7 +52,25 @@ static constexpr int kSetTable1 = 1;
 static constexpr int kSetConstants = 2;
 static constexpr int kSetSamplers = 3;
 static constexpr int kSetInstances = 4;
-static constexpr int kUavBase = 16;   // kVkUavBindingBase == kMaxBindingSlots
+
+// THE UAV BASE IS DERIVED, AND IT IS THE ONE EXCEPTION TO THE RULE ABOVE. A set index is an
+// architectural choice -- table 0 is set 0 and always will be -- so pinning those as literals makes
+// a change to either side deliberate, which is the point. kVkUavBindingBase is not that kind of
+// number: it is defined as kMaxBindingSlots, a CAPACITY that is expected to grow whenever a table
+// needs more slots, and the invariant worth testing is where UAVs sit RELATIVE to the SRV range,
+// not what that number happens to be this month.
+//
+// Written as the literal 16 it was silently wrong for four days. optimisation-wave-2 (501a1bb6)
+// raised kMaxBindingSlots 16 -> 24 because Voxi's table grew to 17 SRVs and 11 UAVs; the
+// implementation moved with it, as it must -- UAVs based at 16 would now collide with SRVs 16..23 --
+// and this copy did not, so five checks failed and nobody saw, because the suite had never been run.
+//
+// Derived from rhi::kMaxBindingSlots rather than from kVkUavBindingBase itself, which keeps the
+// contract under test: if the Vulkan backend ever based its UAVs somewhere OTHER than
+// kMaxBindingSlots, these checks would still catch it.
+static constexpr int kUavBase = static_cast<int>(kMaxBindingSlots);
+static const std::string kUavBaseStr  = std::to_string(kUavBase);
+static const std::string kUavBase1Str = std::to_string(kUavBase + 1);
 
 // ---- the exact shape that was failing: Voxi's GI layout ------------------------------------------
 //
@@ -93,8 +111,9 @@ static void testVoxiGiLayout() {
     // UAVs were already correct, via -fvk-u-shift. The map has to reproduce that exactly, because
     // supplying a map SUPPRESSES the shift -- the two are mutually exclusive in DXC.
     check(find(binds, n, 'u', 0).set == kSetTable0 && find(binds, n, 'u', 0).binding == kUavBase,
-          "u0 -> set 0, binding 16 (the shift's old answer)");
-    check(find(binds, n, 'u', 1).binding == kUavBase + 1, "u1 (gVoxelAccum) -> binding 17");
+          "u0 -> set 0, binding " + kUavBaseStr + " (the shift's own answer)");
+    check(find(binds, n, 'u', 1).binding == kUavBase + 1,
+          "u1 (gVoxelAccum) -> binding " + kUavBase1Str);
 
     // b1 is root constants here, so it is folded into [[vk::push_constant]] and its register is
     // DELETED from the source -- there is no resource left for DXC to want a mapping for.
@@ -134,11 +153,11 @@ static void testUavsSplitAcrossTables() {
     const u32 n = vkb::buildRegisterBinds(l, binds, vkb::kMaxRegisterBinds);
 
     check(find(binds, n, 'u', 1).set == kSetTable0 && find(binds, n, 'u', 1).binding == kUavBase + 1,
-          "u1 -> set 0, binding 17");
+          "u1 -> set 0, binding " + kUavBase1Str);
     check(find(binds, n, 'u', 2).set == kSetTable1 && find(binds, n, 'u', 2).binding == kUavBase,
-          "u2 -> set 1, restarting at binding 16");
+          "u2 -> set 1, restarting at binding " + kUavBaseStr);
     check(find(binds, n, 'u', 3).set == kSetTable1 && find(binds, n, 'u', 3).binding == kUavBase + 1,
-          "u3 -> set 1, binding 17");
+          "u3 -> set 1, binding " + kUavBase1Str);
 }
 
 // ---- the map has to be COMPLETE, which is why cbuffers are in it -----------------------------------
@@ -246,7 +265,8 @@ static void testInstanceRegister() {
     const Where uav0 = find(binds, n, 'u', 0);
     check(inst.set == kSetInstances, "a full 16-SRV layout still puts the instance register in its own set");
     check(!(inst.set == uav0.set && inst.binding == uav0.binding),
-          "and it therefore cannot collide with UAV slot 0, which sits at binding 16 of set 0");
+          "and it therefore cannot collide with UAV slot 0, which sits at binding " + kUavBaseStr +
+          " of set 0");
 }
 
 int main() {
