@@ -73,7 +73,8 @@ param(
     [int] $Frames = 30,
     [switch] $Windowed,
     [switch] $KeepScratch,
-    # The editor to compare against for the divergence gate. Defaults to this repo's Debug build.
+    # The editor to compare against for the divergence gate. Defaults to the build tree matching
+    # the configuration the package was staged from, which game.json records.
     [string] $Editor = '',
     # Skip the divergence gate outright. For a machine that has a package and no engine tree.
     [switch] $SkipDivergence
@@ -81,6 +82,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $failures = New-Object System.Collections.Generic.List[string]
+# The configuration game.json says this package was staged from. Empty when game.json is missing or
+# unparseable, which is already a failure by the time the gate reads it.
+$stagedConfig = ''
 function Fail([string] $m) { $script:failures.Add($m); Write-Host "[verify] ERROR $m" -ForegroundColor Red }
 function Note([string] $m) { Write-Host "[verify] $m" }
 
@@ -119,6 +123,9 @@ if (Test-Path -LiteralPath $gameJsonPath) {
         # is still worth seeing in the log.
         if ($game.enableUi) { Note 'staged from a UI tree (enableUi=true) -- stage-game.ps1 byte-scans the binary to prove no ImGui reached it' }
         Note "game.json: '$($game.name)' entry=$($game.entryPoint) startMap=$($game.startMap) files=$($game.fileCount)"
+        # Kept for the divergence gate below, which has to compare against an editor built the SAME
+        # way. stage-game.ps1 writes this field from its own -Config.
+        $script:stagedConfig = $game.config
     } catch {
         Fail "game.json is not valid JSON: $($_.Exception.Message)"
     }
@@ -245,7 +252,21 @@ if (-not (Test-Path -LiteralPath $exe)) {
 # a package legitimately ships without Sandbox.exe beside it; a missing editor means this particular
 # question cannot be asked, not that the answer is bad.
 if (-not $SkipDivergence) {
-    $editorExe = if ($Editor) { $Editor } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'build/bin/Sandbox.exe' }
+    # THE DEFAULT FOLLOWS THE PACKAGE, NOT THE REPO'S DEBUG TREE. It used to be a hardcoded
+    # 'build/bin/Sandbox.exe' while stage-game.ps1 defaults to -Config Release and stages out of
+    # build-release. The default pairing therefore compared a DEBUG editor against a RELEASE
+    # runtime, and neither script said so. The census is configuration-independent in principle, so
+    # this would usually still pass -- which is worse than failing, because it means the gate was
+    # quietly answering a question nobody asked. Same derivation stage-game.ps1:67-70 uses.
+    $treeFor = { param($cfg) if ($cfg -eq 'Debug') { 'build' } else { "build-$($cfg.ToLower())" } }
+    $editorExe = if ($Editor) {
+        $Editor
+    } elseif ($stagedConfig) {
+        Join-Path (Split-Path -Parent $PSScriptRoot) "$(& $treeFor $stagedConfig)/bin/Sandbox.exe"
+    } else {
+        Join-Path (Split-Path -Parent $PSScriptRoot) 'build/bin/Sandbox.exe'
+    }
+    if ($stagedConfig) { Note "divergence gate: package staged $stagedConfig, comparing against $editorExe" }
     $pkgProject = Join-Path $pkg 'Game.ocproject'
     if (-not (Test-Path -LiteralPath $editorExe)) {
         Note "divergence gate SKIPPED -- no editor at $editorExe (pass -Editor to point at one)"
@@ -276,7 +297,16 @@ if (-not $SkipDivergence) {
         # --no-editor-chrome is not about pixels here -- the census does not look at any -- but the
         # editor must not be left drawing a gizmo over a selection it made on load, which spawns
         # nothing but keeps the two runs honestly comparable in every other respect too.
-        $censusEditor = Get-Census $editorExe @('--no-vsync', '--no-editor-chrome')
+        #
+        # --open-legacy IS LOAD-BEARING, and without it this gate could never pass on any package
+        # made from a project older than the current series. The editor refuses to open such a
+        # project when the run has a frame limit, because the upgrade prompt is modal and nothing
+        # can answer it -- it says so and carries on with no project, so the census came back
+        # entities=0 while the game reported the real scene, and the gate called that a divergence.
+        # Opening as-is is also the only honest comparison: the packaged runtime has no upgrade
+        # prompt and no way to rewrite the manifest it ships with, so it always opens the staged
+        # manifest exactly as staged. The editor has to be asked the same question.
+        $censusEditor = Get-Census $editorExe @('--no-vsync', '--no-editor-chrome', '--open-legacy')
         $censusGame   = Get-Census (Join-Path $scratch 'AverEngineRuntime.exe') @()
 
         if (-not $censusEditor) {
