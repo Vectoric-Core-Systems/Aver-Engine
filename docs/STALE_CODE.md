@@ -180,6 +180,11 @@ written down here**. Each is a grep anyone can repeat; none of them is a "looks 
   the header and correct the doc.** `AVER_MODULE_ON(m)` (`:46`) goes the same way: one occurrence in
   the tree, its own definition, so the defined-vs-undefined distinction it exists to draw is drawn
   nowhere.
+  **2026-09-20: the header now says this about itself**, in place of the paragraph that claimed each
+  dependent module already invokes the macro. The mechanism is KEPT, not deleted — it is correct, and
+  `ABI_VERIFICATION_PLAN.md` §3 reasons from it — so the item stays open as *adoption*: one
+  `AVER_REQUIRE_MODULE` line per module with `DEPS`, provable only by building the combinations
+  `scripts/module-matrix.ps1` builds, which is why it was not landed alongside the comment.
 - **`docs/ABI_VERIFICATION_PLAN.md:109` states the opposite as settled fact** — "The existing fix is
   that each dependent module invokes `AVER_REQUIRE_MODULE` from its **own** public header." No module
   does. Corrected in place on 2026-09-20; recorded here because it is the same defect class as
@@ -190,12 +195,17 @@ written down here**. Each is a grep anyone can repeat; none of them is a "looks 
   SRV at `t(declaredSrvCount)`) exists only on the SRV side, so there is no UAV analogue to feed.
   Safe to delete — or keep it and say in one line that it is there for symmetry, because as it stands
   it invites a reader to assume a UAV register-derivation convention that does not exist.
+  **2026-09-20: deleted**, and `declaredSrvCount`'s own comment now states why it has no twin, so the
+  symmetry argument cannot quietly put one back.
 - **`modules/core/include/aver/core/ErrorCodes.hpp:82` — the `AbiError`-taking `abiErrorName` has no
   callers**; every call site uses `abiErrorNameOf(i32)` instead (`ErrorCodes.cpp:20`, used three times
   in `tests/abi/src/AbiEnumTest.cpp:976-979`). Low priority on its own, but this is an ABI-adjacent
   header where two similarly-named functions over two numeric vocabularies sit side by side, so
   picking the wrong one is a live hazard rather than a style question. Either delete it or say in one
   line that it is the enum-typed convenience for a caller that already holds an `AbiError`.
+  **2026-09-20: deleted.** It also carried a second copy of the same eight strings — a table to
+  forget to extend the next time a code is appended, across an ABI seam whose own rule is "append,
+  never insert". `abiErrorNameOf(i32)` is now the only namer; a caller holding an `AbiError` casts.
 
 **Two findings from the same sweep are deliberately NOT listed here, because they were fixed while it
 ran.** `frameworkKeyFromMouseButton` (`InputKeys.hpp:63`) was reported as having no callers; it is

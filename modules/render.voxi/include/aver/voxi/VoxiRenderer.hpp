@@ -1736,13 +1736,7 @@ private:
     // that somehow renders a frame before its first setSettings call behaves as Medium would rather
     // than as NoRay (0), which is what an un-initialised u32 read as before this field existed.
     u32 giRestirVisibility_ = 2;
-    // Settings::giRestirMovingAge, cached at setSettings the same way giRestirVisibility_ just above
-    // is. 0 (LEGACY, ALWAYS 30) matches the struct default Voxi.hpp gives it -- it was 3 (bd6e2045)
-    // until the owner tested that nonzero default by hand and the fade came back unchanged, so it was
-    // reverted to the safe, byte-identical-to-history answer rather than left claiming a fix it never
-    // was (see Voxi.hpp's own comment on the field for the full account). A renderer that somehow
-    // renders a frame before its first setSettings call behaves as the shipped default would, the
-    // same reasoning giRestirVisibility_'s own comment gives for its default.
+    // Settings::giRestirSpatialSamples, cached at setSettings the same way giRestirVisibility_ just
     // above is, for the identical defensive reason: Voxi.cpp's setSettings already range-clamps
     // Settings::giRestirSpatialSamples to [0,15], and std::min repeats that ceiling here so this
     // member can never disagree with givis::packAmbientW's own `& 15u` mask of it. 15 (AUTO) matches

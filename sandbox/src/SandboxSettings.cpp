@@ -1159,8 +1159,14 @@ void SandboxApp::buildStreamSettings() {
         ImGui::PopID();
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("RECORDED, NOT YET CONSUMED: ChunkStreamer takes its settings at");
-    ImGui::TextDisabled("construction and nothing re-reads them from the manifest yet.");
+    // These used to read "RECORDED, NOT YET CONSUMED". They are consumed now -- GameStreaming::enable
+    // seeds every field's ChunkWorldSettings::stream from the manifest -- and the two things a user
+    // still needs told are the ones that would otherwise look like the dial being ignored: the
+    // settings are read when streaming is enabled rather than live, and a PCGVOLUME that states its
+    // own radius beats the project-wide radii.
+    ImGui::TextDisabled("Read when streaming starts, not live: a running world keeps the budgets");
+    ImGui::TextDisabled("it opened with. A PCGVOLUME stating its own radius overrides the two");
+    ImGui::TextDisabled("radii above for that field; the budgets and lead time always apply.");
 #endif
 }
 

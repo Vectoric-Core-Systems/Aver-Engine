@@ -79,21 +79,14 @@ enum class AbiError : i32 {
     AllocationFailed = -7, // the request was legal and the memory was not there
 };
 
-inline const char* abiErrorName(AbiError e) {
-    switch (e) {
-        case AbiError::Ok:               return "ok";
-        case AbiError::BadHandle:        return "bad handle";
-        case AbiError::NullPointer:      return "null pointer";
-        case AbiError::NotInitialised:   return "not initialised";
-        case AbiError::OutOfRange:       return "out of range";
-        case AbiError::Unsupported:      return "unsupported";
-        case AbiError::InvalidArgument:  return "invalid argument";
-        case AbiError::AllocationFailed: return "allocation failed";
-    }
-    return "unknown";
-}
-
-// The name for a raw i32 off an ABI boundary, where the value may be anything at all.
+// The name for a raw i32 off an ABI boundary, where the value may be anything at all, and THE ONLY
+// NAMING FUNCTION -- callers holding an AbiError pass `static_cast<i32>(e)`.
+//
+// There used to be an `abiErrorName(AbiError)` overload beside this declaration with a second copy
+// of the same eight strings and no caller anywhere in the tree. Two similarly-named namers for the
+// two numeric vocabularies this header exists to keep apart is precisely the confusion a reader
+// falls into here, and the uncalled one was also a second table to forget to extend when a code is
+// appended. One table, in ErrorCodes.cpp, beside the frozen-values rule it has to obey.
 const char* abiErrorNameOf(i32 code);
 
 // ---- The channel the codes travel on -----------------------------------------------------------

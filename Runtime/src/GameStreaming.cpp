@@ -18,6 +18,23 @@
 
 namespace aver::game {
 
+namespace {
+// The residency radius ceiling, shared by the manifest's STREAM.LOADRADIUS / EVICTRADIUS /
+// VERTICALRADIUS and by a PCGVOLUME's own radiusChunks. Both are hand-authored text and chunk
+// residency cost grows with the cube of this, so a stray digit must not be able to ask for a world
+// that never finishes loading. One constant rather than one per site: two ceilings that disagree
+// would make the same number legal from the level and clamped from the project.
+constexpr i32 kMaxRadiusChunks = 24;
+
+// Names the key it clamped, because the value the streamer ends up running is otherwise nowhere a
+// reader of the manifest can see it.
+i32 clampRadiusKey(const char* key, i32 asked) {
+    if (asked <= kMaxRadiusChunks) return asked;
+    AVER_WARN("[ChunkWorld] {} asks for radius {}; clamped to {}", key, asked, kMaxRadiusChunks);
+    return kMaxRadiusChunks;
+}
+} // namespace
+
 void GameStreaming::accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add) {
     into.residentChunks    += add.residentChunks;
     into.residentEntities  += add.residentEntities;
@@ -93,6 +110,43 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
                       sp.meshPath, sp.volume);
     }
 
+    // ---- STREAM.* FROM THE MANIFEST, WHICH USED TO REACH NOTHING --------------------------------
+    //
+    // All six keys parse, serialise and carry a Project Settings widget, and not one of them was
+    // read: ChunkWorldSettings reached open() on world::StreamSettings' compiled-in defaults, so a
+    // title that lowered its load budget for a slower platform shipped the built-in 2 anyway. A key
+    // that survives a save and changes nothing is worse than a missing key -- it reads as a dial
+    // somebody already tried, which is why this one is applied rather than deleted.
+    //
+    // UNSTATED IS NEGATIVE, this block's own rule in OcProject.hpp, so a key the project never
+    // writes leaves the StreamSettings default standing instead of writing a zero over it. A STATED
+    // zero budget IS honoured and means unbounded -- StreamSettings' own documented contract for it,
+    // and the reason the test here is `>= 0` rather than `> 0`.
+    world::StreamSettings manifestStream;   // defaults until a key overrides one
+    if (project.streamLoadRadius >= 0)
+        manifestStream.loadRadius = clampRadiusKey("STREAM.LOADRADIUS", project.streamLoadRadius);
+    if (project.streamEvictRadius >= 0)
+        manifestStream.evictRadius = clampRadiusKey("STREAM.EVICTRADIUS", project.streamEvictRadius);
+    if (project.streamVerticalRadius >= 0)
+        manifestStream.verticalRadius =
+            clampRadiusKey("STREAM.VERTICALRADIUS", project.streamVerticalRadius);
+    if (project.streamLoadBudget >= 0)
+        manifestStream.loadBudget = static_cast<u32>(project.streamLoadBudget);
+    if (project.streamEvictBudget >= 0)
+        manifestStream.evictBudget = static_cast<u32>(project.streamEvictBudget);
+    if (project.streamLeadSeconds >= 0.0f)
+        manifestStream.leadSeconds = project.streamLeadSeconds;
+    // Logged only when the project actually stated something, so a manifest with no STREAM block
+    // does not grow a line claiming it configured streaming. evictRadius may still be raised from
+    // here by ChunkStreamer::setSettings, which enforces evictRadius > loadRadius rather than
+    // trusting either source of them.
+    if (project.hasStreamSettings())
+        AVER_INFO("[ChunkWorld] STREAM.* applied -- loadRadius={} evictRadius={} loadBudget={} "
+                  "evictBudget={} verticalRadius={} leadSeconds={:.2f}",
+                  manifestStream.loadRadius, manifestStream.evictRadius, manifestStream.loadBudget,
+                  manifestStream.evictBudget, manifestStream.verticalRadius,
+                  manifestStream.leadSeconds);
+
     std::vector<std::unique_ptr<world::ChunkWorld>> built;
     for (usize fi = 0; fi < fieldCount; ++fi) {
         const fmt::OcPcgVolume* v = fields.empty() ? nullptr : fields[fi];
@@ -117,6 +171,8 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
 
         auto cw = std::make_unique<world::ChunkWorld>();
         world::ChunkWorldSettings cwSettings;
+        // The project's budgets first; anything this field states for itself overrides them below.
+        cwSettings.stream = manifestStream;
 
         // PER FIELD ONLY WHEN THERE IS MORE THAN ONE: region files are keyed by chunk coordinate, so
         // two worlds sharing a directory would write each other's chunks.
@@ -153,8 +209,13 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
             }
             // evictRadius is raised with loadRadius: ChunkStreamer.hpp requires evictRadius >
             // loadRadius or the boundary thrashes, and it enforces that rather than trusting the caller.
+            //
+            // AND THIS BEATS THE MANIFEST'S STREAM.LOADRADIUS, which was applied to cwSettings.stream
+            // above. That is the narrower statement winning, for the same reason this function builds
+            // one ChunkWorld per field at all: a single project-wide radius cannot serve a dense floor
+            // and a sparse canopy, so a field that states its own has said something the project-wide
+            // key cannot say. The remaining four STREAM.* keys are untouched here and still apply.
             if (v->radiusChunks > 0) {
-                constexpr i32 kMaxRadiusChunks = 24;
                 const i32 r = v->radiusChunks > kMaxRadiusChunks ? kMaxRadiusChunks : v->radiusChunks;
                 if (r != v->radiusChunks)
                     AVER_WARN("[ChunkWorld] PCGVOLUME '{}' asks for radius {}; clamped to {}",

@@ -394,9 +394,14 @@ struct PipelineLayout {
 constexpr u32 kBindingTableCount = 2;
 
 // The register a layout's SRV declarations run out to, ACROSS BOTH TABLES.
+//
+// NO UAV TWIN, AND THE ABSENCE IS THE POINT. This exists to serve one convention -- the instance
+// buffer binds at the derived register t(declaredSrvCount), so both backends and the shared HLSL
+// have to agree on where a layout's declarations end. Nothing derives a UAV register that way. A
+// declaredUavCount() sat here uncalled for a while purely because it looked symmetric, which reads
+// as evidence of a UAV convention that does not exist; write `l.uavCount + l.uavCount1` at the
+// first site that genuinely needs it, and give it a name then, for the reason it actually has.
 inline u32 declaredSrvCount(const PipelineLayout& l) { return l.srvCount + l.srvCount1; }
-// The register a layout's UAV declarations run out to, across both tables.
-inline u32 declaredUavCount(const PipelineLayout& l) { return l.uavCount + l.uavCount1; }
 
 // ---------------------------------------------------------------- vertex layout
 // For pipelines that draw geometry the CALLER owns, beside MeshHandle rather than replacing it.

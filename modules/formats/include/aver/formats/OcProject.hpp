@@ -251,6 +251,13 @@ struct ProjectDesc {
     // an options struct (GltfImportOptions, ObjImportOptions, UsdImportOptions, TextureLoadOptions,
     // MaterialCookOptions) and NONE of them was reachable from a project -- so "this project's
     // source art is in metres" was a fact that could only be re-stated on every command line.
+    //
+    // STILL TRUE, AND ADDING THESE KEYS DID NOT CLOSE IT. Nothing constructs any of those five
+    // option structs from a ProjectDesc: the keys parse, serialise and have Project Settings
+    // widgets, and AverAssetC takes its options from its own command line without opening the
+    // owning .ocproject. Said here rather than only in the UI's disclosure text because the
+    // paragraph above otherwise reads as a gap that was closed, and the next reader would have to
+    // grep the importers to find out it was not.
     f32 importScale       = -1.0f;  // IMPORT.SCALE <f>       source unit -> cm (100 = metres)
     int importConvertAxes = -1;     // IMPORT.CONVERTAXES 0/1 Y-up right-handed -> Z-up left-handed
     int importGenNormals  = -1;     // IMPORT.GENNORMALS 0/1  synthesise missing normals
@@ -266,6 +273,12 @@ struct ProjectDesc {
     // world::StreamSettings is exactly the set a shipping title tunes per-platform, and it lived in
     // compiled-in defaults with no file and no UI. loadBudget in particular is documented as "the
     // only thing bounding the frame hitch, since the load is synchronous".
+    //
+    // APPLIED IN GameStreaming::enable, which seeds every field's ChunkWorldSettings::stream from
+    // these before a PCGVOLUME's own radiusChunks overrides the two radii. They spent a while
+    // parsed, written back out and editable in Project Settings while reaching nothing at all, so
+    // the read side is named here: a key whose only consumer is the file it came from is the shape
+    // this struct has been caught in more than once.
     int streamLoadRadius     = -1;  // STREAM.LOADRADIUS
     int streamEvictRadius    = -1;  // STREAM.EVICTRADIUS
     int streamLoadBudget     = -1;  // STREAM.LOADBUDGET     chunks loaded per frame
