@@ -504,6 +504,13 @@ private:
     // No physics members here any more: there is no implicit ground, so nothing for GameApp to
     // own besides the world itself, which aver_phys_init/aver_phys_shutdown manage globally.
     // Counted so "did physics step at all" is answerable from a log rather than a debugger.
+    //
+    // FIXED STEPS, NOT FRAMES, which is what the log lines always claimed and what this only
+    // started holding once tickGameplayGroups stopped hardcoding its return: a frame that catches
+    // up over three steps adds three, and a frame shorter than the fixed step adds nothing.
+    // lastReportedSteps_ is the value the last log line carried, so onUpdate can report on crossing
+    // a 600-step boundary rather than on landing exactly on one -- which a counter that can advance
+    // by more than one at a time is free to skip.
     u64 physSteps_ = 0;
     u64 lastReportedSteps_ = 0;
 

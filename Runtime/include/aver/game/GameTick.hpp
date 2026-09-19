@@ -74,7 +74,16 @@ inline void applyProjectPhysics(const fmt::ProjectDesc& project) {
         if (project.fixedStep > 0.0f && !aver_phys_set_fixed_step(project.fixedStep))
             AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
                       project.fixedStep);
-    } else if (project.hasPhysicsSettings()) {
+        // THE else BELOW ASKS FOR THE TWO KEYS THIS FUNCTION CAN ACTUALLY APPLY -- the two set
+        // above -- and deliberately not for hasPhysicsSettings(), which used to stand there.
+        // That predicate also answers true for PHYSICS.MAXBODIES / MAXBODYPAIRS / MAXCONTACTS /
+        // TEMPALLOCMB (OcProject.hpp's own list), and nothing in this engine reads those four: the
+        // Jolt ceilings are baked into PhysicsWorld.cpp's system.Init call, aver_phys_init takes no
+        // parameters, and there is no aver_phys_set_max_* to call once the world does exist. A
+        // manifest stating only a body ceiling used to be told its settings "will apply once the
+        // world exists" -- a promise with no code anywhere behind it, which misleads a reader far
+        // more than the silence it replaces.
+    } else if (project.hasGravity || project.fixedStep > 0.0f) {
         AVER_INFO("[Project] physics settings will apply once the world exists");
     }
 }
@@ -104,7 +113,17 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 
 #if AVER_MODULE_FRAMEWORK
 // Runs the three gameplay tick groups for one frame, with the physics step between the first two.
-// Returns true when physics actually stepped, so the caller can count it.
+// Returns HOW MANY FIXED STEPS the physics world actually ran this frame: 0 when the accumulator
+// did not reach a full step, when there is no world yet, when dt is not positive, and in a build
+// without physics at all.
+//
+// THE COUNT, NOT A FLAG, and that is a correction rather than a refinement. This used to write
+// `stepped = true` beside the call and throw aver_phys_step's return value away, so a caller that
+// counted what came back was counting GAMEPLAY-TICK FRAMES and then reporting them as physics
+// steps. The two genuinely differ in both directions: aver_phys_step accumulates real time and
+// drains it in fixed steps (physics_abi.h:35, "Returns how many fixed steps actually ran"), so one
+// long frame runs several -- up to the eight-step catch-up clamp in PhysicsWorld.cpp's while loop
+// -- while a frame shorter than the fixed step runs none and the old code still said true.
 //
 // THE CALLER DECIDES whether the world advances THIS FRAME AT ALL (a live Play session, or the
 // editor's own --spawn-test harness) -- once called, this runs unconditionally.
@@ -114,16 +133,15 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 // and PHYSICS below, so PHYSICS-group ticks observe the results of this frame's simulation rather
 // than last frame's. Reordering to match "bracket" literally would make every PHYSICS-group actor
 // read stale transforms.
-inline bool tickGameplayGroups(f32 dt) {
+inline i32 tickGameplayGroups(f32 dt) {
     aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, dt);
-    bool stepped = false;
+    i32 steps = 0;
 #if AVER_MODULE_PHYSICS
-    aver_phys_step(dt);
-    stepped = true;
+    steps = aver_phys_step(dt);
 #endif
     aver_fw_tick(AVER_FW_TICK_PHYSICS, dt);
     aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, dt);
-    return stepped;
+    return steps;
 }
 #endif
 

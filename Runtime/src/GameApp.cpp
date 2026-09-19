@@ -363,7 +363,10 @@ bool ocgraphIsForeign(const std::string& text) {
     return !equalsAsciiCI(domain, "gameplay");
 }
 
-// True for a path ending in ".ocproject", case-insensitively. Lifted from SandboxApp.cpp:5562.
+// True for a path ending in ".ocproject", case-insensitively. Lifted from the editor's own copy,
+// which sat at SandboxApp.cpp:5562 back when that file was the whole editor in 29,952 lines; commit
+// 8ce6f6d4 split it, and the editor's copy is sandbox/src/SandboxMain.cpp:26 today, spelled through
+// that file's hasExtension helper.
 bool isOcproject(const char* p) {
     const usize n = std::strlen(p);
     if (n < 11) return false;
@@ -553,10 +556,11 @@ BootConfig GameApp::config() const {
     // ---- WINDOW.* FROM THE MANIFEST, read HERE and not in onInit ------------------------------
     //
     // This is the only moment the answer is usable: the window is created from this BootConfig,
-    // before onInit runs, so a title or resolution the project states has to be known now. That is
-    // why the manifest is read twice -- once here for four keys, once in openProject for everything
-    // -- and reading a small text file twice is a much smaller price than a window that has to be
-    // resized after it is already on screen.
+    // before onInit runs, so a title, a resolution or a fullscreen intent the project states has to
+    // be known now. That is why the manifest is read twice -- once here for WINDOW.TITLE/SIZE/
+    // FULLSCREEN (plus NAME, the title's fallback), once in openProject for everything -- and
+    // reading a small text file twice is a much smaller price than a window that has to be resized,
+    // or re-created borderless, after it is already on screen.
     //
     // THE SAME TWO PLACES openProject looks, in the same order: an explicit path, else
     // Game.ocproject beside the executable, which is what stage-game.ps1 writes for a packaged game
@@ -585,6 +589,35 @@ BootConfig GameApp::config() const {
                 }
                 if (cfg_.width  == GameConfig::kDefaultWidth  && d.windowWidth  > 0) b.windowWidth  = static_cast<u32>(d.windowWidth);
                 if (cfg_.height == GameConfig::kDefaultHeight && d.windowHeight > 0) b.windowHeight = static_cast<u32>(d.windowHeight);
+                // WINDOW.FULLSCREEN, read here for the same reason as the three above: the window
+                // is created from this BootConfig, and borderless fullscreen is a creation-time
+                // decision in the platform layer (WindowDesc::fullscreen -> Win32Window::create),
+                // not something to redo once a window is already on screen. A non-interactive
+                // capture run is unaffected whatever the manifest says: WindowDesc ignores
+                // fullscreen when activate is false, precisely so a measured run keeps the exact
+                // window its baselines were recorded through.
+                //
+                // NO `cfg_ == default` GUARD, unlike title and size: this build has no --fullscreen
+                // for the manifest to outrank, so the project is the only thing that can state it
+                // and -1 already means "unstated". Whoever adds that flag owes this line the same
+                // command-line-wins shape the three above carry.
+                //
+                // Until this landed the key was parsed (OcProject.cpp's WINDOW.FULLSCREEN), written
+                // back out, and editable in the editor's Project Settings while no host read it --
+                // an author could tick Fullscreen, save, ship, and watch the game start windowed
+                // with nothing logged. That is the "declared but unread" shape this repo keeps
+                // being bitten by, and the sink had existed the whole time.
+                if (d.windowFullscreen >= 0) b.fullscreen = d.windowFullscreen != 0;
+                // WINDOW.RESIZABLE CANNOT BE APPLIED FROM HERE, and stays unread for one missing
+                // link rather than an unwritten policy: platform::WindowDesc::resizable exists and
+                // Win32Window::create honours it, but BootConfig -- the only thing an Application
+                // hands the engine before the window exists -- has no resizable member for the
+                // value to travel on. Closing it is two lines outside this file: `bool resizable =
+                // true;` on BootConfig (modules/runtime/include/aver/runtime/Application.hpp) and
+                // `wd.resizable = cfg.resizable;` beside the existing wd.fullscreen assignment in
+                // modules/runtime/src/Engine.cpp. This comment exists so the next reader finds that
+                // out here, where the key is otherwise conspicuously absent, instead of concluding
+                // the omission was deliberate.
             }
         }
     }
@@ -613,7 +646,11 @@ void GameApp::tickGameplay(f32 dt) {
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
 
 #if AVER_MODULE_PHYSICS
-    if (game::tickGameplayGroups(dt)) ++physSteps_;
+    // += THE COUNT, not ++ on a flag. tickGameplayGroups returns how many fixed steps aver_phys_step
+    // actually ran; it used to hardcode true, so this counter was counting the frames on which
+    // gameplay ticked and the two log lines below were reporting that number as "physics step(s)".
+    // One frame can run several steps (the accumulator drains up to eight) or none at all.
+    physSteps_ += static_cast<u64>(game::tickGameplayGroups(dt));
 #else
     game::tickGameplayGroups(dt);
 #endif
@@ -2420,7 +2457,14 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // --pcg-volume-test run should be given at least that many.
     if (cfg_.pcgVolumeTest) checkPcgVolume();
 
-    if (physSteps_ != lastReportedSteps_ && (physSteps_ <= 1 || physSteps_ % 600 == 0)) {
+    // A CROSSING TEST, not `physSteps_ % 600 == 0`, now that this counter advances by the real step
+    // count rather than by one per gameplay frame: a frame that catches up over two steps can step
+    // straight from 599 to 601, and an exact-multiple test would skip that report and then stay
+    // silent for the next 600. `lastReportedSteps_ == 0` keeps the other half of the old rule -- the
+    // first step the process ever runs is always announced, which is the "did physics step at all"
+    // question this counter exists to answer from a log.
+    if (physSteps_ != lastReportedSteps_ &&
+        (lastReportedSteps_ == 0 || physSteps_ / 600 != lastReportedSteps_ / 600)) {
         AVER_INFO("[Game] physics: {} step(s) taken", physSteps_);
         lastReportedSteps_ = physSteps_;
     }

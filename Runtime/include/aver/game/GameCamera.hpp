@@ -114,7 +114,21 @@ inline scene::Entity drivePlayCamera(Vec3& pos, f32& yaw, f32& pitch, scene::Ent
         const Vec3 pivot  = haveView ? headPos : pawnPos + up * eye;
         const Vec3 armDir = haveView ? headFwd : pawnFwd;
         pos  = pivot - armDir * boom;
-        look = (pivot - pos).getSafeNormal();
+        // armDir IS the look direction. `(pivot - pos).getSafeNormal()` stood here instead, which is
+        // the eye+dir round trip pushCamera refuses (its own comment at :47-51) run backwards, and
+        // it costs the same: pivot - pos is armDir * boom in exact arithmetic, and armDir is already
+        // unit (getSafeNormal at :104 and :106), so the subtraction could never hand back anything
+        // but armDir -- it only spent precision doing it. Far from the origin the boom offset falls
+        // inside pivot's own f32 ulps and what comes back is a direction nobody asked for;
+        // Mat4::lookAtDirLH's comment carries the measurement.
+        //
+        // AT boom == 0 IT DID NOT RETURN A DIRECTION AT ALL: pivot - pos is exactly zero, so
+        // getSafeNormal answered {0,0,0} and the decode below turned that into atan2(0,0) = 0 and
+        // asin(0) = 0 -- the camera silently snapping to level and facing +X. Nothing clamps the
+        // boom on the way in (aver_fw_set_view stores it verbatim, and C# Character.BoomLength is a
+        // plain settable float), so a game asking for a zero-length boom now simply looks where the
+        // pawn looks from the pivot itself.
+        look = armDir;
     }
     // cameraForward() composes {cosP cosY, cosP sinY, sinP}; invert the look direction to yaw/pitch.
     yaw   = std::atan2(look.y, look.x);
