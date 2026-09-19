@@ -81,17 +81,28 @@ function Get-PeImports {
 # SKUs but NOT on 'N' editions without the Media Feature Pack -- they are not ours to redistribute,
 # so they stay on this list, but that is a support note rather than a staging obligation.
 #
-# THE SCAN THIS WAS GROUNDED IN HAS SINCE GONE STALE ONCE, which is worth recording because the
+# THE SCAN THIS WAS GROUNDED IN HAS NOW GONE STALE TWICE, which is worth recording because the
 # failure is a hard one: staging ABORTS on an unlisted import rather than warning, so the payload
 # could not be produced at all. comctl32 and dbghelp are both Windows' own and both arrived with the
 # crash reporter -- comctl32 for its dialog, dbghelp for the minidump and stack walk that are the
 # whole point of it. Neither is ours to redistribute and neither was in the original scan.
+#
+# xinput1_4.dll is the second time, and it went unnoticed for longer: it arrived with controller
+# support (385a5e8e, XInput polling in both hosts) and from that commit until this list was
+# corrected, NO project could be staged at all -- stage-game.ps1 refused every package before
+# writing it. Nothing caught that, because nobody had run stage-game.ps1 since. It is Windows' own
+# (System32, Windows 8 and later) and is NOT the redistributable one: that is xinput1_3.dll, from
+# the retired DirectX SDK, which we deliberately do not use.
+#
+# Re-grounded by scanning the import table of every .exe and .dll in build-release\bin, not by
+# adding the one name the last failure happened to print. That scan leaves exactly the three
+# redistributable CRT DLLs unresolved, and stage-game.ps1 stages those on purpose.
 $AverOsProvidedDlls = @(
     'advapi32.dll', 'avrt.dll', 'comctl32.dll', 'd3d11.dll', 'd3d12.dll', 'd3dcompiler_47.dll',
     'dbghelp.dll', 'dxgi.dll',
     'gdi32.dll', 'imm32.dll', 'kernel32.dll', 'mfplat.dll', 'mfreadwrite.dll', 'mscoree.dll',
     'ole32.dll', 'oleaut32.dll', 'shell32.dll', 'shlwapi.dll', 'user32.dll', 'version.dll',
-    'ws2_32.dll', 'ucrtbase.dll'
+    'ws2_32.dll', 'ucrtbase.dll', 'xinput1_4.dll'
 )
 
 # The debug CRT, which ships with Visual Studio and may not be redistributed at all.
