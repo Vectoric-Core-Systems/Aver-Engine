@@ -7,12 +7,25 @@ three more in the session that wrote this file. That loop is entirely mechanical
 hand a dozen times. This turns it into tools an agent can call, so "open it and look" stops being the
 step that gets skipped because it is tedious.
 
-IT DRIVES THE EXISTING CLI AND CHANGES NOTHING IN THE ENGINE. Sandbox.exe already takes 43 flags --
+IT DRIVES THE EXISTING CLI AND CHANGES NOTHING IN THE ENGINE. The hosts already take the flags --
 --frames, --screenshot, --probe-rel, --open-asset, --force-caps, --warp and the rest -- and the gates
 oracle is built entirely out of them. So there is no engine-side listener here, no socket, no named
 pipe, and no risk to a working editor. That is a deliberate first cut, not an oversight: a live control
 channel is a real feature with threading and lifetime concerns, and it should not be the thing that
 also introduces this tooling.
+
+The count used to be written out here ("already takes 43 flags"). It was 43 when that sentence was
+written and 183 when someone next checked, which is the whole reason aver_flags reads the set out of
+the source instead of listing it: a number in prose is a claim nobody re-derives. There is no count in
+this file any more, deliberately.
+
+THERE ARE TWO HOSTS, and they do NOT parse the same flags. Sandbox.exe is the editor
+(sandbox/src/SandboxMain.cpp); AverEngineRuntime.exe is the shipped game host
+(Runtime/src/GameApp.cpp::parseArgs, Runtime/host/). The runtime parses no render-override flag at
+all -- no --rt, no --gi, no --force-caps, no --probe/--probe-rel -- so the gates oracle can only ever
+be driven against the editor. Both hosts IGNORE an argument they do not recognise rather than
+rejecting it (GameApp.cpp says so in as many words: "Anything else is deliberately ignored"), which is
+why aver_run names the host it ran and reports any flag it could not find in that host's source.
 
 WHAT IT WILL NOT DO, and these are refusals rather than omissions:
 
@@ -201,6 +214,20 @@ def run_powershell(script, timeout):
 _BUILD_KNOWN_ARGS = {"release", "config", "build_dir", "cmake_args", "target", "description"}
 _BUILD_CONFIGS = ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
 
+
+def default_tree_for(config):
+    """The build tree scripts/build.ps1 picks for `config` when -BuildDir is not given.
+
+    Copied from that script's own default rather than guessed, because this file used to guess and
+    got it wrong for half the configs: `"build-release" if config != "Debug" else "build"` reported
+    build-release for RelWithDebInfo and MinSizeRel, whose real trees are build-relwithdebinfo and
+    build-minsizerel. That is the same class of defect as the dropped `config` the comment above
+    describes -- a result that names a tree the build never touched -- only quieter, because the
+    build genuinely succeeded and only the report was false.
+    """
+    return "build" if config == "Debug" else "build-" + config.lower()
+
+
 def tool_build(args):
     unknown = sorted(k for k in args if k not in _BUILD_KNOWN_ARGS)
     if unknown:
@@ -218,8 +245,32 @@ def tool_build(args):
         config = "Release"
     else:
         config = "Debug"
+    # `target` WAS ACCEPTED AND SILENTLY DROPPED, which is the exact failure the comment above this
+    # block is about, committed a second time. scripts/build.ps1 hands everything after its own
+    # parameters to scripts/build.bat, which forwards them to CMAKE CONFIGURE (`%*` on the -S/-B
+    # line) and then always runs a bare `cmake --build "%AVER_BUILD_DIR%"` with no --target. So a
+    # target name could not reach the build step even in principle: it would have landed on the
+    # configure line, where CMake takes an unknown bare argument as a source-directory-ish positional
+    # and warns rather than failing. Refused by name instead, because building everything when the
+    # caller asked for one target is indistinguishable in the result from building that one target.
+    if args.get("target"):
+        return {"ok": False, "error": "target %r cannot be honoured: scripts/build.ps1 forwards extra "
+                                      "arguments to CMake CONFIGURE and then builds the whole tree "
+                                      "(scripts/build.bat has no --target). Drop it, or run cmake "
+                                      "--build <tree> --target <t> from a developer shell."
+                                      % args["target"]}
     extra = args.get("cmake_args") or []
     build_dir = args.get("build_dir")
+    if build_dir and not re.fullmatch(r"[A-Za-z0-9_.-]+", build_dir):
+        # The SAME charset check resolve_tree and tool_package already apply, which this call site
+        # did not: build_dir is interpolated straight into the PowerShell command string below, so a
+        # quote or a semicolon in it ran as script. The three are meant to agree; only two did.
+        return {"ok": False, "error": "suspicious build_dir %r: letters, digits, dot, dash and "
+                                      "underscore only" % build_dir}
+    # -Config rather than -Release even for Release, and that is not an oversight: build.ps1 defines
+    # -Release as nothing more than a default for -Config ($Config = if ($Release) {'Release'}), and
+    # -BuildDir derives from $Config either way, so the two spellings produce an identical build. Only
+    # -Config can also say RelWithDebInfo or MinSizeRel, so one code path says it for all four.
     cmd = "./scripts/build.ps1 -Config %s" % config
     if build_dir:
         cmd += ' -BuildDir "%s"' % build_dir
@@ -236,7 +287,7 @@ def tool_build(args):
         "ok": code == 0,
         "exit": code,
         "config": config,
-        "build_dir": build_dir or ("build-release" if config != "Debug" else "build"),
+        "build_dir": build_dir or default_tree_for(config),
         "status": tail[-1] if tail else "(no [build] line)",
         "errors": errors[:40],
         "warning_count": len(warnings),
@@ -257,7 +308,13 @@ def tool_build(args):
 # release + build_dir together: build_dir wins, because it is the more specific statement of intent.
 # `release` only ever selected a tree NAME, and naming the tree outright says the same thing better.
 def resolve_tree(args):
-    """Returns (tree_name, error_or_None). Same charset check tool_package uses."""
+    """Returns (tree_name, error_or_None). Same charset check tool_package uses.
+
+    `release` covers only the two trees this repo actually pairs baselines with (build and
+    build-release, see scripts/build.ps1's header). A RelWithDebInfo or MinSizeRel tree has to be
+    named outright with build_dir -- there is no third boolean, because a run against one of those
+    has no gate baseline to mean anything against.
+    """
     build_dir = args.get("build_dir")
     if build_dir:
         # Rejects path separators and .., so this can only ever name a sibling of the repo root --
@@ -269,9 +326,75 @@ def resolve_tree(args):
     return ("build-release" if bool(args.get("release")) else "build"), None
 
 
+# THE TWO HOSTS, by the names they have since the editor/runtime split (2026-09-16).
+#
+# `game` was the old third entry and it is gone: AverGame.exe lived in game/ with its library in
+# modules/runtime.game, and both paths were deleted when the runtime moved to Runtime/. The library
+# is Aver.Runtime.Game.Core (shared) plus Aver.Runtime.Game (GameApp alone), and the executable is
+# AverEngineRuntime.exe -- the FILE has no spaces so nothing has to quote it; the name people see is
+# "Aver Engine Runtime", set by the .rc. See Runtime/host/CMakeLists.txt.
+#
+# The source roots are what binary_provenance walks and what aver_flags reads, so they are stated
+# once here rather than in each.
+_HOSTS = {
+    "editor": {
+        "exe": "Sandbox.exe",
+        # sandbox/src/Sandbox*.{cpp,hpp} only. Verified rather than assumed: those are the only files
+        # under sandbox/src containing a "--flag" string literal at all -- the sole other hits in the
+        # directory are ProjectScaffold.cpp's "--" and "---", which are markdown rules, not flags.
+        "flag_globs": [("sandbox/src", lambda n: n.startswith("Sandbox") and n.endswith((".cpp", ".hpp")))],
+    },
+    "runtime": {
+        "exe": "AverEngineRuntime.exe",
+        "flag_globs": [("Runtime/src", lambda n: n.endswith((".cpp", ".hpp"))),
+                       ("Runtime/host", lambda n: n.endswith((".cpp", ".hpp")))],
+    },
+}
+
+
+def resolve_host(args):
+    """Returns (host_key, exe_basename, error_or_None). Defaults to the editor.
+
+    AverEngineRuntime.exe only exists in a tree configured with AVER_BUILD_GAME=ON (the default, see
+    the root CMakeLists.txt). A tree built without it reports the missing file rather than falling
+    back to Sandbox.exe, because silently measuring the other host is the same wrong-binary failure
+    resolve_tree exists to stop.
+    """
+    host = args.get("host") or "editor"
+    if host not in _HOSTS:
+        return None, None, ("unknown host %r: one of %s" % (host, ", ".join(sorted(_HOSTS))))
+    return host, _HOSTS[host]["exe"], None
+
+
+def host_flag_set(host):
+    """Every "--flag" string literal in that host's own sources, as a set.
+
+    A HEURISTIC, and used as one: it finds literals, not parse sites, so a flag only mentioned in a
+    log line would be counted as accepted. It cannot miss a parsed flag on either host today --
+    both parse with std::strcmp against a literal and neither uses strncmp or starts_with (checked)
+    -- and over-accepting is the safe direction for the only thing it is used for, which is telling
+    a caller that a flag they passed appears nowhere in the host that was about to ignore it.
+    """
+    flags = set()
+    for rel, keep in _HOSTS[host]["flag_globs"]:
+        base = os.path.join(ROOT, *rel.split("/"))
+        if not os.path.isdir(base):
+            continue
+        for name in sorted(os.listdir(base)):
+            if not keep(name):
+                continue
+            with open(os.path.join(base, name), encoding="utf-8", errors="replace") as f:
+                flags.update(re.findall(r'"(--[a-z0-9-]+)"', f.read()))
+    return flags
+
+
 # The flags this refuses to pass through, and why. A denylist rather than an allowlist because the CLI
-# grows and an allowlist would silently block new flags; these two are the only ones that can outlive
-# the call.
+# grows and an allowlist would silently block new flags.
+#
+# "these two are the only ones that can outlive the call" is what this comment used to say, and it
+# described neither the contents nor the reason: there has only ever been ONE entry, and --headless
+# does not outlive anything -- it is refused because a run with no swapchain cannot write the
+# screenshot this tool exists to produce. Both hosts take --headless, so the refusal applies to both.
 _REFUSED_FLAGS = {
     "--headless": "pointless here -- a headless run cannot produce the screenshot this tool exists for",
 }
@@ -311,9 +434,14 @@ def tool_run(args):
     tree, err = resolve_tree(args)
     if err:
         return {"ok": False, "error": err}
-    exe = os.path.join(ROOT, tree, "bin", "Sandbox.exe")
+    host, exe_name, err = resolve_host(args)
+    if err:
+        return {"ok": False, "error": err}
+    exe = os.path.join(ROOT, tree, "bin", exe_name)
     if not os.path.exists(exe):
-        return {"ok": False, "error": "%s does not exist -- build first" % exe}
+        return {"ok": False, "error": "%s does not exist -- build first%s"
+                % (exe, "" if host == "editor" else
+                   " (the runtime host needs a tree configured with AVER_BUILD_GAME=ON)")}
 
     shot = args.get("screenshot")
     argv = [exe, "--frames", str(frames)]
@@ -322,6 +450,12 @@ def tool_run(args):
         os.makedirs(os.path.dirname(shot), exist_ok=True)
         argv += ["--screenshot", shot]
     argv += flags
+
+    # Read before the run, not after, so a build racing this call cannot change the answer between
+    # the two. Only leading-dashes tokens are checked: a value ("no-rt" after --force-caps), a level
+    # path and a .ocproject are all ordinary positional arguments.
+    known = host_flag_set(host)
+    not_parsed = [f for f in flags if f.startswith("--") and f.split("=", 1)[0] not in known]
 
     started = time.time()
     try:
@@ -368,11 +502,18 @@ def tool_run(args):
         "warnings": warns[:30],
         "matched": matched[:60],
         "log_lines": len(lines),
+        "host": host,
         # WHICH BINARY THIS ACTUALLY MEASURED, always reported, never on request. A result that does
         # not say what it ran is indistinguishable from a result that ran the wrong thing, and the
         # engine ignores unrecognized flags rather than rejecting them, so "my new flag did nothing"
         # and "my new flag was never in this binary" produce identical output. See resolve_tree.
         "binary": binary_provenance(exe),
+        # THE SAME SILENCE, ONE STEP EARLIER: a flag the OTHER host parses. binary_provenance catches
+        # a flag newer than the exe; this catches a flag that was never this host's to begin with.
+        # The runtime parses no render-override flag at all, so `--gi --no-rt --probe-rel .5 .5`
+        # aimed at AverEngineRuntime.exe runs cleanly, exits 0, prints no probe line and means
+        # nothing -- and before this, said so nowhere.
+        "flags_not_in_host_source": not_parsed,
     }
 
 
@@ -383,9 +524,18 @@ def tool_run(args):
 # nothing (an unrelated edit also trips it). A false "stale" costs a rebuild; a false "fresh" costs a
 # published number that was never real, which is the failure this is here to prevent.
 def binary_provenance(exe):
+    # THE ROOTS IT WALKS ARE THE POINT, and one of them had been dead for days while another was
+    # never added. `game/` went with AverGame.exe: os.path.isdir skipped it silently, so the list
+    # read as three roots and behaved as two. `Runtime/` is where the runtime library moved, and
+    # since the editor/runtime split Sandbox.exe LINKS it -- content, level, water, streaming,
+    # landscape, physics/audio/tick, camera, mouse capture, input publishing and the whole world
+    # draw walk including the depth prepass are all Aver.Runtime.Game.Core now. So an edit to
+    # Runtime/src/GameRender.cpp is an edit to the editor binary, and until this line it could not
+    # mark one stale: exactly the "published a number that was never real" failure below, aimed at
+    # the code most likely to be under edit this month.
     built = os.path.getmtime(exe)
     newest, newest_path = 0.0, None
-    for sub in ("modules", "sandbox", "game"):
+    for sub in ("modules", "sandbox", "Runtime"):
         base = os.path.join(ROOT, sub)
         if not os.path.isdir(base):
             continue
@@ -454,42 +604,132 @@ def tool_inspect_image(args):
     return {"ok": True, "path": dst, "size": list(im.size), "source_size": list(full)}
 
 
+# THE EXACT PATTERN CTest REGISTERS, repeated here only to explain it -- see the FAIL_REGULAR_EXPRESSION
+# in the root CMakeLists.txt's aver_register_ctest_in, which is the one that decides.
+#
+# Two spaces after FAIL, and `FAILED ===`, because the bare word is not a failure signal in this tree:
+# suites describe their negative cases in prose ("an OBJ with no faces FAILS rather than returning an
+# empty mesh") and a naive /FAIL/ marks six green suites red. That is the same over-match the old
+# per-suite `failures` list here produced.
+_CTEST_FAIL_PATTERN = re.compile(r"FAIL  |FAILED ===")
+
+# `N/M Test #K: SuiteName ......   Passed    0.05 sec`, or `...***Failed  Required regular expression
+# not found. Regex=[...]  0.12 sec`. Parsed in two steps rather than one regex because the status text
+# is free-form -- Passed, Failed, Timeout, `Exception: SegFault`, and the fail-regex explanation --
+# and a single pattern that tried to enumerate it would drop the row it most needs to report.
+_CTEST_ROW = re.compile(r"^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+(.*)$")
+
+
+def _parse_ctest_rows(lines):
+    rows = []
+    for raw in lines:
+        m = _CTEST_ROW.match(raw)
+        if not m:
+            continue
+        rest = m.group(2)
+        secs = re.search(r"([\d.]+)\s+sec\s*$", rest)
+        if secs:
+            rest = rest[:secs.start()]
+        status = rest.lstrip(". ").lstrip("*").strip() or "?"
+        rows.append({"suite": m.group(1),
+                     "status": status,
+                     "seconds": float(secs.group(1)) if secs else None})
+    return rows
+
+
 def tool_tests(args):
+    """Run the suites THROUGH CTest, which is the only way their pass/fail means anything.
+
+    THIS USED TO GLOB bin/*Test.exe AND RUN EACH ONE DIRECTLY, keying off nothing but the exit code
+    -- and that made it strictly worse than no harness. The root CMakeLists.txt registers every
+    *Test target with a FAIL_REGULAR_EXPRESSION precisely because suites in this tree have
+    historically returned 0 however they went; there is a commit named "Two skin tests that exited 0
+    however they went", and docs/STALE_CODE.md records an `ok_` flag that was set and never read. A
+    suite that prints `FAIL  ` and exits 0 was reported here as a pass, in green, by the one tool an
+    agent session could reach. The old code even COLLECTED the FAIL lines into a `failures` field and
+    then never let them affect the verdict.
+
+    Nothing is lost by going through CTest: the registration walk matches exactly the set this used
+    to glob -- 140 registered tests against 140 bin/*Test.exe, no name in either that is not in the
+    other -- and it adds the fail-regex, the 600s per-suite timeout this tool had on its own, and the
+    bin/ working directory, which this tool did NOT have. It ran from the repo root, while several
+    suites resolve fixtures relative to the executable the way a shipped editor resolves shaders.
+    Those suites were being run in conditions no other caller uses.
+
+    It shells out to scripts/test.ps1 rather than to ctest directly so the ctest DISCOVERY lives in
+    one place: that script falls back to Visual Studio's bundled copy when ctest is not on PATH,
+    which it is not in a plain python subprocess on this machine. Its exit codes are 0 pass, 1 at
+    least one suite failed, 3 environment (no tree, or a tree configured without CTest registration).
+    """
     tree, err = resolve_tree(args)
     if err:
         return {"ok": False, "error": err}
-    binf = os.path.join(ROOT, tree, "bin")
-    if not os.path.isdir(binf):
-        return {"ok": False, "error": "%s does not exist -- build first" % binf}
-    only = args.get("only")
-    results, failed = [], 0
-    for name in sorted(os.listdir(binf)):
-        if not name.endswith("Test.exe"):
-            continue
-        if only and only.lower() not in name.lower():
-            continue
-        try:
-            p = subprocess.run([os.path.join(binf, name)], cwd=ROOT, capture_output=True,
-                               text=True, timeout=600, errors="replace")
-        except subprocess.TimeoutExpired:
-            results.append({"suite": name, "exit": None, "summary": "TIMED OUT"})
-            failed += 1
-            continue
-        out = (p.stdout or "") + (p.stderr or "")
-        summary = ""
-        for l in reversed(out.splitlines()):
-            if "assertions" in l or "passed" in l or "SKIP" in l:
-                summary = l.strip()
-                break
-        if p.returncode != 0:
-            failed += 1
-        results.append({"suite": name, "exit": p.returncode, "summary": summary,
-                        "failures": [l.strip() for l in out.splitlines() if "FAIL" in l][:10]})
-    return {"ok": failed == 0, "suites": len(results), "failed": failed, "results": results}
+    if not os.path.isdir(os.path.join(ROOT, tree)):
+        return {"ok": False, "error": "%s does not exist -- build first" % os.path.join(ROOT, tree)}
+
+    # `only` IS A CTest NAME REGEX NOW, not the case-insensitive substring it was. Said out loud in
+    # the schema too, because "import" used to match ImportTest and no longer does: CMake's regex
+    # engine has no inline case-insensitivity to paper over it with, and quietly matching nothing
+    # would report "0 suites, all passed" -- the same shape of lie this whole rewrite is about.
+    only = args.get("only") or ""
+    if only and not re.fullmatch(r"[A-Za-z0-9_.|^$()\[\]*+-]+", only):
+        return {"ok": False, "error": "suspicious `only` %r: it reaches a shell, so it is restricted "
+                                      "to the characters a CTest -R name pattern needs" % only}
+
+    cmd = "./scripts/test.ps1 -BuildDir %s" % tree
+    if only:
+        # SINGLE quotes: a CTest name pattern legitimately contains '|', '$' and '^', every one of
+        # which PowerShell acts on inside double quotes -- '|' would end the command outright. A
+        # single-quoted PowerShell string is literal, and the charset check above already forbids the
+        # apostrophe that would close it.
+        cmd += " -Filter '%s'" % only
+    if args.get("rerun"):
+        cmd += " -Rerun"
+    jobs = args.get("jobs")
+    if jobs is not None:
+        if not isinstance(jobs, int) or jobs <= 0:
+            return {"ok": False, "error": "jobs must be a positive integer"}
+        cmd += " -Jobs %d" % jobs
+    # The whole sweep, not one suite: 140 suites at test.ps1's default parallelism. The old 600s was
+    # a PER-SUITE budget and CTest still applies that one per suite, so this is only the outer bound.
+    code, out = run_powershell(cmd, timeout=int(args.get("timeout", 3600)))
+    lines = out.splitlines()
+
+    rows = _parse_ctest_rows(lines)
+    failing = [r for r in rows if r["status"] != "Passed"]
+    return {
+        # test.ps1's own contract, not ctest's raw number -- it deliberately does not pass ctest's
+        # vocabulary (8 = some tests failed) through, because this repo's error-code table gives 8 a
+        # different meaning entirely.
+        "ok": code == 0,
+        "exit": code,
+        "environment_error": code == 3,
+        "build_dir": tree,
+        "suites": len(rows),
+        "failed": len(failing),
+        "failures": failing[:40],
+        # The lines that tripped the fail-regex, quoted. A suite can now fail for a reason its exit
+        # code never carried, so the result has to say which line did it or the verdict is unarguable
+        # with.
+        "fail_lines": [l.strip() for l in lines if _CTEST_FAIL_PATTERN.search(l)][:40],
+        "summary": next((l.strip() for l in reversed(lines) if "tests passed" in l), ""),
+        "status": next((l.strip() for l in reversed(lines) if l.strip().startswith("[test]")), ""),
+    }
 
 
 def tool_gates(args):
-    """A READ-ONLY gate sweep. -Record is not reachable from here, by design -- see the module docstring."""
+    """A READ-ONLY gate sweep. -Record is not reachable from here, by design -- see the module docstring.
+
+    ALWAYS THE EDITOR. gates.ps1's -Exe defaults to <tree>/bin/Sandbox.exe and this tool does not
+    override it, which is not a limitation to be lifted: the oracle is built on --probe-rel and
+    --force-caps, and AverEngineRuntime.exe parses neither. The check that the runtime draws what the
+    editor draws is a different mechanism and a coarser one -- scripts/verify-game.ps1's divergence
+    gate opens the same project in both hosts and compares their [Census] lines, --scene-census being
+    a flag both of them do parse.
+
+    No build_dir either, for the same reason it has no -Exe here: -Release switches the executable
+    and the baseline file TOGETHER, and a third tree would have no baseline to be measured against.
+    """
     configs = args.get("configs") or ["baseline"]
     bad = [c for c in configs if not re.fullmatch(r"[a-z0-9,=-]+", c)]
     if bad:
@@ -581,18 +821,30 @@ def tool_package(args):
 
 
 def tool_flags(args):
-    """The engine's CLI flags, read out of the source so this cannot go stale."""
-    # Every file SandboxApp spans. It was the single SandboxApp.cpp until 2026-09-16; the argv parser now
-    # lives in SandboxMain.cpp, and reading only SandboxApp.cpp would return a near-empty list silently.
-    src_dir = os.path.join(ROOT, "sandbox", "src")
-    text = ""
-    for name in sorted(os.listdir(src_dir)):
-        if name.startswith("Sandbox") and name.endswith((".cpp", ".hpp")):
-            with open(os.path.join(src_dir, name), encoding="utf-8", errors="replace") as f:
-                text += f.read()
-    flags = sorted(set(re.findall(r'"(--[a-z0-9-]+)"', text)))
-    return {"ok": True, "count": len(flags), "flags": flags,
-            "refused": {k: v for k, v in _REFUSED_FLAGS.items()}}
+    """Each host's CLI flags, read out of its own source so this cannot go stale.
+
+    IT USED TO RETURN ONE LIST, which read as "the engine's flags" and was the editor's alone. That
+    was true enough while there was one host; since the editor/runtime split there are two, and they
+    parse overlapping-but-different sets -- AverEngineRuntime.exe has no render-override flag at all,
+    and has --project, --width, --height, --title, --trace-opens, --input-echo and --no-mouse-capture
+    that the editor does not. Handing a caller a single merged list would have them pass an editor
+    flag to the runtime, which ignores it in silence (GameApp.cpp: "Anything else is deliberately
+    ignored") and produces a clean exit 0 that measured nothing.
+
+    So: per host, plus the differences spelled out, because the differences are the part a caller
+    gets wrong. See host_flag_set for why this is a literal scan and what that cannot promise.
+    """
+    per_host = {h: sorted(host_flag_set(h)) for h in _HOSTS}
+    editor, runtime = set(per_host["editor"]), set(per_host["runtime"])
+    return {
+        "ok": True,
+        "hosts": {h: {"exe": _HOSTS[h]["exe"], "count": len(per_host[h]), "flags": per_host[h]}
+                  for h in per_host},
+        "both": sorted(editor & runtime),
+        "editor_only": sorted(editor - runtime),
+        "runtime_only": sorted(runtime - editor),
+        "refused": {k: v for k, v in _REFUSED_FLAGS.items()},
+    }
 
 
 TOOLS = [
@@ -605,7 +857,9 @@ TOOLS = [
             "release": {"type": "boolean", "description": "shorthand for config Release"},
             "config": {"type": "string", "enum": list(_BUILD_CONFIGS),
                        "description": "CMAKE_BUILD_TYPE. Reconfigures the tree named by build_dir, "
-                                      "so naming the wrong one flips that tree for every later build."},
+                                      "so naming the wrong one flips that tree for every later build. "
+                                      "Debug builds 'build', Release 'build-release', and the other "
+                                      "two their own 'build-<lowercase>' trees."},
             "build_dir": {"type": "string"},
             "cmake_args": {"type": "array", "items": {"type": "string"}},
         }},
@@ -613,13 +867,24 @@ TOOLS = [
     },
     {
         "name": "aver_run",
-        "description": "Run Sandbox.exe for a fixed number of frames with engine flags, optionally "
-                       "writing a screenshot. Returns exit code, the parsed probe (raw codes, viewport "
-                       "rect, in/outside tag), errors, warnings and any lines matching `grep`. Always "
-                       "terminates: interactive runs are refused. Use aver_flags to see what is "
-                       "available.",
+        "description": "Run a host for a fixed number of frames with engine flags, optionally writing "
+                       "a screenshot. `host` picks Sandbox.exe (the editor, default) or "
+                       "AverEngineRuntime.exe (the shipped game host) -- they do NOT parse the same "
+                       "flags, and a flag the chosen host's source never mentions is reported back "
+                       "rather than silently ignored. Returns exit code, the parsed probe (raw codes, "
+                       "viewport rect, in/outside tag; editor only), errors, warnings and any lines "
+                       "matching `grep`. Always terminates: interactive runs are refused. Use "
+                       "aver_flags to see what each host takes.",
         "inputSchema": {"type": "object", "properties": {
-            "frames": {"type": "integer", "description": "must be > 0; default 40"},
+            "frames": {"type": "integer", "description": "must be > 0; default 40. A bounded run opens "
+                                                         "its window WITHOUT focus (Engine.cpp's "
+                                                         "`interactive`), so anything that needs "
+                                                         "keyboard focus is not being exercised."},
+            "host": {"type": "string", "enum": sorted(_HOSTS),
+                     "description": "'editor' (Sandbox.exe, default) or 'runtime' "
+                                    "(AverEngineRuntime.exe, which takes no render-override flags "
+                                    "and no --probe/--probe-rel, and wants a --project or a bare "
+                                    ".ocproject/level path to have a world to draw)"},
             "flags": {"type": "array", "items": {"type": "string"}},
             "screenshot": {"type": "string", "description": "path for a PNG of the whole backbuffer"},
             "grep": {"type": "string", "description": "regex; matching log lines are returned"},
@@ -647,14 +912,24 @@ TOOLS = [
     },
     {
         "name": "aver_tests",
-        "description": "Run the headless suites in bin/ and report pass/fail with each one's assertion "
-                       "summary and any FAIL lines. `only` filters by substring.",
+        "description": "Run the headless suites through CTest (./scripts/test.ps1) and report the "
+                       "failures. CTest, not the bare .exe files: every *Test target is registered "
+                       "with a FAIL_REGULAR_EXPRESSION because suites here have historically exited 0 "
+                       "however they went, so a suite that prints `FAIL  ` fails even on exit 0. The "
+                       "lines that tripped that pattern come back in `fail_lines`.",
         "inputSchema": {"type": "object", "properties": {
-            "only": {"type": "string"},
+            "only": {"type": "string", "description": "CTest -R name regex (CASE-SENSITIVE, and a "
+                                                      "regex -- this used to be a case-insensitive "
+                                                      "substring, so 'import' no longer matches "
+                                                      "ImportTest; write 'Import')"},
             "release": {"type": "boolean"},
             "build_dir": {"type": "string", "description": "build tree to run from (default 'build'). "
                                                            "MUST match the build_dir you passed to "
                                                            "aver_build, or you run stale executables."},
+            "jobs": {"type": "integer", "description": "parallel suites; default is CPU count minus two"},
+            "rerun": {"type": "boolean", "description": "only the suites that failed last time"},
+            "timeout": {"type": "integer", "description": "seconds for the whole sweep (default 3600); "
+                                                          "CTest still applies its own 600s per suite"},
         }},
         "fn": tool_tests,
     },
@@ -676,9 +951,12 @@ TOOLS = [
         "name": "aver_package",
         "description": "Stage the ENGINE payload -- what the Aver Launcher pulls and installs -- with "
                        "./scripts/stage-payload.ps1, and optionally prove it runs outside the tree "
-                       "that built it with ./scripts/verify-payload.ps1. There is no packaged-GAME "
-                       "path any more: AverGame.exe and stage-game.ps1 were removed, so this takes no "
-                       "project. Defaults to Release, because a payload is what ships.",
+                       "that built it with ./scripts/verify-payload.ps1. A payload is the engine, so "
+                       "it takes no project. The packaged-GAME path is NOT gone -- it came back with "
+                       "AverEngineRuntime.exe, and scripts/stage-game.ps1 plus scripts/verify-game.ps1 "
+                       "(whose divergence gate launches both hosts) are how a project is cut; that is "
+                       "a human's command, not this tool's. Defaults to Release, because a payload is "
+                       "what ships.",
         "inputSchema": {"type": "object", "properties": {
             "out": {"type": "string", "description": "directory to stage the payload into"},
             "build_dir": {"type": "string", "description": "build tree to stage from (default: derived from config)"},
@@ -691,8 +969,11 @@ TOOLS = [
     },
     {
         "name": "aver_flags",
-        "description": "List the engine's command-line flags, read from the source so the list cannot "
-                       "go stale, plus the ones this server refuses and why.",
+        "description": "List each host's command-line flags, read from that host's own source so the "
+                       "list cannot go stale: Sandbox.exe from sandbox/src/Sandbox*, "
+                       "AverEngineRuntime.exe from Runtime/. Also reports which flags both take, "
+                       "which are editor-only and which are runtime-only, plus the ones this server "
+                       "refuses and why.",
         "inputSchema": {"type": "object", "properties": {}},
         "fn": tool_flags,
     },

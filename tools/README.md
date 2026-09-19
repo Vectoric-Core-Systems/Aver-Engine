@@ -48,9 +48,10 @@ end to end, and a generator that wrote the engine's own container would be testi
 
 `make_pbr_textures.py` generates tileable procedural PBR texture sets (diffuse/ARM/normal) as PNGs
 for any project's content folder, for the same licensing reason `MakeFoliage` generates rather than
-sources. `mcp/aver_mcp.py` is an MCP server that drives `Sandbox.exe` by its existing CLI flags —
-build, launch, screenshot, crop — turning the manual "open it and look" loop that found most of this
-tree's visual defects into tools an agent can call; it changes nothing in the engine itself. See
+sources. `mcp/aver_mcp.py` is an MCP server that drives the two hosts — `Sandbox.exe` and
+`AverEngineRuntime.exe` — by their existing CLI flags: build, launch, screenshot, crop, and run the
+suites through CTest. It turns the manual "open it and look" loop that found most of this tree's
+visual defects into tools an agent can call, and it changes nothing in the engine itself. See
 `tools/mcp/README.md` for that one.
 
 ## What actually compiles the `.oc*` formats
