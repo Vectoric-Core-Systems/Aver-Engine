@@ -36,6 +36,80 @@ void SandboxApp::applyProject(Engine& e) {
     editor::setAnimEditorContentRoot(project_.contentDir());
     loading.stage("Applying project settings");
     applyProjectRenderSettings();
+    // ---- RENDER.EXPOSURE / BLOOM / AUTOEXPOSURE / TONEMAP: THE POST CHAIN A PROJECT COULD NOT
+    // AUTHOR. docs/RUNTIME-DEDUP.md carried the gap as one line of owner decision -- "A project
+    // cannot author exposure/bloom/tonemap, so a shipped game uses compiled defaults" -- and this
+    // is the editor's half of closing it. Every one of these was settable from a command line
+    // (--exposure/--bloom/--auto-exposure at SandboxMain.cpp:986-988, --tonemap at :419) and from
+    // the Post Process panel (SandboxPanels.cpp:1912-1927), and by nothing the FILE could hold, so
+    // the editor showed the afternoon's work and the packaged game rendered rhi::PostSettings'
+    // compiled defaults instead. Applying the keys here is what makes the viewport show what the
+    // packaged game will show.
+    //
+    // HERE RATHER THAN IN applyProjectRenderSettings, for exactly the reason the PHYSICS.*/AUDIO.*
+    // block below gives at length: everything past that function's two early returns is gated on
+    // hasRenderSettings() AND on voxiAttached_, and the whole function is an empty stub with Voxi
+    // compiled out (SandboxLevelEdit.cpp:152). post_ is an rhi::PostSettings pushed straight at the
+    // device every frame (SandboxApp.cpp:2733); a camera's exposure has nothing to do with whether
+    // a GI renderer is attached, and a build without one still has a camera.
+    //
+    // THE COMMAND LINE OUTRANKS THE MANIFEST, the rule applyProjectRenderSettings' own "COMMAND
+    // LINE OUTRANKS THE MANIFEST" block records being broken five separate times. The shape is
+    // identical here: setPost (SandboxSelfTests.cpp:198) applies the flags ONCE at startup and this
+    // function runs LATER, when a project opens, so an unconditional assignment would silently
+    // discard what the human typed. postExposureFromCli_/postBloomFromCli_/postAutoExpFromCli_ are
+    // already the "was a flag given" record setPost keeps for loadEditorPreferences' identical
+    // problem, so the same three bools answer it here rather than a second, drifting copy.
+    //
+    // A CAPTURE RUN STILL GETS THE MANIFEST'S EXPOSURE AND BLOOM, deliberately unlike the stored
+    // editor preferences, which loadEditorPreferences refuses to restore under --frames: a
+    // preference is one machine's editor.ini and would move a gate probe on that machine and not
+    // another, while these keys are IN THE PROJECT -- the same bytes for everyone who checks it
+    // out, which is the property a baseline needs. Auto exposure is the exception, below.
+    if (project_.postExposure >= 0.0f && !postExposureFromCli_)
+        post_.exposure = project_.postExposure;
+    if (project_.postBloom >= 0.0f && !postBloomFromCli_)
+        post_.bloomIntensity = project_.postBloom;
+    if (project_.postAutoExposure >= 0 && !postAutoExpFromCli_) {
+        post_.autoExposure = project_.postAutoExposure != 0;
+        // THE CAPTURE RULE IS CALLED, NOT RE-SPELLED. applyCaptureExposureRule
+        // (SandboxSelfTests.cpp:214) owns "a --frames run has auto-exposure off unless the run
+        // asked for it by name" and main() calls it at startup -- a manifest key that switched the
+        // adaptation back on afterwards would undo that for every capture of that project, and
+        // eye adaptation is the one post setting whose value is decided per FRAME from a histogram
+        // of the frame before, so a gate would be measuring the warm-up rather than the change
+        // under test. Passing false is not a guess: this branch runs only when postAutoExpFromCli_
+        // is false, which is precisely the question that parameter asks.
+        applyCaptureExposureRule(/*explicitlyRequested=*/false);
+        if (project_.postAutoExposure != 0 && !post_.autoExposure)
+            AVER_INFO("[Project] RENDER.AUTOEXPOSURE 1 in {} is not applied in a run with a frame "
+                      "limit; pass --auto-exposure to ask for it by name", project_.manifestPath);
+    }
+    // RENDER.TONEMAP HAS NO "WAS --tonemap GIVEN" BOOL TO ASK, which is why it is decided against
+    // the compiled default instead: setPost keeps three such bools, setTonemap
+    // (SandboxSelfTests.cpp:209) keeps none -- it writes post_.tonemap and returns. Nothing else in
+    // the editor writes that field before a project opens (the Post Process panel has no tone-curve
+    // control at all, and the post.tonemap console var writes the DEVICE's copy, which onRender
+    // overwrites from post_ on the next frame anyway), so "still holds rhi::PostSettings' own 2"
+    // (RHI.hpp:217) is a sound stand-in for "no flag was given". IT HAS ONE BLIND CASE AND THE
+    // HONEST THING IS TO NAME IT: `--tonemap 2` against a manifest saying 0 or 1 loses, because a
+    // flag asking for the default is indistinguishable from no flag. A postTonemapFromCli_ beside
+    // the other three would close that, and it is a change to SandboxApp.hpp and setTonemap rather
+    // than to this file.
+    if (project_.postTonemap >= 0 && post_.tonemap == rhi::PostSettings{}.tonemap) {
+        // Clamped to the three curves that exist, the same ceiling the post.tonemap console var
+        // applies (EditorConsole.hpp:1069): the parser stores whatever integer the file holds, and
+        // a mode nothing implements would select by falling off the end of a switch in the shader.
+        post_.tonemap = project_.postTonemap > 2 ? 2u : static_cast<u32>(project_.postTonemap);
+    }
+    // THE EFFECTIVE VALUES, AFTER PRECEDENCE -- not what the manifest asked for. A log line saying
+    // what the file requested would be exactly as reassuring and exactly as useless in the case
+    // that matters, which is a flag and a key disagreeing.
+    if (project_.postExposure >= 0.0f || project_.postBloom >= 0.0f ||
+        project_.postAutoExposure >= 0 || project_.postTonemap >= 0)
+        AVER_INFO("[Project] post chain from {}: exposure {:.3f}, bloom {:.3f}, auto-exposure {}, "
+                  "tonemap {}", project_.manifestPath, post_.exposure, post_.bloomIntensity,
+                  post_.autoExposure ? "on" : "off", post_.tonemap);
     startContentWatch();
     pendingUpgrade_ = editor::inspectProject(project_);
     upgradeAsked_ = false;
@@ -69,6 +143,43 @@ void SandboxApp::applyProject(Engine& e) {
 #if AVER_MODULE_SCENE
     loading.stage("Loading level");
     loadStartMap(e);
+#endif
+    // ---- PHYSICS.* AND AUDIO.* FROM THE MANIFEST, HERE RATHER THAN IN applyProjectRenderSettings
+    // WHAT THE OLD PLACEMENT HID. Both calls used to sit at the bottom of applyProjectRenderSettings
+    // -- wholly inside that function's "#if AVER_MODULE_VOXI", and past both of its early returns
+    // (`if (!project_.hasRenderSettings()) return;` and `if (!voxiAttached_) ... return;`). So a
+    // project that stated PHYSICS.GRAVITY or AUDIO.MASTER but no RENDER.* key at all had them
+    // silently discarded by the editor, with nothing logged, and a build with Voxi off discarded
+    // them unconditionally -- that configuration's applyProjectRenderSettings is an empty stub
+    // (SandboxLevelEdit.cpp:152). Gravity and a mix have nothing to do with whether a GI renderer
+    // is attached or whether this manifest happens to mention one.
+    //
+    // THE RUNTIME WAS ALREADY RIGHT AND THE EDITOR, THE NOMINAL BEHAVIOUR REFERENCE, WAS NOT:
+    // GameApp::openProject applies both unconditionally (GameApp.cpp, "That coupling is not
+    // copied"), and docs/RUNTIME-DEDUP.md records this as the one place where the two hosts
+    // disagreed in the editor's disfavour.
+    //
+    // THE POSITION IS COPIED FROM THE RUNTIME ON PURPOSE, not landed wherever it fit: GameTick.hpp
+    // says outright that it decides nothing about WHEN a host calls these, so matching by accident
+    // would be worth nothing. openProject applies them after its level load and after
+    // applyProjectRenderSettings, and before initScripting/spawnClassPlacements -- which is this
+    // line. Physics has already been STARTED by then in both hosts (SandboxApp::onInit calls
+    // game::startPhysics before any project can open, as GameApp::onInit does before openProject),
+    // and applyProjectPhysics asks aver_phys_ready() itself rather than trusting that, so a world
+    // that does not exist yet produces "will apply once the world exists" instead of silence.
+#if AVER_MODULE_PHYSICS
+    game::applyProjectPhysics(project_);
+#endif
+// AVER_WITH_AUDIO_ABI, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
+// and an #if on one compiles this whole block to nothing while the build stays green. It means
+// "this build links the mixer seam", and it is defined on every host that does.
+//
+// IT USED TO BE CALLED AVER_SOUND_EDITOR_AUDIO, and the name was the bug. Named after a TAB IN THE
+// EDITOR, it was defined on exactly one target, so the game runtime was excluded from the audio
+// device by a macro nobody read as a capability -- a packaged game was silent and Audio.Load
+// succeeded into nothing. Renamed for what it actually gates.
+#if AVER_WITH_AUDIO_ABI
+    game::applyProjectAudioMix(project_);
 #endif
 #if AVER_MODULE_SCRIPTING
     loading.stage("Starting scripts");
@@ -201,22 +312,11 @@ void SandboxApp::applyProjectRenderSettings() {
     // see the comment there for why they cannot live down here with the rest of the block.
     if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
 
-    // ---- PHYSICS AND AUDIO, which no manifest could state until now -------------------------
-    // See GameTick.hpp for the readiness guard and the fixed-step refusal.
-#if AVER_MODULE_PHYSICS
-    game::applyProjectPhysics(project_);
-#endif
-// AVER_WITH_AUDIO_ABI, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
-// and an #if on one compiles this whole block to nothing while the build stays green. It means
-// "this build links the mixer seam", and it is defined on every host that does.
-//
-// IT USED TO BE CALLED AVER_SOUND_EDITOR_AUDIO, and the name was the bug. Named after a TAB IN THE
-// EDITOR, it was defined on exactly one target, so the game runtime was excluded from the audio
-// device by a macro nobody read as a capability -- a packaged game was silent and Audio.Load
-// succeeded into nothing. Renamed for what it actually gates.
-#if AVER_WITH_AUDIO_ABI
-    game::applyProjectAudioMix(project_);
-#endif
+    // PHYSICS.* AND AUDIO.* USED TO BE APPLIED HERE, and that is why they now are not: everything
+    // from this point on is reached only past the hasRenderSettings() and voxiAttached_ returns
+    // above, which is the correct gate for a Voxi knob and the wrong one for gravity and a master
+    // volume. Both calls moved up into applyProject -- see the block there for what the coupling
+    // was hiding.
 
     // ---- THE COMMAND LINE OUTRANKS THE MANIFEST, AND UNTIL NOW IT DID NOT ----
     // THE BUG THIS FIXES: CLI overrides apply ONCE at startup, but this function runs LATER when a

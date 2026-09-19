@@ -369,6 +369,12 @@ private:
     // Applies the project's render settings to Voxi.
     void applyProjectRenderSettings();
 
+    // Applies RENDER.EXPOSURE / BLOOM / AUTOEXPOSURE / TONEMAP to post_, the struct pushFrame hands
+    // the device every frame. Separate from applyProjectRenderSettings because none of that
+    // function's three guards -- AVER_MODULE_VOXI, hasRenderSettings(), voxiAttached_ -- has anything
+    // to say about a tone curve; see the definition.
+    void applyProjectPostSettings();
+
     // Depth proxy resolver for shadow/voxel passes using LOD data.
     static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user);
 
@@ -560,6 +566,18 @@ private:
     // Mirrors SandboxApp::gpuTimingDone_'s latch, same reasoning: fire exactly once, near the last
     // frame, never again.
     bool statsFinalDumped_ = false;
+
+    // beginPlayIfGameModeDeclared's own answer, latched at boot: true once
+    // aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) has found a concrete GameMode in this
+    // project, in whatever language declared it -- a graph class reaches that registry exactly as a
+    // C# one does, which is the premise onUpdate's graph-class tick used to get wrong. Read once a
+    // frame by that tick, which needs "nothing here can ever begin play" (gate off, tick forever)
+    // told apart from "play has not begun yet" (gate on); see its call site for the measurement
+    // that made it a gate. A mirror rather than a second call of that query, so the two cannot
+    // disagree. Defaults to false -- the answer that ticks -- so a build with the framework
+    // compiled out, or a boot that never got as far as asking, behaves exactly as it did before
+    // this member existed.
+    bool gameModeDeclared_ = false;
 };
 
 } // namespace aver::game

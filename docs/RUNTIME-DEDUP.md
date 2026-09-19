@@ -18,18 +18,59 @@
 > - **C6b (sky/fog/post/AverSR push).** The hosts' precedence chains differ by design; not shared.
 >
 > Decisions for the project owner, found while scoping:
-> - The editor applies PHYSICS.GRAVITY/FIXEDSTEP and AUDIO.* only inside
->   `applyProjectRenderSettings` (needs a RENDER.* key and Voxi attached); the runtime applies them
->   unconditionally.
-> - The runtime ticks graph-class instances every frame; the editor only during Play. Gating the
->   runtime on PLAYING would freeze graph-class actors in a project with no GameMode, which never
->   reaches PLAYING in a shipped game (editor Play falls back to a spectator GameMode).
-> - Sky defaults with no SKY record differ: editor zenith/horizon (0.19,0.42,0.78)/(0.72,0.80,0.90),
->   runtime and format (0.24,0.45,0.85)/(0.72,0.83,0.95).
-> - `--cam-wobble` shows during Play in the runtime but is overwritten by the play camera in the editor.
-> - A project cannot author exposure/bloom/tonemap, so a shipped game uses compiled defaults.
-> - A shipped game keeps publishing input while alt-tabbed (`publishInput`'s `focused` is "a window
->   exists").
+> - **SETTLED 2026-09-19 -- the editor was fixed, not the runtime.** It applied
+>   PHYSICS.GRAVITY/FIXEDSTEP and AUDIO.* only from inside `applyProjectRenderSettings`, so they
+>   needed a RENDER.* key and an attached Voxi; a project stating only `PHYSICS.GRAVITY` had it
+>   silently ignored. Gravity and audio mix have nothing to do with Voxi, and the runtime was
+>   already right, so "the editor is the reference" did not apply. Both calls now run from
+>   `SandboxApp::applyProject`, outside every Voxi and `hasRenderSettings()` gate, at the position
+>   the runtime uses. Note the side effect: in a build with `AVER_MODULE_VOXI` off these keys were
+>   discarded entirely before and now apply.
+> - **SETTLED 2026-09-19 -- the runtime now gates on "PLAYING, or no GameMode was declared".**
+>   The old justification for being ungated was that a graph-only project never reaches
+>   `aver_fw_begin_play` because there is no C# GameMode to find. **That premise was stale.** A
+>   graph class parented to "GameMode" gets the GAME_MODE bit through `sealClass`'s inherited kind
+>   flags, so `aver_fw_find_class_with_flags` finds it -- verified against the packaged runtime on
+>   graph-only PTTest, which logs `[Graph] GameMode 'AN_FPRules' begins play` and `[Game] play
+>   session begun automatically (GameMode class 10)`. So the ungated tick was mutating worlds that
+>   simply had not begun play. The second term keeps the one case the old premise really protected:
+>   a project declaring no GameMode in any language, where nothing ever begins play. What the
+>   editor measured when ITS equivalent was ungated: on PTTest over 1000 frames with Play never
+>   pressed, a class-placed graph's own VAR climbed from 3.6e-05 to 12.31s across 4003 tick lines.
+> - **SETTLED 2026-09-19 -- sky defaults with no SKY record: the editor moved to the format's.** The
+>   editor's mirror read (0.19,0.42,0.78)/(0.72,0.80,0.90) while the runtime (`GameApp.hpp:420`), the
+>   format (`OcWorld.hpp:401`) and `rhi::SkyAtmosphere` itself (`RHI.hpp:253`) all read
+>   (0.24,0.45,0.85)/(0.72,0.83,0.95) -- the editor was the odd one out of three, so "the editor's
+>   behaviour is the reference" did not apply: it cannot be the reference for a value the file format
+>   itself declares. `SandboxApp.hpp` now holds the format's numbers. **This moves pixels in the
+>   editor**, for a level with no SKY record under the AUTHORED sky model (`--sky-authored`, the Sky
+>   panel's dropdown, or a level that authored `skyPhysical=false` and nothing else): `applyLevelEnv`
+>   is guarded on `w.hasSky` (`LevelSky.hpp:56`) and the frame loop copies the editor's mirror over
+>   `sky_` every frame, so the mirror is what such a level renders. Under the default Physical model
+>   the dome fit overwrites both in the frame constants (`D3D12Device.cpp:4211`,
+>   `VulkanDevice.cpp:2356`, both gated on `model == Physical`) and the authored numbers are inert --
+>   which is how the editor kept a wrong dome this long unnoticed.
+> - **SETTLED 2026-09-19 -- `--cam-wobble` during Play: the difference is kept, deliberately.** It
+>   shows in the runtime and is overwritten by the play camera in the editor. `--cam-wobble` exists to
+>   make a still frame move for verification, nothing combines it with a play camera, and the runtime
+>   applies its offset only to the view matrix because it has no movement yaw to corrupt (the reasoning
+>   is under "Camera wobble" below). Unifying it would be churn on a flag no shipped path uses, so the
+>   code is left alone and this line is the record.
+> - **SETTLED 2026-09-19 -- the manifest gained a post-process channel.** `RENDER.EXPOSURE`,
+>   `RENDER.BLOOM`, `RENDER.AUTOEXPOSURE` and `RENDER.TONEMAP` now reach `rhi::PostSettings` in both
+>   hosts, built on the pattern `RENDER.RESTIRHISTORY` established. Each carries a "not stated"
+>   sentinel so an absent key leaves the compiled default alone -- negative rather than zero,
+>   because a bloom intensity of exactly 0 is a legal authored value meaning "no bloom pass at
+>   all", and `FormatTest` pins that round trip. An explicit `--exposure`/`--bloom` on the command
+>   line still outranks the manifest, which is the precedence an earlier defect inverted.
+> - **SETTLED 2026-09-19 -- a backgrounded game no longer receives input.** `publishInput`'s
+>   `focused` argument was `e.window() != nullptr`, which answers "a window exists", not "the
+>   window has focus". The Win32 foreground test the mouse-capture block already computed is now
+>   hoisted and passed instead. `publishInput` already publishes an explicit release for every
+>   slot when unfocused, so nothing can latch. A bounded `--frames` run deliberately keeps the old
+>   answer: a capture's window is opened unactivated, so a real foreground query would report "not
+>   foreground" for the whole run and turn every gate's input into releases. Off Win32 the old
+>   answer stands, for want of a portable foreground query.
 >
 > **STATUS, 2026-09-17: C1-C4 are swapped -- the editor uses the library for content, level, water,
 > streaming and landscape.** `SandboxApp` holds `game::GameContent content_` (`b97644fe`),
@@ -334,14 +375,17 @@ Each of these mirrors an existing pattern already in the codebase (GameContent's
 - **No hook needed for content-root/anim-root/upgrade-offer/content-watch/LoadingScreen** — these stay entirely inside `SandboxApp::applyProject`, called around (not through) the shared library functions; the shared functions themselves must not grow parameters for any of them.
 - **No hook needed for PtSceneView/A2 conflict** — confirmed diagnostic-only, must not enter the shared function's signature at all (not even as an optional/no-op parameter for Runtime).
 - **A "fix Synapse tick gate" decision, not a hook** — this is a straight bug-parity fix (add the missing `aver_fw_play_state() == AVER_FW_PLAY_PLAYING` check around GameApp.cpp:1966-1977), no editor-only concept is being separated out here, so no hook is needed — just get explicit sign-off since it's a shipped-behavior change (see risks).
-- **A "fix Editor's physics/audio Voxi-coupling" decision, not a hook** — same shape: this is Editor's own bug (physics-gravity and audio-mix trapped inside `#if AVER_MODULE_VOXI` and behind `hasRenderSettings()`), not something the runtime needs a hook to avoid inheriting, since Runtime's audio path is already correctly decoupled. Recommend fixing Editor to call the new `applyProjectPhysicsSettings`/`applyProjectAudioSettings` unconditionally (outside `applyProjectRenderSettings`'s Voxi/hasRenderSettings gates) rather than threading a hook through the old structure.
+- **SETTLED 2026-09-19 -- the editor was fixed; `applyProjectPhysics`/`applyProjectAudioMix` now
+  run from `SandboxApp::applyProject`, outside every Voxi and `hasRenderSettings()` gate, matching
+  the runtime.** The original note, kept for the reasoning: a "fix Editor's physics/audio
+  Voxi-coupling" decision, not a hook — same shape: this is Editor's own bug (physics-gravity and audio-mix trapped inside `#if AVER_MODULE_VOXI` and behind `hasRenderSettings()`), not something the runtime needs a hook to avoid inheriting, since Runtime's audio path is already correctly decoupled. Recommend fixing Editor to call the new `applyProjectPhysicsSettings`/`applyProjectAudioSettings` unconditionally (outside `applyProjectRenderSettings`'s Voxi/hasRenderSettings gates) rather than threading a hook through the old structure.
 
 ### Risks and what to check
 
 1. **Lifting `frameBudgetTick` changes Runtime's steady-state behavior under load for the first time ever** (today: none — quality is always exactly as authored). Hand-check: run `AverEngineRuntime.exe` on a heavy scene with `RENDER.FRAMEBUDGETMS` set; confirm `giUpdateInterval`/`giCones` visibly drop under load and recover after ~60 comfortable frames, matching an Editor Play session at the same settings and scene. Should move zero `Sandbox.exe` pixels (Editor's own controller already exists and is untouched by the extraction if done as a pure refactor).
 2. **Applying `PHYSICS.GRAVITY`/`FIXEDSTEP` in Runtime for the first time changes physics behavior** in any shipped/tested project that already states one (previously silently ignored — default Earth gravity ran regardless). Hand-check: grep existing test/demo `.ocproject` files for `PHYSICS.GRAVITY`/`PHYSICS.FIXEDSTEP` and confirm none were accidentally depending on the old (wrong) always-default behavior once fixed.
 3. **Fixing the Synapse AI tick gate (adding the missing PLAYING check to `GameApp::onUpdate`) changes shipped behavior** for any project using Synapse agents with no declared `GameMode`. Hand-check: build a minimal no-GameMode project with a Synapse agent, confirm it now correctly freezes in the shipped build instead of silently pathing against a "not playing" world, matching Editor's non-Play state.
-4. **Deciding to fix vs. preserve Editor's own `#if AVER_MODULE_VOXI`/`hasRenderSettings()` coupling around physics-gravity and audio-mix is a product decision, not a mechanical port** — "editor is the reference" is ambiguous here because the reference itself has the bug. Flag to the task owner before silently changing Editor behavior as a side effect of this slice; at minimum, land it as its own isolated, clearly-labeled commit (see effort) so it can be reviewed/reverted independently of the pure lift work.
+4. **SETTLED 2026-09-19: fixed, in its own commit.** The original note: deciding to fix vs. preserve Editor's own `#if AVER_MODULE_VOXI`/`hasRenderSettings()` coupling around physics-gravity and audio-mix is a product decision, not a mechanical port — "editor is the reference" is ambiguous here because the reference itself has the bug. Flag to the task owner before silently changing Editor behavior as a side effect of this slice; at minimum, land it as its own isolated, clearly-labeled commit (see effort) so it can be reviewed/reverted independently of the pure lift work.
 5. **Applying `RENDER.GIVOLUME` in Runtime (previously silently discarded in favor of `fitGiVolumeToLevel()`'s auto-fit) will visibly move the GI volume** for any shipped project that explicitly authors one. Hand-check with a screenshot compare (Editor vs. `AverEngineRuntime.exe`, same project, same camera) for at least one project stating `RENDER.GIVOLUME`.
 6. **`PHYSICS.MAXBODIES`/`MAXBODYPAIRS`/`MAXCONTACTS`/`TEMPALLOCMB` remain dead in both hosts** without an `aver_phys_init` ABI change (it currently takes zero parameters, and every one of 30+ call sites across `tests/physics/**` assumes that). Explicitly out of scope for this slice; note it so nobody assumes "port the editor's code" closes this — there is no editor code to port.
 7. **The CLI-override collapse (`RenderCliOverrides`/`applyCliOverrides`) touches the single most bug-scarred function in the file** — SandboxProject.cpp's own N7 comment documents four separate historical regressions of this exact precedence pattern. Do this as its own isolated, behavior-preserving-only commit, extend `tests/formats/src/ProjectRenderApplyTest.cpp`-style coverage to pin Phase A/B ordering, and run the gates specifically on this commit even though it shouldn't move any `Sandbox.exe` pixel (refactor, not a settings change) — this is the one commit in the slice where "should be a no-op" is worth independently verifying rather than assuming from the diff.

@@ -11,12 +11,13 @@
 // it, so each host's own compile sees its own macros correctly.
 //
 // EACH HOST KEEPS ITS OWN GATES AND CALL POSITIONS -- nothing here decides WHEN to call any of this
-// or what a caller does with a failure beyond logging it. The editor still applies PHYSICS.*/
-// AUDIO.* exactly where it does today, inside applyProjectRenderSettings and behind that function's
-// hasRenderSettings()/voxiAttached_ guards; GameApp still applies them unconditionally from
-// openProject. Both pass their own host tag ("Sandbox" or "Game") through so the log lines below
-// stay distinguishable in a shared log, and GameApp keeps its own graph-class instance tick ungated
-// rather than routed through here.
+// or what a caller does with a failure beyond logging it. Both hosts now apply PHYSICS.*/AUDIO.*
+// unconditionally as their project opens: GameApp always did, and the editor was changed to match
+// after the owner decision, because its old position -- inside applyProjectRenderSettings, behind
+// that function's #if AVER_MODULE_VOXI and its hasRenderSettings()/voxiAttached_ early returns --
+// silently discarded gravity and audio mix for any project that stated no RENDER.* key at all.
+// Both pass their own host tag ("Sandbox" or "Game") through so the log lines below stay
+// distinguishable in a shared log.
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"

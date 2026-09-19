@@ -3266,7 +3266,21 @@ private:
     // during the draw walk and cleared right after drawing, so it can never describe a stale set.
     std::vector<std::pair<Mat4, u64>> selectionOutlines_;
     f32 sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;
-    f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
+    // THESE NUMBERS MUST STAY THE FORMAT'S. They are the editor's mirror of sky_.zenith/horizon, and
+    // the frame loop copies them OVER sky_ every frame (the "FROZEN: sunDirection stays unnormalised"
+    // block, SandboxApp.cpp:2692), so rhi::SkyAtmosphere's own defaults at RHI.hpp:253 never survive
+    // frame 1 and a level with no SKY record renders whatever is written here -- applyLevelEnv is
+    // guarded on w.hasSky (LevelSky.hpp:56) and leaves the dome alone for such a level.
+    // They used to read (0.19,0.42,0.78)/(0.72,0.80,0.90), which made the editor the odd one out of
+    // three: OcWorld.hpp:401 declares (0.24,0.45,0.85)/(0.72,0.83,0.95) as the FORMAT's defaults, and
+    // GameApp.hpp:420 and RHI.hpp:253 both agree with the format. "The editor is the behaviour
+    // reference" (docs/RUNTIME-DEDUP.md) cannot hold for a value the file format itself declares, so
+    // the editor moved. THIS CHANGES PIXELS, for a level with no SKY record under the AUTHORED sky
+    // model -- --sky-authored, the Sky panel's dropdown, or a level that authored skyPhysical=false
+    // and nothing else. Under the default Physical model the dome fit overwrites both in the frame
+    // constants (D3D12Device.cpp:4211, VulkanDevice.cpp:2356, both gated on model == Physical), which
+    // is exactly why the editor could sit on wrong numbers this long without anyone seeing it.
+    f32 skyZenith_[3]={0.24f,0.45f,0.85f}, skyHorizon_[3]={0.72f,0.83f,0.95f};
     // A tint on the in-scattered sky (white = clear air), and an extinction per cm.
     f32 fogColor_[3]={1.0f,1.0f,1.0f}, fogDensity_=4e-6f;
 #if AVER_MODULE_SCENE

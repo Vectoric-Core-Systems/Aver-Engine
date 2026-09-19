@@ -1162,11 +1162,17 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Apply the project's render settings to Voxi
     applyProjectRenderSettings();
+    // RENDER.EXPOSURE / BLOOM / AUTOEXPOSURE / TONEMAP, which are per-device post state rather than
+    // Voxi settings, so they are applied unconditionally here instead of inside the call above --
+    // same decoupling, and for the same reason, as the PHYSICS.* and AUDIO.* blocks below. See
+    // applyProjectPostSettings' own comment.
+    applyProjectPostSettings();
 #if AVER_MODULE_PHYSICS
-    // PHYSICS.GRAVITY / PHYSICS.FIXEDSTEP FROM THE MANIFEST. The editor applies these inside
-    // applyProjectRenderSettings (SandboxProject.cpp), behind that function's AVER_MODULE_VOXI,
-    // hasRenderSettings() and voxiAttached_ guards, so a project with no RENDER.* key never gets them
-    // there. That coupling is not copied: this runs unconditionally, like the AUDIO.* block below.
+    // PHYSICS.GRAVITY / PHYSICS.FIXEDSTEP FROM THE MANIFEST, applied unconditionally as the project
+    // opens, like the AUDIO.* block below. The editor used to apply these from inside
+    // applyProjectRenderSettings, behind that function's AVER_MODULE_VOXI, hasRenderSettings() and
+    // voxiAttached_ guards, so a project stating no RENDER.* key never got them there at all; this
+    // host deliberately did not copy that coupling, and the editor has since been moved off it too.
     game::applyProjectPhysics(project_);
 #endif
 #if AVER_WITH_AUDIO_ABI
@@ -1495,10 +1501,16 @@ void GameApp::tickProjectGraphs(f32 dt) {
     // Aver.Framework at all (check the .csproj), so gating a graph's OnTick on the framework's PLAYING
     // state would make every graph silently inert in exactly the configuration where it is most likely
     // to be the ONLY gameplay a project has -- AVER_MODULE_FRAMEWORK off, or on but this project
-    // declares no GameMode (nothing in this task ever calls aver_fw_begin_play from a packaged game;
-    // see initScripting's own comment on that separate, larger, un-closed gap). "OnTick fires every
-    // frame" is read literally: from the first frame this graph loaded successfully, for as long as
-    // the process runs, independent of whether anything else in the game is "playing".
+    // declares no GameMode. That second case used to be written here as "nothing in this task ever
+    // calls aver_fw_begin_play from a packaged game", which stopped being true the day
+    // beginPlayIfGameModeDeclared landed below: a packaged game DOES begin play, and a graph class
+    // counts as the GameMode that makes it, so the clause now means only what it says -- a project
+    // that declares no GameMode in any language. "OnTick fires every frame" is read literally: from
+    // the first frame this graph loaded successfully, for as long as the process runs, independent
+    // of whether anything else in the game is "playing". A DISCOVERED PROJECT-LEVEL GRAPH IS NOT A
+    // CLASS INSTANCE, which is why onUpdate's tickGraphClassInstances call is gated and this one is
+    // not: nothing places these in a level, so no amount of ticking mutates a level's contents the
+    // way the measurement at that call site describes.
     for (const ProjectGraph& g : projectGraphs_) {
         if (!g.loaded) continue;
         scripts_.graphTick(g.syntheticEntity, dt);
@@ -1518,6 +1530,13 @@ void GameApp::beginPlayIfGameModeDeclared() {
     // makes "declared" the right word in this function's name: it is asking the registry a project
     // question, not assuming one.
     const i32 modeClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
+    // LATCHED FOR THE REST OF THE PROCESS, because onUpdate's graph-class tick has to tell "no
+    // session has begun yet" apart from "nothing here can ever begin one" and this line is the only
+    // place that asks. Written before the early return below, not after the begin_play call, so the
+    // "declined" branch at the bottom still counts as a project that HAS a GameMode: the framework
+    // stayed in EDITOR because a session failed, not because nothing was declared, and a graph
+    // actor should not start ticking on the strength of a failure.
+    gameModeDeclared_ = modeClass != 0;
     if (modeClass == 0) {
         AVER_INFO("[Game] no GameMode class declared -- play session not started (the framework stays "
                   "exactly as inert as it was before this existed; see discoverProjectGraphs for the "
@@ -1696,6 +1715,63 @@ void GameApp::applyProjectRenderSettings() {
                   voxi::disableReasonText(reports[i].reason));
     }
 #endif
+}
+
+// RENDER.EXPOSURE / RENDER.BLOOM / RENDER.AUTOEXPOSURE / RENDER.TONEMAP, from the manifest into the
+// post settings the shipped game actually renders through. Before this the four keys parsed, round
+// tripped and were then read by nobody: a packaged game always tonemapped at rhi::PostSettings'
+// compiled defaults, whatever the author had saved.
+//
+// INTO post_, NOT ONTO THE DEVICE. pushFrame ends by pushing this member -- dev->setPostProcess(post_)
+// -- unconditionally, once per frame. A setPostProcess call made here would therefore survive exactly
+// until the first frame drew and then be overwritten by the default-constructed member. post_ is the
+// game's post state; the device only ever holds a copy of it.
+//
+// OUTSIDE applyProjectRenderSettings on purpose, for the reason openProject's PHYSICS.* and AUDIO.*
+// blocks give for the same decoupling: that function sits behind AVER_MODULE_VOXI, hasRenderSettings()
+// and voxiAttached_, and a tone curve has nothing to do with any of the three. A project stating only
+// RENDER.EXPOSURE, or a build with Voxi compiled out, must still ship the exposure its author chose.
+//
+// A KEY AT ITS SENTINEL LEAVES THE COMPILED DEFAULT ALONE, which is the whole point of the negative
+// floats OcProject.hpp:182-189 argues for: zero is a legal authored bloom -- it records no bloom pass
+// at all (RHI.hpp:151-152) -- and a legal authored exposure. So this tests for "the manifest said
+// something" and never for truthiness, and writes nothing where the file said nothing.
+void GameApp::applyProjectPostSettings() {
+    if (!project_.valid()) return;
+
+    bool stated = false;
+    if (project_.postExposure >= 0.0f)  { post_.exposure       = project_.postExposure;          stated = true; }
+    if (project_.postBloom    >= 0.0f)  { post_.bloomIntensity = project_.postBloom;             stated = true; }
+    if (project_.postAutoExposure >= 0) { post_.autoExposure   = project_.postAutoExposure != 0; stated = true; }
+    if (project_.postTonemap >= 0) {
+        // CLAMPED HERE BECAUSE NOTHING DOWNSTREAM DOES: setPostProcess is `post_ = p;` in both
+        // backends (D3D12Device.cpp, VulkanCommon.hpp) and the parser stores whatever number the line
+        // held. The image would survive a 7 on its own -- averTonemap only tests `mode > 1.5`
+        // (color.hlsli:144-147), so anything above 2 already draws as 2 -- but IDevice::postProcess()
+        // would then report a mode the frame was not drawn with, and the console's `get post.tonemap`
+        // exists to be believed. Same [0,2] the console clamps its own `set` to.
+        post_.tonemap = static_cast<u32>(project_.postTonemap > 2 ? 2 : project_.postTonemap);
+        stated = true;
+    }
+    if (!stated) return;
+
+    AVER_INFO("[Project] applied post settings: exposure={:.3f} bloom={:.3f} autoExposure={} tonemap={}",
+              post_.exposure, post_.bloomIntensity, post_.autoExposure ? 1 : 0, post_.tonemap);
+
+    // A MANIFEST CONTRADICTION, reported the way applyProjectRenderSettings reports the Voxi ones.
+    // With eye adaptation running, the composite pass multiplies by the ADAPTED value and never reads
+    // PostSettings::exposure at all (post.hlsl:216-220), so a stated RENDER.EXPOSURE does nothing. It
+    // is easy to hit by accident rather than by choice, because PostSettings::autoExposure defaults to
+    // true (RHI.hpp:158): a manifest that states an exposure and says nothing about adaptation has
+    // asked for something it will not get, and would otherwise find that out only by looking at the
+    // frame. DELIBERATELY NOT "FIXED" BY FORCING ADAPTATION OFF: AUTOEXPOSURE is its own key, and an
+    // author saying nothing about it is not the same as an author saying zero.
+    if (project_.postExposure >= 0.0f && post_.autoExposure) {
+        AVER_WARN("[Project] RENDER.EXPOSURE {:.3f} is not in effect: auto-exposure is on{} and "
+                  "replaces the exposure every frame -- state RENDER.AUTOEXPOSURE 0 to use it",
+                  project_.postExposure,
+                  project_.postAutoExposure >= 0 ? " (RENDER.AUTOEXPOSURE 1)" : " by default");
+    }
 }
 
 Vec3 GameApp::camForward() const {
@@ -2146,6 +2222,24 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
     // Input is READ here, never rolled here. See onRender for why.
 #if AVER_MODULE_FRAMEWORK
+    // IS THIS WINDOW FOREGROUND -- asked once, here, because two things this frame need the answer
+    // and they are not the same question: whether to confine the cursor, and whether the player is
+    // driving the pawn. The mouse-capture block below used to own this test privately, which left
+    // publishInput to answer the focus question with `e.window() != nullptr` -- "a window exists",
+    // which is true of a game the player alt-tabbed away from ten minutes ago. So a backgrounded
+    // shipped game kept feeding its pawn live keyboard, mouse and pad input while the player typed
+    // somewhere else.
+    //
+    // Falls back to "a window exists" off Win32, which is exactly what this host asked everywhere
+    // before today -- there is no portable foreground query in this tree to replace it with, and a
+    // silent behaviour change on a platform nobody measured would be worse than the known gap.
+    bool foreground = e.window() != nullptr;
+#if defined(_WIN32)
+    if (window_) {
+        HWND hwnd = static_cast<HWND>(window_->nativeHandle());
+        foreground = hwnd && ::GetForegroundWindow() == hwnd;
+    }
+#endif
     // MOUSE CAPTURE: decided and polled BEFORE publishInput reads it, the same order
     // SandboxPlay.cpp's own onUpdate uses (setMouseCaptured -> pollCapturedMouse -> pushInput).
     // Capture engages only while a session is actually playing AND the OS says this window is
@@ -2157,11 +2251,8 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     {
         bool wantCapture = false;
 #if defined(_WIN32)
-        if (window_ && cfg_.maxFrames == 0 && !cfg_.noMouseCapture &&
-            aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-            HWND hwnd = static_cast<HWND>(window_->nativeHandle());
-            wantCapture = hwnd && ::GetForegroundWindow() == hwnd;
-        }
+        wantCapture = foreground && window_ && cfg_.maxFrames == 0 && !cfg_.noMouseCapture &&
+                      aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
 #endif
         setMouseCaptured(wantCapture);
         pollCapturedMouse();
@@ -2169,7 +2260,21 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last
     // frame's. Publishing after the tick would give every input one frame of latency, which is the
     // kind of thing that gets blamed on the display.
-    publishInput(input_, e.window() != nullptr, mouse_.captured(), mouse_.dx(), mouse_.dy(),
+    //
+    // A BOUNDED (--frames N) RUN KEEPS THE OLD ANSWER, and this is not caution, it is required: a
+    // capture's window is deliberately opened UNACTIVATED so a measurement never steals the
+    // desktop's focus (docs/headless-vs-editor.md's own "The window opens unactivated" entry, and
+    // that note already warns that "anything gated on window-activation state" diverges between a
+    // capture and an interactive launch). Asking ::GetForegroundWindow() on such a run would answer
+    // "not foreground" every frame of its life, so every gate and screenshot would silently publish
+    // nothing but releases and stop matching the picture it produced yesterday. Same "an automated
+    // run is not a player" line the capture gate above already draws with cfg_.maxFrames.
+    //
+    // Losing focus cannot latch a key down: publishInput writes an explicit 0 to every named slot
+    // and every raw VK when its `focused` argument is false, rather than returning early -- see
+    // GameInput.cpp's own comment on that invariant, and InputBridgeTest, which asserts it.
+    const bool inputFocused = cfg_.maxFrames > 0 ? (e.window() != nullptr) : foreground;
+    publishInput(input_, inputFocused, mouse_.captured(), mouse_.dx(), mouse_.dy(),
                  cfg_.inputEcho ? &echoHeld_ : nullptr);
     if (cfg_.inputEcho && echoHeld_ != echoLast_) {
         AVER_INFO("[Game] input: {}", echoHeld_);
@@ -2197,13 +2302,45 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // just not gated on the same PLAYING check -- see tickProjectGraphs' own comment for why.
     tickProjectGraphs(t.dt);
 #if AVER_MODULE_SCRIPTING
-    // GRAPH-AS-CLASS instances, same "beside tickGameplay(), not gated on PLAYING" placement and
-    // reasoning as tickProjectGraphs immediately above -- see ScriptHost::tickGraphClassInstances'
-    // own comment (and DeclareGraphClasses' `ticks` comment on the C# side) for exactly why: a
-    // graph-only project never calls aver_fw_begin_play (no C# GameMode to find), so gating a
-    // spawned class instance's OnTick on aver_fw_play_state() would make graph-as-class silently
-    // inert in precisely the "no C# at all" configuration it exists to serve.
+    // GRAPH-AS-CLASS instances -- beside tickGameplay() like tickProjectGraphs above, but GATED ON
+    // PLAY, on the same condition the editor spells at sandbox/src/SandboxApp.cpp:2494.
+    //
+    // The comment that stood here defended ticking these every frame with "a graph-only project
+    // never calls aver_fw_begin_play (no C# GameMode to find)". That premise is false. A graph
+    // class declares into the SAME native class registry a C# one does, and sealClass's
+    // inheritedKindFlags (modules/framework/src/FrameworkAbi.cpp, whose own comment names this
+    // query) hands a graph class parented to "GameMode" the GAME_MODE bit that DeclareGraphClasses
+    // never ORs in itself -- so aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) finds it,
+    // and the packaged runtime booting graph-only PTTest logs both halves of that today:
+    //     [Graph] GameMode 'AN_FPRules' begins play with pawn='AN_FPCharacter' ...
+    //     [Game] play session begun automatically (GameMode class 10)
+    // -- the second of those written by beginPlayIfGameModeDeclared in this same file, which a
+    // shipped game reaches on boot because booting IS beginning play for it.
+    //
+    // WHAT UNGATED COST, measured in the editor on PTTest over 1000 frames with Play never pressed:
+    // AN_FPRules' own `elapsed` VAR climbed from 3.6e-05 to 12.31s across 4003 tick lines. A graph
+    // is free to move entities, fire events and write VARs, so merely browsing a level mutated it.
+    // This host has no "just browsing", but it has the same class instances and the same window
+    // between the level loading and play beginning, and one spelling of the condition across both
+    // hosts is worth more than either host's convenience.
+    //
+    // WHY THE SECOND TERM, and it is the one case the false premise was really protecting: a
+    // project that declares no GameMode in ANY language never reaches aver_fw_begin_play at all,
+    // so play_state stays AVER_FW_PLAY_EDITOR for the life of the process and gating on PLAYING
+    // alone would freeze every class-placed graph forever -- inert in precisely the configuration
+    // graph-as-class exists to serve. gameModeDeclared_ is beginPlayIfGameModeDeclared's own
+    // answer, latched when it asked the registry at boot, deliberately not a second query from
+    // here: two callers asking the same question is two answers to keep in step.
+    //
+    // Left ungated with AVER_MODULE_FRAMEWORK absent, same shape and reason as the AI tick below:
+    // no play state to ask about, and no way to declare a GameMode either.
+#if AVER_MODULE_FRAMEWORK
+    if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING || !gameModeDeclared_) {
+#endif
     scripts_.tickGraphClassInstances(t.dt);
+#if AVER_MODULE_FRAMEWORK
+    }
+#endif
 #endif
 
 #if AVER_MODULE_SCENE

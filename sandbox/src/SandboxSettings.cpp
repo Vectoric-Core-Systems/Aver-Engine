@@ -60,10 +60,23 @@ void SandboxApp::loadEditorPreferences() {
     // chain whose default state changed the image would invalidate the whole oracle" -- and a
     // stored exposure reaching a --frames run would do exactly that: on one machine and not on
     // another, which is the worst shape a gate failure can take.
+    //
+    // AND NOT WHEN THE PROJECT STATES THE KEY, which is the second guard on the three fields that
+    // now have one. A project named on the COMMAND LINE is applied in onInit (SandboxApp.cpp:763),
+    // before the first buildUI and therefore before this function has ever run -- so without this
+    // test a stored post.exposure would silently overwrite RENDER.EXPOSURE one frame after
+    // applyProject wrote it, and the key would look inert on every machine whose editor.ini has a
+    // post block in it. The browser path already resolves the other way round (prefs load at the
+    // top of buildUI, the Open click applies the project later in that same frame), so without
+    // this the two ways of opening the same project would disagree about the same file; with it,
+    // both read command line > manifest > my own stored preference.
     if (maxFrames_ == 0) {
-        if (!postExposureFromCli_) post_.exposure      = prefFloat("post.exposure",       post_.exposure);
-        if (!postAutoExpFromCli_)  post_.autoExposure  = prefBool ("post.autoExposure",   post_.autoExposure);
-        if (!postBloomFromCli_)    post_.bloomIntensity= prefFloat("post.bloomIntensity", post_.bloomIntensity);
+        if (!postExposureFromCli_ && project_.postExposure < 0.0f)
+            post_.exposure       = prefFloat("post.exposure",       post_.exposure);
+        if (!postAutoExpFromCli_ && project_.postAutoExposure < 0)
+            post_.autoExposure   = prefBool ("post.autoExposure",   post_.autoExposure);
+        if (!postBloomFromCli_ && project_.postBloom < 0.0f)
+            post_.bloomIntensity = prefFloat("post.bloomIntensity", post_.bloomIntensity);
         post_.exposureKey    = prefFloat("post.exposureKey",    post_.exposureKey);
         post_.exposureSpeed  = prefFloat("post.exposureSpeed",  post_.exposureSpeed);
         post_.exposureMin    = prefFloat("post.exposureMin",    post_.exposureMin);
@@ -248,14 +261,21 @@ void SandboxApp::saveEditorPreferences() {
 
     // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
     // CLI exposure back would leave the next interactive session looking at the capture's eyes.
+    //
+    // THE THREE WITH A MANIFEST KEY ARE GUARDED A SECOND TIME, symmetrically with the load: while
+    // the project states RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE, the preference channel for that field
+    // is inert in BOTH directions. Writing it anyway would quietly adopt the project's authored
+    // look as this user's personal default for every project afterwards, and it could not even buy
+    // a persisted Post-panel tweak in exchange -- the load above would decline to restore it, and
+    // applyProject would overwrite it from the manifest on the next open regardless.
     if (maxFrames_ == 0) {
-        setPrefFloat("post.exposure",       post_.exposure);
-        setPrefBool ("post.autoExposure",   post_.autoExposure);
+        if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     post_.exposure);
+        if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
         setPrefFloat("post.exposureKey",    post_.exposureKey);
         setPrefFloat("post.exposureSpeed",  post_.exposureSpeed);
         setPrefFloat("post.exposureMin",    post_.exposureMin);
         setPrefFloat("post.exposureMax",    post_.exposureMax);
-        setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
+        if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
         setPrefFloat("post.bloomThreshold", post_.bloomThreshold);
         setPrefFloat("post.bloomKnee",      post_.bloomKnee);
         setPrefFloat("post.histogramLow",   post_.histogramLowPercent);
@@ -1521,6 +1541,176 @@ void SandboxApp::buildRenderingSettings(int page) {
                                   "This fades the effect out near the screen edge, where the miss\n"
                                   "would otherwise be visible.");
             ImGui::EndDisabled();
+        }
+
+        // ---- THE POST CHAIN, THE ONE PART OF THE IMAGE THE FILE COULD NOT HOLD ---------------
+        // Four keys that existed only as command-line flags and as live sliders in the Post
+        // Process panel: set an exposure there, package the game, and the game rendered
+        // rhi::PostSettings' compiled defaults instead -- docs/RUNTIME-DEDUP.md carried that as
+        // "A project cannot author exposure/bloom/tonemap". The stated/unstated idiom is
+        // buildImportSettings' and settingInt's (see settingInt's own comment for why -1 rather
+        // than 0 means unstated, and why a project that states everything pins defaults it never
+        // meant to pin).
+        //
+        // ON GENERAL, not beside the ReSTIR sliders on the Global Illumination page whose layout
+        // these copy: filing exposure under Global Illumination would repeat precisely the mistake
+        // the "Indirect diffuse" combo's own comment on that page describes -- a control filed
+        // under its implementation instead of its job, reported as "I cannot find that project
+        // setting". Exposure, bloom and the tone curve belong to the camera, like MSAA and the
+        // shading model above them.
+        //
+        // EVERY CONTROL WRITES THE KEY AND THE LIVE post_ TOGETHER, so the viewport answers the
+        // question the control is actually asking -- what will the shipped game look like -- while
+        // it is being dragged. A LIVE EDIT OUTRANKS A FLAG, which is deliberately the opposite of
+        // load time: applyProject lets --exposure win over the manifest because a flag is the
+        // newest thing the human said, and here the drag is.
+        ImGui::Separator();
+        ImGui::TextUnformatted("Post processing");
+        ImGui::TextDisabled("What a PACKAGED GAME renders with. An unticked key is not stated, and");
+        ImGui::TextDisabled("the engine's compiled default applies to it.");
+        {
+            // A lambda rather than settingInt: these two need a float widget and the live mirror,
+            // neither of which that int helper can give.
+            const auto postFloat = [&](const char* id, const char* label, f32* key, f32* live,
+                                       f32 lo, f32 hi, const char* form, ImGuiSliderFlags flags,
+                                       const char* trackName, const char* tip) {
+                ImGui::PushID(id);
+                bool stated = (*key >= 0.0f);
+                // TICKING ADOPTS WHAT THE VIEWPORT IS ALREADY SHOWING, not a hardcoded number:
+                // the reason anyone ticks this box is to record the look they just spent an
+                // afternoon on in the Post Process panel.
+                f32 v = stated ? *key : *live;
+                if (ImGui::Checkbox("##stated", &stated)) {
+                    // UNTICKING LEAVES THE VIEWPORT ALONE. "Unstated" means the compiled default
+                    // applies on the next open, not that this session's eyes snap back mid-edit --
+                    // which is also how applyProjectRenderSettings reads every other absent key.
+                    *key = stated ? v : -1.0f;
+                    if (stated) *live = v;
+                    projectDirty_ = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Unticked: this project does not state it,\n"
+                                      "and the engine's own default applies.");
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!stated);
+                if (ImGui::SliderFloat(label, &v, lo, hi, form, flags)) {
+                    *key = v;
+                    *live = v;
+                    projectDirty_ = true;
+                }
+                ImGui::EndDisabled();
+                // TRACKED BEFORE THE TOOLTIP IS ASKED FOR, the same ordering rule the ReSTIR
+                // history slider above states for IsItemHovered: both read the LAST item
+                // submitted, and a tooltip submits items of its own.
+                uiReg_.track(trackName);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", tip);
+                ImGui::PopID();
+            };
+            postFloat("exposure", "Exposure", &project_.postExposure, &post_.exposure,
+                      0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic,
+                      "project.post.exposure",
+                      "Linear multiplier on scene radiance, applied before the tone\n"
+                      "curve. Auto exposure below overrides it every frame while it\n"
+                      "is on.\n\nRound-trips as RENDER.EXPOSURE.");
+            postFloat("bloom", "Bloom", &project_.postBloom, &post_.bloomIntensity,
+                      0.0f, 1.0f, "%.3f", 0, "project.post.bloom",
+                      "ZERO IS A REAL ANSWER HERE, which is why the key's sentinel is\n"
+                      "-1 and not 0: zero intensity builds no pyramid and records no\n"
+                      "pass at all (RHI.hpp:151), so it is a cost choice as well as a\n"
+                      "look. The sandbox's own --bloom default is 0 rather than\n"
+                      "PostSettings' 0.06, so every recorded gate image was taken\n"
+                      "with no bloom.\n\nRound-trips as RENDER.BLOOM.");
+            {
+                // A CHECKBOX RATHER THAN settingInt's 0..1 SLIDER, unlike WINDOW.RESIZABLE and the
+                // IMPORT.* pair that use that helper: this is the same on/off the Post Process
+                // panel already spells as a checkbox (SandboxPanels.cpp:1917), and hand-rolling it
+                // is also what lets the registry track the control before its tooltip runs.
+                ImGui::PushID("autoExposure");
+                bool stated = project_.postAutoExposure >= 0;
+                bool on = stated ? project_.postAutoExposure != 0 : post_.autoExposure;
+                if (ImGui::Checkbox("##stated", &stated)) {
+                    project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
+                    if (stated) post_.autoExposure = on;
+                    projectDirty_ = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Unticked: this project does not state it,\n"
+                                      "and the engine's own default (on) applies.");
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!stated);
+                if (ImGui::Checkbox("Auto exposure", &on)) {
+                    project_.postAutoExposure = on ? 1 : 0;
+                    post_.autoExposure = on;
+                    projectDirty_ = true;
+                }
+                ImGui::EndDisabled();
+                uiReg_.track("project.post.autoExposure");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Eye adaptation from a luminance histogram of the frame.\n"
+                                      "A run with a frame limit forces it OFF unless\n"
+                                      "--auto-exposure asked for it by name, so a capture\n"
+                                      "measures one exposure instead of the histogram's warm-up.\n\n"
+                                      "Round-trips as RENDER.AUTOEXPOSURE.");
+                ImGui::PopID();
+            }
+            // AMBER, NOT GREYING THE EXPOSURE SLIDER as the Post Process panel does: there the
+            // slider is the live value the adaptation is about to overwrite, here it is a RECORDED
+            // one that is perfectly meaningful to author in either order -- a project that ships
+            // with adaptation off next month still wants its exposure in the file today.
+            if (post_.autoExposure && project_.postExposure >= 0.0f)
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                    "Auto exposure is on, so the adaptation overwrites Exposure every frame. The "
+                    "recorded value still applies wherever auto exposure is off.");
+            {
+                ImGui::PushID("tonemap");
+                bool stated = project_.postTonemap >= 0;
+                // CLAMPED FROM BOTH SOURCES, because neither one is bounded: the parser stores
+                // whatever integer the file holds (OcProject.cpp's RENDER.TONEMAP) and setTonemap
+                // takes --tonemap's atoi as it comes, so a 5 from either would leave this combo
+                // indexing its item list off the end and showing a blank.
+                int mode = stated ? project_.postTonemap : static_cast<int>(post_.tonemap);
+                if (mode > 2) mode = 2;
+                if (ImGui::Checkbox("##stated", &stated)) {
+                    project_.postTonemap = stated ? mode : -1;
+                    if (stated) post_.tonemap = static_cast<u32>(mode);
+                    projectDirty_ = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Unticked: this project does not state it,\n"
+                                      "and the engine's own default (ACES luminance) applies.");
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!stated);
+                if (ImGui::Combo("Tone curve", &mode,
+                                 "Per-channel ACES\0ACES fitted\0ACES luminance (default)\0")) {
+                    project_.postTonemap = mode;
+                    post_.tonemap = static_cast<u32>(mode);
+                    projectDirty_ = true;
+                }
+                ImGui::EndDisabled();
+                uiReg_.track("project.post.tonemap");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip(
+                        "Which curve resolves HDR radiance to the display:\n"
+                        "  Per-channel     the original Narkowicz/Hill approximation --\n"
+                        "                  the mode EVERY recorded gate baseline in\n"
+                        "                  scripts/ was measured through\n"
+                        "  ACES fitted     the same curve between the ACES matrices\n"
+                        "  ACES luminance  tonemaps LUMINANCE and puts the original\n"
+                        "                  chromaticity back, so hue survives any exposure\n\n"
+                        "Measured on PTTest Sponza at exposure 8: fitted holds chroma 1.41\n"
+                        "where luminance holds 3.09 at the same brightness, and above 5x\n"
+                        "fitted lets BLUE overtake GREEN -- warm stone rendering cold\n"
+                        "(RHI.hpp:196-216).\n\nRound-trips as RENDER.TONEMAP.");
+                ImGui::PopID();
+            }
+            // WHERE THE PRECEDENCE IS ACTUALLY VISIBLE. A flag applies once at startup and the
+            // manifest is applied later, when a project opens, so applyProject deliberately
+            // declines to let these keys overwrite one -- which from this page looks like a
+            // control that saved fine and then did nothing on the next launch. Said here instead.
+            if (postExposureFromCli_ || postBloomFromCli_ || postAutoExpFromCli_)
+                ImGui::TextDisabled("A post-process flag was given on this launch; it outranks "
+                                    "these keys when a project opens.");
         }
 
         ImGui::Separator();
