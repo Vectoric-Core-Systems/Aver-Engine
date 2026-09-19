@@ -1,5 +1,16 @@
 # Aver Engine — Status & Handoff
 
+> **STALENESS BANNER — added 2026-09-20. This document is 659 commits behind the tree.** It was last
+> restamped at `cb1d36f` / 517 commits; HEAD is `ba9c94aa` / 1,176. What has landed in the gap and is
+> described **nowhere below**: the editor/runtime split (the runtime library moved to `Runtime/`, the
+> standalone host came back as `AverEngineRuntime.exe`, and the editor now calls that library for
+> content, level load, water, streaming, landscape, physics/audio/tick, camera, mouse capture, input
+> publishing and the whole world draw walk); the `SandboxApp.cpp` split across ~40 files; NRD/ReSTIR
+> denoising; the packaging restore; and the four `RENDER.EXPOSURE`/`BLOOM`/`AUTOEXPOSURE`/`TONEMAP`
+> manifest keys. `README.md` points here as "where the work actually stands" — treat that as true for
+> everything up to 2026-08-17 and as **unwritten** after it. Nothing below has been re-verified
+> against HEAD; this banner deliberately does not guess which of it survived.
+
 Living record of where the engine stands and what's next. Updated 2026-08-17 at `cb1d36f`
 (517 commits). `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority. The phase
 recorded here gave a game its own UI, its own audio and its own materials — three C seams and the

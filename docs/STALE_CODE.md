@@ -1,5 +1,17 @@
 # Stale code sweep — 2026-08-03
 
+> **THE `sandbox/` CITATIONS BELOW ARE ALL DEAD — re-resolve before acting on one (added 2026-09-20).**
+> This sweep is pinned to `8fcfd71` and predates the 2026-09-16 split of a 29,952-line
+> `SandboxApp.cpp` across ~40 files (`sandbox/CMakeLists.txt:9-11`). That file is now **2,968 lines**,
+> so every `SandboxApp.cpp:5135` / `:5093` / `~12370` / `~10861` / `~11192` / `:6527` in the FIXED
+> narrations below points past its end. The *findings* those narrations describe were checked and are
+> not re-opened by the move — only the coordinates rotted. The surviving work list has been
+> re-verified against HEAD (`ba9c94aa`, 1,176 commits) and restamped in place; where a bullet's line
+> number moved, the new one is given.
+>
+> **Do not read this document as current.** A sweep is a photograph. This one is six weeks and 659
+> commits old, and re-running it would find a different set.
+
 A point-in-time sweep at `8fcfd71`, with every finding put to an adversarial verifier. **This is a
 work list, not a verdict.** Read the caveat before acting on any line of it.
 
@@ -81,7 +93,13 @@ not exist.
   no Rust in this tree.
 - ~~`editor/README.md:3`~~ — described a C#/.NET editor application. **FIXED by deleting the
   directory:** the editor is `sandbox/`.
-- `docs/ABI.md:3`, `:5` — omits the `Aver.Audio.Abi` seam entirely; its own staleness callout is stale
+- ~~`docs/ABI.md:3`, `:5` — omits the `Aver.Audio.Abi` seam entirely~~ — **PARTLY FIXED 2026-09-20,
+  and the bullet understated it.** Two seams were missing, not one: `Aver.Audio.Abi` (25
+  `AVER_AUDIO_API` entry points) and `Aver.Settings` (14 `AVER_SETTINGS_API` entry points, SHARED at
+  `modules/settings/CMakeLists.txt:7`), against which `docs/ABI_VERIFICATION_PLAN.md:348` had counted
+  nine all along. `ABI.md`'s opening now says nine, its §2 table carries a row for each, and a new
+  §19 describes both. **Still open:** neither has a section walking it entry point by entry point the
+  way §§3–10 do the other seven, so the headers remain the reference for their surfaces.
 - ~~`docs/SCENE_FRAMEWORK.md:7` — status banner says "only step 1 is built… no entity, no
   component"~~ — **FIXED.** The banner now says what actually shipped (a working scene layer and a
   working, differently-shaped class registry/spawn/tick in `Aver.Framework`) and what still has
@@ -99,8 +117,13 @@ that either wiring it or retiring it was the choice on the table. It has since b
 every remaining entry point for gameplay. The call site's own comment narrates the exact bug this
 section described — *"NOTHING IN THE RUNTIME HAD EVER OPENED THE AUDIO DEVICE... The six nodes shipped
 in 0.4.0 ... connect to an ABI whose device was shut"* — in the past tense, i.e. as a fixed defect.
-`docs/ABI.md` still does not mention `Aver.Audio.Abi` exists, which is a live gap in that document
-(not owned here).
+**Three corrections, 2026-09-20.** The header now declares **25** entry points, not 24 — one was
+added after this section was written and the count was never bumped. `docs/ABI.md` no longer fails to
+mention the seam: §2's table has a row for it and the new §19 describes it, so the "live gap in that
+document" this paragraph used to end on is closed. And the editor's call site moved out of
+`SandboxApp.cpp` in the 2026-09-16 file split — the device is opened at
+`sandbox/src/SoundEditor.cpp:510` today — while `AverEngineRuntime.exe` now links the seam too
+(`Runtime/CMakeLists.txt:153-154`), which it did not when this was written.
 
 ## D. Dead functions — 28, and the judgement call
 
@@ -115,28 +138,72 @@ this list have not been re-checked since.
 
 A few are more clearly stale and worth a look regardless:
 
-- `modules/formats/src/OcMat.cpp:322` — `saveOcmat()` has zero callers. **The original wording here
-  said "the `.ocmat` writer is unreachable", and that was wrong.** `writeOcmat()` — the actual
-  serialiser — is used and asserted three times in `MaterialTest.cpp` (`:167`, `:216`, `:333`). Only
-  the ten-line wrapper that adds `create_directories` and an `ofstream` is uncalled, because
-  `.ocmat` files are produced by `avermatc`, a **C#** tool. Left in place: deleting the file-writing
-  half of a tested load/save pair to satisfy a metric is worse than leaving it, and any headless C++
-  tool that ever writes a material wants exactly this function.
-- `modules/platform/src/DirectoryWatcher.cpp:190` — `setDebounce()` implemented, never called
-  (re-verified 2026-09-02, still the only hit for that name outside its own header)
+- ~~`modules/formats/src/OcMat.cpp:322` — `saveOcmat()` has zero callers~~ — **RESOLVED, and this
+  bullet was wrong twice over (struck 2026-09-20).** It now has **two** callers:
+  `modules/formats/src/MaterialCook.cpp:209` and `tools/AverAssetC.cpp:508` — precisely the "headless
+  C++ tool that ever writes a material" the old wording said would want it. `MaterialCook.hpp:16`
+  says so in prose as well ("writeOcmat/saveOcmat already exist and are covered by…"). The definition
+  has also moved to `OcMat.cpp:483`, 161 lines from the cited `:322`. Nothing here needs doing; the
+  bullet is kept struck rather than deleted so the next reader inherits the answer.
+- `modules/platform/src/DirectoryWatcher.cpp:195` — `setDebounce()` implemented, never called
+  (still live: re-verified 2026-09-20, and the only hits for that name are its definition and its
+  declaration at `DirectoryWatcher.hpp:48`. The line moved from `:190`.)
 - `modules/landscape/src/LandscapeRenderer.cpp:9` — `setSurface()` implemented, never called
   (re-verified 2026-09-02; its neighbour `setSurfaceBinding()` is a different function and does have
   a caller in `SandboxApp.cpp`, which is not the same thing)
-- `modules/rhi.d3d12/src/D3D12Device.cpp:577` (moved from the originally-cited `:482` as the file
-  grew) — file-local `isDepthFormat()` never called in its only TU, so this one cannot be public-API
-  surface
+- `modules/rhi.d3d12/src/D3D12Device.cpp:598` (`:482` originally, then `:577`; the file keeps
+  growing) — file-local `isDepthFormat()` never called in its only TU, so this one cannot be
+  public-API surface. Still live: re-verified 2026-09-20.
 - ~~`sandbox/src/AssetEditor.cpp:35` — `anyDirty()` has zero callers, so the unsaved-changes prompt
   it exists to drive never fires~~ — **FIXED.** `SandboxApp::requestExitChecked` now calls
   `assetEditors_.anyDirty()` and raises an "Unsaved changes" modal before exiting; the call site's own
   comment narrates this exact bug being closed. A single dirty editor's own tab-close is still silent
   (logs `AVER_WARN` and drops the edit) — only the whole-application exit path was wired.
-- `Runtime/include/aver/game/GameLevel.hpp:55` — `pcgFields()`: the list is populated
-  and never read as a list. (The singular `pcgField(name)` beside it *is* live — the sky uses it.)
+- `Runtime/include/aver/game/GameLevel.hpp:106` — `pcgFields()`: the list is populated and never read
+  as a list. (The singular `pcgField(name)` beside it *is* live, at `Runtime/src/GameLevel.cpp:356` —
+  the sky uses it.) Still live: re-verified 2026-09-20; the declaration moved from `:55`.
+
+---
+
+## E. Added 2026-09-20 — checked at `ba9c94aa`, not by the 8fcfd71 sweep
+
+Four items found by a later read-only sweep and **individually re-verified against HEAD before being
+written down here**. Each is a grep anyone can repeat; none of them is a "looks unused" hunch.
+
+- **`modules/core/include/aver/core/ModuleCheck.hpp` is included by nothing, and its macro is invoked
+  nowhere.** A grep for `ModuleCheck` across the whole tree (excluding `build*/` and
+  `.claude/worktrees/`) hits only `docs/ABI_VERIFICATION_PLAN.md`; a grep for `AVER_REQUIRE_MODULE`
+  hits only its own definition at `ModuleCheck.hpp:33-36` and that same document. No module public
+  header includes it. So the module-DAG guard it describes catches nothing at all — which is the
+  exact *"looks thorough, checks nothing"* shape `ModuleCheck.hpp:10-12` warns about, turned on
+  itself. **Either invoke it from the public headers of the modules that have dependencies, or delete
+  the header and correct the doc.** `AVER_MODULE_ON(m)` (`:46`) goes the same way: one occurrence in
+  the tree, its own definition, so the defined-vs-undefined distinction it exists to draw is drawn
+  nowhere.
+- **`docs/ABI_VERIFICATION_PLAN.md:109` states the opposite as settled fact** — "The existing fix is
+  that each dependent module invokes `AVER_REQUIRE_MODULE` from its **own** public header." No module
+  does. Corrected in place on 2026-09-20; recorded here because it is the same defect class as
+  section B, a document asserting a closed item that was never opened.
+- **`modules/rhi/include/aver/rhi/RHIResources.hpp:399` — `declaredUavCount` has zero callers**, while
+  its immediate sibling `declaredSrvCount` has eighteen hits across both backends and the shared
+  HLSL. The asymmetry is structural rather than accidental: the derived-register trick (the instance
+  SRV at `t(declaredSrvCount)`) exists only on the SRV side, so there is no UAV analogue to feed.
+  Safe to delete — or keep it and say in one line that it is there for symmetry, because as it stands
+  it invites a reader to assume a UAV register-derivation convention that does not exist.
+- **`modules/core/include/aver/core/ErrorCodes.hpp:82` — the `AbiError`-taking `abiErrorName` has no
+  callers**; every call site uses `abiErrorNameOf(i32)` instead (`ErrorCodes.cpp:20`, used three times
+  in `tests/abi/src/AbiEnumTest.cpp:976-979`). Low priority on its own, but this is an ABI-adjacent
+  header where two similarly-named functions over two numeric vocabularies sit side by side, so
+  picking the wrong one is a live hazard rather than a style question. Either delete it or say in one
+  line that it is the enum-typed convenience for a caller that already holds an `AbiError`.
+
+**Two findings from the same sweep are deliberately NOT listed here, because they were fixed while it
+ran.** `frameworkKeyFromMouseButton` (`InputKeys.hpp:63`) was reported as having no callers; it is
+called from `Runtime/src/GameInput.cpp:97`, and the comment at `:90` explains the change. `deliver()`
+/ `VoxiDelivery` (`SceneSubmission.hpp:216, 245`) was reported as having no production callers; it is
+called from `Runtime/src/GameRender.cpp:579`. Recorded so nobody re-opens them from a stale list.
+(`sandbox/src/SandboxRender.cpp:1137` still only *mentions* `deliver()` in a comment — whether the
+editor's own walk should call it too is an open question, not a finding.)
 
 ---
 

@@ -1,20 +1,38 @@
 # Lifting the game half out of SandboxApp
 
-> **WHERE IT LIVES NOW (2026-09-16):** the library and the restored standalone host moved to `Runtime/`;
-> the executable is `AverEngineRuntime.exe` ("Aver Engine Runtime"). Paths below are as they were.
+> **STATUS: HISTORY. Read the three paragraphs below in order — the story reversed twice, and the
+> banner used to carry both endings at once.**
 >
-> **STATUS: HISTORY, 2026-08-17. THIS DOCUMENT DESCRIBES COMPLETED WORK THAT HAS BEEN REMOVED.**
-> The plan was executed in commits C1–C11 and lifted the game rendering half from `SandboxApp.cpp`
-> to `modules/runtime.game`, creating `AverGame.exe`. That executable and the staging scripts have
-> since been deleted in commit b262c73 ("The packaged game is gone"), leaving only the library.
-> The file paths in sections C1–C11 below no longer exist as an executable; the design reasoning
-> — the re-guarding strategy, the separation of concerns, the framework integration — informed the
-> library that survives and is tested by `tests/game/InputBridgeTest`.
+> **1. What this plan did (2026-08-17).** Commits C1–C11 executed it, lifting the game rendering half
+> out of `SandboxApp.cpp` into `modules/runtime.game`, and creating `AverGame.exe`. Sections C1–C11
+> below describe that work against the paths as they were then.
 >
-> **What replaced it: nothing, deliberately.** A second host that rendered a different subset of
-> the scene than the editor was a standing source of confusion; the editor is how a project is run.
-> The library `modules/runtime.game` is still built (controlled by `AVER_BUILD_GAME`) and driven by
-> tests, which is what the plan's architecture enabled.
+> **2. Then the executable was deleted (b262c73, "The packaged game is gone").** The stated reason was
+> real: a second host "rendered a different subset of the scene than the editor", and nothing in the
+> tree could notice. The *library* never left — it kept being built and kept growing.
+>
+> **3. Then it came back, and that is the current state (2026-09-16).** The library and a restored
+> standalone host both moved to the top-level `Runtime/`, and the executable is now
+> **`AverEngineRuntime.exe`** ("Aver Engine Runtime" to a player). `modules/runtime.game/` no longer
+> exists; `AverGame.exe` no longer exists. **What is different this time is a check, not a promise:**
+> `scripts/verify-game.ps1` runs a divergence gate that opens the same project and level in both
+> hosts under `--frames` and compares their probe codes, so "the game draws what the editor draws"
+> fails rather than being claimed. `Runtime/host/CMakeLists.txt:9-27` records the whole reversal in
+> the source. The de-duplication this plan called "a later slice" has since happened too: the editor
+> now **calls** the runtime library for content, level load, water, streaming, landscape,
+> physics/audio/tick, camera, mouse capture, input publishing and the world draw walk, rather than
+> keeping a parallel copy. **There is one runtime with two hosts.**
+>
+> The banner here used to say "**What replaced it: nothing, deliberately**" alongside the 2026-09-16
+> line announcing the restored host — two endings in one box, with the older one reading as current.
+> That is corrected above. `AVER_BUILD_GAME` is still the option, and it now builds
+> `Aver.Runtime.Game` **and** `AverEngineRuntime.exe` (`CMakeLists.txt:63`).
+>
+> **Every path and line number in C1–C11 below is historical.** They were accurate at 2026-08-02 and
+> have not been re-resolved; `SandboxApp.cpp` alone went from 29,952 lines to 2,968 in the
+> 2026-09-16 file split. Read this document for the design reasoning — the re-guarding strategy, the
+> separation of concerns, the framework integration, and the traps section, which documents
+> engine-wide patterns still relevant to any future lift — not for coordinates.
 >
 > Produced 2026-08-02 by five parallel readers over `SandboxApp.cpp:1,2000` plus a refutation pass:
 > 57 risks raised, **2 survived**. Every line number was read, not assumed. Restored here because

@@ -11,6 +11,10 @@ C:\Users\User\Documents\
 │   │                              (the editor is sandbox\ -> Sandbox.exe; HLSL lives in
 │   │                              modules/*/shaders/ and sandbox/shaders/ files instead)
 │   ├── sandbox\                 ← an engine SAMPLE, not a game project — and also THE EDITOR
+│   ├── Runtime\                 ← AverEngineRuntime.exe, the standalone runtime host, plus the
+│   │                              runtime library the editor CALLS rather than duplicating.
+│   │                              One runtime, two hosts. (Was modules/runtime.game\ +
+│   │                              AverGame.exe until 2026-09-16.)
 │   ├── templates\               ← starter templates the engine COPIES into a new project
 │   ├── test-content\            ← fixtures the suites open; miniature projects on purpose
 │   └── tests\                   ← format-conformance vectors only
@@ -38,6 +42,11 @@ A project is **additive, never required**: the editor runs exactly as well with 
 - **Command line.** `Sandbox.exe <path>.ocproject` loads it directly and skips the browser.
   A positional argument is treated as a project when it ends in `.ocproject`, and as an
   `.ocbeam` otherwise.
+- **The standalone runtime opens one the same way.** `AverEngineRuntime.exe <path>.ocproject` takes
+  a bare `.ocproject` as the project, so double-clicking one or dropping it on the executable works
+  (`Runtime/src/GameApp.cpp:520`); given a map instead, it walks up at most eight directories to find
+  the `.ocproject` that owns it (`:394`), and an explicit `.ocproject` argument still wins (`:529`).
+  It has no project browser — a shipped game is pointed at its own project, not asked to pick one.
 - **Never in automation.** The browser is suppressed when `--frames` is present, when a project
   was named on the command line, or when headless. The verification harness drives the editor
   with `--frames` and reads one probe pixel out of the viewport; a full-screen chooser in front
@@ -114,16 +123,52 @@ AUTHOR OpenConstructor Team
   with a message naming both versions rather than loading something the engine cannot honour.
   The build's version comes from `project(... VERSION ...)` via `aver/core/Version.hpp`, so
   there is no second copy of the number to drift.
-- Additional keys (dependencies, plugins/opt-modules the project needs, cook targets)
-  are added as the engine grows — unknown keys are ignored (forward-compatible). This is a
-  guarantee the loader keeps, not an aspiration: an unrecognised key is skipped silently.
+- Additional keys are added as the engine grows — unknown keys are ignored (forward-compatible).
+  This is a guarantee the loader keeps, not an aspiration: an unrecognised key is skipped silently.
 - A leading UTF-8 BOM is stripped. Manifests get hand-edited, and Notepad writes one.
+
+### The sample above is six keys of sixty-seven
+
+**Read "Minimal v1" as minimal, not as the surface.** The growth the bullet above calls future has
+already happened: `modules/formats/src/OcProject.cpp:54-233` parses **67 keys**, and this document
+said nothing about any of them until 2026-09-20. By family:
+
+| Family | Count | Keys |
+|---|---|---|
+| Identity | 9 | `OCPROJECT` `NAME` `ENGINE` `CREATEDWITH` `CONTENT` `STARTMAP` `AUTHOR` `DRONE.GRAPH` `INPUT.SCHEME` |
+| `RENDER.*` | 35 | quality and feature dials: `GI` `RAYTRACING` `PATHTRACING` `VOXELRES` `GIINTENSITY` `GIDISTANCE` `RTSHADOWRAYS` `RTPIXELSPERRAY` `RTSHADOWDENOISE` `RTRENDERMODE` `PTBOUNCES` `LAYEREDBSDF` `GICONES` `GIMODE` `DENOISER` `RESTIRVISIBILITY` `RESTIRHISTORY` `REFRACTIONMODE` `REFRACTIONSTRENGTH` `REFRACTIONEDGEFADE` `LODSELECT` `LODTHRESHOLD` `OCCLUSIONCULL` `DEPTHPREPASS` `BACKEND` `FRAMEBUDGETMS` `AVERSR` `MSAA` `MESHSHADERS` `GIUPDATEINTERVAL` `GIVOLUME` — **plus the four post keys added most recently, `EXPOSURE`, `BLOOM`, `AUTOEXPOSURE` and `TONEMAP`** (parsed at `OcProject.cpp:161-173`, declared at `OcProject.hpp:190-202`) |
+| `WINDOW.*` | 4 | `TITLE` `SIZE` `RESIZABLE` `FULLSCREEN` |
+| `IMPORT.*` | 5 | `SCALE` `CONVERTAXES` `GENNORMALS` `GENMIPS` `MAXTEXTURE` |
+| `STREAM.*` | 6 | `LOADRADIUS` `EVICTRADIUS` `LOADBUDGET` `EVICTBUDGET` `VERTICALRADIUS` `LEADSECONDS` |
+| `PHYSICS.*` | 6 | `MAXBODIES` `MAXBODYPAIRS` `MAXCONTACTS` `TEMPALLOCMB` `GRAVITY` `FIXEDSTEP` |
+| `AUDIO.*` | 2 | `MASTER` `BUS` (four bus volumes on one line) |
+
+**The single authoritative enumeration is `isOwnedKey`'s table at `OcProject.cpp:303-328`**, not this
+one — a table in prose is a second copy, and this is the copy nobody will update. Point a reader
+there. `isOwnedKey` is load-bearing in its own right: `writeOcproject` splices the owned block in at
+the first owned key and copies everything else through as the author's text, so a key the writer
+emits but `isOwnedKey` does not list is written **twice** and, because parsing is last-write-wins and
+the author's stale line sits below the fresh block, the stale one wins. The comment at
+`OcProject.cpp:314-318` records that happening: changing the renderer appeared to work and reverted
+on reload.
+
+**Parsed is not applied, and this document does not know which is which.** `RENDER.*` reaches the
+renderer and `WINDOW.TITLE`/`WINDOW.SIZE` reach the window, but several families are recorded in the
+manifest and read by nothing — the editor's Project Settings panel discloses that on screen for
+`IMPORT.*` ("RECORDED, NOT YET CONSUMED: AverAssetC takes these on its command line",
+`sandbox/src/SandboxSettings.cpp:1121`) and for `STREAM.*` (`:1162`). **Open question:** the
+per-family "parsed / applied / disclosed" status has
+never been written down anywhere, and this pass did not establish it. Do not read the table above as
+a list of things that take effect.
 
 ## Why this separation (anti-UE-bloat)
 
 - The engine ships without any game's multi-GB content or project-specific code.
 - Multiple projects share one engine build; upgrading the engine doesn't touch content.
-- Tools (Rust cookers, C# editor) operate on a *project path*, not the engine tree.
+- Tools (`avermatc`, `AverAssetC`, the editor, the standalone runtime) operate on a *project path*,
+  not the engine tree. This line named "Rust cookers, C# editor" until 2026-09-20; neither exists —
+  there is no `.rs` file or `Cargo.toml` anywhere in the tree, and the editor is C++ (`sandbox/` →
+  `Sandbox.exe`). The separate C# editor process was never started and its directory was deleted.
 - The `sandbox/` app stays in the engine only because it's an engine-development sample
   with no game content — the moment real content exists, it belongs in a project.
 

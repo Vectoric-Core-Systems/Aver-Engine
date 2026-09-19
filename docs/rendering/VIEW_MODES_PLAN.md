@@ -1,5 +1,27 @@
 # View modes: wireframe/gizmo bugs, Unlit, and Shader Complexity
 
+> **EVERY CITATION IN THIS DOCUMENT IS DEAD, IN TWO SEPARATE WAYS (2026-09-20). Do not follow one
+> without re-deriving it.** This is the sharpest case of citation rot in `docs/`, and it is worth
+> naming precisely because the paragraph directly below claims every citation was read rather than
+> taken on trust. That was true when it was written. Two tree-wide moves have happened since.
+>
+> **(1) The HLSL left the C++ headers.** This document quotes shader source out of
+> `modules/render.voxi/src/VoxiShaders.hpp` (cited up to `:1464`; the file is now **17 lines** and
+> says of itself that its 169,883 bytes of shader source "is a file now"),
+> `modules/render.pbr/src/PbrShaders.cpp` (**30 lines**), `modules/rhi/src/RHIShaders.cpp` (cited up
+> to `:809`; **170 lines**, and no HLSL in them), `modules/render.pcg/src/PcgShaders.hpp` (**22
+> lines**, an empty namespace) and `sandbox/src/ClusterMaterialShader.hpp` (**54 lines**). The bodies
+> live at `modules/<mod>/shaders/*.hlsl` and `sandbox/shaders/*.hlsl` now.
+>
+> **(2) `SandboxApp.cpp` was split.** All 22 of this document's citations into it point past the end
+> of a 2,968-line file (`sandbox/CMakeLists.txt:9-11`).
+>
+> **What survives and what does not.** The *reasoning* — which view mode needs which pass, why the
+> wireframe and gizmo bugs happen, what Shader Complexity would have to count — is design and is not
+> invalidated by a file move. The *quoted HLSL* may or may not still match what the `.hlsl` files
+> hold; nobody has diffed them. Treat every code excerpt below as a snapshot of 2026-08, and
+> re-anchor it before acting.
+
 This is an implementation plan, not a report of work already done. Every claim below was re-verified
 by direct reads of the files cited, in this working tree, during this pass — not taken on the word of
 the four investigations that fed into it. Where those four disagreed, this document says which one

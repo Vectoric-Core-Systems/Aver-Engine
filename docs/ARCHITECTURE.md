@@ -59,9 +59,14 @@ Arrows point to dependencies (A ──▶ B means "A depends on B"). No edge poi
    scripting_abi.h ── the odd one out: STATIC, exports nothing, hands the managed
                  ▲   bridge a function-pointer table instead. See docs/ABI.md
                  │   each seam is implemented by the module below it
- ── TIER 6: COMPOSITION ─────────────────────────────────────────────────────────────
-   Sandbox (sandbox/)  ── the real composition root: owns the frame loop and names every
-                          optional module on its own link line, behind `if(TARGET …)`
+ ── TIER 6: COMPOSITION — TWO hosts over ONE game runtime ───────────────────────────
+   Sandbox (sandbox/)  ── the editor host: owns its frame loop and names every optional
+                          module on its own link line, behind `if(TARGET …)`
+   AverEngineRuntime   ── the standalone host (Runtime/host/). Same library, no editor.
+   (Aver.Runtime.Game) ── the game runtime BOTH hosts call (Runtime/). Project open,
+   (…Game.Core)           content, level, water, streaming, landscape, physics/audio/tick,
+                          camera, mouse capture, input publishing, the world draw walk.
+                          It is not a copy of the editor: the editor calls THIS.
    (Aver.Runtime)      ── window + device bring-up and the run loop. NOT an aggregator:
                           it links Core, Platform, RHI and the compiled-in backends only
                  ▼
@@ -137,10 +142,19 @@ backend appears on any feature's line. Three edges run sideways inside a tier ra
 `Framework → Scene`, `Audio.Abi → Formats.Audio`, `Render.Voxi.Renderer → Render.PBR.Materials` —
 and none points up.
 
-Two things the list says that are worth saying in words. `Aver.Audio.Abi` is built but **nothing
-links it**: `sandbox/CMakeLists.txt` names no audio target at all, so the editor is silent and the
-seam is exercised only by its own tests. And `Aver.Runtime` is not the aggregator the earlier
-revision of this diagram described; `sandbox/` is where the optional modules are actually composed.
+Two things the list says that are worth saying in words — and the first of them has since been
+overtaken. **`Aver.Audio.Abi` is no longer unlinked**: this paragraph said "nothing links it:
+`sandbox/CMakeLists.txt` names no audio target at all, so the editor is silent", and as of 2026-09-20
+that is false twice over. `sandbox/CMakeLists.txt:153-154` links `Aver.Audio.Abi` and `:110-111` links
+`Aver.Formats.Audio`; the Sound editor opens the device at `sandbox/src/SoundEditor.cpp:510`; and
+`Runtime/CMakeLists.txt:153-154` links it for the standalone host too. The seam is exercised by two
+hosts and by `scripting/csharp/Aver.Framework/Audio.cs`, not only by its own tests.
+
+The second still holds, with one correction. `Aver.Runtime` is not the aggregator an earlier revision
+of this diagram described — but neither is `sandbox/` the only place optional modules are composed
+any more. There are **two** composition roots now, `sandbox/CMakeLists.txt` and
+`Runtime/CMakeLists.txt`, and each names the same optional modules behind its own `if(TARGET …)`
+guards. Two roots over one runtime library, not two runtimes.
 
 **Scene and Framework, and the tree's first SHARED-links-SHARED edge.** `Aver.Framework` is a
 shared library that links another shared library, which nothing else here does. The rule that shape
@@ -238,7 +252,7 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.RHI** | C++ | Core, Platform | Core | Abstract render hardware interface: device, queues, command lists, PSO, root signature/descriptor model, typed & structured buffers, textures, resource-state/barrier model, `Buffer<float>`/`RWBuffer` semantics, feature-level query. Backend-agnostic. | The "ONE RHI abstraction"; GPU-deform buffer contract (typed R32) |
 | **Aver.RHI.D3D12** | C++ | RHI | `[opt, default ON]` | DirectX 12 backend (primary). DXIL PSOs, D3D12 barriers, UAV↔vertex-buffer aliasing. | Primary backend |
 | **Aver.RHI.D3D11** | C++ | RHI | `[opt, default ON]` | DirectX 11 backend (fallback for older HW). | Secondary backend |
-| **Aver.RHI.Vulkan** | C++ | RHI | `[opt, default OFF]` | **No longer a stub — this row said "a 13-line stub that returns `nullptr`" for a long time and that is now false.** `VulkanDevice.cpp` alone is 3,819 lines (`VulkanResourceFactory.cpp` another 3,000, `VulkanRenderContext.cpp` 1,478), Vulkan headers are vendored and included, `IDevice` is implemented, and SPIR-V compiles through a vendored `dxcompiler.dll` (`third_party/dxc-spirv`) selected because the Windows SDK's own copy accepts `-spirv` and then refuses at codegen. Per `modules/rhi.vulkan/README.md` it **presents a frame** — grid, cube, shadow, sky, world axes — and the editor's own ImGui UI draws too, since `modules/rhi.vulkan.imgui` was written to mirror `modules/rhi.d3d12.imgui` (both gated on `AVER_ENABLE_UI`, both linked only by Sandbox). 10 of an original 156 validation-layer errors are left, 9 of them the same known gap (`GraphicsPipelineDesc::instanced` and feature-module mesh geometry are unimplemented on this backend) and the 10th not a real error at all. Nothing leaks at teardown. `AVER_RHI_VULKAN` still defaults **OFF** ("staying off until it presents a frame" — the module's own README, written before it did) — so the default build still proves nothing about it, but flipping the flag on now builds and runs rather than linking a stub. `Aver.RHI.D3D11`, unlike Vulkan, genuinely still is a 13-line stub that returns `nullptr` (`modules/rhi.d3d11/src/D3D11Device.cpp`) and is in the DEFAULT build, so the engine still ships one backend — D3D11, not Vulkan any more — that has never executed a GPU command. What a backend must actually implement is tiered — 9 pure virtuals to be a legal device (`resources()` defaults to `nullptr`, so a partial backend is legal and every render feature declines gracefully), 53 to be a complete one. `modules/rhi/src/null/NullDevice.cpp` is the existence proof at 43 lines. | Vulkan (SDK still not required — loader `vulkan-1.dll` ships with the GPU driver; SPIR-V codegen is vendored separately) |
+| **Aver.RHI.Vulkan** | C++ | RHI | `[opt, default ON]` | **No longer a stub — this row said "a 13-line stub that returns `nullptr`" for a long time and that is now false.** `VulkanDevice.cpp` alone is 3,819 lines (`VulkanResourceFactory.cpp` another 3,000, `VulkanRenderContext.cpp` 1,478), Vulkan headers are vendored and included, `IDevice` is implemented, and SPIR-V compiles through a vendored `dxcompiler.dll` (`third_party/dxc-spirv`) selected because the Windows SDK's own copy accepts `-spirv` and then refuses at codegen. Per `modules/rhi.vulkan/README.md` it **presents a frame** — grid, cube, shadow, sky, world axes — and the editor's own ImGui UI draws too, since `modules/rhi.vulkan.imgui` was written to mirror `modules/rhi.d3d12.imgui` (both gated on `AVER_ENABLE_UI`, both linked only by Sandbox). 10 of an original 156 validation-layer errors are left, 9 of them the same known gap (`GraphicsPipelineDesc::instanced` and feature-module mesh geometry are unimplemented on this backend) and the 10th not a real error at all. Nothing leaks at teardown. `AVER_RHI_VULKAN` now defaults **ON** (`CMakeLists.txt:58`, whose help text reads "headers vendored; no SDK required") — so the default build links and exercises it, which is a change from the state this row used to describe ("staying off until it presents a frame", the module's own README, written before it did). The 10 remaining validation errors are therefore in the default build, not behind a flag. `Aver.RHI.D3D11`, unlike Vulkan, genuinely still is a 13-line stub that returns `nullptr` (`modules/rhi.d3d11/src/D3D11Device.cpp`) and is in the DEFAULT build, so the engine still ships one backend — D3D11, not Vulkan any more — that has never executed a GPU command. What a backend must actually implement is tiered — 9 pure virtuals to be a legal device (`resources()` defaults to `nullptr`, so a partial backend is legal and every render feature declines gracefully), 53 to be a complete one. `modules/rhi/src/null/NullDevice.cpp` is the existence proof at 43 lines. | Vulkan (SDK still not required — loader `vulkan-1.dll` ships with the GPU driver; SPIR-V codegen is vendored separately) |
 | **Aver.Assets** | C++ | Core, Platform | Core | One source file, `AssetId.cpp` — content ids over `fnv1a64`. **Not there:** the asset registry, typed handles, ref-counting, async streaming, the binary container (that is `Avr1.hpp` in `Aver.Formats`), and the offline-cache reader P6 assumes. A leaf, and much smaller than this row used to imply. | Asset I/O runtime backbone (partial) |
 | **Aver.Assets.Gpu** | C++ | Core, Formats, RHI | always built | The decode-to-GPU join (`TextureUpload.cpp`), deliberately a second target so `Aver.Assets` stays a leaf: a tool that only needs asset ids drags in neither a decoder nor the RHI. | Asset I/O (upload path) |
 | **Aver.Formats** | C++ | Core, Platform, Assets | always built | Runtime *loaders*: `.ocmesh` (now with the JOINTS/WEIGHTS skin streams its `HasSkin` flag always promised), `.ocskel`/`.ocanim`, `.ocworld`, `.ocmap`, `.ocbeam`, `.ocproject`, glTF import **including skins and animation clips**, JSON, texture decode, and the AVR1 container every binary asset shares. Two sibling targets hang off it (below) for the same reason each: they parse into a type that lives outside this module. | Asset I/O (all carried-over text formats) |
@@ -275,7 +289,8 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.Match** ‹skeleton› | C++ | *(planned: Core)* | **not built** | Matchmaking core: coordinator **protocol (§6)** codec (CoordMsg byte layouts), deterministic greedy match forming (`oc_match` successor). Links into the client for queue and the C# coordinator host via the same source. | **coordinator/matchmaking** (`OCMatchCore`) |
 | **Aver.World** | C++ | Core, Formats, Platform, Render.Pcg (+ Scene and Physics when their targets exist) | always built | **No longer a skeleton — this row said "not built" and that is now false.** `modules/world/` has a real `CMakeLists.txt` and eleven source files. What is here: `LevelInstance::instantiate()` turns parsed `.ocworld` placements into live scene entities and their static bodies, plus a real region/chunk streaming stack (`ChunkPayload`, `ChunkPartition`, `ChunkCodec`, `RegionFile`/`RegionIndex`, `ChunkSource`/`ChunkStreamer`/`ChunkGenerator`, `ScatterPalette`). It is unconditional — both the editor and a shipped game link it, which is the point (`modules/world/README.md`): a tree with `AVER_MODULE_SCENE=OFF` still configures it, `LevelInstance.cpp` just compiles to nothing. **This row said region streaming was "still ahead" for a long time — that stopped being true at slice 6 (`84178f6`).** Per its own README, `docs/CHUNKS.md`'s slices 0–9 are now all done: placement instantiation, the `.avrgn`/`.ocindex` region format, streaming residency, generation-as-you-go and runtime region writes. What is actually still open is slice 10, floating-origin rebasing — no rebasing code exists anywhere in the tree, so a level far from the coordinate origin still simulates unrebased. It deliberately does not link `Aver.Render.PBR` — material resolution stays a host job. | **world/scene** (placement and region streaming done; floating-origin rebasing next) |
 | **Aver.Scripting.Host** | C++ | Core, Platform | `AVER_MODULE_SCRIPTING` (ON) | In-process CLR host: `nethost`/`hostfxr` resolved with `LoadLibraryW` at run time, so this builds on a machine with no .NET at all. Deliberately not the RHI. Exports nothing — it hands the managed bridge a function-pointer table at bootstrap (`scripting_abi.h`). | **scripting** (native half) |
-| **Aver.Runtime** | C++ | Core, Platform, RHI (+ compiled-in backends) | always built | Window and device bring-up and the run loop. **Not** the module registry and tick scheduler this row used to claim: there is no registry, and the optional modules are composed by `sandbox/`. | — |
+| **Aver.Runtime** | C++ | Core, Platform, RHI (+ compiled-in backends) | always built | Window and device bring-up and the run loop. **Not** the module registry and tick scheduler this row used to claim: there is no registry, and the optional modules are composed by the two hosts. Do not confuse it with `Aver.Runtime.Game` below — this is the loop, that is the game. | — |
+| **Aver.Runtime.Game**, **.Core** | C++ | Core, Platform, RHI, Formats, World + every optional module that exists, each `if(TARGET …)`-guarded | `AVER_BUILD_GAME`, default ON | **Lives at the top-level `Runtime/`, not under `modules/`** (it was `modules/runtime.game/` until 2026-09-16). The game-side runtime **both** hosts run: project open, content index, level load, water, streaming, landscape, physics/audio/tick, play camera, mouse capture, input publishing, and the world draw walk including the depth prepass. `Sandbox.exe` calls it; it does not carry a second copy. `Runtime/host/` builds `AverEngineRuntime.exe` on top of it. **One runtime, two hosts** — and that is checked, not asserted: `scripts/verify-game.ps1` runs a divergence gate comparing both hosts' probe codes on the same project and level (`Runtime/host/CMakeLists.txt:9-19`). | the game half, lifted out of `SandboxApp.cpp` — see `docs/GAME-LIFT.md` for the history |
 | **Aver.ABI** ‹skeleton› | C | — | **dropped, not deferred** | A single flat `extern "C"` seam with an `aver_abi_version()`. It is not coming: one seam has to link everything it exposes, so it could hold none of the properties the separate seams exist for. `modules/abi/README.md` records the decision; `docs/ABI.md` documents the seams that replaced it. | — |
 | **Aver.Editor** ‹skeleton› | C# | *(planned: a C ABI)* | **not built** | *Planned:* a C# editor over the ABI, runtime hosted headless. **Not built, and the architecture moved.** The editor that exists is `sandbox/` — a C++ ImGui application that links the modules directly. P3's separation is therefore claimed and not held; it is the largest single gap between this document and the tree. | **editor** |
 | **Aver.Scripting / Aver.Scene / Aver.Framework** | C# | the matching native DLL, by P/Invoke | staged with the bridge when `dotnet` is on PATH | The managed contract assemblies under `scripting/csharp/`, compiled by `modules/scripting/CMakeLists.txt` and copied beside the executable. `Aver.Scene` and `Aver.Framework` share a file name with their native halves and each needs a `NativeResolver` because of it — the newer seams are named apart precisely so they do not. | **scripting** (managed half) |
@@ -416,6 +431,10 @@ module table: an option exists where a module is genuinely severable, and nowher
 option(AVER_RHI_D3D12  "DirectX 12 backend (primary)"       ON)
 option(AVER_RHI_D3D11  "DirectX 11 backend"                 ON)
 option(AVER_RHI_VULKAN "Vulkan backend (needs Vulkan SDK)"  OFF)  # no SDK yet
+# ^ HISTORICAL, as of 2026-09-20. The real line is CMakeLists.txt:58:
+#   option(AVER_RHI_VULKAN "Vulkan backend (headers vendored; no SDK required)" ON)
+# Both halves changed: the default is ON, and the SDK requirement was never real once the
+# headers were vendored and SPIR-V codegen moved to third_party/dxc-spirv.
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app"    ON)
 option(AVER_BUILD_TESTS   "Build test executables"          ON)
 option(AVER_ENABLE_UI     "In-window editor UI (Dear ImGui)" ON)
@@ -554,21 +573,34 @@ of independent features, each driving `Aver.RHI` directly with no render graph b
   authoring surface is **C#** rather than a runtime graph API — `[AverMaterial]` and
   `MaterialBuilder` under `scripting/csharp/Aver.Materials`, compiled to `.ocmat` by `avermatc`. The
   recon's headless-crash lesson still holds: nothing recompiles a shader to change a material.
-- **Third-party actually vendored:** **four** things, and one of them is not under `third_party/`.
-  Dear ImGui (MIT, editor only), stb (public domain) and the editor's fonts are; **Jolt Physics
-  (MIT) is vendored at `modules/physics.jolt/`**, because it is the rigid-body backend behind
-  `Aver.Physics` and is named like every other backend here (`rhi.d3d12`, `audio.wasapi`,
-  `formats.roslyn`). The directory says what it is in the module graph; the README in it keeps the
-  provenance — version, upstream archive, SHA-256, licence, and what upstream was left out.
-  Vendored is still vendored: those sources are not edited, and `scripts/stage-payload.ps1`
-  concatenates the `LICENSE` there into `THIRD-PARTY-NOTICES.txt`. Everything else this
-  list used to claim is absent: no meshoptimizer, no DirectXTex, no FSR, no EnTT, no miniaudio, no
-  cgltf, no xxHash, no Blake3, no Recast/Detour. Where a capability was needed and no permissive
-  dependency was taken, the tree either wrote its own (the audio mixer, the WAV reader, the glTF
-  import) or used what the OS already ships (Media Foundation for compressed audio; `d3dcompiler`,
-  which tops out at SM 5.1, with `dxcompiler.dll` redistributed beside the executable and loaded at
-  run time for SM 6.x). The licence constraint is intact — no GPL, no Unreal, no proprietary tech —
-  but it has been met by writing code rather than by collecting libraries.
+- **Third-party actually vendored: fourteen trees under `third_party/`, plus Jolt, which is not
+  under it.** This bullet said "**four** things" and named "no meshoptimizer, no FSR" as proof the
+  engine wrote rather than collected; both claims were false by 2026-09-20 and are corrected here.
+  `ls third_party/` returns: `dxc-spirv`, `fidelityfx-denoiser`, `fidelityfx-fsr`, `fonts`, `imgui`,
+  `mathlib`, `meshoptimizer`, `nrd`, `nuget`, `rtxdi`, `rtxgi`, `shadermake`, `stb`,
+  `vulkan-headers`. **Jolt Physics (MIT) is vendored at `modules/physics.jolt/`**, because it is the
+  rigid-body backend behind `Aver.Physics` and is named like every other backend here (`rhi.d3d12`,
+  `audio.wasapi`, `formats.roslyn`). The directory says what it is in the module graph; the README in
+  it keeps the provenance — version, upstream archive, SHA-256, licence, and what upstream was left
+  out. Vendored is still vendored: those sources are not edited, and `scripts/stage-payload.ps1`
+  concatenates the `LICENSE` there into `THIRD-PARTY-NOTICES.txt`.
+
+  **The licence constraint is no longer "intact" in the unqualified sense this bullet used to
+  claim.** `third_party/nrd/LICENSE.txt` opens "NVIDIA RTX SDKs LICENSE", which is not
+  MIT/BSD/zlib/Apache-2.0/public-domain, and `rtxdi`/`rtxgi` come from the same source. That is a
+  **named exception**, taken deliberately in commit `d91ce76e` ("Vendor NVIDIA NRD 4.18.0, as a named
+  exception to the permissive-licence rule"), not a drift. The rule as it actually stands: no GPL, no
+  Unreal, no proprietary tech **except NVIDIA's RTX denoising/sampling SDKs, under their own
+  licence**. `README.md`'s closing line has acknowledged the NVIDIA code for longer than its opening
+  line did.
+
+  Where a capability was needed and no dependency was taken, the tree still wrote its own (the audio
+  mixer, the WAV reader, the glTF import) or used what the OS already ships (Media Foundation for
+  compressed audio; `d3dcompiler`, which tops out at SM 5.1, with `dxcompiler.dll` redistributed
+  beside the executable and loaded at run time for SM 6.x). **Open question:** which of the fourteen
+  are actually compiled into a shipping target and which are vendored-but-unwired was not established
+  by this documentation pass — `nuget` and `shadermake` in particular are build-time things, not
+  engine dependencies, and no one has written down which is which.
 
 ---
 
@@ -592,19 +624,40 @@ Aver Engine/
     BUILT (49):    core/ platform/ assets/ formats/ formats.roslyn/ formats.particles/ anim/
               anim.scene/ deform/ rhi/ rhi.d3d12/ rhi.d3d12.imgui/ rhi.d3d11/ rhi.vulkan/
               rhi.vulkan.imgui/ scene/ framework/ physics/ physics.jolt/ scripting/ runtime/
-              runtime.game/ landscape/ mcp/ save/ settings/ upgrade/ synapse/ synapse.scene/
+              landscape/ mcp/ save/ settings/ upgrade/ synapse/ synapse.scene/
               render.pbr/ render.voxi/ render.ui/ render.actorpreview/ render.pcg/ render.pt/
-              render.skin/ render.softbody/ render.sr/ fluids/ particles/ occlusion/ trifactor/
-              sound/ ui/ ui.abi/ audio/ audio.wasapi/ audio.abi/ world/
+              render.skin/ render.softbody/ render.sr/ render.nrd/ fluids/ particles/ occlusion/
+              trifactor/ sound/ ui/ ui.abi/ audio/ audio.wasapi/ audio.abi/ world/
+    # runtime.game/ was in this list and is GONE from the tree: the runtime library moved to the
+    # top-level Runtime/ on 2026-09-16 (Runtime/CMakeLists.txt:1 records the move). render.nrd/ was
+    # missing from BOTH lists and is real — it has a CMakeLists.txt and a tests/render.nrd suite.
+    # The two errors cancelled in the totals, which is why 58/49 stayed right while the list was
+    # wrong; do not trust a count to catch a substitution.
     README-only (9): abi/ aero/ fracture/ gpudeform/ match/ net/ netvehicle/ softbody/ vehicle/
     # `render/` and `render.gi/` are not in either list above — see the DELETED note below, and §1/§3.
-  sandbox/                       # the editor. C++ + Dear ImGui, links the modules directly.
-  tests/                         # ui/ render.ui/ render.actorpreview/ audio/ formats/
-                                 #   scene/ framework/ physics/ — each a plain exe in bin/
+  sandbox/                       # the editor, Sandbox.exe. C++ + Dear ImGui, links the modules
+                                 #   directly. It CALLS Runtime/ below rather than duplicating it.
+  Runtime/                       # the shared game-side runtime library (Aver.Runtime.Game,
+                                 #   Aver.Runtime.Game.Core) and Runtime/host/, which builds
+                                 #   AverEngineRuntime.exe -- "Aver Engine Runtime" to a player.
+                                 #   Was modules/runtime.game/ + AverGame.exe until 2026-09-16.
+                                 #   ONE runtime with two hosts, not two runtimes: project open,
+                                 #   content index, level load, water, streaming, landscape,
+                                 #   physics/audio/tick, play camera, mouse capture, input
+                                 #   publishing and the world draw walk all live here.
+  tests/                         # 34 directories -- see tests/CMakeLists.txt; suites are
+                                 #   registered by a walk over built targets, not a hand list,
+                                 #   the same treatment the modules block above now gets. This
+                                 #   line used to enumerate 8 of them, which was a strict subset.
   scripting/csharp/              # Aver.Scripting(+.Bridge) Aver.Scene Aver.Framework
                                  #   Aver.UI Aver.Materials Aver.MaterialCompiler + samples
-  third_party/                   # imgui/ stb/ fonts/ dxc-spirv/ vulkan-headers/ — and Jolt is
-                                 #   NOT here: it is the physics backend, at modules/physics.jolt/
+  third_party/                   # 14 trees: dxc-spirv/ fidelityfx-denoiser/ fidelityfx-fsr/
+                                 #   fonts/ imgui/ mathlib/ meshoptimizer/ nrd/ nuget/ rtxdi/
+                                 #   rtxgi/ shadermake/ stb/ vulkan-headers/. nrd, rtxdi and rtxgi
+                                 #   are NVIDIA's, under the NVIDIA RTX SDKs licence -- the named
+                                 #   exception to the permissive rule; see §8 above.
+                                 #   Jolt is NOT here: it is the physics backend, at
+                                 #   modules/physics.jolt/
   branding/                      # splash, logo, icon sheets staged beside the exe
   scripts/                       # build.ps1, run.ps1, gates.ps1 + baselines, brand.py
   content/legacy/                # sample fixtures for golden tests
@@ -634,7 +687,7 @@ Aver Engine/
 2. **`.ocbeam` material field-count discrepancy is load-bearing** (runtime wanted exactly 10, writer emitted 13). Canonicalize in `Aver.Formats` + `aver-ocbeamc` (accept 10–13, default 10–12) or existing content silently loses all materials.
 3. **Map ROOT/locale/CRLF bugs** in the legacy Java writer must be *fixed* in `aver-mapc` (invariant locale, LF, real Merkle root) while `Aver.Formats` stays tolerant of the old mixed output for import.
 4. **Scene↔Render dependency direction.** Kept one-way (Scene stays render-agnostic) to preserve the DAG — do not let a render module reach back into Scene. Held so far, and held by a link line: `Aver.Scene` does not link `Aver.Render.PBR`, which is why a material is an interned name there and nothing more.
-5. **Vulkan stays compiled OFF** (`AVER_RHI_VULKAN=OFF`). This item used to say enabling it "produces nothing, because the backend is a stub" — that is no longer true (see §3's `Aver.RHI.Vulkan` row and `modules/rhi.vulkan/README.md`): the flag now builds a backend that presents a frame, including the editor's own UI, with 10 validation-layer messages left over an original 156. Two of the four obstacles this item used to list turned out to be exactly what the work went into, and are done:
+5. **Vulkan is compiled ON by default** (`AVER_RHI_VULKAN`, `CMakeLists.txt:58`) — this item said "stays compiled OFF" until 2026-09-20, which stopped being true when the default flipped, so the 10 validation-layer messages below are in the **default build** rather than behind a flag nobody sets. It also used to say enabling it "produces nothing, because the backend is a stub" — that is no longer true either (see §3's `Aver.RHI.Vulkan` row and `modules/rhi.vulkan/README.md`): the flag now builds a backend that presents a frame, including the editor's own UI, with 10 validation-layer messages left over an original 156. Two of the four obstacles this item used to list turned out to be exactly what the work went into, and are done:
    - ~~Root CBVs and root SRVs are in the GENERIC layout... Vulkan has no equivalent short of `VK_KHR_buffer_device_address`.~~ **Done for CBVs.** `patchCbuffersForLayout` (`VulkanResourceFactory.cpp`) lowers every cbuffer per `PipelineLayout::constantDwords[k]` — non-zero folds into one push-constant struct, zero becomes a descriptor at binding `N` in `kVkSetConstants` — computed at pipeline creation rather than assumed from the shader text. **Not done for the mesh path's root SRVs**: `gVerts`/`gIndices` on `MSVoxel` and `gInstanceWorlds` at `t17` are exactly the 9 remaining validation errors, because `GraphicsPipelineDesc::instanced` and feature-module mesh geometry are still unimplemented on this backend. This is the one real obstacle left of the four.
    - **The push-constant budget** is no longer an unaccounted-for design gap: `VulkanDevice` queries the real `maxPushConstantsSize` from the physical device and every pipeline's computed `PushConstantLayout::totalBytes` is checked against it at build time (`VulkanResourceFactory.cpp`, `VulkanPipeline.cpp`), failing loudly rather than overflowing silently. Whether 144 bytes fits a given GPU's guaranteed 128-byte minimum is still a real per-device question; it is now a checked one.
    - ~~Register spaces. HLSL here uses `b0`/`t0`/`u0`/`s0` simultaneously... need explicit remapping.~~ **Done.** `buildRegisterBinds` (`VulkanRegisterMap.hpp`) derives one `-fvk-bind-register` per resource from the `PipelineLayout` and hands the complete map to DXC, splitting HLSL's one continuous table into per-set bindings that each restart at 0 — `tests/rhi/RegisterBindMapTest.cpp` pins it against the layout that was originally failing.

@@ -194,9 +194,15 @@ driver revisions.
 > **Not required:** Vulkan and D3D11. **D3D11 is still a stub** (`modules/rhi.d3d11/src/D3D11Device.cpp`
 > is 13 lines). **Vulkan is no longer one** — see `modules/rhi.vulkan/README.md`: it presents a frame
 > (grid, cube, shadow, sky, world axes) and the editor UI now draws on it too, behind
-> `AVER_RHI_VULKAN`, a build option **OFF by default**. So for the default, shipped build, D3D12 is
-> still the only backend a user reaches, and "supports DirectX 12" is still a hard requirement rather
-> than a preference — but the reason is "off by default," not "the only backend that works."
+> `AVER_RHI_VULKAN`, a build option that **defaults ON** (`CMakeLists.txt:58`; this said "OFF by
+> default" until 2026-09-20). **That changes why D3D12 is a hard requirement, and the honest answer is
+> now less certain.** The default build does contain Vulkan code, so the old reason — "off by
+> default" — no longer applies; but the backend is still selected by `--backend vulkan` rather than
+> automatically, it still has 10 validation errors, and `docs/VULKAN.md` records that its cascaded
+> shadow map has never been written. **Open question this pass did not settle:** whether a machine
+> with a Vulkan driver and no D3D12 can actually run the editor end to end. Until somebody tries it,
+> treat "supports DirectX 12" as a hard requirement — on the evidence of the known defects, not on
+> the build flag.
 
 ---
 

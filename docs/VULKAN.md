@@ -6,8 +6,11 @@
 > — grid, cube, shadow, sky, world axes — with instanced draws, runs the whole editor UI (menus,
 > toolbar, World Outliner, Details, dockspace, 3D viewport) through its own ImGui backend, and tears
 > down with **zero leaked objects** and **10 non-fatal validation errors, down from 156**. It needs
-> no Vulkan SDK to build or run. `AVER_RHI_VULKAN` is still `OFF` by default in CMake
-> (`CMakeLists.txt:30`), so a default build of the engine contains no Vulkan code at all. And it has
+> no Vulkan SDK to build or run. **`AVER_RHI_VULKAN` now defaults `ON`** (`CMakeLists.txt:58`), so a
+> default build of the engine *does* contain Vulkan code — this banner said "still `OFF` by default …
+> contains no Vulkan code at all", citing `CMakeLists.txt:30`, and both the default and the line
+> number changed before 2026-09-20. The backend is still chosen with `--backend vulkan` rather than
+> automatically, so a default *run* is still D3D12. And it has
 > one confirmed, precisely-diagnosed rendering defect: **the cascaded shadow map has never been
 > written on this backend**, for a structural reason recorded below.
 >
@@ -273,15 +276,23 @@ every pass on this backend acquires its render scope, not a local patch.
 
 ---
 
-## Why it is still off by default
+## It is no longer off by default — what the flag now does
 
-`AVER_RHI_VULKAN` is `OFF` in `CMakeLists.txt:30` (*"Vulkan backend (needs Vulkan SDK)"* — that
-parenthetical is also now inaccurate, per "Why no SDK is needed" above). Turning it on:
+> **This section was headed "Why it is still off by default" until 2026-09-20, and the premise is
+> gone.** `AVER_RHI_VULKAN` is now `ON` in `CMakeLists.txt:58`, and its help text reads *"Vulkan
+> backend (headers vendored; no SDK required)"* rather than the *"needs Vulkan SDK"* this section
+> quoted — so both the default and the parenthetical it corrected have changed. **The reasoning below
+> survives as a description of what the flag switches on; it no longer answers "why off", because it
+> is not off.** Nobody has written down why the default flipped while the backend still has 10
+> validation errors and a shadow map that has never been written — that is an open question, not
+> something this pass could answer from the tree.
+
+Building with it — which a default configure now does:
 
 - Adds `modules/rhi.vulkan` and, if `AVER_ENABLE_UI` is also on, `modules/rhi.vulkan.imgui`
-  (`CMakeLists.txt:264-272`).
-- Defines `AVER_HAS_VULKAN=1` publicly on `Aver.RHI` (`modules/rhi/CMakeLists.txt:40`) and links
-  `Aver.RHI.Vulkan` into `Aver.Runtime` (`modules/runtime/CMakeLists.txt:19`).
+  (`CMakeLists.txt:309`).
+- Defines `AVER_HAS_VULKAN=1` publicly on `Aver.RHI` (`modules/rhi/CMakeLists.txt:39-40`) and links
+  `Aver.RHI.Vulkan` into `Aver.Runtime` (`modules/runtime/CMakeLists.txt:18`).
 - Does **not** change what a default `Sandbox.exe` run does. `modules/runtime/src/Engine.cpp`'s
   request-a-backend path still has the bug the 2026-08-02 draft found: when `--backend vulkan` is
   passed, `dd.preferred` becomes `{Vulkan, D3D12, Vulkan, Null}` (`Engine.cpp:65-68`) — Vulkan named

@@ -1,5 +1,16 @@
 # Landscape editor: feasibility, and a plan
 
+> **CITATION NOTE (2026-09-20): the `sandbox/src/SandboxApp.cpp` anchors below were written against a
+> 29,952-line file that is now 2,968 lines.** `:5464-5526` and `:13390-13396` point past its end
+> outright; `:2374-2385`, `:2417-2436`, `:2833-2836` and `:5293-5294` are still *within* the file but
+> were not re-checked, and the 2026-09-16 split moved most of that code to `SandboxViewport.cpp`,
+> `SandboxShell.cpp` and siblings (`sandbox/CMakeLists.txt:9-11`). The editor-precedent arguments
+> those citations support — the gesture-bracket pattern, the `EditId ↔ scene::Entity` undo keying,
+> the focus gate — are design observations that a file move does not invalidate; re-derive the
+> coordinate before quoting one. Separately, landscape is now loaded by the shared runtime library
+> (`Runtime/`'s `GameLandscape`), which both hosts call, so any sentence below contrasting the editor
+> with a game host should be re-checked before it is relied on.
+
 > **STATUS: PLAN ONLY. No code has been written.** Produced 2026-08-08 from a five-area survey —
 > the CPU model (`modules/landscape`), `.ocland` persistence and quantisation arithmetic, the
 > renderer's per-frame contract, editor precedent in `sandbox/src` (asset editors, undo,

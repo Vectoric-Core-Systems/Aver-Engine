@@ -42,10 +42,11 @@ check can discover as separate, independently-versionable units are the eight SH
 on a different timeline entirely, the .NET scripting bridge that `modules/scripting/src/ScriptHost.cpp`
 loads via `hostfxr` well after the native DLLs are already resolved.** Everything static is out of
 scope for *discovery* — not because it doesn't matter, but because there is no boundary for a runtime
-check to stand on. The engine already has a mechanism for the static half of this problem
+check to stand on. The engine already has a *mechanism* for the static half of this problem
 (`modules/core/include/aver/core/ModuleCheck.hpp`'s `AVER_REQUIRE_MODULE`, `cmake/AvModule.cmake:55-98`'s
 `aver_check_module_dag()`, and `scripts/module-matrix.ps1`), and this plan does not try to duplicate or
-replace it — see §3.
+replace it — see §3, **and note there that `AVER_REQUIRE_MODULE` is written but never invoked**, so
+"already has" means the header exists, not that anything checks.
 
 "Active" needs the same tightening. It cannot mean "present in `bin/`", because `bin/` is not a clean
 set: it holds `dxcompiler.dll`, `dxil.dll` and `nethost.dll` — third-party binaries pulled from the
@@ -106,8 +107,20 @@ Aver.Core sits at the bottom of the DAG by construction: `modules/core/CMakeList
 all — the only module in the tree without one. That is exactly why `ModuleCheck.hpp` cannot supply its
 own facts: *"Core is built first and links none of the optional modules, so a list of DAG facts written
 HERE would see every macro undefined and check nothing at all, while looking thorough"* (`ModuleCheck.hpp:10-12`).
-The existing fix is that each dependent module invokes `AVER_REQUIRE_MODULE` from its **own** public
+The intended fix is that each dependent module invokes `AVER_REQUIRE_MODULE` from its **own** public
 header, so the macro fires only in a translation unit that has already linked what it is asking about.
+
+> **CORRECTION, 2026-09-20: that is the design, not the state of the tree.** This sentence read "The
+> existing fix is…", which describes a closed item. **No module invokes `AVER_REQUIRE_MODULE`.** A
+> repo-wide grep (excluding `build*/` and `.claude/worktrees/`) returns only the macro's own
+> definition at `ModuleCheck.hpp:33-36` and this document's lines 46 and 109. Nothing includes
+> `ModuleCheck.hpp` either — it is the one orphan header in the tree. So the guard is **AVAILABLE BUT
+> UNADOPTED**, and the "identical inversion problem" the next sentence draws an analogy to is an
+> analogy to something that has never fired. The modules that would need the invocation are the ones
+> with `DEPS`: `render.voxi` → `rhi`, `anim.scene` → `scene`, `framework` → `scene`,
+> `render.softbody` → `scene` and `physics`, and so on for every non-Core module. Either land those
+> invocations and restore the original wording, or delete `ModuleCheck.hpp` and rewrite §3 around
+> whatever replaces it — but the argument below should not keep resting on a mechanism nobody runs.
 A version/ABI check has the identical inversion problem, one level worse: it is not a compile-time
 `static_assert` that can be dropped into an arbitrary header and left to fire wherever it's included —
 it needs to make an actual function call, at actual runtime, into an actual DLL that is actually
@@ -346,11 +359,11 @@ because a module it actually disabled was then asked to do something it could no
 
 **Stage 0 — fill the gap that has to exist before anything else can.** Add `AVER_X_ABI_VERSION_MAJOR`/
 `_MINOR` and an `aver_x_abi_version()` accessor to the six seams that have neither today: Physics, PBR,
-Voxi, Audio.Abi, Settings, UI.Abi — following exactly the pattern already in `scene_abi.h:25-35`. This
+Voxi, Audio.Abi, Settings, UI.Abi — following exactly the pattern already in `scene_abi.h:24-37`. This
 is real, additive, per-module work, not incidental plumbing to assume already exists; it is independently
 valuable (six ABI surfaces become self-describing for the first time) and independently verifiable (one
 unit test per module asserting the accessor returns the compiled-in constant, the same shape as the one
-real existing caller at `tests/scene/src/SceneTest.cpp:664`), even with nothing yet calling any of them
+real existing caller at `tests/scene/src/SceneTest.cpp:665`), even with nothing yet calling any of them
 from a shipping path.
 
 **Stage 1 — wire the two accessors that already exist and already work.** `aver_fw_scene_abi_matches()`

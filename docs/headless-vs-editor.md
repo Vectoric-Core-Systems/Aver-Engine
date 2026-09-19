@@ -1,5 +1,19 @@
 # Headless vs. editor: every way a `--frames` capture is not the image you see
 
+> **EVERY `sandbox/src/SandboxApp.cpp` LINE NUMBER IN THIS DOCUMENT IS DEAD (2026-09-20).** Fourteen
+> of its fifteen citations into that file — `:6991`, `:20716`, `:20807`, `:20916`, `:20928`,
+> `:22536`, `:23727`, `:23732`, `:23836`, `:23895`, `:25361`, `:26827` and the rest — point past the
+> end of a file that is now **2,968 lines**. The 2026-09-16 split moved that code into
+> `SandboxSettings.cpp`, `SandboxViewport.cpp`, `SandboxShell.cpp`, `SandboxRender.cpp` and their
+> siblings (`sandbox/CMakeLists.txt:9-11`).
+>
+> **This matters more here than in most documents**, because this one's whole premise is "read it
+> from the source, with a file:line, not inferred from behaviour" — the citations are the method, not
+> decoration. A reader who follows one and finds nothing should conclude the coordinate rotted, not
+> that the finding was wrong: the *divergences* described below were each measured, and none of them
+> has been re-tested against HEAD either way. **Open: every anchor needs re-resolving against the
+> post-split files, and the divergences re-measured, before this list is trusted as current.**
+
 The complaint, verbatim: "the headless you said is different from the one I see." It is correct,
 it has been correct multiple times, and it bit this session too — a `--frames` capture showed a
 darkening the live editor does not show, and the reverse has also happened. This document exists so

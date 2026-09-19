@@ -12,6 +12,18 @@
 > built. Slice 10 (floating origin) is the one genuine exception — no rebasing code was found anywhere
 > in the tree, so it remains exactly what §11 already says: not done.
 >
+> **CITATION NOTE (2026-09-20): the six `SandboxApp.cpp` line numbers below are dead**, and one word
+> in this document means something different now. The editor citations — `:2503`, `:5271`, `:5400`,
+> `:5406`, `:5464-5561`, `:5478`, `:5511-5514`, `:5683` — all point past the end of a file that is
+> now **2,968 lines** after the 2026-09-16 split (`sandbox/CMakeLists.txt:9-11`). The `Runtime/`
+> citations beside them (`GameLevel.cpp`, `GameLevel.hpp`) are in the right file, because the runtime
+> library moved as a unit; only the editor half rotted. Separately, where this document contrasts the
+> editor with "`GameApp`" it means `Runtime/src/GameApp.cpp`, which still exists — but several of
+> those contrasts predate the editor/runtime de-duplication and may no longer describe a real
+> difference. **Open: each editor-vs-game divergence claimed below needs re-checking**, because the
+> editor now calls the runtime library for level load, streaming and landscape rather than keeping
+> its own copy, which is precisely the kind of gap those sentences were written to record.
+>
 > This is revision 2, dated 2026-08-08. It **supersedes** the 2026-08-02 revision, which is in git
 > history at `0fcfcaa`. Revision 1 was written from reader evidence after its design agents died;
 > this revision re-derived every load-bearing claim from the code with a second fan-out plus an
