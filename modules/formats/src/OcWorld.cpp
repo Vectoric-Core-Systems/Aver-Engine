@@ -801,7 +801,7 @@ std::string writeOcworld(const OcWorldData& w) {
     for (const i32 root : roots) {
         if (emitted[static_cast<usize>(root)]) continue;
         emitted[static_cast<usize>(root)] = true;
-        line(w.placements[static_cast<usize>(root)], "PLACE ", "PLACEG");
+        line(w.placements[static_cast<usize>(root)], "PLACE", "PLACEG");
         stack.push_back(Frame{root, 0, false});
         while (!stack.empty()) {
             Frame& f = stack.back();
@@ -826,7 +826,7 @@ std::string writeOcworld(const OcWorldData& w) {
             // splitWhitespace discard it before any parse sees it. The nesting is carried by the
             // records; the spaces are for whoever opens the file.
             s.append(stack.size() * 2, ' ');
-            line(w.placements[static_cast<usize>(c)], "CHILD ", "CHILDG");
+            line(w.placements[static_cast<usize>(c)], "CHILD", "CHILDG");
             stack.push_back(Frame{c, 0, false});
         }
     }
