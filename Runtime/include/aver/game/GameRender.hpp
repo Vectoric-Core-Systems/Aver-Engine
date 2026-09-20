@@ -7,8 +7,25 @@
 // is (RHIResources.hpp:13 spells both as plain u32). This is a leaf header over
 // aver/core/Types.hpp, and this library already exposes the much larger aver/rhi/RHI.hpp through
 // GameContent.hpp, so it costs nothing new.
+//
+// UNGUARDED, AND THAT IS A FACT ABOUT THE LINK GRAPH, not an oversight: Aver.RHI is an
+// unconditional DEP of Aver.Runtime.Game.Core and reaches every host again PUBLICly through
+// Aver.Runtime (Runtime/CMakeLists.txt), so there is no module configuration in which this header
+// compiles and that one is absent. The scene include below is the opposite case.
 #include "aver/rhi/RHIResources.hpp"
-#include "aver/scene/Entity.hpp"
+// GUARDED, because Aver.Scene is an OPTIONAL link -- Runtime/CMakeLists.txt reaches it through
+// `if(TARGET Aver.Scene)`, and its include directory arrives with the target or not at all. With
+// AVER_MODULE_SCENE=0 this line was a C1083 that killed every translation unit reaching this
+// header, GameApp.cpp among them, which is why two whole matrix configurations died here before
+// anything of their own was ever compiled.
+//
+// Nothing ABOVE the `#if AVER_MODULE_SCENE` region below names a scene type -- SceneDrawStats is
+// three pairs of ints, and both hosts read it in every configuration -- so the guard costs that
+// region nothing, and with the module present the include still lands here, ahead of everything
+// else and in the same order it always did.
+#if AVER_MODULE_SCENE
+#  include "aver/scene/Entity.hpp"
+#endif
 
 namespace aver::rhi { class IDevice; }
 namespace aver::pbr { class MaterialSystem; }

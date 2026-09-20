@@ -514,21 +514,37 @@ private:
     u64 physSteps_ = 0;
     u64 lastReportedSteps_ = 0;
 
-#if AVER_MODULE_SCRIPTING
-    // Owned here, not by GameContent or GameLevel: its lifetime is the WHOLE APPLICATION's, not the
-    // current project's. ScriptHost starts an in-process .NET runtime, which this engine has never
-    // supported tearing down and re-initialising within one process (see ScriptHost.hpp's own "one
-    // per process" phrasing), so this member is constructed once and lives exactly as long as GameApp
-    // does -- never reset on a project change the way content_/level_ are.
-    // Installed onto anim::animSystem() once the scripting host is up -- see its own definition.
+    // ---- THE STATIC RELAYS, and why NOT ONE of them is keyed on AVER_MODULE_SCRIPTING.
+    //
+    // They used to be, all five, and it was proximity rather than dependency: initScripting() is the
+    // only thing that installs them, so they were written inside the block that function's body sits
+    // in. Not one of them touches scripts_. Each reads a SYSTEM -- anim, synapse -- and hands the
+    // answer back through a plain function pointer, which is exactly why GameApp.cpp already defines
+    // each one under the module that system belongs to. So declaration and definition disagreed in
+    // every -DAVER_MODULE_SCRIPTING=OFF build, where the definitions stayed and the declarations
+    // vanished: "'animCurve' is not a member of aver::game::GameApp", three of them reported and the
+    // other two waiting behind ninja's cap.
+    //
+    // Each guard below is what that relay's own BODY needs, which is what GameApp.cpp spells for the
+    // definition -- one answer stated in two places instead of two answers.
+
+#if AVER_MODULE_SCENE
+    // Raises an animation notify as a graph event. scene::Entity IS the reason this is keyed on the
+    // scene: it is in the signature, so the declaration cannot even be parsed without it. The body's
+    // own dependency on the host is a separate, narrower thing and lives inside the definition,
+    // which compiles to a no-op with no scripting module -- see it.
     static void animNotify(scene::Entity e, const char* name, void* user);
-    // Answers the framework's relayed animation-curve query -- see its own definition.
+    // Answers the framework's relayed animation-curve query -- see its own definition. Reads
+    // anim::animSystem(), which is Aver.Anim.Scene, which stands on the scene.
     static i32 animCurve(i32 entity, i64 nameHash, f32* outValue, void* user);
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
     // Answers the framework's relayed Synapse steering-target query -- see its own definition.
     static i32 synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void* user);
 #if AVER_MODULE_FRAMEWORK
     // PerceptionSystem's own TargetResolverFn -- who agents should perceive. See its own definition.
+    // The framework term is real here and not shared with its two neighbours: this body asks
+    // aver_fw_controlled_pawn who the player possesses, where they only read a component.
     static scene::Entity synapseTargetResolver(void* user);
 #endif
     // Answers the framework's relayed Synapse perception query -- see its own definition.
@@ -536,6 +552,12 @@ private:
                                  f32* outTimeSinceSeen, void* user);
 #endif
 
+#if AVER_MODULE_SCRIPTING
+    // Owned here, not by GameContent or GameLevel: its lifetime is the WHOLE APPLICATION's, not the
+    // current project's. ScriptHost starts an in-process .NET runtime, which this engine has never
+    // supported tearing down and re-initialising within one process (see ScriptHost.hpp's own "one
+    // per process" phrasing), so this member is constructed once and lives exactly as long as GameApp
+    // does -- never reset on a project change the way content_/level_ are.
     aver::scripting::ScriptHost scripts_;
     bool scriptsReady_ = false;
 

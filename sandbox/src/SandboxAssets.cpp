@@ -446,12 +446,25 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
     // Based at THIS layout's own srvCount, so material textures land in table 1 wherever Stage
     // 3's merge put it (t13 with Voxi, t4 without). AVER_CLUSTER_PS_DEBUG=0 is the real shader;
     // 1..7 isolate one input each when this path renders wrong (see ClusterMaterialShader.hpp).
+    // THE THIRD ARGUMENT IS A VOXI SETTING, and a Voxi-off build has nobody to ask: layeredBsdf
+    // lives in voxi::Settings and voxi::Quality is a Voxi type, so this one sub-expression -- alone
+    // among the voxi:: names in this function -- was reached with no AVER_MODULE_VOXI guard around
+    // it. The feature genuinely belongs to the module, so the USE is guarded rather than the
+    // setting re-homed. False is the answer with a precedent, not a guess: ActorPreview passes
+    // /*layeredBsdf=*/false for the same reason (it cannot see voxi::Settings either) and states
+    // the same consequence out loud -- a coated material shades WITHOUT its coat on this path.
+    // The default arm below is left character-for-character as it was; it is the arm that ships.
     std::string psDefs =
         // The cluster path assembles its OWN defines string, separately from VoxiRenderer's --
         // why materialShaderDefines takes this as a required argument. Read from live settings
         // rather than latched: this string is rebuilt per compile, and Voxi's own latch decides shader contents.
+#if AVER_MODULE_VOXI
         pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
                                    voxi::Renderer::get().settings().layeredBsdf != voxi::Quality::Off) +
+#else
+        pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
+                                   /*layeredBsdf=*/false) +
+#endif
         ";AVER_CLUSTER_PS_DEBUG=0";
 #if AVER_MODULE_VOXI
     // AVER_CLUSTER_VOXI=1 is what switches PSClusterMain from the neutral sun.visibility=1.0 /
@@ -511,10 +524,15 @@ void SandboxApp::releaseProjectMeshes(Engine& e) {
     for (const u64 id : content_.projectMeshIds()) {
         meshTris_.erase(id);
         pickGeometry_.erase(id);   // whatever pickGeometryFor cached (loaded or empty) for this id
+#if AVER_MODULE_PBR
+        // selOutlineLines_ exists only under PBR (see its declaration in SandboxApp.hpp): the line
+        // mesh it caches is built from the material system's own geometry, so a PBR-off build has
+        // neither the map nor anything for it to hold, and this is the drop its own comment promises.
         if (const auto oit = selOutlineLines_.find(id); oit != selOutlineLines_.end()) {
             if (oit->second) e.device()->destroyLineMesh(oit->second);
             selOutlineLines_.erase(oit);
         }
+#endif
 #if AVER_MODULE_TRIFACTOR
         meshLods_.erase(id);
         meshClusterData_.erase(id);
@@ -605,7 +623,7 @@ void SandboxApp::warnDeadMaterialHandle(i32 mat) {
     AVER_WARN("[Editor] surface '{}' holds a material handle that no longer resolves in "
               "pbr::MaterialLibrary; drawing its named look instead of the white/metal=1 "
               "placeholder. A stale handle here would otherwise render as a bright mirror.",
-              aver_scene_material_name(mat));
+              editor::surfaceDisplayName(mat));
 }
 
 } // namespace aver

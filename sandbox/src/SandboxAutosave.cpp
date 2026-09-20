@@ -5,7 +5,15 @@
 #include "SandboxApp.hpp"
 
 namespace aver {
-#if AVER_MODULE_LANDSCAPE
+// NOT GUARDED ON ANY MODULE, and everything down to drawRecoveryPrompt() used to sit inside one
+// AVER_MODULE_LANDSCAPE block -- the same mistake, and the same fix, as the AVER_MODULE_SCRIPTING
+// narrowing described at locateAverDesign() below. Nothing from here to there names a landscape
+// type, a landscape:: function or landscape_; preference autosave, level autosave and crash
+// recovery are editor infrastructure, and an editor built without terrain must still not lose an
+// hour of work to a kill. The callers already said so -- maybeAutosave/maybeAutosavePrefs from
+// onUpdate() and drawRecoveryPrompt() from the shell are all unguarded -- so a
+// -DAVER_MODULE_LANDSCAPE=OFF build was asking for members that had been compiled away.
+//
 // ---- editor preferences, written while the editor is still running --------------------------
 //
 // THEY ONLY REACHED DISK ON A CLEAN EXIT. saveEditorPreferences() had exactly two callers: the
@@ -207,10 +215,16 @@ void SandboxApp::maybeAutosave(f32 dt) {
 
 // Clears any countdown notification and returns to Idle. Safe to call when there is none.
 void SandboxApp::autosaveCancelNotice() {
+#if AVER_MODULE_SCENE
+    // autosaveNotify_/autosaveState_/autosaveShownSec_ exist only to track the LEVEL autosave
+    // countdown, declared under the same guard as levelPath_ itself -- a build with no scene has
+    // no level, no countdown, and nothing here to cancel. Emptying the body rather than reaching
+    // for fields a SCENE=OFF build never declared.
     if (autosaveNotify_) editor::notifications().close(autosaveNotify_);
     autosaveNotify_ = 0;
     autosaveState_ = AutosaveState::Idle;
     autosaveShownSec_ = -1;
+#endif
 }
 
 // The write itself, unchanged in substance from what maybeAutosave used to do inline. Guarded on
@@ -260,12 +274,17 @@ void SandboxApp::autosaveRunSave() {
 
 // Drops the sidecar. Called when the level is saved for real, and when its recovery is declined.
 void SandboxApp::clearAutosave() {
+#if AVER_MODULE_SCENE
+    // levelPath_ is scene state, and autosaveWritten_/autosaveAccum_ track nothing but the sidecar
+    // this function deletes -- without SCENE there is no level for any of it to be about, so the
+    // whole body goes rather than resetting fields a SCENE=OFF build never declared.
     const std::string p = autosavePathFor(levelPath_);
     if (p.empty()) return;
     std::error_code ec;
     std::filesystem::remove(p, ec);
     autosaveWritten_ = false;
     autosaveAccum_ = 0.0f;
+#endif
 }
 
 // Offers a newer sidecar after a level opens. Answering is the point -- an autosave nobody is
@@ -344,8 +363,6 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
 #endif
 }
 
-#endif
-
 // Tells the formats layer where averdesign.exe is installed. Not scripting-specific: it points at
 // the Roslyn build tool and is called unguarded from onInit(). This, and everything down to
 // reloadScripts(), used to sit inside one AVER_MODULE_SCRIPTING block, but only
@@ -387,7 +404,16 @@ void SandboxApp::maybeAutosaveProject(f32 dt) {
         // slider is being dragged -- a toast per success would be a toast twice a second. A
         // FAILURE means the manifest could not be written at all, and today that is invisible
         // the moment the Project Settings panel is closed.
+        //
+        // GUARDED, because a toast needs somewhere to be drawn. notifyOutcome and the whole
+        // notification queue live under AVER_WITH_IMGUI; projectSaveStatus_ above does not, and is
+        // still set either way, so the message is not lost -- it is only unshown in a build with no
+        // editor UI to show it in, where the log line below is the whole story.
+#if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Error, "Could not save project settings", why, true);
+#else
+        AVER_ERROR("[Project] could not save project settings: {}", why);
+#endif
     }
 }
 

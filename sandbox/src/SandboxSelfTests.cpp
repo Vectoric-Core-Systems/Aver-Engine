@@ -239,9 +239,25 @@ void SandboxApp::setFocusTools(bool b) { tools_.armToolsMenu(b); }
 
 void SandboxApp::setOpenLevelPicker(bool b) { armOpenLevelPicker_ = b; }
 
+// --no-editor-chrome sets a plain bool that suppresses viewport CHROME -- the grid, the gizmo, the
+// selection outline (SandboxRender.cpp) -- and every one of those is drawn whether or not
+// AVER_MODULE_SCENE is compiled in; none of them touch a scene::Entity. noEditorChrome_ only
+// landed inside SandboxApp.hpp's AVER_MODULE_SCENE block because that is where the cursor was when
+// multi-selection was being written next to it, not because the flag needs a world. Left unguarded
+// here on purpose; see this task's headerChanges for moving the member out of that block instead of
+// compiling this setter out.
 void SandboxApp::setNoEditorChrome(bool b) { noEditorChrome_ = b; }
 
+// --scene-census, unlike --no-editor-chrome above, has nothing to report without a scene to walk:
+// its one reader (SandboxApp.cpp's onUpdate) calls world::takeSceneCensus(scene::World::instance(),
+// playerStart_), and sceneCensus_ is declared `#if AVER_MODULE_SCENE` in SandboxApp.hpp for exactly
+// that reason. This setter must be guarded the same way -- same shape as
+// setDroneGraph/setFogMatchToStreamRadius above.
+#if AVER_MODULE_SCENE
 void SandboxApp::setSceneCensus(bool b) { sceneCensus_ = b; }
+#else
+void SandboxApp::setSceneCensus(bool) {}
+#endif
 
 void SandboxApp::setOpenLevelByName(std::string n) { openLevelByName_ = std::move(n); }
 
@@ -336,61 +352,166 @@ void SandboxApp::setLumaSweep(bool on, int stride) { lumaSweep_ = on; lumaSweepS
 // always was, exactly like --luma-sweep beside it.
 void SandboxApp::setFireflyMetric(bool on, f32 mult) { fireflyMetric_ = on; fireflyMult_ = mult > 0.0f ? mult : 8.0f; }
 
+// pieCamFrames_/inputStuckFrames_/inputSrcFrames_/wheelTestFrames_ (and recapFrames_/vmFrames_
+// further below) are all declared `#if AVER_MODULE_FRAMEWORK` in SandboxApp.hpp: maybePieCameraTest
+// and its three siblings here live entirely inside that same block, because there is no
+// Play-in-Editor camera or input to drive a proof against without Framework's play-mode plumbing.
+// These setters were left unguarded, so a FRAMEWORK=OFF tree (module-matrix.ps1's scene-off row,
+// which forces FRAMEWORK off with it) failed on an undeclared identifier at every one of them.
+// Guarded the same way setDroneGraph/setFogMatchToStreamRadius are guarded above, with a
+// same-signature no-op stub so the unconditional --pie-camera-test/--input-stuck-test/... argv
+// parsing in SandboxMain.cpp keeps compiling either way.
+#if AVER_MODULE_FRAMEWORK
 void SandboxApp::setPieCameraTest(int n) { pieCamFrames_ = n; }
+#else
+void SandboxApp::setPieCameraTest(int) {}
+#endif
 
+#if AVER_MODULE_FRAMEWORK
 void SandboxApp::setInputStuckTest(int n) { inputStuckFrames_ = n; }
+#else
+void SandboxApp::setInputStuckTest(int) {}
+#endif
 
+#if AVER_MODULE_FRAMEWORK
 void SandboxApp::setInputSourceTest(int n) { inputSrcFrames_ = n; }
+#else
+void SandboxApp::setInputSourceTest(int) {}
+#endif
 
+#if AVER_MODULE_FRAMEWORK
 void SandboxApp::setWheelSpeedTest(int n) { wheelTestFrames_ = n; }
+#else
+void SandboxApp::setWheelSpeedTest(int) {}
+#endif
 
+// multiSelTestFrames_ is declared `#if AVER_WITH_IMGUI` in SandboxApp.hpp -- its one reader,
+// runMultiSelectTest further down this file, is already guarded the same way, and so is its
+// onUpdate call site in SandboxApp.cpp. Only this setter was left unguarded, so a no-ui or
+// d3d12-off tree (the two module-matrix.ps1 rows that turn AVER_WITH_IMGUI off) failed on it.
+// Every setter below down to setClearShaderCache shares this exact shape -- a member guarded
+// `#if AVER_WITH_IMGUI` whose only reader is a run*Test also guarded that way further down this
+// file -- so each gets the same fix without repeating the explanation.
+#if AVER_WITH_IMGUI
 void SandboxApp::setMultiSelectTest(int n) { multiSelTestFrames_ = n; }
+#else
+void SandboxApp::setMultiSelectTest(int) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
+#else
+void SandboxApp::setCbMoveTest(const std::string&) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }
+#else
+void SandboxApp::setSaveDirtyTest(int) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }
+#else
+void SandboxApp::setPrefsWriteTest(int) {}
+#endif
 
 // --notify-test N. The lift is the point: drawNotifications refuses to draw during a bounded
 // run so a capture never has a toast in shot, and this is the one run where the toast IS the
-// thing being captured.
+// thing being captured. notifyTestFrames_/notifyTestLift_ are both `#if AVER_WITH_IMGUI` (the
+// toast itself is drawNotifications' own, in the ImGui half of this app).
+#if AVER_WITH_IMGUI
 void SandboxApp::setNotifyTest(int n) { notifyTestFrames_ = n; notifyTestLift_ = true; }
+#else
+void SandboxApp::setNotifyTest(int) {}
+#endif
 
 // --autosave-test <sec>: shorten the interval, mark the level dirty so the timer has a reason to
 // run, and lift the capture suppression. The countdown is otherwise unreachable from a bounded
-// run -- it needs thirty seconds of unsaved edits, which no capture has.
+// run -- it needs thirty seconds of unsaved edits, which no capture has. NEEDS BOTH MACROS, not
+// just one: autosaveIntervalSec_ is `#if AVER_MODULE_SCENE` (maybeAutosave in SandboxAutosave.cpp
+// is a whole-function AVER_MODULE_SCENE block, since autosave saves the level), while
+// notifyTestLift_/autosaveTestArm_/autosaveTestLift_ are `#if AVER_WITH_IMGUI` (the toast and the
+// capture-suppression lift they drive both live there). Missing either one leaves one of the four
+// assignments below reaching a member that does not exist in that configuration.
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
 void SandboxApp::setAutosaveTest(f32 sec) {
     autosaveIntervalSec_ = sec;
     notifyTestLift_ = true;
     autosaveTestArm_ = true;
     autosaveTestLift_ = true;
 }
+#else
+void SandboxApp::setAutosaveTest(f32) {}
+#endif
 
 // --find-refs <content-relative-path>: print what references an asset and exit. The delete
 // confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
 // shared asset can be tested rather than eyeballed once.
+#if AVER_WITH_IMGUI
 void SandboxApp::setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
+#else
+void SandboxApp::setFindRefs(const std::string&) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setRenameRepointTest(int frames) { renameRepointFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setRenameRepointTest(int) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setProjectSwitchTest(int) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
+#else
+void SandboxApp::setValidateGraph(const std::string&) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setGraphPrintTest(int) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setAssetAssignTest(int frames) { assetAssignTestFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setAssetAssignTest(int) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setGraphHitsTest(const std::string& p) { graphHitsTestPath_ = p; graphHitsTestFrames_ = 8; }
+#else
+void SandboxApp::setGraphHitsTest(const std::string&) {}
+#endif
 
+#if AVER_WITH_IMGUI
 void SandboxApp::setClearShaderCache(const std::string& dir) {
     clearShaderCacheDir_ = dir; clearShaderCacheFrames_ = 4;
 }
+#else
+void SandboxApp::setClearShaderCache(const std::string&) {}
+#endif
 
+// Same reason as pieCamFrames_ et al. at the top of this run: recapFrames_/vmFrames_ are
+// `#if AVER_MODULE_FRAMEWORK` in SandboxApp.hpp (maybeRecaptureTest/maybeViewmodelTest are
+// Play-in-Editor-only).
+#if AVER_MODULE_FRAMEWORK
 void SandboxApp::setRecaptureTest(int n)   { recapFrames_ = n; }
+#else
+void SandboxApp::setRecaptureTest(int)     {}
+#endif
 
+#if AVER_MODULE_FRAMEWORK
 void SandboxApp::setViewmodelTest(int n)   { vmFrames_ = n; }
+#else
+void SandboxApp::setViewmodelTest(int)     {}
+#endif
 
 void SandboxApp::setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }
 
@@ -570,7 +691,11 @@ void injectKey(InputState& in, i32 vk, bool pressed) {
 // further every frame and the view slowly tumbles. Nothing else asserts the round trip.
 void SandboxApp::maybePieCameraTest() {
     if (pieCamFrames_ <= 0) return;
-#if AVER_MODULE_FRAMEWORK
+// AND ON AVER_WITH_IMGUI, the same pairing maybeInputSourceTest below carries and for a related
+// reason: this test drives the camera by writing keys and mouse deltas into ImGuiIO, so
+// AVER_MODULE_FRAMEWORK -- which proves only that there is a pawn to possess -- is not enough. With
+// AVER_ENABLE_UI=OFF there is no io to write into and nothing for the assertions to observe.
+#if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
     ++pieCamFrame_;
     if (pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
     if (pieCamFrame_ < 11) return;
@@ -1410,6 +1535,13 @@ void SandboxApp::runClearShaderCache() {
 }
 
 void SandboxApp::runValidateGraph() {
+    // scripts_ is a scripting::ScriptHost, and that TYPE is declared `#if AVER_MODULE_SCRIPTING` in
+    // SandboxApp.hpp -- there is no member to call graphValidateAvailable/graphValidate on at all in
+    // a scripting-off tree, unlike AVER_WITH_IMGUI above, which this whole function already sits
+    // inside and which proves nothing about AVER_MODULE_SCRIPTING (module-matrix.ps1's scripting-off
+    // row leaves the UI on and only this module off). The function's only reason to exist is to
+    // drive the bridge, so the guard covers the body rather than one call inside it.
+#if AVER_MODULE_SCRIPTING
     if (!scripts_.graphValidateAvailable()) {
         AVER_ERROR("[validate-graph] the staged bridge exports no GraphValidate");
         return;
@@ -1426,6 +1558,9 @@ void SandboxApp::runValidateGraph() {
         AVER_INFO("[validate-graph] '{}' is VALID", validateGraphPath_);
     else
         AVER_INFO("[validate-graph] '{}' is INVALID: {}", validateGraphPath_, err);
+#else
+    AVER_ERROR("[validate-graph] this build has no scripting module; nothing to validate against");
+#endif
 }
 
 void SandboxApp::runRenameRepointTest() {
@@ -1755,6 +1890,14 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 }
 
 void SandboxApp::runGraphHitsTest() {
+    // Every failure branch and every assertion below reaches through scripts_ (scripting::ScriptHost,
+    // graphLoad/graphTick/graphNodeHits/graphUnload), and that member is declared
+    // `#if AVER_MODULE_SCRIPTING` in SandboxApp.hpp -- unlike the AVER_WITH_IMGUI this whole function
+    // already sits inside (which proves nothing about AVER_MODULE_SCRIPTING; module-matrix.ps1's
+    // scripting-off row leaves the UI on), a scripting-off tree has no ScriptHost to call any of
+    // this on at all. The whole function is meaningless without it, so the guard covers the
+    // function rather than each call, same as runValidateGraph just above.
+#if AVER_MODULE_SCRIPTING
     int failures = 0;
     auto check = [&](bool cond, const char* what) {
         if (cond) AVER_INFO("[graph-hits-test] PASS: {}", what);
@@ -1823,6 +1966,10 @@ void SandboxApp::runGraphHitsTest() {
     scripts_.graphSetHitRecording(false);
     scripts_.graphUnload(kEnt);
     AVER_INFO("[graph-hits-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+#else
+    AVER_ERROR("[graph-hits-test] FAIL: this build has no scripting module; no bridge to hit-test");
+    AVER_INFO("[graph-hits-test] RESULT: FAIL");
+#endif
 }
 
 void SandboxApp::runAssetAssignTest() {
@@ -2537,7 +2684,15 @@ void SandboxApp::navBakeCheck(Engine& e) {
     if (!navBakeOnStart_ || navBakeDone_) return;
     if (e.time().frame < 5) return;
     navBakeDone_ = true;
+    // PAIRED WITH bakeNavigationNow'S OWN GUARD. It samples scene::World::instance(), so it is
+    // compiled only under AVER_MODULE_SCENE; AVER_MODULE_SYNAPSE above is the grid math and proves
+    // nothing about there being a world. --bake-nav in a scene-less build has nothing to sample, and
+    // says so rather than silently doing nothing.
+#if AVER_MODULE_SCENE
     bakeNavigationNow(e);
+#else
+    AVER_WARN("[Editor] --bake-nav: this build has no scene module, so there is no world to sample");
+#endif
 }
 
 #endif
@@ -2570,6 +2725,14 @@ void SandboxApp::rayProbeCheck(Engine& e) {
     const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
     if (e.time().frame < want) return;
     rayProbeDone_ = true;
+    // viewportRay is declared `#if AVER_WITH_IMGUI` in SandboxApp.hpp (SandboxViewport.cpp defines
+    // it the same way) -- pick/handleSculpt/handleFoliage/dropWorldPoint all go through that one
+    // function, and none of them exist either without the interactive viewport, so a no-ui or
+    // d3d12-off build has no screen-to-world conversion to report on at all. Guarding just this one
+    // call and letting the log below print anyway would silently report a ray that was never
+    // computed (ro/rd left at their zero-init), which is worse than not printing -- so the whole
+    // body is guarded, and the flag is accepted and answered honestly instead.
+#if AVER_WITH_IMGUI
     Vec3 ro{}, rd{};
     viewportRay(rayProbeX_, rayProbeY_, ro, rd);
     const Vec3 fwd = camForward();
@@ -2583,6 +2746,9 @@ void SandboxApp::rayProbeCheck(Engine& e) {
               rayProbeX_, rayProbeY_, vpX_, vpY_, vpW_, vpH_,
               eye_.x, eye_.y, eye_.z, ro.x, ro.y, ro.z, along,
               rd.x, rd.y, rd.z, ok ? "ok" : "BEHIND", bx, by);
+#else
+    AVER_INFO("[RayProbe] this build has no editor viewport (AVER_WITH_IMGUI is off); nothing to probe");
+#endif
 }
 
 void SandboxApp::gpuTimingCheck(Engine& e) {

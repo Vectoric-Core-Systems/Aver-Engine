@@ -77,9 +77,13 @@
 #include "SkinDrawTest.hpp"
 #include "SkinSceneTest.hpp"
 #include "ReflTest.hpp"
+// UNGUARDED, beside the other editor-local headers rather than inside the scene block where it was
+// written. ThumbnailCache stands on the RHI and ActorPreview and names no scene type (see its own
+// includes), and ThumbnailCache.cpp is in the sandbox's source list with no condition on it -- so
+// the only thing a scene-less build lost was this line, and with it the declaration of thumbnails_.
+#include "ThumbnailCache.hpp"
 #if AVER_MODULE_SCENE
 #include "aver/render/SkinnedScene.hpp"
-#include "ThumbnailCache.hpp"
 #endif
 #include "aver/ui/ui_abi.h"
 
@@ -89,6 +93,7 @@
 #include "ProjectScaffold.hpp"
 #include "GraphAssetPresentation.hpp"
 #include "MaterialResolve.hpp"
+#include "SurfaceName.hpp"
 #include "ClusterMaterialShader.hpp"
 // F1 (occlusion-fix-plan.md): the ONE place the "which route delivers this entity's draws" rule
 // lives -- see that header's own top comment. It is reached through Aver.Runtime.Game.Core's public
@@ -243,9 +248,16 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/MaterialScript.hpp"
-#include "aver/assets/LevelSky.hpp"
 #include "aver/assets/TextureUpload.hpp"
 #endif
+
+// OUTSIDE THE PBR BLOCK, unlike TextureUpload.hpp beside which it was included. LevelSky.hpp maps a
+// level's weather record onto an rhi::SkyAtmosphere; it names no material and its own top comment
+// makes this exact argument about Voxi -- "a build without it still has an rhi::SkyAtmosphere to
+// fill". A PBR=OFF editor still loads a level, still has a sky, and still has to SAVE one:
+// captureLevelEnv is what writes the sun and fog back out, and guarding the call instead of fixing
+// the include would mean a level's weather silently stopped being saved in that configuration.
+#include "aver/assets/LevelSky.hpp"
 
 #if AVER_MODULE_SCRIPTING
 #include "aver/scripting/ScriptHost.hpp"
@@ -265,6 +277,15 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // itself (the module-boundary rule Scalability.hpp's own header comment states), so the ONE place
 // that can check the two enums actually agree is a host that includes both, like this one. Caught
 // here, at compile time, rather than as a level that silently renders at the wrong scale.
+//
+// AND VOXI, NOT SR ALONE: the constants on the right-hand side are render.voxi's, reached only
+// through the `#if AVER_MODULE_VOXI` include block above. AverSR and Voxi are independent options,
+// so SR-on/VOXI-off is a real configuration -- and it is not a rare one, since PBR=OFF forces
+// VOXI=OFF too (root CMakeLists.txt: "Voxi renders materials and cannot be built without them"),
+// which is why module-matrix.ps1's pbr-off and voxi-off rows both died on `aver::voxi::ladder`
+// here. With no ladder in the tree there are no two numberings to disagree, so there is nothing to
+// assert; the default build states both and still checks them.
+#if AVER_MODULE_VOXI
 static_assert(static_cast<aver::u32>(aver::sr::Quality::Off)         == aver::voxi::ladder::kAverSrOff,
              "aver::sr::Quality::Off no longer matches aver::voxi::ladder::kAverSrOff");
 static_assert(static_cast<aver::u32>(aver::sr::Quality::Quality)     == aver::voxi::ladder::kAverSrQuality,
@@ -273,7 +294,8 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Balanced)    == aver::vo
              "aver::sr::Quality::Balanced no longer matches aver::voxi::ladder::kAverSrBalanced");
 static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::voxi::ladder::kAverSrPerformance,
              "aver::sr::Quality::Performance no longer matches aver::voxi::ladder::kAverSrPerformance");
-#endif
+#endif  // AVER_MODULE_VOXI
+#endif  // AVER_MODULE_SR
 
 // physics_abi.h was nested inside AVER_MODULE_FRAMEWORK, but every use site below is guarded on
 // AVER_MODULE_PHYSICS alone -- invisible while physics implied framework, until SCENE=OFF forced
@@ -1472,7 +1494,13 @@ public:
 
     void rebuildNavOverlay(Engine& e);
 
+    // PAIRED WITH THE DEFINITION'S OWN GUARD (SandboxShell.cpp). AVER_MODULE_SYNAPSE is the grid
+    // math and proves nothing about there being a world to sample; the definition is compiled only
+    // when both hold, so a declaration visible on SYNAPSE alone would be a member every caller can
+    // name and no caller can link.
+#if AVER_MODULE_SCENE
     bool bakeNavigationNow(Engine& e, std::string* why = nullptr);
+#endif
 
     void loadNavForLevel(Engine& e);
 #endif
@@ -1568,12 +1596,21 @@ public:
 
     void applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q);
 
+    // THE THREE THAT NEED VOXI AS WELL AS SR, and are nested rather than sitting with their
+    // neighbours above: each names a render.voxi type outright (Scalability.hpp's AverSrSource,
+    // voxi::Settings, voxi::DeviceInfo), because the CLI > user > manifest > ladder chain they
+    // resolve is the LADDER'S, and the ladder is Voxi's. Everything above this point is AverSR on
+    // its own -- a render scale and an upscaler -- and keeps working with the renderer compiled
+    // out. onUpdate's own call site already asks for both (SandboxApp.cpp, `#if AVER_MODULE_VOXI`
+    // inside `#if AVER_MODULE_SR`); this is the declaration finally agreeing with it.
+#if AVER_MODULE_VOXI
     const char* averSrSourceText(voxi::AverSrSource source) const;
 
     const char* averSrAutoRungName(const voxi::Settings& s, const voxi::DeviceInfo& d) const;
 
     void updateAverSrAuto(Engine& e);
-#endif
+#endif  // AVER_MODULE_VOXI
+#endif  // AVER_MODULE_SR
 
     void syncPtSceneView(rhi::IDevice* dev);
 
@@ -1642,7 +1679,17 @@ private:
 
     void applyProject(Engine& e);
 
-#if AVER_MODULE_LANDSCAPE
+    // WHERE THE TERRAIN BLOCK USED TO START -- at this line, swallowing preference autosave, level
+    // autosave, crash recovery and the selection outline on the way down to createLandscapeForLevel.
+    // The DEFINITION side of that mistake is already fixed and says so at length (SandboxAutosave.cpp's
+    // file header, SandboxViewport.cpp's "WHERE THE TERRAIN BLOCK STARTS"): every body from here to
+    // drawRecoveryPrompt is compiled unguarded, and so is every call site -- maybeAutosave and
+    // maybeAutosavePrefs from onUpdate, checkForRecovery from the level load, clearAutosave from the
+    // save path, drawRecoveryPrompt from the shell, selectionOutlineLines from the selection draw.
+    // Only this header was left behind, so -DAVER_MODULE_LANDSCAPE=OFF had definitions and callers
+    // for members that had ceased to be DECLARED. Nothing between here and the #if below names a
+    // landscape type, a landscape:: function or landscape_; an editor built without terrain must
+    // still not lose an hour of work to a kill.
     void maybeAutosavePrefs(f32 dt);
 
     // ONE MESH PER MATERIAL: content_ splits a mesh naming several materials at load
@@ -1674,6 +1721,10 @@ private:
 
     void drawRecoveryPrompt(Engine& e);
 
+    // HERE is where the terrain block belongs, which is the same line SandboxViewport.cpp's copy of
+    // this split settled on: everything below reads landscape_ or takes a landscape section's own
+    // numbers, and none of it has an unguarded caller.
+#if AVER_MODULE_LANDSCAPE
     bool createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 spacingCm);
 
     void recordLandscapeInLevel();
@@ -1756,9 +1807,17 @@ private:
     // the standalone runtime; frameBudget_ is its state.
     f32  frameBudgetMs_ = 0.0f;       // RENDER.FRAMEBUDGETMS; <= 0 disables the whole controller
     bool frameBudgetForced_ = false;  // --frame-budget: run the controller even in a capture
+    // THE TWO ABOVE STAY UNGUARDED and these two do not. frameBudgetMs_ is a manifest key
+    // (RENDER.FRAMEBUDGETMS) that the project apply/capture pair must round-trip whatever is
+    // compiled in, and frameBudgetForced_ is the flag that tells the two apart -- neither depends
+    // on a renderer existing. The state and the tick below are the CONTROLLER, and the controller
+    // is voxi::frameBudgetTick's (FrameBudget.hpp): both name a render.voxi type outright, so a
+    // VOXI=OFF tree had a member of a type it had never seen.
+#if AVER_MODULE_VOXI
     voxi::FrameBudgetState frameBudget_;
 
     void frameBudgetTick(f32 dt, voxi::Settings& vs);
+#endif
 
     void maybeAutosaveProject(f32 dt);
     bool projectRenderPending_ = false;   // manifest read before the device attached
@@ -1944,14 +2003,6 @@ private:
     // read only by multiRange.
     std::vector<scene::Entity> outlinerOrder_;
     std::string outlinerFilter_;   // name filter box; empty = show everything
-    // Filled when the delete-confirm modal opens; see cbFindReferencesTo for what it can and
-    // cannot see. Cleared on delete or cancel so a later modal never shows a previous answer.
-    std::vector<std::string> cbDeleteRefs_;
-    std::vector<std::string> cbRenameRefs_;   // the same, for the rename dialog
-    // Whether the rename dialog will repoint what it found. ON by default: repointing is what an
-    // author wants nearly every time, and the checkbox exists so a tool that edits other people's
-    // files can be told not to.
-    bool cbRenameRepoint_ = true;
 
     void selectAllInOutliner();
 #endif
@@ -2296,6 +2347,54 @@ private:
 
     f32 selectedRadius() const;
 
+    // ---- FOUR GROUPS THAT SAT INSIDE `#if AVER_MODULE_SCENE` AND ARE READ FROM OUTSIDE IT ----
+    //
+    // Each of these is plain arithmetic or a plain flag -- not one of them names a scene:: type --
+    // and each is read by a body that is compiled in every configuration. They were inside that
+    // block because that is where the cursor was when they were written, and the module matrix's
+    // `scene-off` row is what noticed: with AVER_MODULE_SCENE=OFF the declaration vanished and the
+    // read did not, so the file failed to compile on a line hundreds away from the guard.
+    //
+    // THE PREFERENCE AUTOSAVE TIMER. maybeAutosavePrefs (SandboxAutosave.cpp) runs unguarded from
+    // onUpdate and persists editor-wide settings -- fly speed, wireframe, Content Browser tile size
+    // -- none of which is a level or a world. The LEVEL autosave above it is the one that needs a
+    // scene; this is not it.
+    // Preferences are cheap to check and tiny to write, so this can be far tighter than the level
+    // autosave above: two seconds is short enough that nothing a person adjusts is worth losing,
+    // and a tick that changed nothing does no I/O at all.
+    // WAS 2 SECONDS, AND THAT WAS TOO LONG TO BE BELIEVED. A preference changed and then not seen
+    // in the file is indistinguishable from one that never saved, and the gap was wide enough to
+    // lose a change to any abrupt exit inside it.
+    //
+    // NOT ZERO, which would be the literal reading of "save directly": a slider being dragged dirties
+    // the store on every frame, and at zero that is a file write per frame. A quarter second reads as
+    // instant to a person and collapses a one-second drag into four writes instead of sixty. The
+    // write itself only happens when something actually CHANGED -- setPrefString compares before
+    // dirtying and flushEditorPrefs early-outs when nothing is dirty -- so an idle editor still does
+    // no I/O at all, however short this is.
+    static constexpr f32 kPrefsAutosaveSec = 0.25f;
+    f32 prefsAutosaveAccum_ = 0.0f;
+
+    // THE TWO DEFERRED AUTOSAVE ANSWERS. drawNotifications writes them and the unguarded
+    // maybeAutosave consumes them. A build with no scene still ticks the autosave machinery, so it
+    // still needs somewhere to record that the user pressed Postpone or Retry.
+    // Set by a notification button and consumed by maybeAutosave on the next tick. Deferred rather
+    // than acted on inline because the buttons are drawn from onRender, which runs AFTER onUpdate --
+    // acting immediately would apply a postpone to a save that had already happened this frame.
+    bool autosavePostponeRequested_ = false;
+    bool autosaveRetryRequested_ = false;
+
+    // THE CREATE-A-LANDSCAPE KNOBS: a grid resolution and a tile spacing, read and written by the
+    // landscape mode panel, which is guarded on AVER_MODULE_LANDSCAPE alone -- and LANDSCAPE does
+    // not imply SCENE in either direction (root CMakeLists.txt's cascade lists neither).
+    int landCreateSamples_ = 513;
+    f32 landCreateSpacingCm_ = 100.0f;
+
+    // --no-editor-chrome: suppress everything the editor draws ON TOP of the scene, so a capture
+    // can be compared against AverEngineRuntime.exe's. Run-scoped and never persisted -- see the flag's own
+    // comment in the argv loop for why it is not routed through showGrid_.
+    bool noEditorChrome_ = false;
+
     // ---- PlayerStart: where the player spawns in ----
     // THE LEVEL FORMAT ALREADY HAD THE ANSWER AND NOBODY READ IT: OcWorldData's hasSpawn/spawnX/Y/Z/
     // Yaw were parsed and written but consulted nowhere -- not begin_play, not loadLevel, not
@@ -2305,6 +2404,19 @@ private:
     // onto that record, the same shape hasLevelSun_/hasLevelFog_ have for SUN and FOG.
     // A TRANSIENT ENTITY, never pushed to levelEntities_, for the same reason the drone is not: it
     // must not also be saved as a PLACE record -- two sources of truth, one invisible.
+    // OUTSIDE `#if AVER_MODULE_SCENE`, though they were written inside it. cbFindReferencesTo --
+    // their only producer -- is an unconditional text scan over .ocworld/.ocmap/.ocmat/.ocgraph/
+    // .ocproject files on disk; it reads no world and names no scene:: type, and the modal that
+    // shows what it found is drawn under AVER_WITH_IMGUI, which proves nothing about the scene.
+    // Filled when the delete-confirm modal opens; see cbFindReferencesTo for what it can and
+    // cannot see. Cleared on delete or cancel so a later modal never shows a previous answer.
+    std::vector<std::string> cbDeleteRefs_;
+    std::vector<std::string> cbRenameRefs_;   // the same, for the rename dialog
+    // Whether the rename dialog will repoint what it found. ON by default: repointing is what an
+    // author wants nearly every time, and the checkbox exists so a tool that edits other people's
+    // files can be told not to.
+    bool cbRenameRepoint_ = true;
+
 #if AVER_MODULE_SCENE
     scene::Entity playerStart_ = scene::kInvalidEntity;
 
@@ -2347,37 +2459,11 @@ private:
     static constexpr f32 kAutosaveWarnSec = 10.0f;
     // A Postpone that works forever is a way to switch the safety net off without ever deciding to.
     static constexpr u8  kAutosaveMaxPostpones = 3;
-    // Preferences are cheap to check and tiny to write, so this can be far tighter than the level
-    // autosave above: two seconds is short enough that nothing a person adjusts is worth losing,
-    // and a tick that changed nothing does no I/O at all.
-    // WAS 2 SECONDS, AND THAT WAS TOO LONG TO BE BELIEVED. A preference changed and then not seen
-    // in the file is indistinguishable from one that never saved, and the gap was wide enough to
-    // lose a change to any abrupt exit inside it.
-    //
-    // NOT ZERO, which would be the literal reading of "save directly": a slider being dragged dirties
-    // the store on every frame, and at zero that is a file write per frame. A quarter second reads as
-    // instant to a person and collapses a one-second drag into four writes instead of sixty. The
-    // write itself only happens when something actually CHANGED -- setPrefString compares before
-    // dirtying and flushEditorPrefs early-outs when nothing is dirty -- so an idle editor still does
-    // no I/O at all, however short this is.
-    static constexpr f32 kPrefsAutosaveSec = 0.25f;
-    f32 prefsAutosaveAccum_ = 0.0f;
     bool autosaveWritten_ = false;
     bool autosaveFailedWarned_ = false;
-    // Set by a notification button and consumed by maybeAutosave on the next tick. Deferred rather
-    // than acted on inline because the buttons are drawn from onRender, which runs AFTER onUpdate --
-    // acting immediately would apply a postpone to a save that had already happened this frame.
-    bool autosavePostponeRequested_ = false;
-    bool autosaveRetryRequested_ = false;
     std::string recoveryPath_;      // a sidecar newer than its level, waiting to be offered
 
-    int landCreateSamples_ = 513;
-    f32 landCreateSpacingCm_ = 100.0f;
 
-    // --no-editor-chrome: suppress everything the editor draws ON TOP of the scene, so a capture
-    // can be compared against AverEngineRuntime.exe's. Run-scoped and never persisted -- see the flag's own
-    // comment in the argv loop for why it is not routed through showGrid_.
-    bool noEditorChrome_ = false;
 
     // --scene-census, and the latch that makes it fire exactly once. Emitted from onUpdate rather
     // than from the load, because a project's class placements are spawned by a LATER stage than
@@ -2392,8 +2478,22 @@ private:
 
     void beginOutlinerRename(scene::Entity e);
 
-    void refreshPlayerStart();
 #endif
+    // OUTSIDE THE SCENE BLOCK IT WAS DECLARED IN, because its two callers are not in one. Both are
+    // RAII guards in SandboxSelection.cpp -- undo and redo -- whose whole job is "however this body
+    // returns, the Player Start handle is re-read afterwards", and neither body is guarded. The
+    // definition keeps its own `#if AVER_MODULE_SCENE` around the part that needs a world, so with
+    // no scene this is a function that still exists and does nothing, which is a far smaller thing
+    // to get right than a destructor that exists in one configuration and not another.
+    void refreshPlayerStart();
+
+    // THE OPEN LEVEL'S FILE PATH AND DISPLAY NAME, outside the scene block they were declared in.
+    // Both are plain strings about a file on disk. loadNavForLevel reads levelPath_ to find the
+    // .ocnav baked beside it, and that function is guarded on AVER_MODULE_SYNAPSE -- the grid math,
+    // which exists in a tree with no entity world at all. A path is not scene state even when
+    // everything that path loads INTO is.
+    std::string levelPath_, levelName_;
+
     f32 playerStartYaw_ = 0.0f;
 
     bool playerStartTransform(Vec3& outPos, f32& outYawDeg) const;
@@ -2481,6 +2581,14 @@ private:
     void drawSculptCursor(Engine& e);
 #endif
 
+    // THE --autosave-test LATCHES, moved out of the AVER_WITH_IMGUI block they were declared in.
+    // maybeAutosave (SandboxAutosave.cpp) reads autosaveTestLift_ and autosaveTestWarned_ from a
+    // body guarded on AVER_MODULE_SCENE alone, and AVER_WITH_IMGUI proves nothing about the scene;
+    // they are three plain bools driven by a command-line flag and touch no ImGui type.
+    bool autosaveTestArm_ = false;   // --autosave-test: mark the level dirty once, then let it run
+    bool autosaveTestLift_ = false;  // ...and lift the capture guard, loudly (see maybeAutosave)
+    bool autosaveTestWarned_ = false;
+
 #if AVER_WITH_IMGUI
     void deleteSelection();
 
@@ -2500,9 +2608,6 @@ private:
     int prefsWriteTestFrames_ = 0;
     int  notifyTestFrames_ = 0;      // --notify-test: frames left before the samples are raised
     bool notifyTestLift_ = false;    // ...and the one thing that lets them draw in a bounded run
-    bool autosaveTestArm_ = false;   // --autosave-test: mark the level dirty once, then let it run
-    bool autosaveTestLift_ = false;  // ...and lift the capture guard, loudly (see maybeAutosave)
-    bool autosaveTestWarned_ = false;
 
     // --project-switch-test: opening a project that states NO render settings must not leave the
     // previous project's settings in force. Synthetic on purpose -- it drives applyProjectRenderSettings
@@ -2663,6 +2768,14 @@ private:
 
     void drawUpgradePrompt();
 
+    // OUTSIDE `#if AVER_WITH_IMGUI`, unlike loadEditorPreferences/buildEditorPrefs beside which it
+    // was written. Its body (SandboxSettings.cpp) only pushes members through setPrefBool/
+    // setPrefFloat/setPrefInt and makes no ImGui:: call at all, while BOTH its callers --
+    // onShutdown and maybeAutosavePrefs -- are compiled in every configuration. With
+    // AVER_ENABLE_UI=OFF the declaration vanished and those two calls did not, which is the
+    // `no-ui` matrix row's failure.
+    void saveEditorPreferences();
+
     void buildUI(Engine& e);
 
 #if AVER_WITH_IMGUI
@@ -2682,6 +2795,31 @@ private:
     // of editor::FileEntry::path -- never a path this editor assembled).
     void revisionControlSelect(const std::string& repoRelativePath);
     void buildRevisionControlPanel();
+
+    // ---- the bottom status bar's right-hand widgets -----------------------------------------
+    //
+    // ONE HELPER, NOT TWO HAND-ROLLED BUTTONS. A status-bar widget is a specific thing and both of
+    // these are it: an icon and a word, tinted by state, that answers a question on hover and opens
+    // a menu on click. Writing that twice means two sets of padding, two hover rules and two
+    // tooltips whose wording drifts -- and the bar already carries three drawer buttons that share
+    // a lambda for exactly this reason.
+    //
+    // RETURNS WHETHER IT WAS CLICKED. The popup itself belongs to the caller, because what is in it
+    // is the only part that differs between the two.
+    bool statusBarWidget(const char* id, const char* face, const ImVec4& tint, const char* tooltip);
+
+    // Reads the SAME latched answer the panel reads, through editor::summariseForStatusBar, and
+    // chooses only a colour for it. See that function's own comment for why the states are decided
+    // in RevisionControl.hpp rather than here.
+    void drawRevisionControlStatusWidget();
+    static ImVec4 rcMoodColour(editor::RepoMood m);
+
+#if AVER_MODULE_MCP
+    // The control-channel widget: whether the loopback listener is up, and the one place it can be
+    // started or stopped by hand. Guarded on the module, because a button offering to start a
+    // channel that was never compiled in is a button that lies.
+    void drawMcpStatusWidget();
+#endif
     // An absolute editor path as git would name it: repo-relative, forward slashes, empty when the
     // path is outside the repository (or when no repository is known yet).
     std::string rcKeyFor(const std::string& absolute) const;
@@ -2772,7 +2910,14 @@ private:
 
     void cbAdoptNewAsset(const std::filesystem::path& target, bool openEditor = true);
 
+    // Guarded for cbCreateParticleEffect's reason one module over: the body builds a starter
+    // pbr::MaterialDesc and hands it to fmt::newMaterialScript, and with the material system
+    // compiled out there is neither a type to build nor anything that could read the file. The
+    // Content Browser's "New Material" item carries the same guard, so a build with no materials
+    // does not offer to create one.
+#if AVER_MODULE_PBR
     void cbCreateMaterial();
+#endif
 
     void cbCreateSoundGraph();
 
@@ -3009,7 +3154,12 @@ private:
     std::string saveMaterialSource(const std::string& name, const pbr::MaterialDesc& d, std::string& err);
 #endif  // AVER_MODULE_PBR
 
+    // GUARDED like saveMaterialSource just above it, and for the identical reason: the parameter
+    // TYPE is pbr::MaterialHandle, which aver/pbr/Material.hpp declares and a PBR=OFF tree never
+    // includes. It sat outside by one #endif.
+#if AVER_MODULE_PBR
     void materialPanel(pbr::MaterialHandle handle);
+#endif
 
     void buildModePanel(Engine& e);
 
@@ -3023,9 +3173,16 @@ private:
 
     void buildSimulateModePanel();
 
-#if AVER_MODULE_LANDSCAPE
+    // WATER IS NOT A TERRAIN FEATURE, and this declaration was the last place still saying it was.
+    // SandboxPanels.cpp already moved its `#if AVER_MODULE_LANDSCAPE` down past the definition and
+    // argued the case there in full ("WHERE THE GUARD STARTS"): buildWaterPanel touches
+    // levelHeader_.waters, levelHeader_.waves and water_ and names no landscape type, and its call
+    // site sits in the level-properties panel beside Sky and Fog, guarded on AVER_WITH_IMGUI alone.
+    // Left here, the declaration disagreed with both, and -DAVER_MODULE_LANDSCAPE=OFF is what made
+    // the disagreement a compile error rather than a difference of opinion.
     void buildWaterPanel(Engine& e);
 
+#if AVER_MODULE_LANDSCAPE
     void buildLandscapeModePanel(Engine& e);
 
     void foliagePanelCreateType();
@@ -3071,7 +3228,6 @@ private:
 
     void resolvePreferredIdeFromPrefs();
 
-    void saveEditorPreferences();
 
     void buildEditorPrefs();
 
@@ -3081,7 +3237,15 @@ private:
 
 #if AVER_MODULE_VOXI
     static void featureStatusBadge(aver::voxi::Renderer& vx, aver::voxi::Feature f);
+#endif
 
+    // WINDOW / IMPORT / STREAMING / PHYSICS / AUDIO ARE NOT RENDER PAGES, and had no business
+    // behind AVER_MODULE_VOXI -- they landed there by proximity to buildRenderingSettings, which
+    // is the only page on this list a voxel renderer has anything to do with. buildSettings()
+    // dispatches to all seven from one else-if chain that is gated on ImGui alone, and already
+    // says what a VOXI=OFF tree should show for the Rendering page in its own `#else`; the other
+    // five were left calling functions that had ceased to be declared. settingInt is the -1-means-
+    // unstated int field three of those five draw with, so it comes out with them.
     bool settingInt(const char* label, int* v, int lo, int hi, int whenEnabled, const char* tip);
 
     void buildWindowSettings();
@@ -3094,6 +3258,7 @@ private:
 
     void buildAudioSettings();
 
+#if AVER_MODULE_VOXI
     void buildRenderingSettings(int page);
 #endif
 
@@ -3298,7 +3463,14 @@ private:
     // this codebase already lost a session to a handle that outlived its meaning
     // (aver-float-cannot-hold-handles), and a stale handle matching a REUSED one in edit mode is the
     // same bug shape, for a hide flag.
+    // GUARDED: scene::Entity does not exist with AVER_MODULE_SCENE=OFF, and this sat between
+    // flying_ and the selection-outline latch with no guard at all -- pure proximity to the camera
+    // members, while the type is the scene's. Both use sites are already inside a scene guard
+    // (SandboxRender.cpp's ownerHideRoot pushes) or a framework one that cannot be on without it
+    // (SandboxPlay.cpp's drivePlayCamera -- the root CMakeLists forces FRAMEWORK off with SCENE).
+#if AVER_MODULE_SCENE
     scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
+#endif
     // Latched during the scene pass so the outline draws after every surface is down.
     Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
     // Every selected entity's (world transform, mesh id) for this frame's outline pass. Rebuilt
@@ -3453,6 +3625,20 @@ private:
     // voxiRenderer_ below.
     GBufferDebugFeature gbufferDebugFeature_;
     bool gbufferDebugAttached_ = false;
+    // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (default) never
+    // calls occluder_ or reorders the entity walk -- see renderSceneEntities' comment for the two-pass
+    // mechanism, which reorders IN PLACE rather than duplicating the walk depthPrepassOverride_ uses,
+    // since the draw logic it reuses (LOD, material binding, GPU-cluster paths) that walk doesn't replicate.
+    //
+    // UNGUARDED, ALONE ON THIS SIDE OF THE #if, BECAUSE IT IS A MANIFEST MIRROR FIRST. This bool is
+    // what RENDER.OCCLUSIONCULL reads into and writes back out of (applyProjectRenderSettings,
+    // captureRenderSettingsFromUi) -- and both of those are gated on VOXI, not on this module, so
+    // an OCCLUSION=OFF tree lost the member while the project round-trip kept using it. Guarding
+    // those uses instead would be worse than a compile error: captureRenderSettingsFromUi writes
+    // the whole render block back on every settings edit, so a build without the culler would
+    // silently rewrite a teammate's OCCLUSIONCULL 1 to 0. Everything below, which is the culler
+    // itself and the per-entity bookkeeping that belongs to the caller of it, stays guarded.
+    bool occlusionCullEnabled_ = false;
 // AND AVER_MODULE_SCENE, not just OCCLUSION -- every OTHER `#if AVER_MODULE_OCCLUSION` in this file
 // carries the same pair: two members below are keyed on scene::Entity, so OCCLUSION-on/SCENE-off
 // named a type that doesn't exist (module-matrix.ps1's scene-off and all-off rows both failed here).
@@ -3460,11 +3646,6 @@ private:
 // region, so guarding only the members would leave readers compiling against vanished members -- the
 // same split-guard shape this file has been bitten by before.
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-    // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (default) never
-    // calls occluder_ or reorders the entity walk -- see renderSceneEntities' comment for the two-pass
-    // mechanism, which reorders IN PLACE rather than duplicating the walk depthPrepassOverride_ uses,
-    // since the draw logic it reuses (LOD, material binding, GPU-cluster paths) that walk doesn't replicate.
-    bool occlusionCullEnabled_ = false;
     bool occlusionCullForceOff_ = false;   // --no-occlusion-cull: see setOcclusionCullForceOff's own comment
     // --occlusion-waitidle / --no-occlusion-waitidle: see setOcclusionDebugForceWaitIdle's own
     // comment. CLI-seeded default only -- once occluder_ exists, EditorConsole.hpp's
@@ -3629,7 +3810,11 @@ private:
     // (Scalability.hpp's AverSrSource), read back by the Project Settings upscaling line and the
     // Display combo's "Auto (<level> from <source>)" label. Written only by updateAverSrAuto, which
     // runs every frame, so this is never stale by more than one frame.
+    // GUARDED ON VOXI TOO, for the same reason updateAverSrAuto itself is: AverSrSource is
+    // Scalability.hpp's enum, and with no ladder in the tree there is no source to name.
+#if AVER_MODULE_VOXI
     voxi::AverSrSource averSrSource_ = voxi::AverSrSource::Auto;
+#endif
     // The project's own AverSR default combo's live edit state (Project Settings > Rendering, page 1)
     // -- mirrors project_.averSr the same way occlusionCullEnabled_ mirrors project_.occlusionCull,
     // EXCEPT unconditionally on every project open rather than only when the manifest states a value:
@@ -3834,7 +4019,15 @@ private:
                                  f32* outTimeSinceSeen, void*);
 #endif
 
+    // NEEDS THE SCENE AS WELL AS SCRIPTING, and said only the latter. The parameter is a
+    // scene::Entity and the sink it is handed to is aver::anim::AnimNotifyFn -- Aver.Anim.Scene,
+    // which the root CMakeLists only adds inside `if(AVER_MODULE_SCENE)`, so a SCENE=OFF tree has
+    // neither the type nor the header that declares the seam. Scripting stays on in that tree
+    // (module-matrix.ps1's scene-off row turns off SCENE and FRAMEWORK only), which is what made
+    // the missing half visible at all.
+#if AVER_MODULE_SCENE
     static void animNotify(scene::Entity e, const char* name, void* user);
+#endif
 
     scripting::ScriptHost scripts_;
 #endif
@@ -3847,16 +4040,21 @@ private:
     int skinSelfTestExit_ = -1;
     int skinDrawExit_     = -1;
     bool skinDrawTest_ = false;   // --skin-draw-test: does the RASTERISER read the skinned buffer
-    std::unique_ptr<aver::editor::SkinDrawTest> skinDraw_;
-#if AVER_MODULE_SCENE
-    // The scene join: gives every entity with a CSkeletalMesh its own posed mesh. Null when the
-    // skinning shader would not compile, in which case skinned entities simply draw at rest.
-    std::unique_ptr<aver::render::SkinnedScene> skinnedScene_;
+    // BESIDE skinDraw_ AND OUTSIDE THE SCENE GUARD, where it used to sit one line inside.
+    // ThumbnailCache (sandbox/src/ThumbnailCache.hpp) stands on the RHI and ActorPreview and
+    // nothing else; it never names a scene::Entity. The content browser already treats that as
+    // settled -- its texture-thumbnail branch calls requestTexture()/textureIdForPath() with a
+    // standing comment saying so -- and only this declaration disagreed.
     // The content browser's rendered mesh thumbnails -- a small ActorPreview of its own, kept rather
     // than re-shared with skinnedScene_ or the asset editors' preview, since sharing either would
     // fight this one for its draw list or force every thumbnail to a size it isn't. A value member,
     // matching particleRenderer_'s declaration: init() can still fail, but nothing else needs the object to not exist, only to be inert.
     aver::editor::ThumbnailCache thumbnails_;
+    std::unique_ptr<aver::editor::SkinDrawTest> skinDraw_;
+#if AVER_MODULE_SCENE
+    // The scene join: gives every entity with a CSkeletalMesh its own posed mesh. Null when the
+    // skinning shader would not compile, in which case skinned entities simply draw at rest.
+    std::unique_ptr<aver::render::SkinnedScene> skinnedScene_;
 #if AVER_MODULE_RENDER_SOFTBODY
     // Beside skinnedScene_ because it is the same kind of thing: a per-entity vertex source that the
     // scene pass substitutes for the authored mesh. The two never both claim one entity -- see the
@@ -3955,7 +4153,14 @@ private:
     // there. False when their window is closed, which is correct: a hidden panel holds no focus.
     bool outlinerFocused_ = false;
     // A row asked to be deleted; answered after the tree walk. See drawOutlinerRow.
+    // GUARDED for the same reason firstPersonPawn_ above is: the type is scene::Entity, and this
+    // landed in the panel-focus run of bools by proximity to the Outliner's other state. Every use
+    // is already inside `AVER_WITH_IMGUI && AVER_MODULE_SCENE` (SandboxPanels.cpp) -- SCENE alone
+    // here, because the type is the only thing that forces a guard; a no-UI tree carrying four
+    // unread bytes is not worth a second condition to keep in step.
+#if AVER_MODULE_SCENE
     scene::Entity outlinerDeleteRequest_ = scene::kInvalidEntity;
+#endif
     bool detailsFocused_  = false;
     bool levelHovered_ = true;    // the cursor is over the Level tab and it is topmost there
     bool inputProbe_ = false;
@@ -3981,14 +4186,18 @@ private:
     // (SPAWN deleted, BUILD back to 0, ID recomputed, `lux` reverted to 100000). Starting the save
     // from what the file actually said, overwriting only what the editor genuinely owns, fixes all of
     // those at once -- and any field added to the format later, which enumerating them would not.
-#if AVER_FLUIDS_SIMULATED
     // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
     // viewportIconsReady_ is the ONE flag the render walk consults to decide whether to skip the
     // Player Start's cube, false unless the feature AND its texture both came up -- every failure path lands on the same behaviour, drawing the cube as before.
+    // NO LONGER BEHIND AVER_FLUIDS_SIMULATED. Nothing here is a fluid: ViewportIconRenderer is
+    // sandbox's own header, included unconditionally at the top of this file, and the marker it
+    // draws is the Player Start. The guard was proximity -- it wrapped these three and nothing
+    // else -- and AVER_FLUIDS_SIMULATED is defined only when PHYSICS is in the tree
+    // (modules/fluids/CMakeLists.txt), so -DAVER_MODULE_PHYSICS=OFF deleted the icon members while
+    // every use site (all guarded on SCENE, which is where playerStart_ lives) stayed compiled in.
     editor::ViewportIconRenderer viewportIcons_;
     bool viewportIconsReady_ = false;
     editor::ViewportIconRenderer::IconHandle playerStartIcon_ = editor::ViewportIconRenderer::kNoIcon;
-#endif
     fmt::OcWorldData levelHeader_;
     // Whether each level entity's placement said `nocollide`. There is NO component for this: it is
     // a load-time instruction and nothing on the entity records it afterwards, so without this the
@@ -4035,10 +4244,14 @@ private:
     // mesh id -> its cached outline line mesh (0 = this mesh yields no outline). See
     // selectionOutlineLines; dropped with the project's meshes.
     std::unordered_map<u64, rhi::LineHandle> selOutlineLines_;
+#endif
     // The ASSET id of the selected mesh (what meshPathById_ and the outline cache key on), as
     // distinct from selectionMesh_, which is a GPU upload handle nothing can turn back into a file.
+    // UNGUARDED although the outline cache above it is not: this is an asset id, a u64, and the
+    // placeholder Floor/Cube loop that clears it to 0 runs in every configuration -- it is what a
+    // selection IS, not what PBR does with one. The cache stays behind PBR because the outline it
+    // holds is built from the material system's own geometry.
     u64 selectionMeshId_ = 0;
-#endif
 
     // ---------------- landscape (opt-in; --landscape <path>, or <levelname>.ocland beside the level) ----------------
     // Hosts ONE open .ocland section, through game::GameLandscape below: render, collision,
@@ -4160,7 +4373,6 @@ private:
     bool playWorldCaptured_ = false;
 
     std::vector<scene::Entity> levelEntities_;
-    std::string levelPath_, levelName_;
     bool hasLevelSun_ = false;
     bool hasLevelSky_ = false;
     bool hasLevelFog_ = false;
@@ -4256,6 +4468,19 @@ private:
     void applyMcpCommand(const mcp::Command& c);
 
     void registerMcpAbis();
+
+    // STARTS THE CHANNEL, WHOLE. Until the status-bar widget existed this happened inline in
+    // onInit and nowhere else, so "start MCP" meant three statements in one place: register the
+    // ABIs, install the widget hooks, then listen. A button that did only the last of those would
+    // bring up a channel that answers ping and nothing else -- so the three moved here together,
+    // and onInit now calls this too rather than keeping its own copy.
+    //
+    // REGISTRATION HAPPENS ONCE. Starting, stopping and starting again must not register every ABI
+    // a second time; mcpAbisRegistered_ is what makes that safe rather than hoping nobody does it.
+    // Returns false and logs when the listener could not bind -- the editor is unaffected either way.
+    bool mcpStart(u16 port);
+    void mcpStop();
+    bool mcpAbisRegistered_ = false;
 #endif // AVER_MODULE_MCP
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
 
@@ -4425,11 +4650,20 @@ private:
     // startupComplete's settle detector; see it for why these are mutable and why a frame count.
     mutable int startupSettleCount_ = -2;   // -2 so it cannot match lastSceneDrawn_'s -1 start
     mutable int startupSettleFrames_ = 0;
+// THE LOADING SCREEN IS NOT SCENE STATE. It landed inside this block by proximity to the settle
+// counters it happens to be dismissed by, and the test is the one that settled the rest of these:
+// neither member names a scene type, and every one of its five use sites -- the log sink in
+// SandboxApp.cpp, applyProject in SandboxProject.cpp, the dismiss check in SandboxRender.cpp -- is
+// unguarded, because a project opens, streams assets and wants a splash whether or not this tree
+// has an ECS. The guard closes and reopens around the pair rather than moving them, so no member
+// changes position relative to any other.
+#endif  // AVER_MODULE_SCENE
     // The project-open loading screen, alive from applyProject until the scene settles. Null the
     // rest of the time; see applyProject for why it is not a local any more.
     std::unique_ptr<struct LoadingScreen> projectLoading_;
     // Frames the OWNED project loading screen has been up; see onRender for why it is capped.
     int projectLoadingFrames_ = 0;
+#if AVER_MODULE_SCENE
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
     int lastSceneOwnerHidden_=-1;     // and the owner-hide count, so a stuck `hidden=owner` mesh shows as a number too
 #endif
@@ -4450,7 +4684,17 @@ private:
         std::vector<std::vector<trifactor::ClusterView>> clusters;
     };
     std::unordered_map<u64, MeshLodLadder> meshLods_;
+#endif
 
+    // THE TWO KNOBS ARE OUT OF THE GUARD; THE LADDER THEY DRIVE STAYS IN IT. A bool and a pixel
+    // count are not virtualized geometry -- these are RENDER.LODSELECT and RENDER.LODTHRESHOLDPX,
+    // which applyProjectRenderSettings reads and captureRenderSettingsFromUi writes back, both
+    // gated on VOXI rather than on this module. A TRIFACTOR=OFF tree therefore lost the members
+    // while the project round-trip and the Rendering page's own checkbox kept reading them. Same
+    // trade as occlusionCullEnabled_ above: guarding those uses instead would make an edit on a
+    // build without the Cook rewrite a manifest key it cannot honour, which is worse than the
+    // compile error it replaces.
+    //
     // ON by default since the cost of leaving it off was measured: every instance was drawing LOD 0
     // no matter how far away it was, which is the entire thing the Cook builds a ladder to avoid.
     // --no-lod-select restores the old behaviour. See setLodSelect for the numbers.
@@ -4460,6 +4704,7 @@ private:
     f32  lodErrorThresholdPx_ = 1.0f;   // --lod-error-px <n>; pixels of projected screen error
                                         // tolerated before a coarser level is preferred. Same unit
                                         // ClusterSelect.hpp's inCut/screenSpaceErrorPx compare against.
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     // --lod-cluster-stats: OFF by default, on purpose: it gates ONLY the informational per-meshlet
     // frustum/cone-cull telemetry below (a real, extra per-instance CPU cost). Keeping it separate
     // from lodSelectEnabled_ means the primary --lod-select frame-time comparison measures ONLY the

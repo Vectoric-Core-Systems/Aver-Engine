@@ -18,6 +18,13 @@ struct BootConfig {
     // Borderless fullscreen for an INTERACTIVE run; see WindowDesc::fullscreen for why a capture run
     // ignores it.
     bool fullscreen = false;
+    // Whether the window has a sizing border. Defaults to WindowDesc::resizable's own default, so a
+    // host that never sets it gets exactly the window it got before this member existed.
+    //
+    // A CREATION-TIME DECISION, like fullscreen above: Win32Window::create picks the window style
+    // from it, and no host restyles a window that is already up. That is why this lives on
+    // BootConfig at all rather than being something a running game could ask for.
+    bool resizable = true;
     bool enableDebugLayer = false;   // opt-in in every build type; `--debug-layer`
     // Which RHI backend to ASK FOR first: "d3d12", "d3d11", "vulkan", "null", or empty for the
     // compiled-in default order. The engine still falls back if it is unavailable, and says loudly

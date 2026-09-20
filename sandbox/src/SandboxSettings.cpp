@@ -123,6 +123,15 @@ void SandboxApp::loadEditorPreferences() {
     // guard the pre-Auto render-scale restore used); --aversr LEVEL or --aversr auto wins too
     // (averSrFromCli_) -- loadEditorPreferences leaves BOTH the render scale and the AverSR choice
     // alone in either case, matching "the command line wins" everywhere else in this file.
+    // THE WHOLE RESTORE IS AverSR's, so the whole restore is guarded rather than the four members
+    // the compiler happened to name first. display.aversrChoice, display.aversr and
+    // display.renderScalePending are the three keys the AverSR combo owns (saveEditorPreferences
+    // calls them "the three AverSR keys" in as many words), and every branch below either resolves
+    // an aver::sr::Quality or applies one through applyAverSrQuality, which is itself declared
+    // `#if AVER_MODULE_SR`. With the module out there is no level to restore, and the load skips
+    // the same keys the save skips -- symmetric, rather than reading back a preference nothing in
+    // the build can act on.
+#if AVER_MODULE_SR
     if (prefsDevice_ && renderScaleOverride_ == 1.0f && !averSrFromCli_) {
         const std::string storedChoice = prefString("display.aversrChoice", "");
         averSrChoice_ = editor::migrateAverSrChoice(!storedChoice.empty(), storedChoice,
@@ -210,6 +219,7 @@ void SandboxApp::loadEditorPreferences() {
             if (q != averSrQuality_) applyAverSrQuality(prefsDevice_, q);
         }
     }
+#endif  // AVER_MODULE_SR
 
     keybinds_.loadFromPrefs();
 }
@@ -223,129 +233,6 @@ void SandboxApp::resolvePreferredIdeFromPrefs() {
     prefIdeName_.clear();
 }
 
-// Writes every editor preference back and flushes. Each setter compares before it stores.
-void SandboxApp::saveEditorPreferences() {
-    using namespace editor;
-    setPrefBool ("contentBrowser.gallery",       cbGallery_);
-    setPrefFloat("contentBrowser.tileSize",      cbTileSize_);
-    setPrefBool ("contentBrowser.dblClickEnter", cbDoubleClickEnter_);
-    setPrefFloat("drawers.heightFraction",       drawerFrac_);
-    setPrefFloat("drawers.slideRate",            drawerRate_);
-    setPrefBool ("outputLog.autoScroll",         logAutoScroll_);
-    setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
-    setPrefBool ("console.autoScroll",           consoleAutoScroll_);
-    // Not written back from a --auto-compile run: that launch must not overwrite what the user chose
-    // from the Tools menu before this session started.
-    if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
-    setPrefBool ("viewport.showGrid",            showGrid_);
-    setPrefBool ("viewport.showColliders",       showColliders_);
-    setPrefBool ("viewport.wireframe",           wireframe_);
-    setPrefBool ("panels.worldOutliner",         showOutliner_);
-    setPrefBool ("panels.details",               showDetails_);
-    setPrefFloat("viewport.flySpeed",            flySpeed_);
-    setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
-    setPrefFloat("ddc.ramBudgetMb",              ddcRamBudgetMb_);
-    // Guarded exactly as the load is: a --frames run that wrote its --unlit back would leave
-    // the next interactive session unlit, and the run after that with moved gates.
-    if (maxFrames_ == 0) {
-        setPrefBool("viewport.unlit",             unlit_);
-        setPrefBool("viewport.showStaticMeshes",  showStaticMeshes_);
-        setPrefBool("viewport.showAtmosphere",    showAtmosphere_);
-    }
-    setPrefBool ("snap.move",                    snapMove_);
-    setPrefBool ("snap.rotate",                  snapRot_);
-    setPrefBool ("snap.scale",                   snapScale_);
-    setPrefFloat("snap.moveStep",                moveSnap_);
-    setPrefFloat("snap.rotateStep",              rotSnap_);
-    setPrefFloat("snap.scaleStep",               scaleSnap_);
-
-    // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
-    // CLI exposure back would leave the next interactive session looking at the capture's eyes.
-    //
-    // THE THREE WITH A MANIFEST KEY ARE GUARDED A SECOND TIME, symmetrically with the load: while
-    // the project states RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE, the preference channel for that field
-    // is inert in BOTH directions. Writing it anyway would quietly adopt the project's authored
-    // look as this user's personal default for every project afterwards, and it could not even buy
-    // a persisted Post-panel tweak in exchange -- the load above would decline to restore it, and
-    // applyProject would overwrite it from the manifest on the next open regardless.
-    if (maxFrames_ == 0) {
-        if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     post_.exposure);
-        if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
-        setPrefFloat("post.exposureKey",    post_.exposureKey);
-        setPrefFloat("post.exposureSpeed",  post_.exposureSpeed);
-        setPrefFloat("post.exposureMin",    post_.exposureMin);
-        setPrefFloat("post.exposureMax",    post_.exposureMax);
-        if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
-        setPrefFloat("post.bloomThreshold", post_.bloomThreshold);
-        setPrefFloat("post.bloomKnee",      post_.bloomKnee);
-        setPrefFloat("post.histogramLow",   post_.histogramLowPercent);
-        setPrefFloat("post.histogramHigh",  post_.histogramHighPercent);
-    }
-
-    const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
-    if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size()))
-        setPrefString("contentBrowser.ide", ides[static_cast<usize>(cbIdeChoice_)].name);
-    else
-        setPrefString("contentBrowser.ide", "");   // Automatic
-
-    // GUARDED ON maxFrames_ == 0 LIKE EVERY OTHER CAPTURE-SENSITIVE PREF, and these two were the
-    // ones that were not. The viewport flags above and the post-processing block above them each
-    // carry this guard with a comment explaining it -- "a --frames run that wrote its CLI
-    // exposure back would leave the next interactive session looking at the capture's eyes" --
-    // and display.vsync/display.renderScale sat just below, unguarded.
-    //
-    // WHY THAT IS WORSE THAN IT SOUNDS: maybeAutosavePrefs() DOES return early on maxFrames_,
-    // but onShutdown() calls saveEditorPreferences() unconditionally, and onShutdown() runs at
-    // the end of every capture, benchmark and gate invocation. So every `--frames N
-    // --render-scale F` or `--no-vsync` run wrote its measurement settings into the SAME
-    // %LOCALAPPDATA%/AverEngine/editor.ini an interactive session reads back -- and the load at
-    // the top of this file then faithfully restored the capture's settings as if the user had
-    // chosen them. Measured against this session's own history: --no-vsync is passed by every
-    // capture harness in scripts/, so the user's vsync preference has been decided by whichever
-    // measurement ran last.
-    //
-    // The guard belongs here rather than in onShutdown() so that a future third caller cannot
-    // reintroduce it, and so the rule reads identically to its two neighbours.
-    if (maxFrames_ == 0) {
-        if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
-            setPrefBool("display.vsync", prefsDevice_->vsync());
-        // optimisation-wave-2, 3.3 A: THE THREE AverSR KEYS BELOW ARE SKIPPED OUTRIGHT, not
-        // merely written a neutral value, when the command line drove this session's render scale
-        // or AverSR level. TODAY'S OWN GUARD ENDS AT maxFrames_ == 0, so an interactive `--aversr
-        // quality` run (maxFrames_ IS 0 for an interactive session -- this is not a --frames
-        // capture) used to write itself into editor.ini with no CLI check at all, and the NEXT
-        // ordinary launch inherited a choice nobody made from the Display page. Skipping the write
-        // means a session driven by --render-scale/--aversr never touches any of the three keys,
-        // so whatever a PRIOR interactive session actually chose there survives untouched.
-        if (!averSrFromCli_ && renderScaleOverride_ == 1.0f) {
-            setPrefString("display.aversrChoice", editor::averSrChoiceName(averSrChoice_));
-            if (prefsDevice_)
-                // THROUGH renderScaleToPersist, not the live device scale directly -- persisting
-                // the live scale for anything but Manual is the exact bug this wave's own
-                // 10.1/3.3-A corrections describe: Auto would persist whatever fraction the rung
-                // it happened to land on THIS session resolved to, and the crash-cookie
-                // render-scale block at load would apply that stale fraction before Auto ever got
-                // a chance to re-derive it.
-                setPrefFloat("display.renderScale",
-                            editor::renderScaleToPersist(averSrChoice_, prefsDevice_->renderScale()));
-            // THE UPSCALER'S QUALITY MIRROR -- WHICH, BEFORE display.aversrChoice EXISTED, WAS
-            // NEVER PERSISTED AT ALL (the Display page's AverSR combo wrote averSrQuality_ and
-            // applied it to the device; nothing wrote it to a pref and nothing read one back, so
-            // it reset to Off on every launch, and desynced from display.renderScale above once it
-            // was). display.aversrChoice is now the source of truth this mirror only backs up --
-            // kept for at-a-glance reading of a raw editor.ini, and so a build that predates
-            // display.aversrChoice reading the same file back still sees a level, not Off.
-            // setPrefFloat rather than an int helper because there is no int helper -- the prefs
-            // layer is float/bool/string, and every other numeric setting here goes through the
-            // float pair. The enum is four values; a float carries them exactly.
-            setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
-        }
-    }
-
-    keybinds_.saveToPrefs();
-
-    flushEditorPrefs();
-}
 
 // Draws the Editor Preferences window: how this machine's editor behaves.
 void SandboxApp::buildEditorPrefs() {
@@ -991,11 +878,17 @@ void SandboxApp::buildProjectSettings() {
                                                   : ImVec4(0.75f,0.35f,0.35f,1);
     ImGui::SameLine(); ImGui::TextColored(col, "[%s]", vx.statusText(f));
 }
+#endif  // AVER_MODULE_VOXI
 
-// Draws one of the Rendering page's sub-pages (General / Global Illumination / Ray Tracing /
-// Path Tracing). Each feature reports its real status and is disabled when the renderer or GPU
-// can't do it. Reads and writes the WHOLE Settings struct regardless of which sub-page is showing.
-// Project Settings > Physics. World-wide defaults, written to PHYSICS.* in the manifest.
+// ---- THE FIVE PAGES THAT ARE NOT THE RENDERING PAGE ------------------------------------------
+// Window, Import, Streaming, Physics and Audio were inside the `#if AVER_MODULE_VOXI` above purely
+// because buildRenderingSettings is, and they were written next to it. None of them mentions a
+// voxel: they edit WINDOW.*/IMPORT.*/STREAM.*/PHYSICS.*/AUDIO.* manifest keys, and buildSettings()
+// dispatches to all five from an else-if chain gated on ImGui alone -- so -DAVER_MODULE_VOXI=OFF
+// (which -DAVER_MODULE_PBR=OFF forces too) deleted five definitions while their five calls stayed.
+// The Rendering page reopens the guard below, where it belongs, and buildSettings' own `#else`
+// already says what that page shows without the module.
+//
 // A small helper for the three pages below: an int field that is UNSTATED at -1 rather than
 // zero, which is the convention every RENDER.*/STREAM.* key uses. Without the checkbox there is
 // no way to author "this project does not state a value", and a project that states everything
@@ -1170,6 +1063,7 @@ void SandboxApp::buildStreamSettings() {
 #endif
 }
 
+// Project Settings > Physics. World-wide defaults, written to PHYSICS.* in the manifest.
 void SandboxApp::buildPhysicsSettings() {
     ImGui::TextUnformatted("Physics");
     ImGui::SameLine(); ImGui::TextDisabled("(Jolt, behind the plain-C seam)");
@@ -1254,6 +1148,10 @@ void SandboxApp::buildAudioSettings() {
 #endif
 }
 
+#if AVER_MODULE_VOXI
+// Draws one of the Rendering page's sub-pages (General / Global Illumination / Ray Tracing /
+// Path Tracing). Each feature reports its real status and is disabled when the renderer or GPU
+// can't do it. Reads and writes the WHOLE Settings struct regardless of which sub-page is showing.
 void SandboxApp::buildRenderingSettings(int page) {
     using namespace aver::voxi;
     Renderer& vx = Renderer::get();
@@ -2363,5 +2261,145 @@ void SandboxApp::buildRenderingSettings(int page) {
 
 #endif
 #endif
+
+// OUTSIDE `#if AVER_WITH_IMGUI`, matching the declaration, and it has to be BOTH or neither:
+// moving only the declaration left `no-ui` linking against a definition that was never compiled,
+// an LNK2019 raised from maybeAutosavePrefs -- which calls this every quarter second in every
+// configuration. The body makes no ImGui call at all; it only pushes members through
+// setPrefBool/setPrefFloat/setPrefInt.
+// Writes every editor preference back and flushes. Each setter compares before it stores.
+void SandboxApp::saveEditorPreferences() {
+    using namespace editor;
+    setPrefBool ("contentBrowser.gallery",       cbGallery_);
+    setPrefFloat("contentBrowser.tileSize",      cbTileSize_);
+    setPrefBool ("contentBrowser.dblClickEnter", cbDoubleClickEnter_);
+    setPrefFloat("drawers.heightFraction",       drawerFrac_);
+    setPrefFloat("drawers.slideRate",            drawerRate_);
+    setPrefBool ("outputLog.autoScroll",         logAutoScroll_);
+    setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
+    setPrefBool ("console.autoScroll",           consoleAutoScroll_);
+    // Not written back from a --auto-compile run: that launch must not overwrite what the user chose
+    // from the Tools menu before this session started.
+    if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
+    setPrefBool ("viewport.showGrid",            showGrid_);
+    setPrefBool ("viewport.showColliders",       showColliders_);
+    setPrefBool ("viewport.wireframe",           wireframe_);
+    setPrefBool ("panels.worldOutliner",         showOutliner_);
+    setPrefBool ("panels.details",               showDetails_);
+    setPrefFloat("viewport.flySpeed",            flySpeed_);
+    setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
+    setPrefFloat("ddc.ramBudgetMb",              ddcRamBudgetMb_);
+    // Guarded exactly as the load is: a --frames run that wrote its --unlit back would leave
+    // the next interactive session unlit, and the run after that with moved gates.
+    if (maxFrames_ == 0) {
+        setPrefBool("viewport.unlit",             unlit_);
+        setPrefBool("viewport.showStaticMeshes",  showStaticMeshes_);
+        setPrefBool("viewport.showAtmosphere",    showAtmosphere_);
+    }
+    setPrefBool ("snap.move",                    snapMove_);
+    setPrefBool ("snap.rotate",                  snapRot_);
+    setPrefBool ("snap.scale",                   snapScale_);
+    setPrefFloat("snap.moveStep",                moveSnap_);
+    setPrefFloat("snap.rotateStep",              rotSnap_);
+    setPrefFloat("snap.scaleStep",               scaleSnap_);
+
+    // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
+    // CLI exposure back would leave the next interactive session looking at the capture's eyes.
+    //
+    // THE THREE WITH A MANIFEST KEY ARE GUARDED A SECOND TIME, symmetrically with the load: while
+    // the project states RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE, the preference channel for that field
+    // is inert in BOTH directions. Writing it anyway would quietly adopt the project's authored
+    // look as this user's personal default for every project afterwards, and it could not even buy
+    // a persisted Post-panel tweak in exchange -- the load above would decline to restore it, and
+    // applyProject would overwrite it from the manifest on the next open regardless.
+    if (maxFrames_ == 0) {
+        if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     post_.exposure);
+        if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
+        setPrefFloat("post.exposureKey",    post_.exposureKey);
+        setPrefFloat("post.exposureSpeed",  post_.exposureSpeed);
+        setPrefFloat("post.exposureMin",    post_.exposureMin);
+        setPrefFloat("post.exposureMax",    post_.exposureMax);
+        if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
+        setPrefFloat("post.bloomThreshold", post_.bloomThreshold);
+        setPrefFloat("post.bloomKnee",      post_.bloomKnee);
+        setPrefFloat("post.histogramLow",   post_.histogramLowPercent);
+        setPrefFloat("post.histogramHigh",  post_.histogramHighPercent);
+    }
+
+    const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
+    if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size()))
+        setPrefString("contentBrowser.ide", ides[static_cast<usize>(cbIdeChoice_)].name);
+    else
+        setPrefString("contentBrowser.ide", "");   // Automatic
+
+    // GUARDED ON maxFrames_ == 0 LIKE EVERY OTHER CAPTURE-SENSITIVE PREF, and these two were the
+    // ones that were not. The viewport flags above and the post-processing block above them each
+    // carry this guard with a comment explaining it -- "a --frames run that wrote its CLI
+    // exposure back would leave the next interactive session looking at the capture's eyes" --
+    // and display.vsync/display.renderScale sat just below, unguarded.
+    //
+    // WHY THAT IS WORSE THAN IT SOUNDS: maybeAutosavePrefs() DOES return early on maxFrames_,
+    // but onShutdown() calls saveEditorPreferences() unconditionally, and onShutdown() runs at
+    // the end of every capture, benchmark and gate invocation. So every `--frames N
+    // --render-scale F` or `--no-vsync` run wrote its measurement settings into the SAME
+    // %LOCALAPPDATA%/AverEngine/editor.ini an interactive session reads back -- and the load at
+    // the top of this file then faithfully restored the capture's settings as if the user had
+    // chosen them. Measured against this session's own history: --no-vsync is passed by every
+    // capture harness in scripts/, so the user's vsync preference has been decided by whichever
+    // measurement ran last.
+    //
+    // The guard belongs here rather than in onShutdown() so that a future third caller cannot
+    // reintroduce it, and so the rule reads identically to its two neighbours.
+    if (maxFrames_ == 0) {
+        if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
+            setPrefBool("display.vsync", prefsDevice_->vsync());
+        // optimisation-wave-2, 3.3 A: THE THREE AverSR KEYS BELOW ARE SKIPPED OUTRIGHT, not
+        // merely written a neutral value, when the command line drove this session's render scale
+        // or AverSR level. TODAY'S OWN GUARD ENDS AT maxFrames_ == 0, so an interactive `--aversr
+        // quality` run (maxFrames_ IS 0 for an interactive session -- this is not a --frames
+        // capture) used to write itself into editor.ini with no CLI check at all, and the NEXT
+        // ordinary launch inherited a choice nobody made from the Display page. Skipping the write
+        // means a session driven by --render-scale/--aversr never touches any of the three keys,
+        // so whatever a PRIOR interactive session actually chose there survives untouched.
+        // AND SKIPPED ENTIRELY WITH THE MODULE OFF, the mirror of loadEditorPreferences' own
+        // `#if AVER_MODULE_SR`: all three keys are AverSR's, two of them are written FROM
+        // AverSR-only state (averSrChoice_, averSrQuality_), and a build that cannot read them
+        // back has no business overwriting what a build that can wrote there.
+#if AVER_MODULE_SR
+        if (!averSrFromCli_ && renderScaleOverride_ == 1.0f) {
+            setPrefString("display.aversrChoice", editor::averSrChoiceName(averSrChoice_));
+            if (prefsDevice_)
+                // THROUGH renderScaleToPersist, not the live device scale directly -- persisting
+                // the live scale for anything but Manual is the exact bug this wave's own
+                // 10.1/3.3-A corrections describe: Auto would persist whatever fraction the rung
+                // it happened to land on THIS session resolved to, and the crash-cookie
+                // render-scale block at load would apply that stale fraction before Auto ever got
+                // a chance to re-derive it.
+                setPrefFloat("display.renderScale",
+                            editor::renderScaleToPersist(averSrChoice_, prefsDevice_->renderScale()));
+            // THE UPSCALER'S QUALITY MIRROR -- WHICH, BEFORE display.aversrChoice EXISTED, WAS
+            // NEVER PERSISTED AT ALL (the Display page's AverSR combo wrote averSrQuality_ and
+            // applied it to the device; nothing wrote it to a pref and nothing read one back, so
+            // it reset to Off on every launch, and desynced from display.renderScale above once it
+            // was). display.aversrChoice is now the source of truth this mirror only backs up --
+            // kept for at-a-glance reading of a raw editor.ini, and so a build that predates
+            // display.aversrChoice reading the same file back still sees a level, not Off.
+            // setPrefFloat rather than an int helper because there is no int helper -- the prefs
+            // layer is float/bool/string, and every other numeric setting here goes through the
+            // float pair. The enum is four values; a float carries them exactly.
+            setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
+        }
+#endif  // AVER_MODULE_SR
+    }
+
+    // THE ONE LINE IN THIS FUNCTION THAT NEEDS THE EDITOR UI. keybinds_ is the chord registry the
+    // ImGui layer owns and is compiled out with it; everything else here is a plain setPref* call,
+    // which is why the function as a whole sits outside the guard.
+#if AVER_WITH_IMGUI
+    keybinds_.saveToPrefs();
+#endif
+
+    flushEditorPrefs();
+}
 
 } // namespace aver

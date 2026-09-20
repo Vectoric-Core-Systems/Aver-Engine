@@ -3697,6 +3697,7 @@ void GraphEditor::drawComponentDetails(float dpi) {
 // the only place the position gets applied.
 bool GraphEditor::buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& c,
                                         render::preview::PreviewDraw& out) {
+#if AVER_MODULE_FLUIDS
     fluids::FluidVolumeDesc fd;
     fd.centreCm[0] = fd.centreCm[1] = fd.centreCm[2] = 0.0f;
     // The same cm-per-unit ApplyFluid uses (GraphComponentTree.cs), so what the preview shows and
@@ -3738,6 +3739,16 @@ bool GraphEditor::buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& 
     out.baseColor[0] = 0.10f; out.baseColor[1] = 0.30f; out.baseColor[2] = 0.36f; out.baseColor[3] = 1.0f;
     out.roughness = 0.12f;   // the value the fluid's own transparent pass shades with
     return true;
+#else
+    // No fluids module means no seed shell to build: fluids::FluidVolumeDesc and fluids::FluidVolume
+    // live under modules/fluids, which this configuration doesn't include at all -- not even the
+    // header is on the path (see the include guard at the top of this file). Failing here is exactly
+    // what buildComponentPreview already expects from a mesh helper: it treats a false return as
+    // "nothing to draw for this component" and moves on, the same as a Mesh component whose file
+    // can't be resolved. A Fluid component just draws nothing in a tree with no fluids module.
+    (void)e; (void)c; (void)out;
+    return false;
+#endif
 }
 
 // The Viewport tab for a MATERIAL graph: one sphere, shaded by this very graph.

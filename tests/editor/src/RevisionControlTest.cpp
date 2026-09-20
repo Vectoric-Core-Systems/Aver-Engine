@@ -351,6 +351,233 @@ int main() {
         check(parseGitLog(in).empty(), "log: a record with too few fields is dropped whole");
     }
 
+    // ---- what the status bar says: changedCount and summariseForStatusBar -------------------------
+    //
+    // THE SECOND HALF OF THIS FILE'S PURITY CLAIM. parsePorcelainV2 turns git's bytes into a
+    // RepoStatus; changedCount and summariseForStatusBar turn a RepoStatus -- plus the three
+    // booleans, the root and the `why` that only SandboxApp's worker thread ever has -- into what a
+    // status-bar button says and what colour it takes. RevisionControl.hpp's own comment on that
+    // block says why the decision belongs here rather than beside the ImGui call that draws the
+    // button: a second surface deriving these states by hand is a second surface that can disagree
+    // with the panel, which is the exact failure this split exists to prevent. So these are pinned
+    // the same way the parse above is -- through parsePorcelainV2 wherever building a RepoStatus by
+    // hand would just be re-typing what real git bytes already produce, and by hand where a state
+    // (no project open, git absent, not yet answered) has no bytes to build from at all.
+
+    // ---- the "nothing open to ask about" state ---------------------------------------------------
+    {
+        const RepoStatus st; // never consulted: projectOpen is false before anything else is read
+        const StatusBarSummary sum = summariseForStatusBar(/*projectOpen=*/false, /*answered=*/false,
+                                                            /*gitPresent=*/false, "", st, "");
+        check(sum.mood == RepoMood::NoProject, "reachable: no project open is its own mood, not folded into Unknown");
+        check(sum.label == "No project",       "no project: the bar's own words, not the panel's five sentences");
+        check(sum.changed == 0,                "no project: nothing has been asked, so nothing is counted");
+    }
+
+    // ---- Unknown vs NotARepo: THE SINGLE MOST LOAD-BEARING DISTINCTION IN THIS BLOCK --------------
+    //
+    // Both render the bar with nothing to say and RepoStatus::files empty either way, but they do
+    // not mean the same thing: one is "the worker thread has not answered yet, so this may still
+    // turn out to be a repository", the other is "git answered, and there genuinely is none". A
+    // status bar that could not tell them apart would show a freshly opened project the exact
+    // colour it shows a project somebody deliberately keeps outside git, and there would be no way
+    // to fix that without adding a THIRD state -- which is the state RepoMood::Unknown already is.
+    {
+        const RepoStatus st; // unused on both paths: neither reads RepoStatus::files
+        const StatusBarSummary unknown  = summariseForStatusBar(true, /*answered=*/false, false, "", st, "");
+        const StatusBarSummary notARepo = summariseForStatusBar(true, /*answered=*/true, true, "", st, "");
+        check(unknown.mood == RepoMood::Unknown,   "unknown: no answer has been latched yet");
+        check(notARepo.mood == RepoMood::NotARepo, "not-a-repo: answered, and the answer is 'no repository here'");
+        check(unknown.mood != notARepo.mood,
+              "unknown and not-a-repo must never compare equal -- 'we have not asked' and 'we asked and there "
+              "is no repository' are opposite facts rendered from the same empty file list");
+        check(unknown.label != notARepo.label,
+              "unknown and not-a-repo also take different words on the button, so a tooltip can never reuse one for the other");
+    }
+
+    // ---- NoGit, and `why` carried into the tooltip on a real failure ------------------------------
+    {
+        const RepoStatus st;
+        const StatusBarSummary sum = summariseForStatusBar(true, true, /*gitPresent=*/false, "", st,
+                                                            "CreateProcessW failed: The system cannot find the file specified.");
+        check(sum.mood == RepoMood::NoGit, "reachable: git missing or off PATH is its own mood");
+        check(sum.label == "No git",       "no git: says nothing about the project, only about the tool");
+        // A REAL FAILURE MUST NOT BE SWALLOWED. Somebody who put git on PATH five minutes ago and
+        // still sees this needs the actual CreateProcessW text, not just "not found" repeated.
+        check(sum.detail.find("CreateProcessW failed") != std::string::npos,
+              "no git: `why` is a real failure and must survive into the tooltip, or a fixable problem looks unfixable");
+    }
+
+    // ---- NotARepo, and an empty `why` producing no blank line -------------------------------------
+    {
+        // NOT A REAL FAILURE. gitRepositoryRoot leaves `why` empty for an ordinary project outside
+        // any repository (see RevisionControl.hpp), and the `line` lambda inside
+        // summariseForStatusBar skips empty text for exactly that reason -- so this must read as
+        // clean prose, never as a tooltip with a mystery gap in the middle of it.
+        const RepoStatus st;
+        const StatusBarSummary sum = summariseForStatusBar(true, true, true, "", st, "");
+        check(sum.mood == RepoMood::NotARepo, "not-a-repo: git ran, and the project's directory answered with nothing");
+        check(sum.detail.find("\n\n") == std::string::npos,
+              "not-a-repo: an empty `why` must never turn into a blank line between two real sentences");
+        check(!sum.detail.empty() && sum.detail.back() != '\n',
+              "not-a-repo: the tooltip ends on real text, not on a trailing blank line from a skipped `why`");
+    }
+
+    // ---- Clean, on a branch level with its real upstream -------------------------------------------
+    {
+        const RepoStatus st = parsePorcelainV2(cleanHeaders());
+        const StatusBarSummary sum = summariseForStatusBar(true, true, true, "C:/Projects/Foo", st, "");
+        check(sum.mood == RepoMood::Clean, "reachable: nothing changed and nothing conflicted is Clean");
+        check(sum.label == "main",         "clean: the real branch name, read off the latched status");
+        check(sum.changed == 0,            "clean: changedCount agrees there is nothing to report");
+        // "0 AHEAD, 0 BEHIND" READS LIKE A PROBLEM WHEN IT IS THE OPPOSITE OF ONE. Being level with
+        // an upstream gets its own sentence so a number that looks alarming never appears for a
+        // branch that has nothing wrong with it.
+        check(sum.detail.find("0 ahead") == std::string::npos,
+              "clean: level with the upstream must never render as \"0 ahead, 0 behind\"");
+        check(sum.detail.find("Level with origin/main.") != std::string::npos,
+              "clean: level with the upstream gets its own sentence instead");
+    }
+
+    // ---- Dirty, on one ordinary modification --------------------------------------------------------
+    {
+        std::string in = cleanHeaders();
+        in += z({"1 .M N... 100644 100644 100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 "
+                 "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 sandbox/src/SandboxApp.cpp"});
+        const RepoStatus st = parsePorcelainV2(in);
+        const StatusBarSummary sum = summariseForStatusBar(true, true, true, "C:/Projects/Foo", st, "");
+        check(sum.mood == RepoMood::Dirty, "reachable: one non-ignored change with no conflict is Dirty");
+        check(sum.changed == 1,            "dirty: changedCount agrees on the one file");
+        check(sum.detail.find("1 changed file.") != std::string::npos,
+              "dirty: the singular reads as one file, not as \"1 changed files.\"");
+        check(sum.detail.find("\n\n") == std::string::npos,
+              "dirty: none of its several conditional lines leave a blank one behind when skipped");
+    }
+
+    // ---- Conflicted OUTRANKS Dirty ------------------------------------------------------------------
+    //
+    // THE DANGEROUS WRONG ANSWER THIS WIDGET CAN GIVE is an unresolved merge rendered as an ordinary
+    // change count. This repository has a conflict, an ordinary modification, AND an ignored build
+    // directory all at once -- three different reasons for a file to appear in porcelain's output --
+    // so the assertions below have to hold the mood to Conflicted, hold `changed` to counting both
+    // of the non-ignored entries (not just the conflicted one), and hold the ignored one out of it,
+    // all from a single latched status.
+    {
+        std::string in = cleanHeaders();
+        in += z({"u UU N... 100644 100644 100644 100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 "
+                 "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 docs/ARCHITECTURE.md",
+                 "1 .M N... 100644 100644 100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 "
+                 "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 sandbox/src/SandboxApp.cpp",
+                 "! build/"});
+        const RepoStatus st = parsePorcelainV2(in);
+        check(changedCount(st) == 2, "sanity: two non-ignored entries feed the case below -- one conflicted, one merely modified");
+
+        const StatusBarSummary sum = summariseForStatusBar(true, true, true, "C:/Projects/Foo", st, "");
+        check(sum.mood == RepoMood::Conflicted,
+              "conflicted outranks dirty: an unresolved merge must never be shown as an ordinary change count");
+        check(sum.changed == 2,
+              "conflicted: `changed` still counts every non-ignored entry, the modified file included, not only the conflict");
+        check(sum.detail.find("unresolved conflicts") != std::string::npos,
+              "conflicted: the tooltip says so in words, not only through the colour");
+    }
+
+    // ---- changedCount and RepoStatus::clean() can never drift apart, in either direction ----------
+    //
+    // Both use the same rule -- ignored paths do not count -- so asserting only one direction per
+    // status would miss a future edit that keeps clean() correct while changedCount starts counting
+    // an ignored path, or the reverse. Each status below is checked both ways.
+    {
+        const RepoStatus emptyStatus; // no `# branch.` header at all: not even a repository
+        check(changedCount(emptyStatus) == 0 && emptyStatus.clean(),
+              "agree: no entries at all reads as zero changed AND as clean, in both directions");
+
+        std::string ignoredIn = cleanHeaders();
+        ignoredIn += z({"! build/"});
+        const RepoStatus ignoredOnly = parsePorcelainV2(ignoredIn);
+        check(changedCount(ignoredOnly) == 0 && ignoredOnly.clean(),
+              "agree: an ignored-only tree is zero changed AND clean -- ignoring something is what makes it not count");
+
+        std::string dirtyIn = cleanHeaders();
+        dirtyIn += z({"1 .M N... 100644 100644 100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 "
+                      "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 sandbox/src/SandboxApp.cpp"});
+        const RepoStatus dirty = parsePorcelainV2(dirtyIn);
+        check(changedCount(dirty) > 0 && !dirty.clean(),
+              "agree: one real modification is nonzero changed AND not clean, in both directions");
+    }
+
+    // ---- a detached HEAD sets `detached` and never invents a branch name ---------------------------
+    {
+        const RepoStatus st = parsePorcelainV2(z({"# branch.oid e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+                                                  "# branch.head (detached)"}));
+        const StatusBarSummary sum = summariseForStatusBar(true, true, true, "C:/Projects/Foo", st, "");
+        check(sum.detached,               "detached: the summary carries the fact forward from RepoStatus");
+        // git says `(detached)` where the branch name goes, and git refuses parentheses in ref
+        // names, so a real branch can never be called that -- inventing a name here would tell
+        // somebody they are on a branch that does not exist.
+        check(sum.label == "detached HEAD",
+              "detached: the label is the state, never a branch name read out of thin air");
+        check(sum.detail.find("Detached at e69de29bb2") != std::string::npos,
+              "detached: the shortened HEAD object name is offered, since there is no branch name to offer instead");
+    }
+
+    // ---- tracking nothing is distinguishable from being level with an upstream --------------------
+    {
+        // A BRANCH THAT TRACKS NOTHING emits no branch.ab line at all -- see parsePorcelainV2's own
+        // test above -- and the bar's tooltip has to keep that apart from a branch that tracks
+        // something and happens to be level with it, because one of the two can be pushed and the
+        // other cannot.
+        const RepoStatus st = parsePorcelainV2(z({"# branch.oid e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+                                                  "# branch.head local-only"}));
+        const StatusBarSummary sum = summariseForStatusBar(true, true, true, "C:/Projects/Foo", st, "");
+        check(sum.detail.find("Tracks nothing.") != std::string::npos,
+              "tracks nothing: said outright, not left as a silent absence of ahead/behind text");
+        check(sum.detail.find("Level with") == std::string::npos,
+              "tracks nothing: never borrows the level-with-upstream sentence it has no upstream to fill in");
+    }
+
+    // ---- every RepoMood the header declares is reachable, and no two collapse onto one another -----
+    //
+    // A mood this function can never produce is a colour the status bar can never show; a bug that
+    // merges two of them is invisible until somebody is staring at a merge conflict rendered in the
+    // "clean" colour. All seven come from the same call the bar itself makes, not from touching
+    // StatusBarSummary's fields by hand.
+    {
+        const RepoStatus none;
+
+        std::string dirtyIn = cleanHeaders();
+        dirtyIn += z({"1 .M N... 100644 100644 100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 "
+                      "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 sandbox/src/SandboxApp.cpp"});
+        const RepoStatus dirty = parsePorcelainV2(dirtyIn);
+
+        std::string conflictedIn = cleanHeaders();
+        conflictedIn += z({"u UU N... 100644 100644 100644 100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 "
+                           "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 docs/ARCHITECTURE.md"});
+        const RepoStatus conflicted = parsePorcelainV2(conflictedIn);
+
+        const RepoMood moods[7] = {
+            summariseForStatusBar(false, false, false, "", none, "").mood,                        // NoProject
+            summariseForStatusBar(true, false, false, "", none, "").mood,                         // Unknown
+            summariseForStatusBar(true, true, false, "", none, "why").mood,                       // NoGit
+            summariseForStatusBar(true, true, true, "", none, "").mood,                           // NotARepo
+            summariseForStatusBar(true, true, true, "C:/Projects/Foo", parsePorcelainV2(cleanHeaders()), "").mood, // Clean
+            summariseForStatusBar(true, true, true, "C:/Projects/Foo", dirty, "").mood,           // Dirty
+            summariseForStatusBar(true, true, true, "C:/Projects/Foo", conflicted, "").mood,      // Conflicted
+        };
+        check(moods[0] == RepoMood::NoProject,  "reachable: NoProject");
+        check(moods[1] == RepoMood::Unknown,    "reachable: Unknown");
+        check(moods[2] == RepoMood::NoGit,      "reachable: NoGit");
+        check(moods[3] == RepoMood::NotARepo,   "reachable: NotARepo");
+        check(moods[4] == RepoMood::Clean,      "reachable: Clean");
+        check(moods[5] == RepoMood::Dirty,      "reachable: Dirty");
+        check(moods[6] == RepoMood::Conflicted, "reachable: Conflicted");
+
+        bool allDistinct = true;
+        for (usize i = 0; i < 7 && allDistinct; ++i)
+            for (usize j = i + 1; j < 7 && allDistinct; ++j)
+                if (moods[i] == moods[j]) allDistinct = false;
+        check(allDistinct, "no two of the seven scenarios above collapse onto the same RepoMood");
+    }
+
     // ---- the read-only tripwire -------------------------------------------------------------------
     //
     // THIS IS THE COMMIT'S SCOPE, WRITTEN AS AN ASSERTION. RevisionControl.cpp spawns git in exactly

@@ -252,10 +252,19 @@ void SandboxApp::cbOpenEntry(const std::string& full, bool isDir) {
     // Content Browser giving it a "Level" icon and colour of its own two hundred lines below.
     // Deferred through requestOpenLevel because this function has no Engine& to load with.
     if (editor::isLevelPath(full)) {
+#if AVER_MODULE_SCENE
         if (requestOpenLevel(full, "opened from the Content Browser"))
             cbStatus_ = "Opening " + std::filesystem::path(full).stem().string();
         else
             cbStatus_ = openLevelError_;
+#else
+        // requestOpenLevel and openLevelError_ (SandboxApp.hpp) are declared under AVER_MODULE_SCENE:
+        // a level's only purpose is instantiating placements into scene::World, which this
+        // configuration does not have. Falling through to openWithShell() would just reintroduce
+        // the Notepad bug the comment above describes, so this says plainly why nothing opened
+        // instead of pretending the double-click did something.
+        cbStatus_ = "This build has no Scene module, so levels cannot be opened";
+#endif
         return;
     }
     if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
@@ -309,6 +318,11 @@ void SandboxApp::cbAdoptNewAsset(const std::filesystem::path& target, bool openE
 // an .ocmat by Compile C#, and the only editor that claims a .cs is the ACTOR editor, which
 // parses for an [AverActor] class this file does not have. Selecting it in the browser and
 // leaving it to the IDE is the honest outcome; opening a tab that cannot show it is not.
+//
+// Guarded: the starter is a pbr::MaterialDesc, and fmt::newMaterialScript (MaterialScript.hpp)
+// pulls in aver/pbr/Material.hpp through OcMat.hpp -- neither reachable with AVER_MODULE_PBR off.
+// A material with no pbr::MaterialDesc to describe it is not a starting point, it is nothing.
+#if AVER_MODULE_PBR
 void SandboxApp::cbCreateMaterial() {
     const std::filesystem::path target = cbFreeAssetPath("NewMaterial", ".cs");
     if (target.empty()) return;
@@ -336,6 +350,7 @@ void SandboxApp::cbCreateMaterial() {
     cbAdoptNewAsset(target, /*openEditor=*/false);
     cbStatus_ = "Created " + target.filename().string() + " (" + bound + ") - Compile C# to build its .ocmat";
 }
+#endif
 
 // Writes a starter .ocsnd into the selected folder and opens it. See the Add menu's own comment
 // for why this exists at all.
@@ -999,8 +1014,13 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.foliageType");
         if (ImGui::MenuItem("New Input Scheme"))    cbCreateInputScheme();
         uiReg_.track("cb.add.inputScheme");
+#if AVER_MODULE_PBR
+        // cbCreateMaterial no longer exists with the material system compiled out -- see its own
+        // guard above -- so the menu entry that reaches it goes with it rather than naming a
+        // function this configuration never declared.
         if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
         uiReg_.track("cb.add.material");
+#endif
         ImGui::EndDisabled();
         ImGui::EndPopup();
     }
@@ -1576,6 +1596,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
 // differently from a static one. Keyed by the SAME fnv1a64(relative path) id loadProjectMeshes
 // assigned, so anything unloaded reads as static rather than guessing.
 bool SandboxApp::isSkinnedMeshEntry(const DirEntry& e) const {
+#if AVER_MODULE_SCENE
     if (e.isDir || e.kindExt != ".ocmesh" || skinnedMeshIds_.empty()) return false;
     const std::string content = project_.contentDir();
     if (content.empty()) return false;
@@ -1584,6 +1605,13 @@ bool SandboxApp::isSkinnedMeshEntry(const DirEntry& e) const {
     if (ec || rel.empty()) return false;
     for (char& c : rel) if (c == '\\') c = '/';
     return skinnedMeshIds_.count(fnv1a64(std::string_view(rel))) != 0;
+#else
+    // skinnedMeshIds_ (SandboxApp.hpp) is declared under AVER_MODULE_SCENE: it is filled by
+    // loadProjectMeshes as it places meshes into the scene, so with the module off nothing was
+    // ever recorded to ask about. Every entry reads as a plain static mesh instead of guessing.
+    (void)e;
+    return false;
+#endif
 }
 
 // The colour of one card's type bar. Null-safe over every entry a listing can contain.

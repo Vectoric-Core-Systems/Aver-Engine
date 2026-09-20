@@ -3,6 +3,16 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+// applyLevelSky below calls assets::applyLevelEnv, and the only thing that brings that declaration
+// in is SandboxApp.hpp's AVER_MODULE_PBR include block -- so a PBR-off build lost the header while
+// the call, guarded on AVER_MODULE_SCENE, stayed compiled in. Named here rather than left to the
+// header because the dependency is honest at both ends: LevelSky.hpp is header-only over
+// Aver.Core/Aver.Formats/Aver.RHI and names no pbr:: type at all (its own header comment argues
+// that a build without the renderer STILL has an rhi::SkyAtmosphere to fill), and Aver.Formats --
+// which Sandbox links unconditionally -- puts modules/assets/include on the public include path
+// through its Aver.Assets dependency, so this resolves with PBR on or off. #pragma once makes the
+// second arrival a no-op, so the default build sees exactly what it saw before.
+#include "aver/assets/LevelSky.hpp"
 
 namespace aver {
 #if AVER_MODULE_SYNAPSE

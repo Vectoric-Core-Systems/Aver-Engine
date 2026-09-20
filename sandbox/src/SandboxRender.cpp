@@ -925,7 +925,13 @@ void SandboxApp::onRender(Engine& e)  {
             // The by-hand false-cull finder (section 3B): an otherwise-culled, non-owner-hidden
             // entity draws through the RASTER route anyway, tinted. chooseRoute owns that pairing,
             // so this is fed to it rather than applied here.
+            // GUARDED, unlike occlusionCullEnabled_ which is a manifest key: the tint answers "what
+            // did the culler decide to hide", so with no culler compiled in there is nothing for it
+            // to show. d.occlusionCulled is false throughout that build for the same reason, so the
+            // route chooseRoute picks is identical either way.
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
             d.tint = self.occlusionShowCulled_;
+#endif
 
             // ASKED HERE TOO, NOT RESTATED. drawWorld calls the identical chooseRoute() on the
             // identical four inputs a few lines after this returns (GameRender.cpp), so the two
@@ -1815,7 +1821,18 @@ void SandboxApp::onRender(Engine& e)  {
     // NOT SCALED. The old shell was inflated 1.02-1.12x to escape z-fighting with the surface it
     // copied; lines depth-test against the ray pass's own depth and sit exactly on the geometry,
     // so growing them would only lift the outline off the object it is meant to trace.
-    if (hasSelection_ && maxFrames_ == 0 && !anyPlayActive() && !noEditorChrome_) {
+    //
+    // anyPlayActive() IS DECLARED WITH startPlay/stopPlay INSIDE AVER_MODULE_FRAMEWORK
+    // (SandboxApp.hpp), so a framework-less build has no notion of a play-in-editor session at
+    // all and can never be mid-play. Resolved once here, rather than called again at the player
+    // start marker's own gate below, so the two conditions that comment already promises stay in
+    // lockstep instead of drifting if only one call site got a guard.
+#if AVER_MODULE_FRAMEWORK
+    const bool anyPlaying = anyPlayActive();
+#else
+    const bool anyPlaying = false;
+#endif
+    if (hasSelection_ && maxFrames_ == 0 && !anyPlaying && !noEditorChrome_) {
         // One drawLines per selected entity. selectionOutlineLines caches per MESH id, so N
         // copies of the same asset share one line buffer and this costs N draws, not N buffers.
         for (const auto& [xf, meshId] : selectionOutlines_)
@@ -1828,12 +1845,12 @@ void SandboxApp::onRender(Engine& e)  {
     // ---- THE PLAYER START'S MARKER ----
     // Queued every frame rather than kept as scene state, matching how the rest of the editor's
     // viewport chrome already works.
-    // HIDDEN BY THE SAME anyPlayActive() THE OUTLINE ABOVE USES, deliberately, so the two can't
+    // HIDDEN BY THE SAME anyPlaying THE OUTLINE ABOVE COMPUTES, deliberately, so the two can't
     // drift apart.
     // NOT GATED ON maxFrames_, unlike the outline: the outline responds to a click, meaningless in
     // a bounded run; the marker is part of what the level LOOKS like.
 #if AVER_MODULE_SCENE
-    if (viewportIconsReady_ && !noEditorChrome_ && !anyPlayActive() &&
+    if (viewportIconsReady_ && !noEditorChrome_ && !anyPlaying &&
         playerStart_ != scene::kInvalidEntity) {
         const scene::World& psw = scene::World::instance();
         if (psw.valid(playerStart_)) {
@@ -2037,13 +2054,23 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         const std::string path = dir + "\\Screenshot_" + ts + ".png";
 
+        // THE LOG LINE IS THE ANSWER WITHOUT ImGui, THE TOAST IS THE ANSWER WITH IT. notifyOutcome
+        // pushes onto editor::notifications(), which only the notification overlay ever drains, so
+        // it is declared and defined behind AVER_WITH_IMGUI along with the rest of the content
+        // browser -- and the caller is guarded instead, exactly as notifyOutcome's own comment says
+        // of --import's deferred handshake. A screenshot is still taken and still written in a
+        // -DAVER_ENABLE_UI=OFF build; only the toast about it has nowhere to appear.
         if (stbi_write_png(path.c_str(), (int)outW, (int)outH, 4, pixels, (int)outW * 4)) {
             AVER_INFO("[Sandbox] screenshot: {} ({}x{})", path, outW, outH);
+#if AVER_WITH_IMGUI
             notifyOutcome(editor::NotifySeverity::Success, "Screenshot saved", path);
+#endif
         } else {
             AVER_WARN("[Sandbox] screenshot: could not write {}", path);
+#if AVER_WITH_IMGUI
             notifyOutcome(editor::NotifySeverity::Warning, "Screenshot failed",
                           "Could not write " + path, true);
+#endif
         }
         viewportShotState_ = 0;
         return;
@@ -2055,8 +2082,10 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
     // viewportShotState_ != 0.
     if (viewportShotTries_ >= 30) {
         AVER_WARN("[Sandbox] screenshot: no frame image after {} frames, giving up", viewportShotTries_);
+#if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Warning, "Screenshot failed",
                       "The captured frame never arrived.", true);
+#endif
         viewportShotState_ = 0;
     }
 }
@@ -2202,7 +2231,7 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
                       "Content/Materials and no built-in look; drawing the flat fallback "
                       "(0.80, 0.80, 0.85). Either author the material or use one of the "
                       "built-in names.",
-                      aver_scene_material_name(mat));
+                      editor::surfaceDisplayName(mat));
     }
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
     if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
@@ -2469,6 +2498,15 @@ void SandboxApp::applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
     logAverSrActive(dev);
 }
 
+// ---- AverSR's RESOLUTION CHAIN, WHICH NEEDS THE LADDER AND THEREFORE VOXI -------------------
+// Everything above this point is AverSR on its own: a render scale, an upscaler, and the CLI flag
+// that pins one. Everything below resolves WHICH level to apply through voxi::resolveAverSrLevel /
+// voxi::autoAverSrLevel against the Overall rung -- render.voxi's ladder, named in these functions'
+// own signatures (voxi::AverSrSource, voxi::Settings, voxi::DeviceInfo). SR and VOXI are
+// independent options and PBR=OFF forces VOXI=OFF, so an SR-on/VOXI-off tree is real and reached
+// these definitions with no aver/voxi header in sight. Their one caller already asks for both
+// (SandboxApp.cpp's onUpdate, `#if AVER_MODULE_VOXI` around `#if AVER_MODULE_SR`).
+#if AVER_MODULE_VOXI
 // Human text for the "(source)" half of every AverSR surface (the mandatory startup log, the
 // Display combo's "Auto (<level> from <source>)" preview, and the Project Settings upscaling
 // line) -- one place so the three descriptions can never drift apart. ForcedOff does not say WHY
@@ -2609,8 +2647,9 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
         averSrStartupLogged_ = true;
     }
 }
+#endif  // AVER_MODULE_VOXI
 
-#endif
+#endif  // AVER_MODULE_SR
 
 // Reconciles ptSceneView_ (the ACTUAL registration) with ptSceneViewWantEnabled_ (what --pt-scene
 // or the settings combo most recently asked for). Idempotent, so free to call every frame.
@@ -2647,7 +2686,15 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     // drawsPrev_/draws_) has not recomputed for this frame yet -- so suppressesScene() here would
     // answer LAST frame's question. willSuppressSceneThisFrame() predicts what prePass is about
     // to make true instead; see its own comment in VoxiRenderer.hpp for the swap it accounts for.
+#if AVER_MODULE_VOXI
     const bool rayDrivenPaints = voxiRenderer_.willSuppressSceneThisFrame();
+#else
+    // THE ELECTION HAS ONE FEWER CANDIDATE. voxiRenderer_ is declared `#if AVER_MODULE_VOXI`, and
+    // this function is deliberately not -- the flag and the PT view's registration must keep
+    // working with the module off (see ptSceneViewWantEnabled_'s own comment). Nothing else claims
+    // primary visibility, so the answer is a constant here rather than a call.
+    const bool rayDrivenPaints = false;
+#endif
     if (rayDrivenPaints && ptSceneViewWantEnabled_) {
         // A1: named for the Path Tracing page's Quality-combo tag (see PtRenderConflict.hpp's
         // choosePtViewTag and this function's caller in buildUI()). Set every frame this branch

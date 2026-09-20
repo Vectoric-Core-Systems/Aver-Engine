@@ -42,6 +42,13 @@ struct NavExtent {
     bool valid() const { return widthCells > 0 && heightCells > 0; }
 };
 
+// GUARDED ON SCENE, not on AVER_MODULE_SYNAPSE, even though this whole file otherwise lives and
+// dies with Synapse: `scene::World&` is a parameter of both signatures below, and a navigation
+// bake IS a walk over that world's entities and transforms -- with the module absent there is no
+// world left to sample, so there is no smaller version of either function to keep, only nothing.
+// navPathForLevel and buildNavOverlay further down name no scene type at all and stay outside this
+// guard, since loading and drawing an already-baked .ocnav needs none of it.
+#if AVER_MODULE_SCENE
 // Measures the world. Returns an invalid extent for a world with nothing in it -- an empty level is
 // not an error, it just has nothing to bake.
 NavExtent measureWorld(scene::World& world, const NavBakeSettings& s);
@@ -52,6 +59,7 @@ NavExtent measureWorld(scene::World& world, const NavBakeSettings& s);
 // thing to look at, not the return value.
 bool bakeNavigation(scene::World& world, const NavBakeSettings& s, fmt::OcNavData& out,
                     synapse::BakeStats* stats, std::string* why);
+#endif  // AVER_MODULE_SCENE
 
 // The path a level's navigation is saved to: the level path with its extension replaced by .ocnav.
 // A convention rather than a record in the level file, so a level that has never been baked and a

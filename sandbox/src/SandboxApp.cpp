@@ -189,7 +189,13 @@ BootConfig SandboxApp::config() const  {
 // wall-clock wait would be a different length on every machine for no reason. The engine's own
 // warm-up cap (600 frames / 20s) still bounds this, so a project that never settles -- streaming
 // that genuinely never ends -- costs seconds rather than the session.
+//
+// THE WHOLE DETECTOR IS SCENE WORK, and it reads three counters that say so in their own names --
+// lastSceneDrawn_ and the two settle members beside it, all declared `#if AVER_MODULE_SCENE` and
+// written only by the scene walk. This predicate is an Engine override and has to exist in every
+// build, so the guard goes around the body rather than around the function.
 bool SandboxApp::startupComplete() const  {
+#if AVER_MODULE_SCENE
     if (lastSceneDrawn_ < 0) return false;             // no frame has walked the scene yet
     // THE LIVE PROJECT, NOT THE COMMAND LINE. projectPath_ is set once from argv and is empty
     // for every project opened through the browser -- so asking it here answered "nothing was
@@ -210,6 +216,15 @@ bool SandboxApp::startupComplete() const  {
     if (lastSceneDrawn_ == startupSettleCount_) ++startupSettleFrames_;
     else { startupSettleCount_ = lastSceneDrawn_; startupSettleFrames_ = 0; }
     return startupSettleFrames_ >= kSettleFrames;
+#else
+    // NOTHING WALKS A SCENE IN THIS TREE, so there is no draw count to hold steady and the settle
+    // run above would never begin -- lastSceneDrawn_ would sit at its -1 start and this would
+    // answer "not yet" until the engine's 600-frame warm-up cap gave up, holding a loading screen
+    // over an editor that had finished loading. What the detector waits for is a level's meshes,
+    // materials and textures arriving behind the first drawn frame; with no world to instantiate
+    // them into there is no tail to wait for, and the editor is up as soon as the engine says so.
+    return true;
+#endif  // AVER_MODULE_SCENE
 }
 
 void SandboxApp::setUseWarp(bool w) { useWarp_ = w; }
@@ -551,6 +566,16 @@ void SandboxApp::onInit(Engine& e)  {
     // ScriptHost::graphValidate is itself a no-op returning "available? no" when the staged
     // bridge predates the GraphValidate export, so an old bridge greys the button out rather
     // than claiming every graph is fine.
+    //
+    // GUARDED ON SCRIPTING, and this whole run of four calls with it: every one of them reaches
+    // scripts_, which IS the .NET host (declared `#if AVER_MODULE_SCRIPTING` beside the rest of
+    // the bridge). The validator and the hit table are answers only managed code can give -- there
+    // is no C++ implementation of Graph.Validate to fall back on -- so a scripting-off tree leaves
+    // both seams uninstalled, which is the state GraphEditor already handles: setGraphValidator is
+    // never called, the Validate button greys out exactly as it does against an old bridge, and
+    // setGraphNodeHitSource's absence leaves the node-hit overlay with nothing to draw. The graph
+    // editor itself stays registered above, because opening and editing a .ocgraph needs no host.
+#if AVER_MODULE_SCRIPTING
     editor::setGraphValidator([this](const std::string& text, std::string& err) {
         if (!scripts_.graphValidateAvailable()) { err = "the .NET bridge exports no GraphValidate"; return false; }
         return scripts_.graphValidate(text, err);
@@ -564,6 +589,7 @@ void SandboxApp::onInit(Engine& e)  {
         scripts_.graphNodeHits(graphName, maxAge, out);
     });
     scripts_.graphSetHitRecording(true);
+#endif  // AVER_MODULE_SCRIPTING
     // Appended for the same reason, and it claims only .ocbt, which nothing above accepts.
     assetEditors_.registerFactory(&editor::makeBtEditor);
     // And again for .ocsnd, which likewise nothing above claims. See SoundEditor.hpp.
@@ -634,7 +660,15 @@ void SandboxApp::onInit(Engine& e)  {
     // two concurrent captures never race to open the same named mutex.
     if (window_ && window_->valid() && singleInstanceEligible_) {
         Window::registerAsSingleInstancePrimary(window_->nativeHandle());
+        // THE HOOK IS THE LEVEL-OPEN PATH, which is why it carries a guard the registration above
+        // does not: onOpenRequestThunk forwards to handleOpenRequest and on to requestOpenLevel
+        // (SandboxLevelEdit.cpp), all three declared `#if AVER_MODULE_SCENE` because what a
+        // forwarded path asks for is a level instantiated into a world. Staying the primary
+        // instance is still right in a scene-less tree -- a second launch should still focus this
+        // window rather than open a rival editor; it simply has nothing to open once it is here.
+#if AVER_MODULE_SCENE
         window_->setOpenRequestHook(&SandboxApp::onOpenRequestThunk, this);
+#endif
     }
     // THE WINDOW'S X BUTTON GOES THROUGH THE SAME UNSAVED-CHANGES CHECK AS File > Exit. It did
     // not: WM_CLOSE set shouldClose_ and Engine::run tests that BEFORE the next frameStep, so
@@ -644,21 +678,13 @@ void SandboxApp::onInit(Engine& e)  {
     if (window_ && window_->valid()) window_->setCloseGuard(&SandboxApp::onCloseGuardThunk, this);
 
 #if AVER_MODULE_MCP
-    if (mcpPort_) {
-        registerMcpAbis();
-        // Widget hooks are UI-only: uiReg_ (the ImGui widget registry) doesn't exist with
-        // AVER_ENABLE_UI=OFF, and there's nothing for MCP to resolve. Left unregistered -- MCP's
-        // other ABIs still work, so a UI-less editor just reports no widgets.
-#if AVER_WITH_IMGUI
-        mcp_.setWidgetResolver([this](const std::string& n, f32& x, f32& y) {
-            return uiReg_.centreOf(n, x, y);
-        });
-        mcp_.setWidgetLister([this] { return uiReg_.describe(); });
-#endif
-        if (!mcp_.start(mcpPort_))
-            AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
-                      "unaffected and carries on");
-    }
+    // 0 means --mcp was never given. mcpStart (SandboxMcp.cpp) is the whole of what used to be
+    // inline here: ABI registration, the UI-only widget hooks, and the listen itself, now shared
+    // with the status-bar widget's own Start button so the two can never start the channel two
+    // different ways.
+    if (mcpPort_ && !mcpStart(mcpPort_))
+        AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
+                  "unaffected and carries on");
 #endif
 
     browser_.init();
@@ -784,7 +810,18 @@ void SandboxApp::onInit(Engine& e)  {
         // A level with no project above it still opens: everything else hangs off applyProject,
         // so without this branch a lone .ocmap would produce an empty editor with no explanation.
         // Its placements won't resolve, but seeing the level's shape beats seeing nothing.
+        //
+        // GUARDED because loading a level IS instantiating entities: loadStartMap is declared
+        // `#if AVER_MODULE_SCENE` with the rest of the level verbs, and there is no world for a
+        // placement to become without the module. The path is still accepted off the command line,
+        // so the #else says it was seen and why it went nowhere -- which is the whole complaint
+        // the branch above exists to answer, an editor sitting empty with no explanation.
+#if AVER_MODULE_SCENE
         loadStartMap(e);
+#else
+        AVER_WARN("[Sandbox] '{}' not opened: this build has no scene to instantiate a level into",
+                  openMapPath_);
+#endif
     }
 #if AVER_WITH_IMGUI
     if (e.device()->uiActive()) {
@@ -1143,6 +1180,14 @@ void SandboxApp::onInit(Engine& e)  {
         // ANIMATION NOTIFIES: the editor wants this as much as a shipped game does (a clip
         // previewed in Play mode should fire what it fires), and the sink survives every level/
         // project reload, since AnimSystem::clear() drops clips and playheads without dropping the wire.
+        //
+        // THE WHOLE INSTALL NEEDS THE SCENE, not just the synapse half that already said so.
+        // aver::anim::animSystem() lives in Aver.Anim.Scene, which the root CMakeLists only adds
+        // inside `if(AVER_MODULE_SCENE)`, and the sink being installed -- animNotify -- takes a
+        // scene::Entity and is now declared under the same condition. A notify is a thing that
+        // happens TO AN ENTITY; with no entities there is nothing to route, so the sink is not
+        // installed rather than installed against a world that does not exist.
+#if AVER_MODULE_SCENE
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&SandboxApp::animNotify, this);
 #if AVER_MODULE_SYNAPSE_SCENE
@@ -1154,23 +1199,36 @@ void SandboxApp::onInit(Engine& e)  {
             synapse::btSystem().setNotifySink(&SandboxApp::animNotify, this);
 #endif
         }
+#endif  // AVER_MODULE_SCENE
 
         // ANIMATION CURVES. The framework relays a query it cannot answer itself; this is where
         // the answer comes from. Installed unconditionally -- unlike the notify sink it needs no
         // scripting host, because a C++ caller can ask too.
+        //
+        // "UNCONDITIONALLY" MEANT "WITHOUT ASKING THE HOST", not "in every build": every
+        // aver_fw_* name in this run comes from aver/framework/framework_abi.h, which the header
+        // includes under `#if AVER_MODULE_FRAMEWORK`. The relay cannot exist without the thing
+        // relaying. Scripting is a separate option from the framework (module-matrix.ps1's
+        // scene-off row turns FRAMEWORK off and leaves SCRIPTING on), which is what exposed it.
+#if AVER_MODULE_FRAMEWORK
         aver_fw_set_anim_curve_provider(&SandboxApp::animCurve, this);
+#endif
 
 #if AVER_MODULE_SYNAPSE_SCENE
+        // THE FRAMEWORK GUARD MOVED OUT to cover all three, because the two relays it did not
+        // cover are aver_fw_* names too -- it sat around the resolver alone, which reads as "the
+        // resolver is the framework-dependent one" when in fact it is the least so.
+#if AVER_MODULE_FRAMEWORK
         // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
         // same reason and same placement as the anim-curve provider immediately above.
         aver_fw_set_synapse_target_provider(&SandboxApp::synapseTarget, this);
         // GetSynapsePerception (Aver Node) reaches CSynapsePerception's current sight state
         // the same way.
         aver_fw_set_synapse_perception_provider(&SandboxApp::synapsePerception, this);
-#if AVER_MODULE_FRAMEWORK
         // PerceptionSystem's own resolver seam (SynapsePerception.hpp), NOT a framework_abi.h
         // relay -- see that header's own comment for why Aver.Synapse.Scene must not link
-        // Aver.Framework at all, so only a composition root (linking both) can answer this.
+        // Aver.Framework at all, so only a composition root (linking both) can answer this. It
+        // still needs the guard: synapseTargetResolver is itself declared under it.
         synapse::perceptionSystem().setTargetResolver(&SandboxApp::synapseTargetResolver, this);
 #endif
 #endif
@@ -1178,7 +1236,16 @@ void SandboxApp::onInit(Engine& e)  {
         // SAVE/LOAD, so a project can test its own save path in the editor rather than only in
         // a shipped game -- which, given there is no packaged game today, is the only place it
         // can be tested at all.
+        //
+        // BOTH CONDITIONS, not just the framework one the ABI call needs: saveWriteProvider and
+        // saveLoadProvider are the inline pair declared `#if AVER_MODULE_SCENE &&
+        // AVER_MODULE_FRAMEWORK` in the header (they save and load a whole scene::World through
+        // Aver.Save, which the root CMakeLists adds only with the scene on), so naming them here
+        // under a narrower condition than their own declaration would be the same inconsistency
+        // one level down.
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
         aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
+#endif
 
         // Graph-as-class catch-up, for a project opened from the command line: applyProject's own
         // "Starting scripts" stage already tries this, but a CLI project opens above this block,
@@ -1723,12 +1790,21 @@ void SandboxApp::refreshWindowTitle(Engine& e) {
     // neither yet (a brand new, never-saved one) reads as "untitled", matching every other place
     // in this file that names an unnamed level (see the exit prompt and Save Level As, both in
     // SandboxShell.cpp).
+    //
+    // THE LEVEL HALF IS GUARDED, the project half is not, and that split is the honest one: both
+    // levelName_ and levelPath_ are declared `#if AVER_MODULE_SCENE` beside levelEntities_, because
+    // every verb that can set either of them -- load, Save As, New Level -- is guarded there too.
+    // A tree with no scene can never have a level open, so it shows the project-only title this
+    // function was written to replace, rather than a permanent "untitled" naming nothing.
+    std::string title = "Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name;
+#if AVER_MODULE_SCENE
     std::string display = levelName_;
     if (display.empty() && !levelPath_.empty())
         display = std::filesystem::path(levelPath_).stem().string();
     if (display.empty()) display = "untitled";
-    std::string title = "Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name + " \xE2\x80\x94 " + display;
+    title += " \xE2\x80\x94 " + display;
     if (levelHasUnsavedEdits()) title += "*";
+#endif
     // ONLY WHEN IT CHANGES: setTitle is a Win32 call, and this runs every frame -- most of which
     // change nothing about the level's name or dirty state.
     if (title != windowTitleShown_) {
@@ -1744,6 +1820,14 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // capture's dials have to land AFTER that -- and a handful of frames costs nothing in a run
     // long enough to measure a temporal artifact. runConsoleLine is the console's own entry point,
     // so a --set takes exactly the text the drawer takes, and reports the same errors to the log.
+    //
+    // WHICH IS ALSO WHY IT IS GUARDED: "the console's own entry point" means runConsoleLine is
+    // part of the console, declared and defined `#if AVER_WITH_IMGUI` (SandboxShell.cpp). That
+    // macro is defined only when Aver.RHI.D3D12.ImGui is built, so -DAVER_RHI_D3D12=OFF takes the
+    // editor UI down with the backend and leaves this call naming nothing. The flag is still
+    // PARSED either way, and the #else says so rather than dropping a caller's dials in silence --
+    // the same choice waterEnabled_ makes for --water.
+#if AVER_WITH_IMGUI
     if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
         consoleSetsApplied_ = true;
         for (const auto& kv : consoleSets_) {
@@ -1751,6 +1835,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             runConsoleLine(e, "set " + kv.first + " " + kv.second);
         }
     }
+#else
+    if (!consoleSetsApplied_ && !consoleSets_.empty()) {
+        consoleSetsApplied_ = true;
+        AVER_WARN("[Sandbox] --set ignored: this build has no editor console to route {} pair(s) through",
+                  consoleSets_.size());
+    }
+#endif
     // FIRST in the frame, so everything downstream (view matrix, gPrevViewProj reprojection,
     // shadow history) sees one consistent camera. Latched base yaw rather than accumulating onto
     // yaw_: accumulating would drift with floating-point error and never return exactly to the start.
@@ -1870,6 +1961,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
     }
 #endif
+    // GUARDED AS A WHOLE, unlike the dropped-files drain below, because nothing can ever be
+    // pending here without the scene: the queue is filled only by the open-request hook, and
+    // onInit installs that hook under the same condition (see setOpenRequestHook). requestOpenLevel
+    // and openLevelError_ are `#if AVER_MODULE_SCENE` for the same reason they are -- a forwarded
+    // path asks for a level in a world.
+#if AVER_MODULE_SCENE
     if (window_ && window_->hasPendingOpenRequest()) {
         const std::string path = window_->takePendingOpenRequest();
         if (isLevelFile(path.c_str())) {
@@ -1883,12 +1980,21 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // handleOpenRequest already confirmed it matches the live project, and Window::focus()
         // already brought this window forward from the WM_COPYDATA receive itself.
     }
+#endif  // AVER_MODULE_SCENE
     // Files dragged in from Explorer, latched the same way as the open request just above (see
     // Window::hasPendingDroppedFiles). Only meaningful with a project open -- importDroppedFiles
     // imports into the Content Browser's current folder, and there is no Content Browser, and
     // nowhere to copy TO, before a project exists.
+    //
+    // THE DESTINATION IS THE CONTENT BROWSER, and that is the guard's whole justification: both
+    // importDroppedFiles and notifyOutcome are declared and defined `#if AVER_WITH_IMGUI`
+    // (SandboxContentBrowser.cpp), so a tree built without the D3D12 ImGui backend has neither the
+    // folder to import into nor the toast to report it with. THE QUEUE IS STILL DRAINED in both
+    // arms: Window keeps accepting WM_DROPFILES regardless of what is drawn on top of it, and a
+    // pending list nothing ever takes would grow for the life of the process.
     if (window_ && window_->hasPendingDroppedFiles()) {
         const std::vector<std::string> dropped = window_->takePendingDroppedFiles();
+#if AVER_WITH_IMGUI
         if (project_.valid()) {
             importDroppedFiles(dropped);
         } else {
@@ -1896,6 +2002,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             notifyOutcome(editor::NotifySeverity::Warning, "Nothing to import into",
                           "Open a project before dropping files into the editor.");
         }
+#else
+        AVER_WARN("[Import] {} file(s) dropped; this build has no Content Browser to import into",
+                  dropped.size());
+#endif
     }
     // --pt-scene-toggle-on/-off: verification-only (see the members' own comment). Checked BEFORE
     // syncPtSceneView() so the same onUpdate() that flips the want-flag is the same one that acts
@@ -2080,7 +2190,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.uiWantsMouse      = oio.WantCaptureMouse;
         ic.playing           = playSessionActive();
         ic.releasedByUser    = releasedByUser_;
+        // LEFT AT ITS DEFAULT WITHOUT THE SCENE, not guarded away: defaultPawnPlay_ is declared
+        // `#if AVER_MODULE_SCENE` beside the Play snapshot it belongs to, and false is the honest
+        // value for a tree that cannot enter Play at all -- InputConditions is a plain struct with
+        // the field either way, so resolveInputOwnership still answers the same question.
+#if AVER_MODULE_SCENE
         ic.defaultPawnPlay   = defaultPawnPlay_;
+#endif
         ic.mouseCaptured     = mouse_.captured();
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
         ic.drawerOpen        = drawer_ != Drawer::None;
@@ -2095,11 +2211,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // them is standing in for the human, not weakening the test: everything downstream --
         // resolveInputOwnership itself, the flying_ block, the wheel read -- runs exactly as it
         // does in a real session. Confined to the test's own frames.
+        //
+        // GUARDED TO MATCH ITS DECLARATION: wheelTestForceFly_ lives in the framework block with
+        // maybeWheelSpeedTest and the other Play self-tests, so -DAVER_MODULE_FRAMEWORK=OFF takes
+        // the flag and the test that sets it together. Nothing else in this frame changes: the
+        // three overrides only ever move off their real values while the test is running.
+#if AVER_MODULE_FRAMEWORK
         if (wheelTestForceFly_) {
             ic.uiWantsKeyboard = false;
             ic.uiWantsMouse = false;
             ic.pointerInViewport = true;
         }
+#endif
         own_ = editor::resolveInputOwnership(ic);
     }
 #endif
@@ -2129,8 +2252,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // a conditional block is the same defect as the input publisher that latched every key.
         if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
         // --wheel-speed-test drives this directly; see maybeWheelSpeedTest for why it forces
-        // the state rather than synthesising the right-drag that normally opens it.
+        // the state rather than synthesising the right-drag that normally opens it. Guarded for
+        // the same reason the InputConditions overrides above are -- the flag is declared with
+        // the test that owns it, inside the framework block.
+#if AVER_MODULE_FRAMEWORK
         if (wheelTestForceFly_) flying_ = true;
+#endif
         if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
         if (flying_) {
@@ -2197,13 +2324,25 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // yaw_/pitch_ from its own LATER tick, so the bump never carried into the pawn -- and
         // drivePlayCamera restored it from the pawn's unchanged forward next frame, a "steady
         // camera" that was actually just bad ordering, not ignored input.
+        // All four pieCam members are declared inside the framework block with maybePieCameraTest,
+        // which is honest -- there is no Play-in-Editor camera to test without a GameMode to enter
+        // Play through -- so the injection point is guarded to match rather than the members moved.
+#if AVER_MODULE_FRAMEWORK
         if (pieCamPendingLook_) {
             pieCamPendingLook_ = false;
             yaw_   += 0.5f;
             pitch_ += 0.3f;
             pieCamWantYaw_ = yaw_; pieCamWantPitch_ = pitch_;
         }
+#endif
+        // defaultPawnPlay_ is scene-guarded (see the InputConditions fill above). Without the
+        // module the editor camera flies on the right button alone, which is what it did before
+        // spectator Play existed and the only behaviour a scene-less tree can offer.
+#if AVER_MODULE_SCENE
         if ((flying_ || defaultPawnPlay_) && !io.WantCaptureKeyboard) {
+#else
+        if (flying_ && !io.WantCaptureKeyboard) {
+#endif
             const f32 sp = flySpeed_ * t.dt;
             Vec3 step{0, 0, 0};
             if (ImGui::IsKeyDown(ImGuiKey_W)) step += fwd * sp;
@@ -2284,6 +2423,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // focus to that panel. Select in the list, press F, nothing happens. Reported as "press F
         // to focus is broken", and it is the identical gate that had Delete and Undo silently
         // doing nothing from the same panel.
+        //
+        // SCENE-GUARDED AS A WHOLE: what F frames is a SELECTED ENTITY's bounds, and
+        // selectionBounds is declared `#if AVER_MODULE_SCENE` because it walks the selection set
+        // through the world. anySelected() is not guarded -- the sun, sky and post rows are
+        // selectable without a scene -- but none of those has bounds to frame a camera on, so the
+        // binding does nothing in that tree rather than framing a point at the origin.
+#if AVER_MODULE_SCENE
         if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantCaptureKeyboard &&
             keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
             // selectionBounds, NOT selectedXform/selectedRadius: those describe only the selection's
@@ -2294,11 +2440,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
                 camPos_ = center - fwd * d;
                 flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
-#if AVER_MODULE_SCENE
+                // streaming_ carried its own `#if AVER_MODULE_SCENE` here, which the guard now
+                // opened above makes a repeat of itself -- one condition, stated once.
                 streaming_.resetVelocityTracking();   // teleport; see frameCameraOnLevel for why
-#endif
             }
         }
+#endif  // AVER_MODULE_SCENE
     }
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -2492,8 +2639,16 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // climbed from 3.6e-05 to 12.31s, 4003 tick lines written, no begin_play -- a graph is free to
     // move entities, fire events and write VARs, so browsing a level mutated it.
     // Same condition as the framework tick groups above, deliberately: one spelling, not two.
+    //
+    // WHICH IS ALSO WHY IT NEEDS THE FRAMEWORK GUARD the tick groups already have: the condition
+    // is spelled with aver_fw_play_state(), out of framework_abi.h, and this block sat under SCENE
+    // and SCRIPTING alone. There is nothing to relax here -- a graph CLASS is placed by a
+    // GameMode's world and ticked because Play began, so with no framework there is no Play to
+    // gate on and no class instances to tick.
+#if AVER_MODULE_FRAMEWORK
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
         scripts_.tickGraphClassInstances(t.dt);
+#endif
 #endif
     // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
     // can prove it happened without a human clicking Window > Chunk Streaming.
@@ -2790,7 +2945,15 @@ void SandboxApp::onShutdown(Engine& e)  {
     // value was silently gone.
     // Calling the sync here reads the live members regardless of which UI last touched them --
     // safe unconditionally since setPref*/flushEditorPrefs() are no-ops on nothing dirty.
+    //
+    // "UNCONDITIONALLY" IS ABOUT THE DIRTY CHECK, not about the build: saveEditorPreferences is
+    // the Preferences window's own push and is declared and defined `#if AVER_WITH_IMGUI`
+    // (SandboxSettings.cpp), so it does not exist in a tree built without the D3D12 ImGui backend.
+    // flushEditorPrefs STAYS OUTSIDE the guard -- it is editor::, not a panel, and a pref set from
+    // the command line still deserves to reach disk in a build with no window to change it from.
+#if AVER_WITH_IMGUI
     saveEditorPreferences();
+#endif
     editor::flushEditorPrefs();
     // THE MANIFEST TOO, for the same reason and one the preferences do not have: the project
     // autosave is a 0.5s DEBOUNCE (kProjectAutosaveSec), so an edit made and immediately

@@ -162,6 +162,27 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 // Bakes, writes the result beside the level, and rebuilds the overlay. Returns false with a
 // reason rather than throwing one away, because every way this fails is something the author
 // has to act on: an empty level, an entity dropped far from the rest, physics not running.
+//
+// THE FOUR TOASTS ARE GUARDED, THE BAKE IS NOT, and the split is deliberate rather than the
+// smallest edit that compiles. This function is guarded on AVER_MODULE_SYNAPSE because that is
+// what it genuinely needs for the grid arithmetic -- editor::bakeNavigation, synapse::BakeStats --
+// and it produces a .ocnav on disk plus a `why` string handed back to its caller, neither of which
+// wants a UI. notifyOutcome is declared and defined behind AVER_WITH_IMGUI because it pushes onto
+// editor::notifications(), which only the notification overlay ever drains; so the CALLER is
+// guarded, exactly as the screenshot writer in SandboxRender.cpp and --import's deferred handshake
+// already are (see notifyOutcome's own comment). Every branch below already logs its outcome
+// first, so a -DAVER_ENABLE_UI=OFF build still answers the question -- only the toast about it has
+// nowhere to appear.
+//
+// AND ALSO ON AVER_MODULE_SCENE, which AVER_MODULE_SYNAPSE alone does not prove. Aver.Synapse is
+// the grid math and nothing else, and a tree can compile it in with no entity world behind it at
+// all. The one line below that actually needs a world -- scene::World::instance(), handed to
+// editor::bakeNavigation as what to sample -- is what makes the WHOLE function meaningless without
+// SCENE, not just that one line, so the guard covers the function rather than the call: a bake
+// that can only ever report "failed" is not a degraded feature, it is a button that lies. The
+// Build menu's "Bake Navigation" item carries the same pairing so a scene-less build does not
+// offer a bake it cannot perform.
+#if AVER_MODULE_SCENE
 bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     editor::NavBakeSettings s;
     s.cellSizeCm = navBakeCell_;
@@ -169,7 +190,9 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     synapse::BakeStats st;
     if (!editor::bakeNavigation(scene::World::instance(), s, nav_, &st, &reason)) {
         AVER_WARN("[Editor] navigation bake failed: {}", reason);
+#if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Error, "Navigation bake failed", reason, true);
+#endif
         if (why) *why = reason;
         nav_ = fmt::OcNavData{};
         rebuildNavOverlay(e);
@@ -184,8 +207,10 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     if (levelPath_.empty()) {
         AVER_WARN("[Editor] navigation baked but NOT saved -- this level has no path yet; "
                   "save the level and bake again to write its .ocnav");
+#if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Warning, "Navigation baked, but not saved",
                      "This level has no path yet. Save it and bake again to write its .ocnav.");
+#endif
         return true;
     }
     const std::string path = editor::navPathForLevel(levelPath_);
@@ -193,14 +218,19 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     if (!fmt::saveOcNav(path, nav_, &wwhy)) {
         AVER_WARN("[Editor] navigation bake could not be written to {}: {}", path, wwhy);
         if (why) *why = wwhy;
+#if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Error, "Could not write the navmesh", wwhy, true);
+#endif
         return false;
     }
     AVER_INFO("[Editor] navigation written to {}", path);
+#if AVER_WITH_IMGUI
     notifyOutcome(editor::NotifySeverity::Success, "Navigation baked",
                  std::filesystem::path(path).filename().string());
+#endif
     return true;
 }
+#endif  // AVER_MODULE_SCENE -- no world to sample without it; see this function's own comment
 
 #endif
 
@@ -270,6 +300,30 @@ int folderRank(editor::FileStatus s) {
         case editor::FileStatus::Ignored:    return 0;
         default:                             return 2;   // any tracked change
     }
+}
+
+// The status-bar face for the revision-control widget: an icon, the branch (or whatever state is
+// standing in for one), and -- only once an answer is current -- the change count beside it, the
+// shape Unreal's own status bar uses for the same fact.
+//
+// SPLIT OUT OF drawRevisionControlStatusWidget SO THE LAYOUT CAN MEASURE IT FIRST. The status bar
+// lays its right-hand cluster out by summing each button's rendered width before any of them are
+// drawn, because ImGui::SameLine needs the run's total width to place its start; that means the
+// exact text drawRevisionControlStatusWidget will render has to exist before that widget's own
+// call, not just inside it. Calling this twice a frame (once to measure, once to draw) costs a
+// few string operations over data that is already latched -- nowhere near the git process this
+// whole file exists to keep off the frame thread.
+//
+// BUSY OVERRIDES THE LABEL RATHER THAN RACING IT. `summary` still describes the last answer that
+// was latched, which is a perfectly good answer right up until the moment a new one is already on
+// its way -- and once rcStatusJob_ is set, that is exactly what is happening. Showing the old
+// label and count as though they were current would be indistinguishable from a live answer, and
+// the count in particular can no longer be trusted to be the number git is about to report.
+std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
+    std::string face = ICON_TREE " ";
+    face += busy ? "Refreshing..." : summary.label;
+    if (!busy && summary.changed > 0) face += " (" + std::to_string(summary.changed) + ")";
+    return face;
 }
 
 } // namespace
@@ -804,6 +858,124 @@ void SandboxApp::buildRevisionControlPanel() {
     }
     ImGui::End();
 }
+
+// ---- the status bar's right-hand widgets --------------------------------------------------
+//
+// ONE HELPER, NOT TWO HAND-ROLLED BUTTONS -- see the declaration in SandboxApp.hpp for why: an
+// icon-and-word control tinted by state, answering a question on hover and opening a menu on
+// click, is one shape shared by revision control and MCP, and writing it twice is two sets of
+// padding and two tooltip conventions that will drift apart the first time either one is touched
+// alone. `face` is built by the caller because the caller is the one that knows which icon and
+// which words its own state calls for; `tint` colours only the text, the same way drawerButton
+// above colours only the fill for an active drawer, so all five controls in this row read as one
+// family; `id` gives both the ImGui id and the uiReg_ entry a name that stays put across frames
+// even though `face` itself changes with the state it is reporting.
+bool SandboxApp::statusBarWidget(const char* id, const char* face, const ImVec4& tint,
+                                 const char* tooltip) {
+    ImGui::PushID(id);
+    ImGui::PushStyleColor(ImGuiCol_Text, tint);
+    // SmallButton, matching drawerButton above: the row's five controls share one height only
+    // because every one of them goes through the same call.
+    const bool clicked = ImGui::SmallButton(face);
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+    ImGui::PopID();
+    // TRACKED BY `id`, which does not move, rather than by `face`, which does -- a name MCP has
+    // learned to click by must not walk away the first time the state it names changes.
+    uiReg_.track(id);
+    return clicked;
+}
+
+// The palette for the status-bar widget alone. See RepoMood's own comment for why the states are
+// decided in RevisionControl.hpp and handed here as an enum rather than re-derived from the files.
+//
+// THE SAME TWO LITERALS THE PANEL ALREADY PAINTS WITH, copied verbatim rather than named and
+// shared, because rcStatusColour's own comment already gives the reason a third definition of
+// either colour must not exist: the same status meaning cannot read as two different colours in
+// two views of one repository. Conflicted here is the pink buildRevisionControlPanel paints an
+// unresolved merge with; Dirty reuses the amber the panel paints a detached HEAD with, because
+// both are "something needs a look, nothing is on fire" and this widget has no separate mood for
+// detached -- StatusBarSummary carries that as its own orthogonal bool, not as a RepoMood, since a
+// detached tree can be either clean or dirty and folding it into this enum would force a choice
+// between the two facts.
+ImVec4 SandboxApp::rcMoodColour(editor::RepoMood m) {
+    switch (m) {
+        case editor::RepoMood::Clean:
+            return ImVec4(0.6f, 0.85f, 0.6f, 1.0f);
+        case editor::RepoMood::Dirty:
+            return ImVec4(1.0f, 0.72f, 0.25f, 1.0f);
+        case editor::RepoMood::Conflicted:
+            return ImVec4(0.94f, 0.27f, 0.59f, 1.0f);
+        case editor::RepoMood::Unknown:
+        case editor::RepoMood::NoProject:
+        case editor::RepoMood::NoGit:
+        case editor::RepoMood::NotARepo:
+            break;
+    }
+    // NOTHING TO REPORT IS NOT AN ALARM. A project living outside a repository, or one this editor
+    // has not asked git about yet, is an ordinary way to work, and painting either one red or
+    // amber would spend the one signal those colours are supposed to carry on a state that is not
+    // a problem -- exactly the case summariseForStatusBar's own comment calls out.
+    return ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+}
+
+// Window > Revision Control's icon-and-word twin in the status bar. Reads the SAME latched answer
+// the panel reads, through editor::summariseForStatusBar, so the two surfaces can never disagree
+// about what state the repository is in -- see that function's own comment for why the decision
+// lives there and not in either UI.
+void SandboxApp::drawRevisionControlStatusWidget() {
+    const bool busy = rcStatusJob_ != nullptr;
+    const editor::StatusBarSummary summary = editor::summariseForStatusBar(
+        project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
+    const std::string face = rcStatusFace(busy, summary);
+
+    // THE TOOLTIP CARRIES THE SAME FACTS THE PANEL WOULD, plus one line this widget owns: what
+    // clicking it does. A tooltip that only repeats facts and never says a button is under the
+    // cursor is a tooltip somebody reads once and never acts on.
+    std::string tooltip = summary.detail;
+    if (busy) {
+        if (!tooltip.empty()) tooltip += "\n";
+        tooltip += "A refresh is already asking git for the current answer.";
+    }
+    if (!tooltip.empty()) tooltip += "\n";
+    tooltip += "Click for Refresh and the Revision Control panel.";
+
+    // BUSY BORROWS THE DISABLED COLOUR rather than whatever `summary.mood` says: that mood
+    // describes an answer a new one is already replacing, and colouring it as though it were
+    // still current is the exact wrong answer this split exists to avoid (see rcStatusFace).
+    const ImVec4 tint = busy ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled)
+                             : rcMoodColour(summary.mood);
+    const bool clicked =
+        statusBarWidget("statusbar.revisionControl", face.c_str(), tint, tooltip.c_str());
+    if (clicked) ImGui::OpenPopup("rcStatusMenu");
+
+    if (ImGui::BeginPopup("rcStatusMenu")) {
+        // THE SAME TOGGLE THE WINDOW MENU OFFERS (see "window.revisionControl" above), reachable
+        // here too because this widget exists precisely so the panel is not the only door to this
+        // answer.
+        ImGui::MenuItem("Revision Control", nullptr, &showRevisionControl_);
+        uiReg_.track("statusbar.revisionControl.togglePanel");
+
+        // DISABLED WHILE BUSY, not hidden: a query already running answers the same question a
+        // second git process would ask again, and offering the button anyway just so it can start
+        // a redundant one is worse than greying it out and saying why underneath the cursor.
+        ImGui::BeginDisabled(busy);
+        if (ImGui::MenuItem(ICON_REFRESH " Refresh")) revisionControlRefresh(true);
+        ImGui::EndDisabled();
+        uiReg_.track("statusbar.revisionControl.refresh");
+        if (busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("A refresh is already asking git for the answer.");
+
+        ImGui::Separator();
+        // THE SAME LINES THE TOOLTIP CARRIES, greyed and always visible: a click already committed
+        // to reading this, and making it hover the button a second time to re-read what it just
+        // said would be a worse interface than a few lines of disabled text right here.
+        ImGui::BeginDisabled(true);
+        ImGui::TextUnformatted(summary.detail.empty() ? "(nothing to report)" : summary.detail.c_str());
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
 #endif  // AVER_WITH_IMGUI -- the whole revision-control UI half
 
 // True when the HUD preview may draw: a tab published a rect and no session is playing.
@@ -854,9 +1026,23 @@ bool SandboxApp::dropButton(const char* label) {
 // It is also misnamed for what it does -- its sites include "Saved", "Added water" and
 // "Created" -- which is why folding it into the notification queue rather than keeping a second
 // parallel channel is the right end for it.
+//
+// THE ONE notifyOutcome CALLER THAT MUST NOT SIMPLY LOSE ITS MESSAGE WITHOUT ImGui, which is why
+// this has an #else and the navmesh bake above does not. Every other caller in this tree logs the
+// same outcome on the line before the toast, so guarding the toast alone costs nothing; folding
+// upgradeStatus_ into the queue removed the status bar that used to carry THESE fourteen messages,
+// so the queue is the only channel left and a bare guard would make "Saved X" and "Could not write
+// X" equally silent. The declaration stays unguarded on purpose -- its callers are ordinary
+// save/create paths (saveLevel, Add Water, landscape create) that a -DAVER_ENABLE_UI=OFF build
+// still runs, so the function has to exist; only its destination changes.
 void SandboxApp::setUpgradeStatus(std::string msg,
                       editor::NotifySeverity sev) {
+#if AVER_WITH_IMGUI
     notifyOutcome(sev, std::move(msg), "", sev == editor::NotifySeverity::Error);
+#else
+    if (sev == editor::NotifySeverity::Error) AVER_ERROR("[Editor] {}", msg);
+    else                                      AVER_INFO("[Editor] {}", msg);
+#endif
 }
 
 // May the window close? Called from inside WM_CLOSE, on the message thread -- so it decides and
@@ -948,7 +1134,16 @@ void SandboxApp::saveAll() {
 // something a user can act on.
 // Help > About. Deliberately short: what this build is, what it is drawing with, and where the
 // preferences it writes live -- the three things somebody filing a bug is asked for.
+//
+// GUARDED INSIDE THE BRACES, like every other draw*Prompt in this file and unlike the two that
+// were missed: the declaration in SandboxApp.hpp is unguarded, buildUI calls it from inside its
+// own AVER_WITH_IMGUI block, and a body made of nothing but raw ImGui:: calls cannot compile in a
+// tree where imgui.h was never included (SandboxApp.hpp gates that include on the same macro).
+// drawPendingOpenPrompt, drawUpgradePrompt and drawExitPrompt all already read this way; this one
+// and drawSaveLevelAsPrompt below simply never got the treatment, and a -DAVER_ENABLE_UI=OFF build
+// is what noticed.
 void SandboxApp::drawAboutPrompt(Engine& e) {
+#if AVER_WITH_IMGUI
     if (!showAbout_) return;
     constexpr const char* kTitle = "About Aver Engine";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
@@ -989,6 +1184,9 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
+#else
+    (void)e;
+#endif
 }
 
 // Names a new file for the current level and saves it there.
@@ -996,7 +1194,9 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
 // A NAME, NOT A FILE DIALOG, because the platform layer has openFileDialog and no save
 // counterpart -- and a level belongs in the project's Content\Maps regardless, the same way
 // the Content Browser's own create items work. saveLevel already accepts an arbitrary path.
+// GUARDED INSIDE THE BRACES for drawAboutPrompt's reason, just above.
 void SandboxApp::drawSaveLevelAsPrompt() {
+#if AVER_WITH_IMGUI
     if (!wantSaveLevelAs_) return;
     constexpr const char* kTitle = "Save Level As";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
@@ -1042,6 +1242,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
                                        : "Enter a name with no path separators.");
     if ((go || (submit && valid)) && valid) {
         std::filesystem::create_directories(maps, ec);
+#if AVER_MODULE_SCENE
         if (saveLevel(target.string())) {
             levelPath_ = target.string();
             levelName_ = stem;
@@ -1052,6 +1253,14 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         } else {
             saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
         }
+#else
+        // levelPath_, levelName_ and saveLevel() are declared only under AVER_MODULE_SCENE (there
+        // is no level to name or write without a world) -- and wantSaveLevelAs_ is raised only
+        // from the SCENE-guarded Save Level As menu item, so this popup cannot actually be open in
+        // a build without it. Close it rather than pretend a save happened.
+        wantSaveLevelAs_ = false;
+        ImGui::CloseCurrentPopup();
+#endif
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
@@ -1060,6 +1269,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
+#endif
 }
 
 void SandboxApp::drawExitPrompt(Engine& e) {
@@ -1073,19 +1283,25 @@ void SandboxApp::drawExitPrompt(Engine& e) {
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     std::vector<std::string> dirty = assetEditors_.dirtyTitles();
+#if AVER_MODULE_SCENE
     // The LEVEL first, because it is the thing most likely to represent an afternoon's work and
-    // the thing this prompt used not to mention at all.
+    // the thing this prompt used not to mention at all. levelName_ and levelPath_ are declared
+    // only under AVER_MODULE_SCENE (there is no level to name or path without a world), so
+    // levelDirty itself lives in here too -- every place it is read below is one of these two.
     const bool levelDirty = levelHasUnsavedEdits();
     if (levelDirty)
         dirty.insert(dirty.begin(),
                      "Level: " + (levelName_.empty() ? std::string("untitled") : levelName_));
+#endif
     ImGui::TextWrapped("%zu item%s ha%s unsaved changes:",
                        dirty.size(), dirty.size() == 1 ? "" : "s", dirty.size() == 1 ? "s" : "ve");
     ImGui::Spacing();
     for (const std::string& t : dirty) ImGui::BulletText("%s", t.c_str());
+#if AVER_MODULE_SCENE
     if (levelDirty && levelPath_.empty())
         ImGui::TextDisabled("This level has never been saved -- \"Save all\" cannot name a file "
                             "for it. Cancel, then File > Save Level As.");
+#endif
     if (!exitPromptError_.empty()) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", exitPromptError_.c_str());
@@ -1099,10 +1315,12 @@ void SandboxApp::drawExitPrompt(Engine& e) {
         // The level too, and only when it already HAS a path: a never-saved level has no name to
         // write to, and inventing one here would put a file somewhere the user did not choose.
         // The line above the buttons says so, and Cancel -> Save Level As is the way out.
+#if AVER_MODULE_SCENE
         if (levelDirty && !levelPath_.empty() && !saveLevel(levelPath_)) {
             ++failed;
             why += (why.empty() ? "" : "; ") + std::string("could not save the level to ") + levelPath_;
         }
+#endif
         if (failed == 0) {
             ImGui::CloseCurrentPopup();
             exitPrompt_ = false;
@@ -1142,7 +1360,9 @@ void SandboxApp::openLevelPickerNow() {
     openLevelList_ = editor::listLevels(project_.contentDir());
     openLevelSelected_ = -1;
     openLevelError_.clear();
-    // Pre-select what is already open, so the list appears showing where you are.
+#if AVER_MODULE_SCENE
+    // Pre-select what is already open, so the list appears showing where you are. levelPath_ is
+    // declared only under AVER_MODULE_SCENE (there is no open level to point at without a world).
     for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
         std::error_code lec;
         if (!levelPath_.empty() &&
@@ -1150,6 +1370,7 @@ void SandboxApp::openLevelPickerNow() {
                                         levelPath_, lec))
             openLevelSelected_ = i;
     }
+#endif
     openLevelPicker_ = true;
 }
 
@@ -1276,14 +1497,21 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
         ImGui::TextWrapped("'%s' is about to be %s. The current level has unsaved changes.",
                            std::filesystem::path(pendingOpenPath_).filename().string().c_str(),
                            pendingOpenWhy_.empty() ? "opened" : pendingOpenWhy_.c_str());
+#if AVER_MODULE_SCENE
+    // levelPath_ is declared only under AVER_MODULE_SCENE (there is no level to have a path
+    // without a world) -- and this whole modal only opens because requestOpenLevel or the New
+    // Level menu item raised pendingOpenPrompt_/pendingNewLevel_, both themselves SCENE-guarded,
+    // so nothing below in this #if can run in a build without it either.
     if (levelPath_.empty())
         ImGui::TextDisabled("This level has never been saved, so there is no file to save it to. "
                             "Cancel, then File > Save Level As.");
+#endif
     ImGui::Spacing();
     ImGui::Separator();
 
     // DISABLED WITH NO PATH TO SAVE TO. It used to treat "never saved" as success and open
     // straight through -- the one case where "Save and open" was a button that discarded.
+#if AVER_MODULE_SCENE
     ImGui::BeginDisabled(levelPath_.empty());
     if (ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open",
                       ImVec2(160.0f * dpi_, 0.0f))) {
@@ -1303,18 +1531,31 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
         }
     }
     ImGui::EndDisabled();
+#else
+    // saveLevel(), startNewLevel() and openLevelDirect() are declared only under
+    // AVER_MODULE_SCENE, and per the comment above this modal cannot actually be open in a build
+    // without it -- kept disabled rather than removed so the row's three-button layout does not
+    // shift between configurations.
+    ImGui::BeginDisabled(true);
+    ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open", ImVec2(160.0f * dpi_, 0.0f));
+    ImGui::EndDisabled();
+#endif
     ImGui::SameLine();
     if (ImGui::Button(pendingNewLevel_ ? "Discard and continue" : "Discard and open",
                       ImVec2(170.0f * dpi_, 0.0f))) {
+#if AVER_MODULE_SCENE
         const std::string toOpen = pendingOpenPath_;
         const bool wasNew = pendingNewLevel_;
+#endif
         AVER_WARN("[Sandbox] the current level's unsaved changes are gone");
         ImGui::CloseCurrentPopup();
         pendingOpenPrompt_ = false;
         pendingNewLevel_ = false;
         pendingOpenPath_.clear();
+#if AVER_MODULE_SCENE
         if (wasNew) startNewLevel(e);
         else        openLevelDirect(e, toOpen);
+#endif
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
@@ -1795,12 +2036,21 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::SetTooltip("No lightmap baker yet.\nLighting is real-time: the sun, and voxel cone-traced GI.");
 #if AVER_MODULE_SYNAPSE
             ImGui::Separator();
+#if AVER_MODULE_SCENE
+            // PAIRED WITH bakeNavigationNow'S OWN GUARD. AVER_MODULE_SYNAPSE alone is the grid
+            // math, not a world to sample, so without AVER_MODULE_SCENE this item would call a
+            // bake that always fails -- offering an action that can only ever report "failed" is
+            // worse than not offering it, so the item is gone rather than disabled.
             if (ImGui::MenuItem("Bake Navigation")) bakeNavigationNow(e);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Samples the live physics scene into a walkable grid and "
                                   "writes it beside this level as .ocnav.\n"
                                   "Colours in the overlay are REGIONS: two patches of floor "
                                   "in different colours have no path between them.");
+#endif
+            // SHOWN EVEN WITHOUT SCENE, unlike the item above: this only visualises nav_, which a
+            // level can carry as an already-baked .ocnav loaded from disk, so a scene-less build
+            // can still open a level someone else baked navigation for and look at it.
             ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
 #if AVER_MODULE_PHYSICS
             ImGui::MenuItem("Show Colliders", nullptr, &showColliders_);
@@ -1836,6 +2086,12 @@ void SandboxApp::buildUI(Engine& e) {
             // matters: outlinerOrder_ is what the filter and the expanded folders left on screen,
             // which is what "all" means to someone looking at it. It is also exactly what
             // multiRange walks, so shift-click and this agree by construction.
+            //
+            // outlinerOrder_ and selectAllInOutliner() are declared only under AVER_MODULE_SCENE
+            // (there are no rows to enumerate without a world) -- so a build without it drops the
+            // item rather than offer a "Select All" with nothing behind it. Select None survives:
+            // it only clears sel_/selEntity_, which need no world to do.
+#if AVER_MODULE_SCENE
             ImGui::BeginDisabled(outlinerOrder_.empty());
             // The hint comes from the registry, like every Edit-menu row. It was a hardcoded
             // "Ctrl+A" string with no command behind it, so the menu named a key that was never
@@ -1848,6 +2104,7 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("select.all");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())
                 ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
+#endif
             // BOTH, like every other deselect in this file. Clearing sel_ alone left selEntity_
             // live; it happens to read correctly today only because every consumer tests sel_
             // first, which is one refactor away from resurrecting a dead selection.
@@ -2251,8 +2508,13 @@ void SandboxApp::buildUI(Engine& e) {
     drawPendingOpenPrompt(e);
     drawLaunchRuntimePrompt(e);
     // AFTER the modals, so a request made this frame is guarded by the prompt this frame rather
-    // than being loaded out from under a modal that is about to ask about it.
+    // than being loaded out from under a modal that is about to ask about it. applyPendingOpen is
+    // declared only under AVER_MODULE_SCENE (it loads through level_ into a scene::World that does
+    // not exist without it) -- and every request it would act on comes from requestOpenLevel,
+    // itself SCENE-only, so there is nothing pending to apply in a build without it.
+#if AVER_MODULE_SCENE
     applyPendingOpen(e);
+#endif
 
     // ---------------- status bar ----------------
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -2278,13 +2540,57 @@ void SandboxApp::buildUI(Engine& e) {
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     };
-    // 250 -> 340: widened for the third (Console) button below; the other two keep their spot.
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 340.0f*dpi_));
+    // THE RIGHT-HAND CLUSTER'S START, MEASURED RATHER THAN GUESSED. A literal here has already been
+    // wrong twice -- 250, then 340 "widened for the third button" -- because a constant is a guess
+    // at what a fixed set of labels will render as, and it stops being even that the moment a
+    // fourth and fifth control join the row or a large DPI scale grows every face past what the
+    // guess allowed for. So this sums what ImGui will actually spend on each button: CalcTextSize
+    // for the face's own text, FramePadding.x*2 for the padding SmallButton puts around it, and
+    // ItemSpacing.x for the gap ImGui::SameLine(with no explicit offset) leaves before the next
+    // item -- the same two style fields ImGui itself reads when it lays the row out, not an
+    // estimate of them. The revision-control face is computed once, here, through the same
+    // rcStatusFace the widget below calls again to draw it (see that function's own comment for
+    // why computing it twice costs nothing worth avoiding); the MCP face is drawn by another file
+    // entirely and cannot be measured from this one, so this uses its documented ceiling instead --
+    // "MCP" plus a five-digit port, wide enough that the run it starts is never too short for what
+    // actually gets drawn into it.
+    const bool rcBusy = rcStatusJob_ != nullptr;
+    const editor::StatusBarSummary rcSummary = editor::summariseForStatusBar(
+        project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
+    const std::string rcFace = rcStatusFace(rcBusy, rcSummary);
+
+    const ImGuiStyle& barStyle = ImGui::GetStyle();
+    const f32 barBtnPad = barStyle.FramePadding.x * 2.0f;
+    const auto faceWidth = [&](const char* s) { return ImGui::CalcTextSize(s).x + barBtnPad; };
+    f32 clusterW = faceWidth("Content Browser") + barStyle.ItemSpacing.x +
+                   faceWidth("Output Log") + barStyle.ItemSpacing.x +
+                   faceWidth("Console") + barStyle.ItemSpacing.x +
+                   faceWidth(rcFace.c_str());
+#if AVER_MODULE_MCP
+    clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_LINK " MCP :65535");
+#endif
+    // A SMALL RIGHT MARGIN so the last button is not flush with the window's edge, and fmax
+    // against the cursor's own position -- exactly the guard the old constant already leaned on.
+    // fmax takes the LARGER of the two, so a window too narrow for the whole cluster leaves it
+    // starting immediately after the status text and running off the right edge, rather than
+    // backing it up over text already drawn. Overflowing is recoverable by widening the window;
+    // two runs of text painted through each other is not readable at all. A five-widget row makes
+    // a narrow window more likely to reach this, not less.
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - clusterW - 8.0f*dpi_));
     drawerButton("Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
     ImGui::SameLine();
     drawerButton("Output Log", Drawer::Log, "Show the Output Log");
     ImGui::SameLine();
     drawerButton("Console", Drawer::Console, "Show the Console  (`)");
+    // REVISION CONTROL SITS AT THE FAR RIGHT, where Unreal's own status bar puts the same widget,
+    // with MCP -- an Aver-specific control channel Unreal has no equivalent of -- one slot further
+    // in rather than displacing it.
+    ImGui::SameLine();
+    drawRevisionControlStatusWidget();
+#if AVER_MODULE_MCP
+    ImGui::SameLine();
+    drawMcpStatusWidget();
+#endif
     ImGui::End();
     ImGui::PopStyleVar(2);
 #else

@@ -117,6 +117,20 @@ public:
     i32 meshDefaultMaterial(u64 meshId) const;
 #endif
 
+    // MESH LOOKUP, OUTSIDE THE SCENE BLOCK THE REST OF THIS SECTION IS IN. The name sceneMeshes_ is
+    // historical: the table is the CONTENT INDEX's mesh id -> handle map, keyed by
+    // fnv1a64(relative path), and nothing about a lookup in it needs an entity world. Two editor
+    // callers prove it -- the foliage loader (guarded on AVER_MODULE_LANDSCAPE) asks whether a
+    // species' mesh is loaded before accepting it, and Add > Primitive asks the same question about
+    // a built-in -- and `scene-off` and `all-off` both failed on those two lines, which is how this
+    // was found at all.
+    //
+    // WITH NO SCENE THE TABLE IS SIMPLY EMPTY, because what FILLS it (loadProjectMeshes, the .ocmesh
+    // upload path) stays behind the guard. meshFor then returns 0 for everything, which is exactly
+    // the answer both call sites already handle and already have a sentence for -- "not loaded --
+    // skipping", "no built-in mesh registered". A degraded lookup, not a compile error.
+    rhi::MeshHandle meshFor(u64 id) const;
+
 #if AVER_MODULE_SCENE
     // Uploads the built-in primitives a .ocworld may name. Call once, before any project meshes.
     void registerBuiltins(rhi::IDevice& device);
@@ -178,7 +192,6 @@ public:
     // survive. The packaged game never reloads, so it never calls this.
     void releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles = true);
 
-    rhi::MeshHandle meshFor(u64 id) const;
     usize meshCount() const { return sceneMeshes_.size(); }
     usize projectMeshCount() const { return projectMeshIds_.size(); }
 
@@ -217,8 +230,8 @@ private:
     fmt::ProjectDesc project_;
     std::unordered_map<u64, std::string> contentIndex_;
 
-#if AVER_MODULE_SCENE
     std::unordered_map<u64, rhi::MeshHandle>       sceneMeshes_;
+#if AVER_MODULE_SCENE
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
     // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
     std::unordered_map<u64, i32>                   meshSlot0Material_;

@@ -96,7 +96,15 @@ void SandboxApp::registerMcpAbis() {
 #endif
         }
         if (a.fn == "widgets") {
-            r = uiReg_.describe();
+            // THE REGISTRY IS THE EDITOR UI'S OWN. uiReg_ records which ImGui widget answers to which
+        // name, so there is nothing for it to describe in a build with no editor UI -- and the
+        // member itself is compiled out, which is what `no-ui` failed on. The command stays,
+        // because an MCP client should get an answer rather than a closed socket.
+#if AVER_WITH_IMGUI
+        r = uiReg_.describe();
+#else
+        r = "{\"widgets\":[],\"note\":\"this build has no editor UI\"}";
+#endif
             if (r.empty()) { w = "nothing tracked yet -- no UI frame has completed"; return false; }
             return true;
         }
@@ -253,6 +261,115 @@ void SandboxApp::registerMcpAbis() {
 #endif
     });
 }
+
+// STARTS THE CHANNEL, WHOLE. See SandboxApp.hpp's own comment on this declaration for why the
+// three steps below -- ABI registration, the widget hooks, and the listen -- moved here together
+// rather than staying as onInit's private copy: a button that did only the last of those would
+// bring up a channel that answers `ping` and nothing else.
+bool SandboxApp::mcpStart(u16 port) {
+    // REGISTERED ONCE. registerAbi replaces a module's dispatcher rather than appending to it, so
+    // calling registerMcpAbis a second time would not itself be wrong -- but a stop/start cycle
+    // (the status-bar widget's Stop then Start, or any future caller) running through every
+    // module's registration again for no reason is exactly the kind of habit that stops being
+    // harmless the day one of those registrations is not idempotent. mcpAbisRegistered_ is what
+    // makes "once" true rather than "true so far".
+    if (!mcpAbisRegistered_) {
+        registerMcpAbis();
+        mcpAbisRegistered_ = true;
+    }
+    // Widget hooks are UI-only: uiReg_ (the ImGui widget registry) doesn't exist with
+    // AVER_ENABLE_UI=OFF, and there's nothing for MCP to resolve. Left unregistered -- MCP's
+    // other ABIs still work, so a UI-less editor just reports no widgets. Installed on every call
+    // rather than gated behind mcpAbisRegistered_ above: both closures are stateless captures of
+    // `this`, so re-installing costs nothing, and doing it unconditionally is what keeps a
+    // restarted channel's widget lookups working even if a future McpBridge::stop() ever clears
+    // its own hooks.
+#if AVER_WITH_IMGUI
+    mcp_.setWidgetResolver([this](const std::string& n, f32& x, f32& y) {
+        return uiReg_.centreOf(n, x, y);
+    });
+    mcp_.setWidgetLister([this] { return uiReg_.describe(); });
+#endif
+    if (!mcp_.start(port)) return false;
+    // THE PORT THAT ACTUALLY STARTED, read back off the bridge rather than echoed from `port`:
+    // today start() binds exactly what it is given or fails outright, so the two never differ, but
+    // asking the bridge is what stays correct the day that stops being true.
+    mcpPort_ = mcp_.port();
+    return true;
+}
+
+// Stops the listener and nothing else. DOES NOT UNREGISTER ANYTHING -- there is no unregister call
+// on McpBridge's surface to make even if this wanted to, and there would be nothing to gain by
+// adding one: the ABI dispatchers and the widget hooks are stateless closures over `this`, so
+// leaving them in place costs nothing while the socket is down, and mcpAbisRegistered_ above is
+// what stops a later mcpStart from registering them a second time rather than this function having
+// to undo them now.
+void SandboxApp::mcpStop() {
+    mcp_.stop();
+}
+
+#if AVER_WITH_IMGUI
+// THE STATUS BAR'S CONTROL-CHANNEL WIDGET. Its default state is simply off -- nobody has to opt
+// into a control channel, --mcp does, and most sessions never pass that flag -- which is the
+// opposite of revision control's default state of "waiting for an answer". So idle is drawn as the
+// ordinary case it is, and the one thing this widget insists on saying, in the tooltip and again in
+// the menu, is what a live channel actually lets happen: it drives the editor with real input and
+// can call any registered engine ABI, from anything on this machine that can reach the loopback
+// port. A one-click Start that did not say that would be the wrong thing to ship.
+void SandboxApp::drawMcpStatusWidget() {
+    const bool live = mcp_.listening();
+    char face[40];
+    if (live) std::snprintf(face, sizeof face, ICON_LINK " MCP :%u", static_cast<unsigned>(mcp_.port()));
+    else      std::snprintf(face, sizeof face, ICON_LINK " MCP");
+
+    // NOT AN ALARM COLOUR WHEN OFF. Idle is the normal state for this widget, so painting it red or
+    // amber would tell somebody something is wrong when nothing is -- it reads as live when live,
+    // and otherwise no different from any other disabled label in the bar.
+    const ImVec4 tint = live ? ImVec4(0.38f, 0.78f, 0.43f, 1.0f)
+                              : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+
+    const char* tooltip =
+        live ? "MCP is listening on 127.0.0.1 only.\n"
+               "Anything on this machine that can open a socket to that port can drive this "
+               "editor -- move the mouse, type, click, and call a registered engine ABI.\n"
+               "Click to stop it."
+             : "MCP: a loopback control channel (127.0.0.1 only) that drives the editor with real "
+               "input events and can call registered engine ABIs.\n"
+               "Off by default. Click to start it.";
+
+    // NAMED LIKE ITS NEIGHBOUR, and tracked by statusBarWidget itself rather than here: that
+    // helper already publishes the control under the id it is handed, so a uiReg_.track() at this
+    // call site would put one rect in the registry twice under two different names.
+    if (statusBarWidget("statusbar.mcp", face, tint, tooltip))
+        ImGui::OpenPopup("mcpStatusMenu");
+
+    if (ImGui::BeginPopup("mcpStatusMenu")) {
+        if (live) {
+            if (ImGui::MenuItem("Stop")) mcpStop();
+            uiReg_.track("statusbar.mcp.stop");
+        } else {
+            // mcpPort_ carries the last port asked for, INCLUDING a port a previous attempt failed
+            // to bind -- so a retry from here offers that same value back rather than silently
+            // falling to the default and binding somewhere the caller did not ask for.
+            const u16 wantPort = mcpPort_ ? mcpPort_ : 45123;
+            if (ImGui::MenuItem("Start")) {
+                if (!mcpStart(wantPort))
+                    AVER_WARN("[Mcp] Start (from the status bar) did not bring the channel up; "
+                              "see the editor log above for why");
+            }
+            uiReg_.track("statusbar.mcp.start");
+        }
+        ImGui::Separator();
+        // GREYED AND SPELLED OUT, not just implied by the icon: this is the same honesty as the
+        // tooltip, kept visible without a hover for whoever already has the menu open.
+        ImGui::TextDisabled("A loopback control channel (127.0.0.1 only).");
+        ImGui::TextDisabled("Drives real input and calls registered engine ABIs.");
+        if (live) ImGui::TextDisabled("Listening on 127.0.0.1:%u", static_cast<unsigned>(mcp_.port()));
+        else      ImGui::TextDisabled("Not listening.");
+        ImGui::EndPopup();
+    }
+}
+#endif // AVER_WITH_IMGUI
 
 #endif
 

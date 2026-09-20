@@ -583,11 +583,6 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
     projectMeshIds_.clear();
 }
 
-rhi::MeshHandle GameContent::meshFor(u64 id) const {
-    const auto it = sceneMeshes_.find(id);
-    return it == sceneMeshes_.end() ? 0 : it->second;
-}
-
 const std::pair<Vec3, Vec3>* GameContent::boundsFor(u64 id) const {
     const auto it = meshBounds_.find(id);
     return it == meshBounds_.end() ? nullptr : &it->second;
@@ -816,5 +811,12 @@ void GameContent::loadProjectParticleEffects() {
                   failed ? (", " + std::to_string(failed) + " failed") : "");
 }
 #endif // AVER_MODULE_PARTICLES
+
+// OUTSIDE EVERY GUARD, matching the declaration -- see GameContent.hpp for why a lookup in
+// the content index's mesh table is not scene state, and what an empty table means.
+rhi::MeshHandle GameContent::meshFor(u64 id) const {
+    const auto it = sceneMeshes_.find(id);
+    return it == sceneMeshes_.end() ? 0 : it->second;
+}
 
 } // namespace aver::game

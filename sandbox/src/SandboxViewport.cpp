@@ -68,7 +68,6 @@ void SandboxApp::rebuildNavOverlay(Engine& e) {
 
 #endif
 
-#if AVER_MODULE_LANDSCAPE
 // ---- the selection outline, as LINES ----------------------------------------------------------
 //
 // WHY LINES AND NOT A MESH, which is the whole bug this replaces. The outline used to be the mesh
@@ -97,6 +96,20 @@ void SandboxApp::rebuildNavOverlay(Engine& e) {
 // frame, and the result is cached by mesh id -- so this costs one file read the first time an
 // asset is ever selected and nothing on any later selection of it.
 rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
+// GUARDED ON THE WHOLE BODY, not just selOutlineLines_'s own two accesses below, and the call site
+// in SandboxRender.cpp stays unconditional -- the same shape drawRecoveryPrompt and the rest of the
+// functions above this one already settled for AVER_MODULE_LANDSCAPE (see "WHERE THE TERRAIN BLOCK
+// STARTS" above). selOutlineLines_ lives behind AVER_MODULE_PBR in SandboxApp.hpp because what it
+// caches is built from the material system's own mesh data; guarding only its find()/operator[]
+// calls would leave everything between them -- reading the .ocmesh, welding edges, calling
+// createLineMesh -- running with nowhere to remember the handle it hands back, which is a NEW line
+// mesh leaked on every single call rather than a degraded feature.
+//
+// AND ON AVER_MODULE_SCENE, which AVER_MODULE_PBR does not imply in either direction -- the root
+// CMakeLists' cascade lists neither. meshPathById_ is the scene's map from mesh id to the .ocmesh
+// on disk, and it is the only thing that can turn the id this function is handed into a file to
+// read. Without it there is no outline to build, whatever the material system is doing.
+#if AVER_MODULE_PBR && AVER_MODULE_SCENE
     if (const auto it = selOutlineLines_.find(meshId); it != selOutlineLines_.end()) return it->second;
 
     const auto pit = meshPathById_.find(meshId);
@@ -207,8 +220,22 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
               pit->second, lines.size() / 2, triCount);
     selOutlineLines_[meshId] = h;
     return h;
+#else
+    // No material system, no cache to fill -- 0 already means "this mesh yields no outline" to
+    // every caller (the selection draw in SandboxRender.cpp treats a zero handle as nothing to
+    // draw), so a PBR-less build reports exactly that instead of a half-built feature.
+    (void)e; (void)meshId;
+    return 0;
+#endif
 }
 
+// WHERE THE TERRAIN BLOCK STARTS -- it used to start above selectionOutlineLines. That function
+// reads an .ocmesh and emits boundary/crease line vertices; it names no landscape type and no
+// landscape_ member, and it is called from the selection draw, which has nothing to do with
+// whether the tree was built with terrain. It sat inside the guard only because it is defined
+// next to the sculpt code, and an AVER_MODULE_LANDSCAPE=OFF build died on the mismatch between
+// that and its unguarded call site. Everything from here down really does read landscape_.
+#if AVER_MODULE_LANDSCAPE
 // Replaces every height in the section with the noise parameters the panel is showing.
 // ONE UNDO ENTRY covering the whole section, using the same LandscapeStroke machinery a brush
 // stroke uses -- the difference between a generator you dare experiment with and one you only run
@@ -529,6 +556,9 @@ void SandboxApp::foliageErase(f32 cx, f32 cy) {
 #endif
 
 #if AVER_MODULE_SCENE
+
+#endif
+
 // Re-finds the Player Start by NAME, which is what makes an entity one (see makePlayerStart).
 //
 // WHY IT HAS TO BE RE-DERIVED. playerStart_ is a cached handle, and three things invalidate it
@@ -561,8 +591,6 @@ void SandboxApp::refreshPlayerStart() {
     playerStart_ = editor::refreshPlayerStart(scene::World::instance(), playerStart_, levelEntities_);
 #endif
 }
-
-#endif
 
 // The spawn transform a level should use: the marker if one is live, else the loaded SPAWN
 // record, else nothing. Returns false when the level declares no spawn at all.
@@ -724,8 +752,17 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
             return;
         }
         mesh = found;
+#if AVER_MODULE_SCENE
         const auto trisIt = meshTris_.find(assetId);
         tris = trisIt != meshTris_.end() ? trisIt->second : 0;
+#else
+        // meshTris_ is filled by onMeshLoaded, which only runs at all under AVER_MODULE_SCENE
+        // (SandboxAssets.cpp) -- a scene-less build never populates it for anything, cube included,
+        // so there is no per-mesh count to hand back here. Leaving tris at cubeTris_ from above
+        // would report the CUBE's triangle count for a sphere; 0 is honest about not knowing rather
+        // than quietly wrong.
+        tris = 0;
+#endif
         scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};   // unit mesh -> cube's size
     }
     if (!mesh) return;
@@ -1372,8 +1409,16 @@ void SandboxApp::handleManip(Engine& e) {
         if (keybinds_.pressed(editor::CommandId::EditDuplicate, io)) duplicateSelection();
         // Guarded on the SAME emptiness the menu item greys itself on, so the key and the menu
         // agree about when Select All does nothing.
+        //
+        // AND ALSO ON AVER_MODULE_SCENE, which is not one of the panel-focus checks above. Both
+        // outlinerOrder_ and selectAllInOutliner belong to the World Outliner's multi-selection
+        // (multiSel_ and friends, declared next to them in SandboxApp.hpp) -- "select everything"
+        // means everything the ECS world holds, which does not exist without SCENE, so there is
+        // nothing here for Ctrl+A to select all OF.
+#if AVER_MODULE_SCENE
         if (!outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
             selectAllInOutliner();
+#endif
         if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
         // Ctrl+Shift+Z: an intentionally NOT-rebindable alternate spelling of Redo (same command,
         // not a second one) -- kept as a small hardcoded fallback next to the registry-driven

@@ -48,6 +48,7 @@ int Engine::run(Application* app) {
         // through rather than short-circuiting here keeps the rule in ONE place (the platform layer),
         // so a second caller cannot get it wrong.
         wd.fullscreen = cfg.fullscreen;
+        wd.resizable = cfg.resizable;
         // HIDDEN WHILE THE SPLASH IS UP. The window is fully created -- sized, DPI-resolved, ready
         // for the swapchain that reads those numbers below -- it just has no pixels on screen. It sat
         // behind the loading screen as a frozen grey rectangle otherwise, which reads as a hang.

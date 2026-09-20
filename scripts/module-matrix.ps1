@@ -15,6 +15,12 @@
 #   ./scripts/module-matrix.ps1                 # every configuration
 #   ./scripts/module-matrix.ps1 -Only pbr-off   # just one
 #   ./scripts/module-matrix.ps1 -KeepDirs       # leave the build trees for inspection
+#
+# RUN scripts/module-guard-audit.py FIRST. It reads the guard stack instead of building, so it finds
+# the three shapes above in about two seconds rather than in hours, and every defect it reports was
+# a real failure of this matrix when it was written. It cannot DECIDE a configuration -- only a
+# compiler and a linker can -- so a clean audit is not a green matrix. It is what turns this script
+# from the thing that discovers defects into the thing that confirms there are none left.
 [CmdletBinding()]
 param(
     [string] $Only = "",

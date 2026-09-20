@@ -170,6 +170,137 @@ struct RepoStatus {
     }
 };
 
+// ---- what a STATUS BAR says about all of the above -----------------------------------------------
+//
+// ONE SET OF STATES, DECIDED HERE, BECAUSE THERE ARE NOW TWO SURFACES ONTO THE SAME ANSWER.
+// buildRevisionControlPanel already spells out its "nothing to show" states in five different
+// sentences, and its own comment gives the reason: collapsing them into one empty list is how a
+// panel tells somebody their work is untracked when git simply is not installed. The status-bar
+// button added beside it reads the SAME latched RepoStatus, and a second surface that re-derives
+// those states by hand is a second surface that can disagree with the first -- which is the exact
+// failure mode this whole file was split to prevent (see the top comment: decisions here, process
+// spawning in the .cpp). So the bar asks this function what state it is in and chooses only a
+// colour; it never looks at RepoStatus::files itself.
+
+enum class RepoMood : u8 {
+    // No answer has been latched yet. DISTINCT FROM NotARepo, which is a real answer: "we have not
+    // asked" and "we asked and there is no repository" render the same empty list and mean opposite
+    // things to somebody deciding whether their work is safe.
+    Unknown,
+    NoProject,    // nothing open to ask about; the panel says the same thing in its own words
+    NoGit,        // git is absent or not on PATH -- says nothing at all about the project
+    NotARepo,     // a real answer: this project is not inside a repository, which is normal
+    Clean,
+    Dirty,
+    // OUTRANKS Dirty, and that ordering is the point. An unresolved merge rendered as "12 changed"
+    // is the most dangerous wrong answer this widget can give, because the number looks ordinary.
+    Conflicted,
+};
+
+// Everything the bar needs, and nothing it would have to compute for itself.
+struct StatusBarSummary {
+    RepoMood mood = RepoMood::Unknown;
+    // The button face after the icon: a branch name, or the state when there is no branch to name.
+    std::string label;
+    // Non-ignored entries. Zero unless Dirty or Conflicted, so a caller can draw the count without
+    // first asking which mood it is in.
+    i32 changed = 0;
+    // Carried separately from `mood` because a detached HEAD is orthogonal to clean/dirty: a
+    // detached tree can be either, and folding it into the enum would force the bar to choose which
+    // of the two facts to drop.
+    bool detached = false;
+    // The tooltip body, one fact per line, already in reading order. Empty lines never appear.
+    std::string detail;
+};
+
+// Non-ignored entries. THE SAME RULE clean() USES -- ignored paths do not count, because that is
+// what ignoring them means -- so "clean() is true" and "changedCount() is 0" can never disagree.
+inline i32 changedCount(const RepoStatus& st) {
+    i32 n = 0;
+    for (const FileEntry& f : st.files)
+        if (!f.ignored()) ++n;
+    return n;
+}
+
+// `why` is the latched failure text, which is empty for every ordinary state -- gitRepositoryRoot
+// leaves it empty for "not a repository" precisely so a real failure and a normal absence cannot be
+// shown as the same thing, and this function preserves that distinction rather than flattening it.
+inline StatusBarSummary summariseForStatusBar(bool projectOpen, bool answered, bool gitPresent,
+                                              std::string_view root, const RepoStatus& st,
+                                              std::string_view why) {
+    StatusBarSummary out;
+    const auto line = [&out](std::string_view text) {
+        if (text.empty()) return;
+        if (!out.detail.empty()) out.detail += "\n";
+        out.detail.append(text);
+    };
+
+    if (!projectOpen) {
+        out.mood  = RepoMood::NoProject;
+        out.label = "No project";
+        line("This reports on the repository the PROJECT lives in,");
+        line("which is not the same tree as the editor's own.");
+        return out;
+    }
+    if (!answered) {
+        out.mood  = RepoMood::Unknown;
+        out.label = "Revision Control";
+        line("Waiting for the first answer from git.");
+        line("git runs on a worker thread, never in a frame.");
+        return out;
+    }
+    if (!gitPresent) {
+        out.mood  = RepoMood::NoGit;
+        out.label = "No git";
+        line("git was not found. Install it, or put it on PATH.");
+        line(why);
+        return out;
+    }
+    if (root.empty()) {
+        out.mood  = RepoMood::NotARepo;
+        out.label = "Not tracked";
+        line("This project is not inside a git repository.");
+        line("That is a normal way to use the editor.");
+        line(why);
+        return out;
+    }
+
+    out.detached = st.detached;
+    out.changed  = changedCount(st);
+    // CONFLICTS FIRST. See RepoMood::Conflicted.
+    out.mood = st.hasConflicts() ? RepoMood::Conflicted
+             : out.changed > 0   ? RepoMood::Dirty
+                                 : RepoMood::Clean;
+
+    // NO INVENTED BRANCH NAME. git says `(detached)` where the branch goes, and a UI that fills
+    // that in tells somebody they are on a branch they are not on -- the panel refuses the same way.
+    if (st.detached)            out.label = "detached HEAD";
+    else if (st.branch.empty()) out.label = "(no branch)";
+    else                        out.label = st.branch;
+
+    line(root);
+    if (st.initialCommit) line("No commits yet.");
+    if (st.detached && !st.headOid.empty()) line("Detached at " + std::string(st.headOid.substr(0, 10)));
+    if (!st.hasUpstream) {
+        line("Tracks nothing.");
+    } else if (st.ahead == 0 && st.behind == 0) {
+        // Level with the upstream gets its own sentence rather than "0 ahead, 0 behind", which
+        // reads like a problem. Both counts are positive -- see RepoStatus -- so the words carry
+        // the direction and this never renders "-3 behind".
+        line("Level with " + st.upstream + ".");
+    } else {
+        line(std::to_string(st.ahead) + " ahead, " + std::to_string(st.behind) +
+             " behind " + st.upstream + ".");
+    }
+    if (out.mood == RepoMood::Conflicted)
+        line("This working tree has unresolved conflicts.");
+    else if (out.changed == 0)
+        line("Working tree clean.");
+    else
+        line(std::to_string(out.changed) + (out.changed == 1 ? " changed file." : " changed files."));
+    return out;
+}
+
 // ---- the parse ---------------------------------------------------------------------------------
 
 // The remainder of `rec` after `n` space-separated fields, or empty when the record is short.

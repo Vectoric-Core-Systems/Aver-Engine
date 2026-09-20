@@ -21,7 +21,16 @@ namespace aver {
 // rather than two that have to agree.
 bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 spacingCm) {
     if (!project_.valid()) { setUpgradeStatus("Open a project first.", editor::NotifySeverity::Warning); return false; }
+    // LEVELNAME_ NEEDS SCENE, LANDSCAPE DOES NOT: levelName_ is declared `#if AVER_MODULE_SCENE`
+    // (SandboxApp.hpp, beside levelEntities_) because only a scene can ever have a level open to
+    // name -- see refreshWindowTitle's own comment on that split. A tree with the scene compiled
+    // out never sets it and, on any tree, an unset one already reads back as "untitled" here, so a
+    // scene-less build gets that name outright instead of reading a member that would not exist.
+#if AVER_MODULE_SCENE
     const std::string stem = levelName_.empty() ? std::string("untitled") : levelName_;
+#else
+    const std::string stem = "untitled";
+#endif
     const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Landscape";
     const std::filesystem::path dst = dir / (stem + ".ocland");
     std::error_code ec;
@@ -47,7 +56,14 @@ bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 
     sculpting_ = false;
     sculptCursorValid_ = false;
     recordLandscapeInLevel();
+    // THE CACHE ONLY EXISTS IF THE BROWSER DOES. cbInvalidate drops a listing out of dirCache_,
+    // which is the Content Browser's own, so it is declared and defined behind AVER_WITH_IMGUI
+    // with the rest of that panel -- and the caller is guarded instead, the rule cbIde()'s comment
+    // states for this whole family. With no browser there is no stale listing to correct; the
+    // .ocland is written and loaded exactly the same either way.
+#if AVER_WITH_IMGUI
     cbInvalidate(dir.string());
+#endif
     setUpgradeStatus("Created " + dst.filename().string());
     AVER_INFO("[Landscape] created {} ({}x{} samples, {:.0f}cm spacing, {:.0f}cm across)",
               dst.string(), samples, samples, spacingCm, tileSizeCm);
@@ -70,7 +86,14 @@ void SandboxApp::recordLandscapeInLevel() {
     fmt::OcLandscapePlacement lp;
     if (!levelHeader_.landscapes.empty()) lp = levelHeader_.landscapes.front();   // keep name/material
     lp.section = rel;
+    // SAME SPLIT AS createLandscapeForLevel above: levelName_ only exists `#if AVER_MODULE_SCENE`,
+    // and a scene-less tree has no open level to name, so it falls back to the record's own
+    // "Landscape" default here too rather than reading a member the scene-off build never declared.
+#if AVER_MODULE_SCENE
     if (lp.name.empty()) lp.name = levelName_.empty() ? std::string("Landscape") : levelName_;
+#else
+    if (lp.name.empty()) lp.name = "Landscape";
+#endif
     lp.x = landscape_.data().originCm[0];
     lp.y = landscape_.data().originCm[1];
     lp.z = landscape_.data().originCm[2];
@@ -546,6 +569,13 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // A DEAD OR MISSING ENTITY FALLS BACK TO THE FILE'S COPY rather than dropping the placement.
     // The pairing and snap rule live in LevelClassSave.hpp, header-only, so a test can drive them
     // with a fake lookup -- SandboxApp is add_executable-only.
+    //
+    // GUARDED ON FRAMEWORK HERE TOO, THE SAME WAY openLevelDirect ALREADY GUARDS ITS OWN
+    // spawnClassPlacements() CALL: level_.classPlacements() (GameLevel.hpp) and levelClassInstances_
+    // (SandboxApp.hpp) are both declared `#if AVER_MODULE_FRAMEWORK`, not merely the SCENE this
+    // whole function already sits behind -- a tree with the scene but not the framework spawns no
+    // graph-as-class actors at all, so there is no live instance list for this call to read.
+#if AVER_MODULE_FRAMEWORK
     editor::appendClassPlacements(
         level_.classPlacements(), levelClassInstances_,
         [&world](int32_t e, Transform& xf) {
@@ -557,6 +587,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
             return true;
         },
         w.placements);
+#endif
 
     std::string why;
     if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }

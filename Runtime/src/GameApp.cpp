@@ -608,16 +608,17 @@ BootConfig GameApp::config() const {
                 // with nothing logged. That is the "declared but unread" shape this repo keeps
                 // being bitten by, and the sink had existed the whole time.
                 if (d.windowFullscreen >= 0) b.fullscreen = d.windowFullscreen != 0;
-                // WINDOW.RESIZABLE CANNOT BE APPLIED FROM HERE, and stays unread for one missing
-                // link rather than an unwritten policy: platform::WindowDesc::resizable exists and
-                // Win32Window::create honours it, but BootConfig -- the only thing an Application
-                // hands the engine before the window exists -- has no resizable member for the
-                // value to travel on. Closing it is two lines outside this file: `bool resizable =
-                // true;` on BootConfig (modules/runtime/include/aver/runtime/Application.hpp) and
-                // `wd.resizable = cfg.resizable;` beside the existing wd.fullscreen assignment in
-                // modules/runtime/src/Engine.cpp. This comment exists so the next reader finds that
-                // out here, where the key is otherwise conspicuously absent, instead of concluding
-                // the omission was deliberate.
+                // WINDOW.RESIZABLE, which used to be the one window key nothing read. The comment
+                // that stood here said the value had nowhere to travel on -- BootConfig had no
+                // member for it -- and named the two lines that would close it; those lines now
+                // exist (BootConfig::resizable, and `wd.resizable = cfg.resizable` in
+                // modules/runtime/src/Engine.cpp), so this is the third.
+                //
+                // SAME SHAPE AS FULLSCREEN ABOVE, deliberately: no `cfg_ == default` guard, because
+                // there is no --resizable flag for a manifest to outrank, and -1 already means the
+                // project never stated it. Whoever adds that flag owes both keys the same
+                // command-line-wins test the title and size carry.
+                if (d.windowResizable >= 0) b.resizable = d.windowResizable != 0;
             }
         }
     }
@@ -1338,28 +1339,48 @@ void GameApp::initScripting() {
         // and the playhead history, deliberately NOT the sink, because which host owns the wire
         // does not change when a project reloads its content.
         // Installed unconditionally: a C++ caller can ask for a curve with no scripting host at all.
+        //
+        // THE GUARD IS THE INSTALL'S, NOT THE RELAY'S, and the two terms are different claims.
+        // aver_fw_set_* is framework_abi.h, which only reaches this file with AVER_MODULE_FRAMEWORK;
+        // saveWriteProvider/saveLoadProvider live in the anonymous namespace at the top of this file
+        // under SCENE && FRAMEWORK; animCurve itself needs only the scene. Being inside
+        // AVER_MODULE_SCRIPTING said none of that, so a scene-off tree (which forces the framework
+        // off with it) reached three undeclared functions here with scripting still switched on.
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
         aver_fw_set_anim_curve_provider(&GameApp::animCurve, this);
 
         // SAVE/LOAD. The framework relays; this is what it relays to.
         aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
+#endif
 
 #if AVER_MODULE_SYNAPSE_SCENE
+#if AVER_MODULE_FRAMEWORK
         // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
-        // same reason and same placement as the anim-curve provider immediately above.
+        // same reason and same placement as the anim-curve provider immediately above, and the same
+        // framework term for the same reason: the relay is Synapse's answer, the SETTER is the
+        // framework's ABI. Nothing forces these two modules on together (the scene does not imply
+        // the framework -- see the root CMakeLists' one-way FRAMEWORK-needs-SCENE forcing), so both
+        // have to be asked for.
         aver_fw_set_synapse_target_provider(&GameApp::synapseTarget, this);
         // GetSynapsePerception (Aver Node) reaches CSynapsePerception's current sight state the
         // same way.
         aver_fw_set_synapse_perception_provider(&GameApp::synapsePerception, this);
-#if AVER_MODULE_FRAMEWORK
         // PerceptionSystem's own resolver seam (SynapsePerception.hpp), NOT a framework_abi.h relay
         // -- see that header's own comment for why Aver.Synapse.Scene must not link Aver.Framework
-        // at all, so only a composition root (linking both) can answer "who is the target".
+        // at all, so only a composition root (linking both) can answer "who is the target". It needs
+        // the framework anyway, one level in: synapseTargetResolver's body asks it who is possessed.
         synapse::perceptionSystem().setTargetResolver(&GameApp::synapseTargetResolver, this);
 #endif
 #endif
 
         if (scripts_.graphFireAvailable()) {
+            // anim::animSystem() is Aver.Anim.Scene, included at the top of this file under the
+            // scene's own guard, and animNotify takes a scene::Entity. The two synapse sinks below
+            // need no separate scene term because AVER_MODULE_SYNAPSE_SCENE cannot be on without it
+            // -- the root CMakeLists only adds modules/synapse.scene inside `if(AVER_MODULE_SCENE)`.
+#if AVER_MODULE_SCENE
             anim::animSystem().setNotifySink(&GameApp::animNotify, this);
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
             // The SAME sink as animNotify immediately above -- its body is just
             // scripts_.graphFire(entity, name), nothing anim-specific, and PerceptionSystem's
@@ -1383,6 +1404,12 @@ void GameApp::initScripting() {
 
 // The animation system's answer to the framework's relayed curve query. See framework_abi.h for
 // why this is a function pointer rather than a link edge.
+//
+// SCENE, not SCRIPTING, and this definition was already the honest half of that disagreement: it
+// stood here unguarded while the declaration sat inside AVER_MODULE_SCRIPTING, so a scripting-off
+// build lost the member and kept the definition. What it actually reaches for is anim::animSystem()
+// and scene::Entity, both of which arrive with the scene -- the scripting host is merely who asks.
+#if AVER_MODULE_SCENE
 i32 GameApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
     f32 v = 0.0f;
     if (!anim::animSystem().curveValue(static_cast<scene::Entity>(entity),
@@ -1390,6 +1417,7 @@ i32 GameApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
     *outValue = v;
     return 1;
 }
+#endif // AVER_MODULE_SCENE (animCurve)
 
 #if AVER_MODULE_SYNAPSE_SCENE
 i32 GameApp::synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void*) {
@@ -1434,6 +1462,13 @@ i32 GameApp::synapsePerception(i32 entity, i32* outCanSee, i32* outLastTarget, f
 //
 // (This comment had drifted ~50 lines up the file, where it sat after a closing brace and above
 // animCurve, which has a doc comment of its own. Re-homed.)
+//
+// TWO GUARDS, AND THEY ARE NOT THE SAME QUESTION. The OUTER one is the signature's: scene::Entity
+// has to exist for this to parse at all, which is also the guard GameApp.hpp now declares it under.
+// The INNER one is the body's, and the inert #else below was already written for it -- somebody
+// foresaw a scripting-off build reaching this function and did not foresee the declaration
+// disappearing out from under it in the same build.
+#if AVER_MODULE_SCENE
 void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
 #if AVER_MODULE_SCRIPTING
     auto* self = static_cast<GameApp*>(user);
@@ -1443,6 +1478,7 @@ void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
     (void)e; (void)name; (void)user;
 #endif
 }
+#endif // AVER_MODULE_SCENE (animNotify)
 
 
 void GameApp::discoverProjectGraphs() {

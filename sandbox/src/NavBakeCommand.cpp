@@ -1,7 +1,12 @@
 #include "NavBakeCommand.hpp"
 
 #include "aver/core/Log.hpp"
+// Only reachable, and only needed, where a scene::World is actually sampled below -- see the
+// AVER_MODULE_SCENE guard around measureWorld/bakeNavigation for why the rest of this file, which
+// never names the type, does not carry this include at all.
+#if AVER_MODULE_SCENE
 #include "aver/scene/World.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +21,10 @@ namespace aver::editor {
 // measuring
 // ---------------------------------------------------------------------------------------------
 
+// GUARDED ON SCENE: the header explains why the declaration disappears with the module off; here
+// it is the body that would not compile, since walking `world.count()`/`world.at(i)` IS the
+// function -- there is nothing left to measure without a scene::World to measure it in.
+#if AVER_MODULE_SCENE
 NavExtent measureWorld(scene::World& world, const NavBakeSettings& s) {
     NavExtent e;
     if (s.cellSizeCm <= 0.0f) return e;
@@ -83,11 +92,17 @@ NavExtent measureWorld(scene::World& world, const NavBakeSettings& s) {
     e.depthCm = (e.topZCm - minZ) + s.marginCm;
     return e;
 }
+#endif  // AVER_MODULE_SCENE
 
 // ---------------------------------------------------------------------------------------------
 // baking against the live physics scene
 // ---------------------------------------------------------------------------------------------
 
+// GUARDED ON SCENE, wrapping physicsFloor/physicsHeadroom along with bakeNavigation itself rather
+// than bakeNavigation alone: both are static helpers that exist only to be passed into
+// synapse::bakeNav from inside this function, so leaving them compiled while their one caller is
+// not would trade a missing-scene error for an unused-static-function one instead.
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_PHYSICS
 static bool physicsFloor(void* /*user*/, f32 x, f32 y, f32 topZ, f32 depth,
                          f32* outZ, f32* outNormalZ) {
@@ -169,6 +184,7 @@ bool bakeNavigation(scene::World& world, const NavBakeSettings& s, fmt::OcNavDat
     return true;
 #endif
 }
+#endif  // AVER_MODULE_SCENE
 
 std::string navPathForLevel(const std::string& levelPath) {
     if (levelPath.empty()) return {};

@@ -24,8 +24,17 @@ void SandboxApp::applyProject(Engine& e) {
         e, e.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
     // Restart the settle detector: this is a NEW load, and whatever the previous scene settled
     // at must not count as this one already being finished.
+    //
+    // GUARDED, EVEN THOUGH BOTH FIELDS ARE PLAIN INTS, because what they count is not: they are
+    // startupComplete's record of lastSceneDrawn_ holding steady, and lastSceneDrawn_ only exists
+    // where a scene walk writes it (SandboxApp.hpp declares all three `#if AVER_MODULE_SCENE`,
+    // and startupComplete's own comment calls the whole detector "SCENE work"). Its #else branch
+    // never reads startupSettleCount_/startupSettleFrames_ at all, so a SCENE-less build has
+    // nothing to restart here -- resetting them would be resetting counters no predicate consults.
+#if AVER_MODULE_SCENE
     startupSettleCount_ = -2;
     startupSettleFrames_ = 0;
+#endif
     projectLoadingFrames_ = 0;
     LoadingScreen& loading = *projectLoading_;
     loading.stage("Opening project");
@@ -519,8 +528,11 @@ void SandboxApp::applyProjectRenderSettings() {
     AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
 }
 
-#endif
-
+// INSIDE THE GUARD, not one line past its #endif where it was: this takes a voxi::Settings& and
+// calls voxi::frameBudgetTick, so a VOXI=OFF tree compiled a definition naming a type it had never
+// included. Its only caller (SandboxApp.cpp's onUpdate) already sits in an AVER_MODULE_VOXI block,
+// so nothing loses a call; frameBudgetMs_ itself stays unguarded in the header because it is a
+// manifest key the project round-trip reads and writes whatever renderer is compiled in.
 void SandboxApp::frameBudgetTick(f32 dt, voxi::Settings& vs) {
     // OFF IN CAPTURE RUNS unless asked for by name. A controller that retunes quality mid-run
     // makes every bounded measurement incomparable, which is most of how this engine is
@@ -535,5 +547,7 @@ void SandboxApp::frameBudgetTick(f32 dt, voxi::Settings& vs) {
                   frameBudget_.budgetMs, frameBudget_.avgMs, frameBudget_.rung, vs.giUpdateInterval,
                   vs.giCones);
 }
+
+#endif  // AVER_MODULE_VOXI
 
 } // namespace aver

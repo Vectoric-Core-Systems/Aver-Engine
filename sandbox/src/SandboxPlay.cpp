@@ -447,11 +447,23 @@ Vec3 SandboxApp::camForward() const {
 // the managed router already logs each once per (entity, event).
 // Answers the framework's relayed curve query out of the animation system.
  i32 SandboxApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
+    // SCRIPTING DOES NOT IMPLY THE SCENE, unlike FRAMEWORK/PARTICLES/SYNAPSE_SCENE above: this
+    // function's own signature stays scene-free (an i32, not a scene::Entity, is exactly what
+    // makes that possible), but the LOOKUP needs a real scene::Entity to hand to
+    // anim::animSystem() -- and Aver.Anim.Scene is itself only added under
+    // if(AVER_MODULE_SCENE) (root CMakeLists.txt:362-366), so a scene-off tree has neither the
+    // type nor the module to ask. The host keeps answering "no such curve" rather than losing the
+    // callback slot the scripting bridge already wired up.
+#if AVER_MODULE_SCENE
     f32 v = 0.0f;
     if (!anim::animSystem().curveValue(static_cast<scene::Entity>(entity),
                                        static_cast<u64>(nameHash), v)) return 0;
     *outValue = v;
     return 1;
+#else
+    (void)entity; (void)nameHash; (void)outValue;
+    return 0;
+#endif
 }
 
 #endif
@@ -506,7 +518,11 @@ Vec3 SandboxApp::camForward() const {
 #endif
 #endif
 
-#if AVER_MODULE_SCRIPTING
+// SCENE AS WELL AS SCRIPTING, because the PARAMETER decides this one: scene::Entity comes from
+// Aver.Scene, so a scripting-on/scene-off tree could not compile this signature however willing the
+// scripting host was. The declaration in SandboxApp.hpp carries both terms for the same reason, and
+// the two disagreeing is what the module matrix's scene-off row found.
+#if AVER_MODULE_SCRIPTING && AVER_MODULE_SCENE
  void SandboxApp::animNotify(scene::Entity e, const char* name, void* user) {
     auto* self = static_cast<SandboxApp*>(user);
     if (!self || !name) return;
