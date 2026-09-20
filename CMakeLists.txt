@@ -122,10 +122,12 @@ if(AVER_EDITION STREQUAL "slim")
   # No voxel GI, no geometry cooking, no sub-bone deformation, no upscaler.
   _aver_edition_defaults(OFF ON ON ON ON ON ON OFF OFF OFF OFF ON)
 elseif(AVER_EDITION STREQUAL "full")
-  # Everything, including the editor control channel that standard deliberately leaves out.
+  # Everything. Identical to standard today; it stays a separate edition because the two differ
+  # whenever a module is added that standard should not carry, and collapsing them would mean
+  # re-deriving that distinction the next time one appears.
   _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON ON)
 elseif(AVER_EDITION STREQUAL "standard")
-  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON OFF ON)
+  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON ON)
 else()
   message(FATAL_ERROR "AVER_EDITION '${AVER_EDITION}' is not a known edition (standard, slim, full)")
 endif()
@@ -133,15 +135,28 @@ endif()
 # AN EDITION CHANGE HAS TO RE-DERIVE, and this is the trap that makes it worth the code. option()
 # never overwrites a cache entry that already exists, so reconfiguring an existing tree with a
 # different -DAVER_EDITION would leave every module exactly as the previous edition set it and the
-# build would silently be the old edition under the new name. Only a CHANGE forces the update, so a
-# deliberate -DAVER_MODULE_X=OFF on a later configure of the SAME edition is still respected.
-if(DEFINED AVER_EDITION_APPLIED AND NOT AVER_EDITION_APPLIED STREQUAL AVER_EDITION)
-  message(STATUS "Aver: edition ${AVER_EDITION_APPLIED} -> ${AVER_EDITION}, re-deriving module set")
+# build would silently be the old edition under the new name.
+#
+# AND SO DOES A CHANGE TO WHAT AN EDITION CONTAINS, which is the same trap wearing a different hat
+# and was NOT covered until 2026-09-20. Turning AVER_MODULE_MCP on for `standard` changed only the
+# DEFAULT, and a default cannot reach a tree that already has the entry cached -- so every existing
+# build-release would have reconfigured, rebuilt, reported success, and still had no MCP module in
+# it, with nothing anywhere saying why. The revision below is what closes that: bump it in the same
+# commit that edits the table above, and trees configured before the edit re-derive exactly as they
+# would for an edition rename.
+#
+# THE COST, STATED BECAUSE IT IS REAL: a re-derive overwrites a deliberate -DAVER_MODULE_X=OFF on
+# that one configure, for the same reason an edition change always has. It is announced, it happens
+# once per bump, and a later -D on the SAME edition and revision is still respected.
+set(AVER_EDITION_REVISION "2" CACHE INTERNAL "bump when the edition table above changes")
+set(_aver_edition_stamp "${AVER_EDITION}@${AVER_EDITION_REVISION}")
+if(DEFINED AVER_EDITION_APPLIED AND NOT AVER_EDITION_APPLIED STREQUAL _aver_edition_stamp)
+  message(STATUS "Aver: edition ${AVER_EDITION_APPLIED} -> ${_aver_edition_stamp}, re-deriving module set")
   foreach(m VOXI PBR SCRIPTING SCENE FRAMEWORK PHYSICS LANDSCAPE DEFORM TRIFACTOR SR MCP UPGRADE)
     set(AVER_MODULE_${m} ${_ed_${m}} CACHE BOOL "" FORCE)
   endforeach()
 endif()
-set(AVER_EDITION_APPLIED "${AVER_EDITION}" CACHE INTERNAL "the edition the cached module set came from")
+set(AVER_EDITION_APPLIED "${_aver_edition_stamp}" CACHE INTERNAL "the edition+revision the cached module set came from")
 
 # --- Optional feature modules (the engine builds and runs with these OFF) ---
 option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ${_ed_VOXI})
@@ -173,9 +188,23 @@ option(AVER_MODULE_TRIFACTOR "Virtualized-geometry cluster builder and LOD DAG (
 # that is the actual test, not the option existing).
 option(AVER_MODULE_SR "AverSR upscaler implementations: the built-in spatial resample, and the seam FSR vendors into" ${_ed_SR})
 # The editor control channel, so a tool can press the editor's own buttons and then look at the result.
-# OFF BY DEFAULT: it is a debugging aid, the editor must work without it, and nobody should ship an
-# editor that can be driven over a socket unless they asked for it. Even built, it listens only when the
-# app is told to with --mcp.
+#
+# ON BY DEFAULT SINCE 2026-09-20, and the argument that kept it off is the same one that makes
+# turning it on safe. That argument was: nobody should ship an editor that can be driven over a
+# socket unless they asked for it. They still have to ask -- COMPILED IN IS NOT LISTENING.
+# mcpPort_ is zero unless `--mcp` sets it, SandboxApp::onInit starts nothing when it is zero, and
+# mcp.conf can only supply the NUMBER a later `--mcp` would use; it cannot turn the channel on by
+# itself (SandboxMain.cpp says so outright). The socket opens on `--mcp` or on a deliberate click
+# of the status bar's MCP widget, and nowhere else.
+#
+# What being OFF actually cost was the widget. drawMcpStatusWidget is behind `#if AVER_MODULE_MCP`,
+# correctly -- a button offering to start a channel that was never compiled in is a button that
+# lies -- so the default edition shipped a status bar with no way to see whether the channel was up
+# or to bring it up, and the only route to either was rebuilding the engine. A debugging aid nobody
+# can reach without a rebuild is not much of an aid.
+#
+# STILL AN option(), and the matrix still builds it OFF, because "the editor must work without it"
+# has not stopped being true -- it just stopped being the default.
 option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not needed to run)" ${_ed_MCP})
 # Upgrade: the project migration chain. ON in every edition, including slim -- an engine that
 # cannot open a project made by an older build of itself is not a smaller engine, it is a broken

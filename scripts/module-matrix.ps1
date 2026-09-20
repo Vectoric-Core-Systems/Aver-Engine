@@ -67,10 +67,13 @@ $configs = [ordered]@{
     "no-game"       = @("-DAVER_BUILD_GAME=OFF")
     "no-sandbox"    = @("-DAVER_BUILD_SANDBOX=OFF")
     "no-tests"      = @("-DAVER_BUILD_TESTS=OFF")
-    # MCP defaults OFF, so every other row here already builds it off and none of them says anything
-    # about it. The UNCHECKED configuration of an off-by-default option is the ON one -- the mirror
-    # image of the rest of this table, and the same gap TRIFACTOR had.
-    "mcp-on"        = @("-DAVER_MODULE_MCP=ON")
+    # FLIPPED WITH THE DEFAULT, 2026-09-20, and the reason is the one this row was added for. It
+    # used to read `mcp-on`, because MCP defaulted OFF and so every other row here already built it
+    # off while none of them said anything about the ON configuration -- "the UNCHECKED
+    # configuration of an off-by-default option is the ON one". The default is ON now, which makes
+    # the unchecked configuration the OFF one, so the row has to turn round with it or this table
+    # goes back to proving nothing about the module in exactly the way it was written to stop.
+    "mcp-off"       = @("-DAVER_MODULE_MCP=OFF")
 
     # ---- the RHI is a module too, and swapping its implementation is the whole point of it ----
     #

@@ -2679,8 +2679,19 @@ two of its gates, permanently and silently.
 
 ### Aver.Mcp — driving the editor over a socket
 
-A new module, `AVER_MODULE_MCP`, **default OFF**. The editor is complete without it: no target, no
-thread, no port, and `Sandbox.exe` runs and exits 0 — verified both ways every commit.
+A new module, `AVER_MODULE_MCP`. **Default OFF until 2026-09-20, default ON since.** The editor is
+still complete without it — no target, no thread, no port, and `Sandbox.exe` runs and exits 0, which
+the module matrix's `mcp-off` row proves every time it runs (that row used to read `mcp-on`, and
+turned round with the default so the table keeps checking the configuration nobody builds by
+accident).
+
+**Compiled in is not listening, and that is why the default could move.** `mcpPort_` is zero unless
+`--mcp` sets it, `onInit` starts nothing when it is zero, and `mcp.conf` supplies only the port
+NUMBER a later `--mcp` would use — it cannot turn the channel on by itself. What OFF actually cost
+was the status bar's MCP widget, which is behind `#if AVER_MODULE_MCP` because a button offering to
+start a channel that was never compiled in would be a button that lies: the default edition shipped
+a bar with no way to see whether the channel was up, and no way to bring it up short of rebuilding
+the engine.
 
 It clicks by **posting real Win32 messages**, so a synthetic click travels the identical path as a
 human one through `ImGui_ImplWin32_WndProcHandler`. Two things had to be learnt the hard way:
