@@ -1418,6 +1418,16 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_PBR
             content_.setTextureFactory(e.device()->resources());
             voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
+            // THE SAME RESOLVER, HANDED TO THE ASSET TABS' SHARED PREVIEW. It is the identical
+            // function and the identical GameContent, because a mesh's material must look the same
+            // in an asset tab as it does in the level -- two resolvers would be two answers to
+            // "what texture is this", and the one nobody is watching drifts.
+            //
+            // WITHOUT THIS THE PREVIEW SAMPLES ITS OWN IDENTITY TEXTURES and every material it
+            // shades comes out white, which is exactly the bug the animation editor's blank mesh
+            // turned out to be. Set here rather than inside the preview because the resolver needs
+            // content_, and ActorEditor.cpp has no business knowing what a project is.
+            editor::setPreviewTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
 #endif
             // Installed unconditionally, even in a build with no Trifactor: depthProxy_ is then
             // simply empty, every lookup answers 0, and every pass draws what it drew before.

@@ -7,8 +7,9 @@
 // why it names Aver.Render.PBR.Materials with `if(TARGET ...)` rather than unconditionally, the way
 // it once named Aver.Formats.Material and broke every PBR=OFF build with an LNK1104 in some
 // unrelated target. MaterialSystem is the full type, not a forward declaration, because ActorPreview
-// owns one by value below (its identity/fallback textures for a graph that samples a map this
-// preview was never given an asset for).
+// owns one by value below: its own identity/fallback textures for a graph or a real material that
+// does not drive every slot, AND -- since PreviewDraw::materialHandle -- the same instance's ordinary
+// bindingSet()/constants() lookup for whatever real material a caller hands it.
 #if AVER_MODULE_PBR
 #include "aver/pbr/MaterialSystem.hpp"
 #endif
@@ -33,6 +34,31 @@ struct PreviewDraw {
     // was registered. Meaningless (and quietly ignored, falling back to the simple shader) in a
     // PBR=OFF build or before any graph has ever compiled -- see ActorPreview::createMaterialPipeline.
     u32 materialGraphId = 0;
+    // The REAL material to shade this draw's textures and factors with, or 0 -- which is what EVERY
+    // EXISTING CALLER gets, unchanged, without touching a line of its own code -- for the preview's
+    // own identity textures (white base colour, flat normal, full roughness, no metal), exactly
+    // today's behaviour. A non-zero value is a pbr::MaterialHandle: pbr::MaterialLibrary is a
+    // process-global singleton, so a handle a caller registered there (or was handed by an asset's
+    // own load) is a handle ActorPreview's materialFallback_ can already resolve, through
+    // pbr::MaterialSystem::bindingSet()/constants(), to that material's REAL binding set and REAL
+    // constant block -- no different from how VoxiRenderer::materials() resolves the same handles
+    // for the scene renderer.
+    //
+    // ORTHOGONAL TO materialGraphId ABOVE, not a replacement for it: this field selects WHICH
+    // TEXTURES AND FACTORS averStockAuthored samples, materialGraphId selects WHICH GRAPH (if any)
+    // runs on top of that stock read -- see actor_preview_material.hlsli's own comment on why
+    // graphId's `default: break` arm already means "exactly the stock material", i.e. a plain
+    // textured surface with no custom graph at all. Setting this alone, with materialGraphId still
+    // 0, is exactly that case: a real material's own textures, no graph.
+    //
+    // Declared as u32 rather than pbr::MaterialHandle for the identical reason materialGraphId is:
+    // this header must stay a complete type in a PBR=OFF build, where pbr::MaterialHandle's
+    // declaring header (MaterialSystem.hpp, included only #if AVER_MODULE_PBR above) never reaches
+    // this translation unit at all. Meaningless (and quietly ignored, falling back to the identity
+    // pair) in a PBR=OFF build, or before a host has ever wired a texture resolver in -- see
+    // ActorPreview::setMaterialTextureResolver for what "wired in" means and what happens before it
+    // is.
+    u32 materialHandle = 0;
 };
 
 // The preview's orbit camera: yaw, pitch and distance about a pivot.
@@ -93,6 +119,28 @@ public:
     // Draws the preview into its own targets, before the scene binds the backbuffer.
     void prePass(rhi::IRenderContext& ctx) override;
 
+#if AVER_MODULE_PBR
+    // Lets the HOST tell this preview how to turn a material's TextureRef into a real GPU texture --
+    // the exact callback pbr::MaterialSystem::setTextureResolver() itself takes, forwarded straight
+    // to materialFallback_. This feature never installs one on its own: it links only Aver.Core and
+    // the RHI (see createMaterialPipeline's own "no coat in the preview" comment on why), has no
+    // project loaded and no path to resolve a TextureRef against, and reaching into the editor to
+    // find one would couple this module to whichever editor happened to ask first. The pattern this
+    // mirrors already exists once: Runtime/src/GameApp.cpp and sandbox/src/SandboxApp.cpp both call
+    // `voxiRenderer_.materials().setTextureResolver(...)` on VoxiRenderer's own exposed
+    // pbr::MaterialSystem the same way, after the host itself decides how a TextureRef becomes a
+    // texture.
+    //
+    // UNTIL A HOST CALLS THIS, every TextureRef a bound PreviewDraw::materialHandle names resolves to
+    // nothing (pbr::MaterialSystem::resolveTexture declines with no resolver set) and every slot
+    // keeps sampling materialFallback_'s own identity pixel for that slot -- today's degrade, and the
+    // correct one: white base colour, flat normal, full roughness, no metal, exactly as if
+    // materialHandle had stayed 0.
+    void setMaterialTextureResolver(pbr::MaterialSystem::TextureResolver fn, void* user) {
+        materialFallback_.setTextureResolver(fn, user);
+    }
+#endif
+
 private:
     ActorPreview() = default;
     // Builds the targets, the shaders and the pipeline.
@@ -104,7 +152,8 @@ private:
 
 #if AVER_MODULE_PBR
     // (Re)builds materialPipeline_ against whatever pbr::materialGraphs() currently holds. Called
-    // from prePass whenever the registry's revision has moved past materialGraphRev_ -- see
+    // from prePass the first time ANY draw asks for it (a materialGraphId, a materialHandle, or
+    // both) and again whenever the registry's revision has moved past materialGraphRev_ since -- see
     // VoxiRenderer::prePass's own pull on the identical revision number, which this mirrors for the
     // identical reason: materials load into the registry long after this feature is constructed.
     //
@@ -128,9 +177,13 @@ private:
 
 #if AVER_MODULE_PBR
     // The SECOND pipeline: shades through averEvalMaterial instead of the fixed key-light-plus-fill
-    // above. Built lazily -- see createMaterialPipeline -- and only ever exists once a project has
-    // registered at least one graph, so a project with none costs this struct's few bytes and
-    // nothing else: no extra shader, no extra pipeline, no extra draw-time branch worth measuring.
+    // above -- the only pipeline in this preview that samples a bound texture table at all, so it is
+    // what a real PreviewDraw::materialHandle needs even with materialGraphId still 0 (see that
+    // field's own comment on averStockAuthored running unconditionally). Built lazily -- see
+    // prePass's own trigger and createMaterialPipeline -- and only ever exists once some draw has
+    // asked for a graph OR a real material, so a project with neither costs this struct's few bytes
+    // and nothing else: no extra shader, no extra pipeline, no extra draw-time branch worth
+    // measuring.
     rhi::PipelineHandle materialPipeline_ = 0;
     rhi::ShaderHandle materialVs_ = 0, materialPs_ = 0;
     u64 materialGraphRev_ = ~0ull;   // the revision materialPipeline_ was last built against
@@ -138,12 +191,19 @@ private:
     // ShaderDesc::defines is a raw pointer and a backend (or a test recording the descs, as
     // ActorPreviewTest does) may read it any time after createShader returns.
     std::string materialDefines_;
-    // This preview's OWN identity textures and fallback binding set -- never a project's real
-    // material assets, which this feature has no way to resolve and was never asked to. A graph
-    // that samples a map still gets a defined answer (white, flat, or black, per slot) rather than
-    // an unbound descriptor table, exactly the guarantee MaterialSystem's own fallback exists to
-    // make for a draw with no specific material; see prePass for how gMaterialGraphId still reaches
-    // it despite the constants otherwise being the identity material's.
+    // TWO JOBS, ONE INSTANCE, because they are the same MaterialSystem machinery either way. First,
+    // as its name still says: this preview's OWN identity textures and binding set, the answer a
+    // draw with PreviewDraw::materialHandle == 0 gets -- white, flat, or black per slot, never a
+    // project's real assets, exactly the guarantee MaterialSystem's own fallback exists to make for
+    // a draw with no specific material; see prePass for how gMaterialGraphId still reaches it despite
+    // the constants otherwise being the identity material's. Second, since PreviewDraw grew a real
+    // pbr::MaterialHandle field: THIS is also what resolves that handle to a REAL binding set and
+    // REAL constants, through the ordinary bindingSet()/constants() any consumer of
+    // pbr::MaterialLibrary's process-global registry uses (VoxiRenderer::materials() included) --
+    // this feature was never given its own separate way to reach a project's materials, and does not
+    // need one, because MaterialLibrary is the one place every handle already lives. What it still
+    // cannot do UNSUPERVISED is turn a material's TextureRef into pixels: that needs a
+    // TextureResolver, which only a host can honestly supply -- see setMaterialTextureResolver.
     pbr::MaterialSystem materialFallback_;
 #endif
 

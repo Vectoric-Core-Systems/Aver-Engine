@@ -554,3 +554,23 @@ add_executable(RevisionControlTest src/RevisionControlTest.cpp)
 target_include_directories(RevisionControlTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(RevisionControlTest PRIVATE Aver.Core)
 set_target_properties(RevisionControlTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AnimEditTest -- the animation editor's pure headless core, sandbox/src/AnimEdit.hpp: per-key edits
+# on one OcTrack (insert/delete/move, the offset arithmetic under them, and CubicSpline's tripled
+# stride), whole-clip retiming (scaleClipDuration/shiftClipTime/trimClip keeping tracks, notifies,
+# notify durations and curves in lock-step), and the bone-chain colour palette (a rig's REAL forks,
+# not merely direct children of its single root).
+#
+# ONE SOURCE FILE AND Aver.Formats, RevisionControlTest's exact precedent immediately above: no
+# sandbox .cpp is compiled in, because AnimEdit.hpp is entirely `inline` -- a pure header over
+# aver/core/Types.hpp and aver/formats/OcAnim.hpp, no ImGui, no AnimEditor, no device. It needs
+# Aver.Formats rather than Aver.Core alone (unlike RevisionControlTest) because OcTrack::
+# componentsPerKey()/valid() and OcAnimation::valid() are defined in modules/formats/src/OcAnim.cpp,
+# and Aver.Core/Aver.Platform arrive with it transitively (Aver.Formats's own DEPS are PUBLIC) -- both
+# are still named explicitly below for the same reason MaterialResolveTest and LevelListTest name
+# theirs, so the link line says what the header actually needs rather than leaning on a transitive
+# default that could silently change.
+add_executable(AnimEditTest src/AnimEditTest.cpp)
+target_include_directories(AnimEditTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(AnimEditTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimEditTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

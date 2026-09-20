@@ -15,6 +15,7 @@
 // the mesh is the right view for everything else. Deleting them to celebrate the mesh would have
 // traded one incomplete answer for another.
 #include "AnimEditor.hpp"
+#include "AnimEdit.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorWidgets.hpp"
@@ -34,6 +35,35 @@
 
 #if AVER_WITH_IMGUI
 #include "imgui.h"
+#endif
+
+// THE PREVIEW'S OWN MATERIAL RESOLUTION (buildPreview's mesh draw, below): a mesh's slot-0 surface
+// name -> its .ocmat -> both the domain graph it names (if any) and the pbr::MaterialHandle for its
+// own factors and textures, which is what ActorPreview actually shades the mesh with -- see
+// resolvePreviewMaterial's own top comment for why a graph id alone used to leave the mesh white.
+//
+// GATED ON AVER_MODULE_PBR ALONE, deliberately NOT also nested inside AVER_WITH_IMGUI the way
+// imgui.h above is -- even though GraphEditor.cpp nests this exact pair of guards for its own,
+// similarly-shaped material preview. The two files differ in one load-bearing way: THIS file already
+// includes ActorPreview.hpp/PreviewMeshCache.hpp unconditionally (the block above), so
+// render::preview::PreviewDraw is a complete type here regardless of ImGui, and nothing the
+// resolution code below touches is an ImGui type either -- its only real dependency is the material
+// system. Nesting these includes inside AVER_WITH_IMGUI as well would build resolvePreviewMaterial()
+// (guarded only by AVER_MODULE_PBR, since that is genuinely all IT depends on) in any UI-less
+// configuration that leaves AVER_MODULE_PBR at its default of ON -- module-matrix.ps1's "no-ui" row
+// is exactly that -- with these declarations missing: an undeclared-identifier error the matrix
+// exists to catch, in a function that itself has nothing to do with ImGui. Aver.Formats.Material
+// (OcMat.hpp) and Aver.Render.PBR (MaterialGraphRegistry.hpp) are still only on Sandbox's include
+// path when AVER_MODULE_PBR is on (sandbox/CMakeLists.txt's own `if(TARGET Aver.Render.PBR)` block),
+// which is why the #include needs a guard at all -- just this one, matching what the code actually
+// needs rather than the file's other, unrelated guard.
+#if AVER_MODULE_PBR
+// MaterialResolve.hpp is the sandbox-local header that already carries the runtime's own
+// candidate-path order (see its own top comment).
+#include "MaterialResolve.hpp"
+#include "aver/formats/OcMat.hpp"
+#include "aver/formats/OcGraph.hpp"
+#include "aver/pbr/MaterialGraphRegistry.hpp"
 #endif
 
 #include <algorithm>
@@ -59,6 +89,70 @@ constexpr f32 kRootCubeCm      = 4.0f;
 // its left stays a fixed width, untouched -- see draw()'s own comment where it is sized.
 constexpr f32 kDefaultViewFraction = 0.62f;
 constexpr const char* kPrefViewSplit = "animEditor.viewSplit";
+
+// THE SEQUENCER STRIP'S OWN SPLIT, along the BOTTOM of the tab rather than side-by-side with
+// anything -- see draw()'s own layout comment for why the transport and the timeline lanes moved
+// down here out of the vertical flow they used to sit in, between the header and the mesh/bones
+// checkboxes. A SEPARATE PREF KEY AND DEFAULT FROM kPrefViewSplit/kDefaultViewFraction just above:
+// this is a different divider, between a different pair of panes, and giving it its own key means
+// dragging one split can never be read back as a resize of the other. 0.32f leaves a bit under a
+// third of the tab's vertical room to the strip by default -- enough for the transport row, the
+// master scrub bar, the always-drawn notify lane and a handful of track lanes before drawTimeline()'s
+// own internal scrollbar has to take over, without starving the preview above it on an
+// ordinary-sized dock.
+constexpr f32 kDefaultSeqFraction = 0.32f;
+constexpr const char* kPrefSeqSplit = "animEditor.seqSplit";
+// Whether the strip is retracted to its own thin header. A SEPARATE KEY FROM THE SPLIT FRACTION
+// above, not folded into it as "fraction == 0 means collapsed": a collapsed strip still remembers
+// the fraction it will spring back open to, rather than forgetting it the moment it closes.
+constexpr const char* kPrefSeqCollapsed = "animEditor.seqCollapsed";
+
+#if AVER_WITH_IMGUI
+// The vertical counterpart to EditorWidgets.hpp's own splitterHandle (see that header's own top
+// comment for why the view/tracks split just above already shares ONE horizontal-divider convention,
+// through SplitPane, across every asset tab that has one). That helper drags a WIDTH between two
+// side-by-side children: it reads MouseDelta.x, sets the East-West resize cursor, and calls
+// ImGui::SameLine() so the second pane lands on the same row as the first. None of that is right for
+// a pane stacked BELOW another one, which is the shape this editor's own drawer already uses at the
+// app level and the shape the sequencer strip needs: this reads MouseDelta.y, sets the North-South
+// resize cursor, and touches no cursor position at all, because ImGui's ordinary top-to-bottom flow
+// already puts the next child exactly where a vertical split wants it.
+//
+// KEPT LOCAL TO THIS FILE rather than folded into EditorWidgets.hpp as a second orientation for
+// splitterHandle: this task's brief is this file alone, and a second orientation for a helper other
+// tabs already share is exactly the kind of change that wants its own review rather than one folded
+// in behind an unrelated fix.
+//
+// `*heightPx` IS THE BOTTOM PANE'S OWN HEIGHT (the strip), so dragging the handle UP hands the strip
+// MORE room: `-= MouseDelta.y`, the opposite sign from splitterHandle's `+= MouseDelta.x`, because
+// here the pane whose size this changes sits on the far side of the handle from where that
+// convention's `+=` already reads correctly.
+bool verticalSplitterHandle(const char* id, f32 thickness, f32* heightPx, f32 avail, f32 minSelf,
+                             f32 minOther, bool* released) {
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const f32 w = ImGui::GetContentRegionAvail().x;
+    ImGui::InvisibleButton(id, ImVec2(w > 8.0f ? w : 8.0f, thickness));
+
+    const bool hot = ImGui::IsItemActive() || ImGui::IsItemHovered();
+    if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+
+    bool moved = false;
+    if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.y != 0.0f) {
+        *heightPx -= ImGui::GetIO().MouseDelta.y;
+        moved = true;
+    }
+    if (released) *released = ImGui::IsItemDeactivated();
+    *heightPx = clampSplitWidth(*heightPx, avail, minSelf, minOther);
+
+    if (hot) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const f32 y = at.y + thickness * 0.5f;
+        dl->AddLine(ImVec2(at.x, y), ImVec2(at.x + (w > 8.0f ? w : 8.0f), y),
+                    ImGui::GetColorU32(ImGuiCol_SeparatorActive), 2.0f);
+    }
+    return moved;
+}
+#endif
 
 // The path a clip's skeletonRef names, looked for beside the clip and then under the content root.
 // OcAnimation::skeletonRef was written by the importer and read by NOTHING before this.
@@ -147,6 +241,11 @@ public:
     bool ready() const { return ready_; }
     rhi::MeshHandle drawMesh() const { return drawMesh_; }
     f32 boundsRadius() const { return radius_; }
+    // The mesh's OWN slot-0 surface name (OcMeshData::materialSlots[0]), or empty when the mesh
+    // named none. This is the one fact buildPreview's material resolution needs and the only reason
+    // it still has the decoded OcMeshData around by the time bind() returns -- see bind()'s own
+    // comment on why that struct is built here rather than borrowed from PreviewMeshCache.
+    const std::string& slot0Material() const { return slot0Material_; }
 
     // Binds a rig + mesh pair. Idempotent for the same pair, so the editor can call it every frame
     // without rebuilding GPU resources -- which it does, because the clip (and therefore possibly the
@@ -160,6 +259,10 @@ public:
         drawMesh_ = 0;
         meshPath_ = meshPath;
         boneCount_ = boneCount;
+        // CLEARED HERE, not only set on success: a rebind that fails partway (no skin streams, a
+        // truncated file) must not leave a stale name from whatever the PREVIOUS mesh was, which
+        // buildPreview's caller-side cache would otherwise happily keep resolving a material for.
+        slot0Material_.clear();
         if (meshPath.empty() || boneCount == 0) return false;
 
         fmt::OcMeshData md;
@@ -168,6 +271,11 @@ public:
             AVER_WARN("[AnimEditor] {}", why);
             return false;
         }
+        // TAKEN REGARDLESS OF hasSkin() BELOW: a mesh with no skin streams still falls back to bone
+        // boxes and never reaches buildPreview's mesh-draw branch, so an empty name here is harmless --
+        // but reading it NOW, while `md` is already in hand, is simpler than re-opening the file later
+        // just for this one field.
+        if (!md.materialSlots.empty()) slot0Material_ = md.materialSlots[0];
         if (!md.hasSkin()) {
             // Not an error and not silent: a mesh beside the rig with no skin streams is an ordinary
             // thing to find, and the editor falls back to bone boxes rather than drawing a T-pose that
@@ -243,6 +351,7 @@ private:
     f32                     radius_ = 1.0f;
     bool                    ready_ = false;
     std::vector<Mat4>       staged_;
+    std::string             slot0Material_;   // OcMeshData::materialSlots[0] of the bound mesh, or ""
 };
 
 AnimSkinFeature g_skin;
@@ -265,6 +374,226 @@ AnimSkinFeature* sharedSkin(Engine& e) {
     }
     return g_skin.ready() ? &g_skin : nullptr;
 }
+
+// THE BONE PALETTE, minus one hue. computeBonePalette (AnimEdit.hpp) spreads chain hues across the
+// whole wheel by the golden angle precisely so no hue is reserved -- which means, left alone, a chain
+// could perfectly well land on the same cyan the socket markers use a few lines below in buildPreview.
+// Cyan there means one specific thing across this whole editor -- "an author placed this" -- and a
+// bone that happened to hash to the same colour would say that about a joint that is not a socket.
+// So this reimplements boneColorForChain's own arithmetic (not computeBonePalette itself: rejecting
+// its answer after the fact would still need this same golden-angle formula to compute a
+// replacement, so there is nothing saved by calling it first) with one change: a hue landing inside
+// the excluded band is pushed to the band's far edge instead. Widened well past the socket's own hue
+// (worked out by hand from its {0.18, 0.72, 0.95} baseColor: max=B, L=0.565, hue≈198°) because the
+// band only has to dodge the HUE -- the palette's lightness cycle (kBoneLightLow..kBoneLightHigh)
+// still crosses the socket's own lightness at some depth in any chain that lands near that hue, so a
+// narrow band would just trade an exact collision for a near one.
+constexpr f32 kSocketHueDeg = 198.0f;
+constexpr f32 kSocketHueHalfWidthDeg = 28.0f;
+
+BoneColor boneColorAvoidingSocketCyan(u32 chainRootBoneIndex, u32 depthInChain) {
+    f32 hue = std::fmod(static_cast<f32>(chainRootBoneIndex) * kBoneHueGoldenTurns, 1.0f) * 360.0f;
+    const f32 lo = kSocketHueDeg - kSocketHueHalfWidthDeg;
+    const f32 hi = kSocketHueDeg + kSocketHueHalfWidthDeg;
+    if (hue >= lo && hue <= hi) hue = std::fmod(hue + (hi - lo), 360.0f);
+
+    // IDENTICAL TO boneColorForChain BELOW THIS LINE -- see AnimEdit.hpp's own comment on the
+    // triangle-wave lightness cycle and why it does not simply ramp with depth.
+    const u32 phase = depthInChain % (2 * kBoneLightPeriod);
+    const u32 folded = phase <= kBoneLightPeriod ? phase : (2 * kBoneLightPeriod - phase);
+    const f32 frac = static_cast<f32>(folded) / static_cast<f32>(kBoneLightPeriod);
+    const f32 lightness = kBoneLightLow + (kBoneLightHigh - kBoneLightLow) * frac;
+    return hslToBoneColor(hue, kBoneSaturation, lightness);
+}
+
+// The .cpp-side equivalent of computeBonePalette: one entry per bone, childCounts built once and
+// shared across the walk -- see that function's own comment for why this shape (rather than calling
+// boneColorFor per bone) is the one to use in a loop. The only difference from the header's own
+// version is the substitution above.
+std::vector<BoneColor> computeAnimEditorBonePalette(const fmt::OcSkeleton& skeleton) {
+    std::vector<u32> counts;
+    boneChildCounts(skeleton, counts);
+    std::vector<BoneColor> out(skeleton.bones.size());
+    for (usize i = 0; i < skeleton.bones.size(); ++i) {
+        u32 root = static_cast<u32>(i), depth = 0;
+        boneChainRootAndDepth(skeleton, static_cast<u32>(i), counts, root, depth);
+        out[i] = boneColorAvoidingSocketCyan(root, depth);
+    }
+    return out;
+}
+
+#if AVER_MODULE_PBR
+// Everything one call to resolvePreviewMaterial (below) hands buildPreview: the compiled graph id
+// PreviewDraw::materialGraphId wants, the REAL pbr::MaterialHandle PreviewDraw::materialHandle wants
+// (see that field's own comment for why the preview shades white without one), and a single sentence
+// -- always set, never empty -- for what actually happened. That sentence is cheap enough to both
+// log once (buildPreview's own materialTried_ latch is what makes "once" true) and paint straight
+// into the tab, which is the whole point of it existing as a field rather than living only in a log
+// line nobody thought to go looking for.
+struct PreviewMaterialResolution {
+    u32 graphId = 0;                 // pbr::materialGraphs() id, or 0 = no graph runs on top
+    pbr::MaterialHandle handle = 0;  // the surface's OWN textures/factors, or 0 = the preview's stock identity set
+    std::string status;              // one sentence, safe to print verbatim in the tab
+    bool failed = false;             // a genuine problem -- see the no-GRAPHREF branch for the one case this stays false despite graphId being 0
+};
+
+// Turns a mesh's slot-0 surface NAME into everything the preview seam wants to shade with. This
+// REPLACES the narrower resolvePreviewMaterialGraph this used to be: that function answered only
+// "which graph", discarding the pbr::MaterialDesc loadOcmat() had already parsed on the way there --
+// which is exactly the factors and textures PreviewDraw::materialHandle exists to carry. Throwing
+// them away is why a material with no graph at all (most of them; see the no-GRAPHREF branch below)
+// still drew ActorPreview's white identity textures no matter how correctly the graph half resolved.
+// This answers both questions from the one .ocmat parse instead of discarding half of it.
+//
+// `binariesDir` may be "" (see this function's one call site's own comment on how it is derived) --
+// resolveMaterialPath already tolerates that, it just never matches the Binaries candidate.
+//
+// NOT GameContent::resolveMaterialGraph/materialForSurface (Runtime/src/GameContent.cpp): those
+// methods are PRIVATE to a class this editor has no instance of and no business reaching into (see
+// this function's own reuse-by-name paragraph below for what that costs), and the two hosts resolve
+// a NAME to a FILE differently besides -- the runtime only ever tries Binaries\Materials, by a name a
+// level already recorded; the editor also accepts a hand-authored .ocmat straight under
+// Content\Materials (MaterialResolve.hpp's three-candidate order, the same one the Content Browser
+// and SandboxAssets.cpp already share), which is the common case for a rig an artist just imported
+// and has not yet run through avermatc.
+//
+// FIVE WAYS THIS CAN COME BACK UNABLE TO SHADE WITH ANYTHING REAL, and before this function existed
+// only the last one said why: an empty surface name, an empty content root, no .ocmat found by that
+// name, an .ocmat that failed to parse, and a GRAPHREF naming a graph that will not load or compile.
+// The four genuine failures among them (all but the next paragraph's) each fill `status` with what
+// they were looking for -- the name, the paths tried, the graph it could not read -- and log it once
+// through AVER_WARN.
+//
+// AN .ocmat WITH NO GRAPHREF IS NOT ONE OF THE FOUR FAILURES, on purpose: most materials that exist
+// are exactly this -- factors and textures, no graph at all -- so `failed` stays false, `graphId`
+// stays 0, and `handle` is still the real material's, which is what makes the mesh shade with its
+// authored look instead of the preview's own identity textures. Reporting the ordinary case as a
+// problem would be exactly the kind of cried-wolf log line that made the ACTUAL failure (a mesh that
+// stayed white no matter what this function returned) impossible to tell apart from business as usual.
+//
+// pbr::MaterialLibrary IS A PROCESS-GLOBAL SINGLETON, so a handle for this exact surface may already
+// exist -- created by SandboxApp's own GameContent when the open level placed something wearing it
+// (GameContent::materialForSurface), or by another tab that resolved this same name first. This
+// editor cannot reach GameContent's own name -> handle cache to ask it directly (content_ is a
+// private SandboxApp field, and an AssetEditor tab holds no SandboxApp reference), so it scans the
+// library's LIVE materials by NAME instead -- count()/at()/desc() are the only names MaterialLibrary
+// itself exposes, and an editor session rarely has more than a few dozen materials live, so the scan
+// is cheap, especially run only once per attempt rather than per frame. A NAME MATCH IS A HEURISTIC,
+// not a guarantee: two different .ocmat files that both leave NAME unauthored take it from their own
+// file stem (loadOcmat's own documented default), so a collision would need two different stems to
+// somehow share one authored NAME record -- the same trust MaterialLibrary itself already places in
+// `name` being distinctive enough to show in a tooltip. Nothing found means this really can be the
+// first thing in the process to touch this surface -- a rig opened in a project whose level never
+// placed anything wearing its mesh's material -- so this loads and creates it itself: the same
+// three-candidate-path parse GameContent::materialForSurface does, minus that class's own per-
+// instance cache, which is the thing this whole reuse-by-name scan stands in for.
+PreviewMaterialResolution resolvePreviewMaterial(const std::string& binariesDir,
+                                                  const std::string& contentDir,
+                                                  const std::string& name) {
+    PreviewMaterialResolution r;
+    if (name.empty()) {
+        r.status = "no material: the bound mesh's slot-0 surface has no name";
+        r.failed = true;
+        AVER_WARN("[AnimEditor] {}", r.status);
+        return r;
+    }
+    if (contentDir.empty()) {
+        r.status = "no material: no project content root is open to look '" + name + "' up in";
+        r.failed = true;
+        AVER_WARN("[AnimEditor] {}", r.status);
+        return r;
+    }
+    const std::string matPath = resolveMaterialPath(binariesDir, contentDir, name);
+    if (matPath.empty()) {
+        r.status = "surface '" + name + "' has no .ocmat -- tried " +
+                    (binariesDir.empty() ? std::string("<no Binaries dir; project not fully opened>")
+                                          : binariesDir + "\\Materials\\" + name + ".ocmat") +
+                    ", " + contentDir + "\\Materials\\" + name + ".ocmat, and " + contentDir + "\\" + name;
+        r.failed = true;
+        AVER_WARN("[AnimEditor] {}", r.status);
+        return r;
+    }
+
+    fmt::OcMatExtras extras;
+    pbr::MaterialDesc desc;
+    std::string err;
+    if (!fmt::loadOcmat(matPath, desc, &extras, &err)) {
+        r.status = "material '" + name + "' at " + matPath + " would not parse: " + err;
+        r.failed = true;
+        AVER_WARN("[AnimEditor] {}", r.status);
+        return r;
+    }
+
+    // REUSE FIRST -- see this function's own comment above on why a name scan stands in for
+    // GameContent's own cache, which this editor cannot reach.
+    for (u32 i = 0, n = pbr::MaterialLibrary::get().count(); i < n && !r.handle; ++i) {
+        const pbr::MaterialHandle h = pbr::MaterialLibrary::get().at(i);
+        if (const pbr::MaterialDesc* live = pbr::MaterialLibrary::get().desc(h))
+            if (live->name == desc.name) r.handle = h;
+    }
+
+    if (extras.graphRef.empty()) {
+        // AN ORDINARY MATERIAL -- see this function's own top comment for why this is not one of
+        // the four failures: most materials that exist are exactly this, factors and textures with
+        // no graph at all.
+        if (!r.handle) r.handle = pbr::MaterialLibrary::get().create(desc);
+        if (!r.handle) {
+            r.failed = true;
+            r.status = "material '" + name + "' parsed but MaterialLibrary is full";
+            AVER_WARN("[AnimEditor] {}", r.status);
+        } else {
+            r.status = "shading with '" + desc.name + "' (factors and textures, no graph)";
+        }
+        return r;
+    }
+
+    // CONTENT-RELATIVE, exactly as GameContent::resolveMaterialGraph reads it -- see
+    // OcMatExtras::graphRef's own comment for why the stored path never carries the content
+    // directory on the front.
+    std::string graphPath = contentDir + "\\" + extras.graphRef;
+    for (char& c : graphPath) if (c == '/') c = '\\';
+
+    // idOf() FIRST, so a graph another material or another editor tab already compiled is reused
+    // rather than recompiled (ids are stable for the process -- see MaterialGraphRegistry's own top
+    // comment).
+    u32 graphId = pbr::materialGraphs().idOf(graphPath);
+    bool graphBroken = false;
+    if (!graphId) {
+        fmt::OcGraphData g;
+        if (!fmt::loadOcgraph(graphPath, g, &err)) {
+            graphBroken = true;
+            r.status = "material '" + name + "' names graph '" + extras.graphRef +
+                       "' but it did not load: " + err;
+            AVER_WARN("[AnimEditor] {}", r.status);
+        } else {
+            // add() ITSELF LOGS AND RETURNS 0 when the graph reads fine but does not compile
+            // (MaterialGraphRegistry::add's own comment) -- nothing here needs to repeat that.
+            graphId = pbr::materialGraphs().add(graphPath, g.name, g);
+            if (!graphId) {
+                graphBroken = true;
+                r.status = "material '" + name + "' names graph '" + extras.graphRef +
+                           "' but it did not compile; see the log above";
+            }
+        }
+    }
+
+    // A BROKEN GRAPH DOES NOT TAKE THE WHOLE MATERIAL DOWN WITH IT -- GameContent::materialForSurface's
+    // own comment states the identical rule for the runtime's copy of this same load. graphId stays 0
+    // (ActorPreview's `default: break` arm), but the material's own factors and textures still reach
+    // the mesh through `handle` below, exactly as an ordinary graph-less material would.
+    desc.graphId = graphId;
+    if (!r.handle) r.handle = pbr::MaterialLibrary::get().create(desc);
+    r.graphId = graphId;
+    r.failed = graphBroken || !r.handle;
+    if (!r.handle) {
+        r.status = "material '" + name + "' parsed but MaterialLibrary is full";
+        AVER_WARN("[AnimEditor] {}", r.status);
+    } else if (!graphBroken) {
+        r.status = "shading with '" + desc.name + "' and graph '" + extras.graphRef + "'";
+    }
+    return r;
+}
+#endif
 
 // One .ocanim or .ocskel, open.
 class AnimEditor final : public AssetEditor {
@@ -319,13 +648,32 @@ private:
     // overwriting whichever is on screen with a value that was never part of it -- see pushUndo()'s
     // own comment for the full reasoning.
     //
-    // ONLY THE FIELDS THIS EDITOR CAN WRITE are snapshotted, not a whole clip or a whole skeleton --
-    // ParticleEditor.hpp's own comment on AnimEditor explains why: clip_.tracks carries every sampled
-    // key an importer wrote, and copying that array on a key drag this editor never touches would be
-    // a cost with nothing behind it. skel_.bones is read-only here for the same reason -- selectedBone_
-    // picks one; nothing on this tab moves one. So the clip side snapshots as this small bundle, and
-    // the socket side snapshots as itself, matching SoundEditor's own "State IS the record" shape.
+    // ONLY THE FIELDS THIS EDITOR CAN WRITE are snapshotted, not a whole clip or a whole skeleton.
+    // skel_.bones is STILL read-only here, for the reason ParticleEditor.hpp's own comment on
+    // AnimEditor originally gave for the whole struct -- selectedBone_ picks one; nothing on this tab
+    // moves one -- so it stays out of both stacks.
+    //
+    // clip_.tracks AND clip_.duration ARE NOW IN HERE, which that same original comment said they
+    // never needed to be: "copying that array on a key drag this editor never touches would be a cost
+    // with nothing behind it" was true right up until this editor grew the ability to touch it. A key
+    // move, insert or delete, and a clip-wide retime/scale/trim, all mutate `tracks` (and the last two
+    // also mutate `duration`), so an Undo that left them out would put back every notify, curve and
+    // flag an edit touched while leaving the actual key or timing change on screen -- exactly the
+    // "restores something the author was not editing" failure pushUndo()'s own comment warns about,
+    // just inverted: here it would be an edit that DOES touch tracks/duration but pushes a stack that
+    // doesn't carry them. The cost this reintroduces -- a full copy of every sampled key on every drag
+    // start -- is the same trade GraphEditor's own whole-graph snapshot already makes; there is no
+    // cheaper correct answer once the thing being dragged is IN the snapshot's blast radius.
+    //
+    // sampleRate IS ALSO HERE for the same reason as duration: scaleClipDuration (AnimEdit.hpp) writes
+    // it for a BakedUniform clip, and an Undo that restored `duration` and every track's times but left
+    // sampleRate at its post-scale value would hand a later save() a clip whose baked rate no longer
+    // matches its own duration -- a field silently wrong in a way nothing on screen shows, until
+    // something re-derives key times from it.
     struct ClipUndoState {
+        std::vector<fmt::OcTrack> tracks;
+        f32 duration = 0.0f;
+        u16 sampleRate = 0;
         std::vector<fmt::OcNotify> notifies;
         std::vector<f32> notifyDurations;
         std::vector<fmt::OcCurve> curves;
@@ -348,12 +696,33 @@ private:
     void drawNotifies();
     void drawSockets();
     void drawCurves();
+    // THE THREE WHOLE-CLIP RETIME OPERATIONS (AnimEdit.hpp's scaleClipDuration/shiftClipTime/
+    // trimClip), as one small toolbar rather than three. Split out of drawTracks() -- which is where
+    // it is drawn, at the top of that panel -- because it edits the CLIP, not a track, and giving it
+    // its own function keeps that distinction visible in the diff rather than folding a third kind of
+    // edit into a function whose name still says "tracks".
+    void drawClipRetime();
+    // A track's sampled value at the playhead, formatted per enabled channel -- see its own comment
+    // for why this reads pose_ instead of calling trackSampleAt() a second time.
+    std::string trackValueLabel(const fmt::OcTrack& t) const;
+    // The selected key's time and value-component editors, plus Insert/Delete for the selected
+    // track -- see its own comment for why this is not folded into drawTracks() itself.
+    void drawTrackKeyEditor();
+    // Bounds-clamps selectedTrack_/selectedTrackKey_ against clip_.tracks as it stands right now --
+    // see its own comment for the one case (a trim) that needs this outside of undo/redo.
+    void clampTrackKeySelection();
     // ITEM 7.2: the 2D curve canvas -- draggable keys and draggable tangent handles. Split out of
     // drawCurves() because it is the one part of that panel with real geometry to get right (see its
     // own header comment for the ImGui-free math it calls into and what is and is not tested).
     void drawCurveWidget(fmt::OcCurve& c);
     void buildPreview(Engine& e);
     void reloadIfNeeded();
+    // THE VIEWPORT'S "F" GESTURE WITH A BONE SELECTED: frames that one bone rather than
+    // ActorPreview::frameAll()'s whole-draw-list bounds -- see its own .cpp comment for why this
+    // needs a little geometry of its own rather than reusing frameAll(), which has no notion of
+    // "just this one draw" and nothing else in PreviewCamera (addOrbit/addZoom/panPixels, see its
+    // own declaration) that could stand in for it.
+    void frameSelectedBone(render::preview::ActorPreview& preview, usize boneIndex);
 
     // ITEM 1.3: loop, additive-base and root-motion all persist through parseOcAnim/writeOcAnim
     // already (clip_.flags is a plain u8 the parser fills and the writer emits verbatim) -- this
@@ -423,6 +792,28 @@ private:
     CurveHitKind curveDragKind_ = CurveHitKind::None;
     usize curveDragKeyIndex_ = 0;
 
+    // TRACK/KEY SELECTION, shared between drawTimeline()'s per-track lanes (where a key is clicked
+    // and dragged) and drawTracks()'s detail panel (where the same key's exact time and value
+    // components are typed) -- one selection, read and written from both places, so clicking a key in
+    // the timeline and then typing its time in the table edit the SAME key rather than two the author
+    // has to keep in sync by hand.
+    int   selectedTrack_ = -1;                      // index into clip_.tracks, or -1 for none
+    usize selectedTrackKey_ = kInvalidKeyIndex;      // index into that track's times/values, or none
+    // Set at the moment the mouse goes down on a key in a lane, held for the rest of the drag --
+    // the same press-time-hit-test-then-hold shape curveDragKind_ above already uses, collapsed to a
+    // single bool because a track lane has exactly one draggable thing (the key itself), never a
+    // tangent handle: see AnimEdit.hpp's own note that this file does not build a handle UI for
+    // track tangents, only for curves.
+    bool  trackKeyDragging_ = false;
+
+    // RETIME TOOLBAR STATE (drawClipRetime()). Plain session-only fields, never saved and never
+    // undone themselves -- they hold whatever the author last TYPED, not a fact about the clip, so an
+    // Undo after clicking Apply should put the clip back, not these boxes.
+    f32 retimeScaleFactor_ = 1.0f;
+    f32 retimeShiftSeconds_ = 0.0f;
+    f32 retimeTrimStart_ = 0.0f;
+    f32 retimeTrimEnd_ = 0.0f;
+
     f32 time_ = 0.0f;
     f32 speed_ = 1.0f;
     bool playing_ = true;
@@ -433,8 +824,10 @@ private:
     anim::Pose pose_;
     std::vector<Mat4> model_;
     std::vector<Mat4> skin_;      // poseToSkinning output, handed to the GPU each frame
-    // The bone boxes are an OVERLAY now, not the picture. On by default only when there is no
-    // skinned mesh to show, so a rig with no mesh looks exactly as it always did.
+    // The bone boxes are an OVERLAY now, not the picture -- and, since buildPreview's first bind,
+    // shown BY DEFAULT alongside a mesh rather than only in its absence. See buildPreview's own
+    // comment on why the earlier "mesh present -> bones off" default was wrong; both checkboxes
+    // below (draw(), the "Mesh"/"Bones" pair) still let an author turn either one off by hand.
     bool showBones_ = false;
     bool showMesh_ = true;
     bool skinBound_ = false;
@@ -442,11 +835,55 @@ private:
     bool framed_ = false;
     u32 pendingW_ = 0, pendingH_ = 0;
     f64 resizeDue_ = 0.0;
+    // ONE COLOUR PER BONE (AnimEdit.hpp's palette, minus the socket-cyan band -- see
+    // boneColorAvoidingSocketCyan above), rebuilt only when the skeleton changes size. Sized 0 by
+    // default, which buildPreview's own size check treats as "not built yet" the same way it treats
+    // a genuine skeleton reload -- see reloadIfNeeded(), which clears this outright on one.
+    std::vector<BoneColor> bonePalette_;
+    // THE PREVIEW MESH'S MATERIAL, resolved from its slot-0 surface name and cached rather than
+    // re-resolved every frame -- see buildPreview's own comment for what re-running this per frame
+    // would cost. Plain fields, not gated on AVER_MODULE_PBR, matching GraphEditor's own
+    // materialPreviewGraphId_/materialPreviewDirtyMark_ (GraphEditor.hpp): only the CODE that fills
+    // them needs the guard, not their existence, so this tab's fields keep compiling either way.
+    u32 materialGraphId_ = 0;        // pbr::materialGraphs() id, or 0 = draw the stock pale colour
+    // THE MATERIAL'S OWN TEXTURES AND FACTORS, orthogonal to materialGraphId_ just above -- see
+    // PreviewDraw::materialHandle's own comment for why a real handle is what actually fixes a mesh
+    // that samples white: materialGraphId_ alone selects a GRAPH, but the fixed key-light-plus-fill
+    // and stock shaders both still read from ActorPreview's own identity textures (white base
+    // colour, flat normal, full roughness) until a real pbr::MaterialHandle says otherwise.
+    u32 materialHandle_ = 0;         // a pbr::MaterialHandle, or 0 = the preview's stock identity textures
+    // Set while no content root has been seen yet, so the FIRST resolution that can actually
+    // succeed re-arms the latch above rather than inheriting a verdict reached without a root.
+    bool materialRootPending_ = true;
+    std::string materialTriedFor_;   // the slot-0 name materialGraphId_/materialHandle_ were resolved for
+    bool materialTried_ = false;     // has ANY attempt (success or failure) been made yet
+    // WHAT THE LAST ATTEMPT ACTUALLY FOUND, IN ONE SENTENCE -- always non-empty once materialTried_
+    // is true, and safe to print verbatim: draw() paints this straight into the preview panel (see
+    // its own comment there) so a white or grey mesh is never a silent mystery with nothing but an
+    // Output Log line -- which used to not even exist for four of resolvePreviewMaterial's five ways
+    // of coming back with nothing to shade with -- to explain it.
+    std::string materialStatus_;
+    // Whether materialStatus_ describes a genuine problem (drawn as a warning) rather than an
+    // ordinary outcome (an authored material with no graph is NOT a problem -- see
+    // resolvePreviewMaterial's own comment on why that case leaves this false).
+    bool materialFailed_ = false;
 
     // The view/tracks divider. A plain SplitPane (EditorWidgets.hpp), not gated on AVER_WITH_IMGUI,
     // matching every plain-POD field above it: this tab's fields must keep compiling with no ImGui
     // even though only draw() and resetLayout() actually touch it.
     SplitPane split_;
+
+    // THE SEQUENCER STRIP (drawTransport() + drawTimeline(), now a pane of its own along the BOTTOM
+    // of the tab rather than inline partway down it -- see draw()'s own comment for the reason).
+    // A SEPARATE SplitPane FROM split_ ABOVE, not a second use of it: split_ divides the bones/view/
+    // tracks ROW left-to-right, this divides that whole row from the strip top-to-bottom, and the two
+    // dividers must never read or write each other's persisted fraction. resetLayout() resets both.
+    SplitPane seqSplit_;
+    // Read ONCE, at construction, rather than through SplitPane's lazy `fraction < 0` sentinel: a
+    // bool has no unused value to overload as "not loaded yet" the way a negative fraction already
+    // does for a float, and nothing after construction ever needs to re-read the preference -- only
+    // to write it back, which the toggle below does directly.
+    bool seqCollapsed_ = prefBool(kPrefSeqCollapsed, false);
 };
 
 // Pushes the current state of whichever asset isClip_ says is being edited -- see the header's own
@@ -459,11 +896,16 @@ private:
 // unless isClip_, and drawSockets()' own editable half runs only when it is not -- so the stack this
 // picks always agrees with the edit it is about to record.
 void AnimEditor::pushUndo() {
-    if (isClip_) clipHistory_.push(ClipUndoState{clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags});
+    if (isClip_) clipHistory_.push(ClipUndoState{clip_.tracks, clip_.duration, clip_.sampleRate,
+                                                  clip_.notifies, clip_.notifyDurations, clip_.curves,
+                                                  clip_.flags});
     else         socketHistory_.push(skel_.sockets);
 }
 
 void AnimEditor::applyClipUndoState(ClipUndoState&& s) {
+    clip_.tracks = std::move(s.tracks);
+    clip_.duration = s.duration;
+    clip_.sampleRate = s.sampleRate;
     clip_.notifies = std::move(s.notifies);
     clip_.notifyDurations = std::move(s.notifyDurations);
     clip_.curves = std::move(s.curves);
@@ -477,6 +919,11 @@ void AnimEditor::applyClipUndoState(ClipUndoState&& s) {
     else if (selectedCurve_ >= 0)
         std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s",
                       clip_.curves[static_cast<usize>(selectedCurve_)].name.c_str());
+    // SAME RULE FOR THE TRACK/KEY SELECTION undo just added a stake in: `tracks` can be a different
+    // length after an Undo/Redo than it was before it, and clampTrackKeySelection() is the one place
+    // (shared with drawClipRetime()'s trim, the only live EDIT that can also shrink a track's key
+    // count) that re-derives whether selectedTrack_/selectedTrackKey_ still point at something real.
+    clampTrackKeySelection();
 }
 
 void AnimEditor::applySocketUndoState() {
@@ -488,7 +935,8 @@ void AnimEditor::applySocketUndoState() {
 
 void AnimEditor::undo() {
     if (isClip_) {
-        ClipUndoState s{clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags};
+        ClipUndoState s{clip_.tracks, clip_.duration, clip_.sampleRate,
+                        clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags};
         if (!clipHistory_.undo(s)) return;
         applyClipUndoState(std::move(s));
     } else {
@@ -500,7 +948,8 @@ void AnimEditor::undo() {
 
 void AnimEditor::redo() {
     if (isClip_) {
-        ClipUndoState s{clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags};
+        ClipUndoState s{clip_.tracks, clip_.duration, clip_.sampleRate,
+                        clip_.notifies, clip_.notifyDurations, clip_.curves, clip_.flags};
         if (!clipHistory_.redo(s)) return;
         applyClipUndoState(std::move(s));
     } else {
@@ -523,7 +972,10 @@ void AnimEditor::reloadIfNeeded() {
         else AVER_WARN("[AnimEditor] {}", why);
     } else {
         fmt::OcSkeleton s;
-        if (fmt::loadOcSkel(path_, s, &why)) { skel_ = std::move(s); socketHistory_.clear(); }
+        // bonePalette_ IS CLEARED HERE, not left for buildPreview's size check to catch: a reloaded
+        // rig that happens to keep the same bone count would otherwise pass that check and go on
+        // showing colours computed against whatever the PREVIOUS hierarchy's forks were.
+        if (fmt::loadOcSkel(path_, s, &why)) { skel_ = std::move(s); socketHistory_.clear(); bonePalette_.clear(); }
         else AVER_WARN("[AnimEditor] {}", why);
     }
 }
@@ -655,7 +1107,15 @@ void AnimEditor::buildPreview(Engine& e) {
     if (skin && !skinBound_) {
         skinBound_ = true;   // tried once; a failure falls back to bones and does not retry per frame
         showMesh_ = skin->bind(*e.device(), meshPath_, static_cast<u32>(skel_.bones.size()));
-        showBones_ = !showMesh_;
+        // USED TO BE `showBones_ = !showMesh_` -- bones went off the instant a mesh bound, on the
+        // reasoning that the skinned surface already shows what the rig is doing and a redundant
+        // box-per-bone overlay was clutter by default. That reasoning does not survive what the
+        // overlay is actually FOR: it is how an author tells which bone a selected track belongs to,
+        // spots a broken chain, and -- now that every chain has its own colour (see the palette
+        // rebuild below) -- reads the rig's structure at a glance, none of which the skinned surface
+        // shows by itself. A rig with a mesh now defaults to showing both, same as a rig with none
+        // always has; the "Mesh"/"Bones" checkboxes in draw() still let an author turn either off.
+        showBones_ = true;
     }
 
     anim::restPose(skel_, pose_);
@@ -692,11 +1152,82 @@ void AnimEditor::buildPreview(Engine& e) {
         d.mesh = skin->drawMesh();
         d.boundsRadius = skin->boundsRadius();
         d.roughness = 0.62f;
+        // THE STOCK PALE FALLBACK. Left set unconditionally -- not only when no material resolves --
+        // because a mesh with no slot-0 name, or one whose graph will not compile, must still draw
+        // rather than vanish (materialGraphId simply stays 0 below and ActorPreview falls back to
+        // its own simple key-light-plus-fill shader, which is exactly this colour). Refusing to draw
+        // a mesh over a broken material would turn a shading problem into what looks like a missing
+        // asset -- the same reasoning MaterialGraphRegistry::add's own comment gives for returning 0
+        // on a graph that fails to compile rather than failing the whole material.
         d.baseColor[0] = 0.78f; d.baseColor[1] = 0.76f; d.baseColor[2] = 0.72f;
         const Mat4 id = Mat4::identity();
         std::memcpy(d.world, &id.m[0][0], sizeof d.world);
+#if AVER_MODULE_PBR
+        // RESOLVED ONCE PER SURFACE NAME, NOT ONCE PER FRAME. resolvePreviewMaterial does at least
+        // one filesystem probe (resolveMaterialPath) and, on a cold name, a parse of the .ocmat and
+        // its graph, plus a scan of every live pbr::MaterialLibrary entry -- paying any of that every
+        // frame would be the "compile a graph per frame" cost the task that added this explicitly
+        // ruled out. materialTried_ latches even a FAILED lookup (no .ocmat, a parse error, a graph
+        // that will not compile) for the same reason: a name that never resolves must not be retried
+        // sixty times a second either. Re-armed only when the mesh's own slot-0 name actually
+        // changes -- which, since skin->bind() above only ever runs once per tab (skinBound_
+        // latches), in practice means "resolved exactly once".
+        //
+        // A MISSING CONTENT ROOT IS NOT A FAILED LOOKUP, and latching it as one was a real bug that
+        // survived a build and a run. setAnimEditorContentRoot is called from applyProject
+        // (SandboxProject.cpp), so a tab opened by `--open-asset` draws its first frames BEFORE any
+        // root is known -- and the latch above then recorded "this material does not resolve" for
+        // the rest of the session, from a lookup that never had anywhere to look. The mesh stayed
+        // white with the content root sitting right there one frame later.
+        //
+        // So the latch distinguishes TERMINAL from TRANSIENT: no .ocmat, a parse error, a graph that
+        // will not compile are all answers about the material and are latched, because a name that
+        // never resolves must not be retried sixty times a second. An empty g_contentRoot is an
+        // answer about the EDITOR's state instead, it changes without the material changing, and it
+        // is the one case worth asking again about.
+        const std::string& slot0 = skin->slot0Material();
+        const bool haveRoot = !g_contentRoot.empty();
+        if (haveRoot && (!materialTried_ || materialTriedFor_ != slot0 || materialRootPending_)) {
+            materialTriedFor_ = slot0;
+            materialTried_ = true;
+            materialRootPending_ = false;
+            // BINARIES DIR, DERIVED RATHER THAN PLUMBED IN: this tab only ever receives a content
+            // root (setAnimEditorContentRoot, called from SandboxProject.cpp with project_.
+            // contentDir()), and adding a second setter for the binaries root is a change to a file
+            // outside this one. OcProject::contentDir() is `dir + "\" + contentRoot` and
+            // ::binariesDir() is `dir + "\Binaries"` (OcProject.hpp) -- both built from the SAME
+            // `dir`, one path segment apart -- so taking the parent of the content root recovers
+            // `dir` exactly whenever contentRoot (default "Content") is a single path segment, which
+            // it is for every project this tree ships. A contentRoot nested in a subdirectory would
+            // make this guess wrong; the failure mode is only that the Binaries\Materials candidate
+            // never matches, which resolveMaterialPath already tolerates by falling through to its
+            // next candidate, not a crash or a wrong material.
+            const std::string binariesDir =
+                std::filesystem::path(g_contentRoot).parent_path().string() + "\\Binaries";
+            const PreviewMaterialResolution res = resolvePreviewMaterial(binariesDir, g_contentRoot, slot0);
+            materialGraphId_ = res.graphId;
+            materialHandle_ = res.handle;
+            materialStatus_ = res.status;
+            materialFailed_ = res.failed;
+        }
+        d.materialGraphId = materialGraphId_;
+        // THE FIX ITSELF: a non-zero handle makes averStockAuthored (ActorPreview.cpp's material
+        // pipeline) sample this material's OWN base-colour/normal/roughness textures and factors
+        // instead of the preview's white/flat/full-rough identity set -- see
+        // PreviewDraw::materialHandle's own comment for the two fields' orthogonality and
+        // ActorPreview.cpp's prePass for exactly how a non-zero handle changes which binding set and
+        // constants get bound.
+        d.materialHandle = materialHandle_;
+#endif
         draws.push_back(d);
     }
+
+    // REBUILT ONLY WHEN THE SKELETON CHANGED SIZE -- a genuine reload (a different bone count, or
+    // the same count after reloadIfNeeded() clears this outright, see its own comment) -- not every
+    // frame. computeAnimEditorBonePalette is O(bone count) TOTAL (childCounts built once, shared
+    // across the walk), so this guard is about not repeating that walk sixty times a second for a
+    // rig that never changes, not about the walk itself being expensive.
+    if (bonePalette_.size() != skel_.bones.size()) bonePalette_ = computeAnimEditorBonePalette(skel_);
 
     for (usize i = 0; showBones_ && i < model_.size(); ++i) {
         const Vec3 here{model_[i].m[3][0], model_[i].m[3][1], model_[i].m[3][2]};
@@ -706,10 +1237,28 @@ void AnimEditor::buildPreview(Engine& e) {
         d.boundsRadius = radius;
         d.roughness = 0.55f;
         d.selected = static_cast<int>(i) == selectedBone_;
-        // The selected bone is amber, a root is pale, everything else is the neutral the actor tab
-        // already uses -- so the hierarchy reads without a legend.
-        if (d.selected) { d.baseColor[0] = 0.95f; d.baseColor[1] = 0.62f; d.baseColor[2] = 0.18f; }
-        else if (parent < 0) { d.baseColor[0] = 0.85f; d.baseColor[1] = 0.86f; d.baseColor[2] = 0.90f; }
+        // EVERY CHAIN GETS ITS OWN HUE (computeAnimEditorBonePalette above), so an author can tell a
+        // limb apart from its neighbour -- left arm from right, a finger from the chain it forks off
+        // of -- without reading a single bone name. This REPLACES the old "root is pale" special
+        // case: a skeleton's true root is chain-root-of-itself at depth 0, which the palette already
+        // renders at its own darkest step (kBoneLightLow), so nothing distinct is lost by dropping
+        // the special case, and a rig with several disconnected roots no longer paints them all the
+        // same washed-out grey.
+        if (i < bonePalette_.size()) {
+            const BoneColor& c = bonePalette_[i];
+            d.baseColor[0] = c.r; d.baseColor[1] = c.g; d.baseColor[2] = c.b;
+        }
+        // SELECTION STILL HAS TO WIN against a rig that is now colourful everywhere, not just against
+        // the old flat neutral grey -- so dropping the amber highlight in favour of "the palette
+        // colour, brightened" was not good enough: the golden-angle spread reserves no hue, so SOME
+        // chain can legitimately land close to whatever hue "brightened" would produce, and picking a
+        // fixed accent hue has the identical problem (see the socket-cyan comment above
+        // boneColorAvoidingSocketCyan for the same reasoning applied to a different colour). What the
+        // palette CANNOT produce, by construction, is a lightness above kBoneLightHigh (0.64) at any
+        // hue or any depth -- so a highlight paler than that reads as "brighter than any rig colour"
+        // regardless of which bone, or which chain, is selected. Kept warm (amber-ish) rather than
+        // pure white to match the "selected" language this same file already uses for a socket.
+        if (d.selected) { d.baseColor[0] = 0.98f; d.baseColor[1] = 0.92f; d.baseColor[2] = 0.55f; }
 
         Mat4 m;
         if (parent >= 0 && static_cast<usize>(parent) < model_.size()) {
@@ -1408,29 +1957,108 @@ void AnimEditor::drawNotifies() {
 #endif
 }
 
+// A stable, cheap-to-call time-to-pixel mapper shared by every lane this function draws, so the
+// master slider, the notify lane, the curve lane and every per-track lane all agree on where a given
+// second lands -- one bar of ticks and forty scattered rows would still be useless if they each did
+// their own rounding. Already inside this file's own top-level anonymous namespace (opened above
+// AnimSkinFeature), so this needs no linkage of its own -- same as boneBox and computeAnimEditorBonePalette
+// beside it.
+f32 laneX(f32 x0, f32 x1, f32 t, f32 dur) { return x0 + (x1 - x0) * (dur > 0.0f ? t / dur : 0.0f); }
+#if AVER_WITH_IMGUI
+// A lane row's screen rect, named rather than std::pair<ImVec2, ImVec2> so a call site reads
+// `.min`/`.max` instead of `.first`/`.second`.
+struct LaneRect { ImVec2 min, max; };
+#endif
+
+// ITEM: PER-TRACK LANES. This used to be ONE shared bar -- the master slider itself -- with every
+// track's key times painted onto it as identical yellow ticks. That told an author THAT a key existed
+// somewhere near a given time and nothing about WHOSE key it was; a forty-bone rig gave one bar of
+// forty overlapping ticks and no way to click any single one of them. Below, each track gets its own
+// row, named by its bone, with only ITS OWN keys drawn in it -- which is also what makes a key
+// something the mouse can land on: drawTracks()'s selectedTrack_/selectedTrackKey_ are set from a
+// click IN A SPECIFIC LANE, not from a click on a bar that never said which track it belonged to.
+//
+// NOTIFIES AND THE SELECTED CURVE GET THEIR OWN LANES TOO, ABOVE THE TRACK LIST, rather than staying
+// overlaid on the master slider. The old comment on the notify loop said Unreal gives notifies their
+// own lane and that doing the same here would be right "once there are lanes to give" -- there are
+// now, so notifies take the first one and the selected curve (when there is one) takes the next,
+// both drawn UNSCROLLED and always visible: a notify or a curve shape is a small, bounded amount of
+// content an author wants to see continuously while scrolling past track 80 of 200, not something
+// that should scroll away with the tracks underneath it.
 void AnimEditor::drawTimeline() {
 #if AVER_WITH_IMGUI
     const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
     ImGui::SetNextItemWidth(-1);
-    // Scrubbing PAUSES, because a slider that fights the clock cannot be placed.
+    // Scrubbing PAUSES, because a slider that fights the clock cannot be placed. This is now the
+    // ONLY thing drawn on the slider itself -- every per-track tick, the curve overlay and the
+    // notify markers that used to be painted over it moved into their own lanes below, so this bar
+    // goes back to being what an ImGui slider already looks like.
     if (ImGui::SliderFloat("##time", &time_, 0.0f, dur, "%.3f s")) playing_ = false;
 
-    // The key times of every track, so a scrub can be landed on a key rather than near one.
-    const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
+    const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+    // THE NAME COLUMN'S WIDTH is fixed across every lane -- the master slider has none, so this
+    // constant exists only from here down -- so that a key's x in one row lands under the same
+    // instant as a key's x in every other row, and under the same instant as the playhead line
+    // drawn across all of them.
+    const f32 nameW = 130.0f * uiScale;
+    const f32 rowH = ImGui::GetTextLineHeightWithSpacing();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    for (const fmt::OcTrack& t : clip_.tracks) {
-        for (const f32 k : t.times) {
-            const f32 x = p0.x + (p1.x - p0.x) * (dur > 0.0f ? k / dur : 0.0f);
-            dl->AddLine(ImVec2(x, p1.y - 4.0f), ImVec2(x, p1.y), IM_COL32(240, 190, 90, 200), 1.0f);
+
+    // A lane row's canvas: a name label of fixed width, then an InvisibleButton spanning whatever is
+    // left, exactly as drawCurveWidget's own canvas captures input -- one big invisible button, hit-
+    // tested by hand, no vendored timeline widget anywhere in this tree. Returns the canvas rect so
+    // the caller can draw into it and hit-test against it.
+    auto beginLaneRow = [&](const char* label) -> LaneRect {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(nameW);
+        ImGui::InvisibleButton("##lane", ImVec2(ImGui::GetContentRegionAvail().x, rowH));
+        return {ImGui::GetItemRectMin(), ImGui::GetItemRectMax()};
+    };
+
+    // NOTIFY LANE, ALWAYS DRAWN even with zero notifies -- an author scanning forty tracks still
+    // needs to see "there are no notifies here" rather than wonder whether the row silently vanished.
+    {
+        ImGui::PushID("##notifyLane");
+        const auto [p0, p1] = beginLaneRow("Notifies");
+        dl->AddRectFilled(p0, p1, IM_COL32(26, 26, 30, 255));
+        for (usize i = 0; i < clip_.notifies.size(); ++i) {
+            const fmt::OcNotify& n = clip_.notifies[i];
+            const f32 x = laneX(p0.x, p1.x, n.time, dur);
+            const bool sel = (static_cast<int>(i) == selectedNotify_);
+            const ImU32 col = sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(120, 200, 255, 230);
+            // A STATE'S WINDOW, drawn as a translucent band UNDER the marker -- visual-only, matching
+            // the clamp AnimSystem itself applies at the loop seam, so an author dragging a window
+            // past the end of the clip sees it stop exactly where the runtime will actually close it.
+            const f32 stateDur = notifyDurationAt(i);
+            if (stateDur > 0.0f) {
+                const f32 xEnd = laneX(p0.x, p1.x, std::min(n.time + stateDur, dur), dur);
+                dl->AddRectFilled(ImVec2(x, p0.y), ImVec2(xEnd, p1.y),
+                                  sel ? IM_COL32(255, 220, 90, 70) : IM_COL32(120, 200, 255, 55));
+            }
+            // A downward triangle rather than another vertical tick, so a notify is never mistaken
+            // for the key ticks the track lanes below draw in the same style of row.
+            const ImVec2 tri[3] = {ImVec2(x - 5.0f, p0.y), ImVec2(x + 5.0f, p0.y), ImVec2(x, p0.y + 9.0f)};
+            dl->AddConvexPolyFilled(tri, 3, col);
+            dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p1.y), col, sel ? 2.0f : 1.0f);
         }
+        dl->AddLine(ImVec2(laneX(p0.x, p1.x, time_, dur), p0.y), ImVec2(laneX(p0.x, p1.x, time_, dur), p1.y),
+                    IM_COL32(255, 210, 90, 150), 1.0f);
+        ImGui::PopID();
     }
 
-    // THE SELECTED CURVE, drawn over the same bar. Only the selected one: overlaying every curve
-    // on a 20-pixel-high slider gives a scribble, and the one being edited is the one whose shape
-    // an author is trying to see. Normalised to its own min and max, because a curve's range is
-    // whatever the author chose and a fixed 0..1 would flatten most of them into a line.
+    // THE SELECTED CURVE'S OWN LANE, drawn only when a curve is actually selected -- an unselected
+    // one has nothing an author is looking at, and reserving the row anyway would waste vertical
+    // space on every clip that has no curves at all. Normalised to the curve's own min/max, exactly
+    // as the old shared-bar overlay was: a curve's range is whatever the author chose, and a fixed
+    // 0..1 mapping would flatten most of them into a line.
     if (selectedCurve_ >= 0 && static_cast<usize>(selectedCurve_) < clip_.curves.size()) {
         const fmt::OcCurve& c = clip_.curves[static_cast<usize>(selectedCurve_)];
+        ImGui::PushID("##curveLane");
+        char label[64];
+        std::snprintf(label, sizeof label, "%.16s", c.name.c_str());
+        const auto [p0, p1] = beginLaneRow(label);
+        dl->AddRectFilled(p0, p1, IM_COL32(22, 30, 24, 255));
         if (c.times.size() >= 2 && c.values.size() == c.times.size()) {
             f32 lo = c.values[0], hi = c.values[0];
             for (const f32 v : c.values) { lo = v < lo ? v : lo; hi = v > hi ? v : hi; }
@@ -1438,7 +2066,7 @@ void AnimEditor::drawTimeline() {
             const f32 top = p0.y + 2.0f, bot = p1.y - 2.0f;
             ImVec2 prev{};
             bool have = false;
-            // SAMPLED ACROSS THE BAR rather than drawn key-to-key, so a STEP curve reads as steps
+            // SAMPLED ACROSS THE LANE rather than drawn key-to-key, so a STEP curve reads as steps
             // instead of as a straight line between its keys -- which is what it is not.
             const int steps = 96;
             for (int k = 0; k <= steps; ++k) {
@@ -1450,56 +2078,322 @@ void AnimEditor::drawTimeline() {
                 have = true;
             }
         }
+        dl->AddLine(ImVec2(laneX(p0.x, p1.x, time_, dur), p0.y), ImVec2(laneX(p0.x, p1.x, time_, dur), p1.y),
+                    IM_COL32(255, 210, 90, 150), 1.0f);
+        ImGui::PopID();
     }
 
-    // NOTIFIES, on the SAME bar as the keys and above them. Unreal gives them their own lane, and
-    // that is the right answer once there are lanes to give; with one clip and no curves the thing
-    // an author needs is the notify's position against the KEYS it is being placed relative to --
-    // a footstep belongs on the frame the foot plants, and that frame is one of those yellow ticks.
-    for (usize i = 0; i < clip_.notifies.size(); ++i) {
-        const fmt::OcNotify& n = clip_.notifies[i];
-        const f32 x = p0.x + (p1.x - p0.x) * (dur > 0.0f ? n.time / dur : 0.0f);
-        const bool sel = (static_cast<int>(i) == selectedNotify_);
-        const ImU32 col = sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(120, 200, 255, 230);
+    if (clip_.tracks.empty()) { ImGui::TextDisabled("No tracks."); return; }
 
-        // A STATE'S WINDOW, drawn as a translucent band UNDER the marker -- visual-only, matching
-        // the clamp AnimSystem itself applies at the loop seam, so an author dragging a window past
-        // the end of the clip sees it stop exactly where the runtime will actually close it rather
-        // than being told nothing until the surprise shows up in play.
-        const f32 stateDur = notifyDurationAt(i);
-        if (stateDur > 0.0f) {
-            const f32 endT = dur > 0.0f ? std::min(n.time + stateDur, dur) : 0.0f;
-            const f32 xEnd = p0.x + (p1.x - p0.x) * (dur > 0.0f ? endT / dur : 0.0f);
-            dl->AddRectFilled(ImVec2(x, p0.y), ImVec2(xEnd, p1.y),
-                              sel ? IM_COL32(255, 220, 90, 70) : IM_COL32(120, 200, 255, 55));
+    // THE TRACK LANES. A rig can carry far more tracks than fit on screen -- FirstPerson's own 7-bone
+    // rig is small, but nothing here assumes that stays true -- so this is a fixed-height, scrolling
+    // child (ImGui's own scrollbar does the rest) with ImGuiListClipper choosing which rows to
+    // actually submit, the identical clipper shape SandboxContentBrowser.cpp already uses for its own
+    // asset grid. WITHOUT the clipper, a 200-bone rig would mean 200 InvisibleButtons and 200 hit-test
+    // sweeps over every key on every track EVERY FRAME whether or not a single one of them is visible
+    // -- the clipper keeps that cost proportional to what is on screen instead of to the rig.
+    constexpr int kVisibleLanes = 8;
+    const f32 lanesHeight = std::min(static_cast<f32>(clip_.tracks.size()), static_cast<f32>(kVisibleLanes)) * rowH
+                          + ImGui::GetStyle().ItemSpacing.y;
+    if (ImGui::BeginChild("##trackLanes", ImVec2(0, lanesHeight), true)) {
+        // RE-FETCHED, not the outer `dl` captured above: a child window carries its OWN ImDrawList
+        // and its own scissor/clip rect (which is what makes rows scrolled past its top or bottom
+        // disappear correctly), and drawing through the PARENT window's list here would paint into
+        // the wrong clip rect and the wrong place in this frame's draw order.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const f32 hitRadius = 7.0f * uiScale;
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(clip_.tracks.size()), rowH);
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const usize i = static_cast<usize>(row);
+                fmt::OcTrack& t = clip_.tracks[i];
+                ImGui::PushID(row);
+                const bool named = t.boneIndex < skel_.bones.size();
+                const auto [p0, p1] = beginLaneRow(named ? skel_.bones[t.boneIndex].name.c_str()
+                                                          : "<out of range>");
+                const bool laneHovered = ImGui::IsItemHovered();
+                const bool laneActive = ImGui::IsItemActive();
+
+                dl->AddRectFilled(p0, p1, IM_COL32(30, 30, 34, 255));
+
+                // KEYS TINTED BY THE SAME BONE PALETTE the 3D preview paints its boxes with
+                // (computeAnimEditorBonePalette, rebuilt in buildPreview) -- so a key in this lane and
+                // the bone it moves read as the SAME colour, not just the same row label. Falls back
+                // to a neutral grey on the one frame before the palette exists yet (bonePalette_
+                // starts empty; buildPreview fills it before this ever runs a second time) or for a
+                // track whose boneIndex is out of range, matching buildPreview's own fallback.
+                BoneColor bc{0.6f, 0.6f, 0.6f};
+                if (named && t.boneIndex < bonePalette_.size()) bc = bonePalette_[t.boneIndex];
+                // CLAMPED BEFORE THE *255 CONVERSION: IM_COL32 just shifts and ORs its four bytes
+                // together with no range check of its own, so a component that drifted a hair past
+                // 1.0 (float error accumulated through the golden-angle hue math) would bleed a bit
+                // into the NEXT channel instead of merely clipping to white -- a wrong colour rather
+                // than a saturated one.
+                const auto toByte = [](f32 v) { return static_cast<int>(std::clamp(v, 0.0f, 1.0f) * 255.0f); };
+                const ImU32 keyCol = IM_COL32(toByte(bc.r), toByte(bc.g), toByte(bc.b), 235);
+
+                const bool thisTrackSelected = (selectedTrack_ == static_cast<int>(i));
+                for (usize k = 0; k < t.times.size(); ++k) {
+                    const f32 x = laneX(p0.x, p1.x, t.times[k], dur);
+                    const bool keySelected = thisTrackSelected && selectedTrackKey_ == k;
+                    const f32 r = keySelected ? 5.0f * uiScale : 3.0f * uiScale;
+                    dl->AddCircleFilled(ImVec2(x, (p0.y + p1.y) * 0.5f), r,
+                                        keySelected ? IM_COL32(255, 255, 255, 255) : keyCol);
+                }
+                // A ROW OUTLINE ON THE SELECTED TRACK, so "which track is Insert/Delete Key below
+                // going to act on" is visible even when it currently has no key selected inside it.
+                if (thisTrackSelected) dl->AddRect(p0, p1, IM_COL32(255, 220, 140, 200));
+                dl->AddLine(ImVec2(laneX(p0.x, p1.x, time_, dur), p0.y),
+                            ImVec2(laneX(p0.x, p1.x, time_, dur), p1.y), IM_COL32(255, 210, 90, 120), 1.0f);
+
+                // PRESS: decide once, at the instant the mouse goes down on this lane, what it landed
+                // on -- the same press-time-hit-test-then-hold shape drawCurveWidget already uses, so
+                // a fast drag that strays past a key's own hit radius mid-gesture does not drop it.
+                if (laneHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    usize hit = kInvalidKeyIndex;
+                    f32 bestDist = hitRadius;
+                    const f32 mx = ImGui::GetIO().MousePos.x;
+                    for (usize k = 0; k < t.times.size(); ++k) {
+                        const f32 dist = std::fabs(mx - laneX(p0.x, p1.x, t.times[k], dur));
+                        if (dist <= bestDist) { bestDist = dist; hit = k; }
+                    }
+                    selectedTrack_ = static_cast<int>(i);
+                    selectedTrackKey_ = hit;
+                    // SELECTING A TRACK SELECTS ITS BONE, the identical cross-highlight drawSockets'
+                    // own selection already gives a socket, so the tree, the preview highlight and
+                    // this lane all agree about which bone a click just picked.
+                    if (named) selectedBone_ = static_cast<int>(t.boneIndex);
+                    trackKeyDragging_ = (hit != kInvalidKeyIndex);
+                    // ONE UNDO ENTRY PER GESTURE, pushed at this press rather than per frame of the
+                    // drag below -- and only when the press actually landed on a key, so a click on
+                    // empty lane space (which moves nothing) does not leave a no-op entry on the
+                    // stack. Mirrors drawCurveWidget's own identical bracket exactly.
+                    if (trackKeyDragging_) pushUndo();
+                }
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) trackKeyDragging_ = false;
+
+                // DRAG: re-derive the key's time from the mouse's CURRENT x every frame (not a
+                // delta), which is simpler than the curve widget's delta-from-screen-space approach
+                // and correct here because a lane has exactly one axis that means anything -- there
+                // is no y-position for a track key to preserve the way a curve's value is. trackMoveKey
+                // RE-SORTS rather than clamps (see its own header comment for why), so the index this
+                // key lives at can change mid-drag; the return value is what selectedTrackKey_ tracks
+                // afterwards so the NEXT frame's drag still finds the same key.
+                //
+                // GATED ON laneActive, NOT ONLY ON trackKeyDragging_ -- the same gate drawCurveWidget's
+                // own drag block uses (canvasActive there) -- because ImGui's ButtonBehavior clears
+                // this widget's active id INSIDE the very InvisibleButton() call above the instant the
+                // mouse comes up, so laneActive already reads false on the release frame with no
+                // ordering trick needed here to stop this block from firing on it.
+                if (trackKeyDragging_ && laneActive && thisTrackSelected &&
+                    selectedTrackKey_ != kInvalidKeyIndex && selectedTrackKey_ < t.times.size()) {
+                    const f32 mx = ImGui::GetIO().MousePos.x;
+                    const f32 span = std::max(1.0f, p1.x - p0.x);
+                    const f32 newTime = std::clamp((mx - p0.x) / span * dur, 0.0f, dur);
+                    const usize moved = trackMoveKey(t, selectedTrackKey_, newTime);
+                    if (moved != kInvalidKeyIndex) { selectedTrackKey_ = moved; dirty_ = true; }
+                }
+                ImGui::PopID();
+            }
         }
-
-        // A downward triangle sitting on the bar: a shape rather than another vertical line, so a
-        // notify is never mistaken for the key ticks it sits among.
-        const f32 top = p0.y;
-        const ImVec2 tri[3] = {ImVec2(x - 5.0f, top), ImVec2(x + 5.0f, top), ImVec2(x, top + 9.0f)};
-        dl->AddConvexPolyFilled(tri, 3, col);
-        dl->AddLine(ImVec2(x, top), ImVec2(x, p1.y), col, sel ? 2.0f : 1.0f);
     }
+    ImGui::EndChild();
 #endif
+}
+
+// Clamps selectedTrack_/selectedTrackKey_ against clip_.tracks as it stands RIGHT NOW -- the one
+// place this file re-derives after any edit that can shrink either array out from under them: an
+// Undo/Redo (applyClipUndoState), and drawClipRetime()'s trim (the only one of the three retime ops
+// that can remove keys; scale and shift only move times, never the count of them). Bounds-only, not
+// identity-preserving -- a trim that removes the keys BEFORE the selected one shifts every later
+// index down, so the selection can end up pointing at a DIFFERENT surviving key rather than at
+// nothing. That is the same trade applyClipUndoState already made for selectedNotify_/selectedCurve_
+// before this file could touch tracks at all; nothing here raises the bar past what this tab already
+// accepted for its other two selections.
+void AnimEditor::clampTrackKeySelection() {
+    if (selectedTrack_ < 0 || static_cast<usize>(selectedTrack_) >= clip_.tracks.size()) {
+        selectedTrack_ = -1;
+        selectedTrackKey_ = kInvalidKeyIndex;
+        return;
+    }
+    const usize keyCount = clip_.tracks[static_cast<usize>(selectedTrack_)].times.size();
+    if (selectedTrackKey_ != kInvalidKeyIndex && selectedTrackKey_ >= keyCount) selectedTrackKey_ = kInvalidKeyIndex;
+}
+
+// THE THREE WHOLE-CLIP RETIME OPERATIONS, wired straight to AnimEdit.hpp's pure functions. Each is a
+// ONE-SHOT button press rather than a drag, so the "one undo entry per gesture, not per frame" rule
+// this file otherwise enforces with an IsItemActivated/IsItemDeactivatedAfterEdit bracket (the
+// bracket SandboxPanels.cpp's own materialPanel comment describes) is automatic here: a button click
+// is already a single event, never a stream of per-frame deltas, so there is nothing to bracket.
+//
+// EVERY APPLY IS PUSH-THEN-ATTEMPT-THEN-CANCEL-ON-REFUSAL, using SnapshotUndo::cancelPush() exactly
+// the way its own header comment says it exists to be used. scaleClipDuration/shiftClipTime/trimClip
+// can all refuse (a non-finite or non-positive factor, a non-finite shift, a trim range that clamps
+// to nothing) -- and an undo entry that restores a clip to a state IDENTICAL to the one already on
+// screen is not a safety net, it is a Ctrl+Z that visibly does nothing once, the exact failure mode
+// materialPanel's own "PUSHED ON RELEASE" comment calls out for a no-op edit.
+void AnimEditor::drawClipRetime() {
+#if AVER_WITH_IMGUI
+    if (!ImGui::CollapsingHeader("Retime")) return;
+    // LAZILY DEFAULTED TO THE FULL CLIP, not left at its zero-initialised default: an End of 0.0
+    // always fails trimClip's own `end > start` check, so an author's very first look at this panel
+    // would find Trim refusing to do anything until they pressed Full Range once by hand. Re-applied
+    // only while End is still exactly its unset default, so a deliberate End of 0.0 (which can never
+    // succeed anyway -- see the same check) does not fight an author who typed it on purpose.
+    if (retimeTrimEnd_ <= 0.0f && clip_.duration > 0.0f) retimeTrimEnd_ = clip_.duration;
+    const f32 w = 130.0f * (ImGui::GetFontSize() / 16.0f);
+
+    ImGui::TextWrapped("These act on the WHOLE clip: every track's keys, every notify's time and "
+                       "state window, and every curve's keys move together, so nothing drifts out "
+                       "of sync with the pose.");
+
+    ImGui::SetNextItemWidth(w);
+    ImGui::DragFloat("##scaleFactor", &retimeScaleFactor_, 0.01f, 0.01f, 100.0f, "%.3fx");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Scale duration")) {
+        pushUndo();
+        if (scaleClipDuration(clip_, retimeScaleFactor_)) {
+            dirty_ = true;
+            time_ = std::min(time_, clip_.duration);
+        } else {
+            clipHistory_.cancelPush();
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("< 1 speeds the clip up, > 1 slows it down. CubicSpline tangents rescale "
+                          "with it so the curve's SHAPE does not change, only its timing.");
+
+    ImGui::SetNextItemWidth(w);
+    ImGui::DragFloat("##shiftSeconds", &retimeShiftSeconds_, 0.01f, -3600.0f, 3600.0f, "%.3f s");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Shift all keys")) {
+        pushUndo();
+        if (shiftClipTime(clip_, retimeShiftSeconds_)) dirty_ = true;
+        else clipHistory_.cancelPush();
+    }
+
+    ImGui::SetNextItemWidth(w);
+    ImGui::DragFloat("##trimStart", &retimeTrimStart_, 0.01f, 0.0f, clip_.duration, "Start %.3f s");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(w);
+    ImGui::DragFloat("##trimEnd", &retimeTrimEnd_, 0.01f, 0.0f, clip_.duration, "End %.3f s");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Full range")) { retimeTrimStart_ = 0.0f; retimeTrimEnd_ = clip_.duration; }
+    if (ImGui::SmallButton("Trim to [Start, End]")) {
+        pushUndo();
+        if (trimClip(clip_, retimeTrimStart_, retimeTrimEnd_)) {
+            dirty_ = true;
+            time_ = std::min(std::max(time_ - retimeTrimStart_, 0.0f), clip_.duration);
+            retimeTrimStart_ = 0.0f;
+            retimeTrimEnd_ = clip_.duration;
+            clampTrackKeySelection();
+        } else {
+            clipHistory_.cancelPush();
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Cuts everything outside [Start, End] and slides what's left back to "
+                          "start at zero. A boundary key is inserted at each cut first, so the "
+                          "surviving span keeps the exact pose it already had at its own edges.");
+#endif
+}
+
+// THE TRACK'S SAMPLED VALUE AT THE CURRENT PLAYHEAD, in the units OcTrack itself stores: engine
+// centimetres for translation (OcBone::translation's own unit), the raw stored quaternion x/y/z/w for
+// rotation -- NOT Euler degrees, which would be a DIFFERENT and lossy representation of a value the
+// format never keeps that way -- and a unitless multiplier for scale.
+//
+// READS pose_ WHEN IT CAN, rather than calling AnimEdit.hpp's trackSampleAt() a second time.
+// buildPreview() already ran anim::sampleAnimation(clip_, t, pose_) this exact frame (draw() calls it
+// before drawTracks()), and sampleAnimation writes each bone's translation/rotation/scale ONLY for
+// the channels a track for that bone enables -- an untouched channel keeps whatever restPose or an
+// earlier track already put there -- so pose_.local[t.boneIndex] already holds exactly what THIS
+// track contributed, at THIS frame's playhead, with the SAME loop-wrap/clamp buildPreview applied to
+// time_. Re-sampling here would cost a second walk of this track's keys for an answer that can only
+// ever agree with what is already sitting in pose_, or silently stop agreeing with it the day the two
+// call sites' clamping rules drift apart.
+//
+// FALLS BACK TO trackSampleAt() ONLY WHEN THERE IS NO POSE TO READ -- t.boneIndex is past
+// pose_.local's size, which happens when this clip opened with no matching skeleton (see draw()'s own
+// "No skeleton found for this clip" branch) and buildPreview() therefore had no bones to seed a rest
+// pose from at all. A raw sample off the track is still better than showing nothing, and loop-
+// wrapping time_ for it would be wrapping against a duration that, with no skeleton to check tracks
+// against, this function has no better reason to trust than the raw playhead.
+std::string AnimEditor::trackValueLabel(const fmt::OcTrack& t) const {
+    std::string s;
+    auto appendVec3 = [&](const char* tag, f32 x, f32 y, f32 z) {
+        char buf[80];
+        std::snprintf(buf, sizeof buf, "%s%s(%.2f, %.2f, %.2f)", s.empty() ? "" : "  ", tag, x, y, z);
+        s += buf;
+    };
+    auto appendQuat = [&](f32 x, f32 y, f32 z, f32 w) {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "%sR(%.3f, %.3f, %.3f, %.3f)", s.empty() ? "" : "  ", x, y, z, w);
+        s += buf;
+    };
+
+    if (t.boneIndex < pose_.local.size()) {
+        const Transform& xf = pose_.local[t.boneIndex];
+        if (t.channels & fmt::kOcChannelTranslation) appendVec3("T", xf.position.x, xf.position.y, xf.position.z);
+        if (t.channels & fmt::kOcChannelRotation)    appendQuat(xf.rotation.x, xf.rotation.y, xf.rotation.z, xf.rotation.w);
+        if (t.channels & fmt::kOcChannelScale)       appendVec3("S", xf.scale.x, xf.scale.y, xf.scale.z);
+        return s.empty() ? std::string("-") : s;
+    }
+
+    std::vector<f32> values;
+    if (!trackSampleAt(t, time_, values)) return "-";
+    usize idx = 0;
+    if ((t.channels & fmt::kOcChannelTranslation) && idx + 3 <= values.size()) {
+        appendVec3("T", values[idx], values[idx + 1], values[idx + 2]);
+        idx += 3;
+    }
+    if ((t.channels & fmt::kOcChannelRotation) && idx + 4 <= values.size()) {
+        appendQuat(values[idx], values[idx + 1], values[idx + 2], values[idx + 3]);
+        idx += 4;
+    }
+    if ((t.channels & fmt::kOcChannelScale) && idx + 3 <= values.size()) {
+        appendVec3("S", values[idx], values[idx + 1], values[idx + 2]);
+        idx += 3;
+    }
+    return s.empty() ? std::string("-") : s;
 }
 
 void AnimEditor::drawTracks() {
 #if AVER_WITH_IMGUI
+    drawClipRetime();
+    ImGui::Separator();
+
     if (clip_.tracks.empty()) { ImGui::TextDisabled("no tracks"); return; }
-    if (!ImGui::BeginTable("tracks", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
-                                        ImGuiTableFlags_ScrollY)) return;
+    if (!ImGui::BeginTable("tracks", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+                                        ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) return;
     ImGui::TableSetupColumn("Bone");
     ImGui::TableSetupColumn("Channels");
     ImGui::TableSetupColumn("Interp");
+    ImGui::TableSetupColumn("Value @ playhead");
     ImGui::TableSetupColumn("Keys");
     ImGui::TableSetupColumn("Span");
     ImGui::TableHeadersRow();
-    for (const fmt::OcTrack& t : clip_.tracks) {
+    for (usize i = 0; i < clip_.tracks.size(); ++i) {
+        const fmt::OcTrack& t = clip_.tracks[i];
+        ImGui::PushID(static_cast<int>(i));
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
         const bool named = t.boneIndex < skel_.bones.size();
-        ImGui::TextUnformatted(named ? skel_.bones[t.boneIndex].name.c_str() : "<out of range>");
+        // THE BONE CELL IS NOW A SELECTABLE, not plain text. Clicking it sets selectedTrack_ -- the
+        // SAME field drawTimeline()'s lanes set when a key is clicked there instead, and the field
+        // drawTrackKeyEditor() below reads to know which track Insert/Delete Key act on. One
+        // selection, reachable from either the table or the lane.
+        const bool rowSelected = (selectedTrack_ == static_cast<int>(i));
+        if (ImGui::Selectable(named ? skel_.bones[t.boneIndex].name.c_str() : "<out of range>",
+                              rowSelected, ImGuiSelectableFlags_SpanAllColumns)) {
+            selectedTrack_ = rowSelected ? -1 : static_cast<int>(i);
+            selectedTrackKey_ = kInvalidKeyIndex;
+            // SELECTING A TRACK SELECTS ITS BONE, the identical cross-highlight drawSockets' own
+            // selection already gives a socket (see its own comment) -- so the bone tree, the preview
+            // highlight and this table all agree about which bone a click just picked.
+            if (!rowSelected && named) selectedBone_ = static_cast<int>(t.boneIndex);
+        }
         ImGui::TableNextColumn();
         std::string ch;
         if (t.channels & fmt::kOcChannelTranslation) ch += "T";
@@ -1510,12 +2404,118 @@ void AnimEditor::drawTracks() {
         ImGui::TextUnformatted(t.interp == fmt::OcInterp::Step ? "Step"
                              : t.interp == fmt::OcInterp::CubicSpline ? "Cubic" : "Linear");
         ImGui::TableNextColumn();
+        ImGui::TextUnformatted(trackValueLabel(t).c_str());
+        ImGui::TableNextColumn();
         ImGui::Text("%zu", t.times.size());
         ImGui::TableNextColumn();
         if (t.times.empty()) ImGui::TextUnformatted("-");
         else ImGui::Text("%.2f - %.2f s", t.times.front(), t.times.back());
+        ImGui::PopID();
     }
     ImGui::EndTable();
+
+    drawTrackKeyEditor();
+#endif
+}
+
+// THE SELECTED KEY'S DETAILS: its exact time (typed or dragged) and its value components (one drag
+// per enabled channel), plus Insert/Delete for the selected track -- the numeric counterpart to
+// dragging a key in drawTimeline()'s lanes, for the case where the number IS what an author has.
+// Drawn below the table rather than inside it: a table cell is a poor home for a handful of
+// DragFloatN controls whose count and width vary with which channels a track enables.
+//
+// TANGENTS ARE NOT EXPOSED HERE, only the Value slot -- unlike drawCurveWidget, which gives a curve's
+// tangent handles their own draggable geometry, there is no 3D or 2D canvas here to drag a track's
+// tangent ON, and the ask this panel exists to answer ("move/edit/add/delete keys") names values, not
+// tangents. A CubicSpline track's tangents are left exactly as they were; editing only the value slot
+// is still a well-formed edit -- OcTrack::valid() has no rule tying a value to its neighbours' slopes.
+void AnimEditor::drawTrackKeyEditor() {
+#if AVER_WITH_IMGUI
+    if (selectedTrack_ < 0 || static_cast<usize>(selectedTrack_) >= clip_.tracks.size()) return;
+    fmt::OcTrack& t = clip_.tracks[static_cast<usize>(selectedTrack_)];
+    const bool named = t.boneIndex < skel_.bones.size();
+
+    ImGui::Separator();
+    ImGui::Text("Selected track: %s", named ? skel_.bones[t.boneIndex].name.c_str() : "<out of range>");
+
+    if (ImGui::SmallButton("Insert key at playhead")) {
+        pushUndo();
+        const usize idx = trackInsertKey(t, time_);
+        if (idx != kInvalidKeyIndex) { selectedTrackKey_ = idx; dirty_ = true; }
+        else clipHistory_.cancelPush();
+    }
+
+    if (selectedTrackKey_ == kInvalidKeyIndex || selectedTrackKey_ >= t.times.size()) {
+        ImGui::TextDisabled("No key selected. Click one in a lane above, or Insert one here.");
+        return;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Delete key")) {
+        pushUndo();
+        if (trackDeleteKey(t, selectedTrackKey_)) dirty_ = true;
+        else clipHistory_.cancelPush();
+        selectedTrackKey_ = kInvalidKeyIndex;
+        return;
+    }
+
+    const f32 w = 160.0f * (ImGui::GetFontSize() / 16.0f);
+    const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
+
+    // TIME. ImGui's DragFloat already doubles as "type an exact value" -- double-clicking (or
+    // Ctrl+clicking) it opens a text box, the same way every other numeric field in this file already
+    // lets an exact number in alongside the drag, so no separate InputFloat is needed for that.
+    f32 tk = t.times[selectedTrackKey_];
+    ImGui::SetNextItemWidth(w);
+    const bool timeChanged = ImGui::DragFloat("Time", &tk, 0.01f, 0.0f, dur, "%.3f s");
+    // ONE DRAG IS ONE UNDO ENTRY -- pushed at activation, before this widget's own apply below, not
+    // once per frame while it is held. Same bracket as drawNotifies' own "Time" slider.
+    if (ImGui::IsItemActivated()) pushUndo();
+    if (timeChanged) {
+        // trackMoveKey RE-SORTS rather than clamps (see its own header comment for why), so the
+        // index this key lives at can change the instant it crosses a neighbour; the return value is
+        // what selectedTrackKey_ becomes so the NEXT frame of the same drag still finds the same key.
+        const usize moved = trackMoveKey(t, selectedTrackKey_, tk);
+        if (moved != kInvalidKeyIndex) { selectedTrackKey_ = moved; dirty_ = true; }
+    }
+
+    // VALUE, ONE DRAG PER ENABLED CHANNEL, read and written through trackReadComponent/
+    // trackWriteComponent so the per-key stride arithmetic (AnimEdit.hpp's own top-comment trap) is
+    // never re-derived here -- there is exactly one place that does that math, and this is not it.
+    auto editVec3 = [&](const char* label, u8 channel) {
+        if (!(t.channels & channel)) return;
+        f32 v[3] = {0.0f, 0.0f, 0.0f};
+        for (u32 c = 0; c < 3; ++c) trackReadComponent(t, selectedTrackKey_, channel, c, TrackKeySlot::Value, v[c]);
+        ImGui::SetNextItemWidth(w * 1.6f);
+        const bool changed = ImGui::DragFloat3(label, v, 0.05f);
+        if (ImGui::IsItemActivated()) pushUndo();
+        if (changed) {
+            for (u32 c = 0; c < 3; ++c) trackWriteComponent(t, selectedTrackKey_, channel, c, TrackKeySlot::Value, v[c]);
+            dirty_ = true;
+        }
+    };
+    editVec3("Translation (cm)", fmt::kOcChannelTranslation);
+    if (t.channels & fmt::kOcChannelRotation) {
+        f32 q[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        for (u32 c = 0; c < 4; ++c)
+            trackReadComponent(t, selectedTrackKey_, fmt::kOcChannelRotation, c, TrackKeySlot::Value, q[c]);
+        ImGui::SetNextItemWidth(w * 1.8f);
+        const bool changed = ImGui::DragFloat4("Rotation (xyzw)", q, 0.01f);
+        if (ImGui::IsItemActivated()) pushUndo();
+        if (changed) {
+            // RENORMALISED ON EDIT, the identical reasoning drawSockets' own rotation drag already
+            // gives: four components dragged independently stop being a rotation. AnimSampler.cpp
+            // reads this exact key back through Quat::normalized() regardless (see its own
+            // sampleChannel), so this is hygiene rather than a correctness requirement -- it keeps
+            // what is ON DISK a genuine rotation, not only what gets sampled from it.
+            const f32 len = std::sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+            if (len > 1e-6f) { q[0] /= len; q[1] /= len; q[2] /= len; q[3] /= len; }
+            else { q[0] = 0.0f; q[1] = 0.0f; q[2] = 0.0f; q[3] = 1.0f; }
+            for (u32 c = 0; c < 4; ++c)
+                trackWriteComponent(t, selectedTrackKey_, fmt::kOcChannelRotation, c, TrackKeySlot::Value, q[c]);
+            dirty_ = true;
+        }
+    }
+    editVec3("Scale", fmt::kOcChannelScale);
 #endif
 }
 
@@ -1556,6 +2556,48 @@ void AnimEditor::flagCheckbox(u8 bit, const char* label) {
 #else
     (void)bit; (void)label;
 #endif
+}
+
+// Points the preview's pivot at one bone and picks a distance that frames it, rather than the whole
+// rig -- see the header's own comment on why this is not simply a call into ActorPreview::frameAll().
+//
+// THE FRAMING DISTANCE COMES FROM HOW FAR THIS BONE ACTUALLY REACHES, not from boneBox's own
+// geometry: a bone's box is deliberately THIN (kBoneThicknessCm = 2.2cm, sized to read as a limb, not
+// to fill a viewport), so sizing the frame off it the way buildPreview's initial autoframe sizes off
+// the whole draw list's bounds would land the camera far too close, exactly the failure buildPreview
+// already backs off from with its own `addZoom(2.6f)` -- see that call's own comment. What actually
+// answers "how much of the rig around this joint" is the distance to whatever else is ATTACHED to it:
+// its parent, and any bone that names it as parent in turn. Longest of those wins, so framing a hip
+// with a whole leg hanging off it does not crop the thigh the way averaging every neighbour would.
+void AnimEditor::frameSelectedBone(render::preview::ActorPreview& preview, usize boneIndex) {
+    if (boneIndex >= model_.size() || boneIndex >= skel_.bones.size()) return;
+    const Vec3 at{model_[boneIndex].m[3][0], model_[boneIndex].m[3][1], model_[boneIndex].m[3][2]};
+
+    f32 reach = 0.0f;
+    const i32 parent = skel_.bones[boneIndex].parent;
+    if (parent >= 0 && static_cast<usize>(parent) < model_.size()) {
+        const Vec3 p{model_[usize(parent)].m[3][0], model_[usize(parent)].m[3][1],
+                     model_[usize(parent)].m[3][2]};
+        reach = std::max(reach, (at - p).size());
+    }
+    for (usize i = 0; i < skel_.bones.size() && i < model_.size(); ++i) {
+        if (skel_.bones[i].parent != static_cast<i32>(boneIndex)) continue;
+        const Vec3 c{model_[i].m[3][0], model_[i].m[3][1], model_[i].m[3][2]};
+        reach = std::max(reach, (at - c).size());
+    }
+    // AN ISOLATED BONE (no parent, no children -- a one-bone rig, or a disconnected extra root) has
+    // nothing to measure a reach against. kRootCubeCm is the box buildPreview draws for exactly this
+    // case, so framing at a small multiple of it keeps that box comfortably inside view instead of
+    // filling the whole frame (reach too small) or shrinking to a speck (reach left at its 0 default).
+    if (reach < 1e-4f) reach = kRootCubeCm * 3.0f;
+
+    render::preview::PreviewCamera& cam = preview.camera();
+    cam.pivot[0] = at.x; cam.pivot[1] = at.y; cam.pivot[2] = at.z;
+    // THE SAME FORMULA ActorPreview::frameAll() uses -- span * 1.8, clamped to its own [2, 500000]
+    // range -- not reinvented here, so a single bone frames with the identical sense of "comfortably
+    // inside view" the whole-rig frame already has. `reach` is a radius from the joint outward in ONE
+    // direction; frameAll's `span` is a full diameter, hence the *2 before the same multiplier.
+    cam.distance = std::clamp(reach * 2.0f * 1.8f, 2.0f, 500000.0f);
 }
 
 void AnimEditor::draw(Engine& e) {
@@ -1631,7 +2673,12 @@ void AnimEditor::draw(Engine& e) {
     }
 
     ImGui::Separator();
-    if (isClip_) { drawTransport(); drawTimeline(); }
+    // THE TRANSPORT AND THE TIMELINE LANES USED TO BE DRAWN RIGHT HERE, inline between the header
+    // and the mesh/bones checkboxes below -- which meant the lanes fought the preview and the side
+    // panels for height on every frame, at a proportion nothing in this tab let an author change.
+    // They now live in their own retractable strip along the BOTTOM of the tab, drawn after the
+    // bones/view/tracks row further down -- see that row's own comment, right before it, for the
+    // full layout and why the strip's height has to be decided before this row is.
 
     // What the preview shows. Both can be on at once, which is the useful state while checking
     // whether a joint is where the silhouette says it is.
@@ -1652,12 +2699,108 @@ void AnimEditor::draw(Engine& e) {
     buildPreview(e);
 
     ImGui::Separator();
-    const f32 h = ImGui::GetContentRegionAvail().y;
     // SCALED, not 240 raw pixels. Every size in this file predates the editor running at 300% DPI,
     // where a 240px column is about 80 logical pixels -- narrow enough that the bone names fit only
     // because they are short. GetFontSize() is the DPI proxy rather than a plumbed-through scale,
     // because it is already correct here and needs nothing threading through four call sites.
     const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+
+    // THE SEQUENCER STRIP'S HEIGHT HAS TO BE DECIDED HERE, BEFORE THE ROW BELOW IS LAID OUT --
+    // ImGui is immediate-mode, so the bones/view/tracks row's own BeginChild calls need a height
+    // THIS frame, and that height is "whatever total room is left, minus whatever the strip along
+    // the bottom takes" -- so the strip's share has to come first even though the strip itself is
+    // drawn AFTER the row, at the bottom, where it visually belongs. See kDefaultSeqFraction's own
+    // comment for why this is a SplitPane of its own (seqSplit_) rather than a second use of split_
+    // above: split_ divides this row LEFT-TO-RIGHT; seqSplit_ divides the row from the strip
+    // TOP-TO-BOTTOM, and the two must never read or write each other's persisted fraction.
+    const f32 hTotal = ImGui::GetContentRegionAvail().y;
+    const f32 seqHandleH = 6.0f * uiScale;
+    // ONE LINE PLUS FRAME PADDING -- exactly enough for the retract toggle and its label. This IS
+    // "a thin header", the brief's own words: a header plus a summary row plus a mini-transport
+    // would be a strip that never actually collapsed.
+    const f32 seqHeaderH = ImGui::GetFrameHeightWithSpacing();
+    const f32 minSeqH  = std::max(seqHeaderH + 90.0f * uiScale, 160.0f * uiScale);
+    const f32 minMainH = 200.0f * uiScale;
+
+    // A SKELETON TAB (isClip_ == false) HAS NO TRANSPORT OR TIMELINE TO SHOW AT ALL -- both read
+    // clip_, which a .ocskel opened directly has none of (drawTransport/drawTimeline are already
+    // gated the same way drawNotifies/drawCurves are) -- so it gets no strip and no split: the row
+    // below simply takes every pixel hTotal has, exactly the layout this tab already had before the
+    // strip existed.
+    f32 stripH = 0.0f, seqSplitAvail = 0.0f;
+    const bool seqExpanded = isClip_ && !seqCollapsed_;
+    if (isClip_) {
+        if (seqCollapsed_) {
+            stripH = seqHeaderH;
+        } else {
+            if (seqSplit_.fraction < 0.0f)
+                seqSplit_.fraction = loadSplitFraction(kPrefSeqSplit, kDefaultSeqFraction);
+            seqSplitAvail = std::max(0.0f, hTotal - seqHandleH);
+            stripH = clampSplitWidth(splitWidthOf(seqSplit_.fraction, seqSplitAvail), seqSplitAvail,
+                                      minSeqH, minMainH);
+        }
+    }
+    const f32 handleH = seqExpanded ? seqHandleH : 0.0f;
+    const f32 h = std::max(0.0f, hTotal - stripH - handleH);
+
+    // WRAPPED IN A CHILD OF ITS OWN, EXACTLY `h` TALL -- this row did not need one before the strip
+    // existed, and adding it fixes a bug that was ALWAYS latent in drawSplitHandle (EditorWidgets.hpp)
+    // and only became visible here.
+    //
+    // THE SYMPTOM THIS FIXES: the three panels below drew at their correct size, but everything under
+    // them was empty tab background all the way to the status bar, the sequencer strip was not on
+    // screen anywhere, and the tab had grown a vertical scrollbar with a thumb sized as if the tab's
+    // content were roughly double its own height.
+    //
+    // THE ACTUAL CAUSE: drawSplitHandle's own splitterHandle (EditorWidgets.hpp) sizes its invisible
+    // button -- and the hover-highlight line it draws through the same height -- off
+    // `ImGui::GetContentRegionAvail().y` at the moment it runs. That call is only ever correct when
+    // the row calling it already consumes every pixel of vertical room the WINDOW has left, because
+    // splitterHandle is placed via `ImGui::SameLine()`, which leaves the cursor sitting at the ROW's
+    // own top -- so `GetContentRegionAvail().y` there measures all the way down to the WINDOW's own
+    // bottom, not down to wherever the row itself is supposed to end. ActorEditor's own copy of this
+    // pattern and BtEditor/SoundEditor/ParticleEditor's shared calls through drawSplitHandle all still
+    // give their row the FULL remaining height (nothing of theirs is drawn below it in the same
+    // window), so for every one of them "the window's bottom" and "the row's own bottom" are the same
+    // pixel and this was never visible. This tab is the first to draw anything -- the sequencer strip
+    // -- BELOW that same row within the SAME window, which is exactly why `h` above is deliberately
+    // LESS than `hTotal`. drawSplitHandle has no way to know that: it sized its invisible button to
+    // reach the window's actual bottom regardless, and ImGui grows a SameLine()'d row's line height to
+    // its TALLEST item even though every other item on it (the three bordered children) stayed exactly
+    // as tall as their own declared `h` -- so the row's cursor, once it moved to the next line, had
+    // already advanced by very nearly `hTotal`, not `h`. That swallowed almost the entire budget this
+    // function had just set aside for the strip and the seq-split handle before either of them ever
+    // got to draw: the strip's own BeginChild still ran, at its correct `stripH`, but starting from a
+    // cursor position already close to the window's bottom -- which is why it rendered far below the
+    // visible tab instead of merely too short, and why the tab needed a scrollbar roughly as tall as
+    // the strip's own share of the window to ever reach it.
+    //
+    // THE FIX STAYS IN THIS FILE, not in EditorWidgets.hpp: that header is shared by four other tabs
+    // whose own rows are not wrong, and widening drawSplitHandle's contract for the one caller that
+    // now needs a bounded height is exactly the kind of change that wants its own review rather than
+    // one folded in here. Giving this row its OWN child, exactly `h` tall, means
+    // `ImGui::GetContentRegionAvail().y` inside splitterHandle is now measured against THIS child's
+    // own remaining height rather than the tab's -- which caps the invisible button, and with it the
+    // row's own line height and cursor advance, at `h` regardless of what drawSplitHandle assumes.
+    // `ImGuiStyleVar_WindowPadding` IS PUSHED TO ZERO FOR panelsRow'S OWN CREATION ONLY, popped again
+    // the instant BeginChild returns and BEFORE any of the three panels below are drawn -- a
+    // PushStyleVar this early would otherwise stay in effect for everything drawn while it is on the
+    // stack, zeroing the SAME padding back out of "left"/"view"/"tracks" themselves (each its own
+    // bordered child, each still expecting the editor's ordinary interior padding) and quietly
+    // trimming a few DPI-scaled pixels off "tracks"'s own fill-remaining width in the process. Zeroing
+    // it for JUST this one BeginChild call is what makes panelsRow an invisible wrapper rather than a
+    // visible change: with no padding of its own, panelsRow's interior origin lands on the exact same
+    // pixel "left" already started at without it, so nothing already on screen moves -- only
+    // `ImGui::GetContentRegionAvail()` calls made INSIDE panelsRow (splitterHandle's, specifically)
+    // now measure against ITS bottom instead of the tab's.
+    //
+    // THE SAME BUG, AND THE SAME FIX, APPLY WHEN THE STRIP IS COLLAPSED: `seqCollapsed_` only changes
+    // how `stripH` (and therefore `h`) was computed above -- this row is drawn exactly the same way,
+    // through the exact same drawSplitHandle call, whether the strip is a full pane or its own thin
+    // header, so a wrapper that bounds `h` correctly needs no separate case for either state.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::BeginChild("panelsRow", ImVec2(0.0f, h), false);
+    ImGui::PopStyleVar();
     if (ImGui::BeginChild("left", ImVec2(260.0f * uiScale, h), true)) {
         // The bone tree and the clip list share the left column, split so neither starves: the
         // rig is a fixed small thing (7 bones here) and the clip list is the one that grows.
@@ -1691,6 +2834,26 @@ void AnimEditor::draw(Engine& e) {
     const f32 midW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, midAvail,
                                      minView, minTracks);
     if (ImGui::BeginChild("view", ImVec2(midW, h), true)) {
+        // WHAT THE MESH IS SHADING WITH, IN ONE LINE, ABOVE THE PICTURE -- the same "message above
+        // the render" GraphEditor::drawMaterialViewport already uses for a graph that does not
+        // compile. The point in both places is that a preview with nothing said about itself just
+        // looks broken, and an author who never thinks to open the Output Log (or does, and finds
+        // nothing there for four of resolvePreviewMaterial's five ways of coming up empty) needs the
+        // answer right here instead. Guarded on materialStatus_ being non-empty rather than on
+        // AVER_MODULE_PBR: without that module materialTried_ never latches and the string stays
+        // empty forever, so the line simply never draws -- no second guard needed for a plain
+        // std::string with nothing PBR-specific in it.
+        if (!materialStatus_.empty()) {
+            // WRAPPED, NOT A SINGLE LONG LINE -- unlike GraphEditor's own short compile-error
+            // sentence, a couple of this message's branches spell out every candidate .ocmat path
+            // tried, which is easily wider than the view column ever is (minView is 200 logical
+            // pixels). TextDisabled/TextColored neither wrap on their own, so the colour is pushed
+            // by hand around an ordinary TextWrapped instead of switching widgets per branch.
+            if (materialFailed_) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.35f, 1.0f));
+            else                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", materialStatus_.c_str());
+            ImGui::PopStyleColor();
+        }
         if (preview && preview->uiTextureId()) {
             const ImVec2 avail = ImGui::GetContentRegionAvail();
             // DEBOUNCED. resize() waits for the GPU to go idle and destroys a texture ImGui is
@@ -1706,12 +2869,87 @@ void AnimEditor::draw(Engine& e) {
             }
             const f32 iw = avail.x, ih = avail.y;
             ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(iw, ih));
+            // NAVIGATION, MADE TO MATCH THE MAIN VIEWPORT -- the second half of this task's brief.
+            // GATED ON HOVER ALONE, exactly like the orbit this replaces: every gesture below fires
+            // only while the mouse sits over the preview IMAGE itself, never merely somewhere inside
+            // this child window, so a drag that ends with the mouse over the sequencer strip below
+            // (dragging a timeline key, say) can never also spin, pan or nudge this camera.
             if (ImGui::IsItemHovered()) {
                 const ImGuiIO& io = ImGui::GetIO();
+                render::preview::PreviewCamera& cam = preview->camera();
+
+                // LEFT-DRAG ORBITS, X INVERTED. This used to read `+io.MouseDelta.x`, which is what
+                // AssetEditor.cpp's own copy of this exact block still does -- but ActorEditor.cpp and
+                // GraphEditor.cpp both negate it, and negating is the one that matches a real
+                // viewport's feel: the drag moves the WORLD under the cursor, so pushing the mouse
+                // right swings what is on screen to the LEFT, not to the right.
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-                    preview->camera().addOrbit(io.MouseDelta.x * 0.4f, io.MouseDelta.y * 0.4f);
+                    cam.addOrbit(-io.MouseDelta.x * 0.4f, io.MouseDelta.y * 0.4f);
                 if (io.MouseWheel != 0.0f)
-                    preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.9f : 1.1f);
+                    cam.addZoom(io.MouseWheel > 0.0f ? 0.9f : 1.1f);
+
+                // MIDDLE- AND RIGHT-DRAG PAN, THROUGH camera().panPixels() -- the one gesture every
+                // OTHER preview tab in this editor already has (AssetEditor.cpp, ActorEditor.cpp,
+                // GraphEditor.cpp) and this one alone was missing. An orbit camera can spin around its
+                // pivot and dolly to it, but cannot bring an off-centre joint TO the middle of frame,
+                // which is the thing an author actually needs before zooming in on it.
+                for (const ImGuiMouseButton b : {ImGuiMouseButton_Middle, ImGuiMouseButton_Right}) {
+                    if (!ImGui::IsMouseDragging(b)) continue;
+                    const ImVec2 d = ImGui::GetMouseDragDelta(b);
+                    ImGui::ResetMouseDragDelta(b);
+                    cam.panPixels(d.x, d.y, static_cast<f32>(preview->height()));
+                }
+
+                // WASD/QE and F, DECIDED DELIBERATELY RATHER THAN COPIED FROM THE LEVEL VIEWPORT
+                // AS-IS. SandboxViewport's own WASD/QE (SandboxApp.cpp's `flying_` block) fly a free
+                // CAMERA through space: W/A/S/D step camPos_ along the camera's forward/right, Q/E
+                // along world up. PreviewCamera has no camPos_ to step at all -- it is an ORBIT,
+                // yaw/pitch/distance ABOUT A PIVOT (see its own declaration) -- so stepping an eye
+                // position the way a fly camera does would be discarded the instant the next
+                // addOrbit/addZoom recomputed the eye from pivot+distance+yaw+pitch anyway. Moving the
+                // PIVOT along those same forward/right/world-up axes is what keeps every other
+                // control's meaning intact (orbit still turns around whatever is centred, zoom still
+                // dollies to it) while giving WASD/QE the one job an orbit camera can actually do with
+                // them: recentre, along the view's own axis and not only across its screen-parallel
+                // plane the way panPixels above is limited to. Scaled by the camera's OWN distance
+                // rather than a fixed cm/s, so a preview framed close (one small bone) moves in fine
+                // steps and one framed wide (the whole rig) covers ground fast enough to be worth
+                // pressing at all -- the same reasoning frameSelectedBone's own distance formula
+                // leans on.
+                if (!io.WantCaptureKeyboard) {
+                    const f32 yawRad = radians(cam.yawDeg), pitchRad = radians(cam.pitchDeg);
+                    const Vec3 fwd = Vec3{std::cos(pitchRad) * std::cos(yawRad),
+                                          std::cos(pitchRad) * std::sin(yawRad),
+                                          -std::sin(pitchRad)}.getSafeNormal();
+                    const Vec3 worldUp{0.0f, 0.0f, 1.0f};
+                    const Vec3 right = cross(worldUp, fwd).getSafeNormal();
+                    const f32 sp = cam.distance * dt;
+                    Vec3 step{0.0f, 0.0f, 0.0f};
+                    if (ImGui::IsKeyDown(ImGuiKey_W)) step += fwd * sp;
+                    if (ImGui::IsKeyDown(ImGuiKey_S)) step -= fwd * sp;
+                    if (ImGui::IsKeyDown(ImGuiKey_D)) step += right * sp;
+                    if (ImGui::IsKeyDown(ImGuiKey_A)) step -= right * sp;
+                    if (ImGui::IsKeyDown(ImGuiKey_E)) step += worldUp * sp;
+                    if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= worldUp * sp;
+                    cam.pivot[0] += step.x; cam.pivot[1] += step.y; cam.pivot[2] += step.z;
+
+                    // F FRAMES THE SELECTED BONE IF ONE IS SELECTED, THE WHOLE RIG OTHERWISE --
+                    // the brief's own words exactly. `false` (no repeat) so holding F down does not
+                    // refire every frame the way a held movement key above is supposed to.
+                    if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+                        if (selectedBone_ >= 0 && static_cast<usize>(selectedBone_) < model_.size()) {
+                            frameSelectedBone(*preview, static_cast<usize>(selectedBone_));
+                        } else {
+                            preview->frameAll();
+                            // THE SAME BACK-OFF buildPreview's OWN INITIAL AUTOFRAME APPLIES, and for
+                            // the identical reason (see that call's own comment): frameAll sizes on a
+                            // draw's bounds radius times its world scale, and a bone box is thin
+                            // across and long along, so the radius it picks lands the camera inside
+                            // the rig without this.
+                            cam.addZoom(2.6f);
+                        }
+                    }
+                }
             }
         } else {
             ImGui::TextDisabled("No preview on this backend.");
@@ -1734,18 +2972,82 @@ void AnimEditor::draw(Engine& e) {
         drawTracks();
     }
     ImGui::EndChild();
+    ImGui::EndChild();   // "panelsRow" -- see its own BeginChild comment above. Its WindowPadding
+                         // PushStyleVar was already popped right after panelsRow's own BeginChild,
+                         // so EndChild here needs nothing further undone.
+
+    // THE SEQUENCER STRIP, drawn AFTER the row above so ImGui's ordinary top-to-bottom flow places
+    // it exactly where the height budget computed before that row already reserved for it. Nothing
+    // to draw for a skeleton tab -- see hTotal's own comment above for why isClip_ == false takes
+    // none of this and h already claimed all of hTotal in that case.
+    if (isClip_) {
+        if (seqExpanded) {
+            // THE DRAG HANDLE, only while expanded: a strip pinned to its collapsed header height
+            // has nothing to resize, and a handle drawn anyway would invite a drag that silently
+            // does nothing.
+            //
+            // WRITES STRAIGHT BACK INTO `stripH`, UNLIKE split_'s OWN drawSplitHandle (which updates
+            // its SplitPane only for the FOLLOWING frame's splitPaneWidth call, because the pane it
+            // sizes -- "view" -- was already drawn above it by the time drawSplitHandle runs). Here
+            // the order is the other way around: the handle runs BEFORE the "sequencer" child below
+            // it, so the very child a drag is resizing can pick up this SAME frame's delta instead of
+            // trailing it by one -- a strictly better answer to "the layout actually reflows" for the
+            // one pane in this tab where the handle and the pane it sizes are drawn in that order.
+            bool seqReleased = false;
+            verticalSplitterHandle("##seqsplit", seqHandleH, &stripH, seqSplitAvail, minSeqH, minMainH,
+                                    &seqReleased);
+            seqSplit_.fraction = splitFractionOf(stripH, seqSplitAvail);
+            if (seqReleased) storeSplitFraction(kPrefSeqSplit, seqSplit_.fraction);
+        }
+        if (ImGui::BeginChild("sequencer", ImVec2(0, stripH), true)) {
+            // THE RETRACT TOGGLE. ICON_EXPAND ("expand_more", a downward chevron) reads as "open,
+            // click to close" the same way ImGui's own tree-node arrow does when expanded;
+            // ICON_CHEVRON ("chevron_right") reads as "closed, click to open" for the same reason.
+            if (ImGui::SmallButton(seqCollapsed_ ? ICON_CHEVRON " Sequencer" : ICON_EXPAND " Sequencer")) {
+                seqCollapsed_ = !seqCollapsed_;
+                // PERSISTED IMMEDIATELY, matching storeSplitFraction's own "the instant a drag ends"
+                // rule (EditorWidgets.hpp) -- a crash or an alt-tab right after this click should not
+                // silently un-collapse the strip on the next launch.
+                setPrefBool(kPrefSeqCollapsed, seqCollapsed_);
+                flushEditorPrefs();
+            }
+            if (seqExpanded) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.3f s   %zu track(s)", clip_.duration, clip_.tracks.size());
+                // THE STRIP'S OWN CONTENT, filling whatever room is left in it once the header row
+                // just drawn is accounted for. drawTimeline()'s own track-lane child clips itself
+                // further still (its own ImGuiListClipper region), so a strip too short to show every
+                // lane grows an INNER scrollbar there rather than clipping the transport or the
+                // master scrub bar above it.
+                if (ImGui::BeginChild("sequencerBody", ImVec2(0, 0), false)) {
+                    drawTransport();
+                    drawTimeline();
+                }
+                ImGui::EndChild();
+            }
+        }
+        ImGui::EndChild();
+    }
 #else
     (void)e;
 #endif
 }
 
-// Restores the view/tracks split to its default proportion and persists that immediately -- see
-// AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to implement
-// this rather than just ActorEditor. A no-op `#if AVER_WITH_IMGUI` is off: a headless build never
-// lays the panels out at all, so there is nothing for a reset to restore.
+// Restores the view/tracks split AND the sequencer strip to their default proportions, persisting
+// both immediately -- see AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout"
+// needs every tab to implement this rather than just ActorEditor. A no-op with AVER_WITH_IMGUI off: a
+// headless build never lays the panels out at all, so there is nothing for a reset to restore.
 void AnimEditor::resetLayout() {
 #if AVER_WITH_IMGUI
     resetSplitPane(split_, kPrefViewSplit, kDefaultViewFraction);
+    resetSplitPane(seqSplit_, kPrefSeqSplit, kDefaultSeqFraction);
+    // THE COLLAPSE STATE RESETS TOO -- it is layout state exactly as much as either split's fraction
+    // is, and a "Reset Tab Layout" that put the strip back to its default HEIGHT while leaving it
+    // retracted (or the reverse: expanded at whatever fraction it last had before being collapsed)
+    // would still not be the tab's default layout.
+    seqCollapsed_ = false;
+    setPrefBool(kPrefSeqCollapsed, false);
+    flushEditorPrefs();
 #endif
 }
 

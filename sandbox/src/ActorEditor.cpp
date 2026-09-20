@@ -38,6 +38,13 @@ namespace {
 
 // State shared by every open actor tab.
 render::preview::ActorPreview* g_preview = nullptr;
+#if AVER_MODULE_PBR
+// Remembered rather than applied on the spot: setPreviewTextureResolver runs from SandboxApp::onInit,
+// which is long before any asset tab has been opened and therefore before sharedPreview() has made
+// the feature that needs it.
+pbr::MaterialSystem::TextureResolver g_previewTexResolver = nullptr;
+void*                                g_previewTexResolverUser = nullptr;
+#endif
 render::preview::PreviewMeshCache g_meshes;
 std::string g_contentRoot;
 bool g_previewTried = false;
@@ -1594,6 +1601,13 @@ render::preview::ActorPreview* sharedPreview(Engine& e) {
             // Registered non-owning; shutdownActorEditors removes it before deleting.
             g_device = e.device();
             g_device->addRenderFeature(g_preview);
+#if AVER_MODULE_PBR
+            // APPLIED AT CREATION, from whatever was remembered. Without this the preview's own
+            // material system has no way to reach a project texture and every material it shades
+            // samples the identity set -- see setPreviewTextureResolver's comment.
+            if (g_previewTexResolver)
+                g_preview->setMaterialTextureResolver(g_previewTexResolver, g_previewTexResolverUser);
+#endif
         } else {
             AVER_WARN("[AssetEditor] no preview on this backend; the tab shows numbers only");
         }
@@ -1602,6 +1616,17 @@ render::preview::ActorPreview* sharedPreview(Engine& e) {
 }
 
 render::preview::PreviewMeshCache& sharedPreviewMeshes() { return g_meshes; }
+
+#if AVER_MODULE_PBR
+void setPreviewTextureResolver(pbr::MaterialSystem::TextureResolver fn, void* user) {
+    g_previewTexResolver = fn;
+    g_previewTexResolverUser = user;
+    // AND RETROACTIVELY, for the case the order runs the other way: a preview built before the
+    // resolver was known would otherwise keep sampling identity textures for the rest of the
+    // session, which is a bug that only appears when an asset tab is opened unusually early.
+    if (g_preview) g_preview->setMaterialTextureResolver(fn, user);
+}
+#endif
 
 
 // Sets the content root that mesh paths in a designer file are relative to.

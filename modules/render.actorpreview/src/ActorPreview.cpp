@@ -341,6 +341,8 @@ bool ActorPreview::createMaterialPipeline() {
     materialVs_ = vs;
     materialPs_ = ps;
     materialGraphRev_ = pbr::materialGraphs().revision();
+    // {} graph(s) can legitimately read 0 here: a real PreviewDraw::materialHandle with no graph at
+    // all is enough to trigger this rebuild on its own now -- see prePass's own trigger comment.
     AVER_INFO("[Preview] material pipeline rebuilt for {} graph(s), pipeline {}",
               pbr::materialGraphs().count(), materialPipeline_);
     return true;
@@ -423,18 +425,45 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     if (!ready()) return;
 
 #if AVER_MODULE_PBR
-    // A MATERIAL GRAPH THAT APPEARED (OR CHANGED) SINCE materialPipeline_ WAS LAST BUILT. Pulled
-    // here rather than pushed from wherever a graph is authored, for the identical reason
-    // VoxiRenderer::prePass pulls the same revision number: materials load into the process-wide
+    // DOES ANYTHING IN THIS FRAME'S LIST WANT THE MATERIAL PIPELINE. Two independent reasons a draw
+    // can: a compiled graph (materialGraphId) or a real material asset (materialHandle) -- see
+    // PreviewDraw's own comment on why the second needs this pipeline too, even with no graph at all.
+    // A plain scan rather than folding into the draw loop below: the pipeline must exist BEFORE that
+    // loop binds anything to it, and the list is a handful of placements, not thousands.
+    bool wantsMaterialPipeline = false;
+    for (const PreviewDraw& d : draws_)
+        if (d.materialGraphId != 0 || d.materialHandle != 0) { wantsMaterialPipeline = true; break; }
+
+    // BUILT THE FIRST TIME ANYTHING ASKS, REBUILT WHENEVER THE GRAPH REGISTRY MOVES SINCE. Pulling
+    // the revision here rather than being pushed from wherever a graph is authored is the identical
+    // reason VoxiRenderer::prePass pulls the same number: materials load into the process-wide
     // registry long after this feature is constructed, and a revision check that only lives in ONE
-    // renderer's prePass cannot be forgotten by a future second one. Costs nothing when no graph has
-    // ever been registered -- materialGraphs().count() is the short-circuit, so the common case (no
-    // graphs at all) never even reads the revision.
-    if (pbr::materialGraphs().count() > 0 && materialGraphRev_ != pbr::materialGraphs().revision()) {
+    // renderer's prePass cannot be forgotten by a future second one.
+    //
+    // GATED ON wantsMaterialPipeline, NOT on materialGraphs().count() alone the way this used to be:
+    // a real materialHandle draw needs materialPipeline_ even in a project that has never registered
+    // a single graph, because averStockAuthored (the stock texture read every material pipeline
+    // compile carries, graph or not) is the only thing in this feature that samples a bound texture
+    // table at all -- PreviewPS above never does. Costs nothing when nothing in the list wants either
+    // knob: the common case (no graphs, no real materials -- a debug box, say) never reaches
+    // createMaterialPipeline() and pays for none of it, exactly the guarantee this used to make for
+    // "no graphs" alone.
+    if (wantsMaterialPipeline &&
+        (materialPipeline_ == 0 || materialGraphRev_ != pbr::materialGraphs().revision())) {
         if (!createMaterialPipeline())
-            AVER_WARN("[Preview] material pipeline rebuild declined; graph-shaded draws keep using "
-                     "whatever compiled last, or the simple shader if nothing ever has");
+            AVER_WARN("[Preview] material pipeline rebuild declined; graph- or material-shaded draws "
+                     "keep using whatever compiled last, or the simple shader if nothing ever has");
     }
+
+    // DRAINS MaterialLibrary::consumeDirty() ONCE PER FRAME, unconditionally -- the same cadence
+    // VoxiRenderer::prePass drives its own materials_.update() at, and for the identical reason: a
+    // MaterialSystem nobody updates shows the state it had when its first Entry was built and never
+    // notices a later edit (a texture swapped, a factor tweaked) to a material this preview already
+    // drew. Safe to call before materialFallback_ has ever been init()'d -- MaterialSystem::update()
+    // itself declines with `if (!res_) return;` -- so this costs nothing extra on the frame before
+    // the block above first builds it, and nothing at all in a project that never uses this preview's
+    // material path.
+    materialFallback_.update();
 #endif
 
     ctx.pushMarker("ActorPreview");
@@ -495,13 +524,19 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
         // once per frame and the bindings after it were the ones that counted. Adding a second is
         // what made the ordering load-bearing.
         //
-        // 0 -- EVERY EXISTING CALLER's value -- selects pipeline_ unchanged. A non-zero id selects
-        // the material pipeline only once one actually exists; a graph that has not compiled yet
-        // (or a PBR=OFF build, where materialPipeline_ does not exist as a member at all) quietly
-        // falls back to the simple shader rather than skipping the draw.
+        // 0 IN BOTH FIELDS -- EVERY EXISTING CALLER's values -- selects pipeline_ unchanged. A
+        // non-zero materialGraphId OR a non-zero materialHandle selects the material pipeline
+        // instead, once one actually exists: a graph that has not compiled yet, a material asked for
+        // before any draw needed the pipeline built (see prePass's own scan above), or a PBR=OFF
+        // build (where materialPipeline_ does not exist as a member at all) all quietly fall back to
+        // the simple shader rather than skipping the draw. materialHandle alone (materialGraphId
+        // still 0) belongs here too: see actor_preview_material.hlsli's `default: break` arm, which
+        // is already "run averStockAuthored and stop" -- exactly a real material's textures with no
+        // graph on top.
         rhi::PipelineHandle wanted = pipeline_;
 #if AVER_MODULE_PBR
-        const bool wantsMaterial = d.materialGraphId != 0 && materialPipeline_ != 0;
+        const bool wantsMaterial =
+            (d.materialGraphId != 0 || d.materialHandle != 0) && materialPipeline_ != 0;
         if (wantsMaterial) wanted = materialPipeline_;
 #endif
         if (wanted != activePipeline) {
@@ -514,16 +549,36 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
 
 #if AVER_MODULE_PBR
         if (wantsMaterial) {
-            // The identity material's factors, so anything the graph does NOT drive (a roughness
-            // map, an occlusion map) reads as the neutral value averStockAuthored would give a
-            // material with nothing bound -- with graphId overwritten to select this draw's graph
-            // out of the process-wide switch materialGraphHlsl() generated. The fallback BINDING SET
-            // supplies the eight identity textures the same call reads maps through, so a graph that
-            // samples one gets a defined answer (white, flat, or black, per slot) rather than an
-            // unbound descriptor.
-            pbr::MaterialConstants mc = materialFallback_.fallbackConstants();
+            // d.materialHandle == 0 -- EVERY EXISTING CALLER's value -- keeps exactly today's
+            // behaviour: the identity material's factors, so anything a graph does NOT drive (a
+            // roughness map, an occlusion map) reads as the neutral value averStockAuthored would
+            // give a material with nothing bound, through the fallback BINDING SET's eight identity
+            // textures, so a graph that samples one gets a defined answer (white, flat, or black, per
+            // slot) rather than an unbound descriptor.
+            //
+            // A non-zero materialHandle instead resolves through the ordinary bindingSet()/
+            // constants() lookup -- the same two calls VoxiRenderer::materials() answers for the
+            // scene renderer -- to that material's REAL binding set and REAL constant block: THE FIX
+            // for the mesh drawing white, since averStockAuthored (run either way, graph or not) now
+            // samples an actual base-colour map instead of this preview's own white one. An unknown
+            // or stale handle degrades to the identical fallback pair above -- bindingSet()/
+            // constants() make that guarantee themselves -- so a handle gone bad never leaves the
+            // draw unbound.
+            //
+            // graphId is overwritten AFTER either choice, unconditionally: it selects which graph (if
+            // any) runs on top of the stock read averStockAuthored just did, and that choice is
+            // ActorPreview's caller's alone (see PreviewDraw::materialGraphId) -- a real material's
+            // OWN authored graphId, if MaterialLibrary packed one in, is not what this draw asked to
+            // preview.
+            const bool hasRealMaterial = d.materialHandle != 0;
+            const rhi::BindingSetHandle set = hasRealMaterial
+                ? materialFallback_.bindingSet(d.materialHandle)
+                : materialFallback_.fallbackBindingSet();
+            pbr::MaterialConstants mc = hasRealMaterial
+                ? materialFallback_.constants(d.materialHandle)
+                : materialFallback_.fallbackConstants();
             mc.graphId = d.materialGraphId;
-            ctx.setDrawBinding(materialFallback_.fallbackBindingSet(), &mc, sizeof(mc));
+            ctx.setDrawBinding(set, &mc, sizeof(mc));
         }
 #endif
 

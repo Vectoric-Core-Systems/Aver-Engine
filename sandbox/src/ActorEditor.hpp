@@ -7,6 +7,16 @@
 #include <memory>
 #include <string>
 
+#if AVER_MODULE_PBR
+// For pbr::MaterialSystem::TextureResolver, named by setPreviewTextureResolver below. AT FILE
+// SCOPE, which is not a style point: this include first went in beside that declaration, INSIDE
+// `namespace aver::editor`, and every name <unordered_map> and <string> declare became
+// aver::editor::std::* -- the compiler's own words were "'unordered_map': is not a member of
+// 'aver::editor::std'". A standard header included inside a namespace poisons the whole
+// translation unit, and the error names the victim rather than the cause.
+#include "aver/pbr/MaterialSystem.hpp"
+#endif
+
 namespace aver { class Engine; namespace render::preview { class ActorPreview; class PreviewMeshCache; } }
 
 namespace aver::editor {
@@ -34,6 +44,24 @@ inline std::string actorTabTitle(const std::string& baseTitle, bool /*dirty*/) {
 render::preview::ActorPreview* sharedPreview(Engine& e);
 // The mesh registry that preview shares, for the same reason.
 render::preview::PreviewMeshCache& sharedPreviewMeshes();
+
+#if AVER_MODULE_PBR
+// THE TEXTURE RESOLVER EVERY ASSET PREVIEW'S MATERIALS GO THROUGH, installed once by the composition
+// root and remembered so a preview created LATER still gets it.
+//
+// WHY THIS EXISTS AT ALL. A pbr::MaterialSystem turns a material's TextureRef into a GPU texture by
+// asking a resolver; a system with no resolver hands back its IDENTITY textures instead -- white
+// base colour, flat normal. The shared preview never had one, so every material it was asked to
+// shade sampled white, and the animation editor's mesh rendered blank no matter how correctly the
+// material itself resolved. That is the whole bug.
+//
+// IT IS SET FROM SandboxApp, NOT FROM HERE, because the resolver needs the project's content index
+// (game::GameContent::resolveMaterialTexture plus the GameContent that owns the textures) and this
+// file has no business knowing what a project is -- the same division setActorEditorContentRoot
+// above already draws. Calling it before any preview exists is the normal case and is why the
+// value is remembered rather than applied immediately.
+void setPreviewTextureResolver(pbr::MaterialSystem::TextureResolver fn, void* user);
+#endif
 
 
 // Creates an actor editor for a `.Designer.cs` that carries a generated region, else nullptr.
