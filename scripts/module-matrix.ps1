@@ -115,9 +115,60 @@ function Get-Cached([string] $key) {
     if (-not $line) { return "" }
     return ($line.Line -split "=", 2)[1]
 }
+# RUNS A NATIVE TOOL WITHOUT LETTING ITS STDERR END THE SCRIPT.
+#
+# THIS IS WHY THE MATRIX COULD NOT RUN AT ALL. `& $cmake @args 2>&1` under this script's
+# $ErrorActionPreference of 'Stop' wraps every stderr LINE in an ErrorRecord and throws on the
+# first one -- and CMake's configure prints the NRD submodule's ordinary banner, "NRD: v4.18.0", to
+# stderr. So the whole matrix died on a version string before it had compiled anything, reporting a
+# NativeCommandError that named cmake.exe and looked like a toolchain fault.
+#
+# scripts/verify-game.ps1 already documents this exact trap and routes around it, in its own words:
+# redirecting a native executable's stderr inside PowerShell "turns the engine's ordinary [WARN]
+# lines into a terminating NativeCommandError -- measured: the first version of this died on
+# 'cannot enable streaming'". Same defect, second script.
+function Invoke-Native {
+    param([string] $Exe, [string[]] $Arguments)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try   { $out = & $Exe @Arguments 2>&1; return @{ Output = $out; Exit = $LASTEXITCODE } }
+    finally { $ErrorActionPreference = $prev }
+}
+
 $cmake = Join-Path (Split-Path -Parent (Get-Cached "CMAKE_MAKE_PROGRAM")) "..\CMake\bin\cmake.exe"
 if (-not (Test-Path $cmake)) { $cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source }
 if (-not $cmake) { Write-Error "Could not locate cmake.exe." }
+
+# THE COMPILER NEEDS ITS ENVIRONMENT, not just its path. The cached CMAKE_CXX_COMPILER above is
+# where cl.exe lives; INCLUDE and LIB are what let it find a standard header, and those come from
+# vcvars64. Without them CMake's own compiler probe fails first, with
+# "CMakeTestCCompiler.cmake:67 (message)" and nothing about what is actually missing -- which reads
+# as a broken tree rather than a shell that was never set up.
+#
+# scripts/build.ps1 hands this problem to build.bat, which calls vcvars64 before it does anything.
+# This script had no equivalent, so it ran only from a Developer prompt and failed everywhere else.
+# Given the header above calls this matrix "the only thing that can answer" whether the engine still
+# builds with a module off, a check that silently cannot start is a check nobody runs.
+if (-not $env:INCLUDE) {
+    $vcvars = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path $vcvars)) {
+        Write-Error "No MSVC environment (INCLUDE is unset) and no vcvars64.bat at $vcvars. Run this from a Developer prompt, or correct the path here."
+    }
+    # Import what vcvars sets rather than re-launching this script under cmd: one process, and the
+    # variables are then visible to ninja too, which needs them just as much as the configure does.
+    #
+    # THROUGH Invoke-Native, because vcvars64.bat ITSELF trips the same stderr trap: on this machine
+    # it prints "'vswhere.exe' is not recognized" and then carries on to set the environment
+    # correctly anyway. build.bat never noticed because it sends the whole thing to nul. Left
+    # unguarded here, that one benign line ends the script before a single configuration is built --
+    # the same failure, one layer down, as the one this function was written for.
+    $vc = Invoke-Native "cmd" @("/c", "call `"$vcvars`" >nul && set")
+    $vc.Output | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] -ErrorAction SilentlyContinue }
+    }
+    if (-not $env:INCLUDE) { Write-Error "vcvars64 ran but INCLUDE is still unset; the MSVC environment did not take." }
+    Write-Host "[matrix] MSVC environment imported from vcvars64" -ForegroundColor DarkGray
+}
 $ninja = Get-Cached "CMAKE_MAKE_PROGRAM"
 $cxx   = Get-Cached "CMAKE_CXX_COMPILER"
 $cc    = Get-Cached "CMAKE_C_COMPILER"
@@ -129,14 +180,18 @@ foreach ($name in $configs.Keys) {
     $dir = Join-Path $BuildRoot $name
     Write-Host "`n=== $name ===" -ForegroundColor Cyan
 
-    $args = @("-S", ".", "-B", $dir, "-G", "Ninja",
-              "-DCMAKE_BUILD_TYPE=Debug",
-              "-DCMAKE_MAKE_PROGRAM=$ninja",
-              "-DCMAKE_CXX_COMPILER=$cxx", "-DCMAKE_C_COMPILER=$cc", "-DCMAKE_RC_COMPILER=$rc") +
-            $configs[$name]
+    # NOT $args: that is a PowerShell automatic variable holding this script's own arguments, and
+    # assigning to it works only by accident of it being consumed on the very next line.
+    # verify-game.ps1 carries the same warning over its own Get-Census for the same reason.
+    $cfgArgs = @("-S", ".", "-B", $dir, "-G", "Ninja",
+                 "-DCMAKE_BUILD_TYPE=Debug",
+                 "-DCMAKE_MAKE_PROGRAM=$ninja",
+                 "-DCMAKE_CXX_COMPILER=$cxx", "-DCMAKE_C_COMPILER=$cc", "-DCMAKE_RC_COMPILER=$rc") +
+               $configs[$name]
 
-    $cfgOut = & $cmake @args 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $cfg    = Invoke-Native $cmake $cfgArgs
+    $cfgOut = $cfg.Output
+    if ($cfg.Exit -ne 0) {
         $results += [pscustomobject]@{ Config = $name; Stage = "configure"; Ok = $false
                                        Detail = ($cfgOut | Select-String -Pattern "CMake Error" | Select-Object -First 1) }
         Write-Host "  CONFIGURE FAILED" -ForegroundColor Red
@@ -147,8 +202,9 @@ foreach ($name in $configs.Keys) {
     # that produced this script was misled by exactly that: a link failure in a small target aborted
     # the build before SandboxApp.cpp was ever compiled, and the run was reported as "0 compiler
     # errors". Keep going, or the result describes how far ninja got rather than what is broken.
-    $buildOut = & $ninja -C $dir -k 0 2>&1
-    $ok = $LASTEXITCODE -eq 0
+    $build    = Invoke-Native $ninja @("-C", $dir, "-k", "0")
+    $buildOut = $build.Output
+    $ok = $build.Exit -eq 0
     $errs = @($buildOut | Select-String -Pattern "error [A-Z]+[0-9]+" | Select-Object -First 3)
     $results += [pscustomobject]@{ Config = $name; Stage = "build"; Ok = $ok
                                    Detail = if ($ok) { "" } else { ($errs -join " | ") } }
