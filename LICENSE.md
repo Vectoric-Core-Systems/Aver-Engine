@@ -61,9 +61,84 @@ are NOT covered by the grant above. Each carries its own licence text in its dir
   third_party/stb               stb single-file libraries  Public domain / MIT
   third_party/meshoptimizer     meshoptimizer              MIT
   third_party/fonts             Roboto                     Apache-2.0
+  third_party/fonts             Material Icons             Apache-2.0
   third_party/vulkan-headers    Vulkan-Headers (Khronos)   Apache-2.0
   third_party/fidelityfx-fsr    AMD FidelityFX FSR 1       MIT
+  third_party/fidelityfx-denoiser  AMD FidelityFX Denoiser MIT
   modules/physics.jolt/Jolt     Jolt Physics               MIT
+  third_party/dxc-spirv         DirectX Shader Compiler    MIT + LLVM Release Licence
+                                (redistributed binary: dxcompiler.dll)  (Univ. of Illinois/NCSA)
+  third_party/nuget             .NET Compiler Platform (Roslyn)         MIT
+  third_party/nrd               NVIDIA Real-Time Denoisers (NRD)    NVIDIA RTX SDKs Licence
+  third_party/rtxdi             NVIDIA RTXDI (ReSTIR DI/GI)         NVIDIA RTX SDKs Licence
+  third_party/rtxgi             NVIDIA RTXGI (SHaRC)                NVIDIA RTX SDKs Licence
+  third_party/mathlib           NVIDIA MathLib                      MIT
+  third_party/shadermake        NVIDIA ShaderMake                   MIT
 
 Nothing in this Agreement restricts rights granted to you by those licences, and no per-file
 copyright notice in this repository is applied to them.
+
+
+NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This software contains source code provided by NVIDIA Corporation.
+
+That sentence is not a courtesy. It is the notice the NVIDIA RTX SDKs Licence requires, in the
+words it requires, and it is reproduced here because this product contains and distributes NVIDIA
+SDK code:
+
+  * NRD (NVIDIA Real-Time Denoisers) is compiled and statically linked into both the editor and
+    the packaged-game runtime. It denoises the ray-traced global-illumination signal.
+
+  * RTXDI's shader source is distributed VERBATIM. Its HLSL is copied whole into the shaders
+    directory of every build and every package, and the engine's own shaders include it -- the
+    ReSTIR GI estimator is RTXDI's. This is NVIDIA source code shipped as readable text, not
+    merely linked as a compiled artefact, which is the plainest possible case for the notice above.
+
+  * MathLib and ShaderMake are NVIDIA-authored and MIT-licensed. Their own copyright and permission
+    notices are reproduced in their directories and travel with them.
+
+  * RTXGI is vendored in this repository but is NOT currently built, linked, deployed, or
+    referenced by any shader or source file. It is listed for completeness of what this repository
+    CONTAINS, which is what this section is about. Wiring it would not change the terms below; they
+    already apply through NRD and RTXDI.
+
+WHAT NVIDIA REQUIRES. The full text governs and is reproduced unmodified in each directory
+(third_party/nrd/LICENSE.txt, third_party/rtxdi/LICENSE.txt, third_party/rtxgi/License.md). The
+obligations that bear on anyone distributing this software are:
+
+  1. The notice at the head of this section must be included in modifications and derivative works
+     of source code distributed.
+
+  2. An application must have material additional functionality beyond the included portions of
+     the SDK.
+
+  3. Attribution. Use of the applicable SDK must be attributed, and the NVIDIA Marks included, on
+     splash screens, in the application's about box where one exists, and in credits for game
+     applications -- or, where no credit screen exists, prominently in end-user documentation.
+
+     NO NVIDIA MARKS ARE USED BY THIS PRODUCT. The NVIDIA name appears here and in the editor's
+     attribution surface as plain text identifying the SDKs in use. NVIDIA's trademarks, logos and
+     brand assets are not reproduced, and are not licensed for use by this notice. Use of the Marks
+     themselves is separately gated by NVIDIA on prior written approval of a sample use, which has
+     not been sought.
+
+  4. Onward distribution must be subject to terms at least as protective as NVIDIA's own,
+     including the licence grant, the restrictions, and the protection of NVIDIA's intellectual
+     property rights.
+
+  5. Interoperability. Applications incorporating the SDK must be fully interoperable with
+     compatible GPU hardware products designed by NVIDIA or its affiliates. This engine reaches
+     these SDKs only through its vendor-agnostic RHI and never through a backend-specific path,
+     and NRD is built with whichever offline shader compiler is present rather than an
+     NVIDIA-specific toolchain.
+
+  6. NVIDIA reserves the right to identify licensees publicly, and requires notification prior to
+     commercial release of applications incorporating the DLSS or NGX SDKs specifically.
+     NEITHER THE DLSS SDK NOR THE NGX SDK IS INCLUDED IN THIS SOFTWARE, so that notification
+     obligation does not arise. The DLSS-specific and NGX-specific terms in NVIDIA's licence --
+     the NVIDIA-GPU-only development restriction, the cloud-service limitation, and the
+     over-the-air update terms -- likewise do not apply to the SDKs used here.
+
+Nothing in this Agreement grants you any right in NVIDIA's software or intellectual property.
+Your rights in the NVIDIA components are those NVIDIA's own licence gives you, and no more.
