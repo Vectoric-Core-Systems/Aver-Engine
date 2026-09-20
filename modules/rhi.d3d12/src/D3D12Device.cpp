@@ -254,6 +254,29 @@ public:
             // the handler looks -- --shader-source, the cache and hot reload all still apply.
             L"-I", L".",
         };
+        // ONE DEFINE IS A FLAG, NOT A DEFINE: AVER_ENABLE_16BIT_TYPES asks DXC for real fp16
+        // (-enable-16bit-types) for THIS compile only, and is consumed here rather than passed on.
+        //
+        // WHY IT IS OPT-IN PER SHADER AND NOT A GLOBAL ARGUMENT. That switch changes what `half`
+        // MEANS: without it DXC widens half to fp32, with it half is genuinely 16-bit. There are 93
+        // uses of half/min16float across this engine's shaders -- water, the material prelude, the
+        // path tracer's denoiser among them -- every one of which would silently change precision
+        // the day the flag went on globally. That is a renderer-wide numerical change wearing the
+        // costume of a build flag, and it would not show up as a compile error anywhere.
+        //
+        // A shader that genuinely needs fp16 TYPES (float16_t and friends -- RTXGI's SHaRC packs
+        // its resolved radiance as float16_t4, and cannot compile at all without this) asks for it
+        // by name and gets it alone. Requires SM 6.2 or better; this engine targets 6.5.
+        bool want16Bit = false;
+        for (usize i = 0; i < wDefines.size();) {
+            if (wDefines[i] == L"AVER_ENABLE_16BIT_TYPES") {
+                want16Bit = true;
+                wDefines.erase(wDefines.begin() + static_cast<isize>(i));
+            } else {
+                ++i;
+            }
+        }
+        if (want16Bit) args.push_back(L"-enable-16bit-types");
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
         // A real include handler (rhi::shaderFile(), not DXC's default filesystem one -- see
         // DxcShaderInclude.hpp: --shader-source, the cache, CRLF normalisation, hot reload) so a
@@ -2387,6 +2410,15 @@ void D3D12Device::queryCaps() {
         caps_.conservativeRaster = o.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
         caps_.resourceBindingTier = static_cast<u32>(o.ResourceBindingTier);
     }
+    // 64-BIT SHADER ATOMICS, asked of the DEVICE. See DeviceCaps::shaderInt64Atomics for why this
+    // is not read off the shader model. OPTIONS1 carries Int64ShaderOps, which is the plain
+    // 64-bit integer op support a buffer atomic needs; a driver too old to know the query simply
+    // fails it and leaves the bit false, which is the correct conservative answer.
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1{};
+        if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1))))
+            caps_.shaderInt64Atomics = o1.Int64ShaderOps != FALSE;
+    }
     for (D3D_SHADER_MODEL sm : {D3D_SHADER_MODEL_6_6, D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_1, D3D_SHADER_MODEL_6_0}) {
         D3D12_FEATURE_DATA_SHADER_MODEL q{sm};
         if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &q, sizeof(q)))) {
@@ -2429,6 +2461,13 @@ void D3D12Device::queryCaps() {
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster,
               caps_.resourceBindingTier);
     AVER_INFO("[RHI.D3D12] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
+    // LOGGED BESIDE THE SHADER MODEL ON PURPOSE, because the two disagree here and the disagreement
+    // is the point: this engine COMPILES at shader model 6.5 while the device may REPORT 6.6, and a
+    // consumer that infers 64-bit atomic support from the compile target -- which is exactly what
+    // RTXGI's SHaRC does by default -- gets a different answer from the one the hardware just gave.
+    // Printing both is what lets somebody notice that rather than discover it as a corrupted hash
+    // map or a needlessly allocated lock buffer.
+    AVER_INFO("[RHI.D3D12] 64-bit shader atomics: {}", caps_.shaderInt64Atomics ? "yes" : "no");
     if (capsOverride().active)
         AVER_WARN("[RHI.D3D12] caps CLAMPED by --force-caps; the hardware reports MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
                   hw.maxMsaaSamples, hw.rayTracingTier, hw.shaderModel, hw.meshShaderTier,

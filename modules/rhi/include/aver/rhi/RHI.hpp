@@ -104,6 +104,22 @@ struct DeviceCaps {
     // from resourceBindingTier would also be wrong on Vulkan, where that field is hardcoded to 0
     // by design and could never carry this.
     bool rtBindlessTextures = false;
+
+    // Whether a shader may perform 64-BIT ATOMICS on a buffer. Needed by any lock-free hash map
+    // built on a 64-bit compare-exchange, which is what a world-space radiance cache is.
+    //
+    // QUERIED FROM THE DEVICE, NOT DERIVED FROM shaderModel, and the difference is the whole reason
+    // this is its own bit. RTXGI's SHaRC auto-detects the same capability from the DXC SHADER
+    // TARGET alone -- SM 6.6 or better means "assume native 64-bit atomics" -- which answers a
+    // question about the COMPILER when the question is about the HARDWARE AND DRIVER. A device can
+    // report SM 6.6 support and still lack this; the two are independent D3D12 feature queries
+    // (D3D12_FEATURE_D3D12_OPTIONS1::Int64ShaderOps, and OPTIONS9 for the typed-resource form).
+    //
+    // WHAT IT COSTS TO GET WRONG: a consumer that assumes native atomics where there are none has
+    // to fall back to a software spin-lock, which needs a whole extra buffer -- 16 MiB at SHaRC's
+    // suggested cache size. Guessing high silently corrupts the map; guessing low wastes the
+    // memory. So it is asked rather than inferred.
+    bool shaderInt64Atomics = false;
 };
 
 // A development clamp on what a device REPORTS, so capability-gated fallback paths can be run on

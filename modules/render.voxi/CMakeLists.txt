@@ -84,4 +84,28 @@ target_compile_definitions(Aver.Render.Voxi.Renderer PRIVATE
 file(COPY "${CMAKE_SOURCE_DIR}/third_party/rtxdi/Include/Rtxdi"
      DESTINATION "${CMAKE_BINARY_DIR}/bin/shaders")
 
+# ---- RTXGI SHaRC's HLSL, deployed the SAME WAY and for a sharper version of the same reason ----
+#
+# SHaRC is a world-space radiance cache whose shader side is four headers. NOTHING INCLUDES THEM
+# YET -- the estimator that would use them is not written -- and they are deployed anyway so that
+# the day it is, the include closure is already on disk and correct. Deploying is the half of this
+# integration that can be got right and verified now; the multi-bounce update loop is the half that
+# cannot.
+#
+# EVERY ONE OF THEM IS A .h, WHICH IS EXACTLY WHY aver_deploy_shaders CANNOT CARRY THEM.
+# HashGridCommon.h, SharcCommon.h, SharcGlsl.h and SharcTypes.h -- not one .hlsl or .hlsli among
+# them, and that helper globs only those two extensions and flattens what it finds into a single
+# directory. Point it at this tree and it deploys NOTHING, and the failure lands at RUNTIME, because
+# HLSL compiles at runtime here: a missing include is a shader that fails to compile in a running
+# editor, not a build error anyone sees. file(COPY) at configure time preserves both the extensions
+# and the directory structure, exactly as RTXDI's copy above already does.
+#
+# UNDER ITS OWN Sharc/ DIRECTORY rather than flattened beside the engine's shaders, for RTXDI's
+# documented reason one SDK over: <exe>/shaders is a case-insensitive flat namespace, and this
+# engine has already lost a file to a basename collision there once (RTXDI's Color.hlsli against
+# the engine's color.hlsli, which surfaced as an unrelated undeclared identifier because nothing
+# reports one file quietly overwriting another).
+file(COPY "${CMAKE_SOURCE_DIR}/third_party/rtxgi/Libraries/Sharc/include/"
+     DESTINATION "${CMAKE_BINARY_DIR}/bin/shaders/Sharc")
+
 aver_deploy_shaders(Aver.Render.Voxi.Renderer "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

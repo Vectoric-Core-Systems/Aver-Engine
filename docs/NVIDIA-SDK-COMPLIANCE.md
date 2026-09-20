@@ -223,3 +223,51 @@ Two facts worth keeping here so they are not rediscovered:
 
 **Wiring SHaRC changes §1 and §3 but not §2** — the obligations above already apply through NRD and
 RTXDI, so the only change is that a third SDK joins the lists.
+
+### 5.1 What has been done toward wiring it (2026-09-21)
+
+The *compatibility* half is in; the algorithm is not. The split is deliberate: everything below can
+be verified today, and the part left out cannot.
+
+**Done:**
+
+- **SHaRC's four headers deploy**, structure-preserving, into `bin/shaders/Sharc/`
+  (`modules/render.voxi/CMakeLists.txt`). All four are `.h`, which `aver_deploy_shaders` cannot see
+  — it globs `*.hlsl`/`*.hlsli` and flattens — so the naive route deploys nothing and fails at
+  RUNTIME, since HLSL compiles at runtime here. Under their own directory, because `<exe>/shaders`
+  is a case-insensitive flat namespace that has already silently swallowed one file.
+- **`DeviceCaps::shaderInt64Atomics`**, asked of the device rather than inferred.
+- **A per-compile opt-in to 16-bit types**: passing the define `AVER_ENABLE_16BIT_TYPES` adds
+  `-enable-16bit-types` for that compile alone. `SharcPackedData` uses `float16_t4` and cannot
+  compile without it — but enabling it globally would change what `half` MEANS in 93 existing uses
+  across water, the material prelude and the path tracer's denoiser, from widened fp32 to genuine
+  fp16. A renderer-wide numerical change with no compile error to announce it.
+
+**Measured on the development machine (AMD Radeon RX 7800 XT):**
+
+| | |
+|---|---|
+| Device shader model | **6.6** |
+| Engine compiles shaders at | **6.5** |
+| `64-bit shader atomics` | **yes** |
+
+**Those first two rows disagree, and SHaRC reads the wrong one.** Its
+`SHARC_ENABLE_64_BIT_ATOMICS` auto-detect keys off the DXC shader TARGET macros
+(`SharcCommon.h:96-113`): at SM 6.5 it resolves to 0, meaning "no native atomics, use the software
+spin-lock", which needs a fourth buffer — 16 MiB at the suggested 2²² cache size — that this
+hardware does not need. **Set the define explicitly from `caps.shaderInt64Atomics`; do not let the
+SDK guess.**
+
+**Not done, and not attempted:** the SHaRC Update pass. It is structurally a multi-bounce
+path-tracer inner loop (`SHARC_PROPAGATION_DEPTH`, default 4) with no precedent in this codebase —
+much closer in shape to `modules/render.pt`'s `PtSceneView` than to Voxi's single-candidate-ray
+ReSTIR scheme. That is new algorithmic work plus GPU-hours of parameter tuning, not a wiring
+exercise, and SHaRC's own guide devotes a section to the tuning.
+
+**Two SDK facts worth keeping, both of which would cost an implementer time:**
+
+- **`SHARC_QUERY` does not exist.** `Integration.md` calls it required; it appears zero times in all
+  four headers. It is a host permutation-naming convention, not a macro branch.
+- **`Integration.md` is stale against the vendored v1.6.5.** `SHARC_SAMPLE_NUM_BIT_NUM`,
+  `SHARC_SAMPLE_NUM_MULTIPLIER`, `SHARC_RADIANCE_SCALE` and two debug functions it documents are all
+  gone; `GetVoxelSize()` is really `HashGridGetVoxelSize()`. Trust the headers, not the guide.
