@@ -1478,20 +1478,31 @@ public:
     void setViewmodelTest(int n);                             // --viewmodel-test
     void setSkinSceneDir(std::string d);          // --skin-scene-test <dir>
     void setShaderSourceDir(std::string d);
+    // ---- THREE THINGS THAT ARE NOT NAVIGATION, moved out of the block below ------------------
+    //
+    // All three were declared inside `#if AVER_MODULE_SYNAPSE` and not one of them has anything to
+    // do with a navigation grid: a physics collider overlay, a GPU profiler panel and the Content
+    // Browser's References panel. They landed there because that is where the cursor was, and it
+    // cost nothing only because Aver.Synapse has no option() of its own and so is always compiled
+    // in -- which is exactly the state scripts/module-matrix.ps1's own header warns about, "a
+    // module absent from this list is a module nobody checks". The day Synapse gets a switch, every
+    // one of these breaks at once. They are under the guards they actually need instead.
+#if AVER_MODULE_PHYSICS
+    // Rebuilds the collider overlay's line mesh: the world-space AABB of every physics body.
+    void rebuildColliderOverlay(Engine& e);
+#endif
+#if AVER_WITH_IMGUI
+    void buildReferencesPanel();
+
+    void buildProfilerPanel(Engine& e);
+#endif
+
 #if AVER_MODULE_SYNAPSE
     void setBakeNavOnStart(f32 cellCm);   // --bake-nav [cm]
 
     // Rebuilds the overlay line mesh from nav_. Destroying the old one FIRST is the point: this
     // runs on every bake and every level open, and before destroyLineMesh existed each call
     // leaked one committed upload buffer for as long as the editor stayed open.
-#if AVER_MODULE_PHYSICS
-    void rebuildColliderOverlay(Engine& e);
-#endif
-
-    void buildReferencesPanel();
-
-    void buildProfilerPanel(Engine& e);
-
     void rebuildNavOverlay(Engine& e);
 
     // PAIRED WITH THE DEFINITION'S OWN GUARD (SandboxShell.cpp). AVER_MODULE_SYNAPSE is the grid
@@ -2539,7 +2550,15 @@ private:
     // ---- VIEWPORT PLACEMENT VERBS (2026-09-16), dispatched from handleManip's edit-verb block and
     // defined in SandboxViewport.cpp. Each acts on the whole multi-selection as ONE undo entry.
     // End: drop each selected entity onto whatever is below it (rayPickGeometry + dropRestLift).
+    // AND ON AVER_WITH_IMGUI, matching its definition in SandboxViewport.cpp. This is a keybound
+    // editor command -- its one caller is editor::CommandId::SnapToFloor in the viewport's chord
+    // handler -- so the scene is what it operates ON and the editor UI is what invokes it; the
+    // declaration claimed only the first. Latent rather than live, because the caller was already
+    // guarded on both, but a declaration visible in a configuration whose definition is compiled
+    // out is one call away from an unresolved external.
+#if AVER_WITH_IMGUI
     void snapSelectionToFloor();
+#endif
     // Arrow keys / PageUp / PageDown: move by the move-snap step (or 10 cm with snapping off).
     void nudgeSelection(const Vec3& deltaCm);
 
@@ -3522,11 +3541,30 @@ private:
     fmt::OcNavData  nav_;
     rhi::LineHandle navMesh_=0;
     bool showNav_=false;
+    bool navRegionColours_=true;
+    // --bake-nav: bake once at startup, then carry on. Deferred to a frame rather than done at
+    // init because the bake reads PHYSICS BODIES, and a level's bodies are built by
+    // applyProject, which has not run when the app is constructed.
+    bool navBakeOnStart_=false;
+    bool navBakeDone_=false;
+    bool navLoadPending_=false;
+    f32  navBakeCell_=50.0f;
+#endif
+
+    // ---- the state belonging to the three non-navigation features above ----------------------
     // Collider overlay: the world-space AABB of every physics body. There was no way to see
-    // collision in this editor at all before it -- no toggle, no wireframe, nothing. Persisted
-    // through editor.ini like the other view toggles, because it is a property of the VIEW and not
-    // of the level.
+    // collision in this editor at all before it -- no toggle, no wireframe, nothing.
+    //
+    // THE TOGGLE IS UNGUARDED AND THE MESH IS NOT, which is the split its own comment already
+    // implied: this is "a property of the VIEW and not of the level", persisted through editor.ini
+    // beside every other view toggle -- and loadEditorPreferences/saveEditorPreferences run in
+    // every configuration, so a bool they read and write cannot be one that only exists when the
+    // solver does. The line mesh below is the part genuinely built out of physics bodies.
     bool showColliders_=false;
+#if AVER_MODULE_PHYSICS
+    rhi::LineHandle colliderMesh_=0;
+#endif
+#if AVER_WITH_IMGUI
     // The GPU profiler panel. A view over GpuTimingReport, which the device has always
     // produced and only the console ever read.
     bool showProfiler_=false;
@@ -3536,15 +3574,6 @@ private:
     bool refPanelScanned_ = false;
     std::string refPanelAsset_;
     std::vector<std::string> refPanelResults_;
-    rhi::LineHandle colliderMesh_=0;
-    bool navRegionColours_=true;
-    // --bake-nav: bake once at startup, then carry on. Deferred to a frame rather than done at
-    // init because the bake reads PHYSICS BODIES, and a level's bodies are built by
-    // applyProject, which has not run when the app is constructed.
-    bool navBakeOnStart_=false;
-    bool navBakeDone_=false;
-    bool navLoadPending_=false;
-    f32  navBakeCell_=50.0f;
 #endif
     rhi::LineHandle gzMove_[3]={0,0,0}, gzMoveHi_[3]={0,0,0};
     rhi::LineHandle gzRot_[3]={0,0,0}, gzRotHi_[3]={0,0,0};

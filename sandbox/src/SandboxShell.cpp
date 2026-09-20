@@ -5,7 +5,14 @@
 #include "SandboxApp.hpp"
 
 namespace aver {
-#if AVER_MODULE_SYNAPSE
+// GUARDED ON THE EDITOR UI, NOT ON NAVIGATION. Both panels below were written inside this file's
+// AVER_MODULE_SYNAPSE block and neither has anything to do with a navigation grid -- one is a view
+// over GpuTimingReport, the other scans text files for references to an asset. They sat there
+// because that is where the cursor was, and it cost nothing only because Aver.Synapse has no
+// option() of its own. Their declarations moved to AVER_WITH_IMGUI in SandboxApp.hpp; these follow,
+// because a declaration compiled out while its definition is not is a C2039 on a member of a class
+// that no longer has one -- which is exactly how `no-ui` and `d3d12-off` broke.
+#if AVER_WITH_IMGUI
 // ---- The GPU profiler, as a panel rather than as scrolling text -----------------------------
 //
 // D3D12Device has kept a full hierarchical timestamp profiler for a long time and its ONLY
@@ -30,7 +37,6 @@ namespace aver {
 // from here. Reporting "found N" rather than "there are exactly N" is the honest framing and the
 // panel repeats it, because a reader who takes this for a complete answer will delete something.
 void SandboxApp::buildReferencesPanel() {
-#if AVER_WITH_IMGUI
     if (!showReferences_) return;
     ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 320.0f * dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("References", &showReferences_)) { ImGui::End(); return; }
@@ -72,11 +78,9 @@ void SandboxApp::buildReferencesPanel() {
     ImGui::TextDisabled("Cannot see: a path built in C# at runtime, or a reference stored only as");
     ImGui::TextDisabled("a hashed id. This is \"found N\", not \"there are exactly N\".");
     ImGui::End();
-#endif
 }
 
 void SandboxApp::buildProfilerPanel(Engine& e) {
-#if AVER_WITH_IMGUI
     if (!showProfiler_) return;
     ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 420.0f * dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("GPU Profiler", &showProfiler_)) { ImGui::End(); return; }
@@ -154,11 +158,10 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         ImGui::EndTable();
     }
     ImGui::End();
-#else
-    (void)e;
-#endif
 }
+#endif  // AVER_WITH_IMGUI -- the two panels above
 
+#if AVER_MODULE_SYNAPSE
 // Bakes, writes the result beside the level, and rebuilds the overlay. Returns false with a
 // reason rather than throwing one away, because every way this fails is something the author
 // has to act on: an empty level, an entity dropped far from the rest, physics not running.
@@ -2584,13 +2587,15 @@ void SandboxApp::buildUI(Engine& e) {
     drawerButton("Console", Drawer::Console, "Show the Console  (`)");
     // REVISION CONTROL SITS AT THE FAR RIGHT, where Unreal's own status bar puts the same widget,
     // with MCP -- an Aver-specific control channel Unreal has no equivalent of -- one slot further
-    // in rather than displacing it.
-    ImGui::SameLine();
-    drawRevisionControlStatusWidget();
+    // in rather than displacing it. THAT MEANS MCP IS DRAWN FIRST: this row is laid out left to
+    // right by SameLine, so the LAST call is the rightmost control, and drawing them the other way
+    // round put MCP on the end under a comment claiming revision control was there.
 #if AVER_MODULE_MCP
     ImGui::SameLine();
     drawMcpStatusWidget();
 #endif
+    ImGui::SameLine();
+    drawRevisionControlStatusWidget();
     ImGui::End();
     ImGui::PopStyleVar(2);
 #else

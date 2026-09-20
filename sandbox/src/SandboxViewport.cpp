@@ -6,7 +6,9 @@
 #include "ViewportMarquee.hpp"
 
 namespace aver {
-#if AVER_MODULE_SYNAPSE
+// PHYSICS ALONE, matching the declaration. This draws the world-space AABB of every physics body
+// and was nested inside an AVER_MODULE_SYNAPSE block for no reason a reader could act on -- the
+// navigation overlay further down is what that guard is actually for.
 #if AVER_MODULE_PHYSICS
 // Twelve edges per body's world-space AABB, in world space, rebuilt each frame the toggle is on.
 //
@@ -54,8 +56,7 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
         colliderMesh_ = e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
 }
 
-#endif
-#endif
+#endif  // AVER_MODULE_PHYSICS
 
 #if AVER_MODULE_SYNAPSE
 void SandboxApp::rebuildNavOverlay(Engine& e) {

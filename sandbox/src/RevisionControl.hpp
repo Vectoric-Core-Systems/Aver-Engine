@@ -33,9 +33,12 @@
 //
 // SAFETY, WHICH IS A PROPERTY OF THIS FILE'S VOCABULARY AND NOT OF A COMMENT: nothing in this
 // header or in RevisionControl.cpp can discard work. There is no commit, no checkout, no reset, no
-// clean, no stash, no revert and no push -- the entire surface is status, log, diff and rev-parse,
-// and isReadOnlyGitSubcommand() below is the tripwire that keeps it that way at the one place a
-// process is actually spawned. When staging and committing arrive, they arrive as their OWN entry
+// clean, no stash, no revert and no push. The surface this file actually REACHES is four
+// subcommands -- status, log, diff and rev-parse -- while isReadOnlyGitSubcommand() below admits
+// nine, the other five being read-only headroom nothing calls yet (`version` excepted, which
+// gitAvailable probes with). Those two numbers are different on purpose and the distinction is
+// worth keeping straight: the list is the bound, the four are today's use of it. It is the tripwire
+// that keeps either of them honest, at the one place a process is actually spawned. When staging and committing arrive, they arrive as their OWN entry
 // points with their own confirmation, and they do NOT get added to that list; see its comment.
 #pragma once
 #include "aver/core/Types.hpp"

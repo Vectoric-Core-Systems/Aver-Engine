@@ -25,6 +25,15 @@
 #             outside that module's guard. Same absence as the namespace shape, invisible to it
 #             because a C symbol carries no `::`.
 #
+#   defs      A member whose DECLARATION and whose DEFINITION are guarded differently. Twice now
+#             this has been the cost of a half-applied fix: moving a declaration out of a guard and
+#             leaving `void SandboxApp::f() {...}` behind in the old one gives C2039 in the
+#             configuration where the declaration is gone (buildProfilerPanel, buildReferencesPanel
+#             in `no-ui`), and moving it the other way gives LNK2019 in the configuration where the
+#             definition is (saveEditorPreferences, also `no-ui`). The members scan below cannot
+#             see either, because it matches USES and a definition is not one -- `SandboxApp::f` is
+#             preceded by `::` and deliberately skipped.
+#
 #   members   A member DECLARED inside one #if and USED from a site guarded differently. This is the
 #             one a grep cannot see and the one that actually bites: SandboxApp::materialPanel was
 #             declared under AVER_MODULE_PBR and called under AVER_WITH_IMGUI alone, so `pbr-off`
@@ -44,7 +53,7 @@
 #
 # USAGE
 #   python scripts/module-guard-audit.py                 # all three, over sandbox/ and Runtime/
-#   python scripts/module-guard-audit.py --only members
+#   python scripts/module-guard-audit.py --only members     # or includes / namespace / abi / defs
 #   python scripts/module-guard-audit.py --header sandbox/src/SandboxApp.hpp --roots sandbox/src
 #
 # Exits 1 when anything is reported, so CI can run it as a gate.
@@ -106,7 +115,9 @@ IMPLIES = {
     "AVER_MODULE_FRAMEWORK":       ["AVER_MODULE_SCENE"],
     "AVER_MODULE_PARTICLES":       ["AVER_MODULE_SCENE"],
     "AVER_MODULE_RENDER_SOFTBODY": ["AVER_MODULE_SCENE", "AVER_MODULE_PHYSICS"],
-    "AVER_MODULE_SYNAPSE_SCENE":   ["AVER_MODULE_SCENE"],
+    # Aver.Synapse.Scene lists Aver.Synapse among its DEPS (modules/synapse.scene/CMakeLists.txt),
+    # and that macro arrives PUBLICly with the target, so the join proves both halves.
+    "AVER_MODULE_SYNAPSE_SCENE":   ["AVER_MODULE_SCENE", "AVER_MODULE_SYNAPSE"],
     "AVER_FLUIDS_SIMULATED":       ["AVER_MODULE_FLUIDS", "AVER_MODULE_PHYSICS"],
 }
 
@@ -346,6 +357,77 @@ def collect_members(header, cls=None):
     return {n: v for n, v in decl.items() if v and n not in unconditional}
 
 
+def audit_definitions(header, files, report, cls=None):
+    """Declaration guard versus definition guard, for every member function defined out of line.
+
+    A DIFFERENCE IN EITHER DIRECTION IS A REAL FAILURE, and they fail differently: a definition
+    reachable where the declaration is not is C2039 at the definition, and a declaration reachable
+    where the definition is not is LNK2019 at whatever called it. So this compares the two macro
+    sets and reports whenever they are not equal, saying which way round it is.
+
+    Only tracked macros are compared -- a body that guards part of itself on something else is
+    ordinary and is not what this is looking for."""
+    if cls is None:
+        cls = os.path.splitext(os.path.basename(header))[0]
+    decl = {}
+    depth = 0
+    started = False
+    for i, raw, have, t in scan(header):
+        if not started:
+            if re.match(r"(?:class|struct)\s+" + re.escape(cls) + r"\b", t):
+                started = True
+                depth = t.count("{") - t.count("}")
+            continue
+        depth += t.count("{") - t.count("}")
+        if depth <= 0:
+            break
+        code = t.split("//")[0].rstrip()
+        if not code.endswith(";") or "(" not in code:
+            continue
+        m = DECL_RE.match(code)
+        if not m or not m.group(1).strip():
+            continue
+        n = m.group(2)
+        mods = frozenset(x for x in have if x.startswith(TRACKED[0]) or x in TRACKED[1:])
+        # A NAME DECLARED TWICE UNDER DIFFERENT GUARDS is the #if/#else twin shape, which is
+        # deliberate and already understood -- skip it rather than reporting it as a mismatch.
+        if n in decl and decl[n] != mods:
+            decl[n] = None
+        elif n not in decl:
+            decl[n] = mods
+
+    def_re = re.compile(r"^[\w:<>,&*\s]*?\b" + re.escape(cls) + r"::(\w+)\s*\(")
+    hdr_abs = os.path.abspath(header)
+    for path in files:
+        if os.path.abspath(path) == hdr_abs:
+            continue
+        seen = {}
+        for i, raw, have, t in scan(path):
+            m = def_re.match(t)
+            if not m:
+                continue
+            n = m.group(1)
+            if n not in decl or decl[n] is None:
+                continue
+            mods = frozenset(x for x in have if x.startswith(TRACKED[0]) or x in TRACKED[1:])
+            # Defined more than once in a file is the #if/#else twin again.
+            if n in seen:
+                seen[n] = None
+                continue
+            seen[n] = (i, t, mods)
+        for n, v in seen.items():
+            if v is None:
+                continue
+            i, t, mods = v
+            want = decl[n]
+            if mods == want:
+                continue
+            extra = ("declared under %s, defined under %s" %
+                     ("+".join(sorted(want)) or "(nothing)", "+".join(sorted(mods)) or "(nothing)"))
+            missing = sorted(want - mods) or sorted(mods - want)
+            report("defs", path, i, t[:110], missing[0], sorted(mods), extra=extra)
+
+
 def audit_members(header, files, report):
     decl = collect_members(header)
     if not decl:
@@ -455,6 +537,9 @@ def main(argv):
         # it deliberately.
         member_roots = roots if roots_given else [os.path.dirname(header)]
         audit_members(header, walk(member_roots), report)
+    if only in (None, "defs"):
+        def_roots = roots if roots_given else [os.path.dirname(header)]
+        audit_definitions(header, walk(def_roots), report)
 
     for row in urgent:
         print("%s:%d  [%s] needs %s" % (row["path"], row["line"], row["kind"], row["macro"]))

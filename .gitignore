@@ -86,3 +86,16 @@ test-content/**/*.ocnav
 # purpose. A DerivedDataCache never is, anywhere -- it is regenerable by definition -- so there is
 # no location where committing one would be right.
 DerivedDataCache/
+
+# THE RESOURCE COMPILER'S TWO SCRATCH FILES, both of which are `git add -A` hazards and neither of
+# which is authored.
+#
+# A .aps is Visual Studio's BINARY cache of a .rc: the resource editor writes it beside the .rc it
+# just parsed, it is regenerated the moment that .rc is opened again, and committing one would put
+# a binary blob in the tree whose only relationship to the source is that it went stale the next
+# time anybody edited it. Runtime/host/AverEngineRuntime.aps appeared exactly this way.
+*.aps
+# rc.exe's own temporaries, named RCxxxxxx with no extension, left behind under whatever directory
+# it was invoked in -- third_party/nrd/Resources/ collects them because that is where the vendored
+# denoiser's .rc lives. Anchored to nothing because rc.exe chooses the directory, not us.
+RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
