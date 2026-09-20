@@ -113,15 +113,24 @@ obligations that bear on anyone distributing this software are:
   2. An application must have material additional functionality beyond the included portions of
      the SDK.
 
-  3. Attribution. Use of the applicable SDK must be attributed, and the NVIDIA Marks included, on
-     splash screens, in the application's about box where one exists, and in credits for game
-     applications -- or, where no credit screen exists, prominently in end-user documentation.
+  3. Attribution. Where an application has a CREDIT SCREEN, use of the applicable SDK must be
+     attributed and the NVIDIA Marks included on it; where no credit screen is present, attribution
+     goes prominently in end-user documentation instead.
 
-     NO NVIDIA MARKS ARE USED BY THIS PRODUCT. The NVIDIA name appears here and in the editor's
-     attribution surface as plain text identifying the SDKs in use. NVIDIA's trademarks, logos and
-     brand assets are not reproduced, and are not licensed for use by this notice. Use of the Marks
-     themselves is separately gated by NVIDIA on prior written approval of a sample use, which has
-     not been sought.
+     THIS PRODUCT HAS NO CREDIT SCREEN, AND THIS DOCUMENT IS THE ATTRIBUTION. That is a deliberate
+     choice, not an omission: a credit screen would engage the NVIDIA Marks requirement, and Mark
+     usage is separately gated by NVIDIA on style, colour and typeface specifications plus prior
+     written approval of a sample use -- approval that has not been sought and is not needed on
+     this route.
+
+     NO NVIDIA MARKS ARE USED BY THIS PRODUCT. The NVIDIA name appears here as plain text
+     identifying the SDKs in use. NVIDIA's trademarks, logos and brand assets are not reproduced
+     and are not licensed by this notice.
+
+     A DIFFERENT CLAUSE NAMES SPLASH SCREENS AND ABOUT BOXES, and it does not apply here: clause
+     6.1(b) of the Supplement governs applications incorporating the DLSS or NGX SDK, neither of
+     which is included in this product. Clause 6.1(c) is the one that governs the SDKs actually
+     used, and it speaks only of a credit screen or, failing that, end-user documentation.
 
   4. Onward distribution must be subject to terms at least as protective as NVIDIA's own,
      including the licence grant, the restrictions, and the protection of NVIDIA's intellectual

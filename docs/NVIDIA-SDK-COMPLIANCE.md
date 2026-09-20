@@ -55,28 +55,46 @@ The notice is reproduced verbatim in `LICENSE.md` under **NVIDIA SOFTWARE DEVELO
 
 **Still open:** a *packaged game* receives no notice at all. See §3.
 
-### 2.2 Attribution and NVIDIA Marks — **PARTLY MET, deliberately**
+### 2.2 Attribution — **MET, by not having a credit screen**
 
-> "you must attribute the use of the applicable SDK and include the NVIDIA Marks on splash screens,
-> in the about box of the application (if present), and in credits for game applications."
-> — `third_party/nrd/LICENSE.txt:316-318`
+**Read clause 6.1(c), not 6.1(b).** There are two trademark-placement clauses and they cover
+different SDKs. Getting this wrong once already cost an afternoon's worth of the wrong plan.
 
-**The decision taken (2026-09-21): we do not use NVIDIA Marks.** The NVIDIA name appears as plain
-text identifying the SDKs in use; no trademark, logo or brand asset is reproduced. `LICENSE.md`
-states this explicitly rather than leaving it implied.
+> **(b)** "NVIDIA Trademark Placement in Applications with the DLSS SDK or NGX SDK. For
+> applications that incorporate the DLSS SDK or NGX SDK or portions thereof, you must attribute the
+> use of the applicable SDK and include the NVIDIA Marks on splash screens, in the about box of the
+> application (if present), and in credits for game applications."
+> — `third_party/nrd/LICENSE.txt:313-318`
 
-The reason is that Mark usage is separately gated. Under the same licence, style, colour and
-typeface must follow NVIDIA's specifications, and a sample use must be **submitted to NVIDIA for
-prior written approval** — with a notice period, and with NVIDIA's silence past ten business days
-meaning *deemed unapproved*. Text attribution needs none of that.
+That is the clause naming splash screens and about boxes, and **it does not apply to this product**,
+because neither the DLSS SDK nor the NGX SDK is included (§2.6). The clause that governs NRD and
+RTXDI is the next one:
 
-**Open, and honest about it:** the clause says "the NVIDIA Marks", not "the NVIDIA name". Plain-text
-attribution plainly satisfies the *attribute the use of the applicable SDK* half. Whether it
-satisfies the *include the NVIDIA Marks* half is a question this document does not answer. If the
-answer must be yes, the approval process above is the route.
+> **(c)** "NVIDIA Trademark Placement in Applications with a licensed SDK, other than the DLSS SDK
+> or NGX SDK. For applications that incorporates and/or makes use of a licensed SDK, other than the
+> DLSS SDK or NGX SDK, you must attribute the use of the applicable SDK and include the NVIDIA Marks
+> on the credit screen for applications that have such credit screen, or where a credit screen is
+> not present prominently in end user documentation for the application."
+> — `third_party/nrd/LICENSE.txt:320-325`
 
-**Still open:** the editor's About box (`sandbox/src/SandboxShell.cpp`, `drawAboutPrompt`) does not
-yet name NVIDIA or the SDKs. The clause names the about box specifically.
+**The decision taken (2026-09-21): this product has no credit screen, so attribution lives in
+end-user documentation — `LICENSE.md` and this file.** A credit screen was considered and
+deliberately dropped, because having one engages the NVIDIA Marks requirement, and Mark usage is
+separately gated on style/colour/typeface specifications plus prior written approval of a sample
+use. Not having a credit screen routes the obligation to documentation, which costs nothing and
+needs no approval.
+
+**No NVIDIA Marks are used.** The NVIDIA name appears as plain text identifying the SDKs.
+
+**The ambiguity, recorded rather than resolved.** Clause (c)'s second branch is punctuated as "or
+where a credit screen is not present prominently in end user documentation", which can be read
+either as *"or, where a credit screen is not present, attribute prominently in end-user
+documentation"* (the plain reading, and the one relied on here) or as carrying the Marks
+requirement into the documentation branch too. This document does not claim to settle that. If the
+stricter reading is ever required, the route is NVIDIA's Mark-approval process, not a credit screen.
+
+**Consequence for the editor's About box:** none. It is not a credit screen, and clause (b) — the
+one that names about boxes — governs only DLSS/NGX applications. No change is owed there.
 
 ### 2.3 Material additional functionality — **MET**
 
@@ -140,6 +158,27 @@ MIT components, whose licences require the notice to travel with the distributio
 **What would close it:** add the NVIDIA components and the MIT components to the `$components`
 arrays both staging scripts already use to generate `THIRD-PARTY-NOTICES.txt`.
 
+### 3.1 Until then, packaging is BLOCKED
+
+**Decision, 2026-09-21: rather than produce packages that are not clear to distribute, the
+packaging path refuses.** The engine is in beta and nothing is shipping, so stopping costs nothing
+and is the honest answer; producing a package that quietly omits required notices would not be.
+
+Both `scripts/stage-game.ps1` and `scripts/stage-payload.ps1` exit 2 with the reason before doing
+any work. That covers the editor's **File ▸ Package Project…** too, since it shells out to
+`stage-game.ps1` rather than staging anything itself.
+
+`stage-payload.ps1` is gated as well as `stage-game.ps1`, and deliberately: it stages the ENGINE for
+a developer rather than a GAME for a player, but it redistributes the same compiled NRD and the same
+verbatim RTXDI source, so the same obligation attaches to it.
+
+**`-IAcceptNvidiaRedistribution` lifts the block** without editing either script, and prints a loud
+line into the log when used so a package built that way is identifiable afterwards. It exists
+because a hard-coded refusal is the kind of thing somebody deletes in a hurry, and because the day
+clearance arrives the response should not be a source change. **It is not a way to skip the work.**
+
+**To lift the block properly:** close §3, then delete the gate from both scripts.
+
 ---
 
 ## 4. Re-running these checks
@@ -149,9 +188,15 @@ None of this needs a build or a running engine. From the repo root:
 ```bash
 python scripts/module-guard-audit.py            # unrelated, but the same "check, don't assume" habit
 grep -ci nvidia scripts/stage-payload.ps1 scripts/stage-game.ps1   # expect > 0 once §3 is closed
-grep -ci nvidia sandbox/src/SandboxShell.cpp                        # expect > 0 once §2.2 is closed
+# NOT a check: the About box is deliberately NOT an attribution surface -- see §2.2.
 grep -c NVIDIA LICENSE.md                                           # expect > 0 (currently satisfied)
 grep -rl "rtxgi\|sharc" --include=CMakeLists.txt --include=*.hlsl . # expect empty while §5 holds
+```
+
+And the block itself, which should refuse with exit 2 until §3 is closed:
+
+```bash
+pwsh ./scripts/stage-game.ps1 -Project <any.ocproject> -Out <tmp>   # expect: PACKAGING BLOCKED, exit 2
 ```
 
 **When the vendored SDKs are updated, re-read the licence texts rather than assuming they are
