@@ -145,6 +145,32 @@ void SandboxApp::startPlay() {
     // gameplay's effect on it.
     capturePlayWorld();
 
+    // TERRAIN COLLISION, BEFORE A SINGLE PAWN EXISTS TO FALL THROUGH IT.
+    //
+    // GameLandscape::rebuildCollision had exactly two callers, loadForLevel and save, and its own
+    // comment defends that: rebuilding a Jolt heightfield per sculpt tick would cost far more than
+    // editing needs. That is right, and it is untouched -- editing still never rebuilds. What it
+    // missed is that nothing forced a save on the way in here, so the most ordinary way a user
+    // checks terrain work -- sculpt a hill, press Play, walk onto it -- ran against the heights from
+    // BEFORE the edit. Walking through your own hill is indistinguishable from "terrain editing does
+    // not work", which is how it was reported.
+    //
+    // Entering Play is the one moment collision must be current, and this is once rather than per
+    // stroke. rebuildCollisionIfStale is a single branch when nothing has moved, which is the common
+    // Play, so the frequency argument the original comment makes is not weakened by it.
+    //
+    // HERE, NOT AT THE END: the begin_play calls below can possess a pawn and tick physics, and a
+    // rebuild after that point would already be too late for the first frame a player sees.
+    //
+    // GUARDED ON LANDSCAPE, NOT ON FRAMEWORK. `landscape_` is declared under AVER_MODULE_LANDSCAPE
+    // and this function's surrounding region is AVER_MODULE_FRAMEWORK -- two different questions, and
+    // the enclosing guard does not answer this one. A landscape-off build would not compile, which
+    // the default configuration cannot show because it has landscape on;
+    // scripts/module-guard-audit.py caught it, which is the whole reason that tool exists.
+#if AVER_MODULE_LANDSCAPE
+    landscape_.rebuildCollisionIfStale();
+#endif
+
 #if AVER_MODULE_SCRIPTING
     // INPUT SCHEME, before EITHER begin_play call below (the engine's default-pawn fallback and
     // the project's own GameMode both follow this point) so a GameMode's OnBeginPlay -- and

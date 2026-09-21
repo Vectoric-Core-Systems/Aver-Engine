@@ -138,6 +138,24 @@ public:
     // True once heights or origin have been edited since the last load or save.
     bool dirty() const { return dirty_; }
 
+    // Rebuilds ONLY if the heights have moved since the last build, and does nothing otherwise.
+    //
+    // WHY THIS EXISTS. The rule above is right about FREQUENCY and was wrong about one moment. Its
+    // two call sites mean a sculpted, undone or freshly generated section keeps collision from
+    // BEFORE the edit until somebody clicks Save -- and nothing forced a save on the way into Play.
+    // So the most ordinary sequence a user performs to check their work -- sculpt a hill, press Play,
+    // walk onto it -- put them through the old surface, which is indistinguishable from "terrain
+    // editing does not work".
+    //
+    // ENTERING PLAY IS EXACTLY WHEN COLLISION MUST BE CURRENT, and it is once, not per tick: the
+    // frequency argument above is untouched. Editing still never rebuilds, because nothing walks on
+    // terrain while you are sculpting it.
+    //
+    // Guarded by its own flag rather than dirty(), which means "there are unsaved changes" and is
+    // cleared by saving -- a save that rebuilt collision and a save that did not would otherwise be
+    // indistinguishable here.
+    void rebuildCollisionIfStale();
+
     // Writes data().originCm and marks dirty. NO tree/ring rebuild -- an authoring UI that just
     // wants to record where a section sits leaves the tree, which caches centres and bounds derived
     // from originCm, to whatever rebuilds it next (loadForLevel's own placement branch does this
@@ -229,6 +247,7 @@ private:
     // AVER_MODULE_PHYSICS.
     void rebuildCollision();
 
+
     std::function<void()> terrainChanged_;   // see setTerrainChangedHook
 
 #if AVER_MODULE_PBR
@@ -262,6 +281,12 @@ private:
     // ---- authoring state ----
     std::string pathOverride_;   // see setPathOverride
     bool dirty_ = false;         // see dirty()
+    // Heights have moved since the collision body was last built. SEPARATE FROM dirty_ on purpose:
+    // dirty_ answers "does the user have unsaved work" and is cleared by saving, while this answers
+    // "does the physics shape still describe the mesh" and is cleared by rebuilding. Saving happens
+    // to do both today, which is exactly why one flag could not serve -- a future save that skipped
+    // the rebuild would silently take collision with it. See rebuildCollisionIfStale().
+    bool collisionStale_ = false;
 
     // Latched by applyHeightRect, drained by flushPendingInvalidate -- see each one's own comment.
     bool pendingInvalidate_ = false;

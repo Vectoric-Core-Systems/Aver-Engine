@@ -43,6 +43,19 @@ bool GameLandscape::loadLandscape(rhi::IDevice* device, const std::string& path)
     loaded_ = true;
     landscapePath_ = path;
     dirty_ = false;
+    // NEW HEIGHTS MEAN THE OLD SHAPE IS WRONG, and for one caller there is no shape at all.
+    //
+    // loadForLevel calls rebuildCollision() immediately after this returns, so for that path this
+    // flag is set and cleared within a few lines and changes nothing. The caller it exists for is
+    // loadSection() -- the public form, whose own comment says plainly that it does NO collision
+    // rebuild and that "a caller that needs those calls them itself afterward". Its single caller is
+    // Create Landscape (sandbox/src/SandboxLevelEdit.cpp:52), and it does not call them afterward.
+    //
+    // So a freshly created landscape had no collision body at ALL -- not a stale one, none -- and
+    // the first thing anyone does with a new terrain is press Play and walk on it. Marking it here
+    // rather than at that call site is what makes the guarantee survive the next caller of
+    // loadSection, who will be just as unlikely to read that comment.
+    collisionStale_ = true;
     AVER_INFO("[Landscape] '{}' loaded: {} node(s) across {} level(s), {}x{} samples",
               path, landscapeTree_.nodes().size(), landscapeTree_.levelCount(),
               landscapeData_.sampleCount, landscapeData_.sampleCount);
@@ -69,6 +82,21 @@ void GameLandscape::rebuildCollision() {
     else
         AVER_WARN("[Landscape] physics refused the heightfield; terrain has no collision");
 #endif
+    // CLEARED EVEN WITHOUT PHYSICS COMPILED IN, and even when the build above failed. The flag means
+    // "the shape no longer describes the mesh, so ask again at the next moment that matters", and in
+    // both of those cases asking again would fail identically -- latching it true would turn one
+    // refused heightfield into a rebuild attempt on every single Play for the rest of the session.
+    collisionStale_ = false;
+}
+
+void GameLandscape::rebuildCollisionIfStale() {
+    // The whole point is that this is CHEAP WHEN NOTHING MOVED: the common Play, on terrain nobody
+    // has touched since it loaded, costs one branch. Only an actual edit pays for a rebuild, and
+    // then exactly once rather than once per stroke.
+    if (!collisionStale_) return;
+    AVER_INFO("[Landscape] heights changed since the collision body was built -- rebuilding so what "
+              "you walk on matches what you sculpted");
+    rebuildCollision();
 }
 
 void GameLandscape::unload(rhi::IDevice* device) {
@@ -391,6 +419,7 @@ bool GameLandscape::applyHeightRect(u32 x0, u32 y0, u32 x1, u32 y1, const std::v
     pendingX0_ = x0; pendingY0_ = y0;
     pendingX1_ = x1; pendingY1_ = y1;
     dirty_ = true;
+    collisionStale_ = true;   // see rebuildCollisionIfStale
     return true;
 }
 
@@ -494,6 +523,7 @@ landscape::BrushRect GameLandscape::sculpt(rhi::IDevice* device, const landscape
             AVER_ERROR("[Landscape] sculpt left the section unbuildable: {}", why);
         }
         dirty_ = true;
+        collisionStale_ = true;   // see rebuildCollisionIfStale
     }
     return touched;
 }
