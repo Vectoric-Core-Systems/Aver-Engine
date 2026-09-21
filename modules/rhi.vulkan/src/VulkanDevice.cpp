@@ -1132,10 +1132,38 @@ void VulkanDevice::queryCaps() {
 
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
-    caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && bindlessCapable_;
+
+    // caps_.rayTracingTier >= 11 && bindlessCapable_ is what the HARDWARE AND DRIVER can genuinely
+    // do here: descriptor indexing really was requested and came back enabled above (:734-757), and
+    // the inline-query ray path really works. That is deliberately NOT what this bit reports, though.
+    // It hardcodes false regardless of those two conditions, because createBindlessTextureTable()
+    // near the bottom of this file is a stub that always returns 0 -- this backend has no real
+    // implementation to hand out yet. Reporting the hardware bit here would tell
+    // VoxiRenderer::ensureTextureTable and PathTracer::ensureTexturing, both gated on exactly this
+    // flag and nothing else, to go ahead and call a function that can only fail them, with nothing in
+    // the log connecting a "yes" capability to the flat-albedo shading it actually produces. Consumers
+    // across both backends treat this flag as "this device can hand me a working table", not merely
+    // "the hardware bits are present" -- see RHIResources.hpp's own comment on
+    // createBindlessTextureTable -- so honesty toward that contract means reading false here until
+    // the stub below is replaced with a real implementation, at which point this should go back to
+    // the hardware expression above.
+    const bool hwBindlessCapable = caps_.rayTracingTier >= 11 && bindlessCapable_;
+    caps_.rtBindlessTextures = false;
     AVER_INFO("[RHI.Vulkan] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster, caps_.resourceBindingTier);
+    // Mirrors D3D12Device.cpp's own "ray-traced bindless textures: yes/no" line so the two backends'
+    // logs read the same way for the same question, and adds the one thing D3D12 doesn't need: a
+    // WARN, said once at device creation, for the specific case that would otherwise go unexplained
+    // -- hardware that could do this sitting behind a flag that says no because the backend can't
+    // deliver yet. Without this line, a reader sees "no" above and has to already know about the
+    // stub to understand why capable hardware isn't being used.
+    AVER_INFO("[RHI.Vulkan] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
+    if (hwBindlessCapable)
+        AVER_WARN("[RHI.Vulkan] descriptor indexing and inline ray query are both present and enabled "
+                  "on this device -- the hardware could support ray-traced bindless texturing -- but "
+                  "createBindlessTextureTable() has no implementation on this backend yet, so ray "
+                  "hits keep shading from flat albedo until it does (said once)");
     if (capsOverride().active)
         AVER_WARN("[RHI.Vulkan] caps CLAMPED by --force-caps; the hardware reports MSAA {}x, RT tier {}, SM {}, "
                   "mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
@@ -3917,15 +3945,27 @@ IDevice* createVulkanDevice(const DeviceDesc& desc) {
 // aver::rhi::vkb, NOT aver::rhi: these define members of vkb::VulkanResourceFactory/
 // VulkanRenderContext, but the vkb namespace closed further up -- opening bare aver::rhi here put
 // the definitions where those class names don't resolve. The backend stopped compiling the moment
-// these were added, unnoticed because AVER_RHI_VULKAN is OFF by default (nobody builds this file).
+// these were added, and it went unnoticed for a long stretch because AVER_RHI_VULKAN defaulted to
+// OFF back then, so no default build ever reached this translation unit to fail on it.
+// CMakeLists.txt:58 has since flipped the option to ON -- that is the whole point of the "port
+// everything to Vulkan" push this file is part of -- so do not let a future edit reintroduce the
+// belief encoded in that old parenthetical: this file DOES get built by default now, and a compile
+// error here breaks every default build immediately, the way one always should have.
 namespace aver::rhi::vkb {
 
 // ---- the ray path's bindless texture table: DECLINED on this backend, for now ----
 //
 // Declined rather than stubbed to a silent zero. Every caller is gated on
-// DeviceCaps::rtBindlessTextures, set only when descriptor-indexing features are genuinely present
-// AND enabled -- arriving here means something bypassed that gate, so this says so once and lets
-// the flat-albedo path take over, as it does on a device without the capability.
+// DeviceCaps::rtBindlessTextures, and VulkanDevice::queryCaps() (see the caps_.rtBindlessTextures
+// assignment above the two AVER_INFO caps lines) deliberately hardcodes that bit to false on THIS
+// backend even on hardware where descriptor indexing and inline ray query are both genuinely present
+// and enabled -- precisely because this function has nothing real to back the flag up with yet.
+// So arriving here with the normal gated callers (VoxiRenderer::ensureTextureTable,
+// PathTracer::ensureTexturing) should be impossible, not merely unexpected: it would mean a NEW
+// caller forgot to check the flag, or that caps_.rtBindlessTextures got reconnected to the hardware
+// expression without this stub being replaced first. Either way this still declines cleanly rather
+// than asserting, and the flat-albedo path takes over exactly as it does on a device that genuinely
+// lacks the capability.
 
 BindlessTableHandle VulkanResourceFactory::createBindlessTextureTable(u32 capacity) {
     AVER_WARN("[RHI.Vulkan] bindless texture tables are not implemented on this backend yet "
