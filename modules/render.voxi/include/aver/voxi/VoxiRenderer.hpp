@@ -1059,11 +1059,133 @@ public:
     // anything cheaper for this handle?" and accepts 0 for no. Nobody installing a resolver is the
     // default, and it renders exactly as it did before.
     using DepthProxyFn = rhi::MeshHandle (*)(rhi::MeshHandle mesh, void* user);
-    void setDepthProxy(DepthProxyFn fn, void* user) { depthProxyFn_ = fn; depthProxyUser_ = user; }
+    // NO LONGER A ONE-LINE INLINE ASSIGNMENT -- defined in the .cpp because a change here now has a
+    // second job besides storing the new pointer/user pair. submit()'s per-mesh cache
+    // (meshSubmitCache_ below) remembers depthProxyFn_'s ANSWER for a mesh, keyed only by the mesh
+    // handle -- it has no field recording WHICH depthProxyFn_/depthProxyUser_ pair produced that
+    // answer. Reassigning either argument without dropping every entry the cache holds would let the
+    // very next submit() for an already-cached mesh keep answering with the OLD proxy function's
+    // verdict, silently, for as long as that mesh stayed in the cache. See the .cpp definition for
+    // the actual invalidation and meshSubmitCache_'s own comment for the cache this protects.
+    void setDepthProxy(DepthProxyFn fn, void* user);
+
+    // A/B MEASUREMENT TOGGLE for the memoisation meshSubmitCache_ implements below -- reachable the
+    // same way coneTraceEnabled()/setConeTraceEnabled() above are, a runtime dial rather than a
+    // quality setting. Default true: see meshSubmitCache_'s own comment for why this is pixel-neutral
+    // BY CONSTRUCTION rather than merely believed to be. false sends submit() back to resolving both
+    // memoised questions directly, every call, in the ORIGINAL order, with none of the caching
+    // machinery touched -- so an A/B of this change comes from ONE binary, never a `-D` reconfigure
+    // of two build trees (see aver-reconfigure-pollutes-build in the engine's own notes for why that
+    // comparison would not be trustworthy here).
+    void setMeshSubmitCacheEnabled(bool on) { meshSubmitCacheEnabled_ = on; }
+    bool meshSubmitCacheEnabled() const { return meshSubmitCacheEnabled_; }
 
 private:
     DepthProxyFn depthProxyFn_ = nullptr;
     void*        depthProxyUser_ = nullptr;
+
+    // ---- submit()'s per-mesh memoisation (Phase C follow-up to a7ff716d/80730751) ----
+    //
+    // WHAT THIS REPLACES. submit() re-resolves two questions that are functions of `mesh` ALONE --
+    // depthProxyFn_'s answer and dev_->meshBounds' local-space answer -- on every one of the (up to)
+    // 16,000 calls it gets a frame, one per entity, INCLUDING every frustum-culled one, since the
+    // walk routes culled entities here on purpose so shadows/GI/the TLAS never depend on what the
+    // raster camera can see (submit()'s own header comment). A scene rarely has more than a few
+    // hundred DISTINCT meshes, so almost every one of those 16,000 pairs of calls is asking a
+    // question this renderer already knows the answer to.
+    //
+    // A MEMBER, NOT A LOCAL, AND THAT IS THE WHOLE DIFFERENCE FROM 80730751's IDENTICALLY-SHAPED
+    // CACHE. GameRender.cpp's MeshLookupCacheSlot table is local to ONE drawWorld() call and is gone
+    // at its own closing brace, so it can never be asked a question about a frame it did not run in
+    // -- there is no "next call" for it to leak into. submit() has no enclosing call of its own to be
+    // local TO: it runs once per ENTITY, so a cache scoped to submit() itself would be constructed
+    // fresh, and therefore empty, on the very call it exists to speed up. The only scope wide enough
+    // to span many submit() calls is this renderer's OWN lifetime -- which is what turns "when does
+    // it get cleared" from a non-question (a local's closing brace, always) into a real design
+    // decision. See beginScene()'s own comment (VoxiRenderer.cpp) for the answer this class settled
+    // on, and setDepthProxy()'s own comment two members up for the other half of it.
+    //
+    // A FIXED, DIRECT-MAPPED TABLE, MIXED BEFORE MASKING -- THE SAME SHAPE 80730751 CHOSE, reused
+    // rather than reinvented. A single "last mesh" slot was rejected there for scoring ~100% on a
+    // synthetic scene of one mesh submitted 16,000 times in a row and close to 0% on an interleaved
+    // one, which is the shape real content actually takes (GameRender.cpp's own
+    // kMeshLookupCacheSlots comment carries the full argument, and it applies here without
+    // modification: nothing about WHICH function is doing the caching changes how often two
+    // different meshes get submitted back to back). A raw mesh id is masked only after mixMeshId()
+    // (VoxiRenderer.cpp) re-mixes it first -- see that function's own comment for why this file's
+    // reasoning for doing so is NOT the same as GameRender.cpp's, even though the shape is identical.
+    //
+    // 256 SLOTS, NOT 64 -- THE ONE DELIBERATE DEVIATION FROM 80730751's PRECEDENT, sized against a
+    // different population. GameRender's 64 slots hold "a handful" of interleaved species -- camera-
+    // relevant content a level author placed by eye. submit() is reached by this renderer's WHOLE
+    // draw population every frame, culled entities included, and the very redundancy this cache
+    // exists to remove is stated above in terms of "a few hundred distinct meshes". A few hundred
+    // keys into 64 slots averages several meshes per slot before any actual collision is even
+    // considered, which reopens exactly the "close to 0% on the target scene" failure 80730751
+    // rejected a one-slot cache for, just at a different slot count. 256 keeps collisions rare at
+    // that population while still costing nothing but kMeshSubmitCacheSlots small structs on this
+    // object -- no allocation, the same "ZERO ALLOCATION" property 80730751's own table has.
+    static constexpr u32 kMeshSubmitCacheSlots = 256;
+    static_assert((kMeshSubmitCacheSlots & (kMeshSubmitCacheSlots - 1)) == 0,
+                  "kMeshSubmitCacheSlots must be a power of two for '& (kMeshSubmitCacheSlots - 1)' "
+                  "below to be equivalent to '% kMeshSubmitCacheSlots'");
+
+    // ONE SLOT'S ANSWER, FOR ONE MESH HANDLE, TO BOTH of submit()'s per-mesh questions.
+    //
+    // `mesh == 0` MEANS EMPTY, NOT A SEPARATE FLAG: submit()'s own first line is
+    // `if (mesh == 0) return;`, so no live entry is ever asked to remember an answer for handle 0,
+    // and a default-constructed slot -- mesh == 0 -- already reads, correctly, as "never touched".
+    //
+    // CACHES depthProxyFn_'s RAW RETURN, NOT submit()'s OWN SUBSTITUTED ANSWER -- submit() still runs
+    // its own "0 means no proxy, fall back to the mesh itself" substitution against the cached value
+    // on every single call, exactly where that substitution always ran, so a cache hit reproduces
+    // bit-for-bit what an uncached call would have computed for the SAME depthProxyFn_/
+    // depthProxyUser_ pair. "The same pair" is guaranteed by setDepthProxy() dropping this whole
+    // table the moment either argument actually changes -- see that method's own comment above.
+    //
+    // CACHES meshBounds' LOCAL-SPACE ANSWER ONLY -- the centre and radius IN THE MESH'S OWN SPACE,
+    // before submit() transforms them through `world` into THIS INSTANCE's world-space sphere.
+    // `world` differs per entity even when `mesh` does not, so the transformed, world-space result
+    // stays recomputed on every call with no exception; caching THAT instead would hand every
+    // instance of a mesh the FIRST instance's world-space bounds -- a correctness bug wearing this
+    // cache's clothing, not a spelling of it. See submit()'s own comment at the transform for the
+    // failure this was designed away from: entities vanishing from a shadow cascade at the wrong
+    // moment, which reads like a culling tuning problem, not a caching one, for as long as nobody
+    // suspects the cache.
+    //
+    // A FALSE VERDICT FROM meshBounds IS CACHED TOO, not left to fall through to a repeat lookup on
+    // every later call for the same mesh: boundsResolved is set on EITHER outcome, and haveBounds
+    // alone records which one it was. meshBounds' own contract (RHI.hpp) and every backend's
+    // implementation (D3D12Device.cpp, VulkanDevice.cpp) answer purely from a mesh's own upload-time
+    // state, so the same handle cannot flip from "no bounds" to "yes" without a re-upload -- which is
+    // this table's own next-beginScene() clear's job to catch, not this struct's.
+    struct MeshSubmitCacheSlot {
+        rhi::MeshHandle mesh = 0;
+
+        bool depthProxyResolved = false;
+        rhi::MeshHandle depthProxyMesh = 0;
+
+        bool boundsResolved = false;
+        bool haveBounds = false;
+        f32  localCentre[3] = {0.0f, 0.0f, 0.0f};
+        f32  localRadius = 0.0f;
+    };
+    // A FIXED MEMBER ARRAY, NEVER RESIZED -- the "ZERO ALLOCATION" half of the precedent, paid once
+    // as part of this object rather than per frame. Cleared WHOLE, not slot by slot, at the top of
+    // every beginScene() (see that method's own comment in VoxiRenderer.cpp for why a per-frame clear
+    // is the invalidation point this class settled on) and again inside setDepthProxy() the moment
+    // either of its two arguments actually changes.
+    std::array<MeshSubmitCacheSlot, kMeshSubmitCacheSlots> meshSubmitCache_{};
+
+    // Finds mesh's slot in meshSubmitCache_ above, evicting a DIFFERENT mesh's leftover answers first
+    // so a hit can never read a previous occupant's depth-proxy or bounds fields under the new key --
+    // the identical hazard, and the identical fix, as GameRender.cpp's findMeshLookupSlot. Defined in
+    // the .cpp beside submit(), its only caller.
+    MeshSubmitCacheSlot& meshSubmitCacheSlot(rhi::MeshHandle mesh);
+
+    // See setMeshSubmitCacheEnabled()'s own comment two members up for the contract; this is just the
+    // storage for it.
+    bool meshSubmitCacheEnabled_ = true;
 
     // shadowPass() scratch: this cascade's culled draws, grouped by mesh, so every instance of one
     // mesh reaches the GPU in a single drawMeshInstanced() call rather than one drawMesh() each.

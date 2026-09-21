@@ -960,12 +960,98 @@ u64 synthMaterialKey(const f32 color[4], f32 metallic, f32 roughness) {
     fnvMix(h, &roughness, sizeof(f32));
     return h & ~(1ull << 63);
 }
+
+// MIXES A MESH HANDLE'S BITS before submit()'s cache (VoxiRenderer::meshSubmitCacheSlot) masks them
+// into a slot index, instead of masking the raw handle directly. Same shape, same finalizer, as
+// GameRender.cpp's own mixMeshId -- reused rather than reinvented -- but NOT the same justification,
+// and the difference is worth stating rather than copying the old reasoning across unchecked.
+// GameRender.cpp mixes an fnv1a64 hash of an ASSET PATH, whose low bits it argues are weak on this
+// project's short, similar mesh names. `rhi::MeshHandle` here is a different id space entirely (see
+// aver-asset-id-spaces in the engine's own notes): a small, DENSE, MONOTONICALLY INCREASING integer
+// -- both D3D12Device and VulkanDevice hand a new mesh the next index into their own mesh vector and
+// never recycle a destroyed one's slot (D3D12Device.cpp's own comment on destroyMesh: "the slot
+// itself is KEPT"), so two live meshes are never given the same handle and handles do not arrive in
+// any hash-like scattered order. A dense, monotonically increasing key already distributes evenly
+// under a plain mask -- consecutive integers land in consecutive slots, which is the case direct
+// mapping is best at, not worst -- so the specific failure mixing exists to avoid in GameRender.cpp
+// (a hash whose low bits cluster) is not a risk this file has verified to exist. The mix is kept
+// anyway, for the shape this cache was asked to match and because it costs two multiplies and three
+// shifts next to a dev_->meshBounds() call, not because a load-bearing case for it was found here.
+// This is MurmurHash3's 64-bit finalizer (fmix64), the same well-known avalanche mix GameRender.cpp's
+// copy cites; duplicated rather than shared because render.voxi sits BELOW Runtime/game in this
+// engine's dependency direction, so a shared header would have to move the wrong way for one
+// nine-line function.
+constexpr u64 mixMeshId(u64 x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
 } // namespace
 
 // Starts a new draw list. Voxi runs a frame behind: the passes replay the previous one.
+//
+// ALSO CLEARS submit()'s PER-MESH CACHE (meshSubmitCache_) -- the invalidation point this class
+// settled on for it, chosen from the three candidates the design question actually had: a change to
+// depthProxyFn_/depthProxyUser_ (handled separately, at setDepthProxy() itself, since that can
+// happen at any point, not only on a frame boundary); a mesh being destroyed or re-uploaded (NO
+// candidate exists for this one -- nothing calls back into VoxiRenderer when either happens, so
+// there is no event here to hook even if this class wanted one); or once a frame, here.
+//
+// HERE IS THE ONLY ONE OF THE THREE THIS CLASS CAN ACTUALLY GUARANTEE, and it is chosen for that
+// reason ahead of being the cheapest option available (the cheapest would be never clearing it at
+// all, and resolving each mesh once per SESSION instead of once per FRAME). A per-frame clear bounds
+// the cache's own staleness to AT MOST one frame no matter what changed underneath it, INCLUDING a
+// mesh re-upload this class has no way to be told about directly. That bound is not a new risk this
+// cache introduces: it is the SAME one frame of staleness the swap two lines below already accepts
+// for every draw in the list ("Voxi runs a frame behind"), so a mesh whose bounds changed
+// mid-session was never going to be reflected sooner than the NEXT prePass() regardless of whether
+// this cache exists at all. Clearing every frame keeps the memoisation strictly WITHIN that existing
+// tolerance instead of opening a second, independent staleness window with no bound on it -- which
+// is what letting the cache live across frames unconditionally would have done: a mesh re-uploaded
+// with new geometry would keep answering with its FIRST upload's bounds for the rest of the run,
+// silently, until something unrelated forced a clear. That is exactly the "entities vanish from a
+// shadow cascade at the wrong moment, and it looks like a culling tuning problem for a week" bug
+// meshSubmitCache_'s own header comment names as the failure mode this design has to avoid. A few
+// hundred slots reset every frame -- kMeshSubmitCacheSlots default-constructed structs, no
+// allocation -- is not a cost worth trading that guarantee away for; it is a rounding error next to
+// the (up to) 16,000 submit() calls this cache exists to shrink.
 void VoxiRenderer::beginScene() {
     drawsPrev_.swap(draws_);
     draws_.clear();
+    meshSubmitCache_ = {};
+}
+
+// See the header's own comment on setDepthProxy for why this is no longer a one-line inline setter.
+// Guarded on an actual change to either argument -- the same reassert idiom setBlendedGiCone/
+// setShadowRays use elsewhere in this file -- so a hypothetical future caller that reasserts the
+// same fn/user pair every frame (nothing in this codebase does that today) would not pay a full
+// cache clear for a no-op every single time.
+void VoxiRenderer::setDepthProxy(DepthProxyFn fn, void* user) {
+    if (fn == depthProxyFn_ && user == depthProxyUser_) return;
+    depthProxyFn_ = fn;
+    depthProxyUser_ = user;
+    // A cached depthProxyMesh answer is only correct for the fn/user pair that produced it, and a
+    // slot has no field remembering which pair that was -- only the mesh id. Dropping the whole
+    // table is the only way to guarantee the NEXT submit() for an already-cached mesh asks the NEW
+    // pair instead of silently reusing the old one's verdict.
+    meshSubmitCache_ = {};
+}
+
+// Finds mesh's slot in meshSubmitCache_, evicting a DIFFERENT mesh's leftover answers first -- the
+// identical hazard, and the identical fix, as GameRender.cpp's findMeshLookupSlot: handing back a
+// slot that still half-remembers the PREVIOUS occupant's depth-proxy or bounds answer under a NEW
+// mesh id would silently misattribute one mesh's proxy substitution or bounding sphere to another.
+// Aggregate-initialising `MeshSubmitCacheSlot{mesh}` on an eviction sets `.mesh` and leaves every
+// other field at its own in-class default (unresolved), so a fresh occupant reads as "never touched"
+// without this function having to list every field by hand.
+VoxiRenderer::MeshSubmitCacheSlot& VoxiRenderer::meshSubmitCacheSlot(rhi::MeshHandle mesh) {
+    MeshSubmitCacheSlot& slot =
+        meshSubmitCache_[static_cast<u32>(mixMeshId(mesh) & (kMeshSubmitCacheSlots - 1))];
+    if (slot.mesh != mesh) slot = MeshSubmitCacheSlot{mesh};
+    return slot;
 }
 
 // Records one draw into this frame's list, copying its material block.
@@ -998,18 +1084,29 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     // Resolved ONCE here, not per pass: six depth passes asking the same question about the same
     // handle would be six map lookups for one answer that cannot change within a frame.
     //
-    // BOTH d.depthMesh AND THE meshBounds LOOKUP BELOW ARE FUNCTIONS OF mesh ALONE, yet both are
-    // re-resolved on every one of the (up to) 16,000 calls this function gets in a frame, one per
-    // entity, even though a scene rarely has more than a few hundred DISTINCT meshes. A per-frame
-    // cache keyed by mesh handle would turn this from one depthProxyFn_ call and one meshBounds call
-    // PER ENTITY into one of each PER DISTINCT MESH -- the same move commit 3a9dc985 made for the RT
-    // geometry table (dedup by mesh: 64.2ms -> 5.4ms) applied here instead of there. NOT done in this
-    // change: this stage exists to MEASURE where VoxiSubmit's time actually goes, not to spend that
-    // measurement's own commit also changing the thing it is about to report on -- see the file
-    // header on why a fourth guess is exactly what this facility exists to replace with a number.
-    // Left here so whoever reads VoxiSubmit's number next finds the candidate fix next to the code
-    // it would change, not in a separate note that can drift out of sync with it.
-    d.depthMesh = depthProxyFn_ ? depthProxyFn_(mesh, depthProxyUser_) : 0;
+    // BOTH d.depthMesh AND THE meshBounds LOOKUP BELOW ARE FUNCTIONS OF mesh ALONE. a7ff716d's own
+    // note here named the redundancy this used to pay in full: both re-resolved on every one of the
+    // (up to) 16,000 calls this function gets a frame, one per entity, though a scene rarely has more
+    // than a few hundred DISTINCT meshes -- the same shape commit 3a9dc985 found in the RT geometry
+    // table (dedup by mesh: 64.2ms -> 5.4ms). THIS IS THAT FIX: meshSubmitCacheSlot() resolves each
+    // of the two questions once per DISTINCT mesh id seen since the last beginScene() clear, not once
+    // per entity. See meshSubmitCache_'s own header comment for the cache's shape and its 256-slot
+    // deviation from 80730751's precedent, and beginScene()'s own comment (this file) for why a
+    // per-frame clear is the invalidation point this class settled on. meshSubmitCacheEnabled_
+    // (default true) is the runtime A/B switch: false reproduces the two calls below exactly, in the
+    // original order, with none of the caching machinery touched.
+    MeshSubmitCacheSlot* const cacheSlot =
+        meshSubmitCacheEnabled_ ? &meshSubmitCacheSlot(mesh) : nullptr;
+
+    if (cacheSlot) {
+        if (!cacheSlot->depthProxyResolved) {
+            cacheSlot->depthProxyMesh = depthProxyFn_ ? depthProxyFn_(mesh, depthProxyUser_) : 0;
+            cacheSlot->depthProxyResolved = true;
+        }
+        d.depthMesh = cacheSlot->depthProxyMesh;
+    } else {
+        d.depthMesh = depthProxyFn_ ? depthProxyFn_(mesh, depthProxyUser_) : 0;
+    }
     if (!d.depthMesh) d.depthMesh = mesh;
     std::memcpy(d.world, world, 16 * sizeof(f32));
     std::memcpy(d.color, baseColor, 4 * sizeof(f32));
@@ -1023,9 +1120,34 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
 
     // World-space bounding sphere for shadowPass's per-cascade cull. d.boundsRadius already
     // defaults to -1 (unknown) for a backend that has no bounds to give; only overwritten below.
-    f32 localCentre[3] = {};
+    //
+    // ONLY THE LOCAL-SPACE HALF OF THIS IS MEMOISED -- localCentre/localRadius below, and whether
+    // meshBounds found them at all -- NEVER d.boundsCentre/d.boundsRadius themselves, which are the
+    // transform of that local answer through THIS ENTITY's own `world` matrix, right after. `world`
+    // differs per entity even when `mesh` does not, so the transform stays computed on every single
+    // call with no exception; caching its RESULT instead would hand every instance of a mesh the
+    // FIRST instance's world-space bounds -- see meshSubmitCache_'s own header comment for the
+    // failure that was designed away from rather than risked.
+    bool haveBounds = false;
+    const f32* localCentre = nullptr;
     f32 localRadius = 0.0f;
-    if (dev_ && dev_->meshBounds(mesh, localCentre, &localRadius)) {
+    f32 localCentreScratch[3] = {};
+    f32 localRadiusScratch = 0.0f;
+    if (cacheSlot) {
+        if (!cacheSlot->boundsResolved) {
+            cacheSlot->haveBounds =
+                dev_ && dev_->meshBounds(mesh, cacheSlot->localCentre, &cacheSlot->localRadius);
+            cacheSlot->boundsResolved = true;
+        }
+        haveBounds = cacheSlot->haveBounds;
+        localCentre = cacheSlot->localCentre;
+        localRadius = cacheSlot->localRadius;
+    } else {
+        haveBounds = dev_ && dev_->meshBounds(mesh, localCentreScratch, &localRadiusScratch);
+        localCentre = localCentreScratch;
+        localRadius = localRadiusScratch;
+    }
+    if (haveBounds) {
         Mat4 w;
         std::memcpy(&w.m[0][0], world, sizeof(w.m));
         const Vec3 c = xformPoint(Vec3{localCentre[0], localCentre[1], localCentre[2]}, w);
