@@ -76,6 +76,33 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_player_controller(int playerIndex);
     [DllImport(Lib)] internal static extern int aver_fw_play_state();
 
+    // GAME LIFECYCLE: a quit request and a cursor-capture override, both ASSUMED SHAPE. This C#
+    // side and the framework_abi.h exports it binds were built by two separate agents in the SAME
+    // workflow run, and this one could not see the other's file -- so these three declarations are
+    // a guess at the native surface, not a read of it. Named for the aver_fw_* family every other
+    // export in this class already uses, and for the two native shapes a quit request and a cursor
+    // override would have to reach: Engine::requestExit() (Runtime/include/aver/runtime/Engine.hpp,
+    // already how SandboxApp::requestExitChecked exits today) and MouseCapture::captured()/set()
+    // (Runtime/include/aver/game/MouseCapture.hpp), the struct that owns the hide/confine/re-centre
+    // state Runtime/src/GameApp.cpp's own `wantCapture` drives every frame. If the native side lands
+    // under different names or a provider-registration shape (the pattern every other host-backed
+    // export above this line uses -- aver_fw_set_save_provider and its neighbours), ONLY these three
+    // lines plus Game.cs's Quit()/SetCursorCaptured()/CursorCaptured need to change: nothing else in
+    // this assembly calls them. See Game.cs's own comments on each for what it is for and why.
+    [DllImport(Lib)] internal static extern void aver_fw_set_quit_requested(int requested);
+    [DllImport(Lib)] internal static extern int  aver_fw_quit_requested();
+
+    // CURSOR POLICY IS REF-COUNTED, NOT A BOOL, and that is the native side's deliberate choice
+    // rather than an accident to paper over here. Two things can want the pointer at once -- a
+    // pause menu with a dialogue box over it is the ordinary case -- and with a bool the first one
+    // to close takes the cursor back from the second. Request increments, release decrements
+    // (floored at 0), requested() is "is the count > 0". Same discipline as Win32 ShowCursor:
+    // callers must pair 1:1, which is why Game exposes a disposable scope over these rather than
+    // leaving the pairing to whoever writes the menu.
+    [DllImport(Lib)] internal static extern int aver_fw_cursor_request();
+    [DllImport(Lib)] internal static extern int aver_fw_cursor_release();
+    [DllImport(Lib)] internal static extern int aver_fw_cursor_requested();
+
     // Input: the app pushes new_frame/set_key/set_mouse; gameplay reads key/pressed/released/mouse.
     [DllImport(Lib)] internal static extern void aver_fw_input_new_frame();
     [DllImport(Lib)] internal static extern void aver_fw_input_set_key(int key, int down);

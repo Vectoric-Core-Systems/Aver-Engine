@@ -22,6 +22,80 @@ public static class Game
     /// <summary>True while a session exists at all — Playing or Paused.</summary>
     public static bool HasSession => State != PlayState.Editor;
 
+    /// <summary>Requests that the host exit. A REQUEST, NOT AN IMMEDIATE TERMINATION -- the host
+    /// honours it at the next frame boundary, the same way SandboxApp::requestExitChecked already
+    /// defers to Engine::requestExit() (Runtime/include/aver/runtime/Engine.hpp) rather than tearing
+    /// the process down inline from wherever the request happened. THE LINE AFTER THIS CALL STILL
+    /// RUNS, and so does the rest of this frame's OnTick across every other actor -- write a caller
+    /// as if this returned void and changed nothing, because until the host's next frame boundary
+    /// that is exactly what it did.
+    ///
+    /// Before this existed there was NO WAY for a shipped game to exit itself: grepping
+    /// Quit/RequestExit/request_exit across every scripting/csharp/Aver.* file and every *_abi.h
+    /// returned nothing, so a packaged build's only exits were Alt+F4 and the OS killing the window.
+    /// A pause menu's "Quit to Desktop" button had nothing to call.
+    ///
+    /// A REQUEST, NOT A TERMINATION: the host polls this once a frame and shuts down through its own
+    /// ordinary path, so the statement after your call to this DOES run, and so does the rest of the
+    /// frame. Nothing here calls exit() -- unwinding out of a managed call mid-frame with a device,
+    /// an audio stream and a physics world all live is how a clean quit becomes a crash report.</summary>
+    public static void Quit() => Fw.aver_fw_set_quit_requested(1);
+
+    /// <summary>Withdraws a quit request made by <see cref="Quit"/>, for a "really quit?" prompt whose
+    /// answer was no. Also what an editor host calls between Play sessions: the native flag is
+    /// process-wide and <c>aver_fw_begin_play</c> deliberately does not clear it, so a second Play in
+    /// the same editor session would otherwise inherit the first one's quit.</summary>
+    public static void CancelQuit() => Fw.aver_fw_set_quit_requested(0);
+
+    /// <summary>Whether a quit has been requested and not yet acted on.</summary>
+    public static bool QuitRequested => Fw.aver_fw_quit_requested() != 0;
+
+    /// <summary>Frees the OS mouse cursor for as long as the returned scope is alive, then hands
+    /// capture back to the host's ordinary policy. Runtime/src/GameApp.cpp hides and confines the
+    /// cursor for as long as a session is PLAYING, with no way to get it back -- so a pause menu
+    /// could not click its own buttons.
+    ///
+    /// <code>
+    /// using (Game.FreeCursor())
+    /// {
+    ///     // pause menu runs here; the pointer is visible and unconfined
+    /// }   // capture returns to whatever the host would otherwise do
+    /// </code>
+    ///
+    /// A SCOPE RATHER THAN A SETTER, because the native side counts requests instead of holding a
+    /// bool, and a count is only correct if every request is paired with exactly one release. A
+    /// dialogue box opened over a pause menu is the ordinary case where a bool breaks: the box
+    /// closes, sets "captured", and steals the pointer from the menu still underneath it. Disposing
+    /// is what pairs them, and `using` is what makes forgetting hard.
+    ///
+    /// THIS ONLY EVER RELEASES THE CURSOR, never takes it. The host keeps its existing rules about
+    /// when capture is refused outright -- an unfocused window, a bounded --frames capture, an
+    /// explicit --no-mouse-capture -- and this cannot override those. A test harness that grabbed
+    /// the pointer of an unattended machine would be worse than any menu is good.</summary>
+    public static CursorScope FreeCursor() => new CursorScope();
+
+    /// <summary>Whether anything currently wants the cursor free -- see <see cref="FreeCursor"/>.
+    /// Read this rather than tracking your own bool; with several scopes alive at once, yours would
+    /// only ever describe your own.</summary>
+    public static bool CursorFreeRequested => Fw.aver_fw_cursor_requested() != 0;
+
+    /// <summary>The lifetime of one "let the player use the mouse" request. See
+    /// <see cref="Game.FreeCursor"/>; construct it through that rather than directly.
+    ///
+    /// A STRUCT, so the common `using (Game.FreeCursor())` allocates nothing on a path a pause menu
+    /// may open every frame it is visible.</summary>
+    public readonly struct CursorScope : System.IDisposable
+    {
+        /// <summary>Takes the request. PUBLIC because C# requires a parameterless struct constructor
+        /// to be (CS8958), not because direct construction is the intended route -- prefer
+        /// <see cref="Game.FreeCursor"/>, which reads as what it does at the call site. Constructing
+        /// one directly behaves identically, so the compiler's rule costs nothing here.</summary>
+        public CursorScope() => Fw.aver_fw_cursor_request();
+        /// <summary>Releases this request; capture returns to the host's ordinary policy once no
+        /// request is left outstanding.</summary>
+        public void Dispose() => Fw.aver_fw_cursor_release();
+    }
+
     /// <summary>The current GameMode's entity, or <see cref="Entity.None"/> in editor.</summary>
     public static Entity Mode => new(Fw.aver_fw_game_mode());
 

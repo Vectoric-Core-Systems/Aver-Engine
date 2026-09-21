@@ -24,6 +24,11 @@
 #endif
 #if AVER_WITH_UI_ABI
 #  include "aver/render/ui/UiRenderer.hpp"
+// aver::ui::UiFont, for uiFont_ below. loadGameUiFont (GameApp.cpp) parses into it and
+// aver_ui_set_font lends its address to the Aver.UI module every frame -- see that method's own
+// header comment for why the runtime cannot simply reuse SandboxApp::loadGameUiFont: the atlas is
+// uploaded through THIS process's own rhi::IDevice, not the editor's.
+#  include "aver/ui/UiFont.hpp"
 #endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
@@ -264,6 +269,13 @@ private:
     // Hands the UI ABI's draw list to the HUD render feature, once per frame. The editor's
     // submitGameUi also draws its UI demo widget first; that stays in the editor.
     void submitGameUi(Engine& e);
+    // Parses Roboto-Regular.ocfont (staged beside the exe, same convention as the editor's identical
+    // file) into uiFont_ and uploads its atlas through THIS process's device into uiFontTexture_. See
+    // GameApp.cpp's definition for the full contract: NON-FATAL (a missing or bad font leaves uiFont_
+    // invalid and every aver_ui_text call draws nothing, never a startup failure), and why this
+    // cannot just call sandbox/src/SandboxApp.cpp's own loadGameUiFont -- that one uploads through
+    // the EDITOR's device, which this process does not have.
+    void loadGameUiFont(Engine& e);
 #endif
 
     // Attaches the density-volume builder and queues a build. --pcg-volume-test only.
@@ -480,6 +492,17 @@ private:
     // The HUD's render feature. Owned (UiRenderer::create hands back ownership, and there is no
     // value to hold when it fails); null means no HUD.
     render::ui::UiRenderer* gameUi_ = nullptr;
+    // The game UI's font. Invalid (default-constructed, glyphs empty) until loadGameUiFont finds one
+    // beside the exe -- see that method's own comment. Re-lent to aver_ui_set_font every frame rather
+    // than once at load, mirroring SandboxApp.hpp's identical member and identical reasoning: loading
+    // is non-fatal and can leave this invalid, so handing over the same address every frame is the
+    // one call site a future reload would ever need to touch.
+    ui::UiFont uiFont_;
+    // BORROWED BY THE ABI, NOT BY gameUi_: this is the atlas loadGameUiFont uploads and
+    // uiFont_.atlasTexture points at as a raw u64. Torn down in onShutdown BEFORE the device goes,
+    // and aver_ui_set_font(nullptr) is cleared first -- see onShutdown's own comment for why that
+    // order is load-bearing (ui_abi.h: a font whose atlas died draws glyphs from a dead descriptor).
+    rhi::TextureHandle uiFontTexture_ = 0;
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     // Loaded once per level, right after level_.loadStartMap() -- mirrors SandboxApp's own nav_

@@ -66,8 +66,18 @@ extern "C" {
  *    loader can turn a parsed .ocinput file into a live InputMappingContext without a second parser
  *    on the managed side. See that section's own comment for the one-scheme-at-a-time shape. Additive
  *    only, same reason as every entry above: minor 6's own surface is UNCHANGED, so a host built
- *    against it still links and runs unchanged against this header. */
-#define AVER_FW_ABI_VERSION_MINOR 7
+ *    against it still links and runs unchanged against this header.
+ * 8: added the HOST CONTROL section (aver_fw_set_quit_requested/aver_fw_quit_requested and
+ *    aver_fw_cursor_request/aver_fw_cursor_release/aver_fw_cursor_requested) -- a shipped game had
+ *    no way to exit itself (grepping Quit/RequestExit/request_exit across scripting/csharp/Aver.*
+ *    and every *_abi.h found nothing) and no way to release the mouse cursor Runtime/src/GameApp.cpp
+ *    captures for the whole time play state is PLAYING (that file's own wantCapture reads ONLY
+ *    aver_fw_play_state(), nothing a script can influence). See that section's own comment for why
+ *    quit is a polled request rather than an exit() and why the cursor is a request COUNT rather
+ *    than a bool. Additive only, same reason as every entry above: minor 7's own surface is
+ *    UNCHANGED, so a host built against it still links and runs unchanged against this header --
+ *    and both new controls default to exactly today's behaviour (see the section itself for how). */
+#define AVER_FW_ABI_VERSION_MINOR 8
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -219,6 +229,77 @@ AVER_FW_ABI int32_t aver_fw_end_play(void);
 AVER_FW_ABI int32_t aver_fw_set_paused(int32_t paused);
 /* The first declared non-abstract class carrying ALL of `flags`, or 0. 0 flags -> 0. */
 AVER_FW_ABI int32_t aver_fw_find_class_with_flags(int32_t flags);
+
+/* ---- HOST CONTROL: QUIT AND CURSOR POLICY -----------------------------------------------------
+ *
+ * Both pairs below plug THE DEFECT this ABI minor exists to fix: a shipped game
+ * (Runtime/src/GameApp.cpp) has no way to ask its own host to exit, and no way to get the mouse
+ * cursor back once play starts, because nothing under Aver.Framework or Aver.Scene ever gave a
+ * script a path back into the host for either.
+ *
+ * QUIT. Grepping Quit/RequestExit/request_exit across scripting/csharp/Aver.* and every *_abi.h
+ * in this tree finds nothing -- a main menu's Quit button or a story's ending screen has no call
+ * to make. This is modelled as a REQUEST the host polls once a frame, deliberately NOT an
+ * immediate exit(): the setter can be reached from many stack frames deep inside a single frame's
+ * managed tick, with a device, an audio stream and a physics world all live underneath it, and
+ * tearing the process down from THERE would unwind straight through the managed/native boundary
+ * mid-frame instead of through the host's own ordinary shutdown path (GameApp's own teardown
+ * order, window destruction, device release). The setter only RECORDS the request; only the
+ * host's main loop, which already owns that order, decides when it is safe to act on it.
+ *
+ * DEFAULTS TO TODAY'S BEHAVIOUR: aver_fw_quit_requested() reads 0 until something calls
+ * aver_fw_set_quit_requested(1), so a project that never touches this pair keeps running exactly
+ * as it does today -- nothing quits on its own. A plain set/get pair, not a one-shot "request"
+ * verb with no way back, on the same precedent as aver_fw_set_paused/aver_fw_play_state a few
+ * lines up: a host that runs more than one play session per process (Play-In-Editor) needs to be
+ * able to clear the flag before a NEW session's first frame, and aver_fw_begin_play does NOT do
+ * this for you -- it is unrelated by design, so a quit requested moments before one session ended
+ * can never silently re-fire in the next. A host that only ever runs one session per process (a
+ * shipped, packaged game) never needs to call the setter with 0 at all.
+ *
+ * CURSOR POLICY. GameApp::onUpdate's own wantCapture (Runtime/src/GameApp.cpp) derives mouse
+ * capture PURELY from aver_fw_play_state() -- captured whenever PLAYING, full stop -- so no C#
+ * script can hand the pointer back while the session keeps running, and a pause menu or a
+ * dialogue box has no way to show a cursor without ending play entirely.
+ *
+ * NOT a bare SetCursorVisible(bool): one latched flag fights itself the moment two systems each
+ * have an opinion -- a pause menu opens (wants the cursor), a dialogue box opens on top of it
+ * (also wants the cursor), the dialogue box closes and calls its own "false", and the cursor now
+ * vanishes out from under the pause menu that is STILL OPEN and never asked for it back. A shared
+ * bool has no memory of who else is still holding it.
+ *
+ * A REQUEST COUNT instead -- the same shape Win32's own ShowCursor uses for the identical
+ * problem: aver_fw_cursor_request() increments and aver_fw_cursor_release() decrements (floored
+ * at 0, so one stray extra release can never go negative and flip the sign of every caller after
+ * it), and aver_fw_cursor_requested() is simply "is the count > 0". Two callers that each request
+ * once and release once can nest, overlap or outlive each other in any order and the cursor stays
+ * exactly as visible as the highest outstanding count says it should -- the pause-menu-under-a-
+ * dialogue-box case above resolves correctly with neither caller ever needing to know the other
+ * exists.
+ *
+ * DEFAULTS TO TODAY'S BEHAVIOUR: the count starts at 0 and aver_fw_cursor_requested() reads 0
+ * until something calls aver_fw_cursor_request(), so a project that never touches this trio
+ * captures the cursor exactly as it does today -- only while PLAYING, decided by play state
+ * alone. Resolving the two into one decision is the HOST's job, outside this file's brief (a
+ * future GameApp::onUpdate reads aver_fw_cursor_requested() and frees the cursor regardless of
+ * play state when it is 1, falling back to today's play-state-only rule when it is 0). */
+AVER_FW_ABI void    aver_fw_set_quit_requested(int32_t requested);
+/* 1 once something has called aver_fw_set_quit_requested(1) and nothing has since cleared it with
+ * aver_fw_set_quit_requested(0); 0 otherwise -- including before the setter has ever been called,
+ * which is the "never quits on its own" default this section's own comment promises. */
+AVER_FW_ABI int32_t aver_fw_quit_requested(void);
+
+/* Increments the process-wide cursor-visibility request count and returns the new count (always
+ * >= 1). Call when something starts wanting the cursor free -- a pause menu opening, a dialogue
+ * box opening. */
+AVER_FW_ABI int32_t aver_fw_cursor_request(void);
+/* Decrements the count, floored at 0, and returns the new count. Call when that same something
+ * stops wanting it -- exactly once per aver_fw_cursor_request() call, the same discipline Win32's
+ * own ShowCursor documents for its matching show/hide pair. */
+AVER_FW_ABI int32_t aver_fw_cursor_release(void);
+/* 1 while the request count is > 0, 0 when it is exactly 0 -- the default, meaning nothing has
+ * ever asked, meaning the host is free to decide capture from play state alone (today's rule). */
+AVER_FW_ABI int32_t aver_fw_cursor_requested(void);
 
 /* ---- ANIMATION CURVES, RELAYED --------------------------------------------------------------
  *

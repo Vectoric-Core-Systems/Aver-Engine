@@ -25,6 +25,12 @@
 #endif
 #if AVER_WITH_UI_ABI
 #  include "aver/ui/ui_abi.h"
+// aver::ui::parseOcfont, for loadGameUiFont below -- the same .ocfont grammar
+// sandbox/src/SandboxApp.cpp's own loadGameUiFont parses, reused here rather than reinvented.
+#  include "aver/ui/UiFont.hpp"
+// decodeImage/ImageData, for the font atlas -- the .ocfont names a PNG beside it and this host has
+// to decode and upload it itself; nothing else in this file needed image decoding before this.
+#  include "aver/platform/Image.hpp"
 #endif
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
@@ -882,6 +888,77 @@ void GameApp::attachGameUi(Engine& e) {
     } else {
         AVER_WARN("[Game] game UI render feature failed to create -- the HUD will not draw");
     }
+}
+
+// THE GAME UI'S FONT, A SHIPPED BUILD'S OWN LOAD PATH. sandbox/src/SandboxApp.cpp's loadGameUiFont
+// (that file's own comment: "the first thing that gives [Aver.UI] one") cannot be called from here:
+// it uploads the atlas through Sandbox.exe's rhi::IDevice, and this executable opens an entirely
+// separate device of its own -- there is no shared upload path between the two processes, only a
+// shared FILE FORMAT (.ocfont, parsed by the same aver::ui::parseOcfont both hosts call) and a
+// shared STAGING CONVENTION (beside the exe, same as the editor's copy).
+//
+// NON-FATAL, deliberately, on every failure branch below -- exactly the editor's own contract for
+// this same file: a missing .ocfont, a parse error, or an atlas that will not decode all leave
+// uiFont_ either default-constructed or with a font but no usable atlas. aver_ui_has_font() then
+// reads 0 (or addText draws nothing even if it reads 1 with a garbage atlasTexture, which the atlas-
+// decode branch below prevents by resetting uiFont_ outright), and the game keeps running -- a HUD
+// with no labels is a worse HUD, not a worse boot.
+void GameApp::loadGameUiFont(Engine& e) {
+    rhi::IDevice* dev = e.device();
+    rhi::IResourceFactory* res = dev ? dev->resources() : nullptr;
+    if (!res) return;   // headless, or a device that never came up -- nothing to upload into
+
+    const std::string fontPath = executableDir() + "\\Roboto-Regular.ocfont";
+    std::string text;
+    if (!readFileText(fontPath, text)) {
+        // NOT a warning: a packaged game that ships no HUD font at all is a legal, common shape
+        // (see GameConfig's own "unknown arguments are ignored" philosophy a few lines up in the
+        // header -- this host tries not to treat an author's omission as an error), and the editor's
+        // own copy of this function logs the identical line at INFO for the identical reason.
+        AVER_INFO("[Game] no game-UI font at {} -- the HUD draws without text", fontPath);
+        return;
+    }
+    std::string why;
+    if (!ui::parseOcfont(text, uiFont_, &why)) {
+        AVER_WARN("[Game] '{}': {}", fontPath, why);
+        return;
+    }
+
+    // The atlas sits beside the .ocfont, and only the file name survives past the last slash --
+    // uiFont_.atlasPath is CONTENT-relative (what a project that ships its own font would author),
+    // while the staged copy beside this exe is flat, exactly as sandbox/src/SandboxApp.cpp's own
+    // identical three lines resolve it.
+    std::string atlas = uiFont_.atlasPath;
+    const usize slash = atlas.find_last_of("/\\");
+    if (slash != std::string::npos) atlas = atlas.substr(slash + 1);
+    const std::string atlasPath = executableDir() + "\\" + atlas;
+
+    ImageData img;
+    if (!decodeImage(atlasPath, img, &why)) {
+        AVER_WARN("[Game] the game-UI font atlas '{}' could not be read ({})", atlasPath, why);
+        uiFont_ = ui::UiFont{};   // a font with glyphs but no atlas is worse than no font: addText
+                                  // would report aver_ui_has_font()==1 and then sample nothing
+        return;
+    }
+    rhi::TextureDesc td;
+    td.width = img.width;
+    td.height = img.height;
+    td.format = rhi::Format::RGBA8Unorm;
+    td.bind = rhi::ResourceBind::ShaderResource;
+    td.initialState = rhi::ResourceState::ShaderResource;
+    td.debugName = "GameUiFontAtlas";
+    const void* levels[1] = {img.pixels.data()};
+    td.initialData = levels;
+    td.initialDataCount = 1;
+    td.initialRowPitch = img.rowPitch();
+    uiFontTexture_ = res->createTexture(td);
+    if (!uiFontTexture_) { AVER_WARN("[Game] the game-UI font atlas could not be uploaded"); return; }
+    // THE RAW TextureHandle, NOT a UI descriptor id -- UiDrawCmd::texture is cast straight back to an
+    // rhi::TextureHandle by UiRenderer (SandboxApp.cpp:430-434's own comment on this exact line),
+    // which is the game UI's own texture channel and not the one a descriptor-table lookup would hit.
+    uiFont_.atlasTexture = static_cast<u64>(uiFontTexture_);
+    AVER_INFO("[Game] game-UI font '{}' loaded: {} glyph(s), atlas {}x{}",
+              uiFont_.name, uiFont_.glyphs.size(), img.width, img.height);
 }
 #endif
 
@@ -2072,6 +2149,10 @@ void GameApp::onInit(Engine& e) {
     attachVoxi(e);
 #if AVER_WITH_UI_ABI
     attachGameUi(e);
+    // AFTER attachGameUi: loadGameUiFont only needs a device (e.device()->resources()), not the HUD
+    // render feature itself, but attaching first keeps every UI-ABI setup call grouped in one place
+    // rather than interleaved with attachParticles/initPhysics below.
+    loadGameUiFont(e);
 #endif
     attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
@@ -2295,6 +2376,16 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
     // Input is READ here, never rolled here. See onRender for why.
 #if AVER_MODULE_FRAMEWORK
+    // QUIT, POLLED ONCE A FRAME. framework_abi.h's own comment on this pair explains why it is a
+    // polled REQUEST and not an immediate exit(): the setter can be reached from many stack frames
+    // deep inside a script's tick, with a device, an audio stream and a physics world all still live
+    // underneath it, and tearing the process down from there would unwind straight through the
+    // managed/native boundary mid-frame instead of through THIS host's own ordinary shutdown order
+    // (onShutdown's reverse-registration teardown, below, then window and device release). Calling
+    // Engine::requestExit() only sets a flag Engine::run's own loop checks between frames -- it does
+    // not stop this frame's onRender or onShutdown from running exactly as they would on a window-
+    // close quit, which is the whole reason this is the right call and exit() is not.
+    if (aver_fw_quit_requested()) e.requestExit();
     // IS THIS WINDOW FOREGROUND -- asked once, here, because two things this frame need the answer
     // and they are not the same question: whether to confine the cursor, and whether the player is
     // driving the pawn. The mouse-capture block below used to own this test privately, which left
@@ -2327,6 +2418,20 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         wantCapture = foreground && window_ && cfg_.maxFrames == 0 && !cfg_.noMouseCapture &&
                       aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
 #endif
+        // THE NEW ABI FOLDED IN, AS AN ADDITIONAL REASON TO RELEASE ONLY. framework_abi.h's own
+        // comment on aver_fw_cursor_request/_release/_requested spells the resolution this line
+        // implements: "free cursor when aver_fw_cursor_requested()==1 regardless of play state, else
+        // fall back to today's play-state-only rule". Written as a plain assignment to false rather
+        // than folded into the boolean expression above, because THE CURSOR RULE ABOVE IS LOAD-
+        // BEARING FOR THE TEST HARNESS -- a bounded (--frames N) run or one started with
+        // --no-mouse-capture must NEVER have its cursor grabbed, and wantCapture already reads false
+        // in both cases by the time this line runs. Clearing an already-false value is a no-op; the
+        // only thing this line can ever do is turn a true into a false, never the reverse -- so a
+        // script that calls cursor_request() during a gate run changes nothing a gate run's own
+        // guards did not already decide, and a script that forgets to pair request() with release()
+        // can, at worst, leave the cursor visible during ordinary play. It can never cause a capture
+        // that the four guards above did not already independently allow.
+        if (aver_fw_cursor_requested()) wantCapture = false;
         setMouseCaptured(wantCapture);
         pollCapturedMouse();
     }
@@ -2381,6 +2486,50 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         const u32 uiH = e.window() ? e.window()->height() : cfg_.height;
         aver_ui_begin_frame(0.0f, 0.0f, static_cast<f32>(uiW), static_cast<f32>(uiH));
     }
+    // THE FONT, LENT PER FRAME -- mirrors sandbox/src/SandboxApp.cpp's aver_ui_set_font call right
+    // beside its own begin_frame. loadGameUiFont (onInit) is non-fatal and can leave uiFont_ invalid,
+    // so the SAME address is handed over every frame rather than once at load: aver_ui_has_font() and
+    // addText already treat an invalid font as "draw nothing", and re-lending costs one store.
+    aver_ui_set_font(&uiFont_);
+    // THE POINTER. Unlike the editor's own conversion (SandboxApp.cpp, the block right after its
+    // aver_ui_set_font call), NO OFFSET IS NEEDED here: aver_ui_begin_frame was just given
+    // (0,0,uiW,uiH), the WHOLE window, because a game has no dockspace to be inset by -- and
+    // input_.mouseX()/mouseY() are ALREADY window-client-relative (Win32Window.cpp's WM_MOUSEMOVE
+    // handler reads GET_X_LPARAM/GET_Y_LPARAM straight off lParam, which Windows defines as client-
+    // area coordinates). The rect the editor has to subtract off is, for a game, the exact rect these
+    // coordinates were captured in to begin with. While OS mouse capture (above) is engaged the
+    // cursor sits re-centred near the window's middle every frame (MouseCapture.hpp), which is a
+    // meaningless HUD pointer position but a harmless one: a captured, playing session has no pause
+    // menu open to hit-test against, by construction (see the cursor-policy comment further down).
+    {
+        u32 buttons = 0;
+        if (input_.mouseHeld(0)) buttons |= 1u;   // left
+        if (input_.mouseHeld(1)) buttons |= 2u;   // right
+        if (input_.mouseHeld(2)) buttons |= 4u;   // middle
+        aver_ui_set_pointer(static_cast<f32>(input_.mouseX()), static_cast<f32>(input_.mouseY()), buttons);
+    }
+#if AVER_MODULE_SCRIPTING
+    // THE HUD DRAW CALL ITSELF. See ScriptHost::hudDraw's own header comment: "Calls the HUD's
+    // Draw(dt) into whatever rect aver_ui_begin_frame last established" -- which is why this sits
+    // AFTER begin_frame/set_font/set_pointer above and BEFORE tickGameplay below, the identical
+    // ordering sandbox/src/SandboxApp.cpp's own hudPreviewActive() call site uses.
+    //
+    // THE INDEX ARGUMENT. The editor's only caller (SandboxApp.cpp:2567) passes hudPreviewIndex_, a
+    // PREVIEW SELECTION a HUD tab publishes by hand when a developer picks one from a list to look
+    // at; a shipped game has no such tab and no player-facing menu of HUDs to choose from, so that
+    // argument has no equivalent here. INDEX 0 is what this host passes instead: [AverHudAttribute]
+    // (Aver.UI) carries a `Default` flag whose own doc comment already describes exactly this
+    // situation -- "draw this one when [nothing else] has a better reason to choose... ties break on
+    // declaration order" -- but nothing between here and HostBridge.cs's DiscoverHuds ever reads that
+    // flag or exposes which index it landed at; hudCount/hudName/hudDraw (ScriptHost.hpp) are the
+    // WHOLE native surface this host can reach. Closing that gap means changing ScriptHost and the
+    // managed bridge, both outside this task's two files (Runtime/src/GameApp.cpp and its header) --
+    // so index 0 is the closest available answer: the FIRST-declared [AverHud] class, which is where
+    // a project with exactly one HUD (Sample.Game's own SampleHud among them) always lands regardless
+    // of Default. A project that declares MORE than one [AverHud] class gets whichever loaded first,
+    // not necessarily the one it marked Default -- a real, named limitation, not a silent one.
+    if (scriptsReady_ && scripts_.hudCount() > 0) scripts_.hudDraw(0, t.dt);
+#endif
 #endif
     tickGameplay(t.dt);
 #if AVER_MODULE_FLUIDS
@@ -2677,6 +2826,24 @@ void GameApp::onShutdown(Engine& e) {
     particleRenderer_.shutdown();
 #endif
 #if AVER_WITH_UI_ABI
+    // THE FONT COMES OUT FIRST, before anything else in this block. ui_abi.h's own comment on
+    // aver_ui_set_font is explicit about why: "a font that outlives its atlas texture would draw
+    // glyphs sampling a dead descriptor", and uiFont_.atlasTexture is a raw handle into the texture
+    // destroyed two lines down. Clearing to nullptr is unconditional and safe whether or not
+    // loadGameUiFont ever found a font, and whether or not a device exists at all -- it touches no
+    // RHI object, only the Aver.UI module's own held pointer.
+    aver_ui_set_font(nullptr);
+    if (dev && uiFontTexture_) {
+        // waitIdle mirrors sandbox/src/SandboxApp.cpp's own icon-texture teardown at shutdown
+        // (search "destroyTexture" there): destroying a texture a still-in-flight command list
+        // references is a GPU-side use-after-free the debug layer catches immediately and a release
+        // build does not, and this atlas was bound for sampling as recently as this frame's HUD draw.
+        if (rhi::IResourceFactory* res = dev->resources()) {
+            res->waitIdle();
+            res->destroyTexture(uiFontTexture_);
+        }
+        uiFontTexture_ = 0;
+    }
     // Registered after Voxi and before particles, so removed after particles and before Voxi.
     if (dev && gameUi_) {
         dev->removeRenderFeature(gameUi_);

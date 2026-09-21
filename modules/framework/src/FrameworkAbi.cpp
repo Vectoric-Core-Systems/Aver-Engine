@@ -1001,6 +1001,38 @@ int32_t aver_fw_player_controller(int32_t i)    { return i == 0 ? playerCtrlRef(
 // The current AVER_FW_PLAY_* state.
 int32_t aver_fw_play_state(void)                { return playStateRef(); }
 
+// The process-wide "a script asked the host to exit" flag. See framework_abi.h's own HOST CONTROL
+// section for why this is a polled flag and not exit() called straight from here: this ABI runs
+// underneath a live managed call stack, with a device, an audio stream and a physics world still
+// live, and only the host's own main loop knows a safe point to tear all of that down.
+int32_t& quitRequestedRef() { static int32_t s = 0; return s; }
+
+// Records or clears the quit request. NOT cleared by aver_fw_begin_play -- see the header comment
+// for why a host running more than one session per process (Play-In-Editor) must clear this itself
+// before a new session's first frame, rather than have a stale request from a finished session
+// silently reach into the next one.
+void aver_fw_set_quit_requested(int32_t requested) { quitRequestedRef() = requested ? 1 : 0; }
+// 1 once requested and not since cleared; 0 by default (never quits on its own).
+int32_t aver_fw_quit_requested(void)                { return quitRequestedRef(); }
+
+// The process-wide cursor-visibility REQUEST COUNT, not a bool -- see framework_abi.h's own HOST
+// CONTROL section for why a bare flag fights itself the moment two systems (a pause menu, a
+// dialogue box) each want the cursor free and one of them lets go while the other is still open.
+int32_t& cursorRequestCountRef() { static int32_t s = 0; return s; }
+
+// Increments the count and returns the new value (always >= 1 after this call).
+int32_t aver_fw_cursor_request(void) { return ++cursorRequestCountRef(); }
+// Decrements the count, floored at 0 so a stray extra release can never go negative, and returns
+// the new value.
+int32_t aver_fw_cursor_release(void) {
+    int32_t& c = cursorRequestCountRef();
+    if (c > 0) --c;
+    return c;
+}
+// 1 while the count is > 0, 0 by default -- meaning nothing has asked and the host is free to
+// decide capture from play state alone, exactly as it does today.
+int32_t aver_fw_cursor_requested(void) { return cursorRequestCountRef() > 0 ? 1 : 0; }
+
 // Per-process input the app pushes each frame. cur/prev give edge detection. Frame thread only.
 //
 // curVk/prevVk and prevMouse are ADDITIVE to the original cur/prev/mouse trio -- see framework_abi.h's
