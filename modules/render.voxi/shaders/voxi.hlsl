@@ -1242,7 +1242,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // happened, and cost a build that reported OK because HLSL compiles at RUNTIME here.
 #if AVER_RT
     ind4.occlusion    = gAmbientParams.x > 0.5
-                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao)
+                      // true: THIS pass writes the G-buffer REBLUR_DIFFUSE_OCCLUSION reprojects
+                      // against, so its denoised answer is about this frame's geometry. See
+                      // rtSkyOcclusionTemporal's own header for the measurement, and for why the
+                      // ray-driven twin below passes false.
+                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao, true)
                       : ao;
 #else
     ind4.occlusion    = ao;
@@ -2127,7 +2131,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     }
 #elif AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     ind.occlusion    = gAmbientParams.x > 0.5
-                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo)
+                     // false: THIS pass runs with the G-buffer OFF -- that is what selects it -- so
+                     // gNrdAo was reprojected against motion vectors and depth this pass never
+                     // wrote, and its answer is not about this frame. Reading it anyway was the
+                     // whole of the washed-out ray-driven shadows: it overrode a correctly traced
+                     // "fully occluded" with ~0.83 "open", and full sky ambient then landed on every
+                     // interior surface. Measured in rtSkyOcclusionTemporal's own header.
+                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo, false)
                      : rdAo;
 #else
     // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below

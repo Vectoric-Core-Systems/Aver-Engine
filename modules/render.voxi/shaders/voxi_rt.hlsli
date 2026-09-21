@@ -1358,7 +1358,37 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 // `coneAo` is the cone gather's own occlusion -- smooth, deterministic, and ALREADY COMPUTED at
 // every tier. At Epic it was computed and then thrown away (coneTracedIndirect says exactly that of
 // its own `rdAo`). Passing it in as the PRIOR therefore costs nothing.
-float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo) {
+// `nrdAoUsable` SAYS WHETHER THIS PASS'S OWN INPUTS PRODUCED gNrdAo, and it exists because the
+// zero-dimensions test below answers a DIFFERENT question than the one that matters.
+//
+// MEASURED 2026-09-22, PTTest NewSponza, default camera, fixed exposure, viewport crop, deep shadow
+// (path-traced reference < 8 luminance, 71% of the viewport). Ray-driven primary visibility read
+// 12.68 against raster's 7.87 and a path-traced truth of 1.58 -- washed-out darks, reported by the
+// owner as "raster looks more realistic, the darkness is truly dark". Bisecting every term in BOTH
+// paths found the whole of it here: the FRESH trace agrees between the two paths to within noise
+// (median 0.00 in both -- correctly fully occluded), and only after this function's NRD override
+// does ray-driven diverge to ~0.83 open while raster stays at ~0.
+//
+// WHY: gNrdAo is REBLUR_DIFFUSE_OCCLUSION's output, and REBLUR reprojects using motion vectors,
+// depth and normals that the RASTER path writes. Ray-driven primary visibility runs with the
+// G-buffer off (VoxiRenderer selects rayDrivenTexPso_ precisely when it is), so those inputs are not
+// this frame's, and the denoised answer it hands back is not about this frame's geometry. The
+// texture is still BOUND and still reports non-zero dimensions, so the test below cannot see this --
+// it distinguishes "allocated" from "absent", never "produced from inputs this pass actually wrote".
+//
+// DISABLING IT FOR RASTER WOULD BE A REGRESSION, which is why this is a parameter and not a removal:
+// the same experiment moved raster from 7.87 to 25.30 (mean absolute difference from the reference
+// 10.63 -> 22.75). Raster DEPENDS on this denoised answer. Ray-driven is harmed by it: 12.68 -> 8.98,
+// MAD 12.59 -> 9.83, i.e. closer to ground truth than raster itself, and the high-frequency energy
+// falls from 1.486 to 1.172 against raster's 1.035 -- so it is also the less noisy answer, which is
+// the second half of what the owner reported.
+//
+// THE BETTER FIX, NOT TAKEN HERE: give ray-driven correct NRD inputs (motion vectors and depth for a
+// ray-traced primary hit) so the denoiser earns its place on that path too. That is a real piece of
+// work in VoxiRenderer/NRD wiring, not a shader change, and shipping the measured improvement should
+// not wait on it. When it lands, this parameter is what gets flipped back to true.
+float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo,
+                             bool nrdAoUsable) {
     // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
     // distance: the wrapper exists to throw away everything but `.open`, and this function is now
     // one of the callers its own comment describes as "meaning to use them". Identical cost -- the
@@ -1440,7 +1470,7 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // surfaces' signals. See voxi.hlsl's own gAverHistoryWrite/averDrawIsTranslucent for the gate's
     // definition and voxi_restir.hlsli's identical readback gate (gGiRadianceOut's NRD GI readback)
     // for the sibling fix.
-    if (gAverHistoryWrite && nrdW > 0u && nrdH > 0u) {
+    if (nrdAoUsable && gAverHistoryWrite && nrdW > 0u && nrdH > 0u) {
         // STILL WRITTEN TO THE HISTORY BELOW, because that history is what the NEXT frame's
         // reprojection reads and what the pass falls back to the moment NRD stops running -- a
         // frame where the G-buffer is switched off would otherwise resume from a stale average.
