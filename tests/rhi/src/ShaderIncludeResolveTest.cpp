@@ -29,13 +29,19 @@
 //
 // WARP, so no GPU is required, and SKIPPED rather than failed where D3D12 is genuinely absent.
 // Vulkan takes the identical argument list through the identical handler (see
-// VulkanShaderCompiler.cpp), but it needs a real driver, so asserting on D3D12 is what can be done
-// everywhere this runs.
+// VulkanShaderCompiler.cpp), and `ShaderIncludeResolveTest vulkan` now runs it there too, in
+// LineMeshTest's own shape (LineMeshTest.cpp:40-60): preferredCount = 2 with Null second, so a
+// machine with no Vulkan driver reports SKIPPED rather than quietly re-running the D3D12 pass and
+// calling that coverage. useWarp is passed through unchanged; VulkanDevice::init already treats it
+// as a no-op with a warning (Vulkan has no WARP-equivalent software adapter), so this asks for
+// whatever hardware Vulkan can find and accepts SKIPPED when none is there -- exactly the machines
+// where the D3D12 half above falls back to its own WARP path instead.
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 #include "aver/core/Log.hpp"
 
+#include <cstring>
 #include <string>
 
 using namespace aver;
@@ -59,8 +65,26 @@ static rhi::ShaderHandle compile(rhi::IResourceFactory* res, const char* src) {
     return res->createShader(sd);
 }
 
-int main() {
+// ctest's SKIP_RETURN_CODE, wired in the root CMakeLists.txt beside AVER_CTEST_VULKAN_TARGETS. 77 is
+// the long-standing autotools convention for "skipped", picked over an invented number so it reads
+// the same to anyone who has seen a test suite before.
+//
+// WHY THIS IS NOT `return 0`, which is what it was: exit 0 is indistinguishable from a pass, so on
+// any machine without a Vulkan driver the `.vulkan` row reported GREEN while testing nothing at all.
+// A row that cannot tell "Vulkan passed" from "Vulkan was never here" is the same false confidence
+// that let LineMeshTest's Vulkan path sit unexecuted in the first place -- see this file's own header
+// comment about exactly that failure. Red was not the answer either: a row that turns red on a
+// driverless runner is a row somebody deletes. Skipped is the honest third state, and ctest already
+// has it.
+static constexpr int kSkip = 77;
+
+int main(int argc, char** argv) {
     AVER_INFO("=== ShaderIncludeResolveTest ===");
+
+    // `ShaderIncludeResolveTest vulkan` runs the whole thing against the Vulkan backend instead --
+    // see the file header for why this is a meaningful second row and not a decorative one.
+    bool wantVulkan = false;
+    for (int i = 1; i < argc; ++i) if (std::strcmp(argv[i], "vulkan") == 0) wantVulkan = true;
 
     // The fixture has to have been DEPLOYED, not merely committed. Checked first and by name, so a
     // CMake copy that stops working reports as itself rather than as four mysterious compile
@@ -72,21 +96,22 @@ int main() {
     }
 
     rhi::DeviceDesc desc;
-    desc.useWarp = true;
-    desc.preferred[0] = rhi::Backend::D3D12;
+    desc.useWarp = true;   // a no-op on Vulkan (see the file header); harmless to leave set
+    desc.preferred[0] = wantVulkan ? rhi::Backend::Vulkan : rhi::Backend::D3D12;
     desc.preferred[1] = rhi::Backend::Null;
-    desc.preferredCount = 2;
+    desc.preferredCount = 2;   // NO fallback to the other one: an asked-for backend that is absent
+                               // must say SKIPPED, not quietly retest the one already run
     rhi::IDevice* dev = rhi::createDevice(desc);
     if (!dev || dev->backend() == rhi::Backend::Null) {
-        AVER_WARN("  SKIP  no D3D12 device (not even WARP) on this machine");
+        AVER_WARN("  SKIP  no {} device on this machine", wantVulkan ? "Vulkan" : "D3D12 (not even WARP)");
         if (dev) rhi::destroyDevice(dev);
-        return 0;
+        return kSkip;   // see kSkip above
     }
     rhi::IResourceFactory* res = dev->resources();
     if (!res) {
         AVER_WARN("  SKIP  this device exposes no resource factory");
         rhi::destroyDevice(dev);
-        return 0;
+        return kSkip;   // see kSkip above
     }
 
     // ---- 0. the negative control, FIRST ---------------------------------------------------------

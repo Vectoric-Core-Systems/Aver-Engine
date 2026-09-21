@@ -673,6 +673,41 @@ endif()
 # appears on a real failure is the shared check() helper's own formatting, `FAIL` followed by two
 # spaces, and the summary line's `FAILED ===`. Verified against the passing output of all six of
 # those suites: zero matches.
+#
+# VULKAN ROWS -- OPT-IN, NOT BLANKET. A few of these executables accept a `vulkan` argument and, when
+# given it, run the identical assertions against the Vulkan backend instead of D3D12; each one says
+# so in its own header comment (tests/rhi/src/LineMeshTest.cpp:43-49,
+# tests/rhi/src/ShaderIncludeResolveTest.cpp:71-74). Before AVER_CTEST_VULKAN_TARGETS existed that
+# argument was reachable only by a human typing it at a shell: add_test below never passed it, so
+# LineMeshTest's Vulkan path -- written on purpose, with a comment about exactly this failure mode --
+# had never once executed in a gate run or in CI. The list is the fix, and it is a small, explicit
+# allowlist kept right beside the function that reads it, rather than a property each target would
+# set on itself in its own CMakeLists.txt, because the root CMakeLists.txt is the one file this
+# change is scoped to touch; a target earns a place on the list only once its own source is confirmed
+# (by reading it, not by guessing from its name) to branch on argv the way the two above do. The
+# blanket alternative -- give every *Test target a second row and pass `vulkan` unconditionally -- is
+# wrong on purpose: a target that ignores argv would run its D3D12 path twice and report it as two
+# passing rows, which is MORE false confidence than the single untested row it would replace, and
+# false confidence in this exact spot is the whole reason this round of work exists.
+#
+# ON A MACHINE WITH NO VULKAN DRIVER, a `.vulkan` row PASSES, not fails, and does not show ctest's own
+# separate "Not Run" state. Both suites above ask createDevice for Vulkan with Null as the only
+# fallback (no silent retry of the backend already covered by the plain row), and when neither is
+# available they log a line containing the word SKIPPED and `return 0` -- they were written to be
+# safe to run by hand on any machine, long before this row existed, and neither calls
+# set_tests_properties(... SKIP_RETURN_CODE ...) to ask ctest for a dedicated skipped state. Exit 0
+# plus a log that contains neither `FAIL  ` nor `FAILED ===` reads, under the regex below, as an
+# ordinary ctest Passed. That is the correct failure mode for THIS row to have: a `.vulkan` row must
+# never turn red on a driver-less runner, because a red row someone did not expect is a row someone
+# deletes, which is the exact regression -- a Vulkan check that was written and then silently stopped
+# running -- this whole change exists to undo. The cost is that a green `.vulkan` row is not proof
+# Vulkan itself ran; that has to come from reading the row's own output ("running against backend
+# Vulkan" vs a SKIPPED line), the same way a WARP fallback already has to be told apart from a real
+# GPU run today.
+set(AVER_CTEST_VULKAN_TARGETS
+  LineMeshTest
+  ShaderIncludeResolveTest
+)
 function(aver_register_ctest_in dir)
   get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
   foreach(_t IN LISTS _targets)
@@ -686,7 +721,41 @@ function(aver_register_ctest_in dir)
           # bin/, because several suites resolve fixtures relative to the executable the same way a
           # shipped editor resolves shaders and splash.png.
           WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-          FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ===")
+          FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ==="
+          # ON EVERY ROW, NOT ONLY THE .vulkan ONES, AND THAT IS NOT BELT-AND-BRACES. The suites
+          # that learned to exit 77 reach their skip paths from the PLAIN row too -- a machine with
+          # no D3D12 runtime, or a backend with no createLineMesh, skips exactly the same way. Set
+          # on the Vulkan row alone, this change would have turned those previously-green default
+          # rows red, which is a regression introduced by a change whose entire purpose was to stop
+          # tests lying about what they covered. Harmless on every other target: a suite that never
+          # exits 77 never notices this property, and one that learns to later gets the right
+          # behaviour without anyone having to remember this line.
+          SKIP_RETURN_CODE 77)
+        # A second, opt-in row for the targets listed in AVER_CTEST_VULKAN_TARGETS above (see that
+        # comment for why this is a named allowlist and not "every Test target gets one"). Same
+        # executable, same WORKING_DIRECTORY, same FAIL_REGULAR_EXPRESSION -- the regex matches text
+        # the process PRINTS, not the ctest test name, so a `.vulkan`-suffixed name needs no regex of
+        # its own -- with `vulkan` appended to argv so the target's own argv-parsing (grep the source
+        # before adding a name here) takes the Vulkan branch, and a distinct name so `ctest -R`,
+        # dashboards and a human reading `ctest -N` can tell the two rows apart at a glance.
+        if(_t IN_LIST AVER_CTEST_VULKAN_TARGETS)
+          add_test(NAME ${_t}.vulkan COMMAND ${_t} vulkan)
+          set_tests_properties(${_t}.vulkan PROPERTIES
+            TIMEOUT 600
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+            FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ==="
+            # SKIPPED IS ITS OWN STATE, and it has to be, or this row is decorative. Both listed
+            # suites exit 77 when the backend they were asked for is not on the machine. Without
+            # this property that exit code reads as a FAILURE; with the `return 0` these suites
+            # used before it, it read as a PASS. Neither is true, and the pass version is the
+            # dangerous one -- a green `.vulkan` row on a driverless runner is a row that tested
+            # nothing while claiming it tested Vulkan, which is the same false confidence that let
+            # LineMeshTest's Vulkan path go unexecuted for its whole existence and is the reason
+            # this entire block exists. ctest prints these as "Skipped" and does not count them
+            # against the run, so a developer without a Vulkan driver is told the truth and has no
+            # reason to delete the row.
+            SKIP_RETURN_CODE 77)
+        endif()
       endif()
     endif()
   endforeach()

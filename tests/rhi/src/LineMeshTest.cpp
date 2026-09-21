@@ -37,6 +37,19 @@ static rhi::LineHandle makeLine(rhi::IDevice& dev) {
     return dev.createLineMesh(verts, 2);
 }
 
+// ctest's SKIP_RETURN_CODE, wired in the root CMakeLists.txt beside AVER_CTEST_VULKAN_TARGETS. 77 is
+// the long-standing autotools convention for "skipped", picked over an invented number so it reads
+// the same to anyone who has seen a test suite before.
+//
+// WHY THIS IS NOT `return 0`, which is what it was: exit 0 is indistinguishable from a pass, so on
+// any machine without a Vulkan driver the `.vulkan` row reported GREEN while testing nothing at all.
+// A row that cannot tell "Vulkan passed" from "Vulkan was never here" is the same false confidence
+// that let LineMeshTest's Vulkan path sit unexecuted in the first place -- see this file's own header
+// comment about exactly that failure. Red was not the answer either: a row that turns red on a
+// driverless runner is a row somebody deletes. Skipped is the honest third state, and ctest already
+// has it.
+static constexpr int kSkip = 77;
+
 int main(int argc, char** argv) {
     AVER_INFO("LineMeshTest");
 
@@ -60,13 +73,13 @@ int main(int argc, char** argv) {
     rhi::IDevice* dev = rhi::createDevice(desc);
     if (!dev) {
         AVER_WARN("LineMeshTest: no device could be created at all -- SKIPPED");
-        return 0;
+        return kSkip;   // see kSkip above
     }
     if (dev->backend() == rhi::Backend::Null) {
         AVER_WARN("LineMeshTest: only the Null backend is available (no D3D12/Vulkan runtime here) "
                   "-- SKIPPED, since Null has no line meshes to destroy");
         rhi::destroyDevice(dev);
-        return 0;
+        return kSkip;   // see kSkip above
     }
     AVER_INFO("running against backend {}", rhi::backendName(dev->backend()));
 
@@ -77,7 +90,7 @@ int main(int argc, char** argv) {
         if (probe == 0) {
             AVER_WARN("LineMeshTest: this backend does not implement createLineMesh -- SKIPPED");
             rhi::destroyDevice(dev);
-            return 0;
+            return kSkip;   // see kSkip above
         }
         dev->destroyLineMesh(probe);
     }
