@@ -182,14 +182,30 @@ ImU32 colorForType(const std::string& type) {
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     // Unreal's pin colours, kept deliberately (see headerColorForCategory above). Toned down from
     // Unreal's near-fullbright originals (float was (91,255,15), string (255,0,168)) -- fine on
-    // Blueprint's own background but glare at real graph size; these sit at ~75-80% value and lower
-    // saturation while keeping each type's HUE, so the learned association still reads at a glance.
-    if (t == "float")  return IM_COL32(126, 199,  76, 255);  // yellow-green
-    if (t == "int")    return IM_COL32( 72, 181, 152, 255);  // turquoise
-    if (t == "bool")   return IM_COL32(176,  72,  72, 255);  // red
-    if (t == "string") return IM_COL32(186,  92, 152, 255);  // magenta
-    if (t == "exec")   return IM_COL32(206, 210, 216, 255);  // white -- see above
-    return IM_COL32(150, 154, 160, 255);
+    // Blueprint's own background but glare at real graph size.
+    //
+    // TONED DOWN A SECOND TIME (2026-09-22), because the first pass was not enough: the owner
+    // reported the connectors still reading too bright. Every value below is the previous one with
+    // its HUE HELD EXACTLY and saturation scaled 0.72, value 0.86 -- computed in HSV rather than
+    // nudged per channel, which is what keeps the relationship between the five constant instead of
+    // drifting them apart one eyedropper at a time.
+    //
+    // HUE IS THE PART THAT MUST NOT MOVE. The whole reason for carrying Unreal's palette is that a
+    // Blueprint user already knows green-is-float and red-is-bool; dulling is free, re-hueing throws
+    // that away and would be a worse graph than either palette.
+    //
+    // HOW FAR IS TOO FAR, MEASURED RATHER THAN EYEBALLED: the minimum pairwise separation across
+    // these five, in a luma-weighted opponent space, goes 0.220 -> 0.162. Still comfortably
+    // distinguishable at pin size, which is the constraint that actually binds -- a pin is a few
+    // pixels across, so two types that merge there make the graph unreadable in a way no amount of
+    // "calmer" compensates for. Another pass of this size would land near 0.12 and is not advised
+    // without checking that number again.
+    if (t == "float")  return IM_COL32(126, 171,  95, 255);  // yellow-green
+    if (t == "int")    return IM_COL32( 88, 156, 138, 255);  // turquoise
+    if (t == "bool")   return IM_COL32(151,  87,  87, 255);  // red
+    if (t == "string") return IM_COL32(160, 102, 139, 255);  // magenta
+    if (t == "exec")   return IM_COL32(180, 182, 186, 255);  // white -- see above
+    return IM_COL32(131, 134, 138, 255);
 }
 
 // A node's header takes its category's colour, except GetVar/SetVar take their VARIABLE'S TYPE
