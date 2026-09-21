@@ -1311,6 +1311,16 @@ public class GraphCompiler
             case "setlocalposition":
                 EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
                 _il.Emit(OpCodes.Call, SetLocalPositionMethod); break;
+            // PIN NAMES ARE yaw/pitch/roll, NOT x/y/z, and the order pulled here is the order
+            // SetLocalRotationForGraph takes them. Naming them x/y/z would have let them share the
+            // three lines above and would have been a trap: an author wiring "x" into a rotation has
+            // no way to know whether it means yaw or roll, and the two differ by an axis.
+            case "setlocalrotation":
+                EmitPullInput(node, "yaw"); EmitPullInput(node, "pitch"); EmitPullInput(node, "roll");
+                _il.Emit(OpCodes.Call, SetLocalRotationMethod); break;
+            case "lookat":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, LookAtMethod); break;
             default:
                 _il.Emit(OpCodes.Call, DestroyEntityMethod); break;
         }
@@ -3376,7 +3386,8 @@ public class GraphCompiler
     private static bool IsExecCapableTransformWriteType(string type)
     {
         string t = type.ToLowerInvariant();
-        return t == "translate" || t == "setlocalscale" || t == "setlocalposition" || t == "destroyentity";
+        return t == "translate" || t == "setlocalscale" || t == "setlocalposition" ||
+               t == "setlocalrotation" || t == "lookat" || t == "destroyentity";
     }
 
     /// A CallFunc reached by the exec walk. Purity doesn't decide this -- a PURE function can be
@@ -5116,6 +5127,14 @@ public class GraphCompiler
     private static readonly MethodInfo SetLocalPositionMethod =
         typeof(GraphInterop).GetMethod("SetLocalPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetLocalPositionForGraph was not found by reflection");
+
+    private static readonly MethodInfo SetLocalRotationMethod =
+        typeof(GraphInterop).GetMethod("SetLocalRotationForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new MissingMethodException("GraphInterop.SetLocalRotationForGraph");
+
+    private static readonly MethodInfo LookAtMethod =
+        typeof(GraphInterop).GetMethod("LookAtForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new MissingMethodException("GraphInterop.LookAtForGraph");
     private static readonly MethodInfo IsAliveMethod =
         typeof(GraphInterop).GetMethod("IsAliveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsAliveForGraph was not found by reflection");

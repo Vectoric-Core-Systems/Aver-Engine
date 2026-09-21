@@ -250,6 +250,24 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     // OcGraphParser's own note on the pair. Moving a child and resizing one should not be two
     // different things to learn. Translate above is the RELATIVE peer; this one is absolute.
     t.push_back({"SetLocalPosition", "Set Local Position", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // THE PALETTE COULD MOVE, SCALE, PARENT AND DESTROY AN ENTITY AND COULD NOT TURN ONE. A turret
+    // tracking a target, an AI facing where it walks, a door swinging, a pickup spinning: every one
+    // of those needed C#, while Entity::SetLocalRotation sat fully implemented and unreachable from
+    // a graph. Measured against the whole Transform category, it was the only verb missing.
+    //
+    // YAW/PITCH/ROLL IN DEGREES, NOT x/y/z, and the names are load-bearing rather than cosmetic:
+    // PinType is Float/Int/Bool/Exec with no quaternion, so a rotation must ride on three floats --
+    // and three floats called x/y/z sitting next to a position node that also takes x/y/z is exactly
+    // how somebody wires roll into yaw and gets a turret that lies on its side. The pin names are the
+    // only thing carrying which axis is which.
+    //
+    // The values mean what .ocmap's PLACE records mean, because the bridge composes them through the
+    // engine's own Rot::ToQuat rather than a second Euler convention of its own.
+    t.push_back({"SetLocalRotation", "Set Local Rotation", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("yaw", "float", false), pin("pitch", "float", false), pin("roll", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // Yaw and pitch only, roll left at zero -- rolling toward a target is what a stunt plane does,
+    // not what anything aiming does. Same pin shape as Set Local Position on purpose: "move there"
+    // and "face there" take the same three numbers and should not be two things to learn.
+    t.push_back({"LookAt", "Look At", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetLocalScale", "Set Local Scale", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"DestroyEntity", "Destroy Entity", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     // -- PHYSICS. A BODY IS NOT AN ENTITY: a body is a Jolt handle with a shape and a velocity, an

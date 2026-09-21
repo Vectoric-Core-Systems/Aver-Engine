@@ -1413,6 +1413,33 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // DEGREES, and named yaw/pitch/roll rather than x/y/z on purpose: PinType has no
+            // quaternion, so rotation rides on three floats, and three floats called x/y/z beside a
+            // position node that also takes x/y/z is how an author wires roll into yaw. The names
+            // are the only thing carrying the meaning, so they have to say it.
+            case "setlocalrotation":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "yaw", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pitch", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "roll", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // WORLD TARGET, x/y/z, matching every other "a point in the world" node in the set.
+            // Same pin shape as setlocalposition deliberately -- "move there" and "face there" take
+            // the same three numbers and should not have to be learned twice.
+            case "lookat":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "setlocalscale":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });

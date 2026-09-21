@@ -971,6 +971,75 @@ internal static class GraphInterop
         return true;
     }
 
+    /// <summary>Entity.SetLocalRotation, in DEGREES, as three float pins.
+    ///
+    /// The palette could move, scale, parent and destroy an entity and could not TURN one. A turret
+    /// tracking a target, an AI facing what it walks toward, a door swinging, a pickup spinning --
+    /// every one of those needed C#, while Entity.SetLocalRotation sat there fully implemented and
+    /// unreachable from a graph.
+    ///
+    /// DEGREES THROUGH A Rot, NOT A RAW QUATERNION, and that is forced rather than chosen: PinType is
+    /// Float, Int, Bool, Exec -- there is no Vec4 or quaternion pin, and no string. Rot is the
+    /// engine's own yaw/pitch/roll type and its ToQuat uses the intrinsic Z-Y-X composition .ocmap's
+    /// PLACE records already use, so a value typed into a graph means the same thing it means in a
+    /// level file. Reusing that conversion rather than writing another is the point: a second
+    /// Euler-to-quaternion with its own axis order would disagree with every placed actor.</summary>
+    internal static bool SetLocalRotationForGraph(int entity, float yaw, float pitch, float roll)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        e.SetLocalRotation(new Rot(yaw, pitch, roll).ToQuat());
+        return true;
+    }
+
+    /// <summary>Turns an entity to face a world point, the single most reached-for rotation in a game.
+    ///
+    /// YAW AND PITCH ONLY, ROLL ZEROED, which is what "look at" means for a turret, a character or a
+    /// camera -- rolling toward a target is what a stunt plane does, not what anything aiming does. A
+    /// caller wanting roll sets it with SetLocalRotation instead.
+    ///
+    /// DERIVED FROM THE DIRECTION, in the engine's own axis convention (Forward +X, Right +Y, Up +Z),
+    /// so yaw is atan2(dy, dx) and pitch is the rise against the horizontal run. Pitch is NEGATED
+    /// because Rot's pitch turns about +Y (Right) and a right-handed turn about Right tips the nose
+    /// DOWN -- getting that sign wrong gives a turret that aims neatly at the ground when told to
+    /// track something above it, which looks like a targeting bug rather than a sign error.
+    ///
+    /// A TARGET ON TOP OF THE ENTITY leaves the direction with no horizontal run at all, so yaw is
+    /// meaningless rather than merely imprecise: atan2(0,0) is 0, which would snap the entity to face
+    /// +X for no reason the author can see. Straight up or down is answered instead, keeping the
+    /// yaw it already had.
+    ///
+    /// LOCAL ROTATION, WORLD TARGET: correct for an unparented actor, which is the common case. A
+    /// PARENTED one turns relative to its parent, so a child of a rotating mount will not point where
+    /// this asks -- said plainly because the node's name promises world behaviour and the transform
+    /// it writes is local, exactly the asymmetry SetLocalPosition's own comment above calls out.</summary>
+    internal static bool LookAtForGraph(int entity, float targetX, float targetY, float targetZ)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+
+        Vec3 from = e.LocalPosition;
+        float dx = targetX - from.X, dy = targetY - from.Y, dz = targetZ - from.Z;
+
+        float horiz = System.MathF.Sqrt(dx * dx + dy * dy);
+        const float r2d = 180f / System.MathF.PI;
+
+        // Degenerate only in the horizontal plane: a target directly above or below still has a
+        // perfectly good pitch, so answer that and leave yaw where it was rather than snapping.
+        if (horiz < 1e-4f)
+        {
+            if (System.MathF.Abs(dz) < 1e-4f) return true;   // the target IS the entity: nothing to face
+            Rot keep = new Rot(0f, dz > 0f ? -90f : 90f, 0f);
+            e.SetLocalRotation(keep.ToQuat());
+            return true;
+        }
+
+        float yaw   = System.MathF.Atan2(dy, dx) * r2d;
+        float pitch = -System.MathF.Atan2(dz, horiz) * r2d;   // see the sign note above
+        e.SetLocalRotation(new Rot(yaw, pitch, 0f).ToQuat());
+        return true;
+    }
+
     /// <summary>Entity.IsAlive asks the SCENE whether the handle still names anything; IsValid only
     /// asks whether it is non-zero. A graph holding a handle across frames wants the first.</summary>
     internal static bool IsAliveForGraph(int entity) => new Entity(entity).IsAlive;
