@@ -1645,6 +1645,29 @@ void SandboxApp::drawSculptCursor(Engine& e) {
                    Mat4::translation(sculptCursor_);
     e.device()->setLineDepth(false);
     e.device()->drawLines(brushRing_, &w.m[0][0]);
+
+    // THE SECOND RING IS WHERE FULL STRENGTH STOPS, and without it the Falloff slider is invisible
+    // until after a stroke. The outer ring alone says how WIDE the brush is and nothing about its
+    // SHAPE, so a falloff of 0.1 and one of 0.9 draw an identical cursor and then behave completely
+    // differently -- which makes a working parameter feel unreliable, the same way a missing cursor
+    // would make a working brush feel broken.
+    //
+    // (1 - falloff) IS NOT A GUESS, it is the plateau radius Sculpt.cpp's own remap uses: everything
+    // inside (1 - falloff) of the rim takes full weight and the smoothstep shoulder is compressed
+    // into what remains (see applyBrush's `t <= 1.0f - soft` branch). Reading the same expression
+    // here is what keeps the picture honest if that curve is ever retuned.
+    //
+    // DRAWN ONLY WHEN IT SAYS SOMETHING. At falloff 1 the plateau has zero radius and the inner ring
+    // collapses to a dot at the cursor; at falloff 0 it coincides with the outer ring, and two rings
+    // drawn on top of each other just look like one slightly brighter one. Both extremes are already
+    // unambiguous from the outer ring alone, so the second ring appears only in between, where it is
+    // the only thing carrying the information.
+    const f32 soft  = sculptFalloff_ < 0.0f ? 0.0f : (sculptFalloff_ > 1.0f ? 1.0f : sculptFalloff_);
+    const f32 inner = sculptRadiusCm_ * (1.0f - soft);
+    if (inner > sculptRadiusCm_ * 0.04f && inner < sculptRadiusCm_ * 0.96f) {
+        const Mat4 wi = Mat4::scale(Vec3{inner, inner, inner}) * Mat4::translation(sculptCursor_);
+        e.device()->drawLines(brushRing_, &wi.m[0][0]);
+    }
     e.device()->setLineDepth(true);
 }
 
