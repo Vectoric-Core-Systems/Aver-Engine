@@ -56,6 +56,66 @@ AVER_UI_API void aver_ui_rect(float x, float y, float w, float h, uint32_t rgba)
 AVER_UI_API void aver_ui_textured_rect(float x, float y, float w, float h, uint64_t texture,
                                        float u0, float v0, float u1, float v1, uint32_t rgba);
 
+// ---- text -------------------------------------------------------------------------------------------
+//
+// WHY THIS IS AN OPAQUE POINTER AND NOT A PATH. modules/ui is Core-only on purpose -- UiFont.hpp's
+// own header says it "does no file I/O and knows nothing about the filesystem", and this DLL links
+// no RHI, so it can neither read the .ocfont nor upload its atlas. The HOST does both (it already
+// decodes the atlas and fills UiFont::atlasTexture) and lends the result here. This is
+// aver_ui_draw_list's convention run the other way: the host hands over an `aver::ui::UiFont*` it
+// keeps alive, and this module only ever reads it.
+//
+// BORROWED, NOT OWNED. Passing NULL clears it. A font that outlives its atlas texture would draw
+// glyphs sampling a dead descriptor, so a host that tears its device down clears this first.
+AVER_UI_API void aver_ui_set_font(const void* font);
+
+// 1 when a font is set and has glyphs. A HUD checks this rather than measuring an empty string.
+AVER_UI_API int32_t aver_ui_has_font(void);
+
+// Writes ascent, descent, lineHeight (pixels) for the set font, or three zeroes. Descent is
+// negative, matching UiFont.
+AVER_UI_API void aver_ui_font_metrics(float* outAscentDescentLine);
+
+// Draws `utf8` with the pen at (x, y) -- the LEFT END OF THE BASELINE, not a box corner, because
+// that is the convention every glyph's offY is expressed against. Returns the pen's x afterwards so
+// a caller can chain a label and a value without measuring twice. 0 and nothing drawn with no font.
+AVER_UI_API float aver_ui_text(float x, float y, const char* utf8, uint32_t rgba);
+
+// The width `utf8` would occupy. Needed BEFORE drawing to centre or right-align, which is why it is
+// an export of its own and not something a caller derives from aver_ui_text's return.
+AVER_UI_API float aver_ui_text_width(const char* utf8);
+
+// ---- hit testing ------------------------------------------------------------------------------------
+//
+// NOT A WIDGET TREE, deliberately -- see UiDrawList::addHitRect. This is the smallest thing that
+// turns "the UI drew a button" into "the pointer is over that button": the draw list already knows
+// the clip stack and the layer, which are exactly what decide whether a point reaches a widget.
+
+// Registers a rectangle under a caller-chosen id, clipped and layered like a draw would be.
+AVER_UI_API void aver_ui_hit_rect(uint64_t id, float x, float y, float w, float h);
+
+// The id under (x, y), or 0. Topmost wins.
+AVER_UI_API uint64_t aver_ui_hit_test(float x, float y);
+
+// ---- the pointer (the host) --------------------------------------------------------------------------
+//
+// THE POINTER LIVES HERE, NOT ON THE INPUT ABI, and that is the whole point: Aver.Framework's input
+// surface reports mouse DELTAS, and a click on a HUD needs an ABSOLUTE position IN THE SAME SPACE AS
+// aver_ui_begin_frame's rect. In the editor that rect is the viewport, not the window, so a
+// window-relative cursor would be wrong by the dockspace's offset on every click -- the same
+// viewport-relative trap NDC already has here. The host converts once, per frame, beside
+// begin_frame; a game reads what the host converted.
+
+// Sets this frame's pointer position (in begin_frame's space) and its held buttons as a bitmask:
+// bit 0 left, bit 1 right, bit 2 middle. Called by the HOST, never by a game.
+AVER_UI_API void aver_ui_set_pointer(float x, float y, uint32_t buttons);
+
+// Writes the pointer as x, y.
+AVER_UI_API void aver_ui_pointer(float* outXY);
+
+// 1 when `button` (0 left, 1 right, 2 middle) is held this frame.
+AVER_UI_API int32_t aver_ui_pointer_down(int32_t button);
+
 // ---- readback (the host) ----------------------------------------------------------------------------
 
 // Returns the number of vertices submitted this frame.

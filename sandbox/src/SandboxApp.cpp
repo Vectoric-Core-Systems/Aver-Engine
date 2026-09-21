@@ -2533,6 +2533,36 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
     else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
+    // THE FONT AND THE POINTER, BOTH LENT PER FRAME, right after the frame opens.
+    //
+    // The font is re-lent every frame rather than once at load because loadGameUiFont is non-fatal
+    // and can leave uiFont_ invalid; handing over the same address each frame costs a store and
+    // means a host that ever reloads a font does not have to remember a second call site.
+    aver_ui_set_font(&uiFont_);
+    // THE POINTER IS CONVERTED HERE, and this is the only place that can do it correctly: the UI
+    // frame above is laid out against the VIEWPORT (or the HUD preview rect), not the window, so a
+    // window-relative cursor would miss every clickable rect by the dockspace's offset. Same rect
+    // in, same rect out.
+    {
+        const f32 ox = hudPreviewActive() ? hudRectX_ : static_cast<f32>(vpX_);
+        const f32 oy = hudPreviewActive() ? hudRectY_ : static_cast<f32>(vpY_);
+        f32 px = 0.0f, py = 0.0f;
+        u32 buttons = 0;
+#if AVER_WITH_IMGUI
+        const ImGuiIO& uiIo = ImGui::GetIO();
+        px = uiIo.MousePos.x; py = uiIo.MousePos.y;
+        // ImGui reports a cursor outside the window as -FLT_MAX. Left as-is it would land inside
+        // some rect after the offset subtraction on a wide enough viewport; pushed far negative it
+        // hits nothing, which is what "the mouse is not here" should mean.
+        if (px < -1.0e6f || py < -1.0e6f) { px = -1.0e6f; py = -1.0e6f; }
+        else { px -= ox; py -= oy; }
+        for (int b = 0; b < 3; ++b)
+            if (ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(b))) buttons |= (1u << b);
+#else
+        (void)ox; (void)oy;
+#endif
+        aver_ui_set_pointer(px, py, buttons);
+    }
 #if AVER_MODULE_SCRIPTING
     if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
 #endif

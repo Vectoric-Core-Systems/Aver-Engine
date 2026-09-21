@@ -28,6 +28,24 @@ internal static class Native
                                                                        float u0, float v0, float u1, float v1,
                                                                        uint rgba);
 
+    // Text. The font is lent to the ABI by the HOST (aver_ui_set_font, not exposed here — a game
+    // does not own the atlas and must not be able to swap it mid-frame).
+    [DllImport(Lib)] internal static extern int   aver_ui_has_font();
+    [DllImport(Lib)] internal static extern void  aver_ui_font_metrics(float[] outAscentDescentLine);
+    [DllImport(Lib)] internal static extern float aver_ui_text(float x, float y,
+                                                               [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8,
+                                                               uint rgba);
+    [DllImport(Lib)] internal static extern float aver_ui_text_width(
+                                                               [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8);
+
+    // Hit testing.
+    [DllImport(Lib)] internal static extern void  aver_ui_hit_rect(ulong id, float x, float y, float w, float h);
+    [DllImport(Lib)] internal static extern ulong aver_ui_hit_test(float x, float y);
+
+    // The pointer. aver_ui_set_pointer is the HOST's; a game only reads.
+    [DllImport(Lib)] internal static extern void aver_ui_pointer(float[] outXY);
+    [DllImport(Lib)] internal static extern int  aver_ui_pointer_down(int button);
+
     [DllImport(Lib)] internal static extern int aver_ui_vertex_count();
     [DllImport(Lib)] internal static extern int aver_ui_command_count();
 }

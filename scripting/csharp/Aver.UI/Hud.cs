@@ -118,6 +118,80 @@ public static class Hud
     /// <summary>Restore the enclosing clip.</summary>
     public static void PopClip() => Native.aver_ui_pop_clip();
 
+    // ---- text ---------------------------------------------------------------------------------
+
+    private static readonly float[] s_metrics = new float[3];
+
+    /// <summary>Whether a font is available this frame. False leaves every text call a no-op that
+    /// still returns sane numbers, so a HUD never has to branch on it unless it wants a fallback.</summary>
+    public static bool HasFont => Native.aver_ui_has_font() != 0;
+
+    /// <summary>Baseline to baseline, in pixels. 0 with no font.</summary>
+    public static float LineHeight { get { Native.aver_ui_font_metrics(s_metrics); return s_metrics[2]; } }
+
+    /// <summary>How far the font rises above the baseline. Add this to a box's top to get the pen's
+    /// y for text sitting on the first line inside it.</summary>
+    public static float Ascent { get { Native.aver_ui_font_metrics(s_metrics); return s_metrics[0]; } }
+
+    /// <summary>Draws text with the pen at <paramref name="x"/>, <paramref name="y"/> — the LEFT END
+    /// OF THE BASELINE, not a box corner. Returns the pen's x afterwards, so a label and a value can
+    /// be chained without measuring twice. A codepoint the font lacks costs a gap, not a box.</summary>
+    public static float Text(float x, float y, string text, Colour colour)
+        => Native.aver_ui_text(x, y, text ?? string.Empty, colour.Packed);
+
+    /// <summary>The width <paramref name="text"/> would occupy. Measure before drawing to centre or
+    /// right-align; <see cref="Text"/>'s return only tells you where it ended up.</summary>
+    public static float MeasureText(string text)
+        => Native.aver_ui_text_width(text ?? string.Empty);
+
+    /// <summary>Draws text centred horizontally in <paramref name="r"/> and vertically on its
+    /// mid-line. The common case, spelled once here rather than in every HUD.</summary>
+    public static float TextCentred(Rect r, string text, Colour colour)
+    {
+        Native.aver_ui_font_metrics(s_metrics);
+        float w = MeasureText(text ?? string.Empty);
+        float x = r.X + (r.Width - w) * 0.5f;
+        // Centre the INK, not the line box: ascent is positive up, descent negative down, so the
+        // visual middle sits at (ascent + descent) / 2 above the baseline.
+        float y = r.Y + r.Height * 0.5f + (s_metrics[0] + s_metrics[1]) * 0.5f;
+        return Text(x, y, text ?? string.Empty, colour);
+    }
+
+    // ---- hit testing and the pointer ------------------------------------------------------------
+
+    private static readonly float[] s_pointer = new float[2];
+
+    /// <summary>Registers <paramref name="r"/> as clickable under <paramref name="id"/>, clipped and
+    /// layered exactly as a draw would be. <paramref name="id"/> 0 is ignored — it is the answer
+    /// <see cref="HitTest"/> gives for "nothing".</summary>
+    public static void HitRect(ulong id, Rect r)
+        => Native.aver_ui_hit_rect(id, r.X, r.Y, r.Width, r.Height);
+
+    /// <summary>The id registered under a point, or 0. Topmost wins: later layers first, and within
+    /// a layer the last registration, because that is the one drawn on top.</summary>
+    public static ulong HitTest(float x, float y) => Native.aver_ui_hit_test(x, y);
+
+    /// <summary>The id under the pointer, or 0.</summary>
+    public static ulong Hovered
+    {
+        get
+        {
+            Native.aver_ui_pointer(s_pointer);
+            return Native.aver_ui_hit_test(s_pointer[0], s_pointer[1]);
+        }
+    }
+
+    /// <summary>The pointer, in <see cref="Viewport"/>'s space — NOT the window's. The host converts
+    /// once per frame, because in the editor the viewport is inset by the dockspace and a
+    /// window-relative cursor would miss every button by that offset.</summary>
+    public static (float X, float Y) Pointer
+    {
+        get { Native.aver_ui_pointer(s_pointer); return (s_pointer[0], s_pointer[1]); }
+    }
+
+    /// <summary>Whether a pointer button is held: 0 left, 1 right, 2 middle.</summary>
+    public static bool PointerDown(int button = 0) => Native.aver_ui_pointer_down(button) != 0;
+
     /// <summary>How many draw calls this frame's UI will cost. For a debug readout, not for logic.</summary>
     public static int DrawCallCount => Native.aver_ui_command_count();
 }
