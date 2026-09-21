@@ -24,6 +24,7 @@
 #include <algorithm>   // std::find (the once-per-shape binding warning) and std::sort (the blended-mesh flush's back-to-front replay)
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>    // std::getenv (AVER_D3D12_ELIDE_DRAW_BINDING -- see applyDrawBinding)
 #include <cstring>
 #include <deque>      // pipelines_ -- see its declaration for why it is not a vector
 #include <initializer_list>   // D3D12ResourceFactory::uploadBuffers' parameter (W4 Default-heap meshes)
@@ -1265,6 +1266,23 @@ private:
     // setBindingSet on TABLE 0 only (table 1 is per-material and legitimately changes every draw),
     // and the start of each frame / endFrame's post chain.
     bool             fovValid_ = false;
+
+    // TABLE 1's OWN redundant-state elision -- the per-draw material binding set plus its b2
+    // constant block, applied by D3D12RenderContext::applyDrawBinding. See that function for the
+    // full justification, the default-off toggle, and why this exists at all (fov* above is
+    // deliberately blind to table 1, on purpose, for a different reason).
+    //
+    // A DELIBERATE SEPARATE FLAG FROM fovValid_, not a reuse of it, even though both die at the same
+    // setPipeline/beginFrame/endFrame events: fovValid_ is ALSO cleared by setBindingSet on table 0
+    // (its own comment explains why table 0 rebinding must not touch table 1), and folding this into
+    // fovValid_ would wrongly throw this cache away on every table-0 rebind too, defeating most of
+    // what it exists to save. dbSet_/dbConstants_/dbConstantBytes_ mirror what applyDrawBinding last
+    // actually BOUND on the command list, not merely what a caller last requested -- see that
+    // function for why the distinction matters.
+    BindingSetHandle dbSet_ = 0;
+    u8               dbConstants_[kMaxDrawConstantBytes] = {};
+    u32              dbConstantBytes_ = 0;
+    bool             dbValid_ = false;
 
     // (set base, table, pipeline base) triples already reported by setBindingSet's register-mismatch
     // check. ONE BINDING SET LEGITIMATELY SERVES TWO PIPELINES AT TWO BASES (the shared material
@@ -2812,6 +2830,19 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
     if (boundRootSig_ == rs) return;
     boundRootSig_ = rs;
     cmdList_->SetGraphicsRootSignature(rs);
+    // A ROOT SIGNATURE CHANGE DISCARDS EVERY BOUND ROOT ARGUMENT, table 1 and the b2 draw CBV
+    // included, so applyDrawBinding's cache is stale the instant this line runs. Cleared HERE rather
+    // than at this function's call sites because there are several and a new one would not think to
+    // do it -- and the failure mode is not a slow frame but a draw reading whatever material the
+    // previous root signature left behind, which is the black-foliage bug SandboxRender.cpp:1112
+    // records. Only reached on a genuine change, because of the early-out above, so an unchanged
+    // root signature still costs nothing.
+    //
+    // fovValid_ IS DELIBERATELY NOT CLEARED HERE, and that asymmetry is worth explaining rather than
+    // leaving to be discovered: it has exactly the same exposure, predates this cache, and ships
+    // today. Fixing it belongs in its own change with its own before/after, not smuggled into one
+    // that is supposed to be provably inert -- see dbValid_'s member comment.
+    dbValid_ = false;
     cmdList_->SetGraphicsRootConstantBufferView(kSceneFrameParam, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
 }
 
@@ -3586,6 +3617,8 @@ void D3D12Device::beginFrame() {
     // none bound until the first SetDescriptorHeaps of the new recording, same as the root signature.
     boundHeap_ = nullptr;
     fovValid_ = false;   // a reset command list has nothing bound at all
+    dbValid_ = false;    // table 1's own cache dies here too -- see its member comment for why it
+                          // can't just ride fovValid_ instead of getting its own line
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
     drawBlended_ = false;   // sticky per-draw state resets exactly like drawBinding_ just above
@@ -4716,6 +4749,10 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     cmdList_->SetDescriptorHeaps(1, heaps);
     boundHeap_ = postSrvHeap_.Get();
     cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+    // The post chain drives the command list directly, below the context that owns table 1's cache,
+    // so nothing here would otherwise tell that cache its root arguments are gone. fovValid_ is
+    // cleared for this same reason before endFrame calls this function; dbValid_ needs it too.
+    dbValid_ = false;
     boundRootSig_ = nullptr;
     boundPso_ = nullptr;
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4805,6 +4842,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         cmdList_->Dispatch(1, 1, 1);
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+        dbValid_ = false;   // same reason as the chain's opening bind -- see bindGraphicsRoot
     }
 
     {
@@ -4897,6 +4935,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
             ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
             cmdList_->SetDescriptorHeaps(1, heaps);
             cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+            // The upscaler bound its OWN descriptor heap and root signature (see the comment above),
+            // so this is the one site where the root arguments were discarded by code outside this
+            // file entirely. Exactly why the cache is cleared at the binds rather than at a list of
+            // callers somebody has to keep complete.
+            dbValid_ = false;
             srUpscaled = true;
 
             // ONCE, reporting what actually happened, not what was configured: this feature spent
@@ -4974,6 +5017,7 @@ void D3D12Device::endFrame() {
     endGpuSpan();
     beginGpuSpan("sky+post+ui");
     fovValid_ = false;   // the post chain sets pipelines on the command list directly
+    dbValid_ = false;    // same reason, same moment -- see dbValid_'s member comment
     ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
     // Same scene-space rect (and fallback to the scene target, not the present one) as beginFrame --
@@ -5236,6 +5280,8 @@ void D3D12Device::endFrame() {
                 boundPso_ = nullptr;
             }
             fovValid_ = false;   // see the block comment above for why this is hygiene, not a fix
+            dbValid_ = false;    // table 1's cache, same hygiene, same reason: runPostChain next sets
+                                  // pipelines on the command list directly, outside setPipeline
         }
 
         // M3: logged on CHANGE, not every frame -- see blendStatDrawsLogged_'s own comment. Reached
@@ -7289,6 +7335,10 @@ void D3D12RenderContext::setPipeline(PipelineHandle h) {
     dev_->cmdList_->SetPipelineState(p->pso.Get());
     dev_->boundPso_ = p->pso.Get();   // matches what the line above just bound, not a guess
     dev_->fovValid_ = false;          // a different pipeline is bound now; see fovValid_'s comment
+    dev_->dbValid_ = false;           // table 1's cache dies too: a graphics root signature change
+                                       // discards every bound root argument including table 1's
+                                       // descriptor table, and bindDeclaredRootCbvs below re-zeroes
+                                       // this cache's own b2 slot regardless -- see dbValid_'s comment
     pipe_ = p;
 
     bindDeclaredRootCbvs(p);
@@ -7402,6 +7452,10 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     // TABLE 0 ONLY. Table 1 is the per-material binding that applyDrawBinding sets on every single
     // draw; invalidating on that would mean the cache never once survived to the next entity, which
     // is the whole point of it. Table 1 does not disturb what table 0 holds.
+    //
+    // Whether table 1 can ALSO be elided on its own terms is a different question from whether it
+    // should invalidate fov* -- see applyDrawBinding's dbValid_ cache for that one. Kept as a
+    // separate flag and a separate comment on purpose, so the two reasons never collapse into one.
     if (table == 0) dev_->fovValid_ = false;
 
     // ONCE PER SHAPE, not once per draw -- see bindingBaseWarned_'s own comment for why a mismatch
@@ -7499,12 +7553,108 @@ void D3D12RenderContext::setDrawBinding(BindingSetHandle set, const void* consta
 }
 
 // Binds the sticky per-draw state, if the current pipeline declared anywhere to put it.
+//
+// TABLE 1 REDUNDANT-STATE ELISION, OFF BY DEFAULT. Read the whole comment before touching either
+// half below: getting this cache's invalidation wrong is not a slow frame, it is a WRONG-MATERIAL
+// DRAW whose failure mode is a plausible image. This house has that scar already -- SandboxRender.cpp
+// records a cluster-dispatch path that once left table 1 sticky from an earlier draw's material, and
+// the mesh rendered black "even though every value measured correct for a different material". A
+// broken frame from a stale table 1 does not look broken; it looks like a different, wrong object.
+//
+// THE FINDING this closes. setBindingSet's own comment a few dozen lines above explains why the fov*
+// group (pipeline + table 0 + the feature frame CBV) deliberately EXCLUDES table 1 from ITS elision
+// -- invalidating fov* on every table-1 rebind would mean fov* never once survived to the next
+// entity, since table 1 legitimately changes whenever the material does. That reasoning is about
+// fov*, and it is correct. It is silent on a different question: whether table 1 can ALSO be elided
+// on its OWN terms, by comparing THIS draw's (drawSet_, drawConstants_) against the PREVIOUS draw's
+// rather than against table 0. Until this change, nothing did. setBindingSet(drawSet_, 1) below and
+// the b2 constant-buffer upload after it both ran UNCONDITIONALLY on every one of this function's
+// five call sites (drawMesh, drawMeshInstanced, dispatchMeshFor, dispatchMeshClusters, drawIndexed)
+// -- a descriptor-table bind, a 256-byte-aligned ring allocation, a memcpy and a root CBV set, every
+// single draw, even across thousands of consecutive draws sharing one material. Verified before
+// writing this: setBindingSet(_, 1) has exactly one call site in this whole file, the one inside
+// this very function below, so there is no other path that can move table 1 behind this cache's
+// back.
+//
+// WHY ELIDING IS SAFE HERE. dev_->dbSet_/dbConstants_/dbConstantBytes_ mirror what this function
+// last actually BOUND on the command list, not merely what a caller last requested through
+// setDrawBinding -- each half below only updates its own cached copy at the moment it issues the
+// real call, so a half this function SKIPS never drifts the cache away from hardware truth, and a
+// draw that changes only one half (same material set, different shading constants, or the reverse)
+// still pays only for the half that changed. dev_->dbValid_ is cleared at every point that can
+// invalidate root arguments out from under this cache WITHOUT going through setBindingSet or
+// setConstantBuffer: D3D12RenderContext::setPipeline (a new root signature discards every bound root
+// argument, and bindDeclaredRootCbvs re-zeroes this cache's own b2 slot immediately afterwards
+// regardless), D3D12Device::beginFrame (cmdList_->Reset leaves nothing bound at all), and the two
+// points in D3D12Device::endFrame where the sky/post chain and the blended-mesh replay's own
+// pipeline swaps touch the command list directly, bypassing setPipeline -- the exact same reason
+// fovValid_ is force-cleared at those same two points. dbValid_ is a SEPARATE bool from fovValid_,
+// not a reuse of it: fovValid_ is ALSO cleared by setBindingSet on table 0 (see that function's
+// comment for why), and table 0 rebinding must NOT throw this cache away -- folding the two together
+// would silently undo most of what this one exists to save.
+//
+// STILL DEFAULT OFF. A state cache is the category with the worst track record in this codebase --
+// the fov* comment two functions up names its own near-miss, and SandboxRender.cpp's foliage above
+// is a second one, in a different cache entirely -- and this one cannot be validated the way the
+// previous two commits in this programme were, by construction rather than by a screenshot: eliding
+// a redundant bind has no visible effect to diff UNLESS the elision is wrong, and a wrong elision's
+// image does not necessarily look wrong either (see the foliage scar again). The only real evidence
+// is a PIX capture showing table 1's root-parameter set and the b2 CBV set visibly disappearing
+// between consecutive same-material draws, paired with an image diff against the same capture with
+// the toggle off showing zero pixel difference. Until the user has run that A/B, this stays off.
+// AVER_D3D12_ELIDE_DRAW_BINDING flips it without a rebuild specifically so that A/B is one binary,
+// not a rebuild-and-compare against a second one that could differ for reasons having nothing to do
+// with this cache.
+//
+// VULKAN HAS NO TWIN OF THIS YET. VulkanDevice.cpp's own drawMesh comment says outright that backend
+// re-binds its pipeline and b0 set on every single call, "redundant, not incorrect... an
+// optimisation left for later" -- table 1 there is further behind than table 0 was on THIS backend
+// before the profiler and the mesh-probe cache that preceded this change even existed. The owner's
+// stated goal is Vulkan parity, so this cache will want a twin on that backend eventually. Not built
+// here: this pass touches D3D12Device.cpp only.
 void D3D12RenderContext::applyDrawBinding() {
     if (!pipe_) return;
-    if (drawSet_ && pipe_->srvParam[1] >= 0) setBindingSet(drawSet_, 1);
+
+    // Read once for the process, not once per draw -- see the block comment above for what must be
+    // verified before anyone flips this permanently. AVER_D3D12_ELIDE_DRAW_BINDING absent, empty or
+    // "0" leaves this function byte-for-byte the sequence it always issued: both `elided` checks
+    // below short-circuit on kElide first, so neither cache field is even read, let alone written,
+    // when this stays off.
+    static const bool kElide = [] {
+        const char* v = std::getenv("AVER_D3D12_ELIDE_DRAW_BINDING");
+        return v && v[0] != '\0' && v[0] != '0';
+    }();
+
+    if (drawSet_ && pipe_->srvParam[1] >= 0) {
+        // Same table-1 binding set as the last draw this cache saw applied? Then the descriptors it
+        // points at are already the ones bound -- re-issuing the same SetGraphicsRootDescriptorTable
+        // would describe hardware state that is already correct.
+        const bool elided = kElide && dev_->dbValid_ && dev_->dbSet_ == drawSet_;
+        if (!elided) {
+            setBindingSet(drawSet_, 1);
+            if (kElide) dev_->dbSet_ = drawSet_;
+        }
+    }
     if (drawConstantBytes_ && pipe_->slotParam[kDrawConstantRegister] >= 0 &&
-        pipe_->slotDwords[kDrawConstantRegister] == 0)
-        setConstantBuffer(kDrawConstantRegister, drawConstants_, drawConstantBytes_);
+        pipe_->slotDwords[kDrawConstantRegister] == 0) {
+        // Byte-identical b2 block to the one already bound? Then the ring allocation, the memcpy into
+        // it and the root CBV set below would upload and point at bytes the GPU is already reading.
+        const bool elided = kElide && dev_->dbValid_ &&
+                            dev_->dbConstantBytes_ == drawConstantBytes_ &&
+                            std::memcmp(dev_->dbConstants_, drawConstants_, drawConstantBytes_) == 0;
+        if (!elided) {
+            setConstantBuffer(kDrawConstantRegister, drawConstants_, drawConstantBytes_);
+            if (kElide) {
+                dev_->dbConstantBytes_ = drawConstantBytes_;
+                std::memcpy(dev_->dbConstants_, drawConstants_, drawConstantBytes_);
+            }
+        }
+    }
+    // Set AFTER both halves above, same discipline fovValid_ follows near the top of this file: a
+    // bind this call makes must land in the cache before the NEXT applyDrawBinding trusts either half
+    // of it. Left false (never written) while kElide is false, so a disabled cache never reports
+    // itself valid to some later call that flips the flag mid-process.
+    if (kElide) dev_->dbValid_ = true;
 }
 
 // Copies `bytes` into this frame's upload ring and returns their GPU address.
