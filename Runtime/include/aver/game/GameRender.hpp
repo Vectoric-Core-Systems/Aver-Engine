@@ -20,9 +20,10 @@
 // anything of their own was ever compiled.
 //
 // Nothing ABOVE the `#if AVER_MODULE_SCENE` region below names a scene type -- SceneDrawStats is
-// three pairs of ints, and both hosts read it in every configuration -- so the guard costs that
-// region nothing, and with the module present the include still lands here, ahead of everything
-// else and in the same order it always did.
+// plain ints (three pairs plus, since Stage 2 of the CPU-profiler work, one more unpaired one for
+// the WalkLookup mesh cache below), and both hosts read it in every configuration -- so the guard
+// costs that region nothing, and with the module present the include still lands here, ahead of
+// everything else and in the same order it always did.
 #if AVER_MODULE_SCENE
 #  include "aver/scene/Entity.hpp"
 #endif
@@ -68,6 +69,20 @@ struct SceneDrawStats {
     int lastDrawn = -1;
     int lastCulled = -1;
     int lastOwnerHidden = -1;
+
+    // WalkLookup's mesh-cache hit rate for the most recent COLOUR-pass call (see
+    // DrawWorldOptions::useMeshLookupCache and GameRender.cpp's own comment on the cache itself).
+    // NOT ACCUMULATED ACROSS FRAMES OR PASSES -- each is overwritten every colour-pass call, the
+    // same "describes a FRAME, not a running total" convention drawn/culled/ownerHidden already
+    // follow just above, and for the identical reason: the editor runs this walk twice a frame, and
+    // a counter that kept adding the depth-prepass call's own numbers on top would report a rate
+    // that no single call ever produced. Both read 0 with the cache switched off (there is no cache
+    // to have hit or missed), which is a fact worth printing rather than a state worth hiding --
+    // see this stage's own brief on why a cache that cannot report its own hit rate cannot be
+    // judged, and why "off" must say so plainly rather than leave the field looking like a real,
+    // if unlucky, 0%.
+    int meshLookupCacheHits = 0;
+    int meshLookupCacheMisses = 0;
 };
 
 #if AVER_MODULE_SCENE
@@ -343,6 +358,46 @@ struct DrawWorldOptions {
     // writing one it did not want -- see SceneDrawStats' own comment for why the two sentences
     // cannot be unified.
     bool suppressLog = false;
+
+    // Collapse WalkLookup's four per-entity GameContent probes (meshFor, boundsFor,
+    // meshDefaultMaterial, partsFor -- CpuSpan's own comment names all four) to at most one
+    // resolution of each PER DISTINCT MESH ID this call visits, through a small fixed-size,
+    // direct-mapped cache local to this one call (GameRender.cpp's own comment on
+    // MeshLookupCacheSlot has the shape and the reasoning, including why a single "last mesh" slot
+    // was rejected on purpose rather than by omission).
+    //
+    // ON BY DEFAULT, AND THAT IS THE POINT OF STAGE 2. All four probes are a `find()` plus a
+    // return -- const, no lazy upload, no side effect of any kind (verified by reading
+    // GameContent.cpp: meshFor, boundsFor, partsFor, meshDefaultMaterial) -- so memoising them
+    // changes no draw, no branch and no order; it is pixel-neutral BY CONSTRUCTION, not merely
+    // probably safe, and an optimisation with that property should be what a caller gets without
+    // having to ask for it.
+    //
+    // THE ESCAPE HATCH IS FOR THE ONE THING THAT COULD MAKE IT UNSAFE, not for doubt about whether
+    // it helps. boundsFor and partsFor return pointers/values sourced from GameContent's own
+    // unordered_maps, and this cache can hold onto a mesh id's answer across many entities and,
+    // therefore, across many calls to `decide` -- a HOST callback that runs mid-loop and, in
+    // general, can run arbitrary editor code. std::unordered_map's own guarantee is narrower than
+    // it looks: inserting into it, and any rehash that causes, invalidates ITERATORS but never
+    // invalidates a reference or pointer to an element already in the table -- only ERASING that
+    // element does. Nothing reachable from either host's `decide` (or any other hook this struct
+    // exposes) erases from GameContent's mesh tables today -- SandboxRender.cpp's colourDecide and
+    // prepassDecide were read end to end to confirm it, and every other installed hook
+    // (colourVisit, colourDelivered, colourDirect, colourWarn/prepassWarn, colourSkipped) was
+    // searched for a call into GameContent's own mutators (registerMesh, loadProjectMeshes,
+    // releaseProjectMeshes, adopt) and a level (re)load trigger, and found to make none -- so the
+    // cache is safe against every caller that exists. A FUTURE host whose `decide`, `onVisit` or
+    // other hook starts tearing down or reloading meshes THIS SAME WALK IS STILL READING would be
+    // the exception, and this switch
+    // is how it opts back out without a recompile: OFF sends every WalkLookup call site straight to
+    // its original, direct-to-GameContent probe, with none of the caching machinery touched, which
+    // is what this file did before this field existed. A compile-time switch was rejected instead
+    // of this one for the same reason the toggle exists at all: a `-D` reconfigure of a shared
+    // build tree is measured in this repo to move rendering by 16% of pixels on ITS OWN
+    // (see aver-reconfigure-pollutes-build in the engine's own notes), which would make an A/B
+    // comparison of this cache untrustworthy no matter how carefully the two builds were compared.
+    // A runtime bool lets both paths be measured in the SAME binary.
+    bool useMeshLookupCache = true;
 
     // The per-entity sinks. See each type for what it exists to serve.
     DrawWorldVisitFn onVisit = nullptr;

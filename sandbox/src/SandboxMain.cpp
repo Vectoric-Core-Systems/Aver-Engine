@@ -7,6 +7,15 @@
 
 namespace aver {
 
+// Defined in SandboxRender.cpp, right beside the two drawWorld call sites it gates (the colour
+// walk and the depth-prepass walk) -- see that definition's own comment for why this is a free
+// function taking a plain bool rather than a SandboxApp::setXxx(...) member the way every other
+// CLI-driven toggle in this file reaches its app (setDepthPrepassOverride, setNoEditorChrome,
+// setOcclusionCullForceOff, ...): this stage's task brief scoped the whole --no-walk-cache wiring
+// to SandboxMain.cpp and SandboxRender.cpp alone, and SandboxApp's own fields all live in
+// SandboxApp.hpp, a header outside that scope. Forward-declared here so main() (below) can call it
+// without either file needing to see the other's full contents.
+void setNoWalkCacheArg(bool on);
 
 // True for a path ending in `ext` (which must be lower-case and include the dot),
 // case-insensitively, with at least one character of stem before it.
@@ -280,6 +289,19 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--occlusion-waitidle")) occlusionWaitIdleArg = true;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--no-occlusion-waitidle")) occlusionNoWaitIdleArg = true;
+    // --no-walk-cache: see DrawWorldOptions::useMeshLookupCache's own comment (GameRender.hpp) for
+    // the cache this disables -- WalkLookup's four per-mesh-id GameContent probes (meshFor,
+    // boundsFor, meshDefaultMaterial, partsFor), memoised per distinct mesh id for one drawWorld
+    // call. THE FLAG NAMES THE NEGATIVE, matching --no-occlusion-cull/--no-lod-select just above,
+    // because the cache DEFAULTS ON (GameRender.hpp's own field default is `true`) -- an A/B
+    // comparison needs a way to ask for the old, uncached behaviour back, not a way to opt into
+    // the default that already runs unless asked otherwise. Takes no value, so it gets the same
+    // own FULL-LENGTH loop as --no-occlusion-cull above, for the identical reason: matched only in
+    // the i+1<argc loop further up, a trailing "--no-walk-cache" with nothing after it on the
+    // command line would be silently ignored.
+    bool noWalkCacheArg = false;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--no-walk-cache")) noWalkCacheArg = true;
     // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: verification-only, see sunSetAtFrames_. Their
     // own loops rather than the long else-if chain further down, which is at the compiler's nesting limit.
     int sunSetAtArg = 0, giHistoryResetAtArg = 0;
@@ -1435,6 +1457,14 @@ Application* createApplication(int argc, char** argv) {
     }
     app->setDepthPrepassOverride(depthPrepass);
     app->setGBufferOverride(gbuffer);
+    // NOT app->setXxx(...) -- see setNoWalkCacheArg's own forward-declaration comment at the top
+    // of this file for why the WalkLookup mesh-cache toggle is a free function rather than a
+    // SandboxApp member, and GameRender.hpp's DrawWorldOptions::useMeshLookupCache for what it
+    // gates. Called unconditionally, exactly like the two lines above it: with no --no-walk-cache
+    // on the command line, noWalkCacheArg is false and drawWorld runs with the cache on, which is
+    // both hosts' behaviour today and DrawWorldOptions' own default -- this call changes nothing
+    // for a command line that never mentions the flag.
+    setNoWalkCacheArg(noWalkCacheArg);
     // --gbuffer-debug MODE: parsed here, after the arg loop, the same "stored as a string, parsed
     // alongside every other app->setXxx call" shape --aversr uses just above -- so an unrecognised
     // mode name gets a clear error rather than silently mapping to Off.

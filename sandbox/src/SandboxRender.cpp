@@ -20,6 +20,35 @@
 #include "aver/core/CpuTimingFormat.hpp"
 
 namespace aver {
+
+// --no-walk-cache's own storage, gating DrawWorldOptions::useMeshLookupCache (GameRender.hpp) at
+// both drawWorld call sites in this file -- the colour walk below and the depth-prepass walk
+// above it in onRender.
+//
+// A TRANSLATION-UNIT-LOCAL bool PLUS A SETTER, NOT A SandboxApp MEMBER, unlike every other
+// CLI-driven toggle this file reads (noEditorChrome_, occlusionCullForceOff_,
+// depthPrepassOverride_, ...): those are all declared on SandboxApp in SandboxApp.hpp, and this
+// wiring stage's task brief scoped the work to this file and SandboxMain.cpp alone, which does
+// not extend to that header. `static` gives it internal linkage -- nothing outside this
+// translation unit can read it directly, which is the point: SandboxMain.cpp reaches it only
+// through setNoWalkCacheArg() below, the same one-way shape app->setXxx(...) would have given a
+// real member.
+//
+// DEFAULTS FALSE, matching GameRender.hpp's DrawWorldOptions::useMeshLookupCache defaulting
+// TRUE: a process that never calls the setter below (every configuration except the one where
+// SandboxMain.cpp's argv loop found --no-walk-cache) must still send `true` down to drawWorld,
+// which is exactly what "leave this false, negate it at the call site" gives for free without
+// this file needing to know DrawWorldOptions' own default value to reproduce it.
+static bool g_noWalkCacheArg = false;
+
+// Forward-declared in SandboxMain.cpp (see the comment there, beside main()'s argv loop) and
+// called once, after that loop finishes parsing --no-walk-cache, at the same point in main() every
+// other app->setXxx(...) CLI-flag setter is already called from. `on` is the flag's own sense
+// (true means the CLI asked for the cache OFF), not useMeshLookupCache's -- the negation happens
+// at each drawWorld call site below, right next to the field it feeds, so a reader checking either
+// call site never has to hop back here to learn which way the bool was flipped.
+void setNoWalkCacheArg(bool on) { g_noWalkCacheArg = on; }
+
 // Submits the frame: the editor scene, the level world, gizmos, and the overlays.
 void SandboxApp::onRender(Engine& e)  {
     handleManip(e);
@@ -352,6 +381,14 @@ void SandboxApp::onRender(Engine& e)  {
                 // writing depth for something that never appears, which is the whole failure mode
                 // a depth prepass has.
                 popt.ownerHideRoot = firstPersonPawn_;
+                // --no-walk-cache, negated: g_noWalkCacheArg is the CLI flag's own sense (true
+                // means "asked for the cache OFF"), so `!` is what turns that into
+                // useMeshLookupCache's sense (true means "cache ON", its own default). MUST MATCH
+                // the colour call site's copt.useMeshLookupCache below -- this pass resolves the
+                // identical mesh ids the colour pass does, just earlier in the frame, and an A/B
+                // run that cached one walk but not the other would be measuring two different
+                // optimisations wearing one flag, not comparing the same one on and off.
+                popt.useMeshLookupCache = !g_noWalkCacheArg;
                 // NO voxiRenderer AND NO onDirectDraw: the depth pass returns at `!route.raster`
                 // before either sink can be reached, so attaching them would advertise a delivery
                 // that cannot happen. NO onSkipped either -- this walk has never said a word about
@@ -1636,6 +1673,12 @@ void SandboxApp::onRender(Engine& e)  {
         copt.onSurfaceWarn = colourWarn;
         copt.onSkipped = colourSkipped;
         copt.user = &walk;
+        // --no-walk-cache, negated -- see the depth-prepass call site's popt.useMeshLookupCache
+        // just above (:391 as of this writing) for the full comment and, in particular, why the
+        // two assignments must always agree: this walk and that one resolve the same mesh ids for
+        // the same entities, and letting one run cached while the other did not would make
+        // WalkLookup's hit-rate line below describe only half the frame's own probes.
+        copt.useMeshLookupCache = !g_noWalkCacheArg;
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
         copt.onVisit = colourVisit;
         // EMPTY MEANS "NO REORDERING", exactly as the deleted loop's `occlusionOrder_.empty() ? oi
@@ -1772,6 +1815,34 @@ void SandboxApp::onRender(Engine& e)  {
                 // extra guard is needed here for either case.
                 formatCpuTiming(cpuReport,
                                  [](const std::string& line) { AVER_INFO("[Sandbox] {}", line); });
+                // WalkLookup's mesh-cache hit rate, printed IMMEDIATELY BENEATH the tree above for
+                // the same reason that tree sits beneath the single-frame walk time: a hit rate
+                // reported apart from the WalkLookup bucket it explains is two facts nobody joins
+                // up (see DrawWorldOptions::useMeshLookupCache's own comment on Stage 2's whole
+                // point). colourStats, not an accumulator -- SceneDrawStats::meshLookupCacheHits/
+                // Misses are the COLOUR PASS'S OWN most recent call, overwritten every time rather
+                // than summed across frames, the identical convention drawn/culled/ownerHidden
+                // already follow and for the identical reason (see that struct's own comment).
+                //
+                // "off" IS ITS OWN SENTENCE, NOT "0 hits, 0 misses (0.0%)": g_noWalkCacheArg, not
+                // hits+misses==0, decides which, because an emptied scene (n==0, nothing to
+                // resolve) reads hits+misses==0 with the cache still switched ON, and printing a
+                // percentage there would look like a real, if unlucky, measurement rather than "there
+                // was nothing to cache" -- SceneDrawStats' own comment names this exact trap and
+                // says plainly stating "off" is worth more than a 0% that could be mistaken for one.
+                if (g_noWalkCacheArg) {
+                    AVER_INFO("[Sandbox] WalkLookup mesh cache: off (--no-walk-cache)");
+                } else {
+                    const int lookupTotal = colourStats.meshLookupCacheHits +
+                                             colourStats.meshLookupCacheMisses;
+                    const f64 hitPct = lookupTotal
+                        ? 100.0 * static_cast<f64>(colourStats.meshLookupCacheHits) /
+                              static_cast<f64>(lookupTotal)
+                        : 0.0;
+                    AVER_INFO("[Sandbox] WalkLookup mesh cache: {} hits, {} misses ({:.1f}% hit rate)",
+                              colourStats.meshLookupCacheHits, colourStats.meshLookupCacheMisses,
+                              hitPct);
+                }
 #if AVER_MODULE_VOXI
                 // M2(c): the CPU cost of Voxi's acceleration-structure per-draw loop on its last
                 // rebuild (VoxiRenderer::lastAccelBuildCpuMs, C-2), printed at the SAME widening

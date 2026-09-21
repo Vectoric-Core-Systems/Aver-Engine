@@ -69,6 +69,132 @@
 
 namespace aver::game {
 
+namespace {
+
+// MIXES A MESH ID'S BITS before they choose a slot below, rather than trusting the low bits alone
+// (`id & (kMeshLookupCacheSlots - 1)`) the way a plain mask would. CMeshRenderer::mesh is
+// fnv1a64(project-relative path) -- verified by reading every writer of sceneMeshes_'s keys in
+// GameContent.cpp (registerBuiltins' own `add` lambda, and loadProjectMeshes), there is no second
+// scheme anywhere that hands out a mesh id some other way -- so this is already a HASH, not a
+// small sequential index or a raw pointer value. That does not make masking its low bits safe: to
+// avoid this stage's own named failure ("id & (kSlots-1) can degenerate to one hot slot"), if that
+// hash happened to have anything resembling a distribution to it, that is normally judged against
+// the theory of the hash function chosen, not against a single project's example inputs. In
+// practice this project's own three built-in mesh names ("Meshes/sphere.ocmesh",
+// "Meshes/cube.ocmesh", "Meshes/drone.ocmesh") are short and differ in only a handful of trailing
+// bytes, which is an input shape that stresses a multiplicative hash's low-order bits more than a
+// long, varied one -- and a level's own tree/prop kit names, sharing a common directory prefix, are
+// exactly the same shape again. Whether or not that particular worry is founded for THIS specific
+// hash, mixing costs two multiplies and three shifts and removes the question entirely, so it is
+// paid unconditionally rather than argued away. This is MurmurHash3's 64-bit finalizer (fmix64),
+// chosen because it is a well-known, already-reviewed avalanche mix meant for exactly this job --
+// re-mixing a hash that is otherwise trusted, never hashing raw bytes itself, which stays
+// GameContent's own job (fnv1a64) and is not duplicated here.
+constexpr u64 mixMeshId(u64 x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+// FIXED, POWER OF TWO, so the slot for a mesh id is one mask away from its mixed hash rather than a
+// modulo. Verified a power of two by the static_assert just below rather than trusted by eye.
+//
+// 64, NOT 1 -- a single "last mesh" slot was REJECTED HERE, deliberately, not left unconsidered.
+// One slot is the cheaper shape to reach for, and it is 100% effective on the synthetic stress
+// scene this stage's own numbers came from (16,000 copies of one cube: nothing ever evicts a
+// one-entry cache when there is only ever one mesh id to hold) -- and close to useless on the
+// realistic target this stage exists to serve instead: a forest of a HANDFUL of tree species,
+// INTERLEAVED in scene::World's own storage order. Nothing sorts entities by mesh -- World::at
+// below walks its dense array in spawn/load order, and a level author places a pine next to an oak
+// because that is where it looks right, not because a renderer would prefer them grouped -- so two
+// different species drawn back to back would evict a one-entry cache on EVERY single iteration: a
+// 0% hit rate on precisely the content this programme exists to speed up, arrived at by optimising
+// for the benchmark instead of the target. 64 slots buys room for several distinct meshes to
+// coexist without evicting each other -- enough for "a handful" of species, prop-kit pieces or
+// building modules to all stay resident for the length of one walk -- while the whole array still
+// sits in a few cache lines and a full reset (drawWorld's own local, default-constructed fresh on
+// every call) costs nothing measurable once a frame.
+constexpr u32 kMeshLookupCacheSlots = 64;
+static_assert((kMeshLookupCacheSlots & (kMeshLookupCacheSlots - 1)) == 0,
+              "kMeshLookupCacheSlots must be a power of two for the '& (kMeshLookupCacheSlots - 1)' "
+              "mask below to be equivalent to '% kMeshLookupCacheSlots'");
+
+// ONE SLOT'S ANSWER, for the one mesh id it currently holds, to all four of WalkLookup's named
+// probes -- meshFor, boundsFor, meshDefaultMaterial and partsFor (CpuSpan's own comment names all
+// four; GameContent.cpp is where each is verified pure: a `find()` plus a return, const, no lazy
+// upload, no side effect).
+//
+// `meshId == 0` MEANS EMPTY, VERIFIED RATHER THAN ASSUMED, so no separate validity bool is needed
+// to tell "never touched by this walk" apart from "touched by a mesh id that happens to be 0": every
+// entity that reaches ANY of the four call sites below has already survived drawWorld's own
+// `if (!mr || mr->mesh == 0) continue;`, ahead of all four in the loop, so mr->mesh -- the only
+// value ever hashed into this cache -- is never 0 for a live probe. A default-constructed slot
+// therefore reads, correctly, as "empty".
+//
+// THREE OF THE FOUR FIELDS BELOW ARE RESOLVED LAZILY, NOT TOGETHER, because three of the four
+// ORIGINAL probes were themselves gated on something other than "a new mesh id showed up here":
+// boundsFor only ever ran `if (!skinned)`, meshDefaultMaterial only ever ran when
+// `mr->material == 0`, and either one could, for a GIVEN entity, never be reached at all before an
+// earlier `continue` (MeshNotLoaded, decide()'s own `skip`) took that entity out of the loop.
+// Resolving either the moment a mesh id first reaches ANY of the four sites -- rather than the
+// moment each site's OWN gate first lets an entity through -- would make this cache perform a
+// GameContent lookup that entity's own path would never have made, which is exactly the "must
+// still only run when" discipline this stage's own brief states outright for meshDefaultMaterial,
+// and asks by the same argument for boundsFor's `!skinned` guard. `handle` and `parts` are the two
+// exceptions: content.meshFor() and content.partsFor() both run for EVERY entity that reaches
+// WalkLookup at all, with no ternary and no `if` gating either one (their own call sites' comments
+// say so), so there is no gate a lazy `*Resolved` flag would need to respect for them either --
+// they get one exactly the same shape as the other two anyway, purely so all four call sites below
+// share one pattern rather than two.
+struct MeshLookupCacheSlot {
+    u64 meshId = 0;
+
+    bool handleResolved = false;
+    rhi::MeshHandle handle = 0;              // content.meshFor(meshId)
+
+    bool boundsResolved = false;
+    bool haveBounds = false;                 // boundsFor's own verdict: did it find an entry
+    // COPIES of what boundsFor found, NOT the pointer it returned (`&it->second`, into
+    // GameContent::meshBounds_). 24 bytes copies for free and can never dangle; see
+    // DrawWorldOptions::useMeshLookupCache's own comment for why `parts` below does not get the
+    // same treatment and has to reason about the map's own pointer-stability guarantee instead.
+    Vec3 boundsMin{};
+    Vec3 boundsMax{};
+
+    bool defaultMaterialResolved = false;
+    i32 defaultMaterial = 0;                 // content.meshDefaultMaterial(meshId)
+
+    bool partsResolved = false;
+    // content.partsFor(meshId)'s OWN pointer, kept as-is rather than copied -- copying the vector it
+    // points at would be a heap allocation on every miss, which is exactly what this cache exists to
+    // avoid paying, once per distinct mesh, every single frame. Safe on the same grounds
+    // DrawWorldOptions::useMeshLookupCache's comment gives in full: std::unordered_map only
+    // invalidates a reference or pointer to an element by ERASING it, never by inserting elsewhere
+    // or rehashing, and nothing reachable from either installed host's per-entity hooks erases from
+    // GameContent::meshParts_ during a walk today.
+    const std::vector<GameContent::MeshPart>* parts = nullptr;
+};
+
+// Finds this walk's cache slot for `meshId`, evicting whatever DIFFERENT mesh id it held before (if
+// any) and resetting every one of its four fields to unresolved -- never handing back a slot that
+// still half-remembers the PREVIOUS occupant's bounds or parts pointer under the NEW id. Leaves an
+// already-matching slot completely untouched, resolved fields and all, which is the entire point:
+// that is the cache HIT this stage exists to create.
+//
+// CALLED ONCE PER ENTITY, not once per probe -- see drawWorld's own `meshSlot` local, computed at
+// the first WalkLookup call site and threaded through the other three by pointer, rather than
+// re-derived (and re-risking an eviction) at each one.
+MeshLookupCacheSlot& findMeshLookupSlot(MeshLookupCacheSlot* cache, u64 meshId) {
+    MeshLookupCacheSlot& slot = cache[static_cast<u32>(mixMeshId(meshId) & (kMeshLookupCacheSlots - 1))];
+    if (slot.meshId != meshId) slot = MeshLookupCacheSlot{meshId};
+    return slot;
+}
+
+} // namespace
+
 void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content, SceneDrawStats& stats,
                pbr::MaterialSystem* materials, render::SkinnedScene* skinning,
                const DrawWorldOptions& options) {
@@ -93,6 +219,25 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // them.
     const bool depthPass = options.pass == DrawWorldPass::DepthPrepass;
     int drawn = 0, culled = 0, ownerHidden = 0;
+
+    // WalkLookup's mesh cache for THIS CALL ALONE. See MeshLookupCacheSlot's own comment for the
+    // shape and DrawWorldOptions::useMeshLookupCache's for why it can be trusted at all. A LOCAL,
+    // never a class member and never heap-allocated -- Aver.Runtime.Game.Core links against no
+    // arena for this and none is warranted: the array is a few dozen bytes times
+    // kMeshLookupCacheSlots on THIS call's own stack frame, gone the instant drawWorld returns, so
+    // the editor's two calls per frame (depth prepass, then colour, SandboxRender.cpp's onRender)
+    // each get their own and neither can see the other's. Default-constructed UNCONDITIONALLY, cache
+    // on or off, so every call site below can read `options.useMeshLookupCache` with a plain `if`
+    // rather than an `#if` -- the one cost the toggle does NOT remove is this array's own
+    // construction, kMeshLookupCacheSlots trivial (all-zero) field inits, cheap enough on a local
+    // stack array that it was judged not worth an `#if`, or a heap/lazy allocation, just to avoid
+    // paying it on the OFF path too.
+    MeshLookupCacheSlot meshLookupCache[kMeshLookupCacheSlots]{};
+    // Hits and misses across all four WalkLookup call sites this call makes, published onto `stats`
+    // below (colour pass only, matching drawn/culled/ownerHidden's own "describes a frame" rule) so
+    // a host can print or graph the rate rather than have to infer it. See SceneDrawStats' own
+    // comment on why these two are never accumulated ACROSS calls.
+    int meshLookupHits = 0, meshLookupMisses = 0;
 
     // The six frustum planes, from the camera's viewProj. ENGINE convention: row-vector, so a clip
     // coordinate is a dot with a COLUMN, and each plane is a sum or difference of two columns.
@@ -337,12 +482,38 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             continue;
         }
 
+        // THIS ENTITY'S CACHE SLOT, resolved ONCE (inside the very first WalkLookup probe below, so
+        // the array index/mix/compare that finds or evicts it is itself charged to that bucket) and
+        // threaded by pointer through all three of the sites that follow, rather than re-derived at
+        // each. Nothing between here and the last of them (content.partsFor, which runs AFTER
+        // options.decide has already been given this entity) can move `meshSlot` out from under it:
+        // the cache array is local to THIS call's stack frame, invisible to every hook
+        // DrawWorldOptions exposes, so the only thing that could ever evict this exact slot is
+        // ANOTHER entity's OWN call to findMeshLookupSlot, which cannot happen until the NEXT
+        // iteration of this loop begins. Null with the cache switched off, which is what sends every
+        // site below down its original, direct-to-GameContent path unconditionally.
+        MeshLookupCacheSlot* meshSlot = nullptr;
+
         // content.meshFor IS THE FIRST OF WalkLookup's FOUR NAMED PROBES (see CpuSpan's own
-        // comment). Wrapped around the call alone, in an immediately-invoked lambda, so `handle`
-        // stays exactly what it was -- a plain value, not a reference into anything the nest's
-        // lifetime affects -- and so the probe is timed without moving where in this loop it runs.
+        // comment). Wrapped around the cache check (or, cache off, the call alone) in an
+        // immediately-invoked lambda, so `handle` stays exactly what it was -- a plain value, not a
+        // reference into anything the nest's lifetime affects -- and so the probe is timed without
+        // moving where in this loop it runs. UNCONDITIONAL FOR EVERY ENTITY in the original code, so
+        // there is no per-entity gate for this cache to respect: resolved the first time ANY entity's
+        // mesh id lands on this slot, reused by every entity after it that shares that id.
         const rhi::MeshHandle handle = [&] {
             CpuNest lookupNest(CpuSpan::WalkLookup);
+            if (options.useMeshLookupCache) {
+                meshSlot = &findMeshLookupSlot(meshLookupCache, mr->mesh);
+                if (meshSlot->handleResolved) {
+                    ++meshLookupHits;
+                } else {
+                    meshSlot->handle = content.meshFor(mr->mesh);
+                    meshSlot->handleResolved = true;
+                    ++meshLookupMisses;
+                }
+                return meshSlot->handle;
+            }
             return content.meshFor(mr->mesh);
         }();
         if (!handle) {
@@ -370,19 +541,58 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // the rest box is exactly the popping the posed-bounds work exists to stop. The guard was
         // written before skinning was wired; it is live now.
         //
-        // content.boundsFor IS THE SECOND OF WalkLookup's FOUR NAMED PROBES, nested around the CALL
-        // ONLY (an immediately-invoked lambda) because it sits inside the SAME condition that gates
-        // whether it runs at all: pulling the call out ahead of this `if` to wrap it more simply
-        // would call it for skinned entities too, which never happened before and must not start
-        // happening now just because a timer was added.
-        if (!skinned)
-        if (const auto* b = [&] {
+        // content.boundsFor IS THE SECOND OF WalkLookup's FOUR NAMED PROBES, nested around the CACHE
+        // CHECK (or, cache off, the CALL) ONLY, exactly as before, because it sits inside the SAME
+        // condition that gates whether it runs at all: pulling it out ahead of this `if` to wrap it
+        // more simply would ask for -- or cache -- an answer for a skinned entity, which never
+        // happened before and must not start now just because a timer, or a cache, was added. THE
+        // GATE IS PRESERVED PER MESH ID TOO, not only per entity: `boundsResolved` stays false on a
+        // fresh slot until the FIRST `!skinned` entity sharing that mesh id reaches this line, so a
+        // mesh drawn only by skinned entities is never probed for bounds at all, cache on or off,
+        // exactly as it never was before this cache existed.
+        if (!skinned) {
+            bool haveBounds = false;
+            Vec3 boundsMin{}, boundsMax{};
+            {
                 CpuNest lookupNest(CpuSpan::WalkLookup);
-                return content.boundsFor(mr->mesh);
-            }()) {
-            auto* mw = const_cast<scene::CMeshRenderer*>(mr);
-            mw->aabbMin[0] = b->first.x;  mw->aabbMin[1] = b->first.y;  mw->aabbMin[2] = b->first.z;
-            mw->aabbMax[0] = b->second.x; mw->aabbMax[1] = b->second.y; mw->aabbMax[2] = b->second.z;
+                if (options.useMeshLookupCache) {
+                    // meshSlot IS NEVER NULL HERE: it was set by the meshFor call above, in this
+                    // same iteration, for this same mr->mesh, and nothing between there and here can
+                    // have evicted it (see meshSlot's own declaration comment).
+                    if (!meshSlot->boundsResolved) {
+                        const auto* found = content.boundsFor(mr->mesh);
+                        meshSlot->haveBounds = found != nullptr;
+                        // A COPY OF WHAT boundsFor FOUND, not the pointer it returned -- see
+                        // MeshLookupCacheSlot's own comment on boundsMin/boundsMax for why this
+                        // field gets that treatment and `parts` below does not.
+                        if (found) { meshSlot->boundsMin = found->first; meshSlot->boundsMax = found->second; }
+                        meshSlot->boundsResolved = true;
+                        ++meshLookupMisses;
+                    } else {
+                        ++meshLookupHits;
+                    }
+                    haveBounds = meshSlot->haveBounds;
+                    boundsMin = meshSlot->boundsMin;
+                    boundsMax = meshSlot->boundsMax;
+                } else if (const auto* b = content.boundsFor(mr->mesh)) {
+                    haveBounds = true;
+                    boundsMin = b->first;
+                    boundsMax = b->second;
+                } else {
+                    haveBounds = false;
+                }
+            }
+            // THE WRITE-BACK IS PER ENTITY, ALWAYS, cache or no cache, hit or miss -- this is the
+            // one thing memoising the LOOKUP must never also memoise or skip: every `!skinned`
+            // entity that names this mesh still gets its own CMeshRenderer::aabbMin/aabbMax written
+            // here, exactly as often as it did before this cache existed, from a value that is a
+            // faithful copy of what boundsFor answered, not a reference to anything that could have
+            // changed underneath it.
+            if (haveBounds) {
+                auto* mw = const_cast<scene::CMeshRenderer*>(mr);
+                mw->aabbMin[0] = boundsMin.x; mw->aabbMin[1] = boundsMin.y; mw->aabbMin[2] = boundsMin.z;
+                mw->aabbMax[0] = boundsMax.x; mw->aabbMax[1] = boundsMax.y; mw->aabbMax[2] = boundsMax.z;
+            }
         }
 
         // ---- OWNER HIDE, DECIDED BEFORE THE CULL ----
@@ -470,13 +680,29 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
         // content.meshDefaultMaterial IS ONE OF WalkLookup's FOUR NAMED PROBES (see CpuSpan's own
         // comment). A CpuNest, not a `.to()`, so it does not disturb WalkDecide -- the phase this
-        // ternary belongs to on both sides of the probe -- and wrapped around the CALL alone, in an
-        // immediately-invoked lambda, so the ternary's short-circuit is preserved exactly: this
-        // probe still runs only when `mr->material` is zero, precisely as it did before this line
-        // existed.
+        // ternary belongs to on both sides of the probe -- and wrapped around the CACHE CHECK (or,
+        // cache off, the CALL) alone, in an immediately-invoked lambda, so the ternary's
+        // short-circuit is preserved exactly: this probe, and now this cache's own lookup for it,
+        // still runs only when `mr->material` is zero, precisely as it did before either existed.
+        // THE MESH-ID GATE MIRRORS boundsFor's, above: `defaultMaterialResolved` stays false on a
+        // slot until the FIRST zero-material entity sharing that mesh id asks, so a mesh every
+        // entity names its own material for is never probed here at all, cache on or off.
         const i32 mat = mr->material ? mr->material
                                       : [&] {
                                             CpuNest lookupNest(CpuSpan::WalkLookup);
+                                            if (options.useMeshLookupCache) {
+                                                // meshSlot IS NEVER NULL HERE -- see its own
+                                                // declaration comment above.
+                                                if (!meshSlot->defaultMaterialResolved) {
+                                                    meshSlot->defaultMaterial =
+                                                        content.meshDefaultMaterial(mr->mesh);
+                                                    meshSlot->defaultMaterialResolved = true;
+                                                    ++meshLookupMisses;
+                                                } else {
+                                                    ++meshLookupHits;
+                                                }
+                                                return meshSlot->defaultMaterial;
+                                            }
                                             return content.meshDefaultMaterial(mr->mesh);
                                         }();
 #else
@@ -542,10 +768,31 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // split still applies, and a host that substituted a soft-body or LOD copy has changed that
         // answer (see planEntityDraws' own comment).
         // content.partsFor IS THE FOURTH AND LAST OF WalkLookup's NAMED PROBES. This one runs for
-        // every entity that reaches here (no ternary, no `if` gating it), so wrapping just the call
-        // changes nothing about WHEN it runs, only which bucket its ticks land in.
+        // every entity that reaches here (no ternary, no `if` gating it), so wrapping just the
+        // cache check (or, cache off, the call) changes nothing about WHEN it runs, only which
+        // bucket its ticks land in -- and, with the cache on, resolved once per mesh id rather than
+        // once per entity, same as meshFor above. CACHES THE POINTER partsFor RETURNS, NOT A COPY OF
+        // THE VECTOR IT POINTS AT: see MeshLookupCacheSlot's own comment on the `parts` field, and
+        // DrawWorldOptions::useMeshLookupCache's, for why that pointer is safe to hold across many
+        // entities and why copying the vector instead was rejected (a heap allocation on every
+        // distinct mesh, every frame -- exactly what this cache exists to avoid paying).
         const std::vector<GameContent::MeshPart>* parts = [&] {
             CpuNest lookupNest(CpuSpan::WalkLookup);
+            if (options.useMeshLookupCache) {
+                // meshSlot IS NEVER NULL HERE -- see its own declaration comment above. Still true
+                // even though options.decide has already run for this entity by this point (unlike
+                // the other three WalkLookup call sites, all of which run before it): decide() has
+                // no reach into this walk's own local cache array, which is not exposed through
+                // EntityDecision or DrawWorldOptions at all.
+                if (!meshSlot->partsResolved) {
+                    meshSlot->parts = content.partsFor(mr->mesh);
+                    meshSlot->partsResolved = true;
+                    ++meshLookupMisses;
+                } else {
+                    ++meshLookupHits;
+                }
+                return meshSlot->parts;
+            }
             return content.partsFor(mr->mesh);
         }();
         PlannedDraw pdraws[kMaxPlannedDraws];
@@ -740,11 +987,18 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
 
     // NOT IN THE DEPTH PASS. Those three counters and the sentence below describe a FRAME, and a
     // host running this walk twice over the same entities must not see its entity count doubled or
-    // this line fire twice -- see DrawWorldPass::DepthPrepass.
+    // this line fire twice -- see DrawWorldPass::DepthPrepass. THE MESH-CACHE COUNTERS FOLLOW THE
+    // IDENTICAL RULE, for the identical reason: a depth-prepass call resolves the same mesh ids all
+    // over again into its OWN local cache and racks up its own hits and misses doing it, and those
+    // numbers are deliberately DROPPED here rather than added to the colour pass's own -- adding
+    // them would report a rate no single call ever produced, exactly the double-count this whole
+    // guard exists to prevent for drawn/culled/ownerHidden.
     if (!depthPass) {
         stats.drawn = drawn;
         stats.culled = culled;
         stats.ownerHidden = ownerHidden;
+        stats.meshLookupCacheHits = meshLookupHits;
+        stats.meshLookupCacheMisses = meshLookupMisses;
         if (drawn != stats.lastDrawn || culled != stats.lastCulled ||
             ownerHidden != stats.lastOwnerHidden) {
             // SUPPRESSED, NOT REWORDED, for a host with its own sentence: the editor's names
