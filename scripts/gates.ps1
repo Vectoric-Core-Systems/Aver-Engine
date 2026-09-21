@@ -15,7 +15,7 @@
 #
 #     0  ok           every gate matched
 #     1  failed       at least one gate did not -- the COUNT is on the last line, not in the code
-#     2  usage        an unknown -Config name
+#     2  usage        an unknown -Config or -Backend name
 #     3  environment  no Sandbox.exe to run: the tree was never built
 #
 # This used to `exit $failures`, and that was wrong in two ways that only show up from a script. Two
@@ -34,6 +34,36 @@
 # legitimately differ by an LSB between the two. `-Release` therefore switches BOTH the executable
 # and the baseline file together, because comparing one build against the other's numbers is the
 # mistake this pairing exists to make impossible.
+#
+#   ./scripts/gates.ps1 -Backend vulkan        # same gates, run against the Vulkan backend
+#
+# BACKEND IS A RUNTIME FLAG, NOT A BUILD, so unlike -Release it does NOT switch $Exe. D3D12 and
+# Vulkan are two IDevice implementations compiled into the SAME Sandbox.exe (AVER_RHI_VULKAN is ON
+# by default, CMakeLists.txt) and chosen at launch by `--backend <name>`. That flag was found, not
+# invented: SandboxMain.cpp already parses it into SandboxApp::setBackend, which flows through
+# ApplicationConfig::backend into DeviceDesc::preferred[0] in modules/runtime/src/Engine.cpp, and
+# modules/rhi.vulkan/CMakeLists.txt's own history records `Sandbox.exe --backend vulkan` reaching a
+# live device. Inventing a plausible-looking flag instead of finding the real one is a documented
+# repeated failure in this repo -- a --project flag that never existed measured an empty editor
+# three times -- so this script only ever forwards a name the engine already understands (see
+# $KnownBackends below, copied from rhi::parseBackendName's own vocabulary, not guessed at).
+#
+# THE BASELINE FILE SWITCHES WITH IT, for the same reason -Release gets its own file and not as a
+# reflex copy of that precedent. Two backends are not expected to agree pixel-for-pixel even when
+# both are correct -- Debug and Release already prove that codegen alone can move an LSB -- and this
+# pair is not even at that bar yet: modules/rhi.vulkan/CMakeLists.txt says outright that Vulkan's
+# cascade shadow map is not written at all and RT shadows currently mask the gap. A Vulkan row
+# compared against the D3D12 baseline would therefore start RED on day one for a known cause, which
+# trains people to stop reading the row rather than to trust it. So `-Backend vulkan` reads and
+# writes gates.baseline.vulkan.txt (gates.baseline.release.vulkan.txt under -Release too) -- its own
+# oracle, starting EMPTY, every gate NO-BASELINE until someone runs `-Record` against it on purpose,
+# exactly the bootstrap gates.baseline.txt itself once needed. `-Backend d3d12`, the default, keeps
+# today's filenames unchanged.
+#
+# THE DEFAULT MUST STILL BUILD THE EXACT SAME ENGINE INVOCATION AS BEFORE THIS PARAMETER EXISTED.
+# Every stored baseline was recorded from a run that never passed --backend at all, so a no-argument
+# run must not start passing one either -- see `$backendArgs` further down, which is the only place
+# this parameter is allowed to touch the command line, and which is empty exactly when it must be.
 [CmdletBinding()]
 param(
     [string[]] $Config = @(),
@@ -60,8 +90,23 @@ param(
     # every reading count as degenerate, which is how the detection was checked without waiting for
     # a 1-in-76 race to happen again.
     [int]      $MinViewport = 256,
+    # 'd3d12' is the value that must be INVISIBLE on the command line: see $backendArgs, the one place
+    # this touches what gets run, which is empty precisely when this equals 'd3d12' (default or typed
+    # explicitly -- both must produce today's exact invocation). Anything else is forwarded verbatim
+    # as `--backend <value>`, the flag the engine already parses (see the header comment). Validated a
+    # few lines into the run, against the engine's own four spellings, so a typo here is a USAGE error
+    # caught before a single gate launches -- not 153 silent NO-BASELINEs, and not, under -Record, 153
+    # numbers quietly recorded from whatever order DeviceDesc::preferred defaults to.
+    [string]   $Backend = 'd3d12',
     [string]   $Exe = $(if ($Release) { "$PSScriptRoot\..\build-release\bin\Sandbox.exe" } else { "$PSScriptRoot\..\build\bin\Sandbox.exe" }),
-    [string]   $BaselineFile = $(if ($Release) { "$PSScriptRoot\gates.baseline.release.txt" } else { "$PSScriptRoot\gates.baseline.txt" })
+    # Suffixed with the backend, but ONLY when it differs from the default -- so 'd3d12' (again,
+    # default or explicit) names the exact file this script has always used, and every other value
+    # gets its own oracle rather than being silently compared against D3D12's numbers. See the header
+    # comment for why that is the considered answer here and not a shortcut.
+    [string]   $BaselineFile = $(
+        $backendSuffix = if ($Backend.ToLowerInvariant() -eq 'd3d12') { '' } else { ".$($Backend.ToLowerInvariant())" }
+        if ($Release) { "$PSScriptRoot\gates.baseline.release$backendSuffix.txt" } else { "$PSScriptRoot\gates.baseline$backendSuffix.txt" }
+    )
 )
 
 # Launches are spaced by this much. Back-to-back, a process occasionally comes up while the previous
@@ -336,7 +381,7 @@ function Read-Baseline([string] $path) {
 # Runs one gate and returns what the process actually reported. Everything here is read out of the
 # log rather than assumed, INCLUDING the in-viewport tag: a probe that sampled editor chrome still
 # prints a plausible number, so a runner that only grepped the raw codes would happily record it.
-function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frames) {
+function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frames, [string[]] $backendArgs) {
     # --debug-layer is passed by the RUNNER, not defaulted on in the engine. The layer validates
     # every API call and is a per-call tax no ordinary run should pay, but the per-gate C/E/W counts
     # below come out of it, and a gate that reported no corruption because nothing was watching
@@ -347,7 +392,11 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     # internal resolution before that composite would change what pixel raw() is even reading,
     # regardless of which rung the running scene resolves to. Pin native resolution explicitly rather
     # than rely on whatever Auto would otherwise pick.
-    $all = @('--frames', "$frames", '--debug-layer', '--aversr', 'off') + $gateArgs + $extra
+    # $backendArgs LAST, and appended even though it is empty for the default: appending an empty
+    # array changes nothing, so a default run's argument list is untouched, in order and byte for
+    # byte, from what this script built before -Backend existed -- the one requirement this feature
+    # is not allowed to break. See the header comment and $Backend's own comment for why.
+    $all = @('--frames', "$frames", '--debug-layer', '--aversr', 'off') + $gateArgs + $extra + $backendArgs
 
     # START-PROCESS, NOT `& $exe`, AND THAT IS NOT A STYLE CHOICE. Sandbox.exe is linked
     # /SUBSYSTEM:WINDOWS as of 0.5.0 so the editor never opens a console window, and Windows
@@ -413,6 +462,19 @@ foreach ($c in $selected) {
     }
 }
 
+# Same usage bucket as an unknown -Config name, and checked just as early -- before $BaselineFile
+# (whose name $Backend already shaped, above) is ever opened, and long before any gate launches.
+# These four spellings are copied from rhi::parseBackendName in modules/rhi/src/RHI.cpp -- the same
+# canonical names its own error message lists -- not invented for this script, so this can never
+# accept a name the engine would then silently reject and fall back to its default D3D12-first order
+# on. Without this check that fallback is exactly what would happen: a typo'd -Backend would run 153
+# gates against plain D3D12 while everyone believed a different backend had been exercised.
+$KnownBackends = @('d3d12', 'd3d11', 'vulkan', 'null')
+if ($KnownBackends -notcontains $Backend.ToLowerInvariant()) {
+    Write-Error "unknown -Backend '$Backend'; known: $($KnownBackends -join ', ') (rhi::parseBackendName, modules/rhi/src/RHI.cpp)"
+    exit 2   # usage: same reasoning as the -Config check just above
+}
+
 $baseline = Read-Baseline $BaselineFile
 $recorded = [System.Collections.Generic.List[string]]::new()
 $failures = 0
@@ -421,13 +483,29 @@ $flaky = 0
 $tdrBefore = Get-TdrCount
 Write-Host "0x141 LiveKernelEvent count before: $tdrBefore"
 
+# THE ONLY LINE THAT CAN ADD ANYTHING TO THE COMMAND LINE FOR A BACKEND, and it adds nothing for the
+# default: see $Backend's own comment for why that has to be true. Computed once, not per gate, since
+# it is the same for every gate and every configuration in this run.
+$backendArgs = if ($Backend.ToLowerInvariant() -eq 'd3d12') { @() } else { @('--backend', $Backend) }
+if ($backendArgs.Count -gt 0) { Write-Host "backend: $Backend  (baseline $BaselineFile)" }
+
+# WARP HAS NO VULKAN ANALOGUE. VulkanDevice.cpp says so itself -- there is no OS-shipped software
+# rasteriser the way D3D12 ships WARP -- so under a non-d3d12 backend `-Config warp` does not run in
+# software at all: the engine warns and falls through to whatever hardware Vulkan adapter it finds,
+# and a 'warp' row in the output would then be silently measuring hardware under a name that promises
+# a software implementation. Said out loud here because a passing 'warp' row is exactly the kind of
+# line nobody double-checks.
+if ($backendArgs.Count -gt 0 -and ($selected | Where-Object { $Configs[$_] -contains '--warp' })) {
+    Write-Host "NOTE: -Config warp has no meaning under -Backend $Backend -- Vulkan has no WARP; see VulkanDevice.cpp" -ForegroundColor Yellow
+}
+
 foreach ($c in $selected) {
     $extra = $Configs[$c]
     $spacing = if ($extra -contains '--warp') { $WarpSpacingMs } else { $SpacingMs }
     Write-Host ""
     Write-Host "=== $c  [$($extra -join ' ')]"
     foreach ($g in $Gates) {
-        $r = Invoke-Gate $Exe $g.args $extra $Frames
+        $r = Invoke-Gate $Exe $g.args $extra $Frames $backendArgs
         $key = "$c/$($g.name)"
         $want = $baseline[$key]
 
@@ -479,7 +557,7 @@ foreach ($c in $selected) {
             # 153-line report is how the interesting line gets skimmed past.
             if ($verdict -like 'BAD-PROBE*') { $why = "[$verdict] " } else { $why = '' }
             Start-Sleep -Milliseconds $spacing
-            $r2 = Invoke-Gate $Exe $g.args $extra $Frames
+            $r2 = Invoke-Gate $Exe $g.args $extra $Frames $backendArgs
             $r2Clean = $r2.exit -eq 0 -and $r2.place -eq 'in-viewport' -and
                        $r2.rectW -ge $MinViewport -and $r2.rectH -ge $MinViewport -and
                        $r2.debug -match '^C0 E0'
