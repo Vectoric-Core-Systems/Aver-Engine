@@ -1264,7 +1264,9 @@ private:
     std::vector<u8>  fovCb_;
     // Cleared by anything that could bind something else since the last draw: setPipeline always,
     // setBindingSet on TABLE 0 only (table 1 is per-material and legitimately changes every draw),
-    // and the start of each frame / endFrame's post chain.
+    // bindGraphicsRoot on a genuine root signature change (see that function's comment: this was
+    // missing for a long time -- the same hole dbValid_ shipped with until d8326985 fixed it there
+    // alone -- until it was closed here too), and the start of each frame / endFrame's post chain.
     bool             fovValid_ = false;
 
     // TABLE 1's OWN redundant-state elision -- the per-draw material binding set plus its b2
@@ -2830,18 +2832,52 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
     if (boundRootSig_ == rs) return;
     boundRootSig_ = rs;
     cmdList_->SetGraphicsRootSignature(rs);
-    // A ROOT SIGNATURE CHANGE DISCARDS EVERY BOUND ROOT ARGUMENT, table 1 and the b2 draw CBV
-    // included, so applyDrawBinding's cache is stale the instant this line runs. Cleared HERE rather
-    // than at this function's call sites because there are several and a new one would not think to
-    // do it -- and the failure mode is not a slow frame but a draw reading whatever material the
-    // previous root signature left behind, which is the black-foliage bug SandboxRender.cpp:1112
-    // records. Only reached on a genuine change, because of the early-out above, so an unchanged
-    // root signature still costs nothing.
+    // A ROOT SIGNATURE CHANGE DISCARDS EVERY BOUND ROOT ARGUMENT: table 1 and the b2 draw CBV that
+    // applyDrawBinding's dbValid_ assumes survived, AND table 0 and the feature frame CBV that
+    // drawMesh's fovValid_ assumes survived, both stale the instant this line runs. Cleared HERE
+    // rather than at this function's call sites because there are several (beginFrame, drawMesh's raw
+    // path, drawLines, the sky dome, the blended replay's setup bind, transparentPass's setup bind)
+    // and a new one would not think to do it -- and the failure mode is not a slow frame but a draw
+    // reading whatever the previous root signature left behind, which is the black-foliage bug
+    // SandboxRender.cpp:1188 records for table 1's own history (d8326985's own comment here cited
+    // :1112, which was already wrong when it was written -- the walk had moved past that line by
+    // then; corrected while this paragraph was being rewritten rather than left to mislead a second
+    // reader). Only reached on a genuine change, because of the early-out above, so an unchanged root
+    // signature still costs nothing.
     //
-    // fovValid_ IS DELIBERATELY NOT CLEARED HERE, and that asymmetry is worth explaining rather than
-    // leaving to be discovered: it has exactly the same exposure, predates this cache, and ships
-    // today. Fixing it belongs in its own change with its own before/after, not smuggled into one
-    // that is supposed to be provably inert -- see dbValid_'s member comment.
+    // fovValid_ USED TO BE DELIBERATELY LEFT OUT HERE (see d8326985, which gave dbValid_ this clear
+    // alone, reasoning that fovValid_ "has exactly the same exposure, predates this cache, and ships
+    // today" but that fixing it belonged in its own change rather than being smuggled into one meant
+    // to be provably inert). This IS that change. The mechanism: drawMesh's feature-pipeline branch
+    // can leave fovValid_ true while forcing boundRootSig_/boundPso_ to nullptr right after its draw
+    // (so THIS backend's own raw path never mistakes the feature's root signature for its own) --
+    // if any later bindGraphicsRoot call is then reached before fovValid_ is next cleared some other
+    // way, it sees boundRootSig_ == nullptr, takes the branch above for real, and silently discards
+    // the table-0 binding and frame CBV that a subsequent "same pipeline as fovPso_/fovSet_/fovCb_"
+    // comparison in drawMesh (or drawMeshDepthPrepass, or the blended replay) would then trust without
+    // re-sending them -- a draw reading whatever this function's root signature and PSO left behind
+    // instead of the feature's, a wrong image rather than a slow one, the exact shape of the foliage
+    // bug above, just for table 0 instead of table 1.
+    //
+    // NOT KNOWN TO FIRE TODAY: every bindGraphicsRoot call this file makes outside drawMesh's own raw
+    // path (beginFrame's opening bind, the sky dome, the blended replay's setup bind, transparentPass's
+    // setup bind, all in endFrame) runs after endFrame's own top-of-function fovValid_ = false, with
+    // nothing in between able to set it true again before each of those sites is reached in turn --
+    // traced by hand, not assumed, which is why THOSE three sites in runPostChain that gained a
+    // matching dbValid_ clear in d8326985 (its own opening bind, the eye-adaptation compute round
+    // trip, and the post-upscaler restore) are deliberately NOT given one here: dbValid_'s clears
+    // there are the same kind of already-redundant belt-and-suspenders dbValid_ got everywhere a root
+    // signature changes, not evidence fovValid_ needs the same at those particular three -- adding it
+    // there would be inert churn, not a fix. And within drawMesh's own raw path, VoxiRenderer (the one
+    // feature shipped today that overridesScenePipeline()) only ever answers scenePipeline() with 0
+    // for wireframe_, a flag that does not vary between entities within one frame, so today's single
+    // feature cannot actually produce the mid-walk mix of feature-path and raw-path draws the
+    // mechanism above needs. The gap was real and reachable in principle regardless -- RHIResources.hpp
+    // documents a feature answering scenePipeline() per draw as ordinary, drawMesh's `if (!fp) break`
+    // exists specifically to fall back correctly when it does, and nothing stops a second feature or a
+    // future VoxiRenderer change from making that per-draw answer vary -- which is why this is fixed
+    // now rather than left for whichever future feature trips it first.
+    fovValid_ = false;
     dbValid_ = false;
     cmdList_->SetGraphicsRootConstantBufferView(kSceneFrameParam, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
 }
@@ -4750,8 +4786,16 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     boundHeap_ = postSrvHeap_.Get();
     cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
     // The post chain drives the command list directly, below the context that owns table 1's cache,
-    // so nothing here would otherwise tell that cache its root arguments are gone. fovValid_ is
-    // cleared for this same reason before endFrame calls this function; dbValid_ needs it too.
+    // so nothing HERE would tell that cache its root arguments are gone.
+    //
+    // REDUNDANT TODAY, AND KEPT ANYWAY -- said plainly because the first version of this comment
+    // claimed the clear was needed, which was wrong. endFrame force-clears both caches at its own
+    // top, before it calls this function, and nothing between there and here can set dbValid_ true
+    // again; that was traced by hand rather than assumed. So this is belt-and-braces at a site that
+    // genuinely does discard root arguments, not a fix for a live gap. It stays because the cost is
+    // one store per frame and the alternative is a correctness argument that depends on the call
+    // order of a function three levels up. fovValid_ is deliberately NOT given a matching clear here
+    // for the same reason -- see bindGraphicsRoot, which is where the one REAL gap was.
     dbValid_ = false;
     boundRootSig_ = nullptr;
     boundPso_ = nullptr;
