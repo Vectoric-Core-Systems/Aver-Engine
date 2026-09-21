@@ -43,6 +43,14 @@
 
 #include "aver/game/GameContent.hpp"
 #include "aver/game/SceneSubmission.hpp"
+// CpuLap/CpuNest split drawWorld's one "6.8ms in the rest" number into the CpuSpan buckets this
+// walk actually spends its time in (WalkEntity, WalkLookup, WalkFrustum, WalkDecide, the three
+// WalkEmit* delivery routes, WalkResolveLook, WalkOther) -- see aver/core/CpuTiming.hpp's own
+// comment for why this exists and why it is not the GPU side's ScopedGpuStat reused for the CPU.
+// Unguarded by any AVER_MODULE_* macro, deliberately: the facility depends on nothing this file's
+// own AVER_MODULE_SCENE guard does not already require, and it trims itself out at compile time
+// via its own AVER_CPU_TIMING switch rather than needing a second one here.
+#include "aver/core/CpuTiming.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/rhi/RHI.hpp"
 #if AVER_MODULE_PBR
@@ -65,6 +73,20 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                pbr::MaterialSystem* materials, render::SkinnedScene* skinning,
                const DrawWorldOptions& options) {
     scene::World& w = scene::World::instance();
+    // ONE CpuLap FOR THE WHOLE WALK, opened here and never re-constructed, threaded through every
+    // phase below via repeated `.to()` calls -- see CpuLap's own comment on why this is the shape
+    // the facility is built for (one Lap per measured scope, not one per phase or per entity). It
+    // opens on WalkEntity rather than SceneWalk itself: SceneWalk is never measured directly, it is
+    // the COMPUTED sum of its children (kCpuSpanParent's own comment on why that sum must be exact),
+    // and CpuLap's constructor asserts against being handed it. Opening on WalkEntity here, ahead of
+    // the frustum-plane derivation below and before the loop's first entity is even reached, folds
+    // that one-time setup into WalkEntity's bucket -- accurate, since it is exactly the kind of
+    // "loop overhead" WalkEntity's own comment already names, paid once per drawWorld() call rather
+    // than once per entity. `lap` stays alive until this function returns, which is what lets it
+    // also cover the logging tail below the loop: nothing between the loop's last transition and
+    // that destructor calls `.to()`, so the tail's cost lands in whichever phase was open when the
+    // last entity's iteration finished.
+    CpuLap lap(CpuSpan::WalkEntity);
     // The depth-prepass walk is the same walk emitting depth-only draws -- see DrawWorldPass. Read
     // into a local because it is tested per entity and once per planned draw, and because spelling
     // the enum comparison out at each of those sites reads as if the answer could differ between
@@ -119,6 +141,16 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // authoredLive and otherwise falls THROUGH to the named look or the flat fallback, so that
     // stale handle now draws something honest and says so once.
     auto resolveDrawLook = [&](i32 m) {
+        // WalkResolveLook, for this call's ENTIRE body: a CpuNest because this lambda is entered
+        // from all three delivery branches below (the depth-prepass, raster and direct routes, at
+        // their own call sites) and must attribute its own cost to the SAME bucket regardless of
+        // which one called it, without disturbing whichever WalkEmit* phase is the caller's own.
+        // Constructed first, before anything else in the body runs, and destructed by falling out
+        // of this lambda's scope when `return dl;` executes below -- one nest brackets the whole
+        // call, including the two GameContent lookups it makes itself (authoredFor, lookFor), which
+        // are NOT among WalkLookup's four named probes and so are priced here instead, as part of
+        // what resolving a look actually costs.
+        CpuNest resolveLookNest(CpuSpan::WalkResolveLook);
         struct DrawLook {
             // The ladder's verdict, unedited. `look.blended` can only ever be true for a LIVE
             // authored .ocmat: a built-in SurfaceLook (three floats plus metal/rough -- see
@@ -267,6 +299,14 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // this walk has always used, and the only order a game host has ever wanted.
     const u32 visitCount = options.visitOrder ? options.visitOrderCount : n;
     for (u32 oi = 0; oi < visitCount; ++oi) {
+        // Re-opens WalkEntity for this iteration, closing whichever phase the PREVIOUS iteration
+        // left open (one of the WalkEmit* routes, WalkOther, or -- on the very first iteration --
+        // the WalkEntity occurrence `lap` opened in its constructor above, which folded in the
+        // pre-loop setup). One call per visited index, so WalkEntity's `calls` count reads as "how
+        // many entities this walk looked at", not "how many were drawn" -- a skipped entity still
+        // opens this phase and, via the next `.to()` or (on the last entity) `lap`'s own destructor,
+        // still gets counted.
+        lap.to(CpuSpan::WalkEntity);
         const u32 i = options.visitOrder ? options.visitOrder[oi] : oi;
         // An index the caller's order put out of range would otherwise reach World::at, which
         // indexes its dense array without a bound test. Unreachable on the default path (i == oi
@@ -297,7 +337,14 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             continue;
         }
 
-        const rhi::MeshHandle handle = content.meshFor(mr->mesh);
+        // content.meshFor IS THE FIRST OF WalkLookup's FOUR NAMED PROBES (see CpuSpan's own
+        // comment). Wrapped around the call alone, in an immediately-invoked lambda, so `handle`
+        // stays exactly what it was -- a plain value, not a reference into anything the nest's
+        // lifetime affects -- and so the probe is timed without moving where in this loop it runs.
+        const rhi::MeshHandle handle = [&] {
+            CpuNest lookupNest(CpuSpan::WalkLookup);
+            return content.meshFor(mr->mesh);
+        }();
         if (!handle) {
             if (options.onSkipped)
                 options.onSkipped(ent, mr->mesh, DrawSkipReason::MeshNotLoaded, options.user);
@@ -322,8 +369,17 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // this frame by SkinnedScene from its ACTUAL POSE, so leave those alone -- overwriting with
         // the rest box is exactly the popping the posed-bounds work exists to stop. The guard was
         // written before skinning was wired; it is live now.
+        //
+        // content.boundsFor IS THE SECOND OF WalkLookup's FOUR NAMED PROBES, nested around the CALL
+        // ONLY (an immediately-invoked lambda) because it sits inside the SAME condition that gates
+        // whether it runs at all: pulling the call out ahead of this `if` to wrap it more simply
+        // would call it for skinned entities too, which never happened before and must not start
+        // happening now just because a timer was added.
         if (!skinned)
-        if (const auto* b = content.boundsFor(mr->mesh)) {
+        if (const auto* b = [&] {
+                CpuNest lookupNest(CpuSpan::WalkLookup);
+                return content.boundsFor(mr->mesh);
+            }()) {
             auto* mw = const_cast<scene::CMeshRenderer*>(mr);
             mw->aabbMin[0] = b->first.x;  mw->aabbMin[1] = b->first.y;  mw->aabbMin[2] = b->first.z;
             mw->aabbMax[0] = b->second.x; mw->aabbMax[1] = b->second.y; mw->aabbMax[2] = b->second.z;
@@ -366,6 +422,13 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // 2.81% of pixels differing, falling to 0.04% (noise) with --no-lod-select (the account
         // sits on SandboxRender.cpp's depth-prepass phase, which is the call that replaced that
         // second walk). EntityDecision hands the host THIS box for that reason.
+        //
+        // WalkFrustum OPENS HERE, closing out WalkEntity's own occurrence for this iteration: the
+        // "loop overhead, w.at, ... the owner-hide walk" work WalkEntity's own comment names is all
+        // above this line, and everything from here through the frustum test below is instead spent
+        // building the world-space box and testing it against the six planes derived once at the
+        // top of this function.
+        lap.to(CpuSpan::WalkFrustum);
         bool haveWorldBox = false;
         bool frustumCulled = false;
         Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
@@ -399,8 +462,23 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // rule the editor applies. Needed unconditionally now (not only inside the PBR branch below):
         // planEntityDraws' single-draw case reads it directly, and it is what a split part's own empty
         // slot falls back to (planEntityDraws' `p.material ? p.material : entityMaterial`).
+        //
+        // WalkDecide OPENS HERE, ahead of this fallback lookup: everything from this point through
+        // planEntityDraws() below is the route/material DECISION for this entity, as distinct from
+        // the frustum TEST that closed just above it.
+        lap.to(CpuSpan::WalkDecide);
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
-        const i32 mat = mr->material ? mr->material : content.meshDefaultMaterial(mr->mesh);
+        // content.meshDefaultMaterial IS ONE OF WalkLookup's FOUR NAMED PROBES (see CpuSpan's own
+        // comment). A CpuNest, not a `.to()`, so it does not disturb WalkDecide -- the phase this
+        // ternary belongs to on both sides of the probe -- and wrapped around the CALL alone, in an
+        // immediately-invoked lambda, so the ternary's short-circuit is preserved exactly: this
+        // probe still runs only when `mr->material` is zero, precisely as it did before this line
+        // existed.
+        const i32 mat = mr->material ? mr->material
+                                      : [&] {
+                                            CpuNest lookupNest(CpuSpan::WalkLookup);
+                                            return content.meshDefaultMaterial(mr->mesh);
+                                        }();
 #else
         const i32 mat = mr->material;
 #endif
@@ -463,7 +541,13 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // the chosen handle against the UNSUBSTITUTED one to know whether this entity's per-material
         // split still applies, and a host that substituted a soft-body or LOD copy has changed that
         // answer (see planEntityDraws' own comment).
-        const std::vector<GameContent::MeshPart>* parts = content.partsFor(mr->mesh);
+        // content.partsFor IS THE FOURTH AND LAST OF WalkLookup's NAMED PROBES. This one runs for
+        // every entity that reaches here (no ternary, no `if` gating it), so wrapping just the call
+        // changes nothing about WHEN it runs, only which bucket its ticks land in.
+        const std::vector<GameContent::MeshPart>* parts = [&] {
+            CpuNest lookupNest(CpuSpan::WalkLookup);
+            return content.partsFor(mr->mesh);
+        }();
         PlannedDraw pdraws[kMaxPlannedDraws];
         const u32 pdrawCount = planEntityDraws(
             handle, dec.chosenMesh,
@@ -472,6 +556,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             mat, pdraws, kMaxPlannedDraws);
 
         if (depthPass) {
+            // WalkEmitDepth: the depth-prepass delivery branch, mutually exclusive with the raster
+            // and direct routes below because `depthPass` is fixed for the whole call to drawWorld
+            // (set once from options.pass at the top of this function, never touched per entity) --
+            // so this `.to()` fires on every iteration of a depth-prepass call and never on a
+            // colour-pass one.
+            lap.to(CpuSpan::WalkEmitDepth);
             // ---- DEPTH-ONLY DELIVERY ----
             // A non-raster entity writes no depth at all and is not counted: this pass is one half
             // of a frame the colour pass finishes, and both the counters and the "who delivered
@@ -505,6 +595,11 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // counts as drawn.
         const bool rasterDraws = route.raster && !dec.colourAlreadyDrawn;
         if (rasterDraws) {
+            // WalkEmitRaster: the raster delivery branch, mutually exclusive with WalkEmitDepth
+            // (that branch already `continue`d above when depthPass is true, so this line is only
+            // ever reached on a colour-pass call) and with WalkEmitDirect below (an entity takes
+            // exactly one of the two on any given colour-pass iteration).
+            lap.to(CpuSpan::WalkEmitRaster);
             for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
                 const PlannedDraw& pd = pdraws[pdi];
                 if (!pd.mesh) continue;
@@ -539,6 +634,14 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             }
         } else if (dec.emitDirectDraws &&
                    (options.voxiRenderer != nullptr || options.onDirectDraw != nullptr)) {
+            // WalkEmitDirect: the culled/hidden direct route to Voxi, mutually exclusive with
+            // WalkEmitRaster above. THIS IS THE BUCKET THE WHOLE STAGE TURNS ON -- a frustum-culled
+            // entity still reaches here and still calls resolveDrawLook and VoxiRenderer::submit
+            // (below), which is WHY the cost curve this stage exists to explain is linear in entity
+            // count rather than in draw count: shadows, GI voxelisation and the RT TLAS must never
+            // depend on what the raster camera happens to see, so a culled entity pays nearly the
+            // same price as a drawn one here, on purpose, and this bucket is where that price shows.
+            lap.to(CpuSpan::WalkEmitDirect);
             // THE UNIFIED DIRECT ROUTE: frustum-culled, occlusion-culled or owner-hidden (or shaded
             // already by the host), handed straight to Voxi so shadows, GI voxelisation and the RT
             // TLAS never depend on what the raster camera can see. This IS that route for both
@@ -594,6 +697,19 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             }
         }
 
+        // WalkOther, for the bookkeeping below: neither a lookup, a decision nor a delivery, just
+        // the counters and the onEntityDelivered hook that record what the branches above already
+        // decided. Charged here EXPLICITLY and UNCONDITIONALLY -- rather than left to inherit
+        // whichever of WalkEmitRaster/WalkEmitDirect happened to run last -- for the case where
+        // NEITHER branch runs at all: an entity whose route is not raster (route.raster false, or
+        // rasterDraws false because dec.colourAlreadyDrawn is true) and whose direct route has no
+        // sink attached (no voxiRenderer, no onDirectDraw) even though dec.emitDirectDraws defaults
+        // true. That is not a rare corner case -- it is what happens on every colour-pass call that
+        // runs with no Voxi feature attached at all. Without an explicit `.to()` here, such an
+        // entity's bookkeeping would silently stay charged to WalkDecide (the last phase actually
+        // opened for it), which is exactly the kind of unnamed gap WalkOther exists to rule out --
+        // see CpuSpan's own comment on why this bucket must never be a silent remainder.
+        lap.to(CpuSpan::WalkOther);
         if (route.raster) {
             // ONCE PER DELIVERED ENTITY, after its draws, with the handle they actually used -- the
             // editor latches its selection outline here (SandboxRender.cpp's colourDelivered), and

@@ -2,6 +2,10 @@
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 #include "aver/voxi/VoxiRenderer.hpp"
+#include "aver/core/CpuTiming.hpp"   // CpuNest(CpuSpan::VoxiSubmit) below -- a core header (Types.hpp
+                                     // and the standard library only, see that header's own comment
+                                     // on why), so it needs no AVER_MODULE_VOXI guard of its own: it
+                                     // is exactly as unconditional here as Log.hpp and Math.hpp are.
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
 #include "aver/voxi/CameraFactor.hpp"   // beginShadowHistory's NRD block: recovers worldToView/viewToClip
@@ -980,10 +984,31 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
         }
         return;
     }
+    // Nested, not chained off the walk's own CpuLap: submit() is reached from all three WalkEmit*
+    // branches (depth, raster and the culled/hidden direct route alike -- see this function's own
+    // header comment on why culled entities arrive here too), so the call site has no single parent
+    // phase to `.to()` into and CpuNest is the shape built for exactly that (see CpuNest's own
+    // comment). Placed AFTER both early returns above so a mesh==0 no-op or a draw-list-full refusal
+    // -- neither of which does any of the work below -- is not folded into VoxiSubmit's number,
+    // which would otherwise inflate it with calls that never touch a single one of the memcpys,
+    // hash lookups or bounds queries this span exists to measure.
+    CpuNest voxiSubmitTiming(CpuSpan::VoxiSubmit);
     Draw d;
     d.mesh = mesh;
     // Resolved ONCE here, not per pass: six depth passes asking the same question about the same
     // handle would be six map lookups for one answer that cannot change within a frame.
+    //
+    // BOTH d.depthMesh AND THE meshBounds LOOKUP BELOW ARE FUNCTIONS OF mesh ALONE, yet both are
+    // re-resolved on every one of the (up to) 16,000 calls this function gets in a frame, one per
+    // entity, even though a scene rarely has more than a few hundred DISTINCT meshes. A per-frame
+    // cache keyed by mesh handle would turn this from one depthProxyFn_ call and one meshBounds call
+    // PER ENTITY into one of each PER DISTINCT MESH -- the same move commit 3a9dc985 made for the RT
+    // geometry table (dedup by mesh: 64.2ms -> 5.4ms) applied here instead of there. NOT done in this
+    // change: this stage exists to MEASURE where VoxiSubmit's time actually goes, not to spend that
+    // measurement's own commit also changing the thing it is about to report on -- see the file
+    // header on why a fourth guess is exactly what this facility exists to replace with a number.
+    // Left here so whoever reads VoxiSubmit's number next finds the candidate fix next to the code
+    // it would change, not in a separate note that can drift out of sync with it.
     d.depthMesh = depthProxyFn_ ? depthProxyFn_(mesh, depthProxyUser_) : 0;
     if (!d.depthMesh) d.depthMesh = mesh;
     std::memcpy(d.world, world, 16 * sizeof(f32));

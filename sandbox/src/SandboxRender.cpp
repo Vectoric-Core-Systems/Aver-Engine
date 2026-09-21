@@ -9,6 +9,15 @@
 // captureless lambdas local to onRender), and SandboxApp.hpp is included by every sandbox
 // translation unit, so putting it there would rebuild all of them to serve one function.
 #include "aver/game/GameRender.hpp"
+// CpuSpan/CpuLap/CpuNest and formatCpuTiming: the CPU-side twin of rhi::GpuTimingReport, used below
+// to convert the cluster-dispatch steady_clock pair into an exclusive CpuNest span and to print the
+// per-bucket breakdown beneath the scene-walk log line. Included HERE rather than in SandboxApp.hpp
+// for the same reason GameRender.hpp is above -- nothing declared on SandboxApp needs these types,
+// so a member header would rebuild every translation unit that includes it to serve one function.
+// Both headers are dependency-minimal by design (CpuTiming.hpp's own top comment: "included from
+// Runtime/, from modules/render.voxi/ and from sandbox/") so this costs the rest of the file nothing.
+#include "aver/core/CpuTiming.hpp"
+#include "aver/core/CpuTimingFormat.hpp"
 
 namespace aver {
 // Submits the frame: the editor scene, the level world, gizmos, and the overlays.
@@ -370,6 +379,16 @@ void SandboxApp::onRender(Engine& e)  {
         // because --frame-time reports WHOLE frames from the CPU and time spent waiting for the
         // GPU looks exactly like CPU work. Two timers answer it directly: this one, and the
         // streamer's below. On Electric Dreams: 8.2ms walk + 0.7ms streaming inside a 76ms frame -- GPU-bound, so nothing here can matter.
+        //
+        // THIS BRACKET EXCLUDES THE DEPTH-PREPASS drawWorld CALL a few lines above (:372-373),
+        // which is a SECOND full per-entity walk over the identical scene -- gated on
+        // device()->depthPrepassEnabled(), false by default and turned on only by --depth-prepass.
+        // So the number this bracket produces, and everything the CpuTiming breakdown below derives
+        // from it, is THE WHOLE WALK today and only HALF of the CPU time actually spent walking the
+        // scene the moment that flag is passed -- the other half runs, uninstrumented by this
+        // bracket, inside the depth-prepass call above. A reader who sees this number drop by
+        // roughly half after adding --depth-prepass has not found a speedup; they have found this
+        // comment.
         const auto tWalk0 = std::chrono::steady_clock::now();
 
         const u32 n = w.count();
@@ -842,8 +861,13 @@ void SandboxApp::onRender(Engine& e)  {
             u32 culledMultiPart = 0;
             u32 entityDirectDraws = 0;
             bool entityCulled = false;
-            // CPU time inside dispatchMeshClusters, for the scene-walk report below. Accumulated in
-            // decide(), which is where the dispatch now happens.
+            // CPU time inside dispatchMeshClusters, for the scene-walk report below. NO LONGER
+            // ACCUMULATED HERE BY HAND: decide() times the dispatch itself now, through a
+            // CpuSpan::ClusterDispatch CpuNest (see that call site's own comment on why a second,
+            // independent steady_clock pair beside the CpuTiming facility would double-report the
+            // identical microseconds). This field is instead filled, once per throttled print, from
+            // the facility's own published ClusterDispatch bucket -- see the scene-walk log block
+            // below -- so it stays at its constructed 0.0 on any frame that log block does not run.
             f64 dispatchMs = 0.0;
         } walk;
         walk.self = this;
@@ -1101,32 +1125,51 @@ void SandboxApp::onRender(Engine& e)  {
                         consts[25] = 0.04f; consts[26] = 1.0f; consts[27] = 0.0f;
                         consts[28] = consts[29] = consts[30] = consts[31] = 0.0f;
 
-                        const auto tDis0 = std::chrono::steady_clock::now();
-                        ctx->setPipeline(self.lodMeshPipeline_);
-                        ctx->setBindingSet(gpu.bindingSet, 0);
-                        // THE MATERIAL, ON THE CONTEXT -- why the foliage on this path drew black.
-                        // setDrawBinding above records the material on the DEVICE, which only
-                        // forwards it to the context from inside drawMesh(), never called here. So
-                        // dispatchMeshClusters' table-1 binding was whatever an EARLIER draw left
-                        // sticky -- Voxi's fallback set, whose metal-rough map is white -- so
-                        // metallic came out 1, kdAlbedo came out 0, and the diffuse lobe vanished:
-                        // black, even though every value measured correct for a DIFFERENT material.
-                        if (rsEntity.matSet)
-                            ctx->setDrawBinding(rsEntity.matSet, rsEntity.matConstants, rsEntity.matBytes);
-                        ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-                        ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
+                        // CpuSpan::ClusterDispatch, AS A CpuNest AND NOT A SECOND steady_clock PAIR:
+                        // the plain std::chrono pair this replaces (tDis0 in, c.dispatchMs += out)
+                        // measured exactly the interval below, and that interval sits INSIDE the
+                        // decide() callback -- which is to say inside whatever CpuSpan GameRender.cpp
+                        // has open while it calls decide() (CpuSpan::WalkDecide's own comment: "the
+                        // EntityDecision fill, options.decide(), chooseRoute, planEntityDraws"). Left
+                        // as a bare steady_clock pair, the same microseconds would land in BOTH
+                        // c.dispatchMs (read by the scene-walk log line below) AND WalkDecide's own
+                        // bucket (read by the CpuTiming breakdown printed under it) -- two reports of
+                        // the identical time under two different names, with nothing to say which one
+                        // to believe when they inevitably drift apart under a different entity mix. A
+                        // CpuNest instead SUSPENDS whatever span is currently open (WalkDecide) for
+                        // exactly this scope, so its own time is excluded from WalkDecide's bucket and
+                        // resumes it, restarting WalkDecide's clock, the instant this scope ends --
+                        // see CpuNest's own comment in CpuTiming.hpp for why this is the one primitive
+                        // in that header built for a region reachable from more than one enclosing
+                        // phase. walk.dispatchMs (the log line's own number) is populated FROM this
+                        // same facility further down, once per throttled print, rather than from a
+                        // second manual accumulator that could disagree with it -- see that call site.
+                        {
+                            CpuNest clusterDispatchNest(CpuSpan::ClusterDispatch);
+                            ctx->setPipeline(self.lodMeshPipeline_);
+                            ctx->setBindingSet(gpu.bindingSet, 0);
+                            // THE MATERIAL, ON THE CONTEXT -- why the foliage on this path drew black.
+                            // setDrawBinding above records the material on the DEVICE, which only
+                            // forwards it to the context from inside drawMesh(), never called here. So
+                            // dispatchMeshClusters' table-1 binding was whatever an EARLIER draw left
+                            // sticky -- Voxi's fallback set, whose metal-rough map is white -- so
+                            // metallic came out 1, kdAlbedo came out 0, and the diffuse lobe vanished:
+                            // black, even though every value measured correct for a DIFFERENT material.
+                            if (rsEntity.matSet)
+                                ctx->setDrawBinding(rsEntity.matSet, rsEntity.matConstants, rsEntity.matBytes);
+                            ctx->setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+                            ctx->setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frameCb, sizeof(frameCb));
 #if AVER_MODULE_VOXI
-                        // b3: VoxiFrame, the SAME bytes Voxi's own scenePass binds at b4 for the
-                        // ordinary path (see kClusterGiFrameRegister's comment on why this path
-                        // can't reuse b4). Bound every draw rather than once per mesh -- a root CBV
-                        // pointer set is cheap -- keeping shadowFactor()/coneTracedIndirect() valid
-                        // even before Voxi finishes init() (giFrameConstants() returns an all-zero block, degrading the same way Voxi's own checks do).
-                        ctx->setConstantBuffer(kClusterGiFrameRegister, self.voxiRenderer_.giFrameConstants(),
-                                               self.voxiRenderer_.giFrameConstantBytes());
+                            // b3: VoxiFrame, the SAME bytes Voxi's own scenePass binds at b4 for the
+                            // ordinary path (see kClusterGiFrameRegister's comment on why this path
+                            // can't reuse b4). Bound every draw rather than once per mesh -- a root CBV
+                            // pointer set is cheap -- keeping shadowFactor()/coneTracedIndirect() valid
+                            // even before Voxi finishes init() (giFrameConstants() returns an all-zero block, degrading the same way Voxi's own checks do).
+                            ctx->setConstantBuffer(kClusterGiFrameRegister, self.voxiRenderer_.giFrameConstants(),
+                                                   self.voxiRenderer_.giFrameConstantBytes());
 #endif
-                        ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
-                        c.dispatchMs += std::chrono::duration<f64, std::milli>(
-                            std::chrono::steady_clock::now() - tDis0).count();
+                            ctx->dispatchMeshClusters(mesh, gpu.clusterCount);
+                        }
                         clusterDispatched = true;
 
                         // DEFECT 2's FIX, in full: this instance's LIT pixels already came from
@@ -1688,6 +1731,24 @@ void SandboxApp::onRender(Engine& e)  {
             const f64 walkMs = std::chrono::duration<f64, std::milli>(
                 std::chrono::steady_clock::now() - tWalk0).count();
             if ((sceneWalkReports_ & (sceneWalkReports_ + 1)) == 0) {
+                // THE FACILITY'S OWN SNAPSHOT, taken ONCE for this whole throttled print rather than
+                // once per line below -- collectCpuTiming() only reads the last WINDOW the facility
+                // already froze (CpuTimingReport's own comment), so a second call a few lines down
+                // would not see anything newer, only cost a second pass over kCpuSpanCount nodes for
+                // nothing. Reading it here, before the log line that names cluster-dispatch time,
+                // is also what lets walk.dispatchMs (below) come from this same snapshot instead of
+                // a manual accumulator that could disagree with it.
+                const CpuTimingReport cpuReport = collectCpuTiming();
+                // walk.dispatchMs SOURCED FROM THE FACILITY -- see the CpuNest conversion at the
+                // dispatch call site for why a second, independent steady_clock pair was removed
+                // rather than kept alongside it. `nodes` is either empty (nothing published yet, or
+                // this build/process cannot report at all -- CpuTimingReport::supported's own
+                // comment) or sized exactly kCpuSpanCount (collectCpuTiming's own contract), so the
+                // emptiness check alone is enough to index ClusterDispatch safely. Left at its
+                // constructed 0.0, not stale, when there is nothing to read yet.
+                if (!cpuReport.nodes.empty()) {
+                    walk.dispatchMs = cpuReport.nodes[static_cast<usize>(CpuSpan::ClusterDispatch)].ms;
+                }
                 AVER_INFO("[Sandbox] scene walk {:.1f}ms -- {:.1f}ms in cluster dispatch across {} "
                           "drawn ({:.1f}us each), {:.1f}ms in the rest over {} entities",
                           walkMs, walk.dispatchMs, colourStats.drawn,
@@ -1695,6 +1756,22 @@ void SandboxApp::onRender(Engine& e)  {
                               ? walk.dispatchMs * 1000.0 / static_cast<f64>(colourStats.drawn)
                               : 0.0,
                           walkMs - walk.dispatchMs, n);
+                // THE PER-BUCKET TREE, PRINTED DIRECTLY BENEATH THAT LINE ON PURPOSE: the two are
+                // meant to be cross-checked against each other, not read in isolation. walkMs above
+                // is THIS SINGLE FRAME's own steady_clock bracket; the tree below averages over
+                // CpuTiming.hpp's kCpuTimingWindowOccurrences occurrences (a window, stated in the
+                // tree's own header line), so the two are not expected to match to the decimal --
+                // only to stay in the same neighbourhood, which is itself the check: a tree total
+                // wildly different from the single-frame number above says the workload just changed
+                // shape, not that either instrument is lying. This is also the split the whole stage
+                // exists for -- see this bracket's own comment at tWalk0 and CpuTiming.hpp's top-of-
+                // file comment for the sweep (250/1000/4000/16000 entities, ~0.45us/entity) that
+                // showed the single "6.8ms in the rest" number could not say which of several
+                // candidate fixes it would pay for. formatCpuTiming already emits its own "not
+                // supported" / "no window yet" sentences when cpuReport has nothing to show, so no
+                // extra guard is needed here for either case.
+                formatCpuTiming(cpuReport,
+                                 [](const std::string& line) { AVER_INFO("[Sandbox] {}", line); });
 #if AVER_MODULE_VOXI
                 // M2(c): the CPU cost of Voxi's acceleration-structure per-draw loop on its last
                 // rebuild (VoxiRenderer::lastAccelBuildCpuMs, C-2), printed at the SAME widening

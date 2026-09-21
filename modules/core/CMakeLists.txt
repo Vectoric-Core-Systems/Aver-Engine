@@ -6,6 +6,11 @@ aver_add_module(Aver.Core
     src/Time.cpp
     src/Hash.cpp
     src/ErrorCodes.cpp
+    # CpuTiming: the scene walk's CPU-side twin to rhi::GpuTimingReport (see CpuTiming.hpp's own
+    # comment). Only the cold path lives here -- the one-time TSC calibration and the report
+    # builder -- the hot path (CpuLap/CpuNest) is header-only so it can be inlined at every one of
+    # the ~100,000 boundaries a frame it is called from.
+    src/CpuTiming.cpp
   PUBLIC_DEFS
     # Version.hpp needs the number the top-level project() declares; keeping it in one place
     # stops a manifest's ENGINE check from being validated against a stale hard-coded copy.
