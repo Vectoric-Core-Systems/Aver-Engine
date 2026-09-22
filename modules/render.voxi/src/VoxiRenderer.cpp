@@ -3823,8 +3823,10 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
             // at all, not ReblurTuning{}'s own defaults. setSettings() below re-issues this same call
             // every frame thereafter, which is what makes a later console change live without
             // recreating the instance -- see applyReblurTuning's own comment. Index 1 is ReblurDiffuse
-            // in the kinds array above; the occlusion denoiser at index 0 is left on NRD's defaults
-            // because the signal it filters is already unit-free.
+            // in the kinds array above; index 0 is ReblurDiffuseOcclusion and is tuned there too.
+            // It used to be left on NRD's defaults "because the signal it filters is already
+            // unit-free" -- that reasoning was wrong and is refuted in applyReblurTuning's own
+            // comment, with the measurement that caught it.
             if (nrdActive_) applyReblurTuning();
             // THE ENCODING CHECK IS THE ONE SILENT FAILURE MODE LEFT. NRD's shaders were BUILT
             // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it), and
@@ -4038,8 +4040,63 @@ void VoxiRenderer::applyReblurTuning() {
     t.diffusePrepassBlurRadius = settings_.reblurDiffusePrepassBlurRadius;
     t.maxAccumulatedFrameNum   = settings_.reblurMaxAccumulatedFrameNum;
     t.maxStabilizedFrameNum    = settings_.reblurMaxStabilizedFrameNum;
-    // Index 1 is ReblurDiffuse -- see the two call sites' own comments for why index 0 (occlusion)
-    // stays on NRD's own defaults.
+    // ---- INDEX 0 (ReblurDiffuseOcclusion) IS TUNED TOO, AND THE COMMENT SAYING IT NEED NOT BE WAS
+    // WRONG ----
+    //
+    // The claim was that the occlusion signal is "already unit-free", so NRD's own hit-distance
+    // defaults were harmless against it. They are not. NRD de-normalises hit distance as
+    // (A + |viewZ| * B) * lerp(C, 1, smc) in EVERY mode -- REBLUR_Common_SpatialFilter.hlsli calls
+    // _REBLUR_GetHitDistanceNormalization unconditionally, with no NRD_MODE_OCCLUSION exemption, as
+    // do the hit-distance reconstruction, temporal accumulation and history-fix passes. So this is
+    // not a mistuning of an otherwise workable curve, it is the wrong SHAPE of curve: a
+    // viewZ-dependent divisor applied to a signal the producer normalised by a flat constant
+    // (voxi_rt.hlsli's aoTMax = gVoxelParams.z = settings_.giMaxDistance, packed a few hundred lines
+    // above). The texture is R16Unorm, which can only hold [0,1] and would clip a real length --
+    // the encoding is a fraction by construction.
+    //
+    // B = 0 and C = 1 collapse NRD's divisor to a flat A, the only form that can match, and A is
+    // then the same giMaxDistance the producer divided by. This is render.nrd/README.md's own
+    // prescription in its own words: "A consumer wanting NRD's convention passes
+    // hitDistParams = {giMaxDistance, 0, 1}, which makes NRD's own normalisation the identity
+    // against this encoding." It is read from settings_ rather than written as a literal because it
+    // is a live console dial.
+    //
+    // ---- WHAT THIS DOES AND DOES NOT FIX, MEASURED BOTH SIDES ----
+    //
+    // gNrdAo rendered 0.63 in deep shadow and 0.01 in OPEN SUNLIT AREAS on a scale where 1.0 is
+    // 230.8 -- "fully occluded" everywhere, including sky a surface can see all of. With this
+    // tuning applied and ACCEPTED by NRD (no rejection warning), it renders 0.00 across the board,
+    // and the shaded frame is unchanged to two decimal places: 3.61 mean absolute difference from a
+    // converged path-traced reference either way, parity against ray-driven 0.98 either way.
+    //
+    // So THE UNITS WERE GENUINELY WRONG AND ARE NOW RIGHT, and that is worth having on its own --
+    // the previous justification was false against NRD's own source, and a latent unit mismatch
+    // left in place because it currently happens to be invisible is how the rest of this file's
+    // recent bugs survived as long as they did. But it is NOT the cause of the zero output: a
+    // correctly-normalised denoiser still returning zero everywhere means something else in this
+    // signal's path is broken -- the input not reaching it, or the wrong output slot being read
+    // (this module has a history of exactly that; see the NRD contract notes). NOT YET FOUND.
+    //
+    // Consequently: do not read this change as an improvement, and do not let its presence suggest
+    // the AO denoiser works. Raster measures 3.77 with gNrdAo and 4.23 without, so what it is
+    // currently contributing is "fully occluded", which flatters a dark interior by accident and
+    // would be wrong in an open one.
+    //
+    // EVERY OTHER FIELD IS LEFT AT ReblurTuning's defaults, which are NRD's own, so index 0 is
+    // otherwise byte-for-byte the denoiser it was. The accumulation knobs `t` carries are
+    // deliberately NOT copied across: they are a separate decision with a separate measurement, and
+    // folding them in here would make this change two variables instead of one.
+    render::nrd::Denoiser::ReblurTuning ao{};
+    ao.hitDistA = settings_.giMaxDistance;
+    ao.hitDistB = 0.0f;
+    ao.hitDistC = 1.0f;
+    if (!nrd_.setReblurTuning(kNrdAoDenoiser[0], ao) && !nrdWarnedReblurRetune_) {
+        nrdWarnedReblurRetune_ = true;
+        AVER_WARN("[NRD] REBLUR_DIFFUSE_OCCLUSION hit-distance tuning was rejected by NRD; the "
+                  "occlusion denoiser keeps defaults whose scale does not match this engine's "
+                  "fraction-of-giMaxDistance encoding (said once)");
+    }
+    // Index 1 is ReblurDiffuse.
     if (!nrd_.setReblurTuning(1u, t) && !nrdWarnedReblurRetune_) {
         nrdWarnedReblurRetune_ = true;
         AVER_WARN("[NRD] REBLUR_DIFFUSE tuning was rejected by NRD; it keeps whatever the last "
