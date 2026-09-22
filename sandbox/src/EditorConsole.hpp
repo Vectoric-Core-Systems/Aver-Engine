@@ -420,7 +420,13 @@ inline u32& consoleLightingLegacySlot() { static u32 v = 0; return v; }
 // onUpdate, right beside the voxi.giPoisonView/nrdLegacyCamera reasserts these three mirror -- see
 // each setter's own header comment (VoxiRenderer.hpp) for what changing it actually does.
 inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
-inline bool& consoleGiBoundedDispatchSlot() { static bool v = false; return v; }
+// TRUE, because it was measured rather than left as a dial nobody turned. SandboxApp reasserts this
+// slot into VoxiRenderer every frame, so THIS is the editor's real default and the member
+// initialiser in VoxiRenderer.hpp (also true now, for hosts like the Runtime that never call the
+// setter) cannot be it. With it off, every GI rebuild cleared, resolved and mip-filtered the whole
+// 512^3 grid to touch 1.3% of it. See VoxiRenderer.hpp's own comment beside giBoundedDispatch_ for
+// the census line, the 30.64 -> 30.25ms measurement and the pixel-neutrality check.
+inline bool& consoleGiBoundedDispatchSlot() { static bool v = true; return v; }
 inline bool& consoleGiFreeAccumulatorSlot() { static bool v = false; return v; }
 
 // optimisation-wave-2's U1 path-debug view (2.10 I) -- the SAME raw-slot idiom as
@@ -865,12 +871,15 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiForceRebuildSlot() = on; });
         }});
     t.push_back({"voxi.giBoundedDispatch", VarType::Bool, false,
-        "Measurement only: the GI volume's clear/resolve/mip compute passes dispatch only over the "
-        "voxel box the injected draws can actually touch this rebuild, instead of the whole grid. "
-        "Falls back to the full grid on the first build, a moved or resized volume, an unbounded draw, "
-        "or a cache restore -- see GiDispatchBounds.hpp's own comment for the box math. Intended to "
-        "produce IDENTICAL output to the full-grid path; the gain from skipping empty voxels is "
-        "UNMEASURED. Default OFF.",
+        "The GI volume's clear/resolve/mip compute passes dispatch only over the voxel box the "
+        "injected draws can actually touch this rebuild, instead of the whole grid. Falls back to "
+        "the full grid on the first build, a moved or resized volume, an unbounded draw, or a cache "
+        "restore -- see GiDispatchBounds.hpp's own comment for the box math. Produces IDENTICAL "
+        "output to the full-grid path: verified at 99.3% bit-identical, 0.0024 mean absolute "
+        "difference, the residual being this renderer's own GI temporal noise. MEASURED on PTTest "
+        "NewSponza, ray-driven, 400 moving frames: the census line goes from covering 100% of the "
+        "512^3 grid to 1.3%, and GPU total 30.64 -> 30.25ms. Default ON; turn it off to measure "
+        "against the full-grid path.",
         []{ return vBool(consoleGiBoundedDispatchSlot()); },
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
