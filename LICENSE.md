@@ -64,6 +64,9 @@ are NOT covered by the grant above. Each carries its own licence text in its dir
   third_party/vulkan-headers    Vulkan-Headers (Khronos)   Apache-2.0
   third_party/fidelityfx-fsr    AMD FidelityFX FSR 1       MIT
   modules/physics.jolt/Jolt     Jolt Physics               MIT
+  third_party/rtxdi             NVIDIA RTXDI               NVIDIA RTX SDKs License
+  third_party/rtxgi             NVIDIA SHaRC               NVIDIA RTX SDKs License
+  third_party/nrd               NVIDIA NRD                 NVIDIA RTX SDKs License
 
 Nothing in this Agreement restricts rights granted to you by those licences, and no per-file
 copyright notice in this repository is applied to them.
