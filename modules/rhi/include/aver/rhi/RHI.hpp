@@ -469,6 +469,19 @@ public:
     // top-left origin. (0,0,0,0) = full backbuffer.
     virtual void setViewportRect(u32 x, u32 y, u32 w, u32 h) { (void)x; (void)y; (void)w; (void)h; }
 
+    // The aspect ratio scene rendering is actually being confined to: the sub-rect above when one
+    // is set, the whole scene target otherwise. A RATIO rather than the rect, for two reasons: it
+    // is what a consumer deriving a camera needs, and a ratio is invariant under the present-space
+    // to scene-space conversion setViewportRect applies, so no caller has to know about
+    // renderScale. 0 means "not known yet", which callers read as "make no correction".
+    //
+    // THIS EXISTS BECAUSE A CAMERA DERIVED FROM THE WRONG ASPECT IS INVISIBLE UNTIL MEASURED:
+    // PtSceneView built its rays for its own fixed 16:9 accumulator while the editor docks the
+    // scene at whatever ratio it likes, and the blit maps NDC straight across, so the traced image
+    // arrived stretched by exactly dstAspect/srcAspect against the rasterised one it is used as a
+    // reference for -- 1.06x on the dockspace it was found on.
+    virtual f32 viewportAspect() const { return 0.0f; }
+
     // Decouples the 3D scene's own render targets from the swapchain's: the scene renders at
     // round(present * scale) and the post chain's composite upscales it back to the present size,
     // which the editor UI and the backbuffer/viewport texture stay pinned to (they never see this

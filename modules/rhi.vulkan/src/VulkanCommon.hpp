@@ -1414,6 +1414,12 @@ public:
     bool vsync() const override { return vsync_; }
     bool vsyncCanDisable() const override { return tearingSupported_; }
     void setViewportRect(u32 x, u32 y, u32 w, u32 h) override;
+    // D3D12Device's twin, same scene-space reasoning -- see IDevice::viewportAspect.
+    f32  viewportAspect() const override {
+        const u32 w = vpW_ ? vpW_ : sceneWidth_;
+        const u32 h = vpH_ ? vpH_ : sceneHeight_;
+        return h ? static_cast<f32>(w) / static_cast<f32>(h) : 0.0f;
+    }
     void setViewportToTexture(bool on) override { viewportToTex_ = on; }
     bool viewportToTexture() const override { return viewportToTex_; }
     u64 viewportTextureId() override;

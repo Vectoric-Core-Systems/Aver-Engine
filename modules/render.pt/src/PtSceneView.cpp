@@ -283,11 +283,41 @@ bool PtSceneView::deriveCamera(PtCamera& out) const {
     out.right[0] = right.x;  out.right[1] = right.y;  out.right[2] = right.z;
     out.up[0] = up.x;        out.up[1] = up.y;        out.up[2] = up.z;
     out.tanHalfFov = tanV;
-    // THE ACCUMULATOR'S OWN ASPECT, NEVER THE REAL VIEWPORT'S. A small fixed reference target is not
-    // obliged to match whatever ratio the editor happens to be docked at; deriving it from the real
-    // viewport would stretch this image the moment the two disagree, and the editor's dockspace rect
-    // changes size far more often than the level does.
-    out.aspect = static_cast<f32>(accumWidth_) / static_cast<f32>(accumHeight_);
+    // ---- THE DESTINATION VIEWPORT'S ASPECT, NOT THE ACCUMULATOR'S ----
+    //
+    // This line used to read `accumWidth_ / accumHeight_` and the comment above it argued that a
+    // small fixed reference target "is not obliged to match whatever ratio the editor happens to be
+    // docked at", and that using the real viewport "would stretch this image the moment the two
+    // disagree". THAT HAS IT BACKWARDS, and the cost was silent.
+    //
+    // scenePass's blit is a fullscreen triangle: pt_present.hlsl maps the destination's whole NDC
+    // range onto the whole accumulator with no aspect term. So accumulator NDC lands on viewport
+    // NDC one-to-one, and the frustum the rays were generated for has to be the frustum the
+    // DESTINATION implies, or the image arrives scaled horizontally by exactly
+    // dstAspect / srcAspect. Every rung of kAccumLadder is 16:9 (480x270 ... 1280x720) while the
+    // editor docks the scene at whatever ratio it likes.
+    //
+    // MEASURED: a 2-parameter (scale, offset) fit of the PT capture against the rasterised one at
+    // the same camera lands on scale 1.0600, and the same value fits independently on two different
+    // levels. The viewport it was measured on is 1.882:1 against 16:9's 1.778: 1.882/1.778 = 1.0588.
+    // Correcting it takes the mean absolute difference from 11.92 to 6.755 -- i.e. 43% of what
+    // looked like a shading disagreement between the path tracer and the rasteriser was this one
+    // line. Every comparison against this view as a reference was wrong by that much, including the
+    // ones quoted in df4122cc's own message.
+    //
+    // THE ACCUMULATOR STAYS 16:9 AND FIXED, which is what the old comment was really protecting:
+    // it is reallocated only by setQuality, so a dockspace drag still does not resize a buffer. It
+    // does now restart accumulation, because deriveCamera's result feeds the memcmp at the top of
+    // tick() -- and that is correct rather than a cost, since a view whose frustum changed is a
+    // different image and averaging across the change is what a reference must never do.
+    //
+    // Pixels in the accumulator become anisotropic by that same ~6% (a 1.88:1 frustum sampled into
+    // a 16:9 grid), which the blit undoes on the way to the screen. That is the trade against
+    // letterboxing, and it is the right way round: a reference view should fill the pane it is
+    // being compared in.
+    const f32 dstAspect = dev_ ? dev_->viewportAspect() : 0.0f;
+    out.aspect = dstAspect > 0.0f ? dstAspect
+                                  : static_cast<f32>(accumWidth_) / static_cast<f32>(accumHeight_);
     return true;
 }
 

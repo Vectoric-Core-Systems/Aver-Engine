@@ -866,6 +866,15 @@ public:
         if (vpH_ == 0) vpH_ = 1;
     }
 
+    // Scene-space throughout, and that is why this is safe to hand out raw: vpW_/vpH_ were already
+    // converted above, sceneWidth_/sceneHeight_ are the same space, and a RATIO of two values in
+    // one space is the ratio in every space. See IDevice::viewportAspect for why it exists.
+    f32 viewportAspect() const override {
+        const u32 w = vpW_ ? vpW_ : sceneWidth_;
+        const u32 h = vpH_ ? vpH_ : sceneHeight_;
+        return h ? static_cast<f32>(w) / static_cast<f32>(h) : 0.0f;
+    }
+
     void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 camPos[3]) override {
         // Snapshot OUTGOING viewProj as "previous" before overwrite: frameCB_.viewProj still holds
         // the LAST setCamera's matrix here, the same value VoxiRenderer's curViewProj_ reads via
