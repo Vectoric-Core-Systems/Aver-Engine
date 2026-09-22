@@ -1069,9 +1069,55 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
 
 // The Voxi lit pixel shader. Voxi supplies light transport only â€” sun visibility, sky, bounce â€”
 // and the material shades it. Returns linear radiance; the post chain tonemaps.
+//
+// ---- [earlydepthstencil] IS LOAD-BEARING, NOT AN OPTIMISATION ----
+//
+// This shader WRITES UAVs (gAoHistOut u4, gAoHitDistOut u5, via rtSkyOcclusionTemporal) and calls
+// clip(). Both of those individually defeat hardware early-Z, so without this attribute D3D12 moves
+// the depth test AFTER the shader: a fragment that is hidden behind a nearer surface still runs,
+// still traces its hemisphere, and still lands its store. Those stores are plain RWTexture2D --
+// not ROV, not atomic -- so which fragment owns a texel is decided by DRAW ORDER, not by depth.
+// The scene pass rasterises with CullMode::None (VoxiRenderer.cpp, `scene.cull`) and PTTest ships
+// with its depth prepass off, so in an enclosed scene the last writer is routinely a surface BEHIND
+// the wall, whose hemisphere is open to the sky and whose fresh trace is 1.0. The visible fragment
+// then reads that poisoned texel back at history weight 0.97 and renders a fully-lit floor.
+//
+// MEASURED, PTTest NewSponza, fog off, fixed exposure, against a converged path-traced reference
+// corrected for the PT view's own 1.06x horizontal stretch (without that correction 43% of the
+// apparent error is misalignment and none of these numbers mean anything):
+//
+//   the RAW trace is identical on both primary-visibility paths and it is CORRECT --
+//   raster 1.50, ray-driven 1.51 (MAD 0.05 between the two fields) against a truth of 1.32.
+//   Let the accumulator run and the same quantity reads 4.62 on ray-driven (a fullscreen pass, one
+//   invocation per pixel) and 132.76 here. An 88x lift, entirely manufactured downstream.
+//
+//   with this attribute:  occlusion 132.76 -> 21.27 and the gradient comes back (21.27 shadowed vs
+//   59.78 open, where before it was saturated flat); the shaded image moves 6.43 -> 3.77 MAD from
+//   truth, and raster-vs-ray-driven PARITY moves 6.05 -> 0.98. JungleRuins, a second and much more
+//   open scene, moves the other way for the same reason and also improves: 14.06 -> 12.93.
+//
+// WHY NOT THE DEPTH PREPASS. --depth-prepass does suppress the hidden fragments (occlusion
+// 132.76 -> 12.45) but it regresses the shaded image hard (MAD 6.43 -> 21.66, parity -> 20.82) and
+// gives bit-identical results with NRD on and off, so it changes more about the pass than overdraw.
+// It was the diagnostic that confirmed the mechanism; it is not the fix.
+//
+// WHY THIS IS SAFE FOR THE clip(). The only clip() in this function is the translucent ONE-LAYER
+// selection below (gated on AVER_MAT_ALPHA_BLEND && !AVER_MAT_TWO_SIDED) -- there is no alpha-cutout
+// discard here; the cutout lives in PSDepthPrepass. An opaque draw therefore never clips at all, and
+// the blended PSO that shares this shader sets depth.write = false (VoxiRenderer.cpp), so moving the
+// depth TEST ahead of a discard that can no longer affect depth changes nothing about which layer
+// survives. Verified by capture on both scenes; neither lost geometry.
+//
+// TEMPORAL VALIDATION, because this feeds an accumulated term and still frames cannot judge one:
+// matched-pose A/B (--cam-translate 3 --cam-wobble 8 40 --cam-wobble-stop 100, 103 vs 220 frames)
+// puts settle-time sensitivity at MAD 0.43 with the attribute against 0.62 without -- it REDUCES
+// temporal dependence. High-frequency energy rises 0.39 -> 0.46, which is the occlusion field
+// regaining real structure rather than sitting saturated.
 #if AVER_GBUFFER
+[earlydepthstencil]
 GBufferOut PSMainVoxi(VSOut i) {
 #else
+[earlydepthstencil]
 float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     float3 N = normalize(i.nrmWS);
