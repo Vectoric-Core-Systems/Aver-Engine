@@ -1404,21 +1404,68 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     if (gRtDenoiseParams.w < 0.5) return coneAo;
 
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
-    // SEEDED FROM THE CONE, NOT FROM THE RAW RAY. At one ray `fresh` is BINARY -- 0 or 1 -- so a
-    // pixel with no usable history put a coin flip on screen and then wrote that coin flip into the
-    // history for its neighbours to read next frame. That is the measured artefact: with a
-    // scale-free metric (each image normalised to its OWN mean, because both an absolute-code metric
-    // and a divide-by-local-median one are confounded by the brightness an ablation changes -- two
-    // rankings had to be discarded before this was measured honestly), ablating this ray takes
-    // bright speckle from 0.071% of pixels to 0.012%. That is 83% of it, and below the 0.038%
-    // measured with ray tracing off altogether.
+    // ---- SEEDED FROM THIS PIXEL'S OWN TRACE. IT USED TO BE SEEDED FROM `coneAo`, AND THE ARGUMENT
+    // FOR THAT WAS SOUND RIGHT UP UNTIL THE PREMISE STOPPED HOLDING ----
     //
-    // The cone gather answers the SAME question -- how much of the hemisphere is open -- smoothly,
-    // deterministically, and it is what every tier below Epic already ships. So it is the right
-    // thing to stand on when the traced estimate has nothing to average against: the pixel starts
-    // from a plausible smooth value and the traced samples refine it over the following frames,
-    // instead of starting from noise and passing noise on.
-    float vis = coneAo;
+    // The old reasoning, kept because it is still correct on its own terms: at one ray `fresh` is
+    // BINARY -- 0 or 1 -- so a pixel with no usable history puts a coin flip on screen and writes
+    // that coin flip into the history for its neighbours to read next frame. Measured with a
+    // scale-free metric (each image normalised to its OWN mean, because an absolute-code metric and
+    // a divide-by-local-median one are both confounded by the brightness an ablation changes -- two
+    // rankings were discarded before that was measured honestly), seeding from the cone instead took
+    // bright speckle from 0.071% of pixels to 0.012%. The cone gather answers the same question --
+    // how much of the hemisphere is open -- smoothly and deterministically, so it was the right
+    // thing to stand on when the traced estimate had nothing to average against.
+    //
+    // THE PREMISE IS THAT `coneAo` IS A GATHER. UNDER giMode=1 IT IS A HARDCODED 1.0.
+    // giRestirIndirect (voxi_restir.hlsli) declares `out float ao`, sets it to 1.0 on its first
+    // line and NEVER ASSIGNS IT AGAIN -- the identifier appears exactly twice in an 800-line body --
+    // and when ReSTIR GI is the active estimator, voxi.hlsl takes that branch instead of calling
+    // coneTracedIndirect at all. PTTest.ocproject sets RENDER.GIMODE 1, so this is the shipped path
+    // for the scene every measurement in this project is taken on, not a corner.
+    //
+    // MEASURED, and this is what makes the trade go the other way: `ao`/`rdAo` render as a flat 1.0
+    // in BOTH primary-visibility paths, deep shadow included (230.71 against a white of 230.81),
+    // while the cone gather itself is healthy and simply bypassed (traceCone's own alpha measures
+    // 0.90, which would give ao = 0.10). And `fresh` is not merely plausible here, it is nearly
+    // exact: 1.50 in deep shadow against a converged path-traced truth of 1.35.
+    //
+    // So the choice is no longer "smooth prior versus binary noise". It is "a constant that says
+    // FULLY OPEN versus this pixel's own measurement of the hemisphere, which is right in
+    // expectation and noisy". A prior is only consulted where reprojection FAILED -- disocclusions,
+    // which is exactly where a full-open constant paints sky onto newly revealed interior surfaces
+    // and then takes ~33 frames of history to walk it back. Noise that is correct on average is the
+    // better failure.
+    //
+    // ---- AND IT CHANGES ESSENTIALLY NOTHING ON SCREEN. SAID PLAINLY SO NOBODY READS THE ARGUMENT
+    // ABOVE AS A MEASURED WIN ----
+    //
+    // Still frame, PTTest NewSponza, fog off, fixed exposure, against a converged path-traced
+    // reference: 3.61 mean absolute difference either way on raster, 3.71 either way on ray-driven,
+    // parity 0.98 either way; the prior moves a still frame by 0.02 MAD on raster and 0.00 on
+    // ray-driven. Matched-pose moving camera (--cam-translate 3 --cam-wobble 8 40
+    // --cam-wobble-stop 100, 103 frames against 220, so the pose is identical by construction and
+    // only settle time differs), measured against a reference converged AT THAT POSE: the frame you
+    // actually see while moving goes 4.10 -> 4.09, settle-time sensitivity 0.46 -> 0.44, speckle
+    // 0.41 unchanged.
+    //
+    // WHY SO SMALL: the prior is read only where rtReprojectAo FAILS, and it mostly succeeds -- the
+    // depth and normal tests pass for most pixels even under motion. So this is a latent-correctness
+    // change, not a visible one. It is worth making because the value it replaces is provably a
+    // constant in the shipped configuration and the code around it reasons as though it were a
+    // gather; it is NOT worth citing as an improvement.
+    //
+    // A HARSHER MOTION TEST WAS TRIED AND DISCARDED rather than quietly dropped: translate 18/frame
+    // with a 35-degree wobble flew the camera out of the building, leaving 0% of the frame in deep
+    // shadow and all three captures identical to 0.000 MAD. A test whose scene content collapses
+    // measures nothing, and its numbers are not reported above.
+    //
+    // THE SIBLING CASE IS DELIBERATELY NOT CHANGED: the `return coneAo` early-out a few lines above
+    // hands back the same constant when no AO history is allocated at all, and its own comment
+    // already says "returning the fresh trace is also the correct answer there" while the code does
+    // the opposite. That fires only on tiers this scene cannot exercise, so changing it would be a
+    // guess rather than a measurement.
+    float vis = fresh;
     float histV = 0.0;
     float2 velocityPx = 0.0;
     if (gRtHistParams.y > 0.5 && rtReprojectAo(wpos, pixel, histV, velocityPx)) {
