@@ -461,7 +461,8 @@ struct GpuMesh {
     // Whether a COMPUTE PASS writes these vertices, vs. merely living in an RHI buffer. Needed once
     // createMesh started routing every mesh through the factory: every mesh then had a vbBuffer, so
     // meshVertexBuffer's "zero for an ordinary mesh" contract broke and the renderer rebuilt every
-    // static mesh's acceleration structure every frame. Set only by createSkinTargetMesh.
+    // static mesh's acceleration structure every frame. Set by createSkinTargetMesh, and by
+    // createPosedPartMesh (whose vertices ARE a skin target's).
     bool computeWritten = false;
     // Local-space bounding sphere -- AABB midpoint and the distance to a corner, computed once in
     // createMesh. See IDevice::meshBounds for why a corner rather than the farthest actual vertex.
@@ -952,6 +953,7 @@ public:
     // W11: a new mesh sharing `source`'s vertex buffer, with its own index buffer. See
     // IDevice::createMeshSharingVertices (RHI.hpp) for the refcounting and refusal contract.
     MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) override;
+    MeshHandle createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) override;
     bool destroyLineMesh(LineHandle mesh) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
         if (!mesh || mesh > meshes_.size()) return 0;
@@ -1003,10 +1005,12 @@ public:
     void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
     bool drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
     // Shared body of the two above; true when a depth-only draw was actually recorded.
-    bool depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]);
+    // allowComputeWritten: true ONLY from drawMeshDepthOnly (the per-draw path, whose colour draw of
+    // the same handle follows immediately); the frame-wide drawMeshDepthPrepass passes false.
+    bool depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4], bool allowComputeWritten);
     // AUTO-CONSUMED by the next drawMesh() call only -- see the interface comment. Plain assignment:
-    // this records what the CALLER believes, not eligibility; drawMesh() re-checks
-    // meshVertexBuffer(mesh) before trusting it.
+    // this records what the CALLER believes, not eligibility; drawMesh() re-checks it -- a static
+    // mesh via meshVertexBuffer(mesh)==0, a compute-written one only if it is depthOnlyMesh_.
     void setNextDrawPrepassed(bool prepassed) override { nextDrawPrepassed_ = prepassed; }
 
     // Translucency: blended-mesh path -- see IDevice::setDrawBlended (RHI.hpp) for the mechanism
@@ -1375,6 +1379,11 @@ private:
     // call actually used it (a mesh that turns out to be compute-written still clears it) -- see
     // setNextDrawPrepassed's own interface comment for why this must not be sticky.
     bool nextDrawPrepassed_ = false;
+    // The mesh drawMeshDepthOnly() last ACTUALLY depth-drew, or 0. drawMesh() honours
+    // nextDrawPrepassed_ for a compute-written (skinned/soft-body) mesh only when it is this exact
+    // handle: that mesh's posed vertex buffer IS its vbv, so the depth-only draw and the colour draw
+    // read the same bytes. Consumed (zeroed) by every drawMesh() and by beginFrame, like the flag.
+    MeshHandle depthOnlyMesh_ = 0;
     // How many drawMeshDepthPrepass() draws this frame actually issued -- logged on change only,
     // same discipline as lastSceneDrawn_ below, so --depth-prepass with nothing eligible on screen is
     // diagnosable from the log rather than looking identical to the flag being ignored.
@@ -1450,6 +1459,8 @@ private:
     struct SkinSeed { MeshHandle dst; MeshHandle src; };
     std::vector<SkinSeed> skinSeeds_;
     void seedSkinTargets();
+    // Shared body of createMeshSharingVertices and createPosedPartMesh; see the latter.
+    MeshHandle shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed);
 
     // W4: false (the default) reproduces today's behaviour exactly -- every static mesh createMesh()
     // builds lives on the Upload heap. See IDevice::setStaticMeshHeapDefault (RHI.hpp) for the
@@ -3257,9 +3268,18 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
 // See IDevice::createMeshSharingVertices (RHI.hpp) for the full refcounting and refusal contract;
 // this is its D3D12 implementation.
 MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
+    return shareVertices(source, indices, indexCount, /*posed=*/false);
+}
+MeshHandle D3D12Device::createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) {
+    return shareVertices(posedSource, indices, indexCount, /*posed=*/true);
+}
+// Shared body. `posed` flips exactly three things: which source is accepted (compute-written or not),
+// whether every index is range-checked, and whether the result is itself compute-written.
+MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed) {
+    const char* what = posed ? "createPosedPartMesh" : "createMeshSharingVertices";
     if (!device_ || !rhiFactory_ || !indices || indexCount == 0) return 0;
     if (source == 0 || source > meshes_.size()) {
-        AVER_ERROR("[RHI.D3D12] createMeshSharingVertices with an invalid source handle");
+        AVER_ERROR("[RHI.D3D12] {} with an invalid source handle", what);
         return 0;
     }
     const GpuMesh& src = meshes_[source - 1];
@@ -3267,7 +3287,24 @@ MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* 
     // below: a caller offering one of these is expected to fall back to createMesh (IDevice's own
     // contract says so), not to be told why in the log every time an LOD importer merely PROBES
     // whether sharing is available for a given asset.
-    if (!src.alive || src.computeWritten || !src.vb || src.vbv.SizeInBytes == 0) return 0;
+    if (!src.alive || !src.vb || src.vbv.SizeInBytes == 0) return 0;
+    // LOD sharing refuses a compute-written source SILENTLY (its caller probes and falls back); a
+    // posed part REQUIRES one and says so -- its caller's only fallback is the whole-mesh draw.
+    if (src.computeWritten != posed) {
+        if (posed) AVER_WARN("[RHI.D3D12] createPosedPartMesh refused: mesh {} is not compute-written", source);
+        return 0;
+    }
+    // Every index must name a vertex the posed buffer actually has: these indices come from content
+    // (a slice of the base mesh's list), not from this device, and an out-of-range index is a GPU
+    // read past the end of a buffer that compute rewrites every frame.
+    if (posed) {
+        for (u32 k = 0; k < indexCount; ++k)
+            if (indices[k] >= src.vertexCount) {
+                AVER_WARN("[RHI.D3D12] createPosedPartMesh refused: index {} names vertex {} of {}-vertex mesh {}",
+                          k, indices[k], src.vertexCount, source);
+                return 0;
+            }
+    }
 
     // Collapse a sharing CHAIN to its one root rather than letting a sharer become another sharer's
     // source: sharing FROM `source` shares the SAME underlying buffer `source` itself shares (or
@@ -3294,6 +3331,7 @@ MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* 
     for (int a = 0; a < 3; ++a) { m.boundsMin[a] = src.boundsMin[a]; m.boundsMax[a] = src.boundsMax[a]; }
     m.vbOwned = false;
     m.vbSource = root;
+    m.computeWritten = posed;   // a posed part IS posed geometry; see createPosedPartMesh
 
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
     // Through the SAME Upload/Default policy createMesh() itself uses (staticMeshDefaultHeap_ and its
@@ -3305,11 +3343,11 @@ MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* 
         BufferDesc idd;
         idd.bytes = ibytes;
         idd.kind = onDefaultHeap ? BufferKind::Default : BufferKind::Upload;
-        idd.debugName = "mesh indices (shared vertices)";
+        idd.debugName = posed ? "mesh indices (posed part)" : "mesh indices (shared vertices)";
         m.ibBuffer = rhiFactory_->createBuffer(idd);
         RhiBuffer* irb = rhiFactory_->buffer(m.ibBuffer);
         if (!irb || !irb->res) {
-            AVER_ERROR("[RHI.D3D12] createMeshSharingVertices could not allocate its index buffer");
+            AVER_ERROR("[RHI.D3D12] {} could not allocate its index buffer", what);
             if (m.ibBuffer) { rhiFactory_->destroyBuffer(m.ibBuffer); m.ibBuffer = 0; }
             return false;
         }
@@ -3670,6 +3708,7 @@ void D3D12Device::beginFrame() {
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
     drawBlended_ = false;   // sticky per-draw state resets exactly like drawBinding_ just above
+    depthOnlyMesh_ = 0;     // drawMesh consumes it; this is the backstop for an unpaired depth-only draw
     // Cleared here, not right after endFrame's flush drains it: both leave an empty list (nothing
     // between a flush and the next beginFrame calls drawMesh), but clearing only here keeps ONE place
     // deciding "a new frame's captures start empty" -- the same discipline drawBinding_,
@@ -3923,25 +3962,35 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
 // The frame-wide prepass: gated on its switch, and counted -- that count is the pass's own census.
 void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     if (!depthPrepassEnabled_) return;
-    if (depthOnlyDraw(mesh, world, color)) ++depthPrepassDrawsThisFrame_;
+    if (depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false)) ++depthPrepassDrawsThisFrame_;
 }
 
 // One draw's own depth, for an alpha-masked draw -- see IDevice::drawMeshDepthOnly. NOT gated on the
 // frame-wide switch and NOT counted in its census, which describes the frame-wide pass only.
 bool D3D12Device::drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
-    return depthOnlyDraw(mesh, world, color);
+    const bool wrote = depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/true);
+    depthOnlyMesh_ = wrote ? mesh : 0;
+    return wrote;
 }
 
 // The shared body, so the two entry points above cannot drift apart. True when a depth-only draw was
 // actually recorded.
-bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4],
+                                bool allowComputeWritten) {
     if (!hasSwapchain_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return false;
     if (!meshes_[mesh - 1].alive) return false;
-    // Compute-written (skinned) meshes are excluded from the prepass -- see IDevice::
-    // drawMeshDepthPrepass's own comment. The primary contract is the CALLER never offering one
-    // (SandboxApp's prepass walk skips skinnedScene_ entities entirely); this is the defensive
-    // second check, same shape as drawMesh()'s own re-derivation of `prepassed` just below.
-    if (meshVertexBuffer(mesh) != 0) return false;
+    // COMPUTE-WRITTEN (skinned/soft-body) MESHES STAY EXCLUDED FROM THE FRAME-WIDE PREPASS -- that
+    // walk never resolves a posed handle, so it would depth-draw the base mesh -- and are ACCEPTED by
+    // the per-draw path (drawMeshDepthOnly). That is safe for three reasons, each checked:
+    //   - a skin target's vbv/vb point at the compute-written buffer itself (createSkinTargetMesh),
+    //     and D3D12RenderContext::drawMesh binds m.vbv -- so depth and colour read the same bytes;
+    //   - skinning dispatches from SkinnedScene::prePass inside beginFrame, before any walk, and
+    //     leaves the buffer in GeometryRead -- so this frame's pose, in a readable state;
+    //   - the caller's colour draw of the SAME handle follows immediately (GameRender's colour loop).
+    // drawMesh() then honours `prepassed` for it only via depthOnlyMesh_, the exact handle drawn here.
+    // Without that third gate the colour draw would take the Less/write pipeline and reject the equal
+    // depth just written -- the hair would vanish instead of leaking.
+    if (!allowComputeWritten && meshVertexBuffer(mesh) != 0) return false;
     // NO RASTER COLOUR PASS TO CONSUME IT, so no raster depth either. Wireframe draws through the
     // backend's own Less/write pipeline (scenePipeline declines it), which would reject the mesh's
     // own edges against depth written here -- every prepassed mesh vanished in wireframe. And when a
@@ -3999,8 +4048,12 @@ bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
     // AUTO-CONSUME nextDrawPrepassed_ before any early return below, per its own contract: the flag
     // must not leak onto a later, unrelated draw just because this one bailed out early.
-    const bool prepassed = nextDrawPrepassed_ && meshVertexBuffer(mesh) == 0;
+    // A compute-written mesh counts as prepassed ONLY if drawMeshDepthOnly just depth-drew this exact
+    // handle; otherwise its depth may be absent and LessEqual/no-write would drop it entirely.
+    const bool prepassed = nextDrawPrepassed_ &&
+        (meshVertexBuffer(mesh) == 0 || (depthOnlyMesh_ != 0 && mesh == depthOnlyMesh_));
     nextDrawPrepassed_ = false;
+    depthOnlyMesh_ = 0;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     // A destroyed mesh draws NOTHING rather than drawing from a cleared vertex view. This is the
     // other half of not recycling handles: a caller that kept a handle too long gets a visible hole

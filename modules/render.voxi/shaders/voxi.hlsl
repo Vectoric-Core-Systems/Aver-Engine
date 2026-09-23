@@ -1125,7 +1125,8 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
 // clips before it writes), or the colour walk writes that one draw's depth first through
 // IDevice::drawMeshDepthOnly -- and in both cases the colour draw then uses the LessEqual/NO-WRITE
 // twin, which leaves early depth nothing to write. See GameRender.cpp's colour loop for the residuals
-// (skinned alpha-masked meshes, cluster-dispatched geometry, material graphs driving opacity).
+// (cluster-dispatched geometry, material graphs driving opacity; skinned and soft-body meshes ARE
+// covered, via their posed handle).
 //
 // The translucent ONE-LAYER clip is still harmless for the reason originally given: the blended PSO
 // sharing this shader sets depth.write = false (VoxiRenderer.cpp), so there is no depth to leak.

@@ -603,7 +603,8 @@ public:
     // positions cannot exceed the source's own extents.
     //
     // Returns 0 on any refusal -- unsupported backend, dead or invalid source, or a compute-written
-    // source -- and the caller MUST THEN FALL BACK TO createMesh with its own full, independent
+    // source (see createPosedPartMesh for the posed case) -- and the caller MUST THEN FALL BACK TO
+    // createMesh with its own full, independent
     // vertex array, exactly as if this entry point did not exist. A backend that never implements
     // this (D3D11, Null, every mock, and Vulkan until it does) is that fallback path, permanently.
     virtual MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
@@ -648,6 +649,29 @@ public:
     // Zero on failure, and `outVertices` is then untouched.
     virtual MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) {
         (void)source; (void)outVertices; return 0;
+    }
+
+    // A POSED PART: a mesh SHARING a compute-written mesh's vertex buffer (a createSkinTargetMesh
+    // result) with its OWN index buffer -- the per-material split of a skinned mesh, cut over its
+    // live pose. `indices` are in the SOURCE's vertex numbering, i.e. a slice of the base mesh's own
+    // index list, which a skin target shares verbatim.
+    //
+    // WHY IT EXISTS: a mesh naming several materials is split at load into one mesh per slot, but a
+    // skinned entity draws its POSED copy -- a different handle the split was never cut from -- so it
+    // fell back to ONE draw under the entity's own material. A character whose hair cards are their
+    // own material slot never drew them with the hair material at all, so no alpha cut-out ever
+    // applied to them. This builds that split over the pose instead.
+    //
+    // Unlike createMeshSharingVertices: REQUIRES a compute-written source, range-checks every index
+    // against its vertex count, and marks the result compute-written itself, so meshVertexBuffer()
+    // is non-zero for it and every consumer (the frame-wide prepass exclusion, the per-frame BLAS
+    // rebuild, GI-voxelisation and PT-scene exclusion, drawMeshDepthOnly's acceptance) treats it
+    // exactly as the whole posed mesh. Refcounted through the same vertex-share mechanism, so
+    // destroyMesh on the source is refused while a posed part lives, and destroying the part never
+    // frees the shared buffer (that is gated on ownership, not on compute-written). 0 on any refusal;
+    // the caller then keeps the single whole-mesh draw. D3D11/Null/mocks: that fallback, permanently.
+    virtual MeshHandle createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) {
+        (void)posedSource; (void)indices; (void)indexCount; return 0;
     }
 
     // Non-zero when a mesh's vertices are WRITTEN BY COMPUTE rather than uploaded once, and the
@@ -797,8 +821,15 @@ public:
     // (which has no forced early depth and clips BEFORE its write), then drawing its colour with the
     // LessEqual/NO-WRITE twin, leaves early depth nothing to write, so the clip is honoured again.
     //
+    // A COMPUTE-WRITTEN (skinned/soft-body) MESH IS ACCEPTED HERE, unlike drawMeshDepthPrepass: its
+    // posed buffer IS its vertex buffer (a createPosedPartMesh part shares it), and skinning has
+    // already run for this frame by the time any
+    // walk draws, so the colour draw of the same handle that must follow immediately reads identical
+    // vertices. drawMesh honours the prepassed flag for such a mesh only when it is that exact handle
+    // -- otherwise the colour draw would reject its own equal depth and the mesh would vanish.
+    //
     // RETURNS WHETHER DEPTH WAS ACTUALLY WRITTEN, and the caller marks the colour draw prepassed only
-    // on true. False for a skinned mesh, in wireframe, when a feature suppresses the rasterised scene
+    // on true. False in wireframe, when a feature suppresses the rasterised scene
     // (ray-driven primary visibility, a debug view -- there is no raster colour pass to consume the
     // depth, and writing raster depth over the ray-driven pass's own depth would be wrong), or when
     // no feature offers a depth-only pipeline. `color` as for drawMeshDepthPrepass, for the same

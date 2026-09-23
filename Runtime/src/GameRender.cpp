@@ -795,11 +795,35 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             }
             return content.partsFor(mr->mesh);
         }();
+        // ---- A SKINNED ENTITY'S SPLIT, RE-CUT OVER ITS POSE ----
+        //
+        // planEntityDraws applies the per-material split only when the chosen handle IS the one the
+        // split was cut from, so a skinned entity -- drawn through its posed copy, a different handle --
+        // used to take the single-draw branch: ONE draw of the whole posed mesh under the entity's own
+        // material. A character whose hair cards are their own material slot therefore never drew them
+        // with the hair material, and no alpha cut-out ever applied to them; KenneyChar in PTTest (two
+        // materials) had been drawing flat for the same reason.
+        //
+        // Only when the walk's OWN skinning answer is still the chosen handle -- a host substituting a
+        // soft-body or LOD copy keeps the single draw (neither has posed parts). The posed parts ARE
+        // cut from posedMesh, so planning from it makes planEntityDraws' "split applies" test true for
+        // exactly them. Any refusal (no split, no skin streams, a reloaded mesh, a backend without
+        // createPosedPartMesh) returns null and leaves the single whole-mesh draw exactly as before.
+        // Creation cost lands once per skin target, on first sight, in WalkLookup.
+        const std::vector<GameContent::MeshPart>* planParts = parts;
+        rhi::MeshHandle planFrom = handle;
+        if (parts != nullptr && posedMesh != 0 && dec.chosenMesh == posedMesh) {
+            CpuNest lookupNest(CpuSpan::WalkLookup);
+            if (const auto* posed = content.posedPartsFor(device, mr->mesh, handle, posedMesh)) {
+                planParts = posed;
+                planFrom = posedMesh;
+            }
+        }
         PlannedDraw pdraws[kMaxPlannedDraws];
         const u32 pdrawCount = planEntityDraws(
-            handle, dec.chosenMesh,
-            parts ? parts->data() : nullptr,
-            parts ? static_cast<u32>(parts->size()) : 0u,
+            planFrom, dec.chosenMesh,
+            planParts ? planParts->data() : nullptr,
+            planParts ? static_cast<u32>(planParts->size()) : 0u,
             mat, pdraws, kMaxPlannedDraws);
 
         if (depthPass) {
@@ -901,19 +925,22 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // already cover pay the second draw. With --depth-prepass on they are already
                 // covered and this does not fire.
                 //
-                // KNOWN RESIDUALS, stated rather than hidden: a SKINNED alpha-masked mesh (hair
-                // cards) cannot be depth-drawn here -- drawMeshDepthOnly refuses posed vertices and
-                // drawMesh then re-derives prepassed=false -- so it keeps the leak; cluster-dispatched
-                // geometry never reaches this loop; and a material GRAPH driving opacity other than
-                // through the stock alpha can disagree with PSDepthPrepass at cut-out edges, exactly
-                // as it already can under the frame-wide prepass.
+                // SKINNED AND SOFT-BODY MESHES ARE COVERED TOO: their posed handle is depth-drawn here
+                // from the same compute-written buffer its colour draw reads, and the device honours
+                // the prepassed flag for that exact handle (see IDevice::drawMeshDepthOnly). Only an
+                // alpha-masked material can reach this branch, so opaque characters are untouched.
+                //
+                // KNOWN RESIDUALS, stated rather than hidden: cluster-dispatched geometry never
+                // reaches this loop; and a material GRAPH driving opacity other than through the
+                // stock alpha can disagree with PSDepthPrepass at cut-out edges, exactly as it
+                // already can under the frame-wide prepass.
                 if (!prepassedDraw && !dl.look.blended && dl.matConstants &&
                     (static_cast<const pbr::MaterialConstants*>(dl.matConstants)->flags &
                      pbr::MaterialFlag_AlphaMask) != 0u) {
                     // `col` is the exact array drawMesh gets below: the depth shader's alpha test
                     // reads its .a. Marked prepassed ONLY if depth was actually written -- false in
-                    // wireframe, under a scene-suppressing feature, for a skinned mesh, or with no
-                    // depth-only pipeline, and each of those must keep its ordinary pipeline.
+                    // wireframe, under a scene-suppressing feature, or with no depth-only pipeline,
+                    // and each of those must keep its ordinary pipeline.
                     prepassedDraw = device.drawMeshDepthOnly(pd.mesh, &wm.m[0][0], col);
                 }
 #endif

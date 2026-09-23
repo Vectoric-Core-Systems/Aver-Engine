@@ -747,6 +747,11 @@ private:
     // what that distinction was costing.
     std::vector<rhi::MeshHandle> rtGeomMeshes_;
     std::vector<u32> rtGeomFirstVertex_, rtGeomFirstIndex_;
+    // ONE VERTEX SLICE PER VERTEX BUFFER, not per mesh: an LOD or a posed material part shares its
+    // root's vertices under a handle of its own, and gets its root's slice rather than a copy.
+    // Parallel to rtGeomMeshes_: non-zero where that mesh is the one whose copy fills the slice.
+    std::vector<u8> rtGeomCopiesVerts_;
+    std::unordered_map<u64, u32> rtGeomVertSlice_;   // (vb, vertex count) -> first vertex; scratch
 
     // Builds or refreshes the flat table for this frame's draw list. Returns false when it could
     // not be made, which is the signal to fall back to cone-traced reflections.

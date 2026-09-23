@@ -169,6 +169,10 @@ inline u32 planEntityDraws(u32 baseMesh, u32 chosenMesh, const Part* parts, u32 
     }
     // No split applies: either this entity has no parts, or chosenMesh is a substitution (LOD/posed
     // skin/soft-body) that the split was never cut from. One draw, the entity's own material.
+    // A SKINNED entity is no longer normally one of these: drawWorld passes its POSED handle as
+    // `baseMesh` together with that handle's own posed parts (GameContent::posedPartsFor), so the
+    // test above is true for it and it splits like a static mesh. It lands here only when that
+    // posed split was refused, which keeps the old single draw.
     if (chosenMesh != 0 && outCapacity > 0) {
         out[0].mesh = chosenMesh;
         out[0].material = entityMaterial;

@@ -499,6 +499,12 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
     std::unordered_map<u32, u32> remap;
     std::vector<rhi::MeshVertex> pv;
     std::vector<u32> pi;
+    // THE UNREMAPPED SLICES, kept for a SKINNED mesh only. Each part below is compacted and
+    // renumbered, which is right for a static mesh and useless over a posed buffer: a skin target
+    // keeps the BASE mesh's vertex numbering (it shares the base index buffer verbatim), so only a
+    // slice of md.indices in that numbering can be re-cut over the pose. See posedPartsFor.
+    const bool keepBaseIndices = md.hasSkin();
+    std::vector<std::vector<u32>> baseIndices;
 
     for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
         if (sm.indexCount == 0) continue;
@@ -537,6 +543,10 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
             if (!slot.empty()) part.material = aver_scene_material(0, slot.c_str());
         }
         parts.push_back(part);
+        // IN LOCKSTEP with `parts`: pushed only for a part that survived every check above, so
+        // baseIndices[i] is always the slice parts[i] was cut from.
+        if (keepBaseIndices)
+            baseIndices.emplace_back(md.indices.data() + sm.indexStart, md.indices.data() + end);
     }
 
     // ONE SURVIVING PART IS NOT A SPLIT. Falling through to the ordinary single-mesh path costs a
@@ -548,11 +558,69 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
     AVER_INFO("[Mesh] '{}' names {} materials; split into {} part(s) so each draws its own",
               rel, md.materialSlots.size(), parts.size());
     meshParts_[id] = std::move(parts);
+    if (keepBaseIndices) meshPartBaseIndices_[id] = std::move(baseIndices);
 }
 
 const std::vector<GameContent::MeshPart>* GameContent::partsFor(u64 id) const {
     const auto it = meshParts_.find(id);
     return it == meshParts_.end() ? nullptr : &it->second;
+}
+
+const std::vector<GameContent::MeshPart>* GameContent::posedPartsFor(rhi::IDevice& device, u64 id,
+        rhi::MeshHandle baseMesh, rhi::MeshHandle posedMesh) {
+    if (!posedMesh || !baseMesh || posedMesh == baseMesh) return nullptr;
+    if (const auto it = posedParts_.find(posedMesh); it != posedParts_.end())
+        return (it->second.meshId == id && !it->second.parts.empty()) ? &it->second.parts : nullptr;
+    PosedParts& entry = posedParts_[posedMesh];   // recorded now, so a refusal is not retried per frame
+    entry.meshId = id;
+    const auto pit = meshParts_.find(id);
+    const auto bit = meshPartBaseIndices_.find(id);
+    // Every refusal below WARNS, once per posed handle (the entry above caches it): each one leaves
+    // a multi-material character drawing whole under one material, and a log that says nothing
+    // makes that look like the cut-out bug this path exists to fix.
+    if (pit == meshParts_.end() || bit == meshPartBaseIndices_.end() ||
+        bit->second.size() != pit->second.size()) {
+        if (pit != meshParts_.end())   // no parts at all is a single-material mesh: nothing to say
+            AVER_WARN("[Mesh] posed split skipped for mesh {} (posed handle {}): its per-slot index "
+                      "slices were not kept; it draws as one mesh", id, posedMesh);
+        return nullptr;
+    }
+    // PROOF THE POSED COPY IS NUMBERED LIKE THIS UPLOAD, not an assumption: a skin target shares its
+    // source's index buffer verbatim (createSkinTargetMesh), so equal index buffers and equal vertex
+    // counts mean it was cut from `baseMesh` itself. After an editor mesh reload they differ, and the
+    // entity keeps its single whole-mesh draw rather than drawing indices against the wrong vertices.
+    rhi::BufferHandle baseIb = 0, posedIb = 0;
+    u32 baseVc = 0, posedVc = 0;
+    if (!device.meshGeometry(baseMesh, nullptr, &baseIb, &baseVc, nullptr) ||
+        !device.meshGeometry(posedMesh, nullptr, &posedIb, &posedVc, nullptr) ||
+        baseIb == 0 || baseIb != posedIb || baseVc != posedVc) {
+        AVER_WARN("[Mesh] posed split skipped for mesh {}: posed handle {} was not cut from this "
+                  "upload (base {}; reloaded since it was skinned?); it draws as one mesh",
+                  id, posedMesh, baseMesh);
+        return nullptr;
+    }
+    std::vector<MeshPart> out;
+    out.reserve(pit->second.size());
+    for (usize i = 0; i < pit->second.size(); ++i) {
+        MeshPart pp;
+        pp.material = pit->second[i].material;
+        const std::vector<u32>& idx = bit->second[i];
+        if (pit->second[i].mesh && !idx.empty()) {
+            pp.mesh = device.createPosedPartMesh(posedMesh, idx.data(), static_cast<u32>(idx.size()));
+            // ALL OR NOTHING: a half-split character would silently lose the geometry of every part
+            // that failed, where the whole-mesh fallback at least draws all of it.
+            if (!pp.mesh) {
+                for (const MeshPart& q : out) if (q.mesh) device.destroyMesh(q.mesh);
+                AVER_WARN("[Mesh] posed split refused for mesh {} (posed handle {}); it draws as one mesh",
+                          id, posedMesh);
+                return nullptr;
+            }
+        }
+        out.push_back(pp);
+    }
+    entry.parts = std::move(out);
+    AVER_INFO("[Mesh] mesh {}: {} posed part(s) over posed handle {}", id, entry.parts.size(), posedMesh);
+    return &entry.parts;
 }
 
 void GameContent::registerMesh(u64 id, rhi::MeshHandle handle, const std::pair<Vec3, Vec3>& bounds) {
@@ -561,7 +629,14 @@ void GameContent::registerMesh(u64 id, rhi::MeshHandle handle, const std::pair<V
 }
 
 void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles) {
+    // POSED PARTS FIRST: each holds a vertex share on a skin target (which would otherwise refuse its
+    // own destruction while they live), and each was cut from a meshPartBaseIndices_ entry about to go.
+    for (auto& kv : posedParts_)
+        for (const MeshPart& p : kv.second.parts)
+            if (p.mesh) device.destroyMesh(p.mesh);
+    posedParts_.clear();
     for (const u64 id : projectMeshIds_) {
+        meshPartBaseIndices_.erase(id);
         // The split parts are this class's own uploads, and nothing keys anything else on them.
         if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
             for (const MeshPart& p : pit->second)

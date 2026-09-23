@@ -951,7 +951,7 @@ struct GpuMesh {
     BufferHandle vbBuffer = 0;
     BufferHandle ibBuffer = 0;
     u32 vertexCount = 0;
-    // Non-zero only for a createSkinTargetMesh() result; see IDevice::meshVertexBuffer's own
+    // Non-zero only for a createSkinTargetMesh() or createPosedPartMesh() result; see IDevice::meshVertexBuffer's own
     // "cache expiry" contract for why this predicate must stay exact.
     bool computeWritten = false;
     f32 boundsCentre[3] = {0.0f, 0.0f, 0.0f};
@@ -1436,6 +1436,7 @@ public:
     // vbSource fields above. NOT inline: real allocation and (conditionally) a one-shot upload;
     // defined in VulkanDevice.cpp beside createMesh.
     MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) override;
+    MeshHandle createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) override;
     bool destroyMesh(MeshHandle mesh) override;
     bool destroyLineMesh(LineHandle mesh) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
@@ -1481,11 +1482,12 @@ public:
     void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
     bool drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
     // Shared body of the two above; true when a depth-only draw was actually recorded.
-    bool depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]);
+    // allowComputeWritten: true only from drawMeshDepthOnly -- see D3D12Device's twin.
+    bool depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4], bool allowComputeWritten);
     // AUTO-CONSUMED by the very next drawMesh() call, not stored past it (see IDevice). Plain
     // assignment: this only records what the CALLER already believes about the upcoming draw's
-    // eligibility (e.g. a skinned mesh); drawMesh() still re-checks meshVertexBuffer(mesh) before
-    // trusting it, exactly as D3D12Device::drawMesh does.
+    // eligibility; drawMesh() still re-checks it (static via meshVertexBuffer(mesh)==0, compute-
+    // written only if it is depthOnlyMesh_), exactly as D3D12Device::drawMesh does.
     void setNextDrawPrepassed(bool prepassed) override { nextDrawPrepassed_ = prepassed; }
     // Contract on IDevice::sceneDepthTexture (RHI.hpp); mirrors D3D12Device::sceneDepthTexture
     // (D3D12Device.cpp:1993-2006). Lazily (re)adopts depthBuffer_ into rhiFactory_'s texture table
@@ -1612,6 +1614,8 @@ private:
     void notifyRenderTargetsChanged();
     bool ensureViewportTexture();
     void seedSkinTargets();
+    // Shared body of createMeshSharingVertices and createPosedPartMesh; see D3D12Device's twin.
+    MeshHandle shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed);
     void packAtmosphere(const SkyAtmosphere& s);
 
     // ---- bootstrap ----
@@ -1736,6 +1740,8 @@ private:
     // block's comment for why nextDrawPrepassed_ must be auto-consumed rather than sticky.
     bool depthPrepassEnabled_ = false;   // --depth-prepass; OFF reproduces pre-existing behaviour
     bool nextDrawPrepassed_ = false;
+    // Mesh drawMeshDepthOnly() last actually depth-drew, or 0; see D3D12Device's twin.
+    MeshHandle depthOnlyMesh_ = 0;
     // Draws issued by drawMeshDepthPrepass this frame -- NOT wired to a log line the way D3D12's
     // depthPrepassDrawsLastFrame_/depthPrepassDrawsThisFrame_ pair is (that pair only exists to
     // feed an AVER_INFO on change, which nothing in this backend's endFrame does yet); kept as one

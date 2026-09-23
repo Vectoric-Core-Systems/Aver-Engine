@@ -1933,9 +1933,18 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
 // vbOwned/vbShares/vbSource fields for the bookkeeping this mirrors from the existing
 // ibOwned/ibShares/ibSource (createSkinTargetMesh) scheme, in the opposite direction.
 MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
+    return shareVertices(source, indices, indexCount, /*posed=*/false);
+}
+MeshHandle VulkanDevice::createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) {
+    return shareVertices(posedSource, indices, indexCount, /*posed=*/true);
+}
+// Shared body -- D3D12Device::shareVertices' twin. `posed` flips which source is accepted, whether
+// every index is range-checked, and whether the result is itself compute-written.
+MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed) {
+    const char* what = posed ? "createPosedPartMesh" : "createMeshSharingVertices";
     if (!device_ || !rhiFactory_ || !indices || indexCount == 0) return 0;
     if (source == 0 || source > meshes_.size()) {
-        AVER_ERROR("[RHI.Vulkan] createMeshSharingVertices with an invalid source handle");
+        AVER_ERROR("[RHI.Vulkan] {} with an invalid source handle", what);
         return 0;
     }
     const GpuMesh& src = meshes_[source - 1];
@@ -1944,9 +1953,19 @@ MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32*
     // last posed it -- sharing it would make every sharer's geometry jitter with that pose instead
     // of drawing its own, unposed LOD, which is not a bug a caller would think to suspect. RHI.hpp's
     // own contract states this refusal explicitly.
-    if (src.computeWritten) {
-        AVER_WARN("[RHI.Vulkan] createMeshSharingVertices refused: source mesh {} is compute-written (a skin target)", source);
+    if (src.computeWritten != posed) {
+        if (posed) AVER_WARN("[RHI.Vulkan] createPosedPartMesh refused: mesh {} is not compute-written", source);
+        else       AVER_WARN("[RHI.Vulkan] createMeshSharingVertices refused: source mesh {} is compute-written (a skin target)", source);
         return 0;
+    }
+    // Every index must name a vertex the posed buffer has -- see D3D12Device::shareVertices.
+    if (posed) {
+        for (u32 k = 0; k < indexCount; ++k)
+            if (indices[k] >= src.vertexCount) {
+                AVER_WARN("[RHI.Vulkan] createPosedPartMesh refused: index {} names vertex {} of {}-vertex mesh {}",
+                          k, indices[k], src.vertexCount, source);
+                return 0;
+            }
     }
 
     // THE BUFFER THIS SHARE ACTUALLY POINTS AT: `source` itself when source owns its vertices, or
@@ -1962,9 +1981,10 @@ MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32*
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
     const bool useDefaultHeap = staticMeshDefaultHeap_;
     const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
-    BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = "mesh indices (LOD, shared vertices)";
+    const char* ibName = posed ? "mesh indices (posed part)" : "mesh indices (LOD, shared vertices)";
+    BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = ibName;
     const BufferHandle ibBuffer = rhiFactory_->createBuffer(idd);
-    if (!ibBuffer) { AVER_ERROR("[RHI.Vulkan] createMeshSharingVertices could not allocate its index buffer"); return 0; }
+    if (!ibBuffer) { AVER_ERROR("[RHI.Vulkan] {} could not allocate its index buffer", what); return 0; }
     RhiBuffer* irb = rhiFactory_->buffer(ibBuffer);
     if (!irb || !irb->buffer) { rhiFactory_->destroyBuffer(ibBuffer); return 0; }
 
@@ -1976,6 +1996,7 @@ MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32*
     m.vertexCount = rootMesh.vertexCount;
     m.vbOwned = false;
     m.vbSource = root;
+    m.computeWritten = posed;   // a posed part IS posed geometry; see createPosedPartMesh
 
     m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
     m.ibBuffer = ibBuffer;
@@ -2005,11 +2026,11 @@ MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32*
                           "heap for this mesh (further meshes still try the Default heap)");
             }
             rhiFactory_->destroyBuffer(m.ibBuffer);
-            BufferDesc idd2; idd2.bytes = ibytes; idd2.kind = BufferKind::Upload; idd2.debugName = "mesh indices (LOD, shared vertices)";
+            BufferDesc idd2; idd2.bytes = ibytes; idd2.kind = BufferKind::Upload; idd2.debugName = ibName;
             m.ibBuffer = rhiFactory_->createBuffer(idd2);
             irb = rhiFactory_->buffer(m.ibBuffer);
             if (!irb || !irb->buffer) {
-                AVER_ERROR("[RHI.Vulkan] createMeshSharingVertices could not allocate its index buffer on the Upload-heap fallback");
+                AVER_ERROR("[RHI.Vulkan] {} could not allocate its index buffer on the Upload-heap fallback", what);
                 if (m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
                 return 0;
             }
@@ -2422,8 +2443,12 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     // AUTO-CONSUME nextDrawPrepassed_ before any early return, per its contract (RHI.hpp:462-475),
     // same as D3D12Device::drawMesh (D3D12Device.cpp:3096-3100): the flag must not leak onto a later,
     // unrelated draw just because this one bailed out early (dead mesh, no swapchain).
-    const bool prepassed = nextDrawPrepassed_ && meshVertexBuffer(mesh) == 0;
+    // A compute-written mesh counts as prepassed ONLY if drawMeshDepthOnly just depth-drew this exact
+    // handle -- see D3D12Device::drawMesh's twin.
+    const bool prepassed = nextDrawPrepassed_ &&
+        (meshVertexBuffer(mesh) == 0 || (depthOnlyMesh_ != 0 && mesh == depthOnlyMesh_));
     nextDrawPrepassed_ = false;
+    depthOnlyMesh_ = 0;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     if (!meshes_[mesh - 1].alive) return;
     // `blended` explicit and false: TRANSLUCENT MESHES ARE D3D12-ONLY TODAY. IDevice::setDrawBlended
@@ -2525,18 +2550,20 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
 // (IDevice::drawMeshDepthOnly, for alpha-masked draws) is neither, and both share one body.
 void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     if (!depthPrepassEnabled_) return;
-    if (depthOnlyDraw(mesh, world, color)) ++depthPrepassDrawsThisFrame_;
+    if (depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false)) ++depthPrepassDrawsThisFrame_;
 }
 bool VulkanDevice::drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
-    return depthOnlyDraw(mesh, world, color);
+    const bool wrote = depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/true);
+    depthOnlyMesh_ = wrote ? mesh : 0;
+    return wrote;
 }
-bool VulkanDevice::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+bool VulkanDevice::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4],
+                                 bool allowComputeWritten) {
     if (!hasSwapchain_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return false;
     if (!meshes_[mesh - 1].alive) return false;
-    // Compute-written (skinned) meshes are excluded from the prepass (see IDevice::
-    // drawMeshDepthPrepass). Primary contract is the CALLER never offering one; this is the
-    // defensive second check, mirroring drawMesh()'s own `prepassed` re-derivation via meshVertexBuffer().
-    if (meshVertexBuffer(mesh) != 0) return false;
+    // Compute-written meshes: excluded from the FRAME-WIDE prepass, accepted by the per-draw path
+    // (m.vb IS the posed buffer; drawMesh honours `prepassed` via depthOnlyMesh_). See D3D12's twin.
+    if (!allowComputeWritten && meshVertexBuffer(mesh) != 0) return false;
     // No raster colour pass to consume it, so no raster depth -- see D3D12Device::depthOnlyDraw.
     if (wireframe_) return false;
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return false;
@@ -2672,6 +2699,7 @@ void VulkanDevice::beginFrame() {
 
     postRing_[frameIndex_].used = 0;
     drawBinding_ = defaultDrawBinding_;
+    depthOnlyMesh_ = 0;   // backstop; drawMesh consumes it -- see D3D12Device's beginFrame
     seedSkinTargets();
 
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));

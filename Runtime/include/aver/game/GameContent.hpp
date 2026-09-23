@@ -185,6 +185,19 @@ public:
     // for the whole mesh whenever this returns non-null.
     const std::vector<MeshPart>* partsFor(u64 id) const;
 
+    // The split above RE-CUT OVER A POSED COPY: one IDevice::createPosedPartMesh per part,
+    // index-for-index with partsFor(id) (same materials; mesh 0 where the base part is 0). Built once
+    // per posed handle on first ask, and cached. nullptr -- cached too -- when the mesh has no split,
+    // carries no skin streams, the posed copy was not cut from THIS upload of `baseMesh` (its index
+    // buffer differs, e.g. across an editor mesh reload), or the device refuses (D3D11). A null answer
+    // means "keep the single whole-mesh draw", which is exactly the behaviour before this existed.
+    //
+    // WHY: a skinned entity draws its POSED copy, a different handle from the one partsFor's split was
+    // cut from, so it used to draw as ONE mesh under the entity's own material -- a character whose
+    // hair cards are their own material slot never drew them with the hair material.
+    const std::vector<MeshPart>* posedPartsFor(rhi::IDevice& device, u64 id,
+                                               rhi::MeshHandle baseMesh, rhi::MeshHandle posedMesh);
+
     // Forgets every project mesh, destroying its split parts and its depth proxy. The base handle is
     // destroyed too unless `destroyBaseHandles` is false, which only forgets it: the editor's mesh
     // reload passes false, because caches keyed by MeshHandle (its depth proxies and LOD ladders among
@@ -241,6 +254,16 @@ private:
     std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxyMap_;
     // mesh id -> its per-material split, for a mesh whose .ocmesh names more than one. See MeshPart.
     std::unordered_map<u64, std::vector<MeshPart>> meshParts_;
+    // mesh id -> per part, index-for-index with meshParts_[id]: that part's slice of md.indices
+    // UNREMAPPED, i.e. in the base mesh's vertex numbering, which a skin target shares verbatim.
+    // Kept only for a mesh with skin streams (md.hasSkin()), the only kind SkinnedScene poses. The
+    // parts themselves are compacted and renumbered, so their own indices cannot be reused over a
+    // posed buffer -- this is the one piece of information the split used to throw away.
+    std::unordered_map<u64, std::vector<std::vector<u32>>> meshPartBaseIndices_;
+    // posed MeshHandle -> its posed parts. `parts` empty = refused, cached so it is not retried every
+    // frame. Keyed by handle: RHI handles are never recycled (IDevice::destroyMesh's contract).
+    struct PosedParts { u64 meshId = 0; std::vector<MeshPart> parts; };
+    std::unordered_map<rhi::MeshHandle, PosedParts> posedParts_;
     MeshLoadedFn meshLoaded_ = nullptr;
     void* meshLoadedUser_ = nullptr;
     bool buildDepthProxies_ = true;

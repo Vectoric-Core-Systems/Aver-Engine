@@ -2780,16 +2780,26 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
 
     rtGeomFirstVertex_.clear();
     rtGeomFirstIndex_.clear();
+    rtGeomCopiesVerts_.clear();
+    rtGeomVertSlice_.clear();
     rtGeomFirstVertex_.reserve(rtGeomMeshes_.size());
     rtGeomFirstIndex_.reserve(rtGeomMeshes_.size());
+    rtGeomCopiesVerts_.reserve(rtGeomMeshes_.size());
     u32 totalVerts = 0, totalIndices = 0;
     for (rhi::MeshHandle h : rtGeomMeshes_) {
         rhi::BufferHandle vb = 0, ib = 0;
         u32 vc = 0, ic = 0;
         if (!dev_->meshGeometry(h, &vb, &ib, &vc, &ic)) return false;
-        rtGeomFirstVertex_.push_back(totalVerts);
+        // SHARED VERTICES, ONE SLICE. createMeshSharingVertices (LODs) and createPosedPartMesh (a
+        // skinned mesh's per-material parts) hand out handles that name the SAME vertex buffer at
+        // the SAME count with indices in its numbering, so the root's slice is byte-for-byte what a
+        // copy would hold. A two-material character used to put its whole posed buffer in twice.
+        const u64 sliceKey = (static_cast<u64>(vb) << 32) | vc;   // both u32: exact, no collisions
+        const auto [sit, fresh] = rtGeomVertSlice_.try_emplace(sliceKey, totalVerts);
+        rtGeomFirstVertex_.push_back(sit->second);
         rtGeomFirstIndex_.push_back(totalIndices);
-        totalVerts   += vc;
+        rtGeomCopiesVerts_.push_back(fresh ? 1u : 0u);
+        if (fresh) totalVerts += vc;
         totalIndices += ic;
     }
 
@@ -2860,13 +2870,18 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     // reflection ray reading this later would see a resource the runtime still considers a copy dest.
     ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
     ctx.bufferBarrier(rtIndices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    // TWO COPIES PER DISTINCT MESH, where this used to issue two per INSTANCE.
+    // TWO COPIES PER DISTINCT MESH, where this used to issue two per INSTANCE -- one, for a mesh
+    // whose vertex slice another handle's copy already fills.
+    u32 distinctSlices = 0;
     for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
         rhi::BufferHandle vb = 0, ib = 0;
         u32 vc = 0, ic = 0;
         if (!dev_->meshGeometry(rtGeomMeshes_[m], &vb, &ib, &vc, &ic)) return false;
-        ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                       static_cast<u64>(rtGeomFirstVertex_[m]) * sizeof(rhi::MeshVertex), 0);
+        if (rtGeomCopiesVerts_[m]) {
+            ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                           static_cast<u64>(rtGeomFirstVertex_[m]) * sizeof(rhi::MeshVertex), 0);
+            ++distinctSlices;
+        }
         ctx.copyBuffer(rtIndices_, ib, static_cast<u64>(ic) * sizeof(u32),
                        static_cast<u64>(rtGeomFirstIndex_[m]) * sizeof(u32), 0);
     }
@@ -2877,9 +2892,9 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     rtGeometryReady_ = true;
     res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), totalVerts, 0);
     res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), totalIndices, 0);
-    AVER_INFO("[Voxi] ray-traced reflection table: {} instances over {} distinct mesh(es), "
-              "{} vertices, {} indices",
-              rtInstanceData_.size(), rtGeomMeshes_.size(), totalVerts, totalIndices);
+    AVER_INFO("[Voxi] ray-traced reflection table: {} instances over {} distinct mesh(es) "
+              "({} vertex slice(s)), {} vertices, {} indices",
+              rtInstanceData_.size(), rtGeomMeshes_.size(), distinctSlices, totalVerts, totalIndices);
     return true;
 }
 
