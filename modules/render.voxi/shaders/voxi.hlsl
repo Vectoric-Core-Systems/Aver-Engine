@@ -143,12 +143,12 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     // y WAS SPARE; NOW the live GI radiance ceiling (Settings::giRadianceCeiling) -- see
     // AVER_VOX_MAXRAD below, which reads this field with a fallback to today's 16.0 literal.
-    // z/w WERE ALSO SPARE; NOW Settings::giRestirDepthThreshold / giRestirNormalThreshold -- RTXDI's
-    // own reuse-similarity tolerances (stparams.depthThreshold/normalThreshold,
-    // voxi_restir.hlsli's giRestirIndirect), lifted out of a shader literal so the moving-camera
-    // ReSTIR GI fade bisection (gAmbientParams.w's own comment above has the state of it) can sweep
-    // them without a rebuild. 0.1 / 0.5 are the DEFAULTS (Voxi.hpp) and reproduce the literals they
-    // replace exactly, so nothing about the image moves until one of them is set to something else.
+    // z = 1 when ReSTIR GI is the CHOSEN diffuse estimator (VoxiRenderer::giRestirWanted(), a
+    // settings-level answer), 0 otherwise -- read by PSVoxel to leave the sky out of the volume. NOT
+    // gGiRestirParams.x, which also drops to 0 on a frame the estimator merely cannot run (the GI
+    // debug view, an empty TLAS): keying the bake on that rebuilt the volume twice per debug-view
+    // toggle. w is spare, written 0. (z/w briefly carried RTXDI's reuse tolerances during the ReSTIR
+    // fade bisection; those went back to literals in voxi_restir.hlsli.)
     float4   gViewParams;
     // RTXDI ReSTIR GI control (Settings::giMode) -- mirrors FrameConstants::giRestirParams, also
     // appended at the end for the same reason gViewParams was. x = 1 while giMode==1 is ACTUALLY
@@ -2561,13 +2561,34 @@ void PSVoxel(VoxOut i) {
     // A cone that terminated on solid geometry saw no sky; one that ran out of volume saw all of it.
     // traceCone accumulates occlusion in .a and treats leaving the volume as unoccluded, which is
     // the correct reading of "this voxel is open to the sky" for exactly this purpose.
+    //
+    // ...BUT ONLY APPROXIMATELY, AND BADLY INDOORS AT A FINE VOLUME. The volume holds one-voxel shells
+    // of surfaces, and a 60-degree cone a few metres out samples mip 5+, where a shell covers ~2% of
+    // a cell -- so the cone sees through a roof and a voxel deep inside an arcade is handed nearly the
+    // open sky. MEASURED at 512^3 on PTTest's gallery (sun 85.6 deg), painting each visible surface
+    // with its own voxel: sunlit surfaces within 1.3x of the path tracer, shadowed interior ones
+    // 30-350x too bright. Taking the sky term out alone brought the whole frame from 0.55 to 0.011
+    // (path tracer 0.015).
     const float skyVis = saturate(1.0 - room.a);
+    // SO WHILE ReSTIR GI IS THE ESTIMATOR, THE VOLUME CARRIES NO SKY. That estimator traces the sky's
+    // visibility with real rays -- its candidate's miss, and at Half/Full the candidate hit's own
+    // second ray -- and reads this volume only for SURFACE-bounced light, where the leaked sky above
+    // counted 3-7x over the path tracer. Keyed on gViewParams.z, the SETTING (see its cbuffer
+    // comment for why not gGiRestirParams.x); VoxiRenderer::voxelSkyInjected() is the same test, and
+    // the rebuild gate and the GI cache key both carry it, so switching giMode rebakes rather than
+    // reusing a volume baked under the other rule.
+    //
+    // WHAT STILL READS THE SKY FROM HERE and so loses it under ReSTIR: GI-lit particles (their whole
+    // lighting is this volume), the rough-specular cone fallback, and the cone gather on a frame
+    // ReSTIR is chosen but cannot run (the GI debug view). All were reading the leaked sky above;
+    // indoors they get darker and closer to right, in open shade darker than right.
+    const float skyInject = gViewParams.z > 0.5 ? 0.0 : 1.0;
 
     // Exitant radiance, not radiosity: the sun term is an irradiance so it takes the 1/PI, the sky
     // term is already a radiance so it does not, and the feedback term is already exitant radiance
     // gathered from surfaces that have themselves been through this same shader.
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility / PI
-                                + averSkyIrradiance(N) * gAmbient.r * skyVis
+                                + averSkyIrradiance(N) * gAmbient.r * skyVis * skyInject
                                 + room.rgb * AVER_VOX_FEEDBACK);
     radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
 

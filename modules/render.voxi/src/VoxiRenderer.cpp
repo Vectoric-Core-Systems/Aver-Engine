@@ -1275,12 +1275,13 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // viewParams's comment (VoxiRenderer.hpp) for why .y is safe to repurpose. Sent every frame from
     // this already-per-frame block, same as viewParams[0] directly above.
     cb_.viewParams[1] = settings_.giRadianceCeiling;
-    // .z/.w ARE SPARE. Both briefly carried dials while the moving-camera ReSTIR GI fade was
-    // bisected -- RTXDI's two reuse-similarity tolerances, then a boiling-filter strength. Captures
-    // retired all three (the tolerances measured identical to their own defaults; the filter cost
-    // 13% of the settled image's brightness and left the overshoot), so the literals are back in
-    // voxi_restir.hlsli and these two are free again. Written as 0 so a stale value cannot linger.
-    cb_.viewParams[2] = 0.0f;
+    // .z: whether ReSTIR GI is the chosen estimator, which decides whether PSVoxel bakes the sky into
+    // the volume (voxelSkyInjected, and PSVoxel's own comment). Written here, ahead of the rebuild
+    // gate and voxelizePass, from the SETTING -- never from giRestirParams[0], which also reads 0 on
+    // a debug-view or empty-TLAS frame and would rebake the volume on every such flip.
+    // .w is spare, written 0 so a stale value cannot linger. (Both briefly carried dials during the
+    // moving-camera ReSTIR GI fade bisection; those literals are back in voxi_restir.hlsli.)
+    cb_.viewParams[2] = giRestirWanted() ? 1.0f : 0.0f;
     cb_.viewParams[3] = 0.0f;
     // y IS THE COHERENCE TILE EDGE, and it is sent whether or not the rays are on: the shader divides
     // the pixel coordinate by it unconditionally, so a 0 arriving here would be a division by zero in
@@ -2056,6 +2057,7 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
     if (!giSnapValid_) return reject(0, "no snapshot yet (expected once)");
     if (giSnapExtent_ != extent_) return reject(1, "volume extent changed");
     for (u32 i = 0; i < 3; ++i) if (giSnapCenter_[i] != center_[i]) return reject(2, "volume centre changed");
+    if (giSnapVoxelSky_ != voxelSkyInjected()) return reject(6, "ReSTIR GI toggled (volume sky in/out)");
     // The whole sky struct, byte for byte -- sunDirection, sunColor, sunIntensity, ground albedo,
     // sky-light intensity all live here and PSVoxel reads every one. Comparing bytes rather than a
     // chosen field list keeps this correct when a field is ADDED to SkyAtmosphere.
@@ -2227,6 +2229,11 @@ fmt::GiCacheKey VoxiRenderer::giCacheKey() const {
     const u8* p = reinterpret_cast<const u8*>(&sky);
     u64 h = 1469598103934665603ull;
     for (usize i = 0; i < sizeof(sky); ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    // Folded into the sky's key because it IS the sky's part of the bake: with ReSTIR GI chosen,
+    // PSVoxel leaves the sky out (see voxelSkyInjected), and a cached volume from the other rule would
+    // otherwise be restored as if it matched. Only for the sky-less bake, so every key written before
+    // this existed -- all of them sky-injected -- still hits.
+    if (!giSnapVoxelSky_) { h ^= 0x5Cu; h *= 1099511628211ull; }
     k.skyKey = h;
     for (u32 i = 0; i < 3; ++i) k.centre[i] = giSnapCenter_[i];
     k.extent     = giSnapExtent_;
@@ -2595,6 +2602,7 @@ void VoxiRenderer::takeGiSnapshot() {
     if (dev_) { giSky_ = rhi::SkyAtmosphere{}; giSky_ = dev_->skyAtmosphere(); }
     for (u32 i = 0; i < 3; ++i) giSnapCenter_[i] = center_[i];
     giSnapExtent_ = extent_;
+    giSnapVoxelSky_ = voxelSkyInjected();
     giSnapValid_ = true;
 }
 

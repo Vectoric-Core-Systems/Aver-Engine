@@ -73,6 +73,12 @@
 // is worked out. Named once so the two gates cannot drift apart again; they already had.
 #define AVER_GI_MIN_COS 0.05
 
+// The texture footprint of a candidate hit's material maps, as the tangent of a cone half-angle
+// around the candidate ray: the hit samples a footprint of this times the ray length. A diffuse
+// bounce needs the hit's local AVERAGE colour and metalness, not its texel detail, so this is wide
+// on purpose -- a coarser mip is cheaper and no less right on average. See giTraceInitialCandidate.
+#define AVER_GI_HIT_TEX_CONE 0.1
+
 // REBLUR's hit-distance normalisation constants, MIRRORING aver::render::nrd::Denoiser::ReblurTuning
 // (modules/render.nrd/include/aver/render/nrd/NrdDenoiser.hpp), which is what actually configures the
 // denoiser. NRD normalises a hit distance by (A + |viewZ|*B) * lerp(C, 1, smc) and REQUIRES the
@@ -782,12 +788,31 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     const RtMaterial mat = gRtMaterials[inst.materialIndex];
     const float3 L = normalize(gLightDir.xyz);
 
-    // THE SAME UNTEXTURED SURFACE PSRayDriven BUILDS WHEN AVER_RT_BINDLESS ISN'T COMPILED IN --
-    // per-instance factor times per-material factor, no maps sampled. A second bounce is exactly
-    // where that approximation is cheapest to accept: RTXDI resamples this radiance over many
-    // frames (and, once a spatial pass lands, neighbours), so a flat-shaded hit converges toward a
-    // textured one's LOW-FREQUENCY answer, which is the only part indirect light hands back to the
-    // FIRST surface anyway.
+    // ---- THE HIT'S OWN MAPS, NOT ITS FACTORS ALONE ----
+    //
+    // This used to build the surface from factors only, on the reasoning that a flat-shaded hit
+    // converges toward a textured one's low-frequency answer. It does not: a glTF factor is a
+    // MULTIPLIER on its map, not an average of it. Sponza authors metallicFactor 1.0 and keeps the
+    // real (near-zero) metalness in the metal-rough map's blue channel, so every textured hit read as
+    // a pure white METAL -- kdAlbedo 0, so no diffuse bounce and no multi-bounce at all (the
+    // `kdAlbedo * indY` below multiplied every indirect term by zero), and a single bounce that was
+    // nothing but a white specular sun glint.
+    //
+    // MEASURED, PTTest NewSponza, sun 85.6 deg, gallery pose, linear HDR means against the converged
+    // path tracer at the same bounce depth (--tonemap 0, fog off):
+    //   single bounce, factor-only        0.0168 whole   0.00338 inner wall  (PT 1 bounce 0.0095 / 0.0012)
+    //   single bounce, base colour only   0.0099         0.00053
+    //   single bounce, base + metal-rough 0.0112         0.00096
+    // and with the factor-only surface, multi-bounce added 0.0004 to a wall the path tracer lights
+    // 85% by multi-bounce (4 bounces 0.0080 against 1 bounce 0.0012).
+    //
+    // The same maps PSRayDriven's own surface and rtReflection's hit sample, at a footprint rather
+    // than mip 0: a diffuse bounce only needs the local average colour, and mip 0 is the throughput
+    // trap rtReflection's own comment measures. AVER_GI_HIT_TEX_CONE sets that footprint.
+    //
+    // WITHOUT AVER_RT_BINDLESS (raster PSMainVoxi's RT variant) no map can be read here, so that
+    // variant keeps the factor-only surface and its metal-for-glTF error. Ray-driven is the default
+    // and is always bindless.
     AverSurface s = (AverSurface)0;
     s.N           = hitN;
     s.V           = -dir;
@@ -800,9 +825,30 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         const float  vl2 = dot(VL, VL);
         s.H = vl2 > 1e-12 ? VL * rsqrt(vl2) : s.N;
     }
-    s.albedo      = inst.albedo * mat.baseColorFactor.rgb;
-    s.metallic    = saturate(inst.metallic * mat.metallicFactor);
-    s.rough       = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);
+    float4 hitMapBase = float4(1, 1, 1, 1);
+    float4 hitMapMR   = float4(1, 1, 1, 1);
+#ifdef AVER_RT_BINDLESS
+    {
+        const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
+        const float2 huv    = averRtSurfaceUV(mat, inst, hitPos, hitN, meshUV);
+        // The footprint basis is rtReflection's: two in-plane directions at the hit, scaled.
+        const float  rad = AVER_GI_HIT_TEX_CONE * q.CommittedRayT();
+        const float3 hup = abs(hitN.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 ht  = normalize(cross(hup, hitN));
+        const float3 hb  = cross(hitN, ht);
+        float2 hgx, hgy;
+        averRtUvGrad(mat, inst, hitN,
+                     gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
+                     gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
+                     ht * rad, hb * rad, hgx, hgy);
+        hitMapBase = averRtSampleSlot(mat, 0, huv, hgx, hgy, float4(1, 1, 1, 1));
+        hitMapMR   = averRtSampleSlot(mat, 1, huv, hgx, hgy, float4(1, 1, 1, 1));
+    }
+#endif
+    // glTF's metal-rough channels, as PSRayDriven reads them: G roughness, B metalness.
+    s.albedo      = inst.albedo * mat.baseColorFactor.rgb * hitMapBase.rgb;
+    s.metallic    = saturate(inst.metallic * mat.metallicFactor * hitMapMR.b);
+    s.rough       = clamp(inst.roughness * mat.roughnessFactor * hitMapMR.g, 0.045, 1.0);
     s.ndv         = saturate(dot(s.N, s.V));
     s.f90         = mat.f90;
     s.reflectance = mat.reflectance;
@@ -863,11 +909,11 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // and this comment replaces the one that overrode it.
     //
     // WHAT IT COSTS, STATED RATHER THAN LEFT TO BE REDISCOVERED: a metallic hit has kdAlbedo = 0, so
-    // it contributes almost NO bounce light and reads as a black hole for GI. That is a real gap and
-    // it is still open -- F2 below does not touch it, since s.kdAlbedo multiplies whatever indY
-    // resolves to either way. Closing it needs a term weighted by metalness AND scaled/occluded the
-    // way the diffuse ambient is -- not an unconditional sky specular on every surface, which is what
-    // this reverts.
+    // it contributes almost NO bounce light and reads as a black hole for GI. Closing that needs a
+    // term weighted by metalness AND scaled/occluded the way the diffuse ambient is -- not an
+    // unconditional sky specular on every surface, which is what this reverts. (Until the hit read its
+    // metal-rough map, above, EVERY textured glTF hit was such a black hole; genuine metals are now
+    // the only ones left.)
     //
     // ---- F2 (R2): THE DIFFUSE HALF NOW OWNS ITS OWN VISIBILITY, WHERE IT USED TO HAVE NONE ----
     //
@@ -896,7 +942,9 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // legacy value above. gVoxelParams.y (giIntensity) is deliberately NOT applied on this branch: it
     // is applied exactly once, to the WHOLE estimate, at giRestirIndirect's own `est` -- applying it
     // here too would double it on this one bounce alone. Approximation carried over unchanged from the
-    // volume's own injection: the value already contains AVER_VOX_FEEDBACK 3.0.
+    // volume's own injection: the value already contains AVER_VOX_FEEDBACK 3.0. It contains NO SKY
+    // while ReSTIR GI runs (PSVoxel's own comment says why): the sky reaches this bounce only through
+    // this ray's miss, which is the one place its visibility is actually traced.
     //
     // THE NaN-SAFE CLAMP AT THIS FUNCTION'S OWN END STILL RUNS LAST, after `radiance` (built from indY
     // below, same as before) leaves this block -- F2 changes what feeds that clamp, not the clamp
@@ -918,15 +966,22 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         // ---- RECONSTRUCTED: ONE VOXEL-CONE MARCH STANDS IN FOR THE TRACED RAY ----
         // traceCone's own contract (voxi_cone.hlsli:62; forward-declared in voxi_rt.hlsli for this
         // exact reason -- see that prototype's own comment) returns premultiplied radiance plus
-        // coverage, and PSVoxel already reads 1 - a as "this direction is open to the sky"
-        // (voxi.hlsl:2326-2330's skyVis) -- so `indY ~= V*E_sky + (1-V)*L_hit` here is the SAME
-        // reading applied at a second-bounce hit instead of an injected voxel, the structure the
-        // traced ray's own expectation has. gVoxelParams.w guards on the volume being enabled at
-        // all, matching every other conditional voxel read in this file; with it off the legacy
-        // unoccluded sky is the only thing left to fall back to.
+        // coverage. gVoxelParams.w guards on the volume being enabled at all, matching every other
+        // conditional voxel read in this file; with it off the legacy unoccluded sky is the only
+        // thing left to fall back to.
+        //
+        // THE CONE'S RADIANCE ONLY -- NO `sky * (1 - cone.a)` TERM. This used to read 1 - a as "this
+        // direction is open to the sky", as PSVoxel does, and it is not: the volume holds one-voxel
+        // SHELLS of surfaces, and a 60-degree cone a few metres out samples mip 5+, where a shell
+        // covers ~2% of a cell. The cone sees through a roof. MEASURED at PTTest's gallery (sun 85.6
+        // deg, linear means, once the hit's maps were read so the term was no longer multiplied by
+        // zero): keeping it put the whole frame at 0.098 against the path tracer's 0.0149 -- 6.6x.
+        // So Reconstructed has no sky at a candidate hit, and interiors lit through openings read
+        // darker than the path tracer (inner wall 0.0015 against 0.0080); Half and Full trace that
+        // sky and do not have this gap.
         if (gVoxelParams.w > 0.5) {
             const float4 cone = traceCone(hitPos, s.N, AVER_VOX_INJECT_APERTURE);
-            indY = averSkyIrradiance(s.N) * gAmbient.r * saturate(1.0 - cone.a) + min(cone.rgb, AVER_VOX_MAXRAD);
+            indY = min(cone.rgb, AVER_VOX_MAXRAD);
         } else indY = averSkyIrradiance(s.N) * gAmbient.r;
     } else if (f2Path == 2u) {
         // ---- HALF, NON-TRACED PIXEL WITH A VALID RECONSTRUCTION: NO RAY, NO CONE, ONE RATIO ----

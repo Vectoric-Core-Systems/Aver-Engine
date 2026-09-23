@@ -1416,6 +1416,12 @@ private:
     bool giSnapshotUnchanged() const;
     void takeGiSnapshot();
     u64 giDrawsKey() const;
+    // Whether PSVoxel bakes the sky into the volume: the negation of what prePass writes to
+    // cb_.viewParams[2] (and PSVoxel reads as gViewParams.z). The SETTING, not whether ReSTIR GI
+    // actually ran this frame -- that also goes false for a debug-view or empty-TLAS frame, and keying
+    // the bake on it rebuilt the volume twice per debug-view toggle. The gate and the GI cache key both
+    // carry it: a volume baked with the sky is a different answer from one baked without.
+    bool voxelSkyInjected() const { return !giRestirWanted(); }
 
     u64 giDrawsKey_ = 0;
     // WHICH PART OF THE DRAW LIST MOVED. giDrawsKey_ alone says only "different", and knowing that
@@ -1436,6 +1442,7 @@ private:
     f32 giSnapCenter_[3] = {};
     f32 giSnapExtent_ = -1.0f;   // negative = no snapshot yet, so the first tick always rebuilds
     bool giSnapValid_ = false;
+    bool giSnapVoxelSky_ = true;   // voxelSkyInjected() at the last bake
     u64 giSkipped_ = 0, giRebuilt_ = 0;   // for the one-time report; counts, not impressions
     mutable u32  giGateWhyMask_ = 0;   // one bit per rejection reason already reported
     u32          voxelCullLogs_ = 0;   // voxelize passes so far; the cull ratio reports at 2^n of them
