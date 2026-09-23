@@ -1437,28 +1437,29 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // and then takes ~33 frames of history to walk it back. Noise that is correct on average is the
     // better failure.
     //
-    // ---- AND IT CHANGES ESSENTIALLY NOTHING ON SCREEN. SAID PLAINLY SO NOBODY READS THE ARGUMENT
-    // ABOVE AS A MEASURED WIN ----
+    // ---- THIS IS THE FIX FOR RAY-DRIVEN'S GREY WASH WHILE THE CAMERA MOVES. An earlier version of
+    // this comment called it invisible; that was a measurement taken with motion too gentle to fail
+    // reprojection anywhere that mattered ----
     //
-    // Still frame, PTTest NewSponza, fog off, fixed exposure, against a converged path-traced
-    // reference: 3.61 mean absolute difference either way on raster, 3.71 either way on ray-driven,
-    // parity 0.98 either way; the prior moves a still frame by 0.02 MAD on raster and 0.00 on
-    // ray-driven. Matched-pose moving camera (--cam-translate 3 --cam-wobble 8 40
-    // --cam-wobble-stop 100, 103 frames against 220, so the pose is identical by construction and
-    // only settle time differs), measured against a reference converged AT THAT POSE: the frame you
-    // actually see while moving goes 4.10 -> 4.09, settle-time sensitivity 0.46 -> 0.44, speckle
-    // 0.41 unchanged.
+    // The owner's report: flying in ray-driven mode, every shadowed wall goes a mottled grey (its
+    // own albedo lit by full sky ambient) and clears about a second after stopping. Their two shots
+    // at one pose fit an ADDITIVE lift, not an exposure change: no single gain matches every band
+    // (the darkest would need x22, the brightest x1.08). It is this prior: a revealed strip has no
+    // history, reads `vis` = coneAo = 1.0, and takes the whole sky.
     //
-    // WHY SO SMALL: the prior is read only where rtReprojectAo FAILS, and it mostly succeeds -- the
-    // depth and normal tests pass for most pixels even under motion. So this is a latent-correctness
-    // change, not a visible one. It is worth making because the value it replaces is provably a
-    // constant in the shipped configuration and the code around it reasons as though it were a
-    // gather; it is NOT worth citing as an improvement.
+    // MEASURED, PTTest's own gallery (--cam -577 85 746 0 90), matched pose (--cam-wobble 30 16
+    // --cam-wobble-stop 60, 63 frames against 180), the moving frame against the settled one:
+    //   coneAo prior, auto-exposure on:  +10.14 mean, 12.1% of pixels past 32 codes -- the report
+    //   fresh prior,  auto-exposure on:   -0.15 mean,  0.4%
+    //   coneAo prior, fixed exposure 4:   +6.78        fresh: -0.09
+    //   flying 30/frame down the gallery: +2.93        fresh: +0.63
+    // And with voxi.debugResetHistoryEveryFrame 2 (EVERY pixel on the prior, still camera):
+    // coneAo +31.2 with deep shadow gone (11% -> 0.07% of the frame); fresh +0.02.
     //
-    // A HARSHER MOTION TEST WAS TRIED AND DISCARDED rather than quietly dropped: translate 18/frame
-    // with a 35-degree wobble flew the camera out of the building, leaving 0% of the frame in deep
-    // shadow and all three captures identical to 0.000 MAD. A test whose scene content collapses
-    // measures nothing, and its numbers are not reported above.
+    // The still-frame numbers are unchanged either way (3.61 raster / 3.71 ray-driven against the
+    // path-traced reference, parity 0.98), and the old gentle rig (--cam-translate 3 --cam-wobble
+    // 8 40) moved 4.10 -> 4.09: at 8 degrees per 40 frames almost nothing is ever revealed.
+    // THE LESSON: a matched-pose rig only tests a prior if the motion reveals real screen area.
     //
     // THE SIBLING CASE IS DELIBERATELY NOT CHANGED: the `return coneAo` early-out a few lines above
     // hands back the same constant when no AO history is allocated at all, and its own comment
