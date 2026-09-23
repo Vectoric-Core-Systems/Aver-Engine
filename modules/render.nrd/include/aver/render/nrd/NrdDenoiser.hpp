@@ -282,6 +282,35 @@ public:
         // outside this module. 0 skips the Temporal stabilization dispatch entirely.
         u32   maxStabilizedFrameNum = 63;
         u32   maxAccumulatedFrameNum = 30;        // history depth; latency/noise, not dispatch count
+
+        // ---- THE RESIDUAL-NOISE DIALS, every default NRD's own (NRDSettings.h, NRD 4.18) ----
+        //
+        // Exposed because NRD's documentation names this engine's signal as the case for moving
+        // several of them, and none had ever been reachable: setReblurTuning built the other twenty
+        // fields from {} and could not touch them. Same rule as above -- a default here changes only
+        // on a measurement, never on the documentation's say-so alone.
+        //
+        // ANTILAG: luminance delta between the fast and main histories, discounted by local variance
+        // x luminanceSigmaScale; past luminanceSensitivity the history is shortened. NRD's README:
+        // "Initial integration should be done with disabled antilag." A 1-spp ReSTIR input's own
+        // variance can look like a lighting change to it. There is no off switch; a large sigma
+        // scale is how it is quietened.
+        float antilagLuminanceSigmaScale = 2.0f;   // (> 0); NRD notes "old default was 4.0"
+        float antilagLuminanceSensitivity = 3.0f;  // (> 0); smaller = more sensitive
+        // (0; 0.2]. NRD: "smaller values are recommended for signals with relatively clean hit
+        // distance (like RTXDI/RESTIR)" -- which is what REBLUR_DIFFUSE is fed here.
+        float minHitDistanceWeight = 0.1f;
+        // [1; 3]. The colour-box scale clamping main history to fast history. NRD: "2 is old
+        // default, 1.5 works well even for dirty signals".
+        float fastHistoryClampingSigmaScale = 2.0f;
+        // [0; maxAccumulatedFrameNum]; fast history depth, "usually 5x-7x times shorter" than main.
+        u32   maxFastAccumulatedFrameNum = 6;
+        // [0; maxFastAccumulatedFrameNum); frames reconstructed spatially after a history reset.
+        u32   historyFixFrameNum = 3;
+        // Pixels. The spatial passes' radius runs from maxBlurRadius on a fresh history down to
+        // minBlurRadius once converged. Blur trades noise for detail, so these are for measuring.
+        float minBlurRadius = 1.0f;
+        float maxBlurRadius = 30.0f;
     };
 
     // `denoiserIndex` is the index into the kinds array create() was given -- the same index

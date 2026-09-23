@@ -1738,6 +1738,14 @@ private:
     f32                   nrdPrevWorldToView_[16] = {};
     f32                   nrdPrevViewToClip_[16]  = {};
     bool                  nrdPrevCameraValid_     = false;
+    // THE CAMERA ONE FURTHER BACK, for Settings::nrdCameraMatchesInputs: NRD denoises last frame's
+    // inputs, so its "previous" camera is the one from two frames ago. Shifted from the latch above
+    // every time that one is written, and invalidated at every site that invalidates it.
+    f32                   nrdPrev2WorldToView_[16] = {};
+    f32                   nrdPrev2ViewToClip_[16]  = {};
+    bool                  nrdPrev2CameraValid_     = false;
+    // The mode last frame's dispatch used; starts at Settings::nrdCameraMatchesInputs's default.
+    bool                  nrdCameraMatchedLast_    = false;
     // Set the first time CameraFactor::factor() rejects this frame's camera (or dev_->camera() has
     // none to give) while the legacy A/B switch is off -- see beginShadowHistory's own comment for
     // why that frame skips the NRD dispatch entirely rather than falling back to a wrong encoding.

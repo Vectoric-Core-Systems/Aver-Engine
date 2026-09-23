@@ -1666,12 +1666,76 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // at the raw estimate computed just above -- this fragment's own, noisy but correct -- and its own
     // write above is skipped by the same gate, so a blended fragment neither reads nor writes the
     // opaque surface's NRD state.
+    // ---- READ WHERE THIS SURFACE WAS LAST FRAME, NOT AT THIS FRAME'S PIXEL ----
+    //
+    // gNrdGi is laid out on LAST frame's pixel grid: NRD filtered what last frame's pass wrote at
+    // last frame's pixel positions. Loading it at this frame's pixelPos is right only while the camera
+    // is still. In motion it handed each pixel the GI of whatever last frame drew there -- a whole
+    // frame of camera movement away. Every other temporal consumer in this file reprojects
+    // (rtReprojectHistory, rtReprojectAo); this one did not.
+    //
+    // MEASURED, flying 30 cm/frame down PTTest's gallery against a settled frame at the same pose:
+    // the old read's error is STRUCTURED -- a bright GI leak down a door frame, bands along a beam --
+    // and this read's is not. Its fine-scale difference is higher (0.84 against 0.28 codes, below
+    // one display level either way, cause not isolated); its mean is 0.77 codes darker where the old
+    // one was 0.53 brighter. A still frame is identical (MAD 0.01).
+    //
+    // THE SAME RECIPE AS THE TEMPORAL RESAMPLING ABOVE (gPrevViewProj, gSceneViewport), and validated
+    // against the surface ReSTIR itself kept for last frame (RAB_GetGBufferSurface): a texel counts
+    // only if last frame's surface there lies on this pixel's tangent plane and faces the same way.
+    //
+    // NO TAP MATCHES = a genuine disocclusion (the strip a turn reveals, the wall behind a column
+    // being passed): NRD never saw this surface, so no filtered answer for it exists. Such a pixel
+    // keeps the OLD unreprojected read -- smooth, but some neighbouring surface's -- so it is never
+    // worse than before this existed. Its own raw estimate was tried and is far worse: at one sample
+    // it paints the revealed strip black with sparse bright dots.
+    //
+    // Legacy bit 64 (voxi.legacyNrdReadback) skips the reprojection entirely, the pre-fix read, A/B.
+    //
+    // BILINEAR: the four taps around the exact reprojected point, each kept only if last frame's
+    // surface there is this one, renormalised -- the shape a TAA history fetch takes. (A nearest-
+    // texel 3x3 search measured the same, 0.845 against 0.841; bilinear is kept as the principled
+    // resample.) At rest the point is this pixel's own centre and the weights collapse onto it:
+    // measured identical still frames, MAD 0.01 ray-driven and 0.06 raster (run-to-run noise).
+    const bool nrdReproject = gGiRestirParams.y > 0.5 &&   // a previous frame exists to reproject into
+                              ((uint)gAmbientParams.z & 64u) == 0u;
+    float3 nrdYcocg = 0.0;
+    float  nrdWsum  = 0.0;
+    // gAverHistoryWrite: a blended fragment never reads NRD back (the gate below), so it skips the
+    // four surface-history lookups too.
+    if (gAverHistoryWrite && nrdReproject && gw > 0u && gh > 0u) {
+        const float4 nrdPrevClip = mul(float4(wpos, 1.0), gPrevViewProj);
+        if (nrdPrevClip.w > 1e-4) {
+            const float3 nrdPrevNdc = nrdPrevClip.xyz / nrdPrevClip.w;
+            const float2 nrdPrevPx = gSceneViewport.xy +
+                float2(nrdPrevNdc.x * 0.5 + 0.5, 0.5 - nrdPrevNdc.y * 0.5) * gSceneViewport.zw;
+            const float2 nrdF    = nrdPrevPx - 0.5;   // texel CENTRES sit at +0.5
+            const int2   nrdBase = int2(floor(nrdF));
+            const float2 nrdFrac = nrdF - float2(nrdBase);
+            const float  nrdPlaneTol = max(curLinearDepth, 1.0) * 0.02 + 1.0;   // cm
+            [unroll] for (uint k = 0u; k < 4u; ++k) {
+                const int2  off = int2(k & 1u, k >> 1u);
+                const float w   = (off.x != 0 ? nrdFrac.x : 1.0 - nrdFrac.x) *
+                                  (off.y != 0 ? nrdFrac.y : 1.0 - nrdFrac.y);
+                if (w <= 0.0) continue;
+                const int2 tap = nrdBase + off;
+                const RAB_Surface prevSurf = RAB_GetGBufferSurface(tap, true);   // bounds-checked
+                if (!prevSurf.valid) continue;
+                if (abs(dot(prevSurf.worldPos - wpos, N)) > nrdPlaneTol) continue;
+                if (dot(prevSurf.normal, N) < 0.9) continue;
+                nrdYcocg += gNrdGi.Load(int3(tap, 0)).rgb * w;
+                nrdWsum  += w;
+            }
+        }
+    }
     if (gAverHistoryWrite && gw > 0u && gh > 0u) {
         // _NRD_YCoCgToLinear, the matching half of the write above. REBLUR hands back what it
         // filtered, in the basis it filtered it in; NRD's own back-end unpack is this same transform
         // and also ends in a max against zero, because the chroma round trip can put a channel
         // slightly negative and negative radiance reads BRIGHT once it reaches the tonemap.
-        const float3 y = gNrdGi.Load(int3(pixelPos, 0)).rgb;
+        // LINEAR, so blending the four taps in YCoCg and decoding once equals decoding each.
+        const float3 y = nrdWsum > 1e-3 ? nrdYcocg / nrdWsum
+                                        : gNrdGi.Load(int3(pixelPos, 0)).rgb;   // disocclusion / legacy
         const float  t = y.x - y.z;
         const float3 decoded = float3(t + y.y, y.x + y.z, t - y.y);
         // ---- THE SAME GUARD THE RAW ESTIMATOR ABOVE ALREADY HAS, NOW APPLIED HERE TOO ----

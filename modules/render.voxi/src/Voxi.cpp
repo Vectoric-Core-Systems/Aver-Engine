@@ -231,6 +231,19 @@ void Renderer::setSettings(const Settings& s) {
     n.reblurMaxAccumulatedFrameNum = std::clamp(n.reblurMaxAccumulatedFrameNum, 0u, 63u);
     n.reblurMaxStabilizedFrameNum  = std::clamp(n.reblurMaxStabilizedFrameNum, 0u, 63u);
     n.reblurDiffusePrepassBlurRadius = std::clamp(n.reblurDiffusePrepassBlurRadius, 0.0f, 100.0f);
+    // The residual-noise dials, NRD's documented ranges. The two antilag scales only need to stay
+    // positive; 100 is a defensive ceiling, not an NRD figure. The frame counts keep NRD's own
+    // ordering (historyFix < fast <= main) so a dial set alone cannot hand NRD an illegal triple.
+    n.reblurAntilagSigmaScale     = std::clamp(n.reblurAntilagSigmaScale, 0.01f, 100.0f);
+    n.reblurAntilagSensitivity    = std::clamp(n.reblurAntilagSensitivity, 0.01f, 100.0f);
+    n.reblurMinHitDistanceWeight  = std::clamp(n.reblurMinHitDistanceWeight, 0.001f, 0.2f);
+    n.reblurFastHistoryClampSigma = std::clamp(n.reblurFastHistoryClampSigma, 1.0f, 3.0f);
+    n.reblurMaxFastAccumulatedFrameNum =
+        std::min(n.reblurMaxFastAccumulatedFrameNum, n.reblurMaxAccumulatedFrameNum);
+    n.reblurHistoryFixFrameNum = n.reblurMaxFastAccumulatedFrameNum == 0u ? 0u
+        : std::min(n.reblurHistoryFixFrameNum, n.reblurMaxFastAccumulatedFrameNum - 1u);
+    n.reblurMinBlurRadius = std::clamp(n.reblurMinBlurRadius, 0.0f, 100.0f);
+    n.reblurMaxBlurRadius = std::clamp(n.reblurMaxBlurRadius, n.reblurMinBlurRadius, 100.0f);
 
     // A GARBAGE VALUE, NOT A HARDWARE ONE: mirrors n.rtRenderMode's own range clamp a few lines above
     // rather than replacing it -- 2 is the top of the enum RayTraced names, so anything past it is a

@@ -854,6 +854,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "draw blended). Default OFF keeps W6's fix; VoxiRenderer::setLightingLegacyBits is the piece "
         "that resets GI/NRD/RT history on this bit's transition, the same as the five bits above it.",
         legacyBitRead(32u), legacyBitStage(32u)});
+    t.push_back({"voxi.legacyNrdReadback", VarType::Bool, false,
+        "ON reinstates the pre-fix read of NRD's denoised GI for comparison only: at THIS frame's "
+        "pixel, although NRD filtered LAST frame's -- a one-frame displacement in motion, seen as GI "
+        "leaking along edges. Default OFF reprojects the read to where the surface was last frame "
+        "(gAmbientParams.z bit 64). A still frame is identical either way.",
+        legacyBitRead(64u), legacyBitStage(64u)});
     // ---- the engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME raw-slot/
     // deviceSetters shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s own comment
     // for why these three, unlike the tier/dial fields, cannot be staged as ordinary Settings dials).
@@ -957,6 +963,53 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "(engine clamps to [0,63], NRD's own REBLUR_MAX_HISTORY_FRAME_NUM)",
         []{ return vU32(Renderer::get().settings().reblurMaxStabilizedFrameNum); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxStabilizedFrameNum = n; }); }});
+    // The residual-noise dials -- see render.nrd::Denoiser::ReblurTuning for each one's NRD guidance.
+    // Same LIVE shape as the three above; NRD's own defaults.
+    t.push_back({"voxi.reblurAntilagSigmaScale", VarType::F32, false,
+        "REBLUR_DIFFUSE antilag: luminance delta is discounted by local variance times this; LARGER "
+        "quietens antilag (NRD has no off switch). NRD default 2 (its old default was 4)",
+        []{ return vF32(Renderer::get().settings().reblurAntilagSigmaScale); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurAntilagSigmaScale = n; }); }});
+    t.push_back({"voxi.reblurAntilagSensitivity", VarType::F32, false,
+        "REBLUR_DIFFUSE antilag sensitivity; SMALLER is more sensitive. NRD default 3",
+        []{ return vF32(Renderer::get().settings().reblurAntilagSensitivity); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurAntilagSensitivity = n; }); }});
+    t.push_back({"voxi.reblurMinHitDistanceWeight", VarType::F32, false,
+        "REBLUR_DIFFUSE spatial hit-distance weight floor, (0,0.2]; NRD recommends smaller for "
+        "RTXDI/ReSTIR signals. NRD default 0.1",
+        []{ return vF32(Renderer::get().settings().reblurMinHitDistanceWeight); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMinHitDistanceWeight = n; }); }});
+    t.push_back({"voxi.reblurFastHistoryClampSigma", VarType::F32, false,
+        "REBLUR_DIFFUSE colour-box scale clamping main history to fast history, [1,3]; NRD: 1.5 "
+        "works well even for dirty signals. NRD default 2",
+        []{ return vF32(Renderer::get().settings().reblurFastHistoryClampSigma); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurFastHistoryClampSigma = n; }); }});
+    t.push_back({"voxi.reblurMaxFastAccumulatedFrameNum", VarType::U32, false,
+        "REBLUR_DIFFUSE fast-history depth in frames, at most the main depth (equal disables fast "
+        "history). NRD default 6",
+        []{ return vU32(Renderer::get().settings().reblurMaxFastAccumulatedFrameNum); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxFastAccumulatedFrameNum = n; }); }});
+    t.push_back({"voxi.reblurHistoryFixFrameNum", VarType::U32, false,
+        "REBLUR_DIFFUSE frames reconstructed spatially after a history reset, below the fast depth. "
+        "NRD default 3",
+        []{ return vU32(Renderer::get().settings().reblurHistoryFixFrameNum); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurHistoryFixFrameNum = n; }); }});
+    t.push_back({"voxi.reblurMinBlurRadius", VarType::F32, false,
+        "REBLUR_DIFFUSE spatial radius once converged, in pixels. NRD default 1",
+        []{ return vF32(Renderer::get().settings().reblurMinBlurRadius); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMinBlurRadius = n; }); }});
+    t.push_back({"voxi.nrdCameraMatchesInputs", VarType::Bool, false,
+        "ON tells NRD its inputs were rendered with last frame's camera, which they were -- it runs "
+        "before this frame's scene pass. Default OFF (this frame's camera, the shipped wiring): the "
+        "consistent pairing measured no visible gain and ~3% more motion grain on NRD's GI. Flipping "
+        "it resets NRD's history",
+        []{ return vBool(Renderer::get().settings().nrdCameraMatchesInputs); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrdCameraMatchesInputs = on; }); }});
+    t.push_back({"voxi.reblurMaxBlurRadius", VarType::F32, false,
+        "REBLUR_DIFFUSE spatial radius on a fresh history, in pixels. Engine default 10 (NRD's is 30): "
+        "measured ~15% less grain just after camera motion, no still-frame change",
+        []{ return vF32(Renderer::get().settings().reblurMaxBlurRadius); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxBlurRadius = n; }); }});
     t.push_back({"voxi.rtShadowDenoise", VarType::U32, false,
         "Spatial denoise radius for the ray-traced sun shadow, in pixels (engine clamps to [0,3])",
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },

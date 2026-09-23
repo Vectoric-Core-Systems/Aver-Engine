@@ -730,6 +730,7 @@ void VoxiRenderer::setNrdLegacyCamera(bool on) {
     // camera reset together, on the very frame the switch flips.
     nrd_.forceHistoryReset();
     nrdPrevCameraValid_ = false;
+    nrdPrev2CameraValid_ = false;
     AVER_INFO("[NRD] camera encoding switched to {} by console command (voxi.nrdLegacyCamera); "
               "history reset on the next frame so the two encodings are never blended together.",
               on ? "the OLD, WRONG pre-fix encoding (comparison only)" : "the fixed encoding");
@@ -745,9 +746,11 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
     const u32 changed = bits ^ lightingLegacyBits_;
     lightingLegacyBits_ = bits;
     AVER_INFO("[Voxi] lighting legacy bits: ring={} doubleCount={} hitSky={} reuseVis={} cones={} "
-              "blendedHistory={} (console)",
+              "blendedHistory={} nrdReadback={} (console)",
               (bits & 1u) ? 1 : 0, (bits & 2u) ? 1 : 0, (bits & 4u) ? 1 : 0, (bits & 8u) ? 1 : 0,
-              (bits & 16u) ? 1 : 0, (bits & 32u) ? 1 : 0);
+              (bits & 16u) ? 1 : 0, (bits & 32u) ? 1 : 0, (bits & 64u) ? 1 : 0);
+    // Bit 64 (voxi.legacyNrdReadback) needs no reset: it changes only where the shader READS NRD's
+    // output, never what any history accumulates.
     // R0/R2/R3 (bits 1, 4, 8): the ReSTIR estimator itself samples, adds or reuses differently under
     // these, so GI and NRD history accumulated on one side of the flip is a stale answer to a
     // question the shader no longer asks the same way -- same reasoning resetGiHistory's own
@@ -4055,6 +4058,14 @@ void VoxiRenderer::applyReblurTuning() {
     t.diffusePrepassBlurRadius = settings_.reblurDiffusePrepassBlurRadius;
     t.maxAccumulatedFrameNum   = settings_.reblurMaxAccumulatedFrameNum;
     t.maxStabilizedFrameNum    = settings_.reblurMaxStabilizedFrameNum;
+    t.antilagLuminanceSigmaScale    = settings_.reblurAntilagSigmaScale;
+    t.antilagLuminanceSensitivity   = settings_.reblurAntilagSensitivity;
+    t.minHitDistanceWeight          = settings_.reblurMinHitDistanceWeight;
+    t.fastHistoryClampingSigmaScale = settings_.reblurFastHistoryClampSigma;
+    t.maxFastAccumulatedFrameNum    = settings_.reblurMaxFastAccumulatedFrameNum;
+    t.historyFixFrameNum            = settings_.reblurHistoryFixFrameNum;
+    t.minBlurRadius                 = settings_.reblurMinBlurRadius;
+    t.maxBlurRadius                 = settings_.reblurMaxBlurRadius;
     // ---- INDEX 0 (ReblurDiffuseOcclusion) IS TUNED TOO, AND THE COMMENT SAYING IT NEED NOT BE WAS
     // WRONG ----
     //
@@ -4204,6 +4215,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // either.
         giVisHistValid_ = false;
         nrdPrevCameraValid_ = false;
+        nrdPrev2CameraValid_ = false;
         nrdAoRanLastFrame_ = false;   // this return skips the per-frame update at the function's end
         return;
     }
@@ -4504,31 +4516,70 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 std::memcpy(fs.viewToClip,     curViewProj_,  sizeof(fs.viewToClip));
                 std::memcpy(fs.viewToClipPrev, prevViewProj_, sizeof(fs.viewToClipPrev));
                 cameraReady = true;
-            } else if (haveCamera && CameraFactor::factor(camVp, fs.worldToView, fs.viewToClip)) {
+            } else if (f32 curW2V[16], curV2C[16];
+                       haveCamera && CameraFactor::factor(camVp, curW2V, curV2C)) {
                 // NRD keeps ITS OWN previous camera (nrdPrevWorldToView_/nrdPrevViewToClip_), latched
                 // below only once this frame's camera is known good. Deliberately separate from
                 // curViewProj_/prevViewProj_: those describe the COMBINED matrix every other
                 // reprojection consumer in this file wants, a different shape than the factorised pair
                 // NRD needs, so reusing them would still pair a factorised CURRENT camera with a
                 // combined PREVIOUS one.
-                const bool hadPrevCamera = nrdPrevCameraValid_;
-                if (hadPrevCamera) {
-                    std::memcpy(fs.worldToViewPrev, nrdPrevWorldToView_, sizeof(fs.worldToViewPrev));
-                    std::memcpy(fs.viewToClipPrev,  nrdPrevViewToClip_,  sizeof(fs.viewToClipPrev));
+                //
+                // ---- AND THE CURRENT CAMERA IS LAST FRAME'S, because the inputs are ----
+                //
+                // This dispatch runs in beginShadowHistory, BEFORE this frame's scene pass: the view
+                // Z, motion vectors, normals and radiance it reads were all written by LAST frame's
+                // pixel shader, and that frame's velocity is last-frame-minus-the-frame-before. The
+                // camera pair that describes them is (last frame, the frame before), not (this frame,
+                // last frame). Handing NRD this frame's camera -- which an earlier audit did, reading
+                // "last frame's camera" as a staleness bug -- puts its position reconstruction, plane
+                // distance and disocclusion tests one frame ahead of the data they judge.
+                //
+                // MEASURED, AND IT DID NOT MATTER: REBLUR finds history through the motion vectors,
+                // which are right either way, and the matrices only feed its plane and parallax tests.
+                // Consistent pairing moved motion grain on NRD's GI slightly UP (2.444 -> 2.504) with
+                // no structural difference, so Settings::nrdCameraMatchesInputs defaults OFF (the
+                // shipped pairing) and stays as a dial. The one-frame ghost that IS real lives in the
+                // shader's readback of NRD's output, fixed there (voxi_restir.hlsli).
+                const bool matchInputs = settings_.nrdCameraMatchesInputs;
+                const bool hadPrevCamera  = nrdPrevCameraValid_;
+                const bool hadPrev2Camera = nrdPrevCameraValid_ && nrdPrev2CameraValid_;
+                if (matchInputs && hadPrevCamera) {
+                    std::memcpy(fs.worldToView, nrdPrevWorldToView_, sizeof(fs.worldToView));
+                    std::memcpy(fs.viewToClip,  nrdPrevViewToClip_,  sizeof(fs.viewToClip));
                 } else {
-                    // NO VALID PREVIOUS CAMERA YET -- the first frame NRD ever runs, or the first
+                    std::memcpy(fs.worldToView, curW2V, sizeof(fs.worldToView));
+                    std::memcpy(fs.viewToClip,  curV2C, sizeof(fs.viewToClip));
+                }
+                const bool havePrev = matchInputs ? hadPrev2Camera : hadPrevCamera;
+                if (havePrev) {
+                    std::memcpy(fs.worldToViewPrev, matchInputs ? nrdPrev2WorldToView_ : nrdPrevWorldToView_,
+                                sizeof(fs.worldToViewPrev));
+                    std::memcpy(fs.viewToClipPrev,  matchInputs ? nrdPrev2ViewToClip_  : nrdPrevViewToClip_,
+                                sizeof(fs.viewToClipPrev));
+                } else {
+                    // NO VALID PREVIOUS CAMERA YET -- the first frame(s) NRD ever runs, or the first
                     // active frame after beginShadowHistory's own skipped-frame branch invalidated the
-                    // latch above. Passing THIS frame's camera for both halves makes the reprojection a
+                    // latch above. Passing the current camera for both halves makes the reprojection a
                     // no-op (zero parallax, zero motion) instead of reprojecting against an
                     // uninitialised array, and fs.resetHistory below throws away whatever the texture
                     // history still holds from before the gap regardless.
                     std::memcpy(fs.worldToViewPrev, fs.worldToView, sizeof(fs.worldToViewPrev));
                     std::memcpy(fs.viewToClipPrev,  fs.viewToClip,  sizeof(fs.viewToClipPrev));
                 }
-                std::memcpy(nrdPrevWorldToView_, fs.worldToView, sizeof(nrdPrevWorldToView_));
-                std::memcpy(nrdPrevViewToClip_,  fs.viewToClip,  sizeof(nrdPrevViewToClip_));
+                // SHIFTED, then latched: the frame before becomes two frames ago.
+                if (hadPrevCamera) {
+                    std::memcpy(nrdPrev2WorldToView_, nrdPrevWorldToView_, sizeof(nrdPrev2WorldToView_));
+                    std::memcpy(nrdPrev2ViewToClip_,  nrdPrevViewToClip_,  sizeof(nrdPrev2ViewToClip_));
+                }
+                nrdPrev2CameraValid_ = hadPrevCamera;
+                std::memcpy(nrdPrevWorldToView_, curW2V, sizeof(nrdPrevWorldToView_));
+                std::memcpy(nrdPrevViewToClip_,  curV2C, sizeof(nrdPrevViewToClip_));
                 nrdPrevCameraValid_ = true;
-                fs.resetHistory = !hadPrevCamera;
+                // A MODE SWITCH restarts the history: the two pairings describe the history as one
+                // frame apart, and blending across the switch would reproject by the wrong delta.
+                fs.resetHistory = !havePrev || matchInputs != nrdCameraMatchedLast_;
+                nrdCameraMatchedLast_ = matchInputs;
                 cameraReady = true;
             }
 
@@ -4557,6 +4608,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 }
                 nrd_.forceHistoryReset();
                 nrdPrevCameraValid_ = false;
+                nrdPrev2CameraValid_ = false;
             } else {
                 fs.frameIndex = nrdFrame_++;
                 // ---- THE SCALE CARRIES A SIGN *AND* A UNIT CONVERSION, AND THE UNIT WAS MISSING ----

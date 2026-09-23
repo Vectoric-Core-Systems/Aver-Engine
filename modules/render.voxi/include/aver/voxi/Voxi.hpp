@@ -593,6 +593,35 @@ struct Settings {
     // today's defaults (63 here, 30 above) are exactly such a pair, left exactly as they already
     // were).
     u32   reblurMaxStabilizedFrameNum = 63;
+    // The residual-noise dials -- see render.nrd::Denoiser::ReblurTuning for what each does and the
+    // NRD guidance behind exposing it. Defaults are NRD's own; REBLUR_DIFFUSE (index 1) only.
+    float reblurAntilagSigmaScale = 2.0f;
+    float reblurAntilagSensitivity = 3.0f;
+    float reblurMinHitDistanceWeight = 0.1f;
+    float reblurFastHistoryClampSigma = 2.0f;
+    u32   reblurMaxFastAccumulatedFrameNum = 6;
+    u32   reblurHistoryFixFrameNum = 3;
+    float reblurMinBlurRadius = 1.0f;
+    // 10, NOT NRD's 30 -- THE ONE DIAL HERE THAT MEASURED A WIN. REBLUR spreads a fresh history over
+    // this radius with a sparse kernel, and after motion that sparse pattern is the grain. PTTest
+    // gallery, frame after a 30-degree sweep vs settled at the same pose, final image: 1-px grain
+    // 0.761 -> 0.645, 99th percentile 7.04 -> 5.47; NRD's GI alone 2.444 -> 1.965. Still frame MAD
+    // 0.34, no brightness shift, still-camera GI noise +1.5%. 7 bought slightly more in motion and
+    // cost +7% at rest; 15 bought half as much.
+    float reblurMaxBlurRadius = 10.0f;
+    // WHICH CAMERA NRD IS TOLD ITS INPUTS WERE RENDERED WITH. NRD runs in beginShadowHistory, before
+    // this frame's scene pass, so every input it reads (view Z, motion vectors, normals, radiance) was
+    // written by LAST frame's pixel shader. true hands it last frame's camera as current and the one
+    // before as previous -- the pair those inputs were actually made with. false (the DEFAULT) is the
+    // wiring that shipped: this frame's camera, one frame ahead of its own data.
+    //
+    // DEFAULT FALSE BECAUSE THE CONSISTENT PAIRING BOUGHT NOTHING MEASURABLE. PTTest gallery, NRD's GI
+    // alone: after a 30-degree sweep it moved 1-px grain 2.444 -> 2.504, mid-sweep 4.47% -> 4.61%, and
+    // the per-pixel difference between the two is unstructured speckle with no ghost either way --
+    // REBLUR reprojects by the motion vectors, which are right under both, and uses the matrices only
+    // for its plane and parallax tests. Kept as a dial because the analysis is sound and the
+    // difference may show on translation-heavy motion this was not measured on.
+    bool  nrdCameraMatchesInputs = false;
 
     // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 is off: the shadow term is
     // whatever this pixel's own rays returned, unfiltered. N > 0 averages a (2N+1)^2 neighbourhood
