@@ -1387,8 +1387,11 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 // ray-traced primary hit) so the denoiser earns its place on that path too. That is a real piece of
 // work in VoxiRenderer/NRD wiring, not a shader change, and shipping the measured improvement should
 // not wait on it. When it lands, this parameter is what gets flipped back to true.
+//
+// `coneAoIsGather` SAYS WHETHER `coneAo` WAS MEASURED. It is only when coneTracedIndirect ran; under
+// ReSTIR GI (giMode 1) or with GI off, the caller's `ao` is still the 1.0 it was initialised with.
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo,
-                             bool nrdAoUsable) {
+                             bool coneAoIsGather, bool nrdAoUsable) {
     // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
     // distance: the wrapper exists to throw away everything but `.open`, and this function is now
     // one of the callers its own comment describes as "meaning to use them". Identical cost -- the
@@ -1396,12 +1399,18 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
     const float fresh = amb.open;
     // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
-    // reflection pairs exist at every ray-tracing tier, but this one is allocated only where the
-    // ray is actually traced -- High and Epic. At Low and Medium the slots are genuinely absent,
-    // and touching a null UAV is undefined rather than merely wasteful. Returning the fresh trace
-    // is also the correct answer there: with no history there is nothing to accumulate against.
-    // No AO history allocated at all (Low/Medium): the cone's answer, not a lone binary ray.
-    if (gRtDenoiseParams.w < 0.5) return coneAo;
+    // reflection pairs exist at every ray-tracing tier, but this one is allocated only while a sky
+    // occlusion ray is wanted (VoxiRenderer::aoHistoryWanted), and touching a null UAV is undefined
+    // rather than merely wasteful. With rays > 0 that means a TRANSITIONAL frame -- the first after
+    // a resize, a render-scale change or sky occlusion being switched on, before the pair exists --
+    // or an allocation that failed.
+    //
+    // THE CONE'S ANSWER ONLY WHEN THE CONE ANSWERED. A real gather is smooth and beats a lone binary
+    // ray. Under ReSTIR GI `coneAo` is the constant 1.0, and returning it painted full sky ambient on
+    // every enclosed surface for that frame -- the same "fully open" constant whose use as the
+    // reprojection prior below was the ray-driven motion wash. This pixel's own trace is right in
+    // expectation instead.
+    if (gRtDenoiseParams.w < 0.5) return coneAoIsGather ? coneAo : fresh;
 
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
     // ---- SEEDED FROM THIS PIXEL'S OWN TRACE. IT USED TO BE SEEDED FROM `coneAo`, AND THE ARGUMENT
@@ -1461,11 +1470,8 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // 8 40) moved 4.10 -> 4.09: at 8 degrees per 40 frames almost nothing is ever revealed.
     // THE LESSON: a matched-pose rig only tests a prior if the motion reveals real screen area.
     //
-    // THE SIBLING CASE IS DELIBERATELY NOT CHANGED: the `return coneAo` early-out a few lines above
-    // hands back the same constant when no AO history is allocated at all, and its own comment
-    // already says "returning the fresh trace is also the correct answer there" while the code does
-    // the opposite. That fires only on tiers this scene cannot exercise, so changing it would be a
-    // guess rather than a measurement.
+    // THE SIBLING CASE, the early-out above for a frame with no AO pair bound, now makes the same
+    // choice -- see coneAoIsGather there.
     float vis = fresh;
     float histV = 0.0;
     float2 velocityPx = 0.0;

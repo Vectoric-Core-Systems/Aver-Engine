@@ -1210,6 +1210,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // ind4.ambient below) -- the cone gather never did, so this flag gates the sky-ownership
     // subtraction after the occlusion block to exactly the case that needs it.
     bool restirSuppliedDiffuse = false;
+    // True only once coneTracedIndirect has actually written `ao`. Otherwise (ReSTIR GI supplied
+    // the bounce, or GI is off) `ao` is still the 1.0 it was initialised with, a constant saying
+    // "fully open", and rtSkyOcclusionTemporal must not hand that back as an occlusion answer.
+    bool aoGathered = false;
     // GIMODE SWITCHES THE DIFFUSE BOUNCE ESTIMATOR -- see Settings::giMode (Voxi.hpp) for the full
     // contract. Only reachable in the AVER_RT-compiled variant: ReSTIR GI's candidate ray needs the
     // ray-tracing toolkit (gScene, RtInstance, gRtMaterials -- all declared inside this file's own
@@ -1233,8 +1237,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             ind = giRestirIndirect(i.wpos, N, rtViewZ, i.pos.xy, (uint)gRtHistParams.z, ao);
             giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind);
             restirSuppliedDiffuse = true;
-        } else
+        } else {
             ind = coneTracedIndirect(i.wpos, N, ao);
+            aoGathered = true;
+        }
     }
 #else
     if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
@@ -1315,7 +1321,8 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
                       // against, so its denoised answer is about this frame's geometry. See
                       // rtSkyOcclusionTemporal's own header for the measurement, and for why the
                       // ray-driven twin below passes false.
-                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao, true)
+                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao,
+                                               aoGathered, true)
                       : ao;
 #else
     ind4.occlusion    = ao;
@@ -2013,6 +2020,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // below actually supplied ind.diffuse, which is the only estimator that double-counts this
     // receiver's own sky.
     bool rdRestirSuppliedDiffuse = false;
+    // Mirrors PSMainVoxi's aoGathered: true only once coneTracedIndirect has written rdAo.
+    bool rdAoGathered = false;
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     // ablated: no cone gather
 #elif AVER_AO_UNIFIED
@@ -2033,8 +2042,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
                                            i.pos.xy, (uint)gRtHistParams.z, rdAo);
             giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind.diffuse);
             rdRestirSuppliedDiffuse = true;
-        } else
+        } else {
             ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
+            rdAoGathered = true;
+        }
     }
 #endif
 
@@ -2206,7 +2217,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
                      // whole of the washed-out ray-driven shadows: it overrode a correctly traced
                      // "fully occluded" with ~0.83 "open", and full sky ambient then landed on every
                      // interior surface. Measured in rtSkyOcclusionTemporal's own header.
-                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo, false)
+                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo,
+                                              rdAoGathered, false)
                      : rdAo;
 #else
     // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below
