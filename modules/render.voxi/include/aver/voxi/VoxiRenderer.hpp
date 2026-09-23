@@ -1761,6 +1761,11 @@ private:
     // nothing. Allocated only when ReSTIR GI is the active estimator, because nothing else writes it.
     rhi::TextureHandle    giRadiance_ = 0;
     rhi::TextureHandle    nrdGiOutput_ = 0;   // OUT_DIFF_RADIANCE_HITDIST, 0 when not denoised
+    // Whether the OCCLUSION denoiser actually ran last frame. It is skipped under ray-driven
+    // primary visibility, whose output nothing reads (see beginShadowHistory), so on the frame it
+    // rejoins -- the user switching back to raster -- its NRD history is from before the gap and
+    // must be reset rather than reprojected with one frame's camera delta.
+    bool                  nrdAoRanLastFrame_ = false;
 
     // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
     //

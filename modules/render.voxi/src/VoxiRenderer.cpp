@@ -4189,6 +4189,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // either.
         giVisHistValid_ = false;
         nrdPrevCameraValid_ = false;
+        nrdAoRanLastFrame_ = false;   // this return skips the per-frame update at the function's end
         return;
     }
 
@@ -4341,7 +4342,45 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // silently disabled GI denoising for a whole session. Only the denoisers whose input actually
     // exists are selected below; handing NRD one with a blank input is the single most expensive way
     // to be wrong here, which is what made the original coupling look defensible.
-    if (nrd_.valid() && gbufWritten && (rtAoHitDist_ || (giRadiance_ && giRestirWanted()))) {
+    // ---- THE OCCLUSION DENOISER IS SKIPPED WHEN NOTHING WILL READ ITS OUTPUT ----
+    //
+    // Its output lands in t14 as gNrdAo, and the ENTIRE tree reads gNrdAo in exactly one place:
+    // rtSkyOcclusionTemporal (voxi_rt.hlsli), behind `nrdAoUsable && gAverHistoryWrite`. Under
+    // ray-driven primary visibility every route to that read is closed, and each one is checkable:
+    //   - PSRayDriven passes nrdAoUsable = false (voxi.hlsl's ray-driven call site; df4122cc).
+    //   - No OPAQUE draw reaches PSMainVoxi at all: suppressesScene() is true whenever
+    //     rayDrivenActive(), and D3D12Device/VulkanDevice::drawMesh return straight after
+    //     submitDraw when any feature suppresses the scene.
+    //   - Glass still reaches PSMainVoxi through the blended replay (D3D12). A replayed fragment
+    //     whose MATERIAL is translucent (averDrawIsTranslucent) has gAverHistoryWrite false -- the
+    //     second half of that same gate -- UNLESS legacy bit 32 (voxi.legacyBlendedHistoryWrite)
+    //     turns it back on, in which case the denoiser keeps running (see nrdAoSignal below).
+    //   - NOT CLOSED, AND SAID SO: a blended draw with an OPAQUE material -- GameWater's
+    //     unauthored-water fallback (GameWater.cpp, blended=true on the default MaterialDesc) --
+    //     keeps gAverHistoryWrite TRUE and did read t14 under ray-driven mode. It now reads its own
+    //     accumulated occlusion instead of the denoised occlusion of the surface behind it, which is
+    //     the mis-attribution the W6 gate exists to remove, but it IS a pixel change. It needs the
+    //     simulated-fluids build and a water volume with no .ocmat. Found by adversarial review.
+    // So in that mode REBLUR_DIFFUSE_OCCLUSION was being dispatched every frame to fill a texture
+    // with no reader. Measured before this, ray-driven on PTTest: "Voxi NRD denoise 2.18ms" for the
+    // occlusion and radiance denoisers together; this drops the occlusion one. THE SAVING IS NOT
+    // MEASURED -- read the same span with --gpu-timing to get it.
+    //
+    // PIXEL-NEUTRAL in ray-driven mode EXCEPT the opaque-material blended draw above. In raster mode
+    // nothing changes: the signal is computed exactly as before. rayDrivenActive() is THIS frame's answer
+    // here -- buildAccelerationStructures has already set rtActive_ -- and it is the same predicate
+    // scenePass uses later in the frame to choose the ray-driven pass, so the two cannot disagree.
+    //
+    // The one behavioural change is at a MODE SWITCH, and it is deliberate: see the history reset
+    // below the plan, keyed on nrdAoRanLastFrame_.
+    const bool nrdGiSignal = giRadiance_ && giRestirWanted();
+    // Legacy bit 32 (voxi.legacyBlendedHistoryWrite) re-opens the blended-fragment read of gNrdAo
+    // (voxi.hlsl: gAverHistoryWrite = !blendedFragment || bit 32), so the denoiser has to keep
+    // running for that comparison to mean what it did. Toggling the bit flips this signal, and the
+    // rejoin reset below already covers that edge.
+    const bool nrdAoSignal = rtAoHitDist_ != 0 &&
+                             (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
+    if (nrd_.valid() && gbufWritten && (nrdAoSignal || nrdGiSignal)) {
         render::nrd::Recorder::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
@@ -4571,8 +4610,16 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 // See Recorder's outDiffHitDistTex_/outDiffRadHitDistTex_ for the fix, and
                 // Denoiser::ReblurTuning for the hit-distance constants this signal also needed before
                 // REBLUR could do anything useful with it.
-                const bool giSignal = giRadiance_ && giRestirWanted();
-                const bool aoSignal = rtAoHitDist_ != 0;
+                // Computed once above the gate -- see the skip's own comment there.
+                const bool giSignal = nrdGiSignal;
+                const bool aoSignal = nrdAoSignal;
+                // THE OCCLUSION DENOISER REJOINING AFTER A GAP gets a fresh history. Its permanent pool
+                // still holds whatever it accumulated before ray-driven mode started skipping it, and
+                // REBLUR would reproject that with only ONE frame's camera delta -- ghosting of a view
+                // the user left some time ago. FrameSettings is shared by every denoiser in the call,
+                // so the radiance one restarts on that frame too; that is a single frame, at a
+                // user-initiated mode switch that already changes the whole image.
+                if (aoSignal && !nrdAoRanLastFrame_) fs.resetHistory = true;
                 const u32* which  = (giSignal && aoSignal) ? kNrdAoAndGiDenoisers
                                   : giSignal               ? kNrdGiDenoiser
                                                            : kNrdAoDenoiser;
@@ -4583,7 +4630,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 {
                     rhi::ScopedGpuStat nrdStat(ctx, "Voxi NRD denoise");
                     if (nrd_.record(ctx, fs, in, which, whichN)) {
-                        nrdOutput_   = nrd_.outputDiffuseHitDistance();
+                        // Only when the occlusion denoiser actually ran THIS frame: otherwise the
+                        // pool texture holds a stale result, and binding it would break the
+                        // "bound as nothing means not denoised this frame" contract below.
+                        nrdOutput_   = aoSignal ? nrd_.outputDiffuseHitDistance() : 0;
                         nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
                     }
                 }
@@ -4594,6 +4644,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // test mean "not denoised THIS frame" rather than "never denoised" -- leaving last frame's
     // texture bound after the pass stops running would feed the shader a frozen image with no
     // indication anything had changed.
+    // Updated on EVERY frame, including ones where the whole NRD block above was gated off, so the
+    // rejoin test inside it always compares against the frame immediately before.
+    nrdAoRanLastFrame_ = nrdOutput_ != 0;
     if (nrdOutput_) res_->setSrv(bindings_, 14, nrdOutput_);
     else            res_->clearSrv(bindings_, 14);
     if (nrdGiOutput_) res_->setSrv(bindings_, 15, nrdGiOutput_);
