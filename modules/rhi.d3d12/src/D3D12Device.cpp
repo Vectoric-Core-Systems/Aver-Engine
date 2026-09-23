@@ -1000,7 +1000,10 @@ public:
     // ---- same-frame depth prepass -- see IDevice's own comment for the contract ----
     void setDepthPrepassEnabled(bool on) override { depthPrepassEnabled_ = on; }
     bool depthPrepassEnabled() const override { return depthPrepassEnabled_; }
-    void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) override;
+    void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
+    bool drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
+    // Shared body of the two above; true when a depth-only draw was actually recorded.
+    bool depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]);
     // AUTO-CONSUMED by the next drawMesh() call only -- see the interface comment. Plain assignment:
     // this records what the CALLER believes, not eligibility; drawMesh() re-checks
     // meshVertexBuffer(mesh) before trusting it.
@@ -3917,19 +3920,43 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
 // interleaved per-instance with colour draws -- that would split one contiguous "depth prepass" GPU
 // span into hundreds of one-draw slivers, and this engine's GPU stat tree budgets 64 open spans a
 // frame, not one per entity.
-void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) {
-    if (!hasSwapchain_ || !depthPrepassEnabled_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return;
-    if (!meshes_[mesh - 1].alive) return;
+// The frame-wide prepass: gated on its switch, and counted -- that count is the pass's own census.
+void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    if (!depthPrepassEnabled_) return;
+    if (depthOnlyDraw(mesh, world, color)) ++depthPrepassDrawsThisFrame_;
+}
+
+// One draw's own depth, for an alpha-masked draw -- see IDevice::drawMeshDepthOnly. NOT gated on the
+// frame-wide switch and NOT counted in its census, which describes the frame-wide pass only.
+bool D3D12Device::drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    return depthOnlyDraw(mesh, world, color);
+}
+
+// The shared body, so the two entry points above cannot drift apart. True when a depth-only draw was
+// actually recorded.
+bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    if (!hasSwapchain_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return false;
+    if (!meshes_[mesh - 1].alive) return false;
     // Compute-written (skinned) meshes are excluded from the prepass -- see IDevice::
     // drawMeshDepthPrepass's own comment. The primary contract is the CALLER never offering one
     // (SandboxApp's prepass walk skips skinnedScene_ entities entirely); this is the defensive
     // second check, same shape as drawMesh()'s own re-derivation of `prepassed` just below.
-    if (meshVertexBuffer(mesh) != 0) return;
+    if (meshVertexBuffer(mesh) != 0) return false;
+    // NO RASTER COLOUR PASS TO CONSUME IT, so no raster depth either. Wireframe draws through the
+    // backend's own Less/write pipeline (scenePipeline declines it), which would reject the mesh's
+    // own edges against depth written here -- every prepassed mesh vanished in wireframe. And when a
+    // feature suppresses the scene (ray-driven primary visibility, a debug view), drawMesh returns
+    // before any colour draw while that feature's own pass has already written the frame's depth;
+    // writing raster depth over it wherever raster rounds nearer is wrong, not merely wasted. Both
+    // mirror drawMesh's own tests, so this pass and the colour pass cannot disagree about whether a
+    // raster colour draw happens. Found by adversarial review.
+    if (wireframe_) return false;
+    for (IRenderFeature* f : features_) if (f->suppressesScene()) return false;
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline()) continue;
         const PipelineHandle pp = f->depthPrepassPipeline();
-        if (!pp) return;   // this feature has no prepass PSO; nothing else offers one either today
+        if (!pp) return false;   // this feature has no prepass PSO; nothing else offers one either today
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
         const bool haveCb = f->sceneConstants(&cb, &cbBytes) && cb && cbBytes;
@@ -3956,13 +3983,17 @@ void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) {
         rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         f32 fc[kObjectConstantDwords] = {};
         std::memcpy(fc, world, 16 * sizeof(f32));
+        // gBaseColor, in the slots drawMesh fills: PSDepthPrepass's alpha test multiplies by its .a.
+        // Left zero, every alpha-masked material computed alpha 0 and clipped every pixel. See
+        // IDevice::drawMeshDepthPrepass.
+        if (color) std::memcpy(fc + 16, color, 4 * sizeof(f32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         rhiContext_->drawMesh(mesh);
-        ++depthPrepassDrawsThisFrame_;
         boundRootSig_ = nullptr;
         boundPso_ = nullptr;
-        return;
+        return true;
     }
+    return false;
 }
 
 void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
@@ -4038,7 +4069,37 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         // `blended` explicit and false: the OPAQUE scene walk. A translucent mesh never reaches here
         // -- setDrawBlended(true) diverts it into the capture-and-replay path above -- so writing
         // false out loud says so, rather than leaning on the parameter's default.
-        const PipelineHandle fp = f->scenePipeline(msActive_ && msPso_, wireframe_, prepassed, false);
+        // ---- A PREPASSED DRAW GOES DOWN THE SAME GEOMETRY PATH ITS DEPTH WAS WRITTEN THROUGH ----
+        //
+        // drawMeshDepthPrepass above ALWAYS draws through the input assembler and vsMain -- it has
+        // no mesh-shader twin -- and the whole premise of the LessEqual/no-write colour pipelines
+        // is that the colour pass reproduces that depth bit for bit. VoxiRenderer::scenePipeline
+        // says so outright: "the prepass is only offered to the plain drawMesh() path, so
+        // `depthPrepassed && meshShaders` should never both be true". This call site never honoured
+        // it. It passed msActive_ unconditionally, so with the device on mesh shaders
+        // (RENDER.MESHSHADERS 1, which PTTest sets) every prepassed draw asked for the ORDINARY
+        // mesh-shader pipeline -- Less, depth write on -- and then tested against the depth the
+        // prepass had just written for the identical triangle. Less rejects equal. Every eligible
+        // fragment was discarded, and with [earlydepthstencil] on PSMainVoxi it happened before the
+        // pixel shader ran, which is why the broken frame was also 47x cheaper:
+        //
+        //   raster scene draws  47.51ms -> 1.02ms   and the image 0.1% bit-identical, MAD 19.4
+        //
+        // Two earlier diagnoses missed it for a reason worth keeping. --no-lod-mesh-shader turns off
+        // TRIFACTOR's LOD mesh shaders, not this device path (the log still read "geometry path:
+        // mesh shaders"), and forcing scenePipeline's prepassed branch off changed nothing because
+        // that branch was never being reached. Both "eliminations" tested a switch that was already
+        // in the state the test assumed.
+        //
+        // Routing the prepassed draw onto the input assembler restores the contract exactly: same
+        // compiled vsMain in both passes, so identical positions, identical rasteriser snapping,
+        // identical depth -- and LessEqual then keeps precisely the visible surface. MSMain computes
+        // the position with the same two multiplies (shared_prelude.hlsl), so this is not expected
+        // to move a pixel against the mesh-shader frame either, but the depth equality this pass
+        // RELIES on no longer depends on two different shader stages happening to round alike.
+        // Only prepassed draws move; everything else keeps the mesh-shader path it had.
+        const bool featureMs = msActive_ && msPso_ && !prepassed;
+        const PipelineHandle fp = f->scenePipeline(featureMs, wireframe_, prepassed, false);
         if (!fp) break;
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
@@ -4067,8 +4128,10 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
         writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-        if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
-        else                                    rhiContext_->drawMesh(mesh);
+        // featureMs, not msActive_: the draw call has to match the pipeline chosen above, and a
+        // prepassed draw was just given an input-assembler pipeline. See featureMs's own comment.
+        if (featureMs && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
+        else                          rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;
         boundPso_ = nullptr;
         return;

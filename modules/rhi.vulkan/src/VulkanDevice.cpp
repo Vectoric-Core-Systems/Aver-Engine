@@ -2450,7 +2450,14 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     // VulkanResourceFactory.cpp:500-528) paired with depth-write-off.
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
-        const PipelineHandle fp = f->scenePipeline(msActive_ && meshPso_, wireframe_, prepassed, false);
+        // A PREPASSED DRAW GOES DOWN THE SAME GEOMETRY PATH ITS DEPTH WAS WRITTEN THROUGH -- the
+        // input assembler, because drawMeshDepthPrepass has no mesh-shader twin. Passing msActive_
+        // here unconditionally handed every prepassed draw the ORDINARY mesh-shader pipeline (Less,
+        // write on), which then rejected the equal depth the prepass had just written for the same
+        // triangle, and the frame came out almost entirely unshaded. D3D12Device::drawMesh's twin
+        // carries the full account and the measurement.
+        const bool featureMs = msActive_ && meshPso_ && !prepassed;
+        const PipelineHandle fp = f->scenePipeline(featureMs, wireframe_, prepassed, false);
         if (!fp) break;
         rhiContext_->setPipeline(fp);
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
@@ -2465,8 +2472,9 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // D3D12Device.cpp's call; see writeShadingConstants there for why both fields are written.
         writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-        if (msActive_ && meshPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
-        else                                      rhiContext_->drawMesh(mesh);
+        // featureMs, not msActive_: the draw call has to match the pipeline chosen above.
+        if (featureMs && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
+        else                          rhiContext_->drawMesh(mesh);
         return;
     }
 
@@ -2513,18 +2521,30 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
 //     above already re-binds pipeline and b0 set on every call, so this does the same -- redundant
 //     relative to D3D12's cached path, not incorrect.
 // ================================================================================================
-void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) {
-    if (!hasSwapchain_ || !depthPrepassEnabled_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return;
-    if (!meshes_[mesh - 1].alive) return;
+// D3D12Device's twins, same split: the frame-wide prepass is gated and counted, the per-draw one
+// (IDevice::drawMeshDepthOnly, for alpha-masked draws) is neither, and both share one body.
+void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    if (!depthPrepassEnabled_) return;
+    if (depthOnlyDraw(mesh, world, color)) ++depthPrepassDrawsThisFrame_;
+}
+bool VulkanDevice::drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    return depthOnlyDraw(mesh, world, color);
+}
+bool VulkanDevice::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+    if (!hasSwapchain_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return false;
+    if (!meshes_[mesh - 1].alive) return false;
     // Compute-written (skinned) meshes are excluded from the prepass (see IDevice::
     // drawMeshDepthPrepass). Primary contract is the CALLER never offering one; this is the
     // defensive second check, mirroring drawMesh()'s own `prepassed` re-derivation via meshVertexBuffer().
-    if (meshVertexBuffer(mesh) != 0) return;
+    if (meshVertexBuffer(mesh) != 0) return false;
+    // No raster colour pass to consume it, so no raster depth -- see D3D12Device::depthOnlyDraw.
+    if (wireframe_) return false;
+    for (IRenderFeature* f : features_) if (f->suppressesScene()) return false;
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline()) continue;
         const PipelineHandle pp = f->depthPrepassPipeline();
-        if (!pp) return;   // this feature has no prepass PSO; nothing else offers one either today
+        if (!pp) return false;   // this feature has no prepass PSO; nothing else offers one either today
         rhiContext_->setPipeline(pp);
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
         const void* cb = nullptr; u32 cbBytes = 0;
@@ -2536,11 +2556,13 @@ void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) {
         rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         f32 fc[kObjectConstantDwords] = {};
         std::memcpy(fc, world, 16 * sizeof(f32));
+        // gBaseColor -- PSDepthPrepass's alpha test multiplies by its .a. See D3D12Device's twin.
+        if (color) std::memcpy(fc + 16, color, 4 * sizeof(f32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         rhiContext_->drawMesh(mesh);
-        ++depthPrepassDrawsThisFrame_;
-        return;
+        return true;
     }
+    return false;
 }
 
 // ================================================================================================

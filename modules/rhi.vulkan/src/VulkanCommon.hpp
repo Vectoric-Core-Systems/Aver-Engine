@@ -1478,7 +1478,10 @@ public:
     // the default must reproduce today's no-prepass Vulkan behaviour exactly.
     void setDepthPrepassEnabled(bool on) override { depthPrepassEnabled_ = on; }
     bool depthPrepassEnabled() const override { return depthPrepassEnabled_; }
-    void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) override;
+    void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
+    bool drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) override;
+    // Shared body of the two above; true when a depth-only draw was actually recorded.
+    bool depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 color[4]);
     // AUTO-CONSUMED by the very next drawMesh() call, not stored past it (see IDevice). Plain
     // assignment: this only records what the CALLER already believes about the upcoming draw's
     // eligibility (e.g. a skinned mesh); drawMesh() still re-checks meshVertexBuffer(mesh) before

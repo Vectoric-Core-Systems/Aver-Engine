@@ -828,7 +828,10 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // meant to be see-through, vanishing under it instead of showing through.
                 if (dl.look.blended) continue;
                 if (dl.matBytes) device.setDrawBinding(dl.matSet, dl.matConstants, dl.matBytes);
-                device.drawMeshDepthPrepass(pd.mesh, &wm.m[0][0]);
+                // dl.look.col: the SAME base colour the colour pass hands drawMesh (minus a debug tint
+                // that only touches .g). PSDepthPrepass's alpha test multiplies by its .a; without it
+                // every alpha-masked material clipped every pixel and wrote no depth.
+                device.drawMeshDepthPrepass(pd.mesh, &wm.m[0][0], dl.look.col);
             }
             continue;
         }
@@ -876,7 +879,45 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // the host's: dec.prepassEligible stays false unless a host says it prepassed this
                 // entity, and a game host that runs no prepass walk never says so -- which is why
                 // this walk called neither of these two functions before there were hosts that do.
-                if (dec.prepassEligible && !dl.look.blended) device.setNextDrawPrepassed(true);
+                bool prepassedDraw = dec.prepassEligible && !dl.look.blended;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+                // ---- AN ALPHA-MASKED DRAW WRITES ITS OWN DEPTH FIRST WHEN NO PREPASS DID ----
+                //
+                // The scene colour shader forces early depth ([earlydepthstencil] on PSMainVoxi,
+                // 39af0e32 -- load-bearing: without it hidden fragments poison the AO history and
+                // shade for nothing). Under forced early depth the depth WRITE happens before the
+                // shader runs, so averEvalMaterial's `clip(s.alpha - a.alphaCutoff)` on an
+                // alpha-masked material (material_prelude.hlsl) discards the colour and cannot take
+                // the depth back: every cut-out texel of a leaf, a grille or a fence wrote opaque
+                // depth, and anything drawn behind it afterwards failed the test and never showed
+                // through the hole. 39af0e32's own comment claimed PSMainVoxi had no alpha-cutout
+                // discard; it only searched voxi.hlsl, and the clip lives in the material prelude.
+                // Found by adversarial review.
+                //
+                // THE FIX REUSES THE PREPASS MACHINERY FOR ONE DRAW: its depth goes through
+                // PSDepthPrepass, which does NOT force early depth and clips BEFORE it writes, then
+                // its colour goes through the LessEqual/NO-WRITE twin, which leaves early depth
+                // nothing to write. Only alpha-masked opaque draws the frame-wide prepass did not
+                // already cover pay the second draw. With --depth-prepass on they are already
+                // covered and this does not fire.
+                //
+                // KNOWN RESIDUALS, stated rather than hidden: a SKINNED alpha-masked mesh (hair
+                // cards) cannot be depth-drawn here -- drawMeshDepthOnly refuses posed vertices and
+                // drawMesh then re-derives prepassed=false -- so it keeps the leak; cluster-dispatched
+                // geometry never reaches this loop; and a material GRAPH driving opacity other than
+                // through the stock alpha can disagree with PSDepthPrepass at cut-out edges, exactly
+                // as it already can under the frame-wide prepass.
+                if (!prepassedDraw && !dl.look.blended && dl.matConstants &&
+                    (static_cast<const pbr::MaterialConstants*>(dl.matConstants)->flags &
+                     pbr::MaterialFlag_AlphaMask) != 0u) {
+                    // `col` is the exact array drawMesh gets below: the depth shader's alpha test
+                    // reads its .a. Marked prepassed ONLY if depth was actually written -- false in
+                    // wireframe, under a scene-suppressing feature, for a skinned mesh, or with no
+                    // depth-only pipeline, and each of those must keep its ordinary pipeline.
+                    prepassedDraw = device.drawMeshDepthOnly(pd.mesh, &wm.m[0][0], col);
+                }
+#endif
+                if (prepassedDraw) device.setNextDrawPrepassed(true);
                 device.drawMesh(pd.mesh, &wm.m[0][0], col, dl.look.metallic, dl.look.roughness);
             }
         } else if (dec.emitDirectDraws &&

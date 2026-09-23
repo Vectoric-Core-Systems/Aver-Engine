@@ -4820,9 +4820,20 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe
     // The LessEqual/no-write twin, for an instance a same-frame depthPrepassPipeline() draw already
     // wrote depth for -- see depthPrepassPipeline() and D3D12Device::drawMesh for who sets this.
     // MESH-SHADER SCENE DRAWS NEVER TAKE THIS BRANCH: the prepass is only offered to the plain
-    // drawMesh() path, so `depthPrepassed && meshShaders` should never both be true. Falling through
-    // to the ordinary mesh-shader pipeline if it somehow happens is the same "an excluded path just
-    // draws normally" answer this feature gives skinned meshes, the landscape and the GPU cluster path.
+    // drawMesh() path, so `depthPrepassed && meshShaders` must never both be true -- and it is now
+    // the BACKENDS that guarantee it (D3D12Device/VulkanDevice::drawMesh pass meshShaders=false for
+    // a prepassed draw and issue it through the input assembler).
+    //
+    // THIS USED TO SAY "should never both be true", AND THAT FALLING THROUGH TO THE ORDINARY
+    // MESH-SHADER PIPELINE "IF IT SOMEHOW HAPPENS" WAS THE SAME HARMLESS "just draws normally"
+    // ANSWER GIVEN TO SKINNED MESHES. Both halves were wrong. It happened on every prepassed draw
+    // whenever the device ran mesh shaders (RENDER.MESHSHADERS 1, PTTest's own setting), because the
+    // backend passed msActive_ through unconditionally. And the fall-through is not harmless: the
+    // ordinary pipeline is Less with depth write, run against the depth the prepass wrote for the
+    // SAME triangle, and Less rejects equal -- so every eligible fragment was discarded, the frame
+    // came out almost entirely unshaded (0.1% of pixels bit-identical to the prepass-off frame),
+    // and --depth-prepass had to ship off. A skinned mesh differs precisely because the prepass
+    // never wrote depth for it, so there is nothing equal to reject.
     if (depthPrepassed && !meshShaders) {
         if (rtActive_ && sceneRtPsoPrepassed_) return pickGbuf(sceneRtPsoPrepassed_, sceneRtPsoPrepassedGbuf_);
         if (!rtActive_ && scenePsoPrepassed_)  return pickGbuf(scenePsoPrepassed_, scenePsoPrepassedGbuf_);
@@ -4837,7 +4848,18 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe
 // The depth-only prepass pipeline -- see the header's own comment. 0 (declines) whenever
 // createScenePipelines() never got a compiled PSDepthPrepass, which IDevice::drawMeshDepthPrepass
 // treats identically to "this feature has no prepass at all".
-rhi::PipelineHandle VoxiRenderer::depthPrepassPipeline() const { return depthPrepassPso_; }
+// OFFERED ONLY WHEN THIS FRAME'S COLOUR PASS CAN CONSUME IT. A prepass with no LessEqual/no-write
+// twin behind it is not a missed optimisation, it is the original failure: scenePipeline falls back
+// to the Less/write pipeline, which rejects the equal depth this pass just wrote, and the frame goes
+// almost entirely unshaded. The twins are created only when depthPrepassPso_ exists, and each has
+// its own WARN when it does not, so this can only bite on a partial pipeline failure -- but that is
+// exactly when it should degrade to "no prepass" rather than to a black frame. Checks the PLAIN twin
+// because pickGbuf falls back to it when the G-buffer twin is absent. rtActive_ is fixed for the
+// frame by prePass, which runs from beginFrame before any draw. Found by adversarial review.
+rhi::PipelineHandle VoxiRenderer::depthPrepassPipeline() const {
+    const rhi::PipelineHandle twin = rtActive_ ? sceneRtPsoPrepassed_ : scenePsoPrepassed_;
+    return twin ? depthPrepassPso_ : 0;
+}
 
 // Creates the cascaded shadow atlas.
 bool VoxiRenderer::createShadowResources() {

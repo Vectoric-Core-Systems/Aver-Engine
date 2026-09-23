@@ -1096,17 +1096,39 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
 //   truth, and raster-vs-ray-driven PARITY moves 6.05 -> 0.98. JungleRuins, a second and much more
 //   open scene, moves the other way for the same reason and also improves: 14.06 -> 12.93.
 //
-// WHY NOT THE DEPTH PREPASS. --depth-prepass does suppress the hidden fragments (occlusion
-// 132.76 -> 12.45) but it regresses the shaded image hard (MAD 6.43 -> 21.66, parity -> 20.82) and
-// gives bit-identical results with NRD on and off, so it changes more about the pass than overdraw.
-// It was the diagnostic that confirmed the mechanism; it is not the fix.
+// THE DEPTH PREPASS -- THE "WHY NOT" THAT STOOD HERE WAS MEASURED ON A BROKEN PREPASS. It recorded
+// --depth-prepass regressing the image (MAD 6.43 -> 21.66, parity -> 20.82) with bit-identical
+// results NRD on and off, and concluded the prepass was not the fix. The cause was not the prepass:
+// with the device on mesh shaders (RENDER.MESHSHADERS 1) the backends handed every prepassed draw the
+// ORDINARY mesh-shader pipeline -- Less, depth write on -- which rejected the equal depth the prepass
+// had just written, so the colour pass was almost entirely discarded (and 47x cheaper for it). The
+// "bit-identical NRD on and off" was the tell: nothing was shading. Fixed in D3D12Device/VulkanDevice::
+// drawMesh (a prepassed draw now takes the input-assembler path its depth was written through).
+// With that fixed, the prepass is expected to be the stronger form of THIS change -- one shaded
+// fragment per pixel, so the AO history is written only by the visible surface -- and roughly 8x
+// cheaper on the raster path (47.51ms scene draws measured without it). NOT YET MEASURED FIXED.
 //
-// WHY THIS IS SAFE FOR THE clip(). The only clip() in this function is the translucent ONE-LAYER
-// selection below (gated on AVER_MAT_ALPHA_BLEND && !AVER_MAT_TWO_SIDED) -- there is no alpha-cutout
-// discard here; the cutout lives in PSDepthPrepass. An opaque draw therefore never clips at all, and
-// the blended PSO that shares this shader sets depth.write = false (VoxiRenderer.cpp), so moving the
-// depth TEST ahead of a discard that can no longer affect depth changes nothing about which layer
-// survives. Verified by capture on both scenes; neither lost geometry.
+// THE clip() INTERACTION -- THIS PARAGRAPH USED TO SAY IT WAS SAFE, AND IT WAS WRONG.
+//
+// It claimed the only clip() here was the translucent ONE-LAYER selection below and that "there is
+// no alpha-cutout discard here; the cutout lives in PSDepthPrepass". That was checked by searching
+// THIS FILE ONLY. averEvalMaterial (called below) comes from the material prelude, and
+// material_prelude.hlsl does `if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);`.
+// Under forced early depth the depth WRITE happens before this shader runs, so that clip discards the
+// colour of a cut-out texel but not its depth: every hole in a leaf or a fence wrote opaque depth and
+// hid whatever was drawn behind it afterwards. "Verified by capture on both scenes; neither lost
+// geometry" was true and did not test it -- a whole-image comparison cannot see a few percent of
+// foliage pixels. Found by adversarial review, not by a capture.
+//
+// HOW IT IS HANDLED NOW: an alpha-masked draw never reaches this shader with depth write on. Either
+// the frame-wide depth prepass already wrote its depth (PSDepthPrepass does not force early depth and
+// clips before it writes), or the colour walk writes that one draw's depth first through
+// IDevice::drawMeshDepthOnly -- and in both cases the colour draw then uses the LessEqual/NO-WRITE
+// twin, which leaves early depth nothing to write. See GameRender.cpp's colour loop for the residuals
+// (skinned alpha-masked meshes, cluster-dispatched geometry, material graphs driving opacity).
+//
+// The translucent ONE-LAYER clip is still harmless for the reason originally given: the blended PSO
+// sharing this shader sets depth.write = false (VoxiRenderer.cpp), so there is no depth to leak.
 //
 // TEMPORAL VALIDATION, because this feeds an accumulated term and still frames cannot judge one:
 // matched-pose A/B (--cam-translate 3 --cam-wobble 8 40 --cam-wobble-stop 100, 103 vs 220 frames)

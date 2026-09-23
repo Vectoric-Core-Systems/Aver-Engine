@@ -770,7 +770,42 @@ public:
     // rather than trust every future call site to remember, but the caller choosing NOT to call this
     // for such a mesh in the first place is still the primary contract: a skinned entity is one of
     // the paths this feature is meant to exclude, not one it is meant to guard against after the fact.
-    virtual void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
+    //
+    // `color` IS THE SAME ARRAY THE PAIRED drawMesh() RECEIVES, and it is not decoration: the depth
+    // shader's alpha test is `gBaseColor.a * gBaseColorFactor.a * texture.a` (voxi.hlsl's
+    // PSDepthPrepass), and gBaseColor is the per-object constant that array fills. This used to take
+    // no colour and leave that slot zero, so every alpha-masked material computed alpha 0, clipped
+    // every pixel, and wrote NO depth at all -- and its colour draw, being "prepassed", then wrote
+    // none either. Found by adversarial review; it had been latent only because the prepass itself
+    // never took effect while it was broken.
+    virtual void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+        (void)mesh; (void)world; (void)color;
+    }
+
+    // drawMeshDepthPrepass's body WITHOUT the frame-wide depthPrepassEnabled() gate, and without
+    // counting toward its per-frame census -- for a SINGLE draw that needs its depth written by the
+    // alpha-testing depth-only shader immediately before its own colour draw, whether or not the
+    // whole-frame prepass is on. Follow it with setNextDrawPrepassed(true), exactly as a
+    // whole-frame prepass is followed.
+    //
+    // WHY IT EXISTS: an ALPHA-MASKED material under a colour shader that forces early depth. The
+    // scene colour shader (PSMainVoxi) is [earlydepthstencil] -- load-bearing, see its own comment --
+    // and under forced early depth the depth write happens BEFORE the shader runs, so the alpha
+    // clip() in averEvalMaterial cannot take it back. Every cut-out texel of a leaf or a fence
+    // therefore wrote opaque depth, and whatever was drawn behind it afterwards failed the depth test
+    // and never appeared through the hole. Writing that draw's depth first through PSDepthPrepass
+    // (which has no forced early depth and clips BEFORE its write), then drawing its colour with the
+    // LessEqual/NO-WRITE twin, leaves early depth nothing to write, so the clip is honoured again.
+    //
+    // RETURNS WHETHER DEPTH WAS ACTUALLY WRITTEN, and the caller marks the colour draw prepassed only
+    // on true. False for a skinned mesh, in wireframe, when a feature suppresses the rasterised scene
+    // (ray-driven primary visibility, a debug view -- there is no raster colour pass to consume the
+    // depth, and writing raster depth over the ray-driven pass's own depth would be wrong), or when
+    // no feature offers a depth-only pipeline. `color` as for drawMeshDepthPrepass, for the same
+    // alpha-test reason.
+    virtual bool drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
+        (void)mesh; (void)world; (void)color; return false;
+    }
 
     // Marks the VERY NEXT drawMesh() call as one whose depth a prior drawMeshDepthPrepass() call
     // already wrote for the identical mesh/world THIS SAME FRAME, so the backend can ask the scene
