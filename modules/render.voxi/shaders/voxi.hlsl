@@ -440,6 +440,32 @@ RWTexture2D<float4>       gRdGiTex     : register(u13);
 // and stays in the shade pass. See CSRdSkyOcc's own header for the exact gate.
 RWTexture2D<float4>       gRdAoTex     : register(u14);
 
+// gRdReflTex -- MILESTONE 3's addition: splitting PSRayDriven's own ray-traced REFLECTION answer the
+// same way milestones 1/2 split shadow/GI/sky-occlusion above. One RGBA16F texel per pixel, written
+// once by its own dedicated compute stage (CSRdRefl, further down this file, under this same AVER_RT
+// region) and read once by PSRayDriven's AVER_RD_SPLIT branch, further down still. Like gRdSunVisTex/
+// gRdGiTex/gRdAoTex, NOT itself a history buffer: the real frame-to-frame state (gRtReflHist/
+// gRtReflHistOut, t7/u3, this file's own rtReflectionTemporal) is untouched by this texture -- it only
+// ferries ONE frame's answer from CSRdRefl to Stage B.
+//
+// kVoxiUavCount 15 -> 16 (VoxiRenderer.cpp, not this file) -- the next free slot after gRdAoTex's u14,
+// same descriptor table every other stage already uses, so no SRV slot moves.
+//
+// rgb = the same clamped specular colour PSRayDriven's own reflection branch computes today (a real
+// mirror/glossy hit, the atmosphere march blended in at a rough surface's sky weight, or plain sky --
+// see CSRdRefl's own body for which of those three a given pixel took).
+//
+// ALPHA IS NOT "unused" THE WAY THE OTHER THREE STAGED TEXTURES' SPARE CHANNELS ARE: it is THE STAGE'S
+// OWN DECISION, exactly the phrase this field's contract uses -- 1.0 where CSRdRefl actually traced
+// this pixel (its own copy of PSMainVoxi's `gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <=
+// 0.75` gate; 2.0 when that traced value also hit the radiance ceiling before its clamp, for the poison
+// view), 0.0 everywhere else (roughness routed the pixel to the cone/sky fallback instead, or
+// there was no surface at all). Stage B reads this alpha, not a recomputed roughness test, to choose
+// between the traced answer and its OWN cone/sky fallback -- see PSRayDriven's AVER_RD_SPLIT branch,
+// further down this file, and rdSurfaceRoughness's own header for why the roughness test cannot simply
+// be repeated there instead.
+RWTexture2D<float4>       gRdReflTex   : register(u15);
+
 // The surface PSRayDriven reconstructs from a ray hit, minus everything that hit computed for itself
 // (bary, dir, N before its face-the-ray flip): what Stage S and Stage B's AVER_RD_SPLIT branch both
 // need afterward, and nothing they don't -- dpx/dpy (the shadow-ray footprint) and L (the light
@@ -496,6 +522,71 @@ RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     o.hitT = dot(P - gCamPos.xyz, dir);
     o.wpos = gCamPos.xyz + dir * o.hitT;
     return o;
+}
+
+// MILESTONE 3. The one number CSRdRefl needs out of PSRayDriven's own material block before it can
+// even decide whether to trace a reflection ray: the hit's ROUGHNESS. TRANSCRIBED FROM PSRayDriven'S
+// OWN MATERIAL BLOCK (this file, the AVER_RT_BINDLESS branch of "THE STOCK MATERIAL AT A RAY HIT",
+// further down) -- uvS/averRtUvGrad/the slot-1 metal-rough sample/the AVER_MAT_SLOPE_BLEND layer-1
+// blend/the final clamp are copied verbatim, keeping only the statements roughness actually depends
+// on. NOT a full rebuild of AverSurface: mapBase, occlusion, emissive and the normal map are read by
+// PSMainVoxi/PSRayDriven for shading but never feed `s.rough`, so a caller that only wants the gate
+// value (this one) has nothing to do with them -- and CSRdRefl never reads them back, so computing
+// them here would be dead work every one of this pass's pixels pays for nothing.
+//
+// KEEP IN STEP WITH PSRayDriven's OWN COPY BY HAND -- the same rule rdSurfaceFromRecord's own header
+// states just above, and for the same reason: no shared statement, so a change to one does not update
+// the other. A future edit to PSRayDriven's roughness computation (a new map, a different clamp) that
+// isn't mirrored here silently gives CSRdRefl's gate and rtReflectionTemporal call a stale roughness
+// while the shade pass's own s.rough (still computed there in full, and still what the cone/sky
+// fallback below uses) moves on without it.
+//
+// WHY THIS CAN'T JUST RE-CHECK `rough <= 0.75` A SECOND TIME AT STAGE B INSTEAD OF READING gRdReflTex's
+// alpha: Stage B has no cheap way to know CSRdRefl's own roughness without redoing this same
+// reconstruction itself, which is exactly the register-pressure cost splitting the reflection out of
+// the shade pass exists to remove (see CSRdRefl's own header). Reading gRdReflTex[pixel].a instead asks
+// the stage that already paid for this answer, once.
+float rdSurfaceRoughness(RdSurface s, float3 rdRayDx, float3 rdRayDy) {
+#ifdef AVER_RT_BINDLESS
+    // THE EFFECTIVE UV and its footprint, same two calls PSRayDriven's own copy makes -- see that
+    // block's own comments for why averRtSurfaceUV/averRtUvGrad are the right pair and why the
+    // gradient rides the shadow-ray footprint rather than a screen-space derivative (undefined on a
+    // ray hit).
+    const float2 uvS = averRtSurfaceUV(s.mat, s.inst, s.wpos, s.N, s.hitUV);
+    float2 uvGx, uvGy;
+    averRtUvGrad(s.mat, s.inst, s.N,
+                 gRtVerts[s.i0].pos, gRtVerts[s.i1].pos, gRtVerts[s.i2].pos,
+                 gRtVerts[s.i0].uv,  gRtVerts[s.i1].uv,  gRtVerts[s.i2].uv,
+                 rdRayDx, rdRayDy, uvGx, uvGy);
+
+    // glTF packs roughness in G, metallic in B -- the same unpack PSRayDriven's own copy does. Only
+    // slot 1 (MetalRough) is sampled: slots 0/2/3/4 (base colour, normal, occlusion, emissive) feed
+    // shading channels this function has no use for.
+    const float4 mapMR      = averRtSampleSlot(s.mat, 1, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
+    float2       metalRough = float2(mapMR.g, mapMR.b);
+
+    // THE SECOND LAYER, blended by SLOPE off the GEOMETRIC normal -- same predicate and lerp weight as
+    // PSRayDriven's own copy. Only the texIndex[6] (Layer1MetalRough) branch is transcribed: the
+    // sibling texIndex[5]/texIndex[7] branches blend mapBase/normalTS, neither of which this function
+    // returns.
+    if (s.mat.flags & AVER_MAT_SLOPE_BLEND) {
+        const float flat01 = saturate(abs(s.N.z));
+        const float lw = 1.0 - smoothstep(s.mat.slopeBlendLo, s.mat.slopeBlendHi, flat01);
+        if (lw > 0.001) {
+            if (s.mat.texIndex[6] != AVER_TEX_UNBOUND) {
+                const float2 uv1 = uvS * s.mat.layer1UvScale;
+                const float4 mr1 = averRtSampleSlot(s.mat, 6, uv1,
+                                                    uvGx * s.mat.layer1UvScale,
+                                                    uvGy * s.mat.layer1UvScale, mapMR);
+                metalRough = lerp(metalRough, float2(mr1.g, mr1.b), lw);
+            }
+        }
+    }
+
+    return clamp(s.inst.roughness * s.mat.roughnessFactor * metalRough.x, 0.045, 1.0);
+#else
+    return clamp(s.inst.roughness * s.mat.roughnessFactor, 0.045, 1.0);   // averEvalMaterial's own floor
+#endif
 }
 
 // How far a view ray travels INSIDE a volume before something stops it, in centimetres --
@@ -2258,6 +2349,63 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // RAY-TRACED specular term gets this marker, and aver_IsGiRestirPoisonColour's own comment for
     // the precedence against giDiffusePoisoned above.
     bool giPoisonSpecCeilHit = false;
+#if AVER_RD_SPLIT
+    // MILESTONE 3, STAGE B: read CSRdRefl's already-resolved reflection instead of re-deciding
+    // roughness and calling rtReflectionTemporal here -- CSRdRefl ran that same gate and that same
+    // call for this pixel, from its own roughness-only reconstruction (rdSurfaceRoughness, declared
+    // alongside rdSurfaceFromRecord above). THE SPLIT COMPILE MUST CONTAIN NO CALL TO
+    // rtReflectionTemporal -- removing it from this pass is the point (register pressure) -- so this
+    // branch reads a texel instead of tracing.
+    //
+    // THE GATE HERE IS DELIBERATELY MISSING ITS ROUGHNESS TERM: it repeats only
+    // `gShadowParams.z > 0.5 && gRtParams.w > 0.5` (never s.rough <= 0.75) because rdRefl.a already
+    // encodes that CSRdRefl's OWN gate (which does include roughness) passed for this pixel -- see
+    // gRdReflTex's own header comment, "THE STAGE'S OWN DECISION", for why reading that alpha is not
+    // an approximation of the roughness test but IS the roughness test's already-computed answer.
+    // What is repeated here only guards the texture itself: on a frame where the CPU never dispatched
+    // CSRdRefl at all (this same condition false), gRdReflTex may hold a stale or placeholder texel,
+    // exactly the reason CSRdGi's and CSRdSkyOcc's own AVER_RD_SPLIT reads above repeat their own
+    // dispatch conditions the same way.
+    const float4 rdRefl = (gShadowParams.z > 0.5 && gRtParams.w > 0.5)
+                         ? gRdReflTex[uint2(i.pos.xy)] : float4(0.0, 0.0, 0.0, 0.0);
+    if (rdRefl.a > 0.5) {
+        // B1 (F5): CSRdRefl's own PRE-clamp ceiling test, carried in alpha (2.0 = traced AND over the
+        // ceiling) -- NOT recomputed from rdRefl.rgb, which is already clamped and half-float rounded,
+        // so a test against it could disagree with the single pass's test against the unclamped value.
+        giPoisonSpecCeilHit = rdRefl.a > 1.5;
+        ind.specular = rdRefl.rgb;
+    } else if (gVoxelParams.w > 0.5) {
+        // PSMainVoxi's OWN voxel-cone fallback, for the surfaces PSMainVoxi itself falls back for
+        // (rough > 0.75, or RT unavailable): past that roughness a one-ray estimate can't resolve a
+        // near-hemispherical lobe regardless of which pass is asking. DUPLICATED FROM THE #else
+        // BRANCH'S IDENTICAL COPY below rather than shared across the #endif, for the same "no shared
+        // statement" reason PSRayDriven's own trace block above gives (search "no shared statement")
+        // -- this whole chain must stay easy to prove byte-identical to the pre-milestone-3 shape when
+        // AVER_RD_SPLIT is 0, which a statement straddling this preprocessor boundary would not be.
+        float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
+#if AVER_RD_ABLATE == AVER_RD_ABL_SPECCONE
+        // ablated: no specular cone. FULLY OPAQUE (alpha 1) rather than empty, so skyWeight below
+        // goes to 0 and this mode measures the CONE ALONE -- an alpha of 0 would instead hand the
+        // whole branch to skyColor and measure a march this mode is not trying to price.
+        float4 sceneSpec    = float4(0.0, 0.0, 0.0, 1.0);
+#else
+        float4 sceneSpec    = traceCone(wpos, R, specAperture);
+#endif
+        // Same fix as PSMainVoxi's identical branch above: HLSL doesn't short-circuit the multiply,
+        // so skyColor(R)*(1-sceneSpec.a) wastes a 32-step march when occluded. 0.004 threshold, same
+        // reasoning as averFogInscatter's (measured there: "8.9ms -> 1.3ms, 85% of the scene pass").
+        const float skyWeight = 1.0 - sceneSpec.a;
+        ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+#if AVER_RD_ABLATE == AVER_RD_ABL_ROUGHSKY
+        // ablated: the rough branch's atmosphere march. Mode 4 covers only the REFLECTION branch's;
+        // this is the call an enclosed scene actually reaches.
+#else
+        if (skyWeight > 0.004) ind.specular += skyColor(R) * skyWeight;
+#endif
+    } else {
+        ind.specular        = skyColor(R);
+    }
+#else
     if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75) {
         const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
         const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
@@ -2333,6 +2481,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     } else {
         ind.specular        = skyColor(R);
     }
+#endif
     // REAL AMBIENT OCCLUSION NOW, from the same cone march as the diffuse term. Used to be a
     // hardcoded 1.0 ("a traced bounce is its own occlusion" -- true for a converged path tracer, not
     // for one fixed sample per pixel). Cone trace supplies both now, matching the raster path.
@@ -2828,6 +2977,123 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
     // miss case above.
     gRdAoTex[pixel] = float4(1.0, 0.0, 0.0, 1.0);
 #endif
+}
+
+// ---- STAGE R: CSRdRefl -- reconstruct the surface, resolve the ray-traced reflection --------------
+//
+// MILESTONE 3. Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the
+// same reconstruction every other stage uses), and runs the SAME rtReflectionTemporal call PSRayDriven's
+// single pass makes for a qualifying surface -- same pixel-centre argument, same shadow-ray-shaped
+// footprint, so the reflection history pair (gRtReflHist/gRtReflHistOut, t7/u3, this file's own
+// rtReflectionTemporal) means the same thing whichever path is running.
+//
+// UNLIKE Stage S/G/O, this stage's OWN gate includes roughness -- CSRdShadow/CSRdGi/CSRdSkyOcc all
+// answer a question every surface has (is it lit? what bounces off it? how open is its sky?), but a
+// reflection ray is only ever traced for `rough <= 0.75` surfaces in the first place, so this stage has
+// to reconstruct that same roughness before it can even decide whether to trace -- see
+// rdSurfaceRoughness's own header for why that is a dedicated helper rather than reading `s.rough` off
+// a full AverSurface this stage never builds.
+//
+// COMPILED AT SM 6.6 (VoxiRenderer), same defines as CSRdShadow/CSRdGi/CSRdSkyOcc: rtReflectionTemporal
+// calls rtReflectionSpatial, which takes ddx/ddy of depth exactly as rtShadowTemporal's own spatial
+// filter does, so this stage needs the same derivative-capable compute shader model, 8x8 threads
+// forming 2x2 quads.
+[numthreads(8, 8, 1)]
+void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    const uint pitch = (uint)gViewParams.w;
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    const uint4 rec = gRdVisBuf[idx];
+    if (rec.x == 0xFFFFFFFFu) {
+        // A sky pixel has no surface to reflect off. Stage B's own miss branch (PSRayDriven's
+        // #if AVER_RD_SPLIT trace block, above) already returns before ever reaching the reflection
+        // read, so this texel is never read back for this pixel either -- written anyway, the same
+        // "leave no uninitialised texel behind" reasoning CSRdShadow's own miss branch gives, and 0 in
+        // alpha reads as "not traced" if anything ever does read it.
+        gRdReflTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
+    // own header for the derivation.
+    float2 ndc;
+    float3 dir = rdPrimaryRayDir(pixel, ndc);
+
+    RdSurface s = rdSurfaceFromRecord(rec, dir);
+
+    // THE SAME FOOTPRINT RECONSTRUCTION CSRdShadow BUILDS FOR ITS OWN SHADOW CALL, byte-for-byte --
+    // see that stage's own comment for the derivation. gSceneViewport, not Cur: this is a ray
+    // DIFFERENTIAL (the neighbour pixel's own primary ray), the same quantity PSRayDriven's single
+    // pass and CSRdShadow both reconstruct against LAST frame's grid on purpose, not this stage's own
+    // dispatch rect.
+    const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
+                                       2.0 / max(gSceneViewport.w, 1.0));
+    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
+    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
+    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
+    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    const float3 rdRayDx = (dirDx - dir) * s.hitT;
+    const float3 rdRayDy = (dirDy - dir) * s.hitT;
+
+    const float3 L = normalize(gLightDir.xyz);
+    // PSRayDriven's OWN R -- reflect the primary ray about the (already face-the-ray-flipped) surface
+    // normal rdSurfaceFromRecord produced, same as that function's own `float3 R = reflect(dir, N);`.
+    const float3 R = reflect(dir, s.N);
+    // THE ONE VALUE THIS STAGE NEEDS BEFORE IT CAN EVEN GATE -- see rdSurfaceRoughness's own header.
+    const float rough = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
+
+    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's, CSRdGi's and CSRdSkyOcc's own copies of this
+    // line give: a blended (glass/water) draw never reaches the ray-driven primary at all, so every
+    // history write rtReflectionTemporal makes below is always live for this pass.
+    gAverHistoryWrite = true;
+
+    // THE GATE IS PSRayDriven's OWN PREDICATE, roughness included -- see that function's "ENVIRONMENT
+    // SPECULAR" comment for why these three terms are the right ones. Unlike Stage S/G/O, this gate
+    // cannot be dropped from the compute stage and left for Stage B to re-apply: Stage B reads this
+    // gate's OUTCOME off gRdReflTex's alpha channel instead of repeating the roughness test itself --
+    // see PSRayDriven's AVER_RD_SPLIT reflection branch, above, and gRdReflTex's own header comment.
+    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75) {
+        const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
+        const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
+        bool specHit = false;
+#if AVER_RD_ABLATE == AVER_RD_ABL_REFL || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+        float3 refl = float3(0.0, 0.0, 0.0);   // ablated: no mirror ray -- matches PSRayDriven's own copy
+#else
+        float3 refl = rtReflectionTemporal(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
+                                           rdReflDzdx, rdReflDzdy, specHit);
+#endif
+        // Same guard, same reasoning, as PSRayDriven's own copy -- see that function's "ENVIRONMENT
+        // SPECULAR" comment block for the full account of why this is a lerp against skyW rather than
+        // a hard branch.
+        const float skyW = smoothstep(0.5, 0.75, rough);
+        float3 skyR = float3(0.0, 0.0, 0.0);
+#if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+        // ablated: no atmosphere march -- matches PSRayDriven's own copy
+#else
+        if (!specHit || skyW > 0.0) skyR = skyColor(R);
+#endif
+        // CLAMPED, same ceiling PSRayDriven's own copy applies and for the same reason (see that
+        // function's own comment, just above its identical line, for the unbounded-term incident this
+        // guards against) -- clamp() rather than min(), so a NEGATIVE radiance floors to 0 rather than
+        // reading through unclamped on the low side.
+        const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
+        // THE .a CHANNEL IS THE STAGE'S DECISION (gRdReflTex's own header comment) -- nonzero here, and
+        // ONLY here, marks this pixel as one CSRdRefl actually traced. 2.0 rather than 1.0 additionally
+        // carries B1 (F5)'s PRE-clamp ceiling test, `>=` for PSMainVoxi's NaN-safe reason: the clamp
+        // below discards specRaw, so Stage B cannot recompute the test from rgb (a clamped, half-float
+        // value) and still agree with the single pass's own test against the unclamped one.
+        gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
+                                   any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
+    } else {
+        // Roughness (or the outer gate) routed this pixel to Stage B's own cone/sky fallback instead --
+        // 0 in every channel, alpha included, so PSRayDriven's AVER_RD_SPLIT branch takes that fallback
+        // rather than reading a stale or zeroed colour as if it were a traced miss.
+        gRdReflTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
+    }
 }
 #endif  // AVER_RT
 
