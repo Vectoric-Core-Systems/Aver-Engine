@@ -965,6 +965,15 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxStabilizedFrameNum = n; }); }});
     // The residual-noise dials -- see render.nrd::Denoiser::ReblurTuning for each one's NRD guidance.
     // Same LIVE shape as the three above; NRD's own defaults.
+    t.push_back({"voxi.reblurAntiFirefly", VarType::Bool, false,
+        "REBLUR_DIFFUSE anti-firefly (NRD's enableAntiFirefly). NRD default ON",
+        []{ return vBool(Renderer::get().settings().reblurAntiFirefly); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->reblurAntiFirefly = on; }); }});
+    t.push_back({"voxi.reblurFireflySuppressorScale", VarType::F32, false,
+        "REBLUR_DIFFUSE temporal firefly suppressor: each new value is clamped to (this + 38/(history "
+        "length+1)) x the pixel's own history. NRD documents [1,3], default 2",
+        []{ return vF32(Renderer::get().settings().reblurFireflySuppressorScale); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurFireflySuppressorScale = n; }); }});
     t.push_back({"voxi.reblurAntilagSigmaScale", VarType::F32, false,
         "REBLUR_DIFFUSE antilag: luminance delta is discounted by local variance times this; LARGER "
         "quietens antilag (NRD has no off switch). NRD default 2 (its old default was 4)",

@@ -311,6 +311,11 @@ public:
         // minBlurRadius once converged. Blur trades noise for detail, so these are for measuring.
         float minBlurRadius = 1.0f;
         float maxBlurRadius = 30.0f;
+        // [1; 3] per NRD. REBLUR's temporal accumulation clamps each new value to
+        // (this + 38 / (accumSpeed + 1)) x the pixel's own history luminance
+        // (REBLUR_TemporalAccumulation.cs.hlsl, "Firefly suppressor") -- NOT the enableAntiFirefly
+        // switch above, a separate mechanism with no off switch.
+        float fireflySuppressorMinRelativeScale = 2.0f;
     };
 
     // `denoiserIndex` is the index into the kinds array create() was given -- the same index

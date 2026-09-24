@@ -595,6 +595,8 @@ struct Settings {
     u32   reblurMaxStabilizedFrameNum = 63;
     // The residual-noise dials -- see render.nrd::Denoiser::ReblurTuning for what each does and the
     // NRD guidance behind exposing it. Defaults are NRD's own; REBLUR_DIFFUSE (index 1) only.
+    bool  reblurAntiFirefly = true;   // NRD's own default; see ReblurTuning::enableAntiFirefly
+    float reblurFireflySuppressorScale = 2.0f;   // see ReblurTuning::fireflySuppressorMinRelativeScale
     float reblurAntilagSigmaScale = 2.0f;
     float reblurAntilagSensitivity = 3.0f;
     float reblurMinHitDistanceWeight = 0.1f;

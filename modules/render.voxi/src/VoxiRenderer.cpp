@@ -4066,6 +4066,8 @@ void VoxiRenderer::applyReblurTuning() {
     t.diffusePrepassBlurRadius = settings_.reblurDiffusePrepassBlurRadius;
     t.maxAccumulatedFrameNum   = settings_.reblurMaxAccumulatedFrameNum;
     t.maxStabilizedFrameNum    = settings_.reblurMaxStabilizedFrameNum;
+    t.enableAntiFirefly             = settings_.reblurAntiFirefly;
+    t.fireflySuppressorMinRelativeScale = settings_.reblurFireflySuppressorScale;
     t.antilagLuminanceSigmaScale    = settings_.reblurAntilagSigmaScale;
     t.antilagLuminanceSensitivity   = settings_.reblurAntilagSensitivity;
     t.minHitDistanceWeight          = settings_.reblurMinHitDistanceWeight;
