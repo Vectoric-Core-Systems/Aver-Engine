@@ -316,6 +316,18 @@ public:
         // (REBLUR_TemporalAccumulation.cs.hlsl, "Firefly suppressor") -- NOT the enableAntiFirefly
         // switch above, a separate mechanism with no off switch.
         float fireflySuppressorMinRelativeScale = 2.0f;
+
+        // Mirrors ::nrd::CheckerboardMode (NRDSettings.h): 0 OFF (NRD's own RECOMMENDED default --
+        // NRDSettings.h's own comment on the enum says probabilistic lobe selection at the hit is
+        // the better choice), 1 BLACK, 2 WHITE. NRD's contract when not OFF: the noisy inputs this
+        // denoiser reads (IN_DIFF_XXX and friends) must be packed into the LEFT HALF of the
+        // texture at 2x1 screen pixels per input pixel -- one input texel covers a black/white
+        // pixel pair -- and CommonSettings::frameIndex must keep incrementing in step with it (the
+        // mode is the orientation for EVEN frames; odd frames use the other colour). This struct
+        // only carries the value through to ::nrd::ReblurSettings; producing checkerboarded input
+        // in that packed layout, and stepping frameIndex to match, is the caller's job. Default 0
+        // so a caller that touches nothing here still gets today's full-resolution behaviour.
+        u8 checkerboardMode = 0;
     };
 
     // `denoiserIndex` is the index into the kinds array create() was given -- the same index

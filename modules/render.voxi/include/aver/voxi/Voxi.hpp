@@ -737,11 +737,11 @@ struct Settings {
     // looking for a switch.
     u32 rtRenderMode = 1;
 
-    // ---- staged ray-driven passes (milestone 1, A/B switch only) -----------------------------
+    // ---- staged ray-driven passes (milestone 1 split; milestone 4 adds half-rate GI) -----------
     // PSRayDriven above is still ONE fullscreen pixel shader that traces the primary ray,
     // reconstructs the surface, runs the sun-shadow ray, ReSTIR GI, reflections, sky occlusion
-    // and shading in a single invocation. This field only chooses WHICH SHAPE that work runs in
-    // -- it changes nothing about what gets computed.
+    // and shading in a single invocation. This field chooses WHICH SHAPE that work runs in --
+    // for 0 and 1 that changes nothing about what gets computed; 2 (below) deliberately does.
     //
     // 0 = SINGLE PASS, THE DEFAULT AND THE COMPARISON BASELINE: today's one drawFullscreen,
     // byte-for-byte unchanged. 1 = STAGED: the same work split into a visibility compute pass
@@ -754,11 +754,23 @@ struct Settings {
     // is in use, or the active backend is not D3D12), so an opted-in project never silently
     // renders nothing.
     //
+    // 2 = STAGED + HALF-RATE GI (milestone 4): the same staged path as 1, but the ReSTIR GI stage
+    // traces only HALF the pixels each frame -- NRD's own checkerboard pattern, which half
+    // alternates with frame parity -- and REBLUR reconstructs the untraced half from the traced
+    // one and history. UNLIKE 1, THIS DELIBERATELY CHANGES THE IMAGE: it trades GI quality and
+    // latency for speed, so it is a separate value rather than a flag on 1 -- 1 stays the
+    // same-image comparison baseline and 2 is the quality/speed trade. It only differs from 1
+    // while ReSTIR GI is the active diffuse estimator (Settings::giMode == 1) AND the NRD denoiser
+    // (Settings::denoiser) is actually denoising it: with the voxel cone gather (giMode == 0) there
+    // is no ReSTIR GI stage to checkerboard, and without NRD nothing would fill the untraced half --
+    // the untraced pixels display REBLUR's reconstruction -- so in either case 2 behaves as 1 and
+    // says so once in the log. Same D3D12-only restriction and same single-pass fallback as 1.
+    //
     // NOT ONE OF THE TIER-DERIVED KNOBS: like Settings::giRestirMaxHistory below, this has no
-    // ladder rung to fall back to -- it exists to A/B the split against the single pass it
-    // replaces, not to pick a quality. Only meaningful while rtRenderMode itself resolves to
-    // primary rays (RenderSettingsResolver.hpp's Resolution::rayDrivenStages). Console:
-    // voxi.rayDrivenStages.
+    // ladder rung to fall back to -- 1 exists to A/B the split against the single pass it
+    // replaces and 2 is an explicit speed/quality choice, neither is a quality tier. Only
+    // meaningful while rtRenderMode itself resolves to primary rays (RenderSettingsResolver.hpp's
+    // Resolution::rayDrivenStages). Console: voxi.rayDrivenStages.
     u32 rayDrivenStages = 0;
 
     // ---- path tracing -----------------------------------------------------------------------

@@ -855,6 +855,17 @@ private:
     // 0 whenever CSRdGi failed to compile, or under the same conditions that leave rdVisCsPso_/
     // rdShadowCsPso_ at 0 -- SM 6.6, same layout and defines as rdShadowCsPso_.
     rhi::PipelineHandle rdGiCsPso_     = 0;
+    // ---- MILESTONE 4: rdGiCbCsPso_, CSRdGi compiled a second time with AVER_GI_CHECKERBOARD=1 ----
+    //
+    // Same compile call as rdGiCsPso_ immediately above (same layout, same csDefs, same SM 6.6) plus
+    // that one extra define, so it shares rdGiCsPso_'s root signature and dispatch shape exactly --
+    // only the shader body differs, skipping half the pixels in NRD's own checkerboard pattern
+    // (Sequence::CheckerBoard, third_party/nrd) instead of tracing every one. OPTIONAL ON TOP OF AN
+    // OPTIONAL PIPELINE: 0 whenever rdGiCsPso_ itself is 0 (same failure modes), and ALSO 0 if this
+    // one extra permutation alone fails to compile while the plain one succeeds -- rdStagedActive()
+    // never checks this member at all, so its absence never falls back to the single pass, only to
+    // rayDrivenStages == 1's behaviour (see recordStagedRayDriven's own giCb decision).
+    rhi::PipelineHandle rdGiCbCsPso_   = 0;
     // rdSkyOccCsPso_ (CSRdSkyOcc): calls rtSkyOcclusionTemporal exactly as PSRayDriven's own sky-
     // occlusion branch does, writing gRdAoTex (u14). Dispatched only on the frames PSRayDriven's own
     // rdAo would otherwise still read its initial 1.0 -- cb_.ambientParams[0] > 0.5 &&
@@ -1849,6 +1860,30 @@ private:
     // rejoins -- the user switching back to raster -- its NRD history is from before the gap and
     // must be reset rather than reprojected with one frame's camera delta.
     bool                  nrdAoRanLastFrame_ = false;
+    // ---- MILESTONE 4: half-rate ReSTIR GI via NRD's checkerboard (rayDrivenStages == 2) ----
+    //
+    // nrdGiRanThisFrame_: true only when THIS frame's NRD dispatch actually recorded the ReblurDiffuse
+    // GI denoiser (giSignal was true and nrd_.record succeeded) -- set alongside nrdGiOutput_'s own
+    // assignment, reset to false alongside nrdOutput_/nrdGiOutput_'s own per-frame reset further down
+    // in beginShadowHistory. recordStagedRayDriven (called later THIS SAME frame, from scenePass)
+    // reads this to decide whether nrdGiOutput_ is live enough this frame for CSRdGi to skip half the
+    // pixels and trust REBLUR to reconstruct them -- a frame whose GI readback never ran (denoiser
+    // off, NRD unavailable, or ReSTIR GI is not the estimator) must trace every pixel instead.
+    bool                  nrdGiRanThisFrame_ = false;
+    // nrdGiInputCheckerboard_: whether the GI radiance (giRadiance_, u9) THIS frame's NRD dispatch is
+    // about to denoise was itself written in checkerboard form -- i.e. whether LAST frame's CSRdGi
+    // (recordStagedRayDriven, which runs after this function in frame order) only traced half the
+    // pixels. Latched at the very top of beginShadowHistory, before anything else in this function
+    // runs, from giCbWrittenThisFrame_ below -- see that member's own comment for why the latch has
+    // to happen there and not here.
+    bool                  nrdGiInputCheckerboard_ = false;
+    // nrdGiCbApplied_: the ::nrd::CheckerboardMode value (0 OFF / 1 BLACK) last pushed to REBLUR's
+    // ReblurDiffuse (index 1) tuning via applyReblurTuning(). Cached so a steady-state frame -- most
+    // of them, once the mode has settled either way -- does not re-call setReblurTuning() (and the
+    // WARN-once path inside it) every single frame for a value that has not changed; only an actual
+    // toggle re-applies it. NRD's docs list checkerboardMode as one of the settings safe to change on
+    // any frame, so no history reset accompanies a change -- see applyReblurTuning()'s own comment.
+    u8                    nrdGiCbApplied_ = 0;
 
     // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
     //
@@ -1938,6 +1973,15 @@ private:
     // must still know whether IT has caught up, independent of what ensureShadowHistory has done.
     u32  rdStagedW_ = 0, rdStagedH_ = 0;
     u32  rdStagedRowPitch_ = 0;
+    // ---- MILESTONE 4: half-rate ReSTIR GI via NRD's checkerboard ----
+    //
+    // giCbWrittenThisFrame_: written every time recordStagedRayDriven runs (true only when it picked
+    // the checkerboard CSRdGi variant, rdGiCbCsPso_, over the plain one; false whenever CSRdGi was not
+    // dispatched at all this frame). Consumed at the very top of NEXT frame's beginShadowHistory
+    // (latched into nrdGiInputCheckerboard_ there, then reset to false here) rather than read directly
+    // by NRD, because NRD's dispatch this frame denoises LAST frame's CSRdGi write -- see
+    // beginShadowHistory's own comment on the frame lag this mirrors for fs.frameIndex/nrdFrame_.
+    bool giCbWrittenThisFrame_ = false;
     // Tiny stand-ins bound at u11/u12/u13/u14/u15 whenever rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/
     // rdReflTex_ do not exist -- staged mode is off, the device is not D3D12, or the real resources
     // failed to allocate -- so every declared UAV slot in every Voxi binding set always has a valid
@@ -1959,8 +2003,11 @@ private:
     // and for the identical reason: neither alone sees every edge that changes what this should hold.
     bool ensureRdStagedResources(u32 width, u32 height);
     // Whether Settings::rayDrivenStages asks for the staged split at all -- NOT whether it will
-    // actually run this frame, see rdStagedActive() for that.
-    bool rdStagedWanted() const { return settings_.rayDrivenStages == 1u; }
+    // actually run this frame, see rdStagedActive() for that. >= 1u, not == 1u: MILESTONE 4 adds
+    // value 2 (staged + half-rate ReSTIR GI via NRD's checkerboard), which still wants every one of
+    // the staged passes value 1 wants -- CSRdGi's checkerboard variant is an ADDITION on top of the
+    // staged path, not a different path, so both values take it.
+    bool rdStagedWanted() const { return settings_.rayDrivenStages >= 1u; }
     // Whether rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/rdReflTex_ are worth ALLOCATING at all --
     // rdStagedWanted() plus rayTracingWanted(), the same VRAM-consciousness aoHistoryWanted()/
     // giRestirWanted() already apply to their own pairs: the staged compute passes read the SAME RT
@@ -2014,6 +2061,14 @@ private:
     // The other half of that log: said once, the first frame the staged passes actually record, so a
     // one-off fallback logged on a start-up frame (RT history not ready yet) is not the last word.
     bool rdStagedRunLogged_ = false;
+    // MILESTONE 4's own pair, the identical "said once, each half of the story" shape as the two
+    // above: rdGiCbRunLogged_ the first frame recordStagedRayDriven actually dispatches the
+    // checkerboard CSRdGi variant, rdGiCbFallbackLogged_ the first frame rayDrivenStages == 2 is
+    // requested and the staged path is active but the checkerboard dispatch did NOT happen (naming
+    // which of giDispatch/rdGiCbCsPso_/nrdGiRanThisFrame_ said no) -- see recordStagedRayDriven for
+    // where each fires.
+    bool rdGiCbRunLogged_ = false;
+    bool rdGiCbFallbackLogged_ = false;
 
     // THE ENGINE GAP THE TASK BRIEF NAMED: RAB_GetGBufferSurface(idx, /*prevFrame*/true) needs a
     // PREVIOUS frame's primary surface, and nothing in Voxi carried one before this pair existed --

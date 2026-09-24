@@ -1033,19 +1033,26 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rtRenderMode = n; }); }});
     // Milestone 1's A/B switch over rtRenderMode's OWN internal shape, directly beneath it for the
     // same reason voxi.giRestirMaxHistory sits under voxi.giRestirVisibility: the two are read
-    // together while bisecting the staged split against the single pass it replaces. Only meaningful
-    // once voxi.rtRenderMode itself resolves to 1 (primary rays); see
-    // RenderSettingsResolver.hpp's Resolution::rayDrivenStages for the Project Settings page's own
-    // greyed reason.
+    // together while bisecting the staged split against the single pass it replaces. Milestone 4
+    // adds value 2, a staged variant that deliberately trades GI quality for speed rather than
+    // staying a same-image comparison -- see Voxi.hpp's own comment on Settings::rayDrivenStages
+    // for the full reasoning. Only meaningful once voxi.rtRenderMode itself resolves to 1 (primary
+    // rays); see RenderSettingsResolver.hpp's Resolution::rayDrivenStages for the Project Settings
+    // page's own greyed reason.
     t.push_back({"voxi.rayDrivenStages", VarType::U32, false,
         "0 = single pass (default, today's one ray-driven draw -- the comparison baseline), 1 = "
-        "staged: a visibility compute pass, a shadow compute pass, then the same shading draw. "
-        "D3D12 only in this milestone; falls back to single pass and logs once when anything staged "
-        "needs is missing. Only applies when voxi.rtRenderMode resolves to 1. Engine clamps to [0,1].",
+        "staged: a visibility compute pass, a shadow compute pass, then the same shading draw "
+        "(same image as 0). 2 = staged + half-rate GI: the same staged path, but the ReSTIR GI "
+        "stage traces only half the pixels per frame in NRD's checkerboard pattern and REBLUR "
+        "reconstructs the rest -- a deliberate GI quality/latency-for-speed trade, distinct from 1 "
+        "only while ReSTIR GI is the diffuse estimator and the NRD denoiser is on (otherwise 2 "
+        "behaves as 1, logged once). D3D12 only for 1 and 2; falls back to "
+        "single pass and logs once when anything staged needs is missing. Only applies when "
+        "voxi.rtRenderMode resolves to 1. Engine clamps to [0,2].",
         []{ return vU32(Renderer::get().settings().rayDrivenStages); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rayDrivenStages = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.u > 1) { err = "rayDrivenStages must be 0 (single pass) or 1 (staged)"; return false; }
+            if (v.as.u > 2) { err = "rayDrivenStages must be 0 (single pass), 1 (staged) or 2 (staged + half-rate GI)"; return false; }
             return true;
         }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,

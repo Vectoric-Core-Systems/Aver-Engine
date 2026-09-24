@@ -245,7 +245,7 @@ struct RenderCliOverrides {
     int giMode              = -1;    // --gi-mode 0|1
     int giRestirVisibility  = -1;    // --restir-visibility N
     int denoiser            = -1;    // --denoiser 0|1
-    int rayDrivenStages     = -1;    // --rd-stages 0|1
+    int rayDrivenStages     = -1;    // --rd-stages 0|1|2
 };
 
 // WHICH SENTENCE A WINNING OVERRIDE WANTS PRINTED. The host owns the sentence, this header owns the

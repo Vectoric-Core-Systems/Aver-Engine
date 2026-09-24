@@ -81,13 +81,17 @@ struct ProjectDesc {
     // see voxi::Settings::rayDrivenStages, which owns the full explanation. 0 = single pass (today's
     // one drawFullscreen, the default and the comparison baseline), 1 = staged visibility -> shadow
     // -> shade, D3D12 only, falling back to single pass wherever the staged path is unavailable.
+    // Milestone 4 adds 2 = staged + half-rate GI: the same staged path, but the ReSTIR GI stage
+    // checkerboards its rays (NRD's pattern) and REBLUR reconstructs the rest -- unlike 1, this
+    // deliberately changes the image rather than staying a same-image comparison.
     //
     // NOT TIER-DERIVED, THE SAME SHAPE AS RESTIRHISTORY BELOW, NOT RTRENDERMODE JUST ABOVE: this
     // field has no ladder rung to fall back to (Voxi.hpp's own comment on the field says so
     // outright), so an absent key simply leaves the engine's default (0) alone regardless of any RT
     // tier change -- ProjectRenderApply.hpp applies it the way it applies giMode/denoiser/
     // restirHistory, not the way it applies rtRenderMode.
-    int rdStages           = -1; // RENDER.RDSTAGES         0 = single pass (default), 1 = staged
+    int rdStages           = -1; // RENDER.RDSTAGES         0 = single pass (default), 1 = staged,
+                                  //                         2 = staged + half-rate GI
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
     int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]

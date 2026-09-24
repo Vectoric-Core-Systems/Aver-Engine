@@ -388,25 +388,32 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 
 // ---- STAGED RAY-DRIVEN PASSES (milestone 1): the visibility record and resolved sun visibility ----
 //
-// voxi.rayDrivenStages (Settings::rayDrivenStages, RENDER.RDSTAGES, --rd-stages, u32 0/1) splits the
-// single PSRayDriven fullscreen draw below into three GPU passes when set to 1: a compute pass traces
-// the primary ray and writes one record per pixel here (CSRdVisibility, further down this file, under
-// this same AVER_RT region); a second compute pass reads it, reconstructs the surface and resolves the
-// sun shadow into gRdSunVisTex (CSRdShadow); and PSRayDriven itself, compiled a second time with
-// AVER_RD_SPLIT=1, reads both instead of tracing and calling rtShadowTemporal -- everything after that
-// point is the SAME shading code the single pass already runs, unchanged. At 0 (the default) none of
-// this exists at runtime: no new resource is bound, no new pipeline is built, and PSRayDriven's own
+// voxi.rayDrivenStages (Settings::rayDrivenStages, RENDER.RDSTAGES, --rd-stages, u32 0/1/2) splits the
+// single PSRayDriven fullscreen draw below into three GPU passes when set to 1 (or 2, below): a compute
+// pass traces the primary ray and writes one record per pixel here (CSRdVisibility, further down this
+// file, under this same AVER_RT region); a second compute pass reads it, reconstructs the surface and
+// resolves the sun shadow into gRdSunVisTex (CSRdShadow); and PSRayDriven itself, compiled a second time
+// with AVER_RD_SPLIT=1, reads both instead of tracing and calling rtShadowTemporal -- everything after
+// that point is the SAME shading code the single pass already runs, unchanged. At 0 (the default) none
+// of this exists at runtime: no new resource is bound, no new pipeline is built, and PSRayDriven's own
 // AVER_RD_SPLIT=0 compile is byte-for-byte the single pass this file already had.
+//
+// VALUE 2 (milestone 4) is 1 PLUS one more thing: CSRdGi, further down this file, is compiled a second
+// time with AVER_GI_CHECKERBOARD=1 and traces ReSTIR GI's candidate for only half the pixels each frame,
+// in NRD's own checkerboard pattern, leaving REBLUR to reconstruct the rest -- see that compile's own
+// header comment and voxi_restir.hlsli's AVER_GI_CHECKERBOARD section for the full contract. Every OTHER
+// stage (CSRdVisibility/CSRdShadow/CSRdSkyOcc/CSRdRefl, PSRayDriven both variants) runs unchanged at 2;
+// only CSRdGi's own dispatch gains the extra compile.
 //
 // TWO NEW UAV REGISTERS, u11/u12 -- the next two free slots after gGiVisHistOut's u10 (voxi_restir.
 // hlsli). Bound in every stage through the SAME descriptor table the single pass already uses
 // (kVoxiUavCount 11->13, VoxiRenderer.cpp, not this file), so no SRV slot moves and no material
 // texture register is touched.
 //
-// gRdVisBuf: one uint4 per pixel, index = pixel.y * pitch + pixel.x, pitch = (uint)gViewParams.w (this
+// gRdVisBuf: one uint4 per pixel, index = pixel.y * pitch + pixel.x, pitch = rdRowPitch() -- this
 // cbuffer's own w field, "spare, written 0" until this feature -- VoxiRenderer::recordStagedRayDriven
-// sets it to the row pitch in pixels for the three staged uploads only and back to 0 after, so every
-// other pass still reads 0). A HIT is uint4(instanceID, primitiveIndex, asuint(bary.x),
+// sets it to the row pitch in pixels for the staged uploads and back to 0 after, so every other pass
+// still reads 0. A HIT is uint4(instanceID, primitiveIndex, asuint(bary.x),
 // asuint(bary.y)); a MISS is x == 0xFFFFFFFFu (y/z/w undefined, never read on that path).
 RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
 // gRdSunVisTex: this frame's resolved sun visibility, one RGBA16F texel per pixel, rgb = the same
@@ -465,6 +472,17 @@ RWTexture2D<float4>       gRdAoTex     : register(u14);
 // further down this file, and rdSurfaceRoughness's own header for why the roughness test cannot simply
 // be repeated there instead.
 RWTexture2D<float4>       gRdReflTex   : register(u15);
+
+// gViewParams.w carries the staged buffers' row pitch as an exact integer (see gRdVisBuf's own header
+// comment above) PLUS, from milestone 4 on, per-dispatch flag bits above it -- bit 16 is CSRdGi's
+// half-rate-GI checkerboard parity (AVER_GI_CHECKERBOARD, voxi_restir.hlsli), set only for that one
+// dispatch's own constant-buffer upload; VoxiRenderer::recordStagedRayDriven restores the plain pitch
+// immediately afterward, so every OTHER decode of this field must mask the flag bits away rather than
+// read them as part of the pitch. After the staged passes, on a frame CSRdGi packed NRD's input, the
+// field holds bit 17 (plus that parity in bit 16) and no pitch for the rest of the frame --
+// giRestirIndirect's non-checkerboard NRD-input write reads it to follow the packing. Declared here, before every stage that decodes a pitch (PSRayDriven's
+// AVER_RD_SPLIT branch is the first, further down), so it is in scope everywhere it is needed.
+uint rdRowPitch() { return (uint)gViewParams.w & 0xFFFFu; }
 
 // The surface PSRayDriven reconstructs from a ray hit, minus everything that hit computed for itself
 // (bary, dir, N before its face-the-ray flip): what Stage S and Stage B's AVER_RD_SPLIT branch both
@@ -1805,7 +1823,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // preprocessor switch, not a shared statement, is what makes the default (AVER_RD_SPLIT 0) compile
     // byte-for-byte unchanged -- see rdSurfaceFromRecord's own header, declared alongside gRdVisBuf/
     // gRdSunVisTex above, for the reconstruction itself.
-    const uint  rdPitch = (uint)gViewParams.w;
+    const uint  rdPitch = rdRowPitch();
     const uint2 rdPixel = uint2(i.pos.xy);   // truncates the pixel centre to its integer pixel, the
                                               // same convention CSRdVisibility indexes the buffer by
     const uint4 rdRec   = gRdVisBuf[rdPixel.y * rdPitch + rdPixel.x];
@@ -2734,7 +2752,7 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     // pitch 0 means the record buffer has nowhere well-defined to put this pixel (VoxiRenderer writes
     // a nonzero pitch only while it actually means to run the staged path this frame) -- bail rather
     // than guess an index.
-    const uint pitch = (uint)gViewParams.w;
+    const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
 
@@ -2779,7 +2797,7 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
-    const uint pitch = (uint)gViewParams.w;
+    const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
 
@@ -2851,14 +2869,35 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 // with an explicit SampleLevel/gradient, never implicit ddx/ddy -- so this stage does not strictly need
 // 6.6 for that reason the way CSRdShadow does; it is dispatched through the same staged pipeline object
 // as the other three stages regardless, so it shares their shader model rather than inventing a fourth.
+//
+// MILESTONE 4 (voxi.rayDrivenStages == 2): this stage alone is ALSO compiled with AVER_GI_CHECKERBOARD=1
+// -- half-rate ReSTIR GI, tracing a fresh candidate for only the pixel half NRD's REBLUR expects fresh
+// data from this frame (giCbParity below), and leaving REBLUR to reconstruct the other half. The
+// checkerboard skip itself is decided here (gGiCbSkip) but everything it changes lives inside
+// giRestirIndirect (voxi_restir.hlsli, its own AVER_GI_CHECKERBOARD sections) -- this stage's own call
+// below is unchanged either way.
 [numthreads(8, 8, 1)]
 void CSRdGi(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
-    const uint pitch = (uint)gViewParams.w;
+    const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
+
+#if AVER_GI_CHECKERBOARD
+    // HALF-RATE GI'S OWN PARITY, NOT THE ROW PITCH -- read bit 16 of the raw cbuffer field directly
+    // (rdRowPitch() above already masked it away). CONTRACT: NRD's REBLUR, checkerboardMode BLACK, has
+    // data where Sequence::CheckerBoard(pixelPos, frameIndex) == (x ^ y ^ frameIndex) & 1 == 0; `pixel`
+    // here IS pixelPos (this engine's NRD rect is the full render target at origin 0), so tracing
+    // exactly where that expression is 0 is what makes this dispatch's write the half REBLUR expects
+    // fresh data for. `giCbParity` is not this frame's own NRD frameIndex -- prePass (beginShadowHistory)
+    // already ran earlier this frame and denoised LAST frame's write -- it is the frameIndex NEXT
+    // frame's NRD dispatch will use to denoise THIS frame's write, which VoxiRenderer::
+    // recordStagedRayDriven derives and packs into bit 16 for this one dispatch's upload only.
+    const uint giCbParity = ((uint)gViewParams.w >> 16) & 1u;
+    gGiCbSkip = ((pixel.x ^ pixel.y ^ giCbParity) & 1u) != 0u;
+#endif
 
     const uint4 rec = gRdVisBuf[idx];
     if (rec.x == 0xFFFFFFFFu) {
@@ -2924,7 +2963,7 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
-    const uint pitch = (uint)gViewParams.w;
+    const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
 
     // MIRRORS PSRayDriven's OWN GATE FOR READING THIS TEXTURE (its sky-occlusion ternary, further up
@@ -3003,7 +3042,7 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
-    const uint pitch = (uint)gViewParams.w;
+    const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
 

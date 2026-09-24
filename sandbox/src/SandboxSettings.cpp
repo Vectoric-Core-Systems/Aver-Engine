@@ -2133,11 +2133,18 @@ void SandboxApp::buildRenderingSettings(int page) {
         // reason -- primary rays are not the active render mode. SHOWS er.rayDrivenStages.REQUESTED,
         // not the raw s.rayDrivenStages, for giRestirMaxHistory's own reason: effective always equals
         // requested for this field, but requested is what the resolver actually computed.
+        //
+        // MILESTONE 4 adds the combo's third entry, value 2. Unlike Staged it deliberately trades
+        // GI quality for speed rather than staying a same-image comparison against Single pass --
+        // see Voxi.hpp's own comment on Settings::rayDrivenStages for the full reasoning. The combo
+        // index equals the settings value directly (0/1/2), so no separate index<->value mapping is
+        // needed here beyond the string having three entries.
         const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);
         ImGui::BeginDisabled(stagesGreyed);
         int stages = static_cast<int>(er.rayDrivenStages.requested);
         if (ImGui::Combo("Ray-driven passes", &stages,
-                          "Single pass (default)\0Staged (experimental)\0")) {
+                          "Single pass (default)\0Staged (experimental)\0"
+                          "Staged + half-rate GI (experimental)\0")) {
             s.rayDrivenStages = static_cast<u32>(stages); changed = true;
         }
         ImGui::EndDisabled();
@@ -2149,6 +2156,14 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "instead of one. Falls back to Single pass, logged once, wherever the\n"
                               "staged path is unsupported (non-D3D12, or a pipeline/resource it needs\n"
                               "is missing).\n\n"
+                              "Staged + half-rate GI is the same split, but the ReSTIR GI stage traces\n"
+                              "only half the GI rays each frame -- NRD's own checkerboard pattern -- and\n"
+                              "REBLUR reconstructs the other half from the traced half and history.\n"
+                              "Unlike Staged this is NOT a same-image comparison: it deliberately trades\n"
+                              "GI quality and latency for speed, and can smear or shimmer under motion.\n"
+                              "Needs ReSTIR GI and the NRD denoiser on; without them it behaves as Staged.\n"
+                              "Compare it against Staged, not against Single pass, to see what the trade\n"
+                              "actually costs.\n\n"
                               "Round-trips as RENDER.RDSTAGES.");
         if (stagesGreyed) {
             ImGui::SameLine();

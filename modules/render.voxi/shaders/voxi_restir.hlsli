@@ -47,6 +47,16 @@
 // Moved verbatim out of voxi.hlsl: nothing below this header comment was rewritten, reformatted,
 // or otherwise changed in the move.
 
+// Staged ray-driven milestone 4 (Settings::rayDrivenStages == 2): half-rate ReSTIR GI, traced in NRD's
+// own checkerboard so REBLUR (GI denoiser index 1) reconstructs the half this file skips. Guarded by
+// its own macro, defaulted to 0 here, rather than an ambient `#ifdef` test at each use site: every
+// compile that never sets it (PSMainVoxi, PSRayDriven both variants, every other CS stage) sees a
+// plain 0 and takes the untouched branch at each of this file's three checkerboard sites below --
+// see CSRdGi (voxi.hlsl) for the one compile that defines this to 1.
+#ifndef AVER_GI_CHECKERBOARD
+#define AVER_GI_CHECKERBOARD 0
+#endif
+
 // ================= RTXDI ReSTIR GI (Settings::giMode == 1) =================
 //
 // *** USES THE VENDORED SDK -- third_party/rtxdi -- RATHER THAN HAND-ROLLING A RESERVOIR UPDATE
@@ -1053,6 +1063,14 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
 // hit, and F3's own reuse-visibility ray all correct RADIANCE this function already carried -- none
 // of them touch this `ao` output, so R4 (ReSTIR supplying no ambient occlusion at Low/Medium, where
 // this is the ONLY occlusion signal) remains open and deliberately deferred, not fixed in passing.
+#if AVER_GI_CHECKERBOARD
+// A `static`, NOT a parameter, for the SAME reason gGiPoisonPdfHit above is one: giRestirIndirect's
+// signature is shared with PSMainVoxi and PSRayDriven's own (non-checkerboard) call sites, and those
+// compiles must not change. CSRdGi (voxi.hlsl), the one caller that defines AVER_GI_CHECKERBOARD, sets
+// this per invocation -- before calling giRestirIndirect -- to say whether THIS pixel is the half NRD
+// expects fresh data from this frame, or the half REBLUR is about to reconstruct instead.
+static bool gGiCbSkip = false;
+#endif
 float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixel, uint frameIdx,
                         out float ao) {
     ao = 1.0;
@@ -1109,6 +1127,25 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     if (halfBound && !tracedPx && rec.valid) { f2Path = 2u; f3Path = 2u; }   // no valid reconstruction: trace, as Full
     if (((uint)gAmbientParams.z & 4u) != 0u || visMode == 0u) f2Path = 0u;   // legacy bit wins (2.8)
     if (((uint)gAmbientParams.z & 8u) != 0u || visMode == 0u) f3Path = 0u;
+#if AVER_GI_CHECKERBOARD
+    // SKIPPED PIXELS TRACE NO F3 VISIBILITY RAY EITHER -- only the Full-traced path (3); Path 2, Half's
+    // own cheap reconstructed visibility (rec.v3, below), is deliberately left alone. f2Path goes to 0
+    // because no candidate (and so no F2 ray) is traced below, which is also what the path debug view
+    // then paints: yellow, "no ray".
+    //
+    // THE HALF-RESOLUTION HISTORY LOSES HALF ITS SUB-PIXEL POSITIONS, NOT HALF ITS REFRESH RATE. A
+    // skipped Half-phase pixel observes nothing and the history write further down carries its
+    // reconstruction forward (f2Observed/f3Observed false). kGiVisPhase cycles the traced pixel through
+    // a 2x2 block over four frames, but the checkerboard flips every frame, so while the two frame
+    // counters keep a fixed offset the SAME two phases always land on skipped pixels: each block is
+    // refreshed from one fixed diagonal pair instead of all four positions. Which pair shifts whenever
+    // NRD skips a frame. Exempting the phase pixel from the skip would restore all four at +1/8 of the
+    // candidate rays; not done, the diagonal pair still covers both rows and both columns.
+    if (gGiCbSkip) {
+        f2Path = 0u;
+        if (f3Path == 3u) f3Path = 0u;
+    }
+#endif
 
     // rho2: F2's RECONSTRUCTED-NON-TRACED path (f2Path == 2u) reads the neighbourhood's own occluded/
     // unoccluded sky ratio rather than an absolute luminance -- a RATIO OF EXPECTATIONS
@@ -1123,6 +1160,14 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     float f2LumTraced = 0.0, f2LumSky = 0.0;
     bool  f2Observed  = false;
     RTXDI_GIReservoir initial = RTXDI_EmptyGIReservoir();
+    // SKIPPED PIXELS TRACE NO FRESH CANDIDATE: `initial` stays RTXDI_EmptyGIReservoir() (freshValid
+    // false, below), which is the correct half-rate behaviour -- the spatio-temporal resampling just
+    // past this block still runs for EVERY pixel regardless, so a skipped pixel's reservoir is still
+    // re-projected and re-stored from last frame's temporal/spatial reservoirs, keeping the reuse
+    // chain valid under motion even on the frame it traces nothing new.
+#if AVER_GI_CHECKERBOARD
+    if (!gGiCbSkip)
+#endif
     if (giTraceInitialCandidate(wpos, N, pixel, frameJitter, samplePos, sampleNormal, sampleRadiance,
                                  nonFiniteCandidate, f2Path, rho2, f2LumTraced, f2LumSky, f2Observed)) {
         const float cosTheta = saturate(dot(normalize(samplePos - wpos), N));
@@ -1686,7 +1731,35 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // converts unconditionally, so REBLUR filters chroma in that basis; handing it linear RGB is not a
     // format error, it is a confidently wrong colour. The inverse is applied where gNrdGi is read,
     // just below -- the two are a matched pair and neither is correct alone.
-    if (gGiRestirParams.x > 0.5) {
+    // ACTIVE PIXELS WRITE NRD'S INPUT PACKED; SKIPPED PIXELS DO NOT WRITE IT AT ALL -- half-rate GI's
+    // whole contract with REBLUR (see this file's AVER_GI_CHECKERBOARD header comment) is that the
+    // checkerboard's OTHER half is never touched here, only reconstructed by the denoiser itself.
+    // giNrdInPos, not pixelPos, is what actually changes: NRD's BLACK/WHITE checkerboard packs
+    // IN_DIFF_RADIANCE_HITDIST into the LEFT HALF of the input texture, one texel per horizontal pixel
+    // PAIR (NRDSettings.h, CheckerboardMode), so the traced half of every (2k, 2k+1) pair writes the SAME texel -- the
+    // `!gGiCbSkip` gate above is exactly what keeps that from racing (only one of the pair is ever
+    // active). With the macro at 0 and bit 17 clear (every frame but a checkerboarded one), this is the
+    // plain `if (gGiRestirParams.x > 0.5)` it replaced, writing at pixelPos.
+    bool  giNrdInWrite = gGiRestirParams.x > 0.5;
+    uint2 giNrdInPos   = pixelPos;
+#if AVER_GI_CHECKERBOARD
+    giNrdInWrite = giNrdInWrite && !gGiCbSkip;   // NRD reads only the traced half
+    giNrdInPos.x >>= 1;                          // NRD's packed left-half layout
+#else
+    // EVERY OTHER WRITER FOLLOWS THE PACKING ON A FRAME CSRdGi PACKED. After a checkerboard dispatch,
+    // VoxiRenderer::recordStagedRayDriven leaves bit 17 of gViewParams.w set for the rest of the frame,
+    // parity in bit 16. The writer that matters is PSMainVoxi's blended replay of an opaque-material
+    // draw (gAverHistoryWrite stays true for it): unpacked, its write would land on the packed texel of
+    // an unrelated pixel at twice its x. Packed, it replaces its own pair's input exactly as it
+    // replaces its own pixel's at full rate. Zero on every other frame (prePass resets the field), and
+    // the staged stages' row pitch never reaches bit 16.
+    const uint giNrdPackWord = (uint)gViewParams.w;
+    if ((giNrdPackWord & 0x20000u) != 0u) {
+        giNrdInWrite = giNrdInWrite && ((pixelPos.x ^ pixelPos.y ^ (giNrdPackWord >> 16)) & 1u) == 0u;
+        giNrdInPos.x >>= 1;
+    }
+#endif
+    if (giNrdInWrite) {
         const float hitDistNorm = AVER_NRD_HITDIST_A + abs(curLinearDepth) * AVER_NRD_HITDIST_B;
         const float hitT = RTXDI_IsValidGIReservoir(result)
                          ? saturate(length(result.position - wpos) / max(hitDistNorm, 1e-4))
@@ -1703,7 +1776,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // behind it also claims, and REBLUR then denoises across both without any way to tell them
         // apart. voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the old
         // unconditional write, byte-identical, for A/B.
-        if (gAverHistoryWrite) gGiRadianceOut[pixelPos] = float4(ycocg, hitT);
+        if (gAverHistoryWrite) gGiRadianceOut[giNrdInPos] = float4(ycocg, hitT);
     }
 
     // LAST FRAME'S DENOISED ANSWER REPLACES THIS FRAME'S RAW ONE. One frame of lag, which is what

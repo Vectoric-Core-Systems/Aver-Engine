@@ -328,6 +328,10 @@ bool Denoiser::setReblurTuning(u32 denoiserIndex, const ReblurTuning& s) {
     r.minBlurRadius                 = s.minBlurRadius;
     r.maxBlurRadius                 = s.maxBlurRadius;
     r.fireflySuppressorMinRelativeScale = s.fireflySuppressorMinRelativeScale;
+    // See ReblurTuning::checkerboardMode for the packed-input contract this value implies but does
+    // not itself enforce; the u8 -> ::nrd::CheckerboardMode values are the same 0/1/2, restated
+    // rather than shared so this header does not have to include NRD's.
+    r.checkerboardMode = static_cast<::nrd::CheckerboardMode>(s.checkerboardMode);
     return ::nrd::SetDenoiserSettings(*static_cast<::nrd::Instance*>(instance_),
                                       static_cast<::nrd::Identifier>(denoiserIndex), &r)
            == ::nrd::Result::SUCCESS;

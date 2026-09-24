@@ -180,7 +180,7 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // +9, NOT +7, AS OF THE STAGED RAY-DRIVEN PASSES MILESTONE: u11/u12 are the visibility-record buffer
 // and the sun-visibility texture CSRdVisibility/CSRdShadow/the AVER_RD_SPLIT branch of PSRayDriven
 // pass between themselves (rdVisBuf_/rdSunVisTex_) -- bound in EVERY Voxi binding set, not only while
-// voxi.rayDrivenStages == 1, for the same reason u4/u5's sky-occlusion pair is declared here rather
+// voxi.rayDrivenStages is 1 or 2, for the same reason u4/u5's sky-occlusion pair is declared here rather
 // than only allocated when wanted: Tier 1 hardware needs a valid descriptor of the declared KIND in
 // every slot the pipeline layout reserves, staged or not, so a placeholder stands in exactly like
 // voxelAccumPlaceholder_ does for u1 when the real resource does not exist.
@@ -271,7 +271,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[10] = rhi::SlotKind::Texture2D;             // u10 ReSTIR visibility half-res history (write)
     // u11/u12: STAGED RAY-DRIVEN PASSES (milestone 1) -- the visibility record buffer and the sun
     // visibility texture, always declared exactly like every other optional pair above regardless of
-    // whether voxi.rayDrivenStages == 1 this session. u11 is a StructuredBuffer of uint4 records
+    // whether voxi.rayDrivenStages is 1 or 2 this session. u11 is a StructuredBuffer of uint4 records
     // (rdVisBuf_, one per pixel of the render target); u12 is an RW Texture2D (rdSunVisTex_, RGBA16F,
     // rgb = sun transmittance). Both are read AND written through these SAME uav registers by every
     // stage that touches them (CSRdVisibility, CSRdShadow, the AVER_RD_SPLIT branch of PSRayDriven) --
@@ -551,13 +551,13 @@ void VoxiRenderer::shutdown() {
                                         rayDrivenTexGbufPso_,
                                         rayDrivenGbufPso_,
                                         // STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone
-                                        // 2's rdGiCsPso_/rdSkyOccCsPso_ and milestone 3's
-                                        // rdReflCsPso_): the five compute pipelines and Stage B's two
-                                        // AVER_RD_SPLIT graphics twins -- added here, not after, for
-                                        // the identical reason the comment above gives for
+                                        // 2's rdGiCsPso_/rdSkyOccCsPso_, milestone 3's rdReflCsPso_,
+                                        // and milestone 4's rdGiCbCsPso_): the six compute pipelines and
+                                        // Stage B's two AVER_RD_SPLIT graphics twins -- added here, not
+                                        // after, for the identical reason the comment above gives for
                                         // rayDrivenTexPso_/sceneRtBlendedTexPso_.
-                                        rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdSkyOccCsPso_,
-                                        rdReflCsPso_,
+                                        rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
+                                        rdSkyOccCsPso_, rdReflCsPso_,
                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
@@ -571,7 +571,7 @@ void VoxiRenderer::shutdown() {
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
-    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
+    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
@@ -690,7 +690,7 @@ void VoxiRenderer::setSettings(const Settings& s) {
     const u32 wasVis = giRestirVisibility_;
     // STAGED RAY-DRIVEN PASSES (milestone 1): rdVisBuf_/rdSunVisTex_'s OWN edge, for the identical
     // reason wasAoWanted/wasGiRestirWanted exist above -- voxi.rayDrivenStages can flip independently
-    // of the rayTracing tier, and ray tracing can flip while rayDrivenStages was already 1, and
+    // of the rayTracing tier, and ray tracing can flip while rayDrivenStages was already 1 or 2, and
     // onRenderTargetsChanged only ever sees a resize.
     const bool wasRdStagedResourcesWanted = rdStagedResourcesWanted();
     settings_ = s;
@@ -1374,8 +1374,9 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // the volume (voxelSkyInjected, and PSVoxel's own comment). Written here, ahead of the rebuild
     // gate and voxelizePass, from the SETTING -- never from giRestirParams[0], which also reads 0 on
     // a debug-view or empty-TLAS frame and would rebake the volume on every such flip.
-    // .w is 0 here; recordStagedRayDriven sets it to the staged passes' row pitch for their own three
-    // uploads only. (Both briefly carried dials during the moving-camera ReSTIR GI fade bisection;
+    // .w is 0 here; recordStagedRayDriven sets it to the staged passes' row pitch for their own
+    // uploads only, and on a half-rate GI frame leaves the packed-NRD-input flag (bit 17, parity in
+    // bit 16) for the rest of the frame. (Both briefly carried dials during the moving-camera ReSTIR GI fade bisection;
     // those literals are back in voxi_restir.hlsli.)
     cb_.viewParams[2] = giRestirWanted() ? 1.0f : 0.0f;
     cb_.viewParams[3] = 0.0f;
@@ -3707,8 +3708,8 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         // nothing to stage this frame), which is not a fallback worth a line.
         if (stagedFallbackReason && !rdStagedFallbackLogged_) {
             rdStagedFallbackLogged_ = true;
-            AVER_WARN("[Voxi] voxi.rayDrivenStages requested the staged ray-driven passes, but {}; "
-                      "falling back to the single-pass ray-driven primary (said once)",
+            AVER_WARN("[Voxi] voxi.rayDrivenStages (1 or 2) requested the staged ray-driven passes, but "
+                      "{}; falling back to the single-pass ray-driven primary (said once)",
                       stagedFallbackReason);
         }
         // ITS OWN MARKER, so the go/no-go against the rasteriser is a subtraction between two
@@ -3856,12 +3857,64 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // SAME cb_ fields the shader tests this frame, never a separately-tracked flag, so the two can
         // never disagree. rdStagedActive() already refused this frame if the condition holds but
         // rdGiCsPso_ is 0, so reaching here with the condition true means the pipeline exists.
-        if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f) {
-            ctx.setPipeline(rdGiCsPso_);
+        const bool giDispatch = cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
+        // MILESTONE 4: half-rate ReSTIR GI via NRD's checkerboard, gated on three things beyond
+        // giDispatch itself -- the setting actually asking for it (rayDrivenStages == 2; rdStagedWanted()
+        // now treats 1 and 2 alike, so this is the one place that still tells them apart), the
+        // checkerboard variant having compiled at all (rdGiCbCsPso_ is OPTIONAL on top of an already-
+        // optional pipeline, see its own header comment), and THIS frame's NRD readback actually being
+        // live (nrdGiRanThisFrame_, latched by beginShadowHistory earlier this same frame) -- tracing
+        // only half the pixels is only safe when REBLUR has something real to reconstruct the other
+        // half from; see nrdGiRanThisFrame_'s own comment for why.
+        const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
+                          nrdGiRanThisFrame_;
+        // Recorded unconditionally -- false whenever giDispatch itself is false, since giCb already
+        // implies it -- and consumed at the very top of NEXT frame's beginShadowHistory to tell that
+        // frame's NRD dispatch whether the GI input it is about to denoise was written checkerboarded.
+        giCbWrittenThisFrame_ = giCb;
+        // ONE-SHOT LOGS, so half-rate GI's on/off state is visible to whoever is testing
+        // voxi.rayDrivenStages 2 without needing per-frame spam. Mutually exclusive: exactly one of
+        // these two conditions can hold in a given frame (giCb requires rayDrivenStages == 2, and the
+        // "why not" branch only fires when rayDrivenStages == 2 and giCb is false).
+        if (giCb && !rdGiCbRunLogged_) {
+            rdGiCbRunLogged_ = true;
+            AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces NRD's checkerboard half each "
+                      "frame, REBLUR reconstructs the rest");
+        } else if (settings_.rayDrivenStages == 2u && !giCb && !rdGiCbFallbackLogged_) {
+            rdGiCbFallbackLogged_ = true;
+            const char* why =
+                !giDispatch ? "ReSTIR GI is not the diffuse estimator this frame"
+                : !nrdGiRanThisFrame_ ? "the NRD GI denoiser did not run this frame (denoiser off, or "
+                                        "NRD unavailable)"
+                                      : "the checkerboard CSRdGi variant did not compile";
+            AVER_INFO("[Voxi] voxi.rayDrivenStages 2 requested half-rate ReSTIR GI, but {}; behaving as "
+                      "rayDrivenStages 1 for the GI stage (said once)", why);
+        }
+        if (giDispatch) {
+            ctx.setPipeline(giCb ? rdGiCbCsPso_ : rdGiCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
-            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            if (giCb) {
+                // BIT 16 CARRIES THE CHECKERBOARD PARITY, FOR THIS ONE UPLOAD ONLY. Every shader's own
+                // decode of gViewParams.w masks with & 0xFFFFu (see rdStagedRowPitch_'s own comment),
+                // so CSRdVisibility/CSRdShadow/CSRdSkyOcc/CSRdRefl/Stage B below never see bit 16 --
+                // setConstantBuffer copies cb_ at call time, and the plain pitch is restored
+                // immediately below, before any of those later uploads.
+                //
+                // PARITY = nrdFrame_ & 1u: beginShadowHistory's fs.frameIndex = nrdFrame_++, earlier
+                // this same frame, has already post-incremented nrdFrame_ once, so the CURRENT value is
+                // exactly the frameIndex NEXT frame's NRD dispatch will use to denoise the write this
+                // dispatch is about to make -- the two agree by construction, not by convention.
+                //
+                // The pitch always fits the low 16 bits: it is the render target's width, and D3D12
+                // caps a Texture2D at 16384 texels a side (the staged path is D3D12-only).
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | ((nrdFrame_ & 1u) << 16));
+                ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
+            } else {
+                ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            }
             if (gx && gy) ctx.dispatch(gx, gy, 1);
         }
 
@@ -3930,7 +3983,14 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         ctx.drawFullscreen();
     }
-    cb_.viewParams[3] = 0.0f;   // setConstantBuffer copied it at each call above; restore "spare"
+    // setConstantBuffer copied the pitch at each call above, so the pitch goes. What stays, on a frame
+    // CSRdGi wrote NRD's input checkerboarded, is bit 17 plus the parity in bit 16, for the REST of this
+    // frame: the scene draws after this one (PSMainVoxi's blended replay) read cb_ through
+    // sceneConstants(), and giRestirIndirect's own NRD-input write uses it to follow the packed layout
+    // instead of landing on another pixel's texel. prePass zeroes the field again next frame.
+    cb_.viewParams[3] = giCbWrittenThisFrame_
+                      ? static_cast<f32>((1u << 17) | ((nrdFrame_ & 1u) << 16))
+                      : 0.0f;
 }
 
 // Rebuilds the pipelines that bake the sample count and the target formats, and resizes the
@@ -4649,6 +4709,25 @@ void VoxiRenderer::applyReblurTuning() {
                   "occlusion denoiser keeps defaults whose scale does not match this engine's "
                   "fraction-of-giMaxDistance encoding (said once)");
     }
+    // MILESTONE 4: half-rate ReSTIR GI's checkerboard switch, ReblurDiffuse (index 1) ONLY -- never
+    // `ao` immediately above, index 0, ReblurDiffuseOcclusion. The occlusion denoiser is never fed a
+    // checkerboarded input (rtSkyOcclusionTemporal writes gRdAoTex at full rate always; only CSRdGi's
+    // gRdGiTex gets the half-rate treatment), so forcing NRD to reinterpret ITS input as checkerboarded
+    // packing would misread a full-resolution texture as half of one.
+    //
+    // ONE-FRAME LAG, BY CONSTRUCTION, NOT AN OVERSIGHT: this dispatch denoises LAST frame's CSRdGi
+    // write, so the mode that has to apply here is whatever LAST frame's write actually used
+    // (nrdGiCbApplied_, set by the caller from nrdGiInputCheckerboard_ -- see that latch's own comment).
+    // fs.frameIndex this same call is nrdFrame_'s value from BEFORE this dispatch's own increment, i.e.
+    // the exact value recordStagedRayDriven read for ITS OWN parity when it made that write -- so
+    // frameIndex and checkerboardMode agree on which write they both describe.
+    //
+    // NO forceHistoryReset() ON A TOGGLE: REBLUR's permanent-pool history is the same full-resolution
+    // signal in either mode -- checkerboardMode only changes how THIS CALL'S noisy input is READ (packed
+    // 2:1 into the left half, or read at full resolution), not the shape of what REBLUR accumulates or
+    // hands back. A mode flip is exactly as safe as any other frame-to-frame tuning change already
+    // applied here without a reset.
+    t.checkerboardMode = nrdGiCbApplied_;
     // Index 1 is ReblurDiffuse.
     if (!nrd_.setReblurTuning(1u, t) && !nrdWarnedReblurRetune_) {
         nrdWarnedReblurRetune_ = true;
@@ -4659,6 +4738,15 @@ void VoxiRenderer::applyReblurTuning() {
 
 // See VoxiRenderer.hpp for the ping-pong rationale.
 void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
+    // MILESTONE 4: latched BEFORE anything else in this function runs, including the shadowHistoryActive()
+    // early return below. recordStagedRayDriven (scenePass, LATER in frame order than this function) set
+    // giCbWrittenThisFrame_ for LAST frame's own dispatch -- the NRD dispatch further down in THIS
+    // function denoises exactly that write, so "was the input this frame's NRD call is about to read
+    // checkerboarded" has to be read here, at the top of the one frame that call runs in, before this
+    // same frame's OWN (later) recordStagedRayDriven call overwrites giCbWrittenThisFrame_ with its own
+    // decision for NEXT frame's NRD call to read the same way.
+    nrdGiInputCheckerboard_ = giCbWrittenThisFrame_;
+    giCbWrittenThisFrame_ = false;
     // M1: its own child span under "Voxi GI update" (prePass), covering every GPU-visible thing this
     // function does -- the six history-texture barriers and rebinds below, and (nested under its OWN
     // "Voxi NRD denoise" marker further down) the NRD dispatch. RAII, so the early return just below
@@ -4878,6 +4966,17 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // reports itself absent instead, and Voxi falls back to the filter it has always shipped.
     nrdOutput_ = 0;
     nrdGiOutput_ = 0;
+    // MILESTONE 4: reset alongside nrdGiOutput_ immediately above, for the identical reason -- a frame
+    // that skips the NRD dispatch below (gbufWritten false, neither signal present, camera factorisation
+    // failed, or NRD rejects the resize) must not leave recordStagedRayDriven believing the readback is
+    // still live from whenever it last actually ran. Set true only where nrdGiOutput_ itself is assigned
+    // below, from a successful nrd_.record() call, never assumed from nrdGiOutput_'s own truthiness (see
+    // that assignment's own comment for why the two are not the same test this frame).
+    //
+    // PAST the shadowHistoryActive() early return, like the two resets above it, so an inactive frame
+    // leaves all three at the last active frame's values. Harmless: recordStagedRayDriven, the only
+    // reader, runs only when rdStagedActive() has required shadowHistoryActive() this same frame.
+    nrdGiRanThisFrame_ = false;
     // gBufferEnabled() IS NOT THE SAME QUESTION AS "the G-buffer has anything in it", and the
     // difference is a silent one. D3D12 requires every render target in one OMSetRenderTargets call
     // to share a sample count, and the G-buffer's three targets are always single-sample -- so under
@@ -5221,6 +5320,19 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 // M1: nested under "Voxi shadow history" above -- the recorder's own dispatches
                 // (REBLUR's classify/prepass/accumulate/... passes) get their own timing bracket
                 // instead of being folded into the history pair's texture-barrier cost.
+                // MILESTONE 4: whether REBLUR should read gRdGiTex's checkerboard packing this call.
+                // Both halves have to hold -- giSignal, because CheckerboardMode only means anything on
+                // the denoiser that is actually about to run against this input, and
+                // nrdGiInputCheckerboard_ (latched at the top of this function from LAST frame's
+                // recordStagedRayDriven, before this frame's own overwrote it), because the input this
+                // dispatch is about to read is LAST frame's CSRdGi write, not this frame's. Applied only
+                // on a CHANGE (nrdGiCbApplied_ caches the last value pushed) so a steady frame does not
+                // re-call setReblurTuning() -- and its WARN-once rejection path -- every single frame.
+                const u8 wantCb = (giSignal && nrdGiInputCheckerboard_) ? 1u : 0u;
+                if (wantCb != nrdGiCbApplied_) {
+                    nrdGiCbApplied_ = wantCb;
+                    applyReblurTuning();
+                }
                 {
                     rhi::ScopedGpuStat nrdStat(ctx, "Voxi NRD denoise");
                     if (nrd_.record(ctx, fs, in, which, whichN)) {
@@ -5229,6 +5341,16 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                         // "bound as nothing means not denoised this frame" contract below.
                         nrdOutput_   = aoSignal ? nrd_.outputDiffuseHitDistance() : 0;
                         nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
+                        // MILESTONE 4: true only when the diffuse denoiser that just ran is the one
+                        // recordStagedRayDriven (later THIS SAME frame, from scenePass) can trust for
+                        // half-rate GI -- giSignal, not nrdGiOutput_'s own truthiness. Unlike nrdOutput_
+                        // immediately above, nrdGiOutput_ is assigned here whether or not giSignal was
+                        // true this call (`which`/`whichN` may have named only the occlusion denoiser),
+                        // so on such a frame the texture nrdGiOutput_ names is whatever REBLUR's own
+                        // permanent pool last held for a diffuse denoiser that did not run this call --
+                        // not a live readback, which is exactly what nrdGiRanThisFrame_ exists to tell
+                        // recordStagedRayDriven apart from the live case.
+                        nrdGiRanThisFrame_ = giSignal;
                     }
                 }
             }
@@ -5995,12 +6117,13 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rayDrivenTexGbufPso_,
                                          rayDrivenGbufPso_,
                                          // STAGED RAY-DRIVEN PASSES (milestone 1, extended by
-                                         // milestone 2's rdGiCsPso_/rdSkyOccCsPso_ and milestone 3's
-                                         // rdReflCsPso_): the identical "this function overwrites
-                                         // every member a few lines down" reasoning the comment above
-                                         // already gives for rayDrivenTexPso_/sceneRtBlendedTexPso_.
-                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdSkyOccCsPso_,
-                                         rdReflCsPso_,
+                                         // milestone 2's rdGiCsPso_/rdSkyOccCsPso_, milestone 3's
+                                         // rdReflCsPso_, and milestone 4's rdGiCbCsPso_): the
+                                         // identical "this function overwrites every member a few
+                                         // lines down" reasoning the comment above already gives for
+                                         // rayDrivenTexPso_/sceneRtBlendedTexPso_.
+                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
+                                         rdSkyOccCsPso_, rdReflCsPso_,
                                          rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
@@ -6012,7 +6135,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
-    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
+    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
 
     ShaderScope compile(*res_);
@@ -6271,6 +6394,20 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.layout = giTex;
             rdGiCsPso_ = res_->createComputePipeline(p);
         }
+        // MILESTONE 4: CSRdGi compiled a second time with AVER_GI_CHECKERBOARD=1 appended -- same
+        // csDefs, same SM 6.6, same giTex layout as csGi immediately above, so a device that compiled
+        // the plain variant has everything this one needs too. Genuinely optional on top of an
+        // already-optional pipeline: rdStagedActive() never inspects this member, so a build (or a
+        // single permutation) that fails to produce it leaves rayDrivenStages == 2 behaving exactly
+        // like 1 -- see recordStagedRayDriven's own giCb decision and rdGiCbFallbackLogged_.
+        const rhi::ShaderHandle csGiCb = compile("CSRdGi", rhi::ShaderStage::Compute, 66,
+                                                 rasterDefs((csDefs + ";AVER_GI_CHECKERBOARD=1").c_str()).c_str());
+        if (csGiCb) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csGiCb;
+            p.layout = giTex;
+            rdGiCbCsPso_ = res_->createComputePipeline(p);
+        }
         const rhi::ShaderHandle csSkyOcc = compile("CSRdSkyOcc", rhi::ShaderStage::Compute, 66,
                                                    rasterDefs(csDefs.c_str()).c_str());
         if (csSkyOcc) {
@@ -6334,22 +6471,23 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         // ONE LINE FOR THE WHOLE STAGED SET, not one warning per PSO: rdStagedActive() already checks
         // every one of these together every frame staged mode is requested, and its own `reason`
         // output says which requirement was not met at the one point that matters -- when a project
-        // actually asks for voxi.rayDrivenStages 1. Unconditional, like every other optional pipeline
-        // in this function: createScenePipelines() only reruns on a real rebuild, never per frame.
-        // rdGiCsPso_/rdSkyOccCsPso_/rdReflCsPso_ are reported alongside the rest, even though
-        // rdStagedActive() only requires any one of them the frames its own matching cb_ condition
-        // holds -- a project that never turns those on would otherwise never see whether the three
-        // milestone 2/3 shaders compiled at all.
+        // actually asks for voxi.rayDrivenStages 1 or 2. Unconditional, like every other optional
+        // pipeline in this function: createScenePipelines() only reruns on a real rebuild, never per
+        // frame. rdGiCsPso_/rdSkyOccCsPso_/rdReflCsPso_/rdGiCbCsPso_ are reported alongside the rest,
+        // even though rdStagedActive() only requires any one of them the frames its own matching cb_
+        // condition holds -- a project that never turns those on would otherwise never see whether the
+        // milestone 2/3/4 shaders compiled at all.
         if (rdVisCsPso_ && rdShadowCsPso_ && rayDrivenSplitTexPso_)
             AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
-                      "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {})",
+                      "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {}, "
+                      "half-rate GI checkerboard stage {})",
                       kRtTextureCapacity,
                       rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
                       rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable",
-                      rdReflCsPso_ ? "ready" : "unavailable");
+                      rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable");
         else
             AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
-                      "split pixel shader {}); voxi.rayDrivenStages 1 falls back to the single pass",
+                      "split pixel shader {}); voxi.rayDrivenStages 1 or 2 falls back to the single pass",
                       rdVisCsPso_ ? "ready" : "missing", rdShadowCsPso_ ? "ready" : "missing",
                       rayDrivenSplitTexPso_ ? "ready" : "missing");
 

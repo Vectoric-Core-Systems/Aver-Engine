@@ -84,7 +84,7 @@ Application* createApplication(int argc, char** argv) {
     // already at MSVC's nesting limit. -1 is "not given" (0 is the real value "voxel cones"), so an
     // A/B against a manifest that already picks an estimator (RENDER.GIMODE) can be overridden at all.
     int giModeArg = -1;
-    int rdStagesArg = -1;   // --rd-stages 0|1
+    int rdStagesArg = -1;   // --rd-stages 0|1|2
     int denoiserArg = -1;   // --denoiser 0|1
     int reblurAccumArg = -1;   // --reblur-accum N
     // REFRACTION: the tier picks a mode, these override it. -1 is "not given", the sentinel every
@@ -141,7 +141,7 @@ Application* createApplication(int argc, char** argv) {
         // --gi-mode N: selects the indirect-diffuse estimator (0 = voxel cones, 1 = RTXDI ReSTIR GI).
         // In THIS loop for the same C1061 reason as --rd-ablate above.
         if (!std::strcmp(argv[i], "--gi-mode"))              giModeArg = std::atoi(argv[i + 1]);
-        // --rd-stages 0|1: single-pass (0) or staged (1) ray-driven primary. Same C1061 reason.
+        // --rd-stages 0|1|2: single-pass (0), staged (1) or staged + half-rate GI (2). Same C1061 reason.
         if (!std::strcmp(argv[i], "--rd-stages"))            rdStagesArg = std::atoi(argv[i + 1]);
         // --denoiser 0|1: NVIDIA NRD over the ReSTIR GI and the sky occlusion. In THIS loop for the
         // same C1061 reason, and it exists at all because the pass needs the G-buffer -- which for
