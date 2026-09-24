@@ -789,6 +789,46 @@ struct Settings {
     // tracing, and VoxiRenderer refuses to spend it while pathTracing is Off regardless of what
     // is stored here -- see ptBounceParams, which is where that is enforced rather than trusted.
     u32 ptBounces = 1;
+
+    // ---- occlusion-aware fog: the air sky-visibility volume -----------------------------------
+    // WHAT THIS FIXES. shared_prelude.hlsl's height fog (averFogFactor/averFogInscatter/
+    // averApplyFogEx) and the aerial-perspective term both add in-scattered SKY light along the
+    // camera-to-surface path with no regard for what is actually between the two -- correct outdoors,
+    // where the air really does see the sky, and wrong inside an enclosed space, where it mostly does
+    // not. MEASURED on Sponza's arcade: fog alone adds roughly 6% of sky radiance over a 30 m indoor
+    // corridor, brighter than the bounce-lit walls it is layered over, which reads as a flat blue veil
+    // rather than air. With fog off, ReSTIR GI already matches the path-traced reference within 8% --
+    // this is fog's own error, not the GI estimator's.
+    //
+    // ON BY DEFAULT. Off is exactly today's fog, byte for byte (VoxiRenderer binds a 1x1x1 placeholder
+    // at t17/u16 and voxiAirVisibility() -- voxi.hlsl -- returns 1 unconditionally whenever it sees
+    // one, which is the identical "no data, assume open" answer this feature does not otherwise
+    // change): turning this off is never a downgrade in image quality relative to every build before
+    // this field existed, only a reversion to the pre-existing over-bright indoor fog.
+    //
+    // WHY NOT SURFACE AO (a previous attempt, reverted -- see aver-fog-skyvis-failed.md). Fog is a
+    // property of the camera-to-SURFACE PATH, not the surface's own hemisphere, and the temporally-
+    // accumulated AO history this would have reused flashes white on disocclusion (a fast camera pan
+    // resets AO to "open" before it reconverges) -- an artifact fog, which is visible on every frame a
+    // still image is captured from, cannot afford. The volume this field switches on instead is
+    // WORLD-SPACE and has no per-pixel history and no jitter of any kind: CSAirVis (voxi.hlsl) marches
+    // fixed hemisphere directions through the SAME voxel grid the GI cone gather already reads. World
+    // space and recomputed from the current voxels, never accumulated, so camera motion cannot make
+    // it flash.
+    //
+    // COST. One more compute pass, CSAirVis, over a FIXED 32^3 volume (VoxiRenderer::
+    // kAirVisResolution) independent of Settings::voxelResolution -- see that constant's own comment
+    // for why a small fixed grid is enough for path occlusion where the GI radiance volume itself
+    // needs far more. It refreshes one slab of z-layers per frame, round-robin (a full 48^3 pass
+    // measured ~10 ms, and voxel rebuilds are frequent under motion, while sky visibility only changes
+    // with geometry), and the shade-side read (voxiAirVisibility()) is eight fixed texture taps down
+    // the existing fog ray, no extra ray of its own.
+    //
+    // DEVICE-GATED, NOT JUST SETTING-GATED: CSAirVis needs SM 6.0 and DXC (VoxiRenderer::
+    // airVisWanted()); a device without either keeps the placeholder bound and this setting has no
+    // effect, the identical fallback shape Settings::rayDrivenStages already has for its own staged
+    // compute pipelines.
+    bool fogOcclusion = true;
 };
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.

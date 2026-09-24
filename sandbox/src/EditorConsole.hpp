@@ -932,6 +932,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // at 8x MSAA stages true, commits true, and this read reports back false, with nothing more needed
     // than `set voxi.msaa 1` alongside it -- the WARN from VoxiRenderer is the other half of that same
     // story, printed once from the render side.
+    // Occlusion-aware fog (2026-09-24): the fog's in-scattered light scaled by how much sky the air
+    // along the view ray can see, from a world-space volume built off the GI voxels. OFF restores the
+    // old unoccluded fog exactly, for A/B -- the one that glowed blue inside covered arcades.
+    t.push_back({"voxi.fogOcclusion", VarType::Bool, false,
+        "Fog in-scatter respects occlusion: enclosed air (arcades, rooms) stops glowing with sky light it cannot see. Built from the GI voxel volume, so it needs voxel GI on; off = the old unoccluded fog",
+        []{ return vBool(Renderer::get().settings().fogOcclusion); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->fogOcclusion = on; }); }});
     t.push_back({"voxi.denoiser", VarType::Bool, false,
         "NVIDIA NRD over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES RT hardware, the RT tier not Off, something to denoise, D3D12+NRD and MSAA 1; above 1x sample count the pass skips itself and says so once at WARN, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0); },

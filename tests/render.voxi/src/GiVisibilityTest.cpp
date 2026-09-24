@@ -524,9 +524,10 @@ int main() {
 
     // ---- 12. SOURCE ASSERTION: VoxiRenderer.cpp's binding-count static_assert (consumed from L4) ----
     {
-        check(has(rendererCppText(), "kVoxiSrvCount == 17 && kVoxiUavCount == 16"),
-              "VoxiRenderer.cpp asserts the widened binding counts (17 SRV slots, 16 UAV slots) this "
-              "lane's t16/u10 registers depend on (u11-u15 are the staged ray-driven buffers)");
+        check(has(rendererCppText(), "kVoxiSrvCount == 18 && kVoxiUavCount == 17"),
+              "VoxiRenderer.cpp asserts the widened binding counts (18 SRV slots, 17 UAV slots) this "
+              "lane's t16/u10 registers depend on (u11-u15 are the staged ray-driven buffers, t17/u16 "
+              "are the occlusion-aware fog design's air sky-visibility volume)");
     }
 
     if (g_failures == 0) {

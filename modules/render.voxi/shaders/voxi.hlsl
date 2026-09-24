@@ -317,6 +317,38 @@ Texture2D<float>          gGiShadowTex : register(t8);
 // caller asks, and every use falls back to the scalar composite when it says no.
 Texture2D<float4>         gBlendBackdrop : register(t10);
 
+// ---- Occlusion-aware fog: the air sky-visibility volume ----
+//
+// PROBLEM: height fog (averFogFactor/averFogInscatter/averApplyFog, shared_prelude.hlsl) and the
+// aerial-perspective term (averApplyFogAirVis's own `aerial` branch) both add in-scattered SKY light
+// along every view ray with NO occlusion. The air inside an enclosed room sees almost none of the
+// sky, yet fog adds sky radiance as though it stood in the open -- washing bounce-lit walls into a
+// flat blue veil. Gating this on the surface's own screen-space AO history was tried and reverted
+// (aver-fog-skyvis-failed.md): fog is a property of the CAMERA-TO-SURFACE PATH, not the surface's
+// hemisphere, and a per-pixel, temporally-accumulated signal flashes open on camera motion
+// (disocclusion falls back to "open"). This volume is PATH-based and WORLD-SPACE instead -- every
+// cell answers "how much of the upper hemisphere of sky can the air HERE see" -- with NO per-pixel
+// history and NO jitter, so camera motion cannot make it flash.
+//
+// gAirVis covers EXACTLY the GI voxel volume, the SAME mapping voxelUVW/insideVolume already use
+// (uvw = (p - gVoxelOrigin.xyz) * gVoxelOrigin.w, voxi_cone.hlsli) -- just at its own fixed 32x32x32
+// resolution, independent of gVoxelParams.x (the GI radiance volume's own, tier-dependent, resolution;
+// see AVER_AIRVIS_RES, further down this file, by CSAirVis). gAirVis (t17) is what the shade passes
+// read (voxiAirVisibility, further down); gAirVisOut (u16) is CSAirVis's write target -- the same
+// SRV/UAV split gVoxelTex/gVoxelUAV already use for the radiance volume, and for the same reason: one
+// resource can't be bound as both in the same descriptor table slot.
+//
+// kVoxiSrvCount 17 -> 18, kVoxiUavCount 16 -> 17 (VoxiRenderer.cpp, not this file) -- the next free
+// slot after this table's t16/u15 (voxi_restir.hlsli's gGiVisHist, and gRdReflTex above), so no other
+// SRV/UAV register moves and no material texture register (based at t(kVoxiSrvCount)) is touched.
+//
+// WHEN THE FEATURE IS OFF, OR THE VOLUME DOESN'T EXIST YET (VoxiRenderer.cpp, not this file): BOTH
+// slots stay bound to a 1x1x1 placeholder. voxiAirVisibility treats "gAirVis dimensions <= 1" as "no
+// volume" and returns 1.0 -- today's unoccluded behaviour -- so a build or a frame with the setting
+// off is bit-identical to what stood here before this feature existed.
+Texture3D<float>          gAirVis    : register(t17);
+RWTexture3D<float>        gAirVisOut : register(u16);
+
 // Placed above AVER_RT (used to sit inside it, silently losing the definition for the shadow and
 // GI-shadow pipelines and breaking 4 of them): pure arithmetic on the clock and a box, no rays needed.
 // ---- CAUSTICS: light focused by the water surface onto what lies under it ----
@@ -1121,6 +1153,146 @@ cbuffer MipCB : register(b3) { uint gSrcMip; uint3 gBoxLo; uint3 gBoxHi; uint _b
 
 #include "voxi_cone.hlsli"
 
+// ---- CSAirVis: bakes gAirVisOut from gVoxelTex's own occupancy (see gAirVis/gAirVisOut's own header
+// comment, above, for what this volume is and why it exists) ----
+//
+// PLACED HERE, AFTER voxi_cone.hlsli, on purpose: it reuses voxelUVW/insideVolume rather than
+// reimplementing world<->volume-space conversion a third time, so it must sit textually after that
+// file's #include the same way this file's own PSMainVoxi/PSRayDriven do. UNCONDITIONAL -- not inside
+// #if AVER_RT -- because the air-vis volume backs cone-traced GI (PSMainVoxi, no ray tracing needed)
+// just as much as ray-driven shading, and gVoxelTex/gVoxelSamp/cbuffer VoxiFrame it reads are all
+// already unconditional themselves (declared above the first #if AVER_RT guard opens).
+//
+// COMPILED WITH THE FULL giLayout(), the SAME descriptor table and VoxiFrame (b4) binding as
+// CSRdVisibility/CSRdShadow/CSRdGi/CSRdSkyOcc/CSRdRefl (further down this file) -- NOT the tiny MipCB
+// (b3) layout CSClear/CSResolve/CSMip use (just above), which has no VoxiFrame to read gVoxelOrigin/
+// gVoxelParams from. (VoxiRenderer.cpp's own dispatch chooses that root signature; this file has no
+// syntax for "layout," only the resource declarations both layouts happen to share.)
+//
+// SCHEDULED AS A ROUND-ROBIN, NOT PER VOXEL REBUILD: every frame VoxiRenderer::prePass dispatches ONE
+// slab of z-layers, the half-open cell box [gBoxLo, gBoxHi) in MipCB (b3, the same root-constant block
+// the three voxel kernels above read, declared by this pipeline's layout too), so the whole volume
+// refreshes every few frames at a flat, small cost. A full box is dispatched once when the volume is
+// created. MEASURED, the reason: a full 48^3 pass cost ~10 ms, and the voxel volume rebuilds often
+// under camera motion, while sky visibility only changes when geometry does. Nothing is accumulated
+// across frames -- a cell is simply recomputed from the current voxels -- so a still scene writes the
+// same value every refresh and nothing can flicker.
+#define AVER_AIRVIS_RES 32            // gAirVis/gAirVisOut's own resolution (~1.8 m cells over a 56 m GI volume)
+#define AVER_AIRVIS_DIRS 16           // directions marched per cell, tiling the upper hemisphere
+#define AVER_AIRVIS_MIN_ELEV_DEG 3.0  // Fibonacci hemisphere floor: nothing marches near the horizon
+#define AVER_AIRVIS_OCC_GAIN 4.0      // occupancy multiplier so a one-voxel roof averaged into a coarse mip still blocks
+#define AVER_AIRVIS_MIN_T 0.01        // stop marching one direction once its transmittance falls below this
+#define AVER_AIRVIS_MAX_STEPS 48      // per-direction step ceiling, in case neither of the above fires first
+
+[numthreads(8,8,1)]
+void CSAirVis(uint3 tid : SV_DispatchThreadID) {
+    // The dispatch covers one slab (or the whole volume); gBoxLo/gBoxHi say which cells it is.
+    const uint3 id = tid + gBoxLo;
+    if (any(id >= gBoxHi) || any(id >= (uint3)AVER_AIRVIS_RES)) return;
+
+    // Cell centre, world space -- the inverse of voxelUVW (voxi_cone.hlsli): wp = origin + uvw/scale.
+    const float3 uvwCell = (float3(id) + 0.5) / (float)AVER_AIRVIS_RES;
+    const float3 p = gVoxelOrigin.xyz + uvwCell / gVoxelOrigin.w;
+
+    // One voxel of the GI RADIANCE volume, world units -- what CSAirVis is marching THROUGH, and a
+    // different grid from the fixed-48 one it is WRITING (gVoxelParams.x is the GI volume's own,
+    // tier-dependent resolution; see QualityLadder.hpp). Same formula traceCone uses (voxi_cone.hlsli).
+    const float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
+
+    // Half-angle from the direction count, same "tile the hemisphere with N cones" derivation
+    // coneTracedIndirect uses (voxi_cone.hlsli): 2*pi(1-cosHalf) = 2*pi/N covers the hemisphere.
+    const float cosHalf = saturate(1.0 - 1.0 / (float)AVER_AIRVIS_DIRS);
+    const float halfAngleTan = sqrt(max(1.0 - cosHalf * cosHalf, 1e-6)) / max(cosHalf, 1e-6);
+    const float sinMinElev = sin(radians(AVER_AIRVIS_MIN_ELEV_DEG));
+
+    float Tsum = 0.0;
+    // A DETERMINISTIC FIBONACCI HEMISPHERE, not a random/blue-noise set: z stratified evenly over
+    // [sin(minElev), 1] (equal-area per step, since dz is proportional to solid angle) and azimuth
+    // stepped by the golden angle (2.39996323, the SAME constant coneTracedIndirect's own ring uses)
+    // so successive directions don't clump. No frame index anywhere in this function -- the volume is
+    // rebaked, not re-jittered, so it carries no temporal signal to flash on camera motion.
+    [loop] for (uint dirIdx = 0; dirIdx < AVER_AIRVIS_DIRS; ++dirIdx) {
+        const float z = sinMinElev + (1.0 - sinMinElev) * ((float)dirIdx + 0.5) / (float)AVER_AIRVIS_DIRS;
+        const float r = sqrt(saturate(1.0 - z * z));
+        const float phi = 2.39996323 * (float)dirIdx;
+        const float3 d = float3(r * cos(phi), r * sin(phi), z);
+
+        // Widening cone through the volume, same shape as traceCone (voxi_cone.hlsli) but reading
+        // OCCUPANCY (alpha, CSResolve's fragment-covered fraction, box-filtered into coarser mips by
+        // CSMip) instead of radiance, and starting HALF a voxel out rather than traceCone's two --
+        // this marches from a volume CELL CENTRE, not a lit surface point, so there is no coplanar
+        // voxel to avoid self-hitting.
+        float T = 1.0;
+        float dist = voxelWorld * 0.5;
+        [loop] for (uint step = 0; step < AVER_AIRVIS_MAX_STEPS; ++step) {
+            if (T < AVER_AIRVIS_MIN_T) break;
+            const float3 uvwGi = voxelUVW(p + d * dist);
+            if (!insideVolume(uvwGi)) break;   // beyond the volume = open sky: stop, keep T as-is
+            const float footprint = max(voxelWorld, dist * halfAngleTan);
+            const float mip = log2(footprint / voxelWorld);
+            const float occupancy = gVoxelTex.SampleLevel(gVoxelSamp, uvwGi, mip).a;
+            // A ONE-VOXEL-THICK ROOF, averaged into a coarse mip alongside open neighbours, reads as
+            // barely-there occupancy (CSMip's box filter dilutes it 8x per level) -- OCC_GAIN pushes a
+            // thin-but-real occluder back toward fully blocking rather than letting mip climb erase it.
+            T *= 1.0 - saturate(occupancy * AVER_AIRVIS_OCC_GAIN);
+            dist += footprint;
+        }
+        Tsum += T;
+    }
+
+    gAirVisOut[id] = Tsum / (float)AVER_AIRVIS_DIRS;
+}
+
+// ---- SHADE-PASS READ: how much of the sky the air between the camera and wpos can actually see ----
+//
+// Called from voxi.hlsl's own PSMainVoxi/PSRayDriven fog call sites, further down this file, and
+// nowhere in shared_prelude.hlsl -- water.hlsl, scene.hlsl and every other averApplyFog(Ex) caller
+// keep passing airVis == 1.0 (that function's own wrapper, shared_prelude.hlsl) and stay unaffected.
+//
+// DETERMINISTIC, LIKE CSAirVis ABOVE: 8 FIXED points, no jitter, no per-pixel history -- see
+// gAirVis/gAirVisOut's own header comment, further up this file, for why a temporally-accumulated
+// per-pixel signal was tried here first (surface AO) and reverted for flashing open on camera motion.
+float voxiAirVisibility(float3 wpos) {
+    // Voxel GI off, or the volume doesn't exist yet: today's behaviour, unoccluded air. Matches the
+    // `gVoxelParams.w > 0.5` idiom this file already uses everywhere else for the same question.
+    if (gVoxelParams.w <= 0.5) return 1.0;
+    uint dimX, dimY, dimZ;
+    gAirVis.GetDimensions(dimX, dimY, dimZ);
+    // The placeholder is 1x1x1 and cubic, so one axis is enough to tell it apart from a real volume.
+    if (dimX <= 1u) return 1.0;
+
+    const float3 camPos = gCamPos.xyz;
+    const float segLen = length(wpos - camPos);
+    if (segLen <= 1e-4) return 1.0;
+    const float3 dir = (wpos - camPos) / segLen;
+
+    // The sampled sub-segment STARTS at the fog's own start distance, not at the camera: fog before
+    // that distance contributes nothing at all (averFogFactor's `len <= start` early-out,
+    // shared_prelude.hlsl), so a sample there would pull the average toward the near-camera answer
+    // (usually open) for a surface that is entirely inside the fogged range.
+    const float start = min(gFogParams.z, segLen);
+    const float span = segLen - start;
+
+    // Height-fog density weighting, mirroring averFogFactor's own exponential (shared_prelude.hlsl):
+    // a sample deep under the fog should outvote one near its ceiling, or the volume's answer at the
+    // top of a tall atrium would wash out the occluded answer down at street level.
+    const float fogK = gFogParams.x;
+    const float fogHeight = gFogParams.y;
+
+    float wSum = 0.0, vSum = 0.0;
+    [unroll] for (uint i = 0; i < 8u; ++i) {
+        const float t = start + (((float)i + 0.5) / 8.0) * span;
+        const float3 p = camPos + dir * t;
+        const float3 uvw = voxelUVW(p);
+        // Outside the volume counts as open sky, same rule CSAirVis's own march uses.
+        const float v = insideVolume(uvw) ? gAirVis.SampleLevel(gVoxelSamp, uvw, 0.0) : 1.0;
+        const float w = fogK <= 1e-8 ? 1.0 : exp(-(p.z - fogHeight) * fogK);
+        wSum += w;
+        vSum += w * v;
+    }
+    return wSum > 1e-6 ? vSum / wSum : 1.0;
+}
+
 // ================= additive G-buffer: velocity, view-space depth, normal+roughness =================
 // Gated on AVER_GBUFFER, following AVER_RT's convention: a compile-time define (never a runtime
 // branch), off by default, so PSMainVoxi's/PSRayDriven's ORIGINAL variants fall through unchanged --
@@ -1707,7 +1879,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // inscatter term TWICE for one slab of air, the same double-counting the water comment warns
         // about. Fogging `outc.rgb` once is symmetric with the opaque branch's single fog call below.
         // Alpha is coverage, not radiance, and is untouched by fog either way.
-        outc.rgb = averApplyFog(outc.rgb, i.wpos);
+        //
+        // OCCLUSION-AWARE: airVis computed once, from i.wpos, same as the opaque branch below -- see
+        // voxiAirVisibility's own header comment, above, and gAirVis/gAirVisOut's, further up this
+        // file, for why this is a world-space volume lookup and not the surface's own AO.
+        outc.rgb = averApplyFogAirVis(outc.rgb, i.wpos, true, voxiAirVisibility(i.wpos));
         // B1 (F5): applied LAST, after fog, so the marker is the true final colour and cannot be
         // fogged or blended away -- see aver_IsGiRestirPoisonColour's own comment for why a
         // giRestirIndirect colour on the diffuse channel (giDiffusePoisoned) outranks this one.
@@ -1719,7 +1895,8 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 radiance = 0.0;
     radiance = averShadeDirect(radiance, s, sun);
     radiance = averShadeIndirect(radiance, s, ind4);
-    radiance = averApplyFog(radiance, i.wpos);
+    // OCCLUSION-AWARE: see the blended branch's identical comment, above.
+    radiance = averApplyFogAirVis(radiance, i.wpos, true, voxiAirVisibility(i.wpos));
     // B1 (F5): same override, same precedence, as the translucent branch's copy above.
     if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
         radiance = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
@@ -2655,13 +2832,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     }
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_FOG
-    // ablated: no aerial perspective and no fog inscatter march.
+    // ablated: no aerial perspective and no fog inscatter march -- and no gAirVis lookup either,
+    // so this branch still measures the true zero-fog-work cost the ablation exists to isolate.
 #elif AVER_RD_ABLATE == AVER_RD_ABL_AERIAL
     // ablated: the aerial march only. Height fog still runs, so the delta against mode 0 is
-    // this one term and not the pair.
-    radiance = averApplyFogEx(radiance, wpos, false);
+    // this one term and not the pair. OCCLUSION-AWARE: airVis computed once, just for this branch's
+    // own call -- see voxiAirVisibility's own header comment for why this is a world-space volume
+    // lookup and not the surface's own AO.
+    radiance = averApplyFogAirVis(radiance, wpos, false, voxiAirVisibility(wpos));
 #else
-    radiance = averApplyFog(radiance, wpos);
+    radiance = averApplyFogAirVis(radiance, wpos, true, voxiAirVisibility(wpos));
 #endif
 
     // Depth for everything that draws AFTER the scene -- the deferred sky, transparentPass, the

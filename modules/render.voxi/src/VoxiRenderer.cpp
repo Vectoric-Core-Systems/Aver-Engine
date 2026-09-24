@@ -147,7 +147,16 @@ void giSamplers(rhi::PipelineLayout& l) {
 // half-resolution ReSTIR VISIBILITY history's read side (giVisHist_ in VoxiRenderer.hpp) -- see
 // giVisHistWanted()'s own comment for why it is its own optional slot rather than riding t12/t13's
 // giRestirWanted() condition.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 8;
+//
+// +9, NOT +8, AS OF THE OCCLUSION-AWARE FOG DESIGN: t17 is the AIR SKY-VISIBILITY volume's read
+// side (airVisTex_ in VoxiRenderer.hpp) -- a fixed 32^3 single-channel volume, independent of
+// voxelResolution, that CSAirVis writes and the shade passes sample through voxiAirVisibility()
+// (voxi.hlsl) to attenuate height/aerial fog's in-scatter term by how much sky the air at that point
+// actually sees. Bound to a 1x1x1 placeholder (airVisPlaceholder_) whenever voxi.fogOcclusion is off
+// or the real texture has not been created yet -- the shader treats "GetDimensions() <= 1" as "no
+// volume" and reads visibility 1, the identical dimension test t14/t15 above already use for their
+// own optional absence.
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 9;
 
 // The denoiser index Voxi asks NRD to run. create() is handed exactly one kind
 // (ReblurDiffuseOcclusion), so this is 0 -- named rather than written as a bare literal at the
@@ -193,7 +202,13 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // +12, NOT +11, AS OF MILESTONE 3: u15 is CSRdRefl's own output (rdReflTex_) -- the reflection twin of
 // u13/u14 immediately above, bound in EVERY Voxi binding set on the identical contract, for the
 // identical Tier 1 reason. No SRV twin, exactly like u11-u14.
-constexpr u32 kVoxiUavCount = kGiUavCount + 12;
+//
+// +13, NOT +12, AS OF THE OCCLUSION-AWARE FOG DESIGN: u16 is CSAirVis's own output (airVisTex_,
+// t17's UAV twin, SAME resource -- unlike u11-u15 this one DOES have an SRV, because the shade
+// passes read it through gAirVis at t17 while CSAirVis itself only ever writes it). Bound to the
+// SAME 1x1x1 placeholder t17 falls back to whenever the real texture does not exist, so a Tier 1
+// device always has a valid UAV descriptor here regardless of voxi.fogOcclusion.
+constexpr u32 kVoxiUavCount = kGiUavCount + 13;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -250,6 +265,10 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // tests GetDimensions() rather than trusting the slot, because Full/Reconstructed/NoRay never
     // allocate this pair at all.
     srv[16] = rhi::SlotKind::Texture2D;             // t16 ReSTIR visibility half-res history (read)
+    // t17/u16: the AIR SKY-VISIBILITY volume -- see kVoxiSrvCount's own comment above for what it is.
+    // A Texture3D SRV, like t0, not a Texture2D -- it is sampled trilinear over the SAME voxel volume
+    // space t0 occupies, just at its own fixed 32^3 resolution.
+    srv[17] = rhi::SlotKind::Texture3D;             // t17 air sky-visibility volume (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -292,7 +311,9 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // contract as u11-u14 above, and the same "no SRV twin" shape -- RW-only, read and written through
     // this UAV register alone by CSRdRefl and the AVER_RD_SPLIT branch of PSRayDriven.
     uav[15] = rhi::SlotKind::Texture2D;             // u15 ray-driven reflection (RW)
-    static_assert(kVoxiSrvCount == 17 && kVoxiUavCount == 16 && kGiSrvCount == 9 && kGiUavCount == 4,
+    // u16: CSAirVis's own write side, t17's UAV twin -- see kVoxiUavCount's own comment above.
+    uav[16] = rhi::SlotKind::Texture3D;             // u16 air sky-visibility volume (write, CSAirVis)
+    static_assert(kVoxiSrvCount == 18 && kVoxiUavCount == 17 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -321,7 +342,8 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
                                    // history, u11/u12 the staged ray-driven visibility record buffer
                                    // and sun visibility texture, u13/u14 the staged ray-driven GI
                                    // indirect diffuse and sky occlusion outputs, u15 the staged
-                                   // ray-driven reflection output (all this frame's)
+                                   // ray-driven reflection output (all this frame's), u16 the air
+                                   // sky-visibility volume CSAirVis writes (t17's UAV twin)
     // Table 1: the material's textures, based at t(kVoxiSrvCount) -- the root-signature builder
     // accumulates srvBase across tables, so a register number derived from a comment instead of this
     // value goes wrong the moment kVoxiSrvCount grows past kGiSrvCount.
@@ -433,6 +455,17 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     createVoxelVolume(settings_.voxelResolution);
     createPipelines();
 
+    // OCCLUSION-AWARE FOG: airVisPso_ has just been settled by createPipelines() above (device
+    // shader model, DXC availability) -- this is the first point airVisWanted() can be answered
+    // honestly, so it is where the placeholder createVoxelVolume() bound at t17/u16 gets upgraded to
+    // the real kAirVisResolution^3 texture, if the setting and the device both allow it. A failure
+    // here is not fatal to init() -- the placeholder stays bound and fog stays exactly as unoccluded
+    // as it was before this feature existed, the same "wrong but running beats a dead renderer" shape
+    // giShadowPso_'s own soft failure documents above.
+    if (!ensureAirVis())
+        AVER_WARN("[Voxi] air sky-visibility volume unavailable at startup; fog stays unoccluded "
+                  "(voxi.fogOcclusion has no effect until it can be created)");
+
     const char* missing = nullptr;
     if (!shadowTex_)             missing = "shadow texture";
     else if (!voxelTex_)         missing = "voxel volume";
@@ -440,6 +473,11 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     else if (!bindings_)         missing = "main binding set";
     else if (!clearBindings_)    missing = "clear binding set";
     else if (!resolveBindings_)  missing = "resolve binding set";
+    // OCCLUSION-AWARE FOG: airVisPlaceholder_ is created unconditionally inside createVoxelVolume(),
+    // ahead of airVisPso_/airVisTex_ existing at all -- see its own comment there -- so it belongs in
+    // this "always required" chain, unlike airVisPso_/airVisTex_ themselves, which are legitimately 0
+    // on a device below SM 6.0 or with voxi.fogOcclusion off.
+    else if (!airVisPlaceholder_) missing = "air sky-visibility placeholder";
     else if (mipBindings_.size() + 1 != voxelMips_) missing = "mip binding sets (count)";
     else if (!shadowPso_)        missing = "shadow pipeline";
     else if (!voxelPso_)         missing = "voxelise pipeline";
@@ -453,7 +491,7 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
     AVER_INFO("[Voxi] init: shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{} "
               "pipelines shadow={}/{} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} "
-              "scene={}/{}/{}/{} blended={}/{}/{}/{}",
+              "scene={}/{}/{}/{} blended={}/{}/{}/{} airVis={}/{} ({}^3)",
               shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
               bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
               // shadow is per-draw/instanced -- a zero in the second slot is shadowPass silently
@@ -465,7 +503,11 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
               // to have failed on (it hasn't -- see createScenePipelines' own AVER_WARN if one did),
               // most commonly zero simply because vsMain/psVoxi themselves never compiled, in which
               // case scenePso_ above is already zero and `missing` below has already explained why.
-              sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_);
+              sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
+              // airVisTex_ reads 0 here whenever voxi.fogOcclusion is off or airVisPso_ failed to
+              // compile -- ensureAirVis() already ran above, so this reports the FINAL state, not the
+              // placeholder createVoxelVolume() bound before it.
+              airVisPso_, airVisTex_, kAirVisResolution);
 
     if (missing) {
         AVER_ERROR("[Voxi] init FAILED: {} has a zero handle", missing);
@@ -558,10 +600,16 @@ void VoxiRenderer::shutdown() {
                                         // rayDrivenTexPso_/sceneRtBlendedTexPso_.
                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                         rdSkyOccCsPso_, rdReflCsPso_,
-                                        rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_};
+                                        rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
+                                        // OCCLUSION-AWARE FOG: airVisPso_, created alongside mipPso_
+                                        // in createPipelines() and never touched by
+                                        // createScenePipelines()'s own hot-reload -- same lifetime as
+                                        // mipPso_/clearPso_/resolvePso_, so it belongs in this list
+                                        // rather than the stale[] one createScenePipelines() destroys.
+                                        airVisPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
-    voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = 0;
+    voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = airVisPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
@@ -581,6 +629,14 @@ void VoxiRenderer::shutdown() {
     // leaks on every shutdown that ever exercised W12's free branch.
     if (voxelAccumPlaceholder_) res_->destroyTexture(voxelAccumPlaceholder_);
     voxelAccumPlaceholder_ = 0;
+    // OCCLUSION-AWARE FOG: airVisTex_/airVisPlaceholder_, created alongside voxelTex_/
+    // voxelAccumPlaceholder_ immediately above (see createVoxelVolume()/ensureAirVis()) and released
+    // on the identical "not owned by any binding-set slot's own lifetime" reasoning as
+    // voxelAccumPlaceholder_'s own comment gives.
+    if (airVisTex_) res_->destroyTexture(airVisTex_);
+    if (airVisPlaceholder_) res_->destroyTexture(airVisPlaceholder_);
+    airVisTex_ = airVisPlaceholder_ = 0;
+    airVisDirty_ = false;
     if (voxelTex_)  res_->destroyTexture(voxelTex_);
     if (shadowTex_) res_->destroyTexture(shadowTex_);
     if (giShadowTex_) res_->destroyTexture(giShadowTex_);
@@ -693,6 +749,10 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // of the rayTracing tier, and ray tracing can flip while rayDrivenStages was already 1 or 2, and
     // onRenderTargetsChanged only ever sees a resize.
     const bool wasRdStagedResourcesWanted = rdStagedResourcesWanted();
+    // OCCLUSION-AWARE FOG: airVisWanted()'s OWN edge, for the identical reason wasAoWanted/
+    // wasGiRestirWanted exist above -- Settings::fogOcclusion can flip independently of every other
+    // setting captured here, and there is no resize event to catch it on.
+    const bool wasAirVisWanted = airVisWanted();
     settings_ = s;
     // Applied here rather than only through the direct setters, so the editor's Rendering page and
     // the project manifest can drive them the same way every other setting already does; the direct
@@ -765,6 +825,14 @@ void VoxiRenderer::setSettings(const Settings& s) {
         if (!ensureRdStagedResources(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] staged ray-driven resources could not follow a settings change at {}x{}",
                        rtHistWantW_, rtHistWantH_);
+
+    // OCCLUSION-AWARE FOG: airVisWanted()'s own edge -- no size to guard on, unlike the two blocks
+    // above, since airVisTex_ is a fixed kAirVisResolution^3 regardless of viewport. Still guarded on
+    // bindings_ existing (ensureAirVis() re-checks this itself; init() has not necessarily run yet on
+    // the very first setSettings a project's loader issues before the device is ready).
+    if (airVisWanted() != wasAirVisWanted)
+        if (!ensureAirVis())
+            AVER_ERROR("[Voxi] air sky-visibility volume could not follow a voxi.fogOcclusion change");
 
     // B4: REBLUR history/prepass tuning as LIVE dials. setSettings already runs every frame (this is
     // no new per-frame call site), so re-issuing setReblurTuning here -- rather than only once at NRD
@@ -1544,6 +1612,34 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                 giGateNextReport_ = ticks * 2;   // 64, 128, 256, ... -- a handful of lines, not a flood
             }
         }
+    }
+    // OCCLUSION-AWARE FOG: the air sky-visibility refresh, EVERY frame, decoupled from the GI rebuild
+    // gate above. Sky visibility changes only when geometry does, while the voxel volume rebuilds
+    // often under camera motion and a full CSAirVis measured ~10 ms (at 48^3) -- so each frame
+    // refreshes ONE slab of kAirVisSlabLayers z-layers, round-robin, and the whole volume turns over
+    // every kAirVisResolution / kAirVisSlabLayers frames at a flat, small cost. A dirty volume (just
+    // created, or voxel GI just came back on) is filled whole in one dispatch first, so no frame ever
+    // reads an unwritten texel.
+    //
+    // voxelTex_ rests in ShaderResource between frames (createVoxelVolume()'s initialState, and
+    // filterMips()'s final transition) -- a compute read needs NonPixelShaderResource, hence the round
+    // trip around the dispatch.
+    const bool airVisActive = airVisTex_ && airVisPso_ && voxelTex_ && cb_.voxelParams[3] > 0.5f;
+    if (airVisActive && !airVisWasActive_) airVisDirty_ = true;
+    airVisWasActive_ = airVisActive;
+    if (airVisActive) {
+        ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource,
+                           rhi::ResourceState::NonPixelShaderResource);
+        if (airVisDirty_) {
+            dispatchAirVis(ctx, 0, kAirVisResolution);
+        } else {
+            constexpr u32 kSlabs = kAirVisResolution / kAirVisSlabLayers;
+            const u32 zLo = (airVisSlab_ % kSlabs) * kAirVisSlabLayers;
+            dispatchAirVis(ctx, zLo, zLo + kAirVisSlabLayers);
+            airVisSlab_ = (airVisSlab_ + 1) % kSlabs;
+        }
+        ctx.textureBarrier(voxelTex_, rhi::ResourceState::NonPixelShaderResource,
+                           rhi::ResourceState::ShaderResource);
     }
     endShadowHistory();
 }
@@ -5831,6 +5927,25 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     if (giShadowTex_) res_->setSrv(bindings_, 8, giShadowTex_);   // t8, the GI-only shadow map
     res_->setUav(bindings_, 0, voxelTex_, 0);
     res_->setUav(bindings_, 1, voxelAccumTex_, 0);
+    // OCCLUSION-AWARE FOG: t17/u16 ALWAYS get bound here, to a 1x1x1 placeholder -- never left
+    // null-filled the way t6/t7/t11/u2-u5 below are, because createPipelines() (which decides
+    // airVisPso_, and therefore airVisWanted()) has not run yet at this point in init(). ensureAirVis()
+    // -- called once from init() right after createPipelines(), and again from setSettings() on
+    // airVisWanted()'s own edge -- is what upgrades this bind to the real texture.
+    {
+        rhi::TextureDesc pd;
+        pd.dim    = rhi::TextureDim::Tex3D;
+        pd.width  = pd.height = pd.depth = 1;
+        pd.mips   = 1;
+        pd.format = rhi::Format::R16F;
+        pd.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+        pd.initialState = rhi::ResourceState::ShaderResource;
+        pd.debugName    = "Voxi air sky-visibility placeholder";
+        airVisPlaceholder_ = res_->createTexture(pd);
+        if (!airVisPlaceholder_) { AVER_ERROR("[Voxi] air sky-visibility placeholder could not be created"); return false; }
+    }
+    res_->setSrv(bindings_, 17, airVisPlaceholder_, rhi::kAllMips);
+    res_->setUav(bindings_, 16, airVisPlaceholder_, 0);
     // t6/u2 (rtShadowHist_), t7/u3 (rtReflHist_) and t11/u4 (rtAoHist_) are populated once
     // onRenderTargetsChanged creates them -- the resolution is not known this early, and the
     // slots are declared above so Tier 1 null-fills them correctly until then. THREE pairs, not
@@ -5876,6 +5991,94 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
         mipBindings_.push_back(s);
     }
     return true;
+}
+
+// OCCLUSION-AWARE FOG: creates or releases airVisTex_ against airVisWanted()'s own answer -- the
+// identical "wanted() decides, ensure*() acts" shape ensureShadowHistory/ensureRdStagedResources
+// already use, restated in miniature because this resource has neither a resize dependency (fixed
+// kAirVisResolution^3) nor a ping-pong pair. Idempotent: returns true immediately once airVisTex_'s
+// existence already matches what is wanted, so every call site can invoke this unconditionally on
+// its own edge without a separate "did anything actually change" test of its own.
+bool VoxiRenderer::ensureAirVis() {
+    if (!res_ || !bindings_) return false;
+    const bool wanted = airVisWanted();
+    if (wanted == (airVisTex_ != 0)) return true;   // already in the state this settings/device pair wants
+
+    if (!wanted) {
+        // REBIND BEFORE DESTROY, always -- aver-view-outlives-its-buffer.md, the identical rule
+        // manageInjectionAccumulator's own FREE branch and ensureRdStagedResources' own release
+        // branch both state for themselves. airVisPlaceholder_ was created back in
+        // createVoxelVolume(), before this function could ever run, so it already exists here.
+        if (airVisPlaceholder_) {
+            res_->setSrv(bindings_, 17, airVisPlaceholder_, rhi::kAllMips);
+            res_->setUav(bindings_, 16, airVisPlaceholder_, 0);
+        }
+        res_->destroyTexture(airVisTex_);   // fence-deferred on both backends
+        airVisTex_ = 0;
+        airVisDirty_ = false;
+        AVER_INFO("[Voxi] air sky-visibility volume released; voxi.fogOcclusion is off (placeholder "
+                  "bound -- fog reads full sky visibility everywhere, exactly as before this feature "
+                  "existed)");
+        return true;
+    }
+
+    rhi::TextureDesc d;
+    d.dim    = rhi::TextureDim::Tex3D;
+    d.width  = d.height = d.depth = kAirVisResolution;
+    d.mips   = 1;   // CSAirVis writes one level; the shade-pass read is a single trilinear sample, no
+                     // clipmap footprint selection the way the GI radiance volume's chain needs.
+    // R16F: the smallest format this RHI exposes that both backends can bind as a typed UAV store AND
+    // an SRV (see D3D12Device.cpp/VulkanCommon.hpp's Format::R16F mapping) -- a [0,1] mean
+    // transmittance needs no more precision than half-float gives it. Same reasoning rtAoHitDist_
+    // gives for its own R16Unorm, one format family over.
+    d.format = rhi::Format::R16F;
+    d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+    d.initialState = rhi::ResourceState::ShaderResource;   // rests here between frames, like voxelTex_
+    d.debugName    = "Voxi air sky-visibility volume";
+    airVisTex_ = res_->createTexture(d);
+    if (!airVisTex_) {
+        AVER_ERROR("[Voxi] air sky-visibility volume ({}^3) could not be created; fog stays "
+                   "unoccluded (placeholder stays bound at t17/u16)", kAirVisResolution);
+        return false;
+    }
+    res_->setSrv(bindings_, 17, airVisTex_, rhi::kAllMips);
+    res_->setUav(bindings_, 16, airVisTex_, 0);
+    // Nothing has written it yet -- a fresh texture holds whatever the device handed back, not a
+    // neutral value. See airVisDirty_'s own comment (VoxiRenderer.hpp) for why this cannot simply
+    // wait for the next GI rebuild.
+    airVisDirty_ = true;
+    AVER_INFO("[Voxi] air sky-visibility volume created ({}^3, {:.1f} KiB); CSAirVis fills it once, "
+              "this frame or next, before any shade pass reads it", kAirVisResolution,
+              static_cast<f64>(static_cast<u64>(kAirVisResolution) * kAirVisResolution *
+                               kAirVisResolution * 2ull) / 1024.0);
+    return true;
+}
+
+// OCCLUSION-AWARE FOG: binds airVisPso_ and dispatches CSAirVis over the whole volume. See the
+// header's own comment for the contract each call site (filterMips()/prePass()) has to honour around
+// voxelTex_'s state -- this function only ever touches airVisTex_'s own state and airVisDirty_.
+void VoxiRenderer::dispatchAirVis(rhi::IRenderContext& ctx, u32 zLo, u32 zHi) {
+    rhi::ScopedGpuStat stat(ctx, "Voxi air visibility");
+    ctx.textureBarrier(airVisTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
+    ctx.setPipeline(airVisPso_);
+    ctx.setBindingSet(bindings_);
+    // Table 1 is bound outright, exactly like every other full-layout Voxi pass (scenePass()'s debug
+    // view, recordStagedRayDriven()'s stages): the layout declares kMaterialSrvCount SRVs there and
+    // Tier 1 populates whole tables, even though CSAirVis's own body never reads it.
+    ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    // The cell box rides MipCB (b3), the block the voxel kernels use -- set before EVERY dispatch of
+    // this PSO, since a declared-but-unset root constant block is this project's recorded TDR class.
+    VoxelBox box;
+    box.lo[0] = 0; box.lo[1] = 0; box.lo[2] = zLo;
+    box.hi[0] = kAirVisResolution; box.hi[1] = kAirVisResolution; box.hi[2] = zHi;
+    const GiDispatchConstants k = dispatchConstants(box, 0);
+    ctx.setConstants(3, &k, kGiDispatchConstantDwords);
+    constexpr u32 kGroupsXY = (kAirVisResolution + 7u) / 8u;   // CSAirVis: [numthreads(8,8,1)]
+    if (zHi > zLo) ctx.dispatch(kGroupsXY, kGroupsXY, zHi - zLo);
+    ctx.uavBarrierTexture(airVisTex_);
+    ctx.textureBarrier(airVisTex_, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+    if (zLo == 0 && zHi >= kAirVisResolution) airVisDirty_ = false;
 }
 
 // THE MODULAR SEAM (Stage 3, GPU per-cluster shading parity): a caller that has merged Voxi's
@@ -6077,6 +6280,38 @@ bool VoxiRenderer::createPipelines() {
         mipPso_ = res_->createComputePipeline(p);
     }
     if (!mipPso_) AVER_ERROR("[Voxi] mip filter pipeline unavailable");
+
+    // --- 5b. OCCLUSION-AWARE FOG: CSAirVis, the air sky-visibility volume's own march. UNLIKE
+    // CSClear/CSResolve/CSMip immediately above, this is compiled against the FULL Voxi layout (`gi`,
+    // the same PipelineLayout shadowPso_/voxelPso_/etc. use a few dozen lines up) rather than a tiny
+    // srv/uav-only one: CSAirVis reads t0's whole mip chain through gVoxelSamp (s0, declared by `gi`)
+    // and writes u16 -- both live in table 0's declared range -- and it needs VoxiFrame's b4 block
+    // (gVoxelOrigin/gVoxelParams) the way every other full-layout Voxi compute stage does
+    // (recordStagedRayDriven's own header comment states why that costs nothing extra to declare: b4
+    // is a root CBV on every PipelineLayout unconditionally, D3D12Device.cpp's root-signature builder
+    // loop has no `if` gating it). rasterDefs(nullptr), not csDefs/bindlessDefs: CSAirVis needs no
+    // bindless texture table (it touches no material), the identical shape VSShadow/VSVoxel/etc. above
+    // already have with the same `gi` layout.
+    //
+    // SM 6.0, NOT kBaseSm (5.1): no RT, no wave intrinsics, no derivatives -- SM 6.0 is enough, and
+    // gating on instancedShadowsOk's own `caps_.shaderModel >= 60 && caps_.dxcAvailable` test (rather
+    // than compiling unconditionally at kBaseSm the way CSClear/CSResolve/CSMip do) is what makes a
+    // device below that line fall back to the placeholder cleanly instead of failing this compile.
+    if (instancedShadowsOk)
+    if (const rhi::ShaderHandle csAirVis = compile("CSAirVis", rhi::ShaderStage::Compute, 60,
+                                                    rasterDefs(nullptr).c_str())) {
+        rhi::ComputePipelineDesc p;
+        p.cs = csAirVis;
+        p.layout = gi;
+        // b3: the slab box (MipCB, the block the voxel kernels share) -- set before every dispatch
+        // in dispatchAirVis.
+        p.layout.constantDwords[3] = kGiDispatchConstantDwords;
+        airVisPso_ = res_->createComputePipeline(p);
+    }
+    if (!airVisPso_)
+        AVER_WARN("[Voxi] air sky-visibility pipeline unavailable (SM {}, DXC {}); "
+                  "voxi.fogOcclusion has no effect on this device (placeholder stays bound)",
+                  caps_.shaderModel, caps_.dxcAvailable ? "yes" : "no");
 
     // --- 6-10. everything that bakes the sample count and the target formats. ---
     const bool sceneOk = createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(),

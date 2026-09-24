@@ -284,6 +284,17 @@ public:
     // anything moving through the volume at a normal pace.
     static constexpr u32 kMaxGiUpdateInterval = 8;
 
+    // OCCLUSION-AWARE FOG: the air sky-visibility volume's edge. Fixed, not derived from
+    // Settings::voxelResolution -- PATH occlusion for fog needs far fewer texels than the GI radiance
+    // volume itself (CSAirVis marches whole cones through it, not one ray per pixel), so a small
+    // constant keeps its cost bounded regardless of what quality tier drives voxelResolution. See
+    // airVisTex_'s own comment. 32, not the 48 first written: a full 48^3 CSAirVis measured ~10 ms.
+    // Must equal voxi.hlsl's AVER_AIRVIS_RES.
+    static constexpr u32 kAirVisResolution = 32;
+    // Z-layers CSAirVis refreshes per frame (prePass's round-robin), so the whole volume refreshes
+    // every kAirVisResolution / kAirVisSlabLayers frames at ~1/16 of a full pass's cost.
+    static constexpr u32 kAirVisSlabLayers = 2;
+
     // Starts a new frame's draw list; the passes replay the previous one.
     void beginScene() override;
     // Records one draw into this frame's list.
@@ -421,6 +432,18 @@ private:
     void voxelizePass(rhi::IRenderContext& ctx);
     // Box-filters each mip of the volume into the next.
     void filterMips(rhi::IRenderContext& ctx);
+    // OCCLUSION-AWARE FOG: creates or releases airVisTex_ against airVisWanted()'s own edge -- the
+    // identical "wanted() decides, ensure*() acts" shape ensureShadowHistory/ensureRdStagedResources
+    // already use for their own optional resources. Called once from init(), right after
+    // createPipelines() has settled whether CSAirVis compiled (airVisWanted() cannot be answered
+    // honestly before that), and again from setSettings() on the setting's own edge.
+    bool ensureAirVis();
+    // OCCLUSION-AWARE FOG: binds airVisPso_ and dispatches CSAirVis over z-layers [zLo, zHi) of the
+    // air-vis volume (the whole volume, or one round-robin slab). ONE caller, prePass(), which wraps it
+    // with voxelTex_'s ShaderResource -> NonPixelShaderResource -> ShaderResource round trip (CSAirVis
+    // reads t0 from compute); this function only transitions airVisTex_ itself (ShaderResource <->
+    // UnorderedAccess around the dispatch). Clears airVisDirty_ when the dispatch covered everything.
+    void dispatchAirVis(rhi::IRenderContext& ctx, u32 zLo, u32 zHi);
     // STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2): records CSRdVisibility, then
     // CSRdShadow/CSRdGi/CSRdSkyOcc (the last two conditionally, mirroring the shader's own gates) with
     // no barrier between that trio, then the AVER_RD_SPLIT fullscreen draw -- a UAV barrier separates
@@ -461,6 +484,38 @@ private:
     rhi::TextureHandle  voxelAccumTex_ = 0;
     rhi::PipelineHandle voxelPso_ = 0, voxelMsPso_ = 0, mipPso_ = 0, clearPso_ = 0, debugPso_ = 0;
     rhi::PipelineHandle resolvePso_ = 0;
+    // OCCLUSION-AWARE FOG: the air sky-visibility volume -- kAirVisResolution^3, single-mip, R16F
+    // (or the smallest UAV-storable single-channel format this RHI exposes). Bound at t17 (SRV, the
+    // shade passes' read side) and u16 (UAV, CSAirVis's write side) in bindings_ -- see
+    // kVoxiSrvCount/kVoxiUavCount's own comments (VoxiRenderer.cpp) for the table entries. Rests in
+    // ShaderResource between frames, exactly like voxelTex_; dispatchAirVis() is the only place that
+    // moves it to UnorderedAccess and back. Created alongside the voxel volume when
+    // Settings::fogOcclusion is on, released on the setting's off edge -- see ensureAirVis().
+    rhi::TextureHandle  airVisTex_ = 0;
+    // A 1x1x1 stand-in for airVisTex_, bound at BOTH t17 and u16 whenever the real texture does not
+    // exist (voxi.fogOcclusion off, or CSAirVis never compiled) -- the identical "Tier 1 needs a
+    // valid descriptor of the declared kind in every slot" reasoning voxelAccumPlaceholder_ gives for
+    // u1, except this one serves two slots at once because t17/u16 are the SAME resource's two views.
+    // Created once, alongside airVisPlaceholder_'s first bind in createVoxelVolume(); destroyed only
+    // in shutdown().
+    rhi::TextureHandle  airVisPlaceholder_ = 0;
+    // CSAirVis. Optional: needs SM 6.0 and DXC, like the instanced-shadow variants (see
+    // instancedShadowsOk in createPipelines()) -- a device without either keeps the placeholder bound
+    // permanently and voxi.fogOcclusion has no effect, exactly like voxi.rayDrivenStages falling back
+    // when its own staged pipelines fail to compile.
+    rhi::PipelineHandle airVisPso_ = 0;
+    // True from the moment airVisTex_ is (re)created until CSAirVis has written it once -- a freshly
+    // created volume holds whatever the device handed back, not a neutral value, and the GI rebuild
+    // gate can skip 96-98% of ticks (prePass's own comment on giSnapshotUnchanged), so waiting for the
+    // next rebuild could leave garbage bound at t17 for a long stretch. prePass() fills the WHOLE
+    // volume in one dispatch while this is set (also set again when voxel GI turns back on), then
+    // falls back to its per-frame slab round-robin.
+    bool airVisDirty_ = false;
+    // The next slab prePass()'s round-robin refreshes, in units of kAirVisSlabLayers z-layers.
+    u32 airVisSlab_ = 0;
+    // Whether last frame ran the air-vis refresh at all (voxel GI on, volume and pipeline present):
+    // a rising edge marks the volume dirty, since geometry may have changed while nothing refreshed it.
+    bool airVisWasActive_ = false;
     // t0 volume (whole chain), t1 shadow, t2 TLAS, u0 volume mip 0, u1 injection accumulator.
     rhi::BindingSetHandle bindings_ = 0;
     // UAVs only (u0 volume mip 0, u1 accumulator): no SRV may be live while the clear runs.
@@ -2304,6 +2359,14 @@ private:
     // giRestirWanted() already apply to their own pairs. Gates giVisHist_'s own allocation in
     // ensureShadowHistory the same way giRestirWanted() gates the surface-history pair's.
     bool giVisHistWanted() const { return giRestirWanted() && giRestirVisibility_ == 2u; }
+
+    // OCCLUSION-AWARE FOG: whether airVisTex_ will ACTUALLY be created/kept -- the setting alone
+    // (Settings::fogOcclusion) is not enough, the same "ask what will really run" shape
+    // aoHistoryWanted()/giRestirWanted() already use, because airVisPso_ can be 0 on a device below
+    // SM 6.0 or without DXC (see its own comment). Gates ensureAirVis()'s create/release branch and
+    // is read by setSettings() for its own edge, the identical pattern wasAoWanted/wasGiRestirWanted
+    // already follow there.
+    bool airVisWanted() const { return settings_.fogOcclusion && airVisPso_ != 0; }
 
 public:
     // THE SKY-OCCLUSION RAY'S HIT DISTANCE FOR THIS FRAME, or 0 when the ray is not running at this

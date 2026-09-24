@@ -710,7 +710,16 @@ float3 averFogInscatter(float3 wpos, float3 t) {
 // fog mode removes both at once. Splitting it here lets the aerial term's own cost be read off a
 // flag instead of argued about, which is the standard this file's other two gates were held to.
 // averApplyFog keeps its signature and its behaviour, so no caller changes.
-float3 averApplyFogEx(float3 color, float3 wpos, bool aerial) {
+//
+// `airVis` -- OCCLUSION-AWARE FOG (voxi.hlsl's "air sky-visibility volume", gAirVis/voxiAirVisibility):
+// how much of the upper hemisphere of sky the air AT wpos can actually see, in [0,1]. Every caller
+// below but voxi.hlsl's own occlusion-aware call sites passes 1.0 through averApplyFogEx/averApplyFog,
+// and is BYTE-IDENTICAL to before this parameter existed -- `x * 1.0` folds away, so water.hlsl,
+// scene.hlsl and every other non-Voxi shader are unaffected. Only the IN-SCATTER terms are scaled;
+// EXTINCTION (`color * T`, and the lerp's implicit `(1 - fogF)` weight on `color`) is NOT, because a
+// ray losing light to the air on the way here is true however occluded the sky is -- it is only the
+// light the air adds BACK by seeing sky that a wall or ceiling can block.
+float3 averApplyFogAirVis(float3 color, float3 wpos, bool aerial, float airVis) {
     float3 T = 1.0;
     // NO MAGNITUDE GATE ON THIS ONE, UNLIKE THE TWO BELOW IT, AND THAT IS NOW A MEASUREMENT
     // RATHER THAN AN OVERSIGHT. It looks like the bug this file has already fixed twice -- an
@@ -734,7 +743,7 @@ float3 averApplyFogEx(float3 color, float3 wpos, bool aerial) {
     // gate on this term buys a rounding error against a real quality risk.
     if (aerial && averAtmoOn()) {
         float3 inscatter = averAtmoAerial(wpos, T);
-        color = color * T + inscatter;
+        color = color * T + inscatter * airVis;
     }
 
     // BRANCHED, NOT LERPED UNCONDITIONALLY. HLSL evaluates both sides of a lerp eagerly, so every
@@ -745,11 +754,15 @@ float3 averApplyFogEx(float3 color, float3 wpos, bool aerial) {
     // continuous exponential of distance and height, not a hard cutoff -- so divergence within a
     // GPU wave should stay confined to the fog's own boundary, not scatter across the image.
     float fogF = averFogFactor(wpos);
-    if (fogF > 0.001) color = lerp(color, averFogInscatter(wpos, T), fogF);
+    if (fogF > 0.001) color = lerp(color, averFogInscatter(wpos, T) * airVis, fogF);
     return color;
 }
 
-float3 averApplyFog(float3 color, float3 wpos) { return averApplyFogEx(color, wpos, true); }
+// Byte-identical wrappers: airVis == 1.0 is today's unoccluded air, so every caller but voxi.hlsl's
+// own occlusion-aware call sites (PSMainVoxi/PSRayDriven, near their own gAirVis/voxiAirVisibility
+// use) compiles to exactly the code it did before averApplyFogAirVis existed.
+float3 averApplyFogEx(float3 color, float3 wpos, bool aerial) { return averApplyFogAirVis(color, wpos, aerial, 1.0); }
+float3 averApplyFog(float3 color, float3 wpos) { return averApplyFogAirVis(color, wpos, true, 1.0); }
 
 
 // The sky as light: the cosine-weighted average radiance over the hemisphere about N.
