@@ -1031,6 +1031,23 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "0 = rasteriser finds the first surface, 1 = a primary ray per pixel does -- gives up hardware early-Z. Derived from the RT tier on a tier change (Off/Low 0, Medium/High/Epic 1) unless set in the same line",
         []{ return vU32(Renderer::get().settings().rtRenderMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rtRenderMode = n; }); }});
+    // Milestone 1's A/B switch over rtRenderMode's OWN internal shape, directly beneath it for the
+    // same reason voxi.giRestirMaxHistory sits under voxi.giRestirVisibility: the two are read
+    // together while bisecting the staged split against the single pass it replaces. Only meaningful
+    // once voxi.rtRenderMode itself resolves to 1 (primary rays); see
+    // RenderSettingsResolver.hpp's Resolution::rayDrivenStages for the Project Settings page's own
+    // greyed reason.
+    t.push_back({"voxi.rayDrivenStages", VarType::U32, false,
+        "0 = single pass (default, today's one ray-driven draw -- the comparison baseline), 1 = "
+        "staged: a visibility compute pass, a shadow compute pass, then the same shading draw. "
+        "D3D12 only in this milestone; falls back to single pass and logs once when anything staged "
+        "needs is missing. Only applies when voxi.rtRenderMode resolves to 1. Engine clamps to [0,1].",
+        []{ return vU32(Renderer::get().settings().rayDrivenStages); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rayDrivenStages = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 1) { err = "rayDrivenStages must be 0 (single pass) or 1 (staged)"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },

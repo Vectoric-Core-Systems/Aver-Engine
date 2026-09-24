@@ -147,8 +147,9 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // settings-level answer), 0 otherwise -- read by PSVoxel to leave the sky out of the volume. NOT
     // gGiRestirParams.x, which also drops to 0 on a frame the estimator merely cannot run (the GI
     // debug view, an empty TLAS): keying the bake on that rebuilt the volume twice per debug-view
-    // toggle. w is spare, written 0. (z/w briefly carried RTXDI's reuse tolerances during the ReSTIR
-    // fade bisection; those went back to literals in voxi_restir.hlsli.)
+    // toggle. w = the staged ray-driven passes' visibility-record row pitch while they record, 0 for
+    // every other pass (see gRdVisBuf). (z/w briefly carried RTXDI's reuse tolerances during the
+    // ReSTIR fade bisection; those went back to literals in voxi_restir.hlsli.)
     float4   gViewParams;
     // RTXDI ReSTIR GI control (Settings::giMode) -- mirrors FrameConstants::giRestirParams, also
     // appended at the end for the same reason gViewParams was. x = 1 while giMode==1 is ACTUALLY
@@ -384,6 +385,95 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 #include "voxi_rt.hlsli"
 
 #include "voxi_restir.hlsli"
+
+// ---- STAGED RAY-DRIVEN PASSES (milestone 1): the visibility record and resolved sun visibility ----
+//
+// voxi.rayDrivenStages (Settings::rayDrivenStages, RENDER.RDSTAGES, --rd-stages, u32 0/1) splits the
+// single PSRayDriven fullscreen draw below into three GPU passes when set to 1: a compute pass traces
+// the primary ray and writes one record per pixel here (CSRdVisibility, further down this file, under
+// this same AVER_RT region); a second compute pass reads it, reconstructs the surface and resolves the
+// sun shadow into gRdSunVisTex (CSRdShadow); and PSRayDriven itself, compiled a second time with
+// AVER_RD_SPLIT=1, reads both instead of tracing and calling rtShadowTemporal -- everything after that
+// point is the SAME shading code the single pass already runs, unchanged. At 0 (the default) none of
+// this exists at runtime: no new resource is bound, no new pipeline is built, and PSRayDriven's own
+// AVER_RD_SPLIT=0 compile is byte-for-byte the single pass this file already had.
+//
+// TWO NEW UAV REGISTERS, u11/u12 -- the next two free slots after gGiVisHistOut's u10 (voxi_restir.
+// hlsli). Bound in every stage through the SAME descriptor table the single pass already uses
+// (kVoxiUavCount 11->13, VoxiRenderer.cpp, not this file), so no SRV slot moves and no material
+// texture register is touched.
+//
+// gRdVisBuf: one uint4 per pixel, index = pixel.y * pitch + pixel.x, pitch = (uint)gViewParams.w (this
+// cbuffer's own w field, "spare, written 0" until this feature -- VoxiRenderer::recordStagedRayDriven
+// sets it to the row pitch in pixels for the three staged uploads only and back to 0 after, so every
+// other pass still reads 0). A HIT is uint4(instanceID, primitiveIndex, asuint(bary.x),
+// asuint(bary.y)); a MISS is x == 0xFFFFFFFFu (y/z/w undefined, never read on that path).
+RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
+// gRdSunVisTex: this frame's resolved sun visibility, one RGBA16F texel per pixel, rgb = the same
+// tinted transmittance rtShadowTemporal returns (already through its own temporal/spatial filters),
+// alpha unused. Written once by CSRdShadow, read once by PSRayDriven's AVER_RD_SPLIT branch. Not
+// itself a history buffer -- rtShadowTemporal's own gRtShadowHist/gRtShadowHistOut pair still owns the
+// actual frame-to-frame history underneath it; this texture only ferries one frame's answer from
+// Stage S to Stage B.
+RWTexture2D<float4>       gRdSunVisTex : register(u12);
+
+// The surface PSRayDriven reconstructs from a ray hit, minus everything that hit computed for itself
+// (bary, dir, N before its face-the-ray flip): what Stage S and Stage B's AVER_RD_SPLIT branch both
+// need afterward, and nothing they don't -- dpx/dpy (the shadow-ray footprint) and L (the light
+// direction) are cheap and hit-independent, so each caller keeps computing those itself.
+struct RdSurface {
+    RtInstance inst;
+    uint       i0, i1, i2;
+    float3     w;
+    float3     N;
+    float2     hitUV;
+    RtMaterial mat;
+    float      hitT;
+    float3     wpos;
+};
+
+// Rebuilds a PSRayDriven-shaped surface from CSRdVisibility's record instead of a live RayQuery.
+// TRANSCRIBED FROM PSRayDriven'S OWN POST-TRACE STATEMENTS (this file, the AVER_RD_SPLIT==0 branch of
+// PSRayDriven below): inst/tri/i0/i1/i2/w/nObj/N/hitUV/mat are copied verbatim, substituting the
+// record's fields for the RayQuery accessors they came from. KEEP THE TWO IN STEP -- a change to
+// PSRayDriven's own reconstruction that isn't mirrored here silently diverges the staged path from the
+// single pass it exists to reproduce.
+//
+// `hitT`/`wpos` are the one part that cannot be copied verbatim: PSRayDriven reads hitT straight off
+// its own RayQuery (q.CommittedRayT()), which no longer exists here. Instead this rebuilds the world
+// hit point P by the SAME barycentric interpolation already used for the normal and UV above, projects
+// (P - camera) onto `dir` to recover hitT, then forms wpos the same way PSRayDriven's own line does
+// (gCamPos + dir * hitT) -- so a caller holding `wpos`/`hitT` cannot tell which path produced them.
+RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
+    RdSurface o;
+    o.inst = gRtInstances[rec.x];
+    const uint tri = o.inst.firstIndex + rec.y * 3;
+    o.i0 = o.inst.firstVertex + gRtIndices[tri + 0];
+    o.i1 = o.inst.firstVertex + gRtIndices[tri + 1];
+    o.i2 = o.inst.firstVertex + gRtIndices[tri + 2];
+
+    const float2 bary = float2(asfloat(rec.z), asfloat(rec.w));
+    o.w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    const float3 nObj = normalize(gRtVerts[o.i0].nrm * o.w.x + gRtVerts[o.i1].nrm * o.w.y + gRtVerts[o.i2].nrm * o.w.z);
+    o.N = normalize(mul(float4(nObj, 0.0), o.inst.objectToWorld).xyz);
+    if (dot(o.N, dir) > 0.0) o.N = -o.N;   // face the ray, same flip PSRayDriven's own copy applies
+
+    o.hitUV = gRtVerts[o.i0].uv * o.w.x + gRtVerts[o.i1].uv * o.w.y + gRtVerts[o.i2].uv * o.w.z;
+
+    o.mat = gRtMaterials[o.inst.materialIndex];
+
+    // World hit point P, from the SAME three vertices already fetched above, transformed to world
+    // space the way this file's own gWorld transforms (voxi.hlsl, VSMain) transform i.pos, then
+    // blended by the SAME barycentric weights `w` -- see this function's own header for why hitT/wpos
+    // derive from P rather than a stored ray distance.
+    const float3 p0 = mul(float4(gRtVerts[o.i0].pos, 1.0), o.inst.objectToWorld).xyz;
+    const float3 p1 = mul(float4(gRtVerts[o.i1].pos, 1.0), o.inst.objectToWorld).xyz;
+    const float3 p2 = mul(float4(gRtVerts[o.i2].pos, 1.0), o.inst.objectToWorld).xyz;
+    const float3 P  = p0 * o.w.x + p1 * o.w.y + p2 * o.w.z;
+    o.hitT = dot(P - gCamPos.xyz, dir);
+    o.wpos = gCamPos.xyz + dir * o.hitT;
+    return o;
+}
 
 // How far a view ray travels INSIDE a volume before something stops it, in centimetres --
 // averVolumeTransmittance needs a path length, and a blended surface has no idea how thick it is.
@@ -1595,6 +1685,42 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     r.TMin      = 0.0;
     r.TMax      = 1.0e7;
 
+#if AVER_RD_SPLIT
+    // STAGE B: read CSRdVisibility's record instead of tracing. Everything from here to the miss
+    // check below mirrors the #else branch's shape; the two must be kept in step by hand since a
+    // preprocessor switch, not a shared statement, is what makes the default (AVER_RD_SPLIT 0) compile
+    // byte-for-byte unchanged -- see rdSurfaceFromRecord's own header, declared alongside gRdVisBuf/
+    // gRdSunVisTex above, for the reconstruction itself.
+    const uint  rdPitch = (uint)gViewParams.w;
+    const uint2 rdPixel = uint2(i.pos.xy);   // truncates the pixel centre to its integer pixel, the
+                                              // same convention CSRdVisibility indexes the buffer by
+    const uint4 rdRec   = gRdVisBuf[rdPixel.y * rdPitch + rdPixel.x];
+
+    if (rdRec.x == 0xFFFFFFFFu) {
+        // THE SAME MISS HANDLING AS THE #else BRANCH'S OWN COPY BELOW -- see that copy for why each
+        // field is set the way it is. Duplicated rather than shared for the reason given above.
+        o.col   = float4(skyColorFull(dir), 1.0);
+        o.depth = 1.0;
+#if AVER_GBUFFER
+        o.velocity        = float2(0.0, 0.0);
+        o.viewZ            = 1.0e7;
+        o.normalRoughness  = averPackNormalRoughness(-dir, 1.0);
+#endif
+        if (gGiRestirParams.x > 0.5)
+            gGiSurfNrmHistOut[uint2(i.pos.xy)] = float2(0.0, asfloat(0u));
+        return o;
+    }
+
+    RdSurface rdS  = rdSurfaceFromRecord(rdRec, dir);
+    RtInstance inst = rdS.inst;
+    uint i0 = rdS.i0, i1 = rdS.i1, i2 = rdS.i2;
+    float3 w       = rdS.w;
+    float3 N       = rdS.N;
+    float2 hitUV   = rdS.hitUV;
+    RtMaterial mat = rdS.mat;
+    const float hitT = rdS.hitT;
+    float3 wpos    = rdS.wpos;
+#else
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Opaque lane. THE ONE RAY USING THE NARROW LANE: AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL -- it
     // starts inside the viewer's own head, so it is the one traversal that must not see
@@ -1673,6 +1799,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
     const float hitT = q.CommittedRayT();
     float3 wpos = gCamPos.xyz + dir * hitT;
+#endif
     float3 L    = normalize(gLightDir.xyz);
 
     // ---- THE SHADOW-RAY FOOTPRINT: A RAY DIFFERENTIAL, NOT A SCREEN-SPACE DERIVATIVE ----
@@ -1714,10 +1841,22 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // THE SHADOW RAY IS THE SAME CALL THE RASTER PATH MAKES, temporal wrapper included -- identical
     // shadow cost, the timing gap is only primary visibility plus this footprint's matrix multiplies.
     // Keyed by pixel, same grid as the raster pass, so the history buffer means the same thing here.
+#if AVER_RD_SPLIT
+    // STAGE B reads Stage S's already-resolved sun visibility instead of calling rtShadowTemporal
+    // itself -- CSRdShadow ran that same call for this pixel (see its own body, further down this
+    // file). The ablation check is repeated here rather than shared with CSRdShadow's copy, for the
+    // same "no shared statement" reason the trace block above gives.
+#if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray
+#else
+    float3 sunVis = gRdSunVisTex[uint2(i.pos.xy)].rgb;
+#endif
+#else
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     float sunVis = 1.0;   // ablated: fully lit, no ray
 #else
     float3 sunVis = rtShadowTemporal(wpos, N, L, i.pos.xy, dpx, dpy, (uint)max(gRtParams.y, 1.0));
+#endif
 #endif
 
     // Lambertian exitant radiance, /PI on the direct term -- see rtReflection for what omitting it
@@ -2346,6 +2485,143 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     o.normalRoughness  = averPackNormalRoughness(N, s.rough);
 #endif
     return o;
+}
+
+// ---- STAGE A: CSRdVisibility -- trace the primary ray, write the visibility record -----------------
+//
+// The visibility-only half of PSRayDriven's own trace block above (AVER_RD_SPLIT==0 branch): same
+// mask, same cutout handling, same ray. Nothing past a committed hit or a miss is computed here --
+// Stage S (CSRdShadow, immediately below) and Stage B (PSRayDriven's AVER_RD_SPLIT branch, above) do
+// the reconstruction, from this dispatch's own gRdVisBuf write, through rdSurfaceFromRecord.
+//
+// D3D12 ONLY FOR NOW, per this feature's own interface contract -- VoxiRenderer decides whether to
+// dispatch this at all (falls back to the single pass otherwise), not this file.
+[numthreads(8, 8, 1)]
+void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    // pitch 0 means the record buffer has nowhere well-defined to put this pixel (VoxiRenderer writes
+    // a nonzero pitch only while it actually means to run the staged path this frame) -- bail rather
+    // than guess an index.
+    const uint pitch = (uint)gViewParams.w;
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    // Pixel-centre NDC, the exact inverse of the ndc->pixel mapping this file and voxi_rt.hlsli already
+    // use everywhere (this file's own rtReprojectReflection; voxi_rt.hlsli's rtReprojectHistory/
+    // rtReprojectAo/rtAoSpatial/rtShadowSpatial): px = viewport.xy + float2(ndc.x*0.5+0.5,
+    // 0.5-ndc.y*0.5) * viewport.zw. Solved for ndc at this pixel's CENTRE (pixel + 0.5), it equals what
+    // VSky/SkyOut (modules/rhi/shaders/shared_prelude.hlsl:967-975) interpolates there: VSky emits
+    // o.ndc = uv*2-1 with o.pos = float4(o.ndc, 1, 1), so the rasteriser's own NDC-to-viewport transform
+    // is exactly the forward direction of the formula above, and this is its inverse.
+    //
+    // gSceneViewportCur, NOT gSceneViewport: the latter is LAST frame's rect (paired with
+    // gPrevViewProj, for reprojection), and on any frame the docked view is resized or rescaled it
+    // would map this dispatch onto the old pixel grid while Stage B shades the new one. The rect the
+    // rasteriser used for i.ndc/i.pos.xy this frame is this one. (CSRdShadow's shadow FOOTPRINT keeps
+    // gSceneViewport on purpose -- that is what PSRayDriven's own copy uses.)
+    const float2 pxC = float2(pixel) + 0.5;
+    float2 ndc;
+    ndc.x = (pxC.x - gSceneViewportCur.x) / max(gSceneViewportCur.z, 1.0) * 2.0 - 1.0;
+    ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
+
+    // Same NDC-to-world-ray reconstruction as PSRayDriven's own primary ray (and PSVoxelDebug's),
+    // through the same gInvViewProj.
+    float4 far = mul(float4(ndc, 1.0, 1.0), gInvViewProj);
+    float3 dir = normalize(far.xyz / far.w - gCamPos.xyz);
+
+    RayDesc r;
+    r.Origin    = gCamPos.xyz;
+    r.Direction = dir;
+    r.TMin      = 0.0;
+    r.TMax      = 1.0e7;
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    // Same lane as PSRayDriven's own primary ray -- see that function's header comment for why
+    // AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL, is right for a primary ray leaving the viewer's own head.
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
+    averRtProceedSolid(q);
+
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        gRdVisBuf[idx] = uint4(0xFFFFFFFFu, 0u, 0u, 0u);
+        return;
+    }
+
+    const float2 bary = q.CommittedTriangleBarycentrics();
+    gRdVisBuf[idx] = uint4(q.CommittedInstanceID(), q.CommittedPrimitiveIndex(),
+                           asuint(bary.x), asuint(bary.y));
+}
+
+// ---- STAGE S: CSRdShadow -- reconstruct the surface, resolve the sun shadow -------------------------
+//
+// Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the same
+// reconstruction Stage B uses), and runs the SAME rtShadowTemporal call PSRayDriven's single pass
+// makes -- same pixel-centre argument, same footprint, same ray count -- so the history buffer
+// rtShadowTemporal reads and writes means the same thing whichever path is running.
+//
+// COMPILED AT SM 6.6 (VoxiRenderer), because rtShadowTemporal's reprojection and spatial filter take
+// ddx/ddy of depth and compute shaders only have derivatives from 6.6 on. 8x8 threads make 6.6 form
+// 2x2 quads, the pixel shader's own neighbourhood. As in the single pass, a quad with a lane that
+// returned early (a sky pixel, the viewport's last odd row) has undefined derivatives.
+[numthreads(8, 8, 1)]
+void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    const uint pitch = (uint)gViewParams.w;
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    const uint4 rec = gRdVisBuf[idx];
+    if (rec.x == 0xFFFFFFFFu) {
+        // A sky pixel has no surface to shadow-test; Stage B never reads this texel for one either
+        // (its own miss check returns before reaching the sunVis read), but a defined, fully-lit
+        // value here costs nothing and leaves no uninitialised texel behind.
+        gRdSunVisTex[pixel] = float4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
+
+    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see that function's
+    // own comment for the derivation. Needed again here (not carried in the record) to rebuild `dir`
+    // for rdSurfaceFromRecord's face-the-ray normal flip and for this shadow ray's own footprint.
+    const float2 pxC = float2(pixel) + 0.5;
+    float2 ndc;
+    ndc.x = (pxC.x - gSceneViewportCur.x) / max(gSceneViewportCur.z, 1.0) * 2.0 - 1.0;
+    ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
+    float4 far = mul(float4(ndc, 1.0, 1.0), gInvViewProj);
+    float3 dir = normalize(far.xyz / far.w - gCamPos.xyz);
+
+    RdSurface s = rdSurfaceFromRecord(rec, dir);
+
+    // THE SAME SHADOW-RAY FOOTPRINT PSRayDriven builds for its own shadow call -- see that function's
+    // "THE SHADOW-RAY FOOTPRINT" comment for the derivation. gSceneViewport, not Cur -- matches
+    // PSRayDriven's own copy of this step exactly.
+    const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
+                                       2.0 / max(gSceneViewport.w, 1.0));
+    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
+    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
+    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
+    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    const float3 rdRayDx = (dirDx - dir) * s.hitT;
+    const float3 rdRayDy = (dirDy - dir) * s.hitT;
+    const float3 dpx = rdRayDx - s.N * dot(rdRayDx, s.N);
+    const float3 dpy = rdRayDy - s.N * dot(rdRayDy, s.N);
+
+    const float3 L = normalize(gLightDir.xyz);
+
+    // W6/M5: EXPLICITLY TRUE -- same reason PSRayDriven's own copy of this line gives (this function's
+    // header comment, just above PSRayDriven): a blended (glass/water) draw never reaches the
+    // ray-driven primary at all, so every history write this call makes is always live for this pass.
+    gAverHistoryWrite = true;
+
+#if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    const float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray -- matches PSRayDriven's own ablated branch
+#else
+    const float3 sunVis = rtShadowTemporal(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
+                                           (uint)max(gRtParams.y, 1.0));
+#endif
+    gRdSunVisTex[pixel] = float4(sunVis, 1.0);
 }
 #endif  // AVER_RT
 

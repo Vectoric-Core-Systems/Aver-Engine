@@ -118,6 +118,12 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // else-branch, no re-derivation on a tier change.
     if (project.restirHistory >= 0) s.giRestirMaxHistory = static_cast<u32>(project.restirHistory);
 
+    // RENDER.RDSTAGES: the SAME plain-knob shape as RESTIRHISTORY directly above, for the identical
+    // reason -- Settings::rayDrivenStages has no ladder rung either (it exists to A/B the staged
+    // split against the single pass it replaces, not to pick a quality), so an absent key leaves the
+    // engine default (0, single pass) alone regardless of any rtRenderMode tier change just applied.
+    if (project.rdStages >= 0) s.rayDrivenStages = static_cast<u32>(project.rdStages);
+
     // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
     // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
     // giRestirVisibility happened to already be live at.
@@ -239,6 +245,7 @@ struct RenderCliOverrides {
     int giMode              = -1;    // --gi-mode 0|1
     int giRestirVisibility  = -1;    // --restir-visibility N
     int denoiser            = -1;    // --denoiser 0|1
+    int rayDrivenStages     = -1;    // --rd-stages 0|1
 };
 
 // WHICH SENTENCE A WINNING OVERRIDE WANTS PRINTED. The host owns the sentence, this header owns the
@@ -350,6 +357,7 @@ inline bool applyCliKnobs(const RenderCliOverrides& cli, Settings& s, Log&& log)
         overridden = true;
     };
     take(cli.rtRenderMode,    s.rtRenderMode,    "--rt-render-mode");
+    take(cli.rayDrivenStages, s.rayDrivenStages, "--rd-stages");
     take(cli.refractionMode,  s.refractionMode,  "--refraction");
     take(cli.rtShadowDenoise, s.rtShadowDenoise, "--rt-shadow-denoise");
     take(cli.ptBounces,       s.ptBounces,       "--pt-bounces");
@@ -533,6 +541,10 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.giMode             = static_cast<int>(requested.giMode);
     project.denoiser           = requested.denoiser ? 1 : 0;
     project.restirHistory      = static_cast<int>(requested.giRestirMaxHistory);
+    // RENDER.RDSTAGES: unconditional capture, same "EVERYTHING ELSE" rule as RESTIRHISTORY directly
+    // above (giMode/denoiser's shape), never captureKnob's four-branch tier-aware rule -- there is no
+    // ladder rung for a tier change to race against.
+    project.rdStages           = static_cast<int>(requested.rayDrivenStages);
     project.refractionStrength = requested.refractionStrength;
     project.refractionEdgeFade = requested.refractionEdgeFade;
 }

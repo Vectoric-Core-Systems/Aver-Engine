@@ -105,6 +105,7 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.reblurMaxStabilizedFrameNum == b.reblurMaxStabilizedFrameNum &&
            a.rtShadowDenoise == b.rtShadowDenoise &&
            a.rtRenderMode == b.rtRenderMode &&
+           a.rayDrivenStages == b.rayDrivenStages &&
            a.ptBounces == b.ptBounces;
 }
 

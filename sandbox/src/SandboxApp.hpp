@@ -1579,6 +1579,7 @@ public:
     void setRtPixelsPerRay(int n);              // --rt-pixels-per-ray N
     void setRtShadowDenoise(int n);            // --rt-shadow-denoise N
     void setRtRenderMode(int n);                  // --rt-render-mode 0|1
+    void setRdStages(int n);                      // --rd-stages 0|1
     void setPtBounces(int n);                        // --pt-bounces N
     void setLayeredBsdf(int n);                    // --layered-bsdf N
     void setCoat(f32 w, f32 r, f32 f0);   // --coat W [R] [F0]
@@ -3773,6 +3774,7 @@ private:
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
+    int  rdStagesOverride_=-1;        // --rd-stages 0|1 (-1 = flag not given)
     int  ptBouncesOverride_=-1;       // --pt-bounces N (-1 = flag not given)
     int  layeredBsdfOverride_=-1;     // --layered-bsdf N (-1 = flag not given)
     f32  coatWeight_=0.0f;            // --coat W [R] [F0]: 0 = flag not given, and no coat anywhere

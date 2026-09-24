@@ -52,6 +52,9 @@ enum class DisableReason : u8 {
     NotImplemented,               // the engine itself has not built this yet, on any device
     RequiresRestirGi,             // U1: giRestirVisibility only applies once giMode itself resolves
                                    // to ReSTIR -- Resolution::giRestirVisibility's own gate
+    RequiresRayDrivenPrimary,     // milestone 1: rayDrivenStages only applies once rtRenderMode
+                                   // itself resolves to primary rays -- Resolution::rayDrivenStages'
+                                   // own gate
     Count
 };
 
@@ -134,6 +137,8 @@ inline const char* disableReasonText(DisableReason r) {
             return "This engine does not implement it yet, on any device.";
         case DisableReason::RequiresRestirGi:
             return "Only applies when Indirect diffuse is ReSTIR.";
+        case DisableReason::RequiresRayDrivenPrimary:
+            return "Only applies when Primary visibility is Primary rays.";
         default:
             return "Unavailable.";
     }
@@ -168,6 +173,10 @@ struct Resolution {
     // visibility rays and is inert for the identical reason -- see resolve()'s comment on this field
     // for why it borrows giRestirVisibility's reason chain rather than computing one of its own.
     FieldResolution giRestirMaxHistory;
+    // Milestone 1's A/B switch over the ray-driven primary's own internal shape: inert for the
+    // identical reason giRestirMaxHistory is inert above ReSTIR GI -- see resolve()'s own comment on
+    // this field for why it borrows rtRenderMode's reason chain rather than computing one of its own.
+    FieldResolution rayDrivenStages;
     DisableReason rtSubControls = DisableReason::None;
     DisableReason ptSubControls = DisableReason::None;
     bool denoiserGBufferWanted = false;
@@ -247,6 +256,26 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     r.rtRenderMode.requested = s.rtRenderMode;
     r.rtRenderMode.reason    = rtGate;
     r.rtRenderMode.effective = (s.rtRenderMode != 0 && rtGate == DisableReason::None) ? 1u : 0u;
+
+    // ---- rayDrivenStages (milestone 1): only meaningful once rtRenderMode itself resolves to ----
+    // primary rays -- same "borrow the sibling control's reason chain" idiom giRestirMaxHistory uses
+    // above ReSTIR GI. Not a fresh hardware/tier check of its own: rtRenderMode just above already
+    // ran that exact check, and this field cannot be MORE available than the mode it restructures.
+    // Its reason is rtRenderMode's own reason when rtRenderMode has one (the RT prerequisite that
+    // also blocks primary rays blocks this); otherwise RequiresRayDrivenPrimary when the project
+    // simply has not turned primary rays on (s.rtRenderMode == 0), which is not a prerequisite
+    // failure but is still a reason this control should read as inert. NOT tier-derived, the same
+    // reason giRestirMaxHistory is not: no ladder rung to clamp `requested` against, so it is a plain
+    // pass-through of whatever setSettings' own [0,1] range-clamp left in place.
+    r.rayDrivenStages.requested = s.rayDrivenStages;
+    r.rayDrivenStages.reason = (r.rtRenderMode.reason != DisableReason::None)
+                                   ? r.rtRenderMode.reason
+                                   : (s.rtRenderMode == 0 ? DisableReason::RequiresRayDrivenPrimary
+                                                           : DisableReason::None);
+    // effective == requested ALWAYS, for giRestirMaxHistory's own reason (see its comment above):
+    // clamping to 0 on a failed prerequisite would read as a live choice (Single pass) rather than
+    // an inert one. Inertness is carried by `reason` alone.
+    r.rayDrivenStages.effective = r.rayDrivenStages.requested;
 
     // ---- refractionMode = 2 (RayTraced): RT hardware, RT tier not Off ----
     // The one field whose fallback is not "off": a request at or above RayTraced that cannot be

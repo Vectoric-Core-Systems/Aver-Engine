@@ -737,6 +737,30 @@ struct Settings {
     // looking for a switch.
     u32 rtRenderMode = 1;
 
+    // ---- staged ray-driven passes (milestone 1, A/B switch only) -----------------------------
+    // PSRayDriven above is still ONE fullscreen pixel shader that traces the primary ray,
+    // reconstructs the surface, runs the sun-shadow ray, ReSTIR GI, reflections, sky occlusion
+    // and shading in a single invocation. This field only chooses WHICH SHAPE that work runs in
+    // -- it changes nothing about what gets computed.
+    //
+    // 0 = SINGLE PASS, THE DEFAULT AND THE COMPARISON BASELINE: today's one drawFullscreen,
+    // byte-for-byte unchanged. 1 = STAGED: the same work split into a visibility compute pass
+    // (traces the primary ray, writes a per-pixel visibility record), a shadow compute pass
+    // (reconstructs the surface from that record and runs the sun-shadow ray, writing sun
+    // visibility), then the existing PSRayDriven fullscreen draw reading both instead of tracing
+    // and shadowing itself. D3D12 ONLY IN THIS MILESTONE: the renderer falls back to single pass
+    // and logs the reason once when staged is requested but anything it needs is missing (a
+    // staged pipeline failed to compile, its resources are absent, a non-textured ray-driven PSO
+    // is in use, or the active backend is not D3D12), so an opted-in project never silently
+    // renders nothing.
+    //
+    // NOT ONE OF THE TIER-DERIVED KNOBS: like Settings::giRestirMaxHistory below, this has no
+    // ladder rung to fall back to -- it exists to A/B the split against the single pass it
+    // replaces, not to pick a quality. Only meaningful while rtRenderMode itself resolves to
+    // primary rays (RenderSettingsResolver.hpp's Resolution::rayDrivenStages). Console:
+    // voxi.rayDrivenStages.
+    u32 rayDrivenStages = 0;
+
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS, because this file already draws that line
     // and this setting was on the wrong side of it. RAY TRACING is discrete rays answering a

@@ -2498,6 +2498,8 @@ void SandboxApp::setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }
 
 void SandboxApp::setRtRenderMode(int n) { rtRenderModeOverride_ = n; }
 
+void SandboxApp::setRdStages(int n) { rdStagesOverride_ = n; }
+
 void SandboxApp::setPtBounces(int n) { ptBouncesOverride_ = n; }
 
 void SandboxApp::setLayeredBsdf(int n) { layeredBsdfOverride_ = n; }

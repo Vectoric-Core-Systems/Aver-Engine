@@ -369,6 +369,7 @@ void SandboxApp::applyProjectRenderSettings() {
         cli.giForceOff         = giForceOff_;
         cli.rtForceOff         = rtForceOff_;
         cli.rtRenderMode       = rtRenderModeOverride_;
+        cli.rayDrivenStages    = rdStagesOverride_;
         cli.refractionMode     = refractionOverride_;
         cli.rtShadowDenoise    = rtShadowDenoiseOverride_;
         cli.ptBounces          = ptBouncesOverride_;

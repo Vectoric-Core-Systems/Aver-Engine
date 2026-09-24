@@ -2124,6 +2124,37 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "Measured baseline to beat: raster primary visibility plus\n"
                                "material shading is 9.2ms on ElectricDreams at 4x MSAA,\n"
                                "2750x1639; one extra shadow ray costs 1.6ms at the same size.");
+
+        // ---- MILESTONE 1: STAGED RAY-DRIVEN PASSES, AN A/B SWITCH OVER THE COMBO ABOVE'S OWN
+        // INTERNAL SHAPE, RIGHT UNDER IT for the same "read together" reason Indirect light history
+        // sits directly under ReSTIR visibility rays below. GATED THE SAME WAY, DELIBERATELY:
+        // er.rayDrivenStages mirrors er.rtRenderMode's own reason chain (RenderSettingsResolver.hpp)
+        // rather than computing a fresh one, because both controls are inert for the identical
+        // reason -- primary rays are not the active render mode. SHOWS er.rayDrivenStages.REQUESTED,
+        // not the raw s.rayDrivenStages, for giRestirMaxHistory's own reason: effective always equals
+        // requested for this field, but requested is what the resolver actually computed.
+        const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);
+        ImGui::BeginDisabled(stagesGreyed);
+        int stages = static_cast<int>(er.rayDrivenStages.requested);
+        if (ImGui::Combo("Ray-driven passes", &stages,
+                          "Single pass (default)\0Staged (experimental)\0")) {
+            s.rayDrivenStages = static_cast<u32>(stages); changed = true;
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("project.rt.rayDrivenStages");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("For comparing the split against the single pass above, nothing more:\n"
+                              "Staged runs the same primary ray, sun-shadow ray and shading in three\n"
+                              "GPU passes (a visibility pass, a shadow pass, then the existing shade)\n"
+                              "instead of one. Falls back to Single pass, logged once, wherever the\n"
+                              "staged path is unsupported (non-D3D12, or a pipeline/resource it needs\n"
+                              "is missing).\n\n"
+                              "Round-trips as RENDER.RDSTAGES.");
+        if (stagesGreyed) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.rayDrivenStages.reason));
+        }
+
         // BOUNCES ARE NOT ON THIS PAGE ANY MORE: they are a PATH TRACING quantity living with
         // that setting; leaving the slider here, disabled on ray-tracing mode, made the two look
         // like one feature. See Settings::ptBounces.

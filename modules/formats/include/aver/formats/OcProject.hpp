@@ -77,6 +77,17 @@ struct ProjectDesc {
     int rtPixelsPerRayTile = -1; // RENDER.RTPIXELSPERRAY   shadow amortisation tile edge, [1,16]
     int rtShadowDenoise    = -1; // RENDER.RTSHADOWDENOISE  SPATIAL filter radius in pixels, [0,3]
     int rtRenderMode       = -1; // RENDER.RTRENDERMODE     0 = raster primary, 1 = ray-driven
+    // RENDER.RDSTAGES: milestone 1's A/B switch over the ray-driven primary's own internal shape --
+    // see voxi::Settings::rayDrivenStages, which owns the full explanation. 0 = single pass (today's
+    // one drawFullscreen, the default and the comparison baseline), 1 = staged visibility -> shadow
+    // -> shade, D3D12 only, falling back to single pass wherever the staged path is unavailable.
+    //
+    // NOT TIER-DERIVED, THE SAME SHAPE AS RESTIRHISTORY BELOW, NOT RTRENDERMODE JUST ABOVE: this
+    // field has no ladder rung to fall back to (Voxi.hpp's own comment on the field says so
+    // outright), so an absent key simply leaves the engine's default (0) alone regardless of any RT
+    // tier change -- ProjectRenderApply.hpp applies it the way it applies giMode/denoiser/
+    // restirHistory, not the way it applies rtRenderMode.
+    int rdStages           = -1; // RENDER.RDSTAGES         0 = single pass (default), 1 = staged
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
     int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]
@@ -215,7 +226,7 @@ struct ProjectDesc {
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
-               restirHistory >= 0 ||
+               restirHistory >= 0 || rdStages >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
