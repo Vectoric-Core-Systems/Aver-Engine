@@ -1778,6 +1778,12 @@ private:
     VkBuffer histBuf_ = VK_NULL_HANDLE; VkDeviceMemory histMemory_ = VK_NULL_HANDLE;   // 256-bin histogram, StructuredBuffer-shaped
     VkBuffer expBuf_ = VK_NULL_HANDLE;  VkDeviceMemory expMemory_ = VK_NULL_HANDLE;    // the one adapted-exposure scalar
     bool expSeeded_ = false;
+    // Local exposure's bilateral grid of log-luminance (u2 raw, u3 blurred) -- SCENE-sized, unlike
+    // histBuf_/expBuf_ above, so createPostTargets() destroys and rebuilds them in place on every
+    // resize (see that function); the final free for whatever generation is live at shutdown still
+    // happens right here in the destructor, next to histBuf_/expBuf_'s own.
+    VkBuffer localGridBuf_ = VK_NULL_HANDLE;     VkDeviceMemory localGridMemory_ = VK_NULL_HANDLE;
+    VkBuffer localGridBlurBuf_ = VK_NULL_HANDLE; VkDeviceMemory localGridBlurMemory_ = VK_NULL_HANDLE;
     VkDescriptorPool postDescriptorPool_ = VK_NULL_HANDLE;
     // MEMBERS, NOT FILE-SCOPE STATICS -- these four used to live in anonymous-namespace blocks in
     // VulkanDevice.cpp, so nothing destroyed them: the pools, layout and sampler were still alive
@@ -1796,6 +1802,7 @@ private:
     VkPipeline bloomPrefilterPso_ = VK_NULL_HANDLE, bloomDownPso_ = VK_NULL_HANDLE, bloomUpPso_ = VK_NULL_HANDLE;
     VkPipeline compositePso_[2][2] = {};   // indexed [bloom on][auto-exposure on]
     VkPipeline histogramPso_ = VK_NULL_HANDLE, exposurePso_ = VK_NULL_HANDLE;
+    VkPipeline localGridPso_ = VK_NULL_HANDLE, localBlurPso_ = VK_NULL_HANDLE;   // CSLocalGrid, CSLocalBlur -- local exposure's two compute passes
     ConstantRing postRing_[kFrameCount]{};   // reuses section 5's ConstantRing shape; this is the ONE place outside VulkanRenderContext.cpp that owns a ring, exactly as D3D12Device::postConstants() suballocates its own ring separate from D3D12RenderContext::ringAlloc()
     bool postReady_ = false;
     i64 lastFrameTick_ = 0;

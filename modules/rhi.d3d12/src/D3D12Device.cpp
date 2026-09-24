@@ -83,7 +83,8 @@ constexpr u32 kMaxBloomMips = 6;
 // kPostTripleCompositeUpscaled: AverSR's composite reads presentHdrTex_ instead of `scene`, and a
 // contiguous triple can't be rewritten per frame without racing frames still in flight.
 constexpr u32 kPostTripleCount = 4 + (kMaxBloomMips - 1) * 2;
-constexpr u32 kPostDescriptorCount = kPostTripleCount * 3 + 2;   // + the histogram/exposure UAVs
+// + the histogram/exposure/local-exposure-grid/local-exposure-grid-blur UAVs (u0-u3).
+constexpr u32 kPostDescriptorCount = kPostTripleCount * 3 + 4;
 // Which triple is which. The bloom ones are ranges based at these.
 constexpr u32 kPostTriplePrefilter = 0;
 constexpr u32 kPostTripleHistogram = 1;
@@ -97,6 +98,13 @@ constexpr f32 kHistogramMinLogLum = -10.0f;
 constexpr f32 kHistogramMaxLogLum = 12.0f;
 // One histogram thread per four pixels each way.
 constexpr u32 kHistogramDownscale = 4;
+
+// Local exposure's bilateral grid (see PSComposite / CSLocalGrid / CSLocalBlur in post.hlsl): one
+// tile per kLocalExpTile scene pixels square, kLocalExpBins log-luminance bins per tile,
+// kLocalExpCellBytes = asuint(sum of log2 luminance) + asuint(pixel count) per bin.
+constexpr u32 kLocalExpTile      = 32;
+constexpr u32 kLocalExpBins      = 16;
+constexpr u32 kLocalExpCellBytes = 8;
 
 // ---------------------------------------------------------------- shader compilation
 // Compiles HLSL through DXC (shader model 6.x) when dxcompiler.dll is present, else FXC (SM 5.1).
@@ -1424,13 +1432,20 @@ private:
     D3D12_RESOURCE_STATES bloomState_[kMaxBloomMips] = {};
     ComPtr<ID3D12Resource> histBuf_, expBuf_;    // 256-bin histogram, and the one adapted exposure
     bool expSeeded_ = false;
+    // Local exposure's bilateral grid, raw (u2) and blurred (u3) -- SCENE-SIZE DEPENDENT, unlike
+    // histBuf_/expBuf_ above: (re)created in createPostTargets/releasePostTargets, not
+    // createPostPipelines, sized for the CURRENT sceneWidth_/sceneHeight_. Null (and the passes that
+    // write them skipped) if the allocation ever fails; see createPostTargets.
+    ComPtr<ID3D12Resource> localGridBuf_, localGridBlurBuf_;
+    u32 localGridW_ = 0, localGridH_ = 0;        // grid dimensions in tiles, matching the buffers above
     ComPtr<ID3D12DescriptorHeap> postRtvHeap_;   // one RTV per bloom mip
-    ComPtr<ID3D12DescriptorHeap> postSrvHeap_;   // shader-visible: the SRV triples + the UAV pair
+    ComPtr<ID3D12DescriptorHeap> postSrvHeap_;   // shader-visible: the SRV triples + the UAV quad
     ComPtr<ID3D12RootSignature> postRootSig_;
     ComPtr<ID3D12PipelineState> bloomPrefilterPso_, bloomDownPso_, bloomUpPso_;
     // Composite permutations, indexed [bloom on][auto-exposure on].
     ComPtr<ID3D12PipelineState> compositePso_[2][2];
     ComPtr<ID3D12PipelineState> histogramPso_, exposurePso_;
+    ComPtr<ID3D12PipelineState> localGridPso_, localBlurPso_;   // local exposure's bilateral grid
     ComPtr<ID3D12Resource> postCBs_[kFrameCount];
     u8* postCBPtr_[kFrameCount] = {nullptr, nullptr};
     u32 postCBUsed_ = 0;
@@ -4506,7 +4521,9 @@ bool D3D12Device::createPostPipelines() {
     srvRange.BaseShaderRegister = 0;
     D3D12_DESCRIPTOR_RANGE uavRange{};
     uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uavRange.NumDescriptors = 2;              // u0 histogram, u1 exposure
+    // u0 histogram, u1 exposure, u2 local-exposure grid, u3 its blur. Visibility ALL below already
+    // covers the pixel shader, so PSComposite's direct UAV read of u3 needs no extra binding work.
+    uavRange.NumDescriptors = 4;
     uavRange.BaseShaderRegister = 0;
 
     D3D12_ROOT_PARAMETER params[3] = {};
@@ -4592,6 +4609,10 @@ bool D3D12Device::createPostPipelines() {
     };
     if (!makeCompute("CSHistogram", histogramPso_)) return false;
     if (!makeCompute("CSExposure", exposurePso_)) return false;
+    // Local exposure's bilateral grid. Built unconditionally, same as every PSO above -- runPostChain
+    // is what decides per-frame whether either pass actually dispatches.
+    if (!makeCompute("CSLocalGrid", localGridPso_)) return false;
+    if (!makeCompute("CSLocalBlur", localBlurPso_)) return false;
 
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
     auto bd = bufferDesc(kPostConstantRingBytes);
@@ -4645,6 +4666,12 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::postTripleCpu(u32 triple) const {
 void D3D12Device::releasePostTargets() {
     sceneResolved_.Reset();
     bloomTex_.Reset();
+    // Local exposure's bilateral grid: scene-size dependent, so it is dropped and rebuilt here every
+    // resize exactly like the two targets above -- histBuf_/expBuf_ are NOT touched here because
+    // their size (256 bins; one exposure value) never depends on scene resolution.
+    localGridBuf_.Reset();
+    localGridBlurBuf_.Reset();
+    localGridW_ = localGridH_ = 0;
     // FACTORY HANDLES, SO destroyTexture -- NOT .Reset(). These are the only targets here created
     // through the resource factory; treating a handle like the ComPtrs above would leak the
     // factory's row and its descriptors every resize.
@@ -4808,6 +4835,44 @@ bool D3D12Device::createPostTargets() {
     ud.Buffer.NumElements = 2;
     device_->CreateUnorderedAccessView(expBuf_.Get(), nullptr, &ud, uav);
 
+    // ---- local exposure's bilateral grid: u2 raw, u3 blurred ----
+    // gridW/gridH mirror EXACTLY what post.hlsl derives from GetDimensions() of the same scene
+    // texture (t0) -- ceil(scene / kLocalExpTile) -- so the buffer's allocated size and the shader's
+    // own byte-offset arithmetic never disagree.
+    localGridW_ = (sceneWidth_ + kLocalExpTile - 1) / kLocalExpTile;
+    localGridH_ = (sceneHeight_ + kLocalExpTile - 1) / kLocalExpTile;
+    const u64 gridBytes = static_cast<u64>(localGridW_) * localGridH_ * kLocalExpBins * kLocalExpCellBytes;
+    auto makeGridBuf = [&](ComPtr<ID3D12Resource>& out, const char* name) {
+        auto gd = bufferDesc(gridBytes);
+        gd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        // Created COMMON, same reason as histBuf_/expBuf_ above (#1328) -- then transitioned once,
+        // just below. Unlike those two this needs no zero-seed: CSLocalGrid overwrites all
+        // kLocalExpBins of every tile it touches every frame it runs, so stale bytes from a previous
+        // resize's allocation (or the driver's own zero-fill) are never read before being written.
+        return hrOk(device_->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &gd,
+                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&out)), name);
+    };
+    if (!makeGridBuf(localGridBuf_, "local exposure grid") ||
+        !makeGridBuf(localGridBlurBuf_, "local exposure grid blur")) {
+        localGridBuf_.Reset();
+        localGridBlurBuf_.Reset();
+        AVER_WARN("[RHI.D3D12] local exposure's bilateral grid could not be allocated; local exposure stays off until the next resize");
+    } else {
+        // cmdList_ IS recording here: createPostTargets is only ever called from within runPostChain
+        // (see its "!postReady_" call site), mid-frame, below other barriers already issued on it.
+        D3D12_RESOURCE_BARRIER toUav[2] = {
+            transition(localGridBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            transition(localGridBlurBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        };
+        cmdList_->ResourceBarrier(2, toUav);
+
+        uav.ptr += postSrvSize_;
+        ud.Buffer.NumElements = static_cast<UINT>(gridBytes / 4);   // raw view: one element per DWORD
+        device_->CreateUnorderedAccessView(localGridBuf_.Get(), nullptr, &ud, uav);
+        uav.ptr += postSrvSize_;
+        device_->CreateUnorderedAccessView(localGridBlurBuf_.Get(), nullptr, &ud, uav);
+    }
+
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = postRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     for (u32 m = 0; m < bloomMips_; ++m) {
         D3D12_RENDER_TARGET_VIEW_DESC rd{};
@@ -4946,7 +5011,13 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         // a field added here and not there is a silently different image on the other backend.
         cb.misc[3] = static_cast<f32>(post_.tonemap);
         cb.clampRadiance[0] = post_.maxRadiance;
-        cb.clampRadiance[1] = cb.clampRadiance[2] = cb.clampRadiance[3] = 0.0f;
+        // y/z: local exposure's shadow/highlight strengths -- gPostClamp.y/z in post.hlsl's
+        // PSComposite. FILLED HERE, UNCONDITIONALLY, same reasoning as misc/adapt above: every pass
+        // shares this one fillCommon, so the composite and the two new compute passes all see the
+        // same values without a separate path. w stays spare.
+        cb.clampRadiance[1] = post_.localExposureShadows;
+        cb.clampRadiance[2] = post_.localExposureHighlights;
+        cb.clampRadiance[3] = 0.0f;
     };
 
     auto fullscreen = [&](ID3D12PipelineState* pso, u32 triple, u32 w, u32 h,
@@ -5006,6 +5077,53 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
         dbValid_ = false;   // same reason as the chain's opening bind -- see bindGraphicsRoot
+    }
+
+    // ---- local exposure ----
+    // INDEPENDENT OF autoExp: both strengths can be nonzero with auto-exposure off (a fixed
+    // post_.exposure still wants regions pulled toward middle grey), so this is gated on its own
+    // condition and always runs before the composite, not only when the block above ran. Skipped
+    // entirely -- no dispatch, no barrier, same bindings otherwise -- when both strengths are 0,
+    // which is what keeps the chain byte-for-byte identical to before this feature existed.
+    const bool localExp = (post_.localExposureShadows > 0.0f || post_.localExposureHighlights > 0.0f) &&
+                          caps_.computeShaders && localGridBuf_ && localGridBlurBuf_;
+    if (localExp) {
+        // dst == src == the scene itself: this pass has no separate destination texture (it writes
+        // the grid buffer, not a render target), so both fillCommon args are the scene size post.hlsl
+        // would also reach via GetDimensions() on t0.
+        fillCommon(sceneWidth_, sceneHeight_, sceneWidth_, sceneHeight_);
+
+        cmdList_->SetComputeRootSignature(postRootSig_.Get());
+        cmdList_->SetPipelineState(localGridPso_.Get());
+        cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
+        // kPostTripleHistogram: t0/t1/t2 all just `scene`, same triple CSHistogram reads above -- all
+        // this pass needs is t0.
+        cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
+        cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->Dispatch(localGridW_, localGridH_, 1);
+
+        // Barrier #1: CSLocalGrid's write of u2 must land before CSLocalBlur reads it.
+        D3D12_RESOURCE_BARRIER gridUav{};
+        gridUav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        gridUav.UAV.pResource = localGridBuf_.Get();
+        cmdList_->ResourceBarrier(1, &gridUav);
+
+        cmdList_->SetPipelineState(localBlurPso_.Get());
+        cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
+        cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
+        cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->Dispatch((localGridW_ + 7) / 8, (localGridH_ + 7) / 8, 1);
+
+        // Barrier #2: CSLocalBlur's write of u3 must land before PSComposite's pixel-shader UAV read
+        // of it, below. Both buffers stay in UNORDERED_ACCESS throughout -- a UAV barrier, not a
+        // state transition, exactly like histBuf_ between CSHistogram and CSExposure above.
+        D3D12_RESOURCE_BARRIER blurUav{};
+        blurUav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        blurUav.UAV.pResource = localGridBlurBuf_.Get();
+        cmdList_->ResourceBarrier(1, &blurUav);
+
+        cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
+        dbValid_ = false;   // same reason as the eye-adaptation block above -- see bindGraphicsRoot
     }
 
     {
@@ -5122,10 +5240,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // This IS the render-scale upscale: the composite shader already samples by normalized UV
     // through a bilinear sampler (gPostSamp), so telling it a different source size is all it takes.
     //
-    // ON THE AverSR PATH the source is already present-sized, so src == dst and gPostSamp's stretch
-    // does nothing -- AverSR's filter produced those pixels.
-    if (srUpscaled) fillCommon(width_, height_, width_, height_);
-    else            fillCommon(width_, height_, sceneWidth_, sceneHeight_);
+    // ON THE AverSR PATH t0 is already present-sized and gPostSamp's stretch does nothing -- AverSR's
+    // filter produced those pixels. src STAYS THE SCENE SIZE there all the same: PSComposite never
+    // reads src for its own sampling (it samples by UV), and local exposure reads it as the size its
+    // grid was built at, which is always the scene's.
+    fillCommon(width_, height_, sceneWidth_, sceneHeight_);
     const u32 compositeTriple = srUpscaled ? kPostTripleCompositeUpscaled : kPostTripleComposite;
     {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);

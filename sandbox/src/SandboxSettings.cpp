@@ -94,6 +94,8 @@ void SandboxApp::loadEditorPreferences() {
         // knobs around it persisted.
         post_.histogramLowPercent  = prefFloat("post.histogramLow",  post_.histogramLowPercent);
         post_.histogramHighPercent = prefFloat("post.histogramHigh", post_.histogramHighPercent);
+        post_.localExposureShadows    = prefFloat("post.localExposureShadows",    post_.localExposureShadows);
+        post_.localExposureHighlights = prefFloat("post.localExposureHighlights", post_.localExposureHighlights);
     }
 
     // The derived-data cache's write-behind budget, in MEGABYTES on the wire because that is
@@ -2399,6 +2401,8 @@ void SandboxApp::saveEditorPreferences() {
         setPrefFloat("post.bloomKnee",      post_.bloomKnee);
         setPrefFloat("post.histogramLow",   post_.histogramLowPercent);
         setPrefFloat("post.histogramHigh",  post_.histogramHighPercent);
+        setPrefFloat("post.localExposureShadows",    post_.localExposureShadows);
+        setPrefFloat("post.localExposureHighlights", post_.localExposureHighlights);
     }
 
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();

@@ -262,19 +262,36 @@ struct PostSettings {
     // Raise it if a project genuinely wants larger bloom from very bright sources; 0 turns the clamp
     // off entirely and restores the previous behaviour exactly.
     f32  maxRadiance = 8.0f;
+
+    // LOCAL EXPOSURE (as in Unreal's Local Exposure). Auto-exposure above can only pick ONE
+    // multiplier for the whole frame -- in a sunlit arcade the sunlit stone sets it and the shaded
+    // interior sits 4-5 stops down, reading near-black, even though the eye would read both. These
+    // brighten dark REGIONS and gently tame bright ones toward exposureKey (middle grey), using an
+    // edge-aware bilateral grid of log-luminance so it does so without haloing at region edges.
+    //
+    // [0,1]: the fraction of a region's deviation from middle grey that is removed -- 0 is off, 1
+    // fully flattens it (no local contrast left). shadows applies where the local region reads
+    // darker than middle grey, highlights where it reads brighter. Local exposure is on when either
+    // is > 0. Both ride PostCB.clampRadiance[1]/[2] (gPostClamp.y/z in post.hlsl) rather than new
+    // cbuffer rows -- see that struct's own comment on why clampRadiance's spare components are
+    // where a new post scalar lands first.
+    f32  localExposureShadows    = 0.5f;
+    f32  localExposureHighlights = 0.3f;
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
 // check is the reminder -- a new PostSettings field changes it, and must be added here too.
 inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
-    static_assert(sizeof(PostSettings) == 52, "a PostSettings field was added: compare it below too");
+    static_assert(sizeof(PostSettings) == 60, "a PostSettings field was added: compare it below too");
     return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
            a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
            a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
            a.exposureMax == b.exposureMax && a.exposureSpeed == b.exposureSpeed &&
            a.exposureKey == b.exposureKey && a.histogramLowPercent == b.histogramLowPercent &&
            a.histogramHighPercent == b.histogramHighPercent && a.tonemap == b.tonemap &&
-           a.maxRadiance == b.maxRadiance;
+           a.maxRadiance == b.maxRadiance &&
+           a.localExposureShadows == b.localExposureShadows &&
+           a.localExposureHighlights == b.localExposureHighlights;
 }
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct

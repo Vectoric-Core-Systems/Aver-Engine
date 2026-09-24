@@ -1161,6 +1161,10 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
         readField(&rhi::PostSettings::histogramLowPercent), stageClamped(&rhi::PostSettings::histogramLowPercent, 0.0f, 1.0f)});
     t.push_back({"post.histogramHighPercent", VarType::F32, false, "Fraction of the exposure histogram discarded at the bright end (clamped [0,1])",
         readField(&rhi::PostSettings::histogramHighPercent), stageClamped(&rhi::PostSettings::histogramHighPercent, 0.0f, 1.0f)});
+    t.push_back({"post.localExposureShadows", VarType::F32, false, "Local exposure: fraction of a dark region's distance below middle grey that is lifted (0 = off, up to +4 stops; clamped [0,1])",
+        readField(&rhi::PostSettings::localExposureShadows), stageClamped(&rhi::PostSettings::localExposureShadows, 0.0f, 1.0f)});
+    t.push_back({"post.localExposureHighlights", VarType::F32, false, "Local exposure: fraction of a bright region's distance above middle grey that is pulled down (0 = off, at most -2 stops; clamped [0,1])",
+        readField(&rhi::PostSettings::localExposureHighlights), stageClamped(&rhi::PostSettings::localExposureHighlights, 0.0f, 1.0f)});
 
     // Not an f32, so it cannot go through stageClamped above -- clamped by hand, same [0,2] shape.
     t.push_back({"post.tonemap", VarType::U32, false,

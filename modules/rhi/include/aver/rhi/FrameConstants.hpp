@@ -115,13 +115,17 @@ struct PostCB {
     f32 limit[4];   // exposure min, exposure max, histogram low cut, high cut
     f32 misc[4];    // middle grey, auto-exposure on, bloom filter radius, TONEMAP MODE
     // x = the ceiling scene radiance is clamped to just before the tonemap (0 disables it entirely).
-    // y/z/w spare -- and every row in this struct that has ever been described as spare was claimed
-    // within a session or two, so do not read that word as a promise.
+    // y = PostSettings::localExposureShadows, z = localExposureHighlights (both [0,1], local
+    // exposure on when either > 0 -- see PostSettings' own comment). w is still spare, and every
+    // row in this struct that has ever been described as spare was claimed within a session or two,
+    // so do not read that word as a promise.
     //
     // A NEW ROW RATHER THAN misc.w OR adapt.w. adapt.w looked free (this struct called it "unused")
     // but post.hlsl documents the same component as "pixels sampled", and a slot whose two sides
     // disagree about its meaning is exactly the kind of thing that gets read by one of them later.
-    // misc.w takes the tonemap mode because both sides already agreed it was unused.
+    // misc.w takes the tonemap mode because both sides already agreed it was unused. y/z of THIS
+    // row are where localExposureShadows/Highlights landed for the same reason -- an already-spare
+    // slot on the same cbuffer row, rather than growing the struct for two more scalars.
     f32 clampRadiance[4];
 };
 static_assert(sizeof(PostCB) == 112, "the HLSL cbuffer mirrors this byte for byte");

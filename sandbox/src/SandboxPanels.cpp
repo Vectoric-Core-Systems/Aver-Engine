@@ -1974,6 +1974,20 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             ImGui::SliderFloat("Exposure Min", &post_.exposureMin, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("Exposure Max", &post_.exposureMax, 1.0f, 1024.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
         }
+        // LOCAL EXPOSURE, beside auto-exposure because it finishes that job: one exposure per frame
+        // cannot show a sunlit courtyard and the shaded arcade beside it, so dark and bright REGIONS
+        // are pulled toward middle grey (edge-aware bilateral grid, no halos). Works with a fixed
+        // exposure too, so it is not inside the auto-exposure block above.
+        ImGui::SliderFloat("Local Exposure: Shadows", &post_.localExposureShadows, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Brightens regions darker than middle grey by this fraction of how far\n"
+                              "below it they sit (0 = off, 1 = fully flattened; up to +4 stops).\n"
+                              "Edge-aware, so a shaded wall beside sunlit stone lifts without a halo.");
+        ImGui::SliderFloat("Local Exposure: Highlights", &post_.localExposureHighlights, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Darkens regions brighter than middle grey by this fraction of how far\n"
+                              "above it they sit (0 = off; at most -2 stops). Keeps sunlit stone from\n"
+                              "clipping once the shadows are lifted.");
         ImGui::Separator();
         ImGui::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");

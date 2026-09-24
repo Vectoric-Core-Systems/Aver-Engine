@@ -49,6 +49,13 @@ constexpr f32 kHistogramMinLogLum = -10.0f;
 constexpr f32 kHistogramMaxLogLum = 12.0f;
 constexpr u32 kHistogramDownscale = 4;
 
+// Local exposure's bilateral grid of log-luminance: one 32x32-scene-pixel tile per cell, 16
+// luminance bins per cell, (sum, count) as two asuint floats per bin -- see CSLocalGrid/CSLocalBlur
+// in post.hlsl for the layout this sizes gPostLocalGrid/gPostLocalGridBlur to.
+constexpr u32 kLocalExpTile      = 32;
+constexpr u32 kLocalExpBins      = 16;
+constexpr u32 kLocalExpCellBytes = 8;   // one asuint(sum) + one count, per bin
+
 // The mesh-shader geometry registers this backend's OWN fixed pipeline chooses, mirroring
 // D3D12Device.cpp's kSceneMeshSrvBase=3 (an arbitrary frozen constant, not derived from any
 // PipelineLayout -- see that constant's own comment). -D'd into the AVER_MS block the same way.
@@ -877,7 +884,8 @@ VulkanDevice::~VulkanDevice() {
     if (postDescriptorPool_) api_.DestroyDescriptorPool(device_, postDescriptorPool_, nullptr);
     if (postSetLayout_) api_.DestroyDescriptorSetLayout(device_, postSetLayout_, nullptr);
     if (postPipelineLayout_) api_.DestroyPipelineLayout(device_, postPipelineLayout_, nullptr);
-    for (VkPipeline* pso : {&bloomPrefilterPso_, &bloomDownPso_, &bloomUpPso_, &histogramPso_, &exposurePso_})
+    for (VkPipeline* pso : {&bloomPrefilterPso_, &bloomDownPso_, &bloomUpPso_, &histogramPso_, &exposurePso_,
+                            &localGridPso_, &localBlurPso_})
         if (*pso) api_.DestroyPipeline(device_, *pso, nullptr);
     for (int b = 0; b < 2; ++b) for (int a = 0; a < 2; ++a)
         if (compositePso_[b][a]) api_.DestroyPipeline(device_, compositePso_[b][a], nullptr);
@@ -886,6 +894,11 @@ VulkanDevice::~VulkanDevice() {
     }
     if (histBuf_) destroyBufferCommitted(*this, histBuf_, histMemory_);
     if (expBuf_) destroyBufferCommitted(*this, expBuf_, expMemory_);
+    // Scene-sized (createPostTargets destroys and rebuilds them on every resize, in place -- see
+    // that function), but this is still where the LAST generation's free lives, exactly like
+    // histBuf_/expBuf_ just above: nothing else in this destructor's path touches them.
+    if (localGridBuf_) destroyBufferCommitted(*this, localGridBuf_, localGridMemory_);
+    if (localGridBlurBuf_) destroyBufferCommitted(*this, localGridBlurBuf_, localGridBlurMemory_);
     if (captureBuf_) destroyBufferCommitted(*this, captureBuf_, captureMemory_);
 
     for (GpuMesh& m : meshes_) {
@@ -3088,6 +3101,10 @@ const VkRegisterBind kPostBinds[] = {
         {'u', 0, 0, kVkSetConstants, 4},
         {'u', 1, 0, kVkSetConstants, 5},
         {'s', 0, 0, kVkSetConstants, 6},
+        // u2/u3: local exposure's raw and blurred grids. 7/8, not the 6/7 that would immediately
+        // follow u1 -- binding 6 is already the immutable sampler (s0), so these fall in right after it.
+        {'u', 2, 0, kVkSetConstants, 7},
+        {'u', 3, 0, kVkSetConstants, 8},
     };
 constexpr u32 kPostBindCount = static_cast<u32>(sizeof(kPostBinds) / sizeof(kPostBinds[0]));
 }
@@ -3124,11 +3141,14 @@ bool VulkanDevice::createPostPipelines() {
         if (!vkOk(api_.CreateSampler(device_, &si, nullptr, &postSampler_), "post sampler")) return false;
     }
     if (!postSetLayout_) {
-        // SEVEN, not six: t0/t1 are SAMPLED_IMAGE and s0 is its own immutable SAMPLER at binding 6
-        // (what DXC emits for Texture2D + SamplerState). bindingCount used to say six, leaving
+        // NINE, not seven: t0/t1 are SAMPLED_IMAGE and s0 is its own immutable SAMPLER at binding 6
+        // (what DXC emits for Texture2D + SamplerState); bindings 7/8 are u2/u3, local exposure's raw
+        // and blurred grids (kPostBinds above). Every binding is VK_SHADER_STAGE_ALL already, so 7/8
+        // need no special case for PSComposite reading gPostLocalGridBlur (u3) directly in the
+        // fragment shader -- that visibility was already there. bindingCount used to say six, leaving
         // binding 6 built but never handed to Vulkan -- validation caught it: "SPIR-V uses descriptor
         // [Set 2, Binding 6, variable gPostSamp] but the binding was not declared in pSetLayouts[2]".
-        VkDescriptorSetLayoutBinding binds[7] = {};
+        VkDescriptorSetLayoutBinding binds[9] = {};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[2] = {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_ALL, nullptr};
@@ -3136,8 +3156,10 @@ bool VulkanDevice::createPostPipelines() {
         binds[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[6] = {6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL, &postSampler_};
+        binds[7] = {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
+        binds[8] = {8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 7; ci.pBindings = binds;
+        ci.bindingCount = 9; ci.pBindings = binds;
         if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &postSetLayout_), "post set layout")) return false;
     }
     if (!postPipelineLayout_) {
@@ -3160,7 +3182,9 @@ bool VulkanDevice::createPostPipelines() {
             // still consumes a pool slot; immutable means the set can't rewrite it, not that it's free.
             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFrameCount * kPostSlotCount * 2},
             {VK_DESCRIPTOR_TYPE_SAMPLER, kFrameCount * kPostSlotCount},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrameCount * kPostSlotCount * 3},
+            // FIVE storage buffers per set, not three: t2 (gPostExpRead) + u0/u1 (histogram, exposure)
+            // + u2/u3 (local exposure's raw and blurred grids, new).
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrameCount * kPostSlotCount * 5},
         };
         VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         pci.maxSets = kFrameCount * kPostSlotCount; pci.poolSizeCount = 4; pci.pPoolSizes = sizes;
@@ -3249,6 +3273,10 @@ bool VulkanDevice::createPostPipelines() {
     };
     if (!makeCompute("CSHistogram", histogramPso_)) return false;
     if (!makeCompute("CSExposure", exposurePso_)) return false;
+    // Local exposure's two passes -- same root signature/layout, same makeCompute as the pair above;
+    // run unconditionally on runPostChain's local-exposure branch regardless of auto-exposure.
+    if (!makeCompute("CSLocalGrid", localGridPso_)) return false;
+    if (!makeCompute("CSLocalBlur", localBlurPso_)) return false;
     api_.DestroyShaderModule(device_, vsMod, nullptr);
 
     if (!histBuf_) {
@@ -3460,6 +3488,31 @@ bool VulkanDevice::createPostTargets() {
         // dstT->srvView, which is only known once creation above has actually succeeded.
     }
 
+    // ---- local exposure's bilateral grid: scene-sized like the bloom pyramid above, so it is
+    // rebuilt every time this function runs. Not a hot path (only on resize/sample-count/upscaler
+    // changes, never per frame), so the simplest thing that is obviously correct is to always
+    // destroy-then-recreate at the CURRENT scene size rather than track the old size and skip when
+    // unchanged. Unlike bloomTex_, the OLD generation is destroyed HERE rather than by
+    // releasePostTargets() -- the final (shutdown) free for whatever generation is live when the
+    // device goes away lives in ~VulkanDevice beside histBuf_/expBuf_ (see those members).
+    if (localGridBuf_) { destroyBufferCommitted(*this, localGridBuf_, localGridMemory_); localGridBuf_ = VK_NULL_HANDLE; localGridMemory_ = VK_NULL_HANDLE; }
+    if (localGridBlurBuf_) { destroyBufferCommitted(*this, localGridBlurBuf_, localGridBlurMemory_); localGridBlurBuf_ = VK_NULL_HANDLE; localGridBlurMemory_ = VK_NULL_HANDLE; }
+    {
+        // tile = 32x32 SCENE pixels (sceneWidth_/sceneHeight_, the same extent bloomW_/bloomH_ and
+        // sceneResolved_ derive from just above) -- matches CSLocalGrid's dispatch(gridW, gridH, 1)
+        // in runPostChain, which must compute gridW/gridH the same way.
+        const u32 gridW = (sceneWidth_ + kLocalExpTile - 1) / kLocalExpTile;
+        const u32 gridH = (sceneHeight_ + kLocalExpTile - 1) / kLocalExpTile;
+        const VkDeviceSize gridBytes = VkDeviceSize(gridW) * gridH * kLocalExpBins * kLocalExpCellBytes;
+        if (!createBufferCommitted(*this, gridBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, localGridBuf_, localGridMemory_, nullptr, "local exposure grid")) return false;
+        if (!createBufferCommitted(*this, gridBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, localGridBlurBuf_, localGridBlurMemory_, nullptr, "local exposure grid (blurred)")) return false;
+        // No CmdFillBuffer clear, unlike histBuf_/expBuf_: CSLocalGrid overwrites (Store) all 16 bins
+        // of every tile it dispatches over, every frame -- nothing here ever reads a bin it did not
+        // just write this same frame, so a stale or uninitialized previous generation cannot leak in.
+    }
+
     // ---- descriptors: kFrameCount * kPostSlotCount of them, written ONCE for this resize
     // generation. Doubled per frame-in-flight slot NOT because the textures/buffers differ (they
     // don't: one bloom pyramid, one histogram, one exposure scalar, shared like D3D12's single
@@ -3483,7 +3536,12 @@ bool VulkanDevice::createPostTargets() {
         VkDescriptorBufferInfo t2i{expAtT2 ? expBuf_ : histBuf_, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo u0i{histBuf_, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo u1i{expBuf_, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet w[6] = {};
+        // u2/u3: local exposure's raw and blurred grids. Every slot gets them, same as u0/u1 --
+        // including kPostSlotComposite/kPostSlotCompositeUpscaled, since PSComposite reads
+        // gPostLocalGridBlur (u3) directly, with no separate SRV slot for it (see the contract).
+        VkDescriptorBufferInfo u2i{localGridBuf_, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo u3i{localGridBlurBuf_, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet w[8] = {};
         w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w[0].dstSet = set; w[0].dstBinding = 0;
         w[0].descriptorCount = 1; w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; w[0].pBufferInfo = &ringInfo;
         w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w[1].dstSet = set; w[1].dstBinding = 1;
@@ -3496,9 +3554,13 @@ bool VulkanDevice::createPostTargets() {
         w[4].descriptorCount = 1; w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[4].pBufferInfo = &u0i;
         w[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w[5].dstSet = set; w[5].dstBinding = 5;
         w[5].descriptorCount = 1; w[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[5].pBufferInfo = &u1i;
-        // SIX WRITES, NOT SEVEN. Binding 6 is an IMMUTABLE sampler: the layout supplies it and
+        w[6] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w[6].dstSet = set; w[6].dstBinding = 7;
+        w[6].descriptorCount = 1; w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[6].pBufferInfo = &u2i;
+        w[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w[7].dstSet = set; w[7].dstBinding = 8;
+        w[7].descriptorCount = 1; w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[7].pBufferInfo = &u3i;
+        // EIGHT WRITES, NOT NINE. Binding 6 is an IMMUTABLE sampler: the layout supplies it and
         // writing to it is a validation error, not merely redundant.
-        api_.UpdateDescriptorSets(device_, 6, w, 0, nullptr);
+        api_.UpdateDescriptorSets(device_, 8, w, 0, nullptr);
     };
     // The upscaled-composite slot's source, resolved AFTER the AverSR block so a failed creation
     // there (presentHdrTex_ left at 0) leaves this null and the loop below skips writing the slot.
@@ -3617,6 +3679,14 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
 
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
     const bool autoExp = post_.autoExposure && caps_.computeShaders;
+    // INDEPENDENT OF autoExp: both strengths can be nonzero with auto-exposure off (a fixed
+    // post_.exposure still wants regions pulled toward middle grey). Mirrors D3D12Device's identical
+    // `localExp` -- caps_.computeShaders is always true on this backend (core 1.0 mandates a
+    // compute-capable queue), and localGridBuf_/localGridBlurBuf_ are always non-null once postReady_
+    // is true (createPostTargets fails the whole chain, not just this feature, if their allocation
+    // fails -- unlike D3D12's soft-degrade path), so both extra checks are belt-and-braces here.
+    const bool localExp = (post_.localExposureShadows > 0.0f || post_.localExposureHighlights > 0.0f) &&
+                          caps_.computeShaders && localGridBuf_ && localGridBlurBuf_;
 
     if (!expSeeded_) {
         // ZEROED WITH vkCmdFillBuffer RATHER THAN COPIED FROM THE CONSTANT RING. The copy it replaces
@@ -3655,7 +3725,13 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         // The twin of D3D12Device.cpp's fill; see there for why both move together.
         cb.misc[3] = static_cast<f32>(post_.tonemap);
         cb.clampRadiance[0] = post_.maxRadiance;
-        cb.clampRadiance[1] = cb.clampRadiance[2] = cb.clampRadiance[3] = 0.0f;
+        // y/z: local exposure's shadow/highlight strengths -- gPostClamp.y/z in post.hlsl's
+        // PSComposite. FILLED HERE, UNCONDITIONALLY, same reasoning as misc/adapt above: every pass
+        // shares this one fillCommon, so the composite and the two new compute passes all see the
+        // same values without a separate path. Byte-for-byte mirror of D3D12Device's identical fill.
+        cb.clampRadiance[1] = post_.localExposureShadows;
+        cb.clampRadiance[2] = post_.localExposureHighlights;
+        cb.clampRadiance[3] = 0.0f;
     };
     auto bindSetFor = [&](VkPipelineBindPoint bp, u32 slot) {
         const ConstantAllocation ca = postConstants(&cb, sizeof cb);
@@ -3718,6 +3794,40 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         VkBufferMemoryBarrier2 expToSrv = bufBarrier(expBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                      VK_ACCESS_2_SHADER_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
         pipelineBarrier(api_, cmd, nullptr, 0, &expToSrv, 1);
+    }
+
+    // ---- local exposure: bilateral grid of log-luminance ----
+    // Runs regardless of autoExp -- unlike eye adaptation this never depends on it, it only depends
+    // on the strengths being nonzero. Reuses kPostSlotHistogram's descriptor set (t0/t1 already point
+    // at sceneView, same as CSHistogram's own source, and every slot now carries u2/u3 -- see
+    // createPostTargets' writeSlot). gridW/gridH mirror createPostTargets' own derivation exactly;
+    // if they disagree, CSLocalGrid's dispatch and the grid buffers' allocated size disagree too.
+    if (localExp) {
+        const u32 gridW = (sceneWidth_ + kLocalExpTile - 1) / kLocalExpTile;
+        const u32 gridH = (sceneHeight_ + kLocalExpTile - 1) / kLocalExpTile;
+
+        // CSLocalGrid: one group per tile, each thread a 2x2 block of scene pixels -- dst is the
+        // GRID's own extent (what the dispatch covers), src is the SCENE's (what t0 actually is,
+        // for the UV each thread samples and the per-pixel bounds check).
+        fillCommon(gridW, gridH, sceneWidth_, sceneHeight_);
+        api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, localGridPso_);
+        bindSetFor(VK_PIPELINE_BIND_POINT_COMPUTE, kPostSlotHistogram);
+        api_.CmdDispatch(cmd, gridW, gridH, 1);
+
+        VkBufferMemoryBarrier2 gridToBlur = bufBarrier(localGridBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+        pipelineBarrier(api_, cmd, nullptr, 0, &gridToBlur, 1);
+
+        // CSLocalBlur: samples no texture (its 3x3x3 separable blur reads only u2), but src is still
+        // the SCENE size -- post.hlsl derives the grid's own extent from gPostSrc in all three passes.
+        fillCommon(gridW, gridH, sceneWidth_, sceneHeight_);
+        api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, localBlurPso_);
+        bindSetFor(VK_PIPELINE_BIND_POINT_COMPUTE, kPostSlotHistogram);
+        api_.CmdDispatch(cmd, (gridW + 7) / 8, (gridH + 7) / 8, 1);
+
+        VkBufferMemoryBarrier2 blurToFrag = bufBarrier(localGridBlurBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+        pipelineBarrier(api_, cmd, nullptr, 0, &blurToFrag, 1);
     }
 
     // ---- bloom ----
@@ -3842,10 +3952,11 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // dst is present-space (width_/height_); src is the scene target (sceneWidth_/sceneHeight_,
     // or 1:1 at default renderScale_==1.0). This IS the render-scale upscale: PSComposite already
     // bilinear-samples by normalized UV, so only the source size differs from the destination. ON
-    // THE AverSR PATH src==dst already and the shader's stretch does nothing -- AverSR's filter
-    // produced those pixels, not the composite's sampler.
-    if (srUpscaled) fillCommon(width_, height_, width_, height_);
-    else            fillCommon(width_, height_, sceneWidth_, sceneHeight_);
+    // THE AverSR PATH t0 is already present-sized and the shader's stretch does nothing -- AverSR's
+    // filter produced those pixels, not the composite's sampler. src STAYS THE SCENE SIZE there all
+    // the same: PSComposite never reads src for its own sampling, and local exposure reads it as the
+    // size its grid was built at, which is always the scene's. The twin of D3D12Device.cpp's fill.
+    fillCommon(width_, height_, sceneWidth_, sceneHeight_);
 
     // WHERE THE COMPOSITE LANDS: the swapchain image normally, or the viewport texture when the
     // editor asked for one -- only the destination changes (same pipeline/source/extent), since the
