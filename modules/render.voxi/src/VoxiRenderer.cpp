@@ -3697,8 +3697,9 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         if (rdStagedActive(&stagedFallbackReason)) {
             if (!rdStagedRunLogged_) {
                 rdStagedRunLogged_ = true;
-                AVER_INFO("[Voxi] staged ray-driven passes running: visibility -> shadow -> shade "
-                          "(GPU spans 'Voxi RD visibility', 'Voxi RD shadow', 'Voxi ray-driven primary')");
+                AVER_INFO("[Voxi] staged ray-driven passes running: visibility -> lighting (shadow, GI, "
+                          "sky occlusion, reflections) -> shade (GPU spans 'Voxi RD visibility', "
+                          "'Voxi RD lighting stages', 'Voxi ray-driven primary')");
             }
             recordStagedRayDriven(ctx);
             return;
