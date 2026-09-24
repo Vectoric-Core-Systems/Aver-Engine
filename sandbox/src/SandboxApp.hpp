@@ -3525,6 +3525,12 @@ private:
     f32  fogMatchTargetOpacity_ = 0.9f;   // opacity WANTED at the load boundary itself
 #endif
     rhi::PostSettings post_{};
+    // What this editor last handed the device, so the per-frame push can tell when something ELSE
+    // changed the device's post settings in between -- the console's post.* variables write the
+    // device directly -- and adopt that change instead of overwriting it the next frame. Invalid until
+    // the first push, so the very first frame never mistakes the device's defaults for an edit.
+    rhi::PostSettings postPushed_{};
+    bool postPushedValid_ = false;
     // Which post values came from argv, so a stored preference cannot silently outrank a flag the
     // caller typed. Set by setPost, read once by loadEditorPreferences.
     bool postExposureFromCli_ = false, postBloomFromCli_ = false, postAutoExpFromCli_ = false;

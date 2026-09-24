@@ -81,6 +81,11 @@ void SandboxApp::loadEditorPreferences() {
         post_.exposureSpeed  = prefFloat("post.exposureSpeed",  post_.exposureSpeed);
         post_.exposureMin    = prefFloat("post.exposureMin",    post_.exposureMin);
         post_.exposureMax    = prefFloat("post.exposureMax",    post_.exposureMax);
+        // A STORED 8 IS THE OLD DEFAULT, NOT A CHOICE: every session before 2026-09-24 saved the
+        // compiled-in 8 back on exit, so every existing editor.ini holds it and would pin the camera
+        // at the ceiling the physical sky outgrew (RHI.hpp's own comment on exposureMax). Exactly 8
+        // is read as "never chosen" and takes the new default; any other stored value is kept.
+        if (post_.exposureMax == 8.0f) post_.exposureMax = rhi::PostSettings{}.exposureMax;
         post_.bloomThreshold = prefFloat("post.bloomThreshold", post_.bloomThreshold);
         post_.bloomKnee      = prefFloat("post.bloomKnee",      post_.bloomKnee);
         // THE TWO FIELDS OF PostSettings THAT WERE STORED NOWHERE. Every other member of the

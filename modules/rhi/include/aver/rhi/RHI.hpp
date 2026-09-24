@@ -202,7 +202,14 @@ struct PostSettings {
     // keeping chromaticity. Measured at exposure 8, same frame: mode 1 gives chroma 1.41, mode 2
     // gives 3.09, at the same brightness. With a curve that holds its colour there is no reason to
     // forbid the exposure that makes an enclosed scene readable.
-    f32  exposureMax    = 8.0f;
+    //
+    // 256 SINCE THE SKY BECAME PHYSICAL (2026-09-24, kSkyIrradianceCalibration 8 -> 1). 8 was tuned
+    // while the diffuse sky was 8x too bright and did most of an interior's lighting. At physical
+    // scale a sun-overhead NewSponza arcade, lit only by bounce and the sky through its arches, sits
+    // 20-50x below the sunlit courtyard and needed ~128x to read (measured, linear): at 8 the camera
+    // simply ran out of range. 256 is 8 stops above 1, well inside a real camera's metering range.
+    // SandboxSettings migrates a stored 8 (the old default) to this value once.
+    f32  exposureMax    = 256.0f;
     f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second
     f32  exposureKey    = 0.18f;   // middle grey the average luminance is driven towards
     // Fraction of the histogram discarded at each end before averaging.
@@ -256,6 +263,19 @@ struct PostSettings {
     // off entirely and restores the previous behaviour exactly.
     f32  maxRadiance = 8.0f;
 };
+
+// Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
+// check is the reminder -- a new PostSettings field changes it, and must be added here too.
+inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
+    static_assert(sizeof(PostSettings) == 52, "a PostSettings field was added: compare it below too");
+    return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
+           a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
+           a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
+           a.exposureMax == b.exposureMax && a.exposureSpeed == b.exposureSpeed &&
+           a.exposureKey == b.exposureKey && a.histogramLowPercent == b.histogramLowPercent &&
+           a.histogramHighPercent == b.histogramHighPercent && a.tonemap == b.tonemap &&
+           a.maxRadiance == b.maxRadiance;
+}
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct
 // sun's colour and the aerial perspective from Rayleigh/Mie/ozone scattering.

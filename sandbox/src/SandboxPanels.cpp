@@ -1972,7 +1972,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             ImGui::SliderFloat("Middle Grey", &post_.exposureKey, 0.02f, 0.6f, "%.3f");
             ImGui::SliderFloat("Adapt Speed", &post_.exposureSpeed, 0.1f, 20.0f, "%.1f/s");
             ImGui::SliderFloat("Exposure Min", &post_.exposureMin, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat("Exposure Max", &post_.exposureMax, 1.0f, 64.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Exposure Max", &post_.exposureMax, 1.0f, 1024.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
         }
         ImGui::Separator();
         ImGui::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");

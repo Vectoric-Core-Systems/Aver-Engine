@@ -2926,7 +2926,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // Outside the viewport rect is editor chrome, not sky.
     e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
+    // THE CONSOLE'S post.* VARIABLES WRITE THE DEVICE, NOT post_. Pushing post_ unconditionally every
+    // frame silently undid every one of them a frame later (post.exposureKey, post.tonemap, ...). If
+    // the device no longer holds what this editor last pushed, something else changed it on purpose:
+    // adopt that into post_ (so the Post panel shows it and prefs save it), then push as usual.
+    if (postPushedValid_ && !rhi::postSettingsEqual(e.device()->postProcess(), postPushed_))
+        post_ = e.device()->postProcess();
     e.device()->setPostProcess(post_);
+    postPushed_ = post_;
+    postPushedValid_ = true;
 }
 
 // Tears the editor down: MCP, prefs, physics, UI textures, materials, render features, scripts.
