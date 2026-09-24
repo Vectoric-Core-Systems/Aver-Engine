@@ -1596,9 +1596,11 @@ void SandboxApp::buildRenderingSettings(int page) {
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(
                         "Which curve resolves HDR radiance to the display:\n"
-                        "  Per-channel     the original Narkowicz/Hill approximation --\n"
-                        "                  the mode EVERY recorded gate baseline in\n"
-                        "                  scripts/ was measured through\n"
+                        "  Per-channel     the original Narkowicz/Hill approximation, and\n"
+                        "                  the DEFAULT: the gentlest toe, so dim bounce\n"
+                        "                  light stays visible instead of crushing to\n"
+                        "                  black. Every recorded gate baseline in\n"
+                        "                  scripts/ was measured through it\n"
                         "  ACES fitted     the same curve between the ACES matrices\n"
                         "  ACES luminance  tonemaps LUMINANCE and puts the original\n"
                         "                  chromaticity back, so hue survives any exposure\n\n"

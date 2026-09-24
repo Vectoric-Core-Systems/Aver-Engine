@@ -210,12 +210,18 @@ struct PostSettings {
     f32  histogramHighPercent = 0.85f;
 
     // WHICH TONE CURVE. 0 is the original per-channel Narkowicz/Hill approximation; 1 is the same
-    // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap).
+    // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap); 2 is
+    // acesLumaTonemap, which tonemaps LUMINANCE and puts the original chromaticity back.
     //
-    // 2 IS THE DEFAULT NOW: acesLumaTonemap, which tonemaps LUMINANCE and puts the original
-    // chromaticity back, so hue and saturation survive any exposure by construction.
+    // 0 IS THE DEFAULT AGAIN (owner's call, 2026-09-24): its toe is the gentlest of the three, so dim
+    // indirect light stays visible. Mode 2's Hill RRT/ODT fit (with its x2 gain) has a hard black
+    // point at ~0.0016 scene luminance and a steep toe that scales anything below ~0.02 by ~0.2 --
+    // physically correct bounce light at a few percent of a sunlit floor (NewSponza's stone is
+    // albedo ~0.1-0.2) was being crushed to near-black and read as "no GI". The trade, recorded
+    // below: at the large exposures an enclosed scene's auto-exposure reaches for, 0 lets channels
+    // run onto the shoulder and desaturate, which is what made 2 the default before.
     //
-    // WHY THE CHANGE. 1 desaturates less than 0 but it still runs a shoulder per channel after the
+    // WHY 2 WAS THE DEFAULT. 1 desaturates less than 0 but it still runs a shoulder per channel after the
     // matrices, so a big exposure -- which an enclosed scene needs, and which the eye adaptation
     // will reach for -- lands every channel on the flat part and the frame arrives grey. That was
     // the whole of a "colours are washed out" report. MEASURED on PTTest Sponza, chroma (mean R-B)
@@ -228,9 +234,9 @@ struct PostSettings {
     // and rotates back, which is the entire reason ACES has those matrices. It is only mode 2 that
     // declines to let the curve decide colour at all.
     //
-    // 0 IS KEPT, and not only for taste: every recorded gate baseline in scripts/ was measured
-    // through it, so it is the setting that reproduces them.
-    u32  tonemap = 2;
+    // 0 is also the curve every recorded gate baseline in scripts/ was measured through, so the
+    // default now reproduces them again.
+    u32  tonemap = 0;
 
     // Ceiling applied to scene radiance immediately before the tonemap; 0 disables it.
     //
@@ -280,7 +286,11 @@ struct SkyAtmosphere {
     // The authoritative field, pointing TOWARD the light. Need not be normalised. Degrees are the
     // editing form only; setSunAngles / sunAngles convert.
     f32 sunDirection[3] = {-0.5481f, 0.3838f, 0.7431f};
-    f32 sunColor[3]     = {1.0f, 0.96f, 0.90f};
+    // The light ARRIVING AT THE TOP OF THE ATMOSPHERE, before any air. White is the physical
+    // default -- the physical sky (atmoFitDome / dome.sunTransmittance in packAtmosphere) already
+    // tints it toward orange by Rayleigh/Mie/ozone transmittance as elevation drops, so authoring
+    // a warm bias here double-counts the atmosphere's own colouring.
+    f32 sunColor[3]     = {1.0f, 1.0f, 1.0f};
     f32 sunIntensity    = 3.0f;   // scales direct light, GI injection and the sun disk alike
     f32 sunTemperatureK = 0.0f;   // Kelvin; 0 means use sunColor as authored
     f32 sunAngularDiameterDeg = 0.545f;   // disk size, and how fast a shadow edge softens
@@ -1151,7 +1161,9 @@ public:
 };
 
 // Converts a colour temperature in Kelvin to LINEAR sRGB, normalised so the brightest channel is 1.
-// Clamped to 1000..15000 K.
+// Clamped to 1000..15000 K. LINEAR: a caller storing this into a display-encoded field (sunColor,
+// lightColor) must re-encode with pow(x, 1/2.2) first, or every downstream pow(x, 2.2) decode
+// reads it twice.
 void blackbodySrgb(f32 kelvin, f32 outRgb[3]);
 
 // Creates the first available device in the desc's preference order.

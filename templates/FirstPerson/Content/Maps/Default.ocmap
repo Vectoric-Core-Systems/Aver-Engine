@@ -4,7 +4,7 @@ ID 0x122E9F7824A2AF12
 NAME Range
 BUILD 0
 ALGO 3
-SUN dir 0.304027 0.406402 0.861629 color 1 0.98 0.92 lux 100000   # elev 59.5 azim 53.2
+SUN dir 0.304027 0.406402 0.861629 color 1 1 1 lux 100000   # elev 59.5 azim 53.2
 SKY model physical mie 0.0028 multiscatter 1.9 steps 32 aerial 4
 FOG exp density 2e-05 color 0.7 0.78 0.88
 

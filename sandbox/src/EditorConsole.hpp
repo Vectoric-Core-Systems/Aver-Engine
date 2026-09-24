@@ -1157,7 +1157,7 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
 
     // Not an f32, so it cannot go through stageClamped above -- clamped by hand, same [0,2] shape.
     t.push_back({"post.tonemap", VarType::U32, false,
-        "Which tone curve: 0 = per-channel Narkowicz/Hill, 1 = ACES matrixed, 2 = ACES on luminance only so hue/saturation survive any exposure (the default) (clamped to [0,2])",
+        "Which tone curve: 0 = per-channel Narkowicz/Hill (the default: gentlest toe, keeps dim bounce light visible), 1 = ACES matrixed, 2 = ACES on luminance only so hue/saturation survive any exposure (clamped to [0,2])",
         []{ rhi::IDevice* d = consoleDevice(); return vU32(d ? d->postProcess().tonemap : 0u); },
         [](ConsoleBatch& b, VarValue v){
             if (!b.seededPost) { b.post = b.device ? b.device->postProcess() : rhi::PostSettings{}; b.seededPost = true; }
@@ -1198,11 +1198,12 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
     // pt.*, not rhi.*: registered here only because this is the one variable table this file builds
     // with NO module guard (see consolePtLegacyEnvSlot()'s own comment for why that matters for the
     // path tracer specifically) -- not because this is per-device render state the way
-    // rhi.depthPrepass above is. ON reinstates root cause R5 for comparison only: the path tracer's
-    // diffuse-bounce miss returns the unmatched reference sky (skyColor/averSkyPhysical, 8x dimmer)
-    // instead of the SAME calibrated SH the raster ambient term uses (PtFrame gPtTrace.z). Default
-    // OFF matches the raster's diffuse sky lobe for lobe; camera rays and rays after a specular
-    // bounce use skyColor either way. See PtSceneView::setLegacyEnvironment.
+    // rhi.depthPrepass above is. ON reinstates root cause R5 for comparison only: every path-tracer
+    // miss returns the reference sky (skyColor/averSkyPhysical) instead of the SAME SH sky the raster
+    // ambient term and ReSTIR use (PtFrame gPtTrace.z). Default OFF: every INDIRECT miss, off any
+    // lobe, reads that SH sky; camera rays use skyColor either way. (With kSkyIrradianceCalibration 1
+    // since 2026-09-24 the two skies share a scale and differ only by the SH's L2 smoothing; under
+    // the old 8 the reference sky was 8x dimmer.) See PtSceneView::setLegacyEnvironment.
     t.push_back({"pt.legacyEnvironment", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: the path tracer's diffuse-bounce "
         "miss returns the unmatched reference sky instead of the same calibrated sky the raster "

@@ -31,7 +31,11 @@ void SkyAtmosphere::sunAngles(f32& elevationDeg, f32& azimuthDeg) const {
     azimuthDeg = std::atan2(y, x) * kRad;
 }
 
-// Converts a colour temperature in Kelvin to linear sRGB, normalised so the brightest channel is 1.
+// Converts a colour temperature in Kelvin to LINEAR sRGB, normalised so the brightest channel is
+// 1. LINEAR, NOT display-encoded -- SkyAtmosphere::sunColor and frameCB_.lightColor are both the
+// latter (every reader decodes them with pow(x, 2.2)), so a caller that stores this result into
+// either one directly has decoded it twice by the time a shader reads it back. Re-encode with
+// pow(x, 1/2.2) first; see D3D12Device::setSkyAtmosphere / VulkanDevice::setSkyAtmosphere.
 void blackbodySrgb(f32 kelvin, f32 outRgb[3]) {
     const f32 t = kelvin < 1000.0f ? 1000.0f : (kelvin > 15000.0f ? 15000.0f : kelvin);
     const f32 t2 = t * t;

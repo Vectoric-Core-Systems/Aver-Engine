@@ -500,9 +500,9 @@ int main() {
         check(allZero, "a degenerate sun direction projects to zeroes, not to NaN");
     }
 
-    AVER_INFO("luminance diffuse/direct share at calibration 1x vs 8x (R8, contrast-fix plan section "
-              "8 -- kSkyIrradianceCalibration left UNCHANGED per the user's call; this is a "
-              "plausibility probe, not a regression gate, and IS ALLOWED TO FAIL)");
+    AVER_INFO("luminance diffuse/direct share at calibration 1x (shipped since 2026-09-24) vs the old 8x "
+              "(R8, contrast-fix plan section 8; this is a plausibility probe, not a regression gate, "
+              "and IS ALLOWED TO FAIL)");
     {
         // e0 = (1,1,1), the plan's own choice for T4: an achromatic sun isolates the SHAPE of the
         // diffuse/direct split (how much of a Lambertian receiver's light is sky vs sun) from any
@@ -547,14 +547,14 @@ int main() {
             const f32 d1 = diffuseFraction(1.0f);
             const f32 d8 = diffuseFraction(8.0f);
             AVER_INFO("  {:>4.0f} deg: D(1x) = {:.4f}   D(8x) = {:.4f}", elevDeg, d1, d8);
-            // REPORTED, NOT CHECKED. The band's bounds are UNCONFIRMED and kSkyIrradianceCalibration was
-            // left unchanged on purpose, so an out-of-band D(8) is evidence for a future decision about the
-            // x8 calibration (contrast-fix plan R8), not a regression -- and a check() here would have made
-            // the whole suite read FAIL for it.
-            if (d8 < 0.08f || d8 > 0.30f)
-                AVER_WARN("  {:>4.0f} deg: D(8x) = {:.4f} is outside the clear-sky plausibility band [0.08, 0.30] "
-                          "(informational: evidence for the R8 calibration decision, not a failure)",
-                          elevDeg, d8);
+            // REPORTED, NOT CHECKED. kSkyIrradianceCalibration is 1 now (D3D12Device.cpp's packAtmosphere
+            // has why the old 8 was removed), so D(1x) is the shipped share and the one the band applies
+            // to. The band's bounds are still UNCONFIRMED, so an out-of-band value is evidence, not a
+            // regression -- and a check() here would make the whole suite read FAIL for it.
+            if (d1 < 0.08f || d1 > 0.30f)
+                AVER_WARN("  {:>4.0f} deg: D(1x) = {:.4f} is outside the clear-sky plausibility band [0.08, 0.30] "
+                          "(informational: evidence about the atmosphere model's diffuse share, not a failure)",
+                          elevDeg, d1);
         }
     }
 

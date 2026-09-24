@@ -2306,7 +2306,14 @@ void VulkanDevice::setSkyAtmosphere(const SkyAtmosphere& s) {
     frameCB_.lightDir[3] = 0.0f;
 
     f32 sun[3] = {s.sunColor[0], s.sunColor[1], s.sunColor[2]};
-    if (s.sunTemperatureK > 0.0f) blackbodySrgb(s.sunTemperatureK, sun);
+    if (s.sunTemperatureK > 0.0f) {
+        blackbodySrgb(s.sunTemperatureK, sun);
+        // Mirrors D3D12Device::setSkyAtmosphere: blackbodySrgb returns LINEAR sRGB, but
+        // lightColor is DISPLAY-ENCODED (packAtmosphere's e0 below and the shared HLSL prelude's
+        // srgbToLin(gLightColor) both decode it with pow(x, 2.2)), so the kelvin path has to
+        // re-encode here or a temperature-driven sun gets decoded twice.
+        for (int i = 0; i < 3; ++i) sun[i] = std::pow(std::fmax(sun[i], 0.0f), 1.0f / 2.2f);
+    }
     for (int i = 0; i < 3; ++i) frameCB_.lightColor[i] = sun[i];
     frameCB_.lightColor[3] = 0.0f;
 
@@ -2420,10 +2427,10 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
     // THE SAME CALIBRATION D3D12Device APPLIES, and it has to be the same or the two backends
-    // disagree about how much light the sky delivers -- see that copy for the measurement, why the
-    // sun is the calibrated one of the pair, and why 8 is empirical rather than derived. Change one,
+    // disagree about how much light the sky delivers -- see that copy for why it is 1 (the
+    // atmosphere's SH is already in the sun's units) and where the old 8 came from. Change one,
     // change both.
-    constexpr f32 kSkyIrradianceCalibration = 8.0f;
+    constexpr f32 kSkyIrradianceCalibration = 1.0f;
     for (int k = 0; k < 9; ++k) {
         for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i] * kSkyIrradianceCalibration;
         frameCB_.skySh[k][3] = 0.0f;

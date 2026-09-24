@@ -381,7 +381,10 @@ struct OcWorldEnv {
     bool hasSun = false;
     // Points TOWARD the light, matching rhi::SkyAtmosphere::sunDirection.
     f64 sunDir[3] = {-0.5481, 0.3838, 0.7431};
-    f64 sunColor[3] = {1.0, 0.98, 0.92};
+    // Top-of-atmosphere colour, matching rhi::SkyAtmosphere::sunColor. White is the physical
+    // default -- the physical sky tints it by elevation on its own, so a warm default here would
+    // double it.
+    f64 sunColor[3] = {1.0, 1.0, 1.0};
     f64 sunLux = 100000.0;
     // Kelvin, and 0 means "use sunColor as authored" -- rhi::SkyAtmosphere spells it the same way,
     // so this is that field's convention rather than a sentinel of this format's invention.

@@ -214,7 +214,7 @@ struct ProjectDesc {
     // from are recorded at RHI.hpp:196-216). 0 is also the mode every recorded gate baseline in
     // scripts/ was measured through, so a project that exists to reproduce one has to be able to say
     // so in the file rather than on a command line nobody will remember to pass.
-    int postTonemap      = -1;    // RENDER.TONEMAP  0/1/2; -1 keeps PostSettings' own default (2)
+    int postTonemap      = -1;    // RENDER.TONEMAP  0/1/2; -1 keeps PostSettings' own default (0)
 
     // True when the manifest stated at least one RENDER.* key.
     //

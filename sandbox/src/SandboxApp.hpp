@@ -3496,7 +3496,9 @@ private:
     // Every selected entity's (world transform, mesh id) for this frame's outline pass. Rebuilt
     // during the draw walk and cleared right after drawing, so it can never describe a stale set.
     std::vector<std::pair<Mat4, u64>> selectionOutlines_;
-    f32 sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;
+    // Top-of-atmosphere colour, mirroring rhi::SkyAtmosphere::sunColor's own default -- white,
+    // since the physical sky tints it by elevation on its own.
+    f32 sunColor_[3]={1.0f,1.0f,1.0f}, sunAmbient_=1.0f;
     // THESE NUMBERS MUST STAY THE FORMAT'S. They are the editor's mirror of sky_.zenith/horizon, and
     // the frame loop copies them OVER sky_ every frame (the "FROZEN: sunDirection stays unnormalised"
     // block, SandboxApp.cpp:2692), so rhi::SkyAtmosphere's own defaults at RHI.hpp:253 never survive

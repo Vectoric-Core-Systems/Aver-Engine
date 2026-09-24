@@ -433,7 +433,9 @@ private:
     // --- environment ---
     rhi::SkyAtmosphere sky_;
     rhi::PostSettings  post_;
-    f32 sunColor_[3]  = {1.0f, 0.96f, 0.90f};
+    // Top-of-atmosphere colour, mirroring rhi::SkyAtmosphere::sunColor's own default -- white,
+    // since the physical sky tints it by elevation on its own.
+    f32 sunColor_[3]  = {1.0f, 1.0f, 1.0f};
     f32 sunAmbient_   = 1.0f;
     f32 skyZenith_[3] = {0.24f, 0.45f, 0.85f};
     f32 skyHorizon_[3]= {0.72f, 0.83f, 0.95f};

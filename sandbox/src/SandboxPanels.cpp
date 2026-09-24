@@ -1810,6 +1810,10 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             ImGui::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
         } else {
             ImGui::ColorEdit3("Colour", sunColor_);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("White (255, 255, 255) is the physical default -- the light\n"
+                                  "arriving at the top of the atmosphere. The physical sky tints\n"
+                                  "it toward orange by elevation on its own.");
         }
         ImGui::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
         // hasLevelSun_ sits inside SandboxApp.hpp's big AVER_MODULE_SCENE block, beside

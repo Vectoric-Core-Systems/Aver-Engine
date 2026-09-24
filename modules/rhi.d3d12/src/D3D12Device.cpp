@@ -4318,7 +4318,15 @@ void D3D12Device::setSkyAtmosphere(const SkyAtmosphere& s) {
     frameCB_.lightDir[3] = 0.0f;
 
     f32 sun[3] = {s.sunColor[0], s.sunColor[1], s.sunColor[2]};
-    if (s.sunTemperatureK > 0.0f) blackbodySrgb(s.sunTemperatureK, sun);
+    if (s.sunTemperatureK > 0.0f) {
+        blackbodySrgb(s.sunTemperatureK, sun);
+        // blackbodySrgb hands back LINEAR sRGB, but lightColor is DISPLAY-ENCODED -- s.sunColor
+        // above is authored that way, and every reader (packAtmosphere's e0 a few lines below,
+        // the shared HLSL prelude's srgbToLin(gLightColor)) decodes it with pow(x, 2.2). Without
+        // this re-encode a kelvin-driven sun was decoded TWICE: once inside blackbodySrgb's own
+        // XYZ->linear-sRGB matrix, and again by every one of those readers.
+        for (int i = 0; i < 3; ++i) sun[i] = std::pow(std::fmax(sun[i], 0.0f), 1.0f / 2.2f);
+    }
     for (int i = 0; i < 3; ++i) frameCB_.lightColor[i] = sun[i];
     frameCB_.lightColor[3] = 0.0f;
 
@@ -4464,40 +4472,26 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     // wants the sky's irradiance wants the same nine numbers.
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
-    // THE SKY AND THE SUN WERE NOT ON THE SAME SCALE, and the sun is the one that is calibrated.
+    // THE SKY IS ALREADY ON THE SUN'S SCALE -- 1, NOT THE 8 THIS USED TO BE.
     //
-    // A level authors the sun in LUX and LevelSky.hpp converts it with a documented divisor --
-    // `sunLux / (100000.0 / 3.0)` -- so intensity 3 IS 100,000 lux and one engine unit is 33,333
-    // lux. Nothing equivalent was ever applied to the sky: these nine coefficients go to the shader
-    // exactly as the atmosphere produced them, and skyLightIntensity multiplies them by an authored
-    // number that therefore means "1x of an uncalibrated quantity".
+    // The atmosphere's source term is sigma * phase * sunTransmittance * E0 (Atmosphere.cpp), so these
+    // coefficients are radiance in E0's own units and need no conversion. Integrated over the upper
+    // hemisphere they give a clear-sky diffuse share of ~16% on a horizontal surface at 45 degrees of
+    // sun elevation -- inside AtmosphereTest's 15-30% gate for the dome, and where a real clear sky
+    // sits (10-20% of the sun's horizontal irradiance).
     //
-    // MEASURED, PTTest's Default map (open sky, nothing occluding anything), exposure 1, luminance
-    // percentiles of the viewport with the sun unchanged in every row:
+    // THE 8 CAME FROM A DISPLAY-SPACE MEASUREMENT: luminance percentiles of a tonemapped frame (p50
+    // 119 -> 125 with sky light 0 -> 1), with the p50 change divided by the MAX pixel, which sits on
+    // the tonemap's shoulder. The same post-tonemap-metric trap that once "measured" NRD losing 40-80%
+    // of GI. It made the diffuse sky ~1.5x the sun's own horizontal irradiance -- outdoor shadows at
+    // ~40% of sunlit and blue, where physics says ~10-20% -- while the visible dome and reflections
+    // stayed at 1x, so the sky lit the scene 8x brighter than it looked. Removed on the owner's call
+    // (2026-09-24). Judge any future sky-scale change in linear HDR (--tonemap 0), never on 8-bit.
     //
-    //   sky light 0   p50 119   max 237
-    //   sky light 1   p50 125   max 237
-    //   sky light 8   p50 157   max 237
-    //
-    // Out of gamma, the sky at its authored strength adds ~0.02 linear against direct sun at 0.86 --
-    // it delivers 2.3% of the illumination. A real clear sky delivers 15-20%. Indoors, where the sky
-    // through the openings is ALL the light there is, that shortfall is the whole picture: the
-    // median pixel of the Sponza arcade sat at 8/255 while sunlit stone correctly reached 237.
-    //
-    // 8 IS EMPIRICAL AND IS LABELLED AS SUCH. It is 18% / 2.3%, the factor that puts the diffuse
-    // sky where the physics says it should sit, and it matches what looked right by eye
-    // independently. It is NOT derived from the scattering integral, and the honest reading is that
-    // the atmosphere model under-produces diffuse irradiance -- single-versus-multiple scattering is
-    // the obvious suspect (the level carries `multiscatter 1.9`). Fixing that properly would replace
-    // this constant with a derivation and is its own piece of work; this makes the engine ship a
-    // physically sized sky in the meantime.
-    //
-    // APPLIED HERE, TO THE SH ONLY, on purpose. These coefficients feed the AMBIENT term and nothing
-    // else -- the visible sky dome is shaded from the atmosphere directly -- so this changes how much
-    // light the sky delivers without changing what the sky looks like. Scaling skyLightIntensity
-    // instead would have been wrong twice over: applyLevelSky writes that field back out on save, so
-    // a scale applied on load would compound on every round trip.
-    constexpr f32 kSkyIrradianceCalibration = 8.0f;
+    // Kept as a named constant so skyLightIntensity (an authored multiplier, written back on save)
+    // is never the place a calibration gets folded in: a scale applied on load would compound on
+    // every round trip. The Vulkan twin carries the same value.
+    constexpr f32 kSkyIrradianceCalibration = 1.0f;
     for (int k = 0; k < 9; ++k) {
         for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i] * kSkyIrradianceCalibration;
         frameCB_.skySh[k][3] = 0.0f;

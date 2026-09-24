@@ -205,7 +205,9 @@ std::string startLevelText(const std::string& name) {
     // afternoon rather than noon: an overhead sun flattens every surface it lights and hides the
     // shadow work, while this one still shows normal maps, shadow softness and the atmosphere's
     // forward scattering at once.
-    s += "SUN elev 59.5 azim 53.2 color 1 0.98 0.92 lux 100000\n";
+    // color 1 1 1: white, the light arriving at the top of the atmosphere. The physical sky below
+    // tints it by elevation on its own, so an authored warm bias here would double-count that.
+    s += "SUN elev 59.5 azim 53.2 color 1 1 1 lux 100000\n";
     // PHYSICAL sky, the engine's real model: Rayleigh, Cornette-Shanks Mie, an ozone tent and a
     // Chapman-function transmittance.
     //
