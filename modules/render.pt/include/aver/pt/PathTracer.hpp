@@ -139,20 +139,29 @@ struct PtDispatch {
     // its arithmetic is bit-identical to before. PtSceneView opts in.
     u32      rouletteDepth = 0;
 
-    // R5/F6 (contrast-fix plan): a MISS following a cosine-hemisphere-sampled bounce reads
-    // averSkyRadianceCheap() -- the SAME calibrated, SH-sourced sky the raster's diffuse ambient and
-    // ReSTIR already use -- instead of the raw, uncalibrated skyColor() every miss used before. See
-    // pt_pathtrace.hlsl's ptEnvironment/lastDiffuse comments for the full arithmetic; camera rays and
-    // a miss straight after a SPECULAR or dielectric bounce are unaffected either way, matching the
-    // raster's own specular reflections (also uncalibrated skyColor()).
+    // R5/F6 (contrast-fix plan): every INDIRECT miss -- any bounce past the camera ray, off ANY lobe
+    // (diffuse, the GGX branch or a dielectric reflect/refract alike) -- reads
+    // averSkyRadianceCheap(dir) * gAmbient.r, the SAME calibrated, SH-sourced sky ReSTIR uses for its
+    // own indirect miss (voxi_restir.hlsli), instead of the raw, uncalibrated skyColor() every miss
+    // used before. See pt_pathtrace.hlsl's ptEnvironment comment for the full arithmetic. THIS USED
+    // TO BE DIFFUSE-ONLY, gated on a `lastDiffuse` flag that left a miss straight after a SPECULAR or
+    // dielectric bounce reading the uncalibrated dome -- an internal inconsistency (that lobe's
+    // escaped sky read 8x dimmer than a diffuse bounce's for the identical direction), not a
+    // deliberate match to the raster's own uncalibrated specular reflections as this comment used to
+    // claim. Only a CAMERA ray (bounce 0, no previous bounce to have been diffuse or specular) is
+    // still unaffected either way, matching the raster's own primary-visibility sky.
     //
     // DEFAULTS FALSE, i.e. corrected/matched -- the user's own call (contrast-fix plan section 8):
-    // the path tracer is meant as pt-compare's REFERENCE, and a reference whose sky is 8x dimmer than
-    // the renderer it is checking (kSkyIrradianceCalibration) cannot tell the two apart. true
+    // the path tracer is meant as pt-compare's REFERENCE, and a reference whose sky was 8x dimmer than
+    // the renderer it checked (kSkyIrradianceCalibration, 8 until 2026-09-24 and 1 since, so the two
+    // skies now differ only by the SH's L2 smoothing) could not tell the two apart. true
     // restores the old, unmatched behaviour, byte-identical to before this field existed, for
     // comparison only -- see PtSceneView::setLegacyEnvironment. PtFurnaceTest never sets this either:
     // averSkyRadianceCheap() returns averFurnaceL() under the furnace exactly as skyColor() does
-    // (shared_prelude.hlsl), so which branch fires cannot change the furnace's arithmetic.
+    // (shared_prelude.hlsl), and the *gAmbient.r factor is a no-op there too -- PtFurnaceTest only
+    // ever runs behind SandboxApp::setPtFurnaceTest(), which forces skyLightIntensity (gAmbient.r) to
+    // 1 the same way the RASTER furnace test already must for voxi_restir.hlsli's identical term to
+    // read L unmodified -- so which branch fires still cannot change the furnace's arithmetic.
     bool     legacyEnvironment = false;
 };
 

@@ -76,7 +76,8 @@ cbuffer PtFrame : register(b4) {
     float4 gPtTrace;     // x ray bias in cm, y tMax in cm, z legacy-environment bit (R5, see
                          // ptEnvironment below: >= 0.5 is the old unmatched skyColor()-everywhere
                          // reference kept for comparison, < 0.5 is the default, matched to the
-                         // raster's diffuse sky), w spare
+                         // raster: every INDIRECT miss -- any bounce past the camera ray, any lobe --
+                         // reads the calibrated SH sky), w spare
 };
 
 // THE DELIBERATE DEFECTS. They are shipped, not commented out, because a check that has never been
@@ -172,13 +173,19 @@ float3 ptCosineHemisphere(float3 n, float u1, float u2) {
 // UNCALIBRATED (R5 in the contrast-fix plan). skyColor() under the physical atmosphere is
 // averSkyPhysical(dir) (shared_prelude.hlsl), which the raster's own ambient/ReSTIR sky
 // (averSkyRadianceCheap/averSkyIrradiance, also shared_prelude.hlsl) does NOT go through --
-// those are multiplied by kSkyIrradianceCalibration (8x, D3D12Device.cpp/VulkanDevice.cpp)
-// before this shader ever sees them. A miss on a CAMERA ray or straight after a SPECULAR bounce
-// still wants exactly this uncalibrated value (it is what a mirror or the primary view actually
-// sees, matching the raster's own specular reflections at voxi.hlsl:1146/1148, also uncalibrated).
-// A miss straight after a DIFFUSE (cosine-hemisphere) bounce is the one case this function's
-// answer is 8x dimmer than what the raster's diffuse lobe would credit for the identical
-// direction -- see the call site below, and lastDiffuse's own comment on the bounce loop.
+// those are the atmosphere's L2 spherical-harmonic fit, scaled by kSkyIrradianceCalibration
+// (D3D12Device.cpp/VulkanDevice.cpp; 1 since 2026-09-24, 8 before -- the "8x dimmer" below dates
+// from then) before this shader ever sees them. ONLY a miss on the CAMERA RAY (bounce 0, b == 0 in the loop
+// below) wants exactly this uncalibrated value -- it is what the primary view and a mirror's first
+// reflection actually see, matching the raster's own primary sky and its specular reflections at
+// voxi.hlsl:1146/1148, also uncalibrated. Every INDIRECT miss (bounce > 0) used to fall back to this
+// same uncalibrated value for a SPECULAR/GGX or dielectric bounce while a DIFFUSE bounce alone was
+// routed to the calibrated averSkyRadianceCheap() at the call site below -- an inconsistency inside
+// this one integrator, not merely a mismatch against the raster: two lobes bouncing off the same
+// point in the same direction and escaping would read skies 8x apart. Fixed at the call site (see
+// there): now every indirect miss, regardless of which lobe produced it, reads the calibrated sky,
+// and this uncalibrated function is reached only by a camera-ray miss or by the legacy-environment
+// bit restoring the old unmatched behaviour outright.
 float3 ptEnvironment(float3 dir) { return skyColor(dir); }
 
 // ---- the metal/rough lobe -----------------------------------------------------------------------
@@ -653,19 +660,6 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
         float3 throughput = float3(1, 1, 1);
         float3 radiance   = float3(0, 0, 0);
         uint   depth = 0;
-        // R5/F6: true when the PREVIOUS bounce's scatter direction (the `dir` about to be traced)
-        // was drawn from a cosine-weighted hemisphere (a Lambertian or the diffuse half of the
-        // two-lobe GGX branch), false for a camera ray, a specular GGX bounce or a dielectric
-        // reflect/refract. Read only by the miss branch just below, to decide which environment
-        // lobe a MISS along `dir` should charge: false stays skyColor()'s uncalibrated dome
-        // (matching the raster's specular reflections and the camera's own primary-ray sky), true
-        // (with the legacy bit off) switches to averSkyRadianceCheap(), the SAME calibrated,
-        // SH-sourced sky the raster's diffuse ambient and ReSTIR already read -- so a diffuse
-        // bounce that escapes is matched lobe-for-lobe against the renderer being referenced,
-        // rather than being 8x dimmer than it (R5, kSkyIrradianceCalibration). Declared once per
-        // SAMPLE (outside the bounce loop) and starts false, so a camera ray -- the b=0 miss, with
-        // no previous bounce at all -- is correctly never treated as diffuse-sourced.
-        bool lastDiffuse = false;
 
         // <= bounce, not < : the last iteration is allowed to MISS and collect the environment,
         // it is only forbidden to scatter again. Off by one here would make a "1 bounce" path
@@ -676,12 +670,29 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
             if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering, rough, metal)) {
                 // gPtTrace.z (R5/F6): >= 0.5 is the legacy bit, ON restoring skyColor() on every
                 // miss unconditionally (byte-identical to what this line was before this change).
-                // The default, < 0.5, matches the raster lobe by lobe: diffuse uses the calibrated
-                // SH sky (averSkyRadianceCheap, shared_prelude.hlsl -- returns averFurnaceL() under
-                // the furnace exactly as skyColor() does, so PtFurnaceTest's oracle is unaffected),
-                // specular and camera rays keep skyColor(). See lastDiffuse's own comment above.
-                radiance += throughput * ((gPtTrace.z < 0.5 && lastDiffuse) ? averSkyRadianceCheap(dir)
-                                                                             : ptEnvironment(dir));
+                // The default, < 0.5, matches the raster: b == 0 is a CAMERA ray with no previous
+                // bounce at all, and keeps skyColor()'s uncalibrated dome -- what the primary view
+                // and a mirror's first reflection actually see. b > 0 is an INDIRECT miss, off ANY
+                // lobe (diffuse, the GGX branch or a dielectric reflect/refract alike -- the lobe
+                // used to matter here, via a `lastDiffuse` flag that only a diffuse-sourced bounce
+                // set, and that was the bug: a specular or dielectric bounce escaping in the exact
+                // same direction as a diffuse one read 8x dimmer for no physical reason), and reads
+                // the SAME calibrated sky ReSTIR does for its own indirect miss (voxi_restir.hlsli:
+                // averSkyRadianceCheap(dir) * gAmbient.r) -- the *gAmbient.r was the other half of
+                // this same bug: this line omitted it even for the one lobe (diffuse) it did route
+                // to averSkyRadianceCheap before, so a non-default skyLightIntensity silently applied
+                // to the raster's ambient and not to this reference's. averSkyRadianceCheap() returns
+                // averFurnaceL() under the furnace exactly as skyColor() does (shared_prelude.hlsl),
+                // and PtFurnaceTest's own furnace setup (SandboxApp::setPtFurnaceTest) forces
+                // skyLightIntensity to 1 the same way its RASTER furnace test already must for
+                // voxi_restir.hlsli's identical `* gAmbient.r` term to read L unmodified -- so
+                // gAmbient.r is exactly 1.0 under every furnace configuration this ships and the new
+                // multiply is a no-op there, leaving PtFurnaceTest's escaped-fraction identity and
+                // every energy-conservation check it makes untouched.
+                const bool indirectMiss = b > 0;
+                radiance += throughput * ((gPtTrace.z < 0.5 && indirectMiss)
+                                               ? averSkyRadianceCheap(dir) * gAmbient.r
+                                               : ptEnvironment(dir));
                 escaped += 1.0;
                 break;
             }
@@ -733,7 +744,6 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                 // reflection folded into the reflection branch -- so there is no failure case here
                 // to break out of the loop for, unlike the Lambertian branch's cosTheta guard below.
                 ptScatterDielectric(dir, nWS, entering, ior, defect, rng, d, weight);
-                lastDiffuse = false;   // R5/F6: reflect/refract, never cosine-hemisphere
             } else if (ptHasSpecular(rough)) {
                 // TWO LOBES, ONE SAMPLE. Drawing from both and adding would double the ray count for
                 // an estimator that is already unbiased with one, so a single uniform picks which
@@ -747,12 +757,10 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                     d = ptSampleGGX(nWS, V, rough, ptRand(rng), ptRand(rng));
                     if (!(dot(d, nWS) > 0.0)) break;   // sampled below the horizon; this path ends
                     weight = ptScatterSpecular(F0, rough, nWS, V, d) / pSpec;
-                    lastDiffuse = false;   // R5/F6: the GGX lobe, not cosine-hemisphere
                 } else {
                     d = ptCosineHemisphere(nWS, ptRand(rng), ptRand(rng));
                     const float cosTheta = dot(d, nWS);
                     if (!(cosTheta > 0.0)) break;
-                    lastDiffuse = true;   // R5/F6: this branch's `d` IS cosine-hemisphere-sampled
                     // The cosine-weighted weight is the diffuse albedo (see ptScatter), scaled by
                     // (1 - F) so the two lobes together cannot return more energy than arrived.
                     // Fresnel at normal incidence rather than per-direction: the diffuse lobe has no
@@ -771,7 +779,6 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                 float cosTheta = dot(d, nWS);
                 if (!(cosTheta > 0.0)) break;
                 weight = ptScatter(albedo, cosTheta, defect);
-                lastDiffuse = true;   // R5/F6: the pure-Lambertian branch, cosine-hemisphere-sampled
             }
 
             throughput *= weight;

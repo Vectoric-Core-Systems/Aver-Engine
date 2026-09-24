@@ -197,8 +197,9 @@ public:
     u32  quality() const { return quality_; }
 
     // R5/F6 (contrast-fix plan): true restores the pre-fix reference sky (skyColor() on every miss,
-    // unmatched to the raster's calibrated diffuse ambient); false (the default PtDispatch::
-    // legacyEnvironment already carries) is the matched, corrected environment. Idempotent, like
+    // unmatched to the raster's calibrated indirect ambient); false (the default PtDispatch::
+    // legacyEnvironment already carries) is the matched, corrected environment -- every indirect
+    // miss, off any lobe, not diffuse alone. Idempotent, like
     // setQuality above -- safe to call every frame from wherever the caller stores the console/CLI
     // slot. A change RE-ARMS ACCUMULATION (resets sampleCursor_, not the scene or the target: no
     // acceleration structure or resolution is affected) because every sample already summed into the
@@ -329,19 +330,29 @@ private:
     // that a reader does not take the old absolute as a reason not to ask.
     static constexpr u32 kAccumWidthLow  = 480;
     static constexpr u32 kAccumHeightLow = 270;
-    static constexpr u32 kMaxBounces  = 4;
+    // RAISED 4 -> 12 (contrast-fix plan): an interior lit only through a real opening -- Sponza's
+    // arcade is the case that exposed it -- gets most of its light from the SECOND and later bounces,
+    // and the escaped-fraction series (see PtFurnaceTest's cave/4-bounce vs cave/32-bounce configs
+    // for the same identity measured directly) has not converged anywhere near 4. Cost is kept
+    // bounded by Russian roulette, not by the bounce cap itself -- see kRouletteDepth immediately
+    // below, which starts culling dim paths at bounce 2 regardless of how high this constant is set,
+    // so raising it spends traversal only on paths that still carry enough throughput to matter.
+    static constexpr u32 kMaxBounces  = 12;
     // The first bounce Russian roulette may terminate a path at; see PtDispatch::rouletteDepth for
     // the technique and for why it is off unless a caller asks. THIS view asks and PtFurnaceTest does
     // not, which is the whole reason the switch is a dispatch field rather than a shader define.
     //
-    // 2, NOT 0, and with kMaxBounces at 4 that leaves bounces 2, 3 and 4 eligible. Bounces 0 and 1
-    // carry nearly all of a pixel's energy, so rouletting them buys almost no traversal -- a path
-    // killed at b=0 skips at most four iterations the miss/horizon exits often skip anyway -- while
-    // adding variance exactly where the image is brightest and any noise is most visible.
+    // 2, NOT 0, and with kMaxBounces at 12 that leaves bounces 2 through 12 eligible -- eleven
+    // chances to cull a path, not three, which is what keeps the cost of raising kMaxBounces from
+    // scaling anywhere near linearly with it (a path that has scattered off a few dark surfaces by
+    // bounce 5 or 6 is rouletted out long before it would ever reach 12). Bounces 0 and 1 stay
+    // exempt regardless: they carry nearly all of a pixel's energy, so rouletting them buys almost no
+    // traversal while adding variance exactly where the image is brightest and any noise is most
+    // visible.
     //
-    // MEASURED, and it is the largest single win available to this integrator. Sponza at Epic
-    // (1280x720, 4 bounces, 8 spp/step), --no-vsync, --gpu-timing, same camera, only this constant
-    // differing:
+    // MEASURED, and it is the largest single win available to this integrator -- AT THE TIME, WHEN
+    // kMaxBounces WAS STILL 4. Sponza at Epic (1280x720, 4 bounces, 8 spp/step), --no-vsync,
+    // --gpu-timing, same camera, only this constant differing:
     //
     //     kRouletteDepth 0 (off) -- "PT accumulate" 44.72 ms
     //     kRouletteDepth 2       -- "PT accumulate" 28.68 ms      36% cheaper
@@ -350,6 +361,12 @@ private:
     // cost gone with a bit-identical probe -- is what "unbiased" means in practice, and it is the
     // check to repeat if this constant is ever changed. A roulette that CHANGED the probe would mean
     // the throughput division was wrong, not that the estimator had been tuned.
+    //
+    // NOT RE-MEASURED AT kMaxBounces=12 (this change raised the cap without re-running the above):
+    // the percentage saved should only grow, since eight more bounces means eight more chances for a
+    // dim path to be culled before it pays a traversal, but that is reasoning, not a number -- treat
+    // the two readings above as describing the 4-bounce configuration they were taken under, not the
+    // current default, until someone reruns this exact --gpu-timing comparison at 12.
     static constexpr u32 kRouletteDepth = 2;
     // 8 samples per still frame. THE TRACE COUNT IS TWO PER BOUNCE, NOT ONE, and this comment said
     // one for as long as next-event estimation has existed: the bounce ray is joined by ptDirectSun's

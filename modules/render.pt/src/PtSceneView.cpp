@@ -707,10 +707,15 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     // TWO TRACES PER BOUNCE, NOT ONE. This block used to read "(bounces+1)*samples = 5*8 = 40
     // RayQuery traces per pixel" and tabulate from that. It counted only the bounce ray and silently
     // omitted ptDirectSun's next-event shadow ray, which fires at every non-dielectric hit and whose
-    // own comment (pt_pathtrace.hlsl:306) says so in capitals. The real budget is (bounces+1)*2 = 10
-    // traces per sample, 80 per pixel per dispatch, so every figure below DOUBLES:
+    // own comment (pt_pathtrace.hlsl:306) says so in capitals. The real budget is (bounces+1)*2
+    // traces per sample -- 26 now that kMaxBounces is 12, not the 10 it was at the old 4-bounce
+    // default -- times kSamplesPerStep (8) per pixel per dispatch, so every figure below is
+    // RECOMPUTED FOR 12 BOUNCES, not merely doubled the way this comment once said:
     //
-    //     Low 480x270  10.4M | Medium 640x360  18.4M | High 960x540  41.5M | Epic 1280x720  73.7M
+    //     Low 480x270  27.0M | Medium 640x360  47.9M | High 960x540  107.8M | Epic 1280x720  191.7M
+    //
+    // (Arithmetic, not a fresh GPU measurement -- pixels * (bounces+1) * 2 * kSamplesPerStep, same
+    // formula the 4-bounce figures below it were built from, just with the corrected bounce count.)
     //
     // VoxiRenderer's own ray-traced sun shadow -- the only OTHER ray-traced pass in this engine, and
     // one already characterised against a recorded TDR history on this machine -- defaults to 4 rays
@@ -718,21 +723,28 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     // "because there is a recorded TDR history on this machine"): at a modest 1280x720 scene that is
     // 4 * 921,600 = ~3.7M traces/frame.
     //
-    // SO THE TOP RUNG IS 20x THAT REFERENCE -- not the 10x this comment said after the ladder landed,
-    // and not the "same order of magnitude" it said before that while the accumulator was hardcoded
-    // at 480x270. Each reading was correct for the one thing it was written about and went stale
-    // without anything failing.
+    // SO THE TOP RUNG IS NOW ~52x THAT REFERENCE (191.7M / 3.7M), not the 20x this comment said at
+    // 4 bounces, and not the 10x it said after the ladder first landed, and not the "same order of
+    // magnitude" it said before that while the accumulator was hardcoded at 480x270. Each reading was
+    // correct for the one thing it was written about and went stale without anything failing.
     //
-    // AND IT INVERTS A COMPARISON THAT WAS DRAWN FROM THE OLD NUMBER: 73.7M here against ray-driven
-    // primary visibility's ~29.7M at 2600x1430 means this view fires roughly 2.5x MORE rays than the
-    // pass it was claimed to be several times cheaper than. See kAccumLadder's withdrawn cost table.
+    // AND THE INVERTED COMPARISON GOT WORSE: 191.7M here against ray-driven primary visibility's
+    // ~29.7M at 2600x1430 means this view now fires roughly 6.5x MORE rays than the pass it was
+    // originally claimed to be several times cheaper than (2.5x, at the old 4-bounce figure). See
+    // kAccumLadder's withdrawn cost table.
     //
-    // MEASURED, THOUGH, AND NOT A PROBLEM ON THIS HARDWARE: an Epic dispatch over a real streamed
-    // scene (889 surfaces, ~3.3M vertices) times at 3.5-9.2 ms, two to three orders of magnitude
-    // inside the ~2 s TDR window. So this is recorded as a number that GREW UNGOVERNED rather than
-    // as a present danger -- if a slower ray-tracing GPU ever does trip a timeout here, the fix is
-    // to scale kSamplesPerStep down as the rung goes up (more dispatches, same traces each) rather
-    // than to cap the resolution, since the resolution is the entire point of the ladder.
+    // MEASURED, THOUGH, AND NOT A PROBLEM ON THIS HARDWARE -- AT THE OLD 4-BOUNCE DEFAULT: an Epic
+    // dispatch over a real streamed scene (889 surfaces, ~3.3M vertices) timed at 3.5-9.2 ms, two to
+    // three orders of magnitude inside the ~2 s TDR window. NOT RE-MEASURED at 12 bounces (this
+    // change raised the cap without re-running --gpu-timing): the trace count above is roughly 2.6x
+    // the old figure (208 vs 80 traces/pixel/dispatch), and Russian roulette (kRouletteDepth, above)
+    // culls a larger share of that than it did at 4 bounces since there are more eligible bounces for
+    // it to act on, so the real multiplier on wall-clock time is somewhere under 2.6x and unmeasured
+    // rather than assumed -- still expected to sit comfortably inside the TDR window given how much
+    // headroom the old reading had, but that is reasoning, not a number. If a slower ray-tracing GPU
+    // ever does trip a timeout here, the fix is to scale kSamplesPerStep down as the rung goes up
+    // (more dispatches, same traces each) rather than to cap the resolution, since the resolution is
+    // the entire point of the ladder.
     //
     // Unlike the shadow pass this is NOT issued every frame once the image has converged
     // (see the kMaxSamples check above) or while the camera is moving (see the reset above, which

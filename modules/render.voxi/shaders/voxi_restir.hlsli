@@ -89,6 +89,11 @@
 // on purpose -- a coarser mip is cheaper and no less right on average. See giTraceInitialCandidate.
 #define AVER_GI_HIT_TEX_CONE 0.1
 
+// Occupancy (CSResolve's alpha, voxi.hlsl ~3417) below which the F2 traced-hit voxel lookup treats a
+// trilinear tap as having no usable radiance to divide by, rather than dividing by a near-zero
+// footprint and amplifying quantisation noise into a spike -- see that branch's own comment.
+#define AVER_GI_VOX_MIN_OCC 0.05
+
 // REBLUR's hit-distance normalisation constants, MIRRORING aver::render::nrd::Denoiser::ReblurTuning
 // (modules/render.nrd/include/aver/render/nrd/NrdDenoiser.hpp), which is what actually configures the
 // denoiser. NRD normalises a hit distance by (A + |viewZ|*B) * lerp(C, 1, smc) and REQUIRES the
@@ -1011,8 +1016,36 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q2;
         q2.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r2); averRtProceedSolid(q2);
         if (q2.CommittedStatus() != COMMITTED_TRIANGLE_HIT) indY = averSkyRadianceCheap(dir2) * gAmbient.r;
-        else { const float3 uvw = voxelUVW(r2.Origin + dir2 * q2.CommittedRayT());
-               if (gVoxelParams.w > 0.5 && insideVolume(uvw)) indY = min(gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0).rgb, AVER_VOX_MAXRAD); }
+        else {
+            // THE VOXEL SHELL STRADDLE: CSResolve (voxi.hlsl ~3417) stores an occupied voxel as
+            // float4(meanRadiance, 1) and an empty one as float4(0,0,0,0) -- the volume is a
+            // one-voxel-thick SHELL of surfaces, not a solid fill. Sampling exactly ON the hit (the old
+            // `r2.Origin + dir2 * q2.CommittedRayT()`) puts the tap astride that shell, so trilinear
+            // filtering blends the lit texel with whichever unlit neighbours it straddles -- the empty
+            // far side of the shell, or the hollow interior of a thick wall -- and hands back exitant
+            // radiance already scaled down by roughly 0.5-0.75 before anything below even runs.
+            // Pulling the LOOKUP POINT half a voxel back along -dir2 (the direction this ray arrived
+            // FROM -- there is no fetched geometric normal at a RayQuery hit here, only the ray
+            // direction, so this stands in for "the hit's surface normal toward the room") re-centres
+            // the tap on the room side of the shell instead of on its seam. voxelWorldF2 is the same
+            // "one voxel, world units" quantity PSVoxelDebug/CSResolve's neighbours already compute
+            // (voxi.hlsl:3441, voxi_gi.hlsli:210) from the same gVoxelOrigin.w/gVoxelParams.x terms
+            // voxelUVW itself uses -- not a new cbuffer field.
+            const float voxelWorldF2 = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
+            const float3 uvw = voxelUVW(r2.Origin + dir2 * (q2.CommittedRayT() - voxelWorldF2 * 0.5));
+            if (gVoxelParams.w > 0.5 && insideVolume(uvw)) {
+                const float4 vox = gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0);
+                // Read the full float4 and normalise by occupancy (alpha) rather than the premultiplied
+                // mean CSResolve stores -- undoing exactly the darkening the shell-straddle comment
+                // above describes. Below AVER_GI_VOX_MIN_OCC there is effectively no occupied voxel left
+                // in the trilinear footprint to recover a radiance from, so this falls back to 0 (no
+                // information): the SAME value indY already carries into this branch whenever
+                // insideVolume(uvw) is false or the volume is disabled (indY's own declaration above
+                // defaults it to 0.0) -- not a new fallback, only that existing one made explicit for
+                // the low-occupancy case too.
+                indY = vox.a > AVER_GI_VOX_MIN_OCC ? min(vox.rgb / vox.a, AVER_VOX_MAXRAD) : 0.0;
+            }
+        }
         // U1's HALF-RES HISTORY (2.10 E) NEEDS THIS PATH'S OWN LUMINANCE, SEPARATELY FROM THE SKY IT
         // WAS COMPARED AGAINST -- only reachable here, at f2Path == 3u, the one path that actually
         // traced. averShadowLum is this file's own standing luminance reduction (Rec.709 weights,
