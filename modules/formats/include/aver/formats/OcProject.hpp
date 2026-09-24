@@ -92,6 +92,10 @@ struct ProjectDesc {
     // restirHistory, not the way it applies rtRenderMode.
     int rdStages           = -1; // RENDER.RDSTAGES         0 = single pass (default), 1 = staged,
                                   //                         2 = staged + half-rate GI
+    // RENDER.FOGOCCLUSION: voxi::Settings::fogOcclusion -- fog in-scatter scaled by how much sky the
+    // air along the view ray sees, so enclosed air stops glowing. A plain knob like RDSTAGES above:
+    // no ladder rung, so an absent key leaves the engine default (on) alone.
+    int fogOcclusion       = -1; // RENDER.FOGOCCLUSION     0/1 (engine default 1)
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
     int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]
@@ -230,7 +234,7 @@ struct ProjectDesc {
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
-               restirHistory >= 0 || rdStages >= 0 ||
+               restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||

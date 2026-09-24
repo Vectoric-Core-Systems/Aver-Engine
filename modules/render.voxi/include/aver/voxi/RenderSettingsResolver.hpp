@@ -177,6 +177,9 @@ struct Resolution {
     // identical reason giRestirMaxHistory is inert above ReSTIR GI -- see resolve()'s own comment on
     // this field for why it borrows rtRenderMode's reason chain rather than computing one of its own.
     FieldResolution rayDrivenStages;
+    // Occlusion-aware fog: built from the GI voxel volume, so it needs voxel GI itself -- the compute
+    // gate, then the GI tier not being Off.
+    FieldResolution fogOcclusion;
     DisableReason rtSubControls = DisableReason::None;
     DisableReason ptSubControls = DisableReason::None;
     bool denoiserGBufferWanted = false;
@@ -276,6 +279,18 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     // clamping to 0 on a failed prerequisite would read as a live choice (Single pass) rather than
     // an inert one. Inertness is carried by `reason` alone.
     r.rayDrivenStages.effective = r.rayDrivenStages.requested;
+
+    // ---- fogOcclusion: the air-visibility volume is built from the GI voxel volume ----
+    // Compute shaders first (Feature::GlobalIllumination's own device gate), then the GI tier -- the
+    // same order giMode's RT/GI chain uses, so a device limit and a project choice read differently.
+    r.fogOcclusion.requested = s.fogOcclusion ? 1u : 0u;
+    r.fogOcclusion.reason =
+        featureStatus(Feature::GlobalIllumination, d) != Status::Ready
+            ? DisableReason::RequiresComputeShaders
+            : (s.globalIllumination == Quality::Off ? DisableReason::RequiresGlobalIllumination
+                                                     : DisableReason::None);
+    r.fogOcclusion.effective =
+        (s.fogOcclusion && r.fogOcclusion.reason == DisableReason::None) ? 1u : 0u;
 
     // ---- refractionMode = 2 (RayTraced): RT hardware, RT tier not Off ----
     // The one field whose fallback is not "off": a request at or above RayTraced that cannot be

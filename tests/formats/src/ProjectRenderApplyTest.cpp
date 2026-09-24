@@ -106,6 +106,7 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.rtShadowDenoise == b.rtShadowDenoise &&
            a.rtRenderMode == b.rtRenderMode &&
            a.rayDrivenStages == b.rayDrivenStages &&
+           a.fogOcclusion == b.fogOcclusion &&
            a.ptBounces == b.ptBounces;
 }
 

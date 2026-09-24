@@ -1917,6 +1917,28 @@ void SandboxApp::buildRenderingSettings(int page) {
                 ImGui::SetTooltip("Cones in the diffuse gather, including the axial one.\n"
                                   "Changing Quality above re-derives this from the tier.");
         }
+        // OCCLUSION-AWARE FOG (Settings::fogOcclusion): lives on this page because it is built from
+        // the GI voxel volume, and greys with the same prerequisite (er.fogOcclusion.reason).
+        {
+            const bool fogOccGreyed = greysControl(er.fogOcclusion.reason);
+            ImGui::BeginDisabled(fogOccGreyed);
+            bool fogOcc = s.fogOcclusion;
+            if (ImGui::Checkbox("Fog respects occlusion", &fogOcc)) { s.fogOcclusion = fogOcc; changed = true; }
+            ImGui::EndDisabled();
+            uiReg_.track("project.gi.fogOcclusion");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Fog and haze only glow where the air can actually see the sky.\n"
+                                  "Without it, the fog inside a covered arcade or a room is lit as\n"
+                                  "if it were outdoors: a blue veil brighter than the walls behind it.\n\n"
+                                  "Built from the GI voxel volume (a small sky-visibility grid,\n"
+                                  "refreshed a slice per frame, ~0.2 ms), so it needs Global\n"
+                                  "Illumination on. Outdoor fog is unchanged.\n\n"
+                                  "Round-trips as RENDER.FOGOCCLUSION.");
+            if (fogOccGreyed) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.fogOcclusion.reason));
+            }
+        }
         ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
 
         // LIVE, CONSOLE-VAR-ONLY DEBUG PAINTS, beside the voxel-radiance one above: neither is a

@@ -124,6 +124,10 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // engine default (0, single pass) alone regardless of any rtRenderMode tier change just applied.
     if (project.rdStages >= 0) s.rayDrivenStages = static_cast<u32>(project.rdStages);
 
+    // RENDER.FOGOCCLUSION: the same plain-knob shape again -- no ladder rung, so an absent key keeps
+    // the engine default (on).
+    if (project.fogOcclusion >= 0) s.fogOcclusion = project.fogOcclusion != 0;
+
     // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
     // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
     // giRestirVisibility happened to already be live at.
@@ -545,6 +549,8 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     // above (giMode/denoiser's shape), never captureKnob's four-branch tier-aware rule -- there is no
     // ladder rung for a tier change to race against.
     project.rdStages           = static_cast<int>(requested.rayDrivenStages);
+    // RENDER.FOGOCCLUSION: unconditional capture, denoiser's shape (a bool, no tier to race).
+    project.fogOcclusion       = requested.fogOcclusion ? 1 : 0;
     project.refractionStrength = requested.refractionStrength;
     project.refractionEdgeFade = requested.refractionEdgeFade;
 }

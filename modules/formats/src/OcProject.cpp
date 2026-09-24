@@ -111,6 +111,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.rtRenderMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.RDSTAGES")) {
             if (t.size() > 1) out.rdStages = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.FOGOCCLUSION")) {
+            if (t.size() > 1) out.fogOcclusion = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PTBOUNCES")) {
             if (t.size() > 1) out.ptBounces = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.GICONES")) {
@@ -307,7 +309,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
-        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
+        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
         "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
         "RENDER.RESTIRHISTORY",
         "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
@@ -372,6 +374,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.RTSHADOWDENOISE", d.rtShadowDenoise);
     appendKey(owned, "RENDER.RTRENDERMODE", d.rtRenderMode);
     appendKey(owned, "RENDER.RDSTAGES", d.rdStages);
+    appendKey(owned, "RENDER.FOGOCCLUSION", d.fogOcclusion);
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
     appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
     appendKey(owned, "RENDER.GICONES", d.giCones);
