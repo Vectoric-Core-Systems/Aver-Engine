@@ -444,14 +444,18 @@ int main() {
               "before it");
 
         // Exactly 4 gAverHistoryWrite WRITE gates (store, surface history, NRD input, the new
-        // visibility write) plus the one NRD readback gate (gAverHistoryWrite && gw > 0u).
+        // visibility write) plus the NRD readback's TWO gates: the reprojected read b6a64126 added
+        // (gAverHistoryWrite && nrdReproject ...) and the decode it falls back to (gAverHistoryWrite &&
+        // gw > 0u) -- both keep a blended fragment from reading the opaque surface's denoised answer.
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
         const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && gw > 0u");
-        check(totalGates == 5 && readbackGates == 1,
+        const int reprojectGates = countOccurrences(t, "if (gAverHistoryWrite && nrdReproject");
+        check(totalGates == 6 && readbackGates == 1 && reprojectGates == 1,
               "voxi_restir.hlsli has exactly 4 gAverHistoryWrite write gates (store/surface-history/"
-              "NRD-input/visibility-write) plus the one NRD readback gate -- " +
+              "NRD-input/visibility-write) plus the NRD readback's two gates (reprojected read, decode) -- " +
               std::to_string(totalGates) + " total `if (gAverHistoryWrite` occurrences, " +
-              std::to_string(readbackGates) + " of them the readback");
+              std::to_string(readbackGates) + " decode + " + std::to_string(reprojectGates) +
+              " reprojected-read gate(s)");
     }
 
     // ---- 9. SOURCE ASSERTIONS: voxi_rt.hlsli's traceCone prototype and its own gate count ----
@@ -462,11 +466,13 @@ int main() {
         check(has(t, "averShadowLum"), "F2's traced-path luminance still uses this file's own "
                                         "averShadowLum reduction, not a second formula");
 
+        // No NRD readback gate here any more: df4122cc ("Ray-driven stops reading a denoised occlusion
+        // it did not produce") removed voxi_rt.hlsli's gAverHistoryWrite && nrdW > 0u read.
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
         const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && nrdW > 0u");
-        check(totalGates == 5 && readbackGates == 1,
+        check(totalGates == 4 && readbackGates == 0,
               "voxi_rt.hlsli has exactly 4 gAverHistoryWrite write gates (AO history/AO hit-distance/"
-              "RT-shadow tiled/RT-shadow untiled) plus the one NRD readback gate -- " +
+              "RT-shadow tiled/RT-shadow untiled) and no NRD readback gate (df4122cc) -- " +
               std::to_string(totalGates) + " total, " + std::to_string(readbackGates) + " readback");
     }
 
