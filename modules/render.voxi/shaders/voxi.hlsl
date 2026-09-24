@@ -417,6 +417,29 @@ RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
 // Stage S to Stage B.
 RWTexture2D<float4>       gRdSunVisTex : register(u12);
 
+// gRdGiTex / gRdAoTex -- MILESTONE 2's pair, splitting PSRayDriven's own diffuse-GI and sky-occlusion
+// answers the same way milestone 1 split its shadow answer above: one RGBA16F texel per pixel, each
+// written once by its own dedicated compute stage (CSRdGi / CSRdSkyOcc, further down this file, under
+// this same AVER_RT region) and read once by PSRayDriven's AVER_RD_SPLIT branch, further down still.
+// Like gRdSunVisTex, NEITHER is itself a history buffer: the real frame-to-frame state each answer
+// depends on (gGiReservoirs/gGiSurfPosHist/gGiSurfNrmHist for GI, gAoHist/gAoHitDistOut for sky
+// occlusion, all voxi_restir.hlsli/voxi_rt.hlsli-owned) is untouched by this pair -- these two textures
+// only ferry ONE frame's answer from their own compute stage to Stage B.
+//
+// kVoxiUavCount 13 -> 15 (VoxiRenderer.cpp, not this file) -- the next two free slots after
+// gRdSunVisTex's u12, same descriptor table every other stage already uses, so no SRV slot moves.
+//
+// gRdGiTex: rgb = giRestirIndirect's diffuse radiance, alpha unused. Written by CSRdGi only when GI is
+// actually ReSTIR this frame (gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5) -- the cone-traced
+// branch has no per-pixel history to split out this way and stays inside Stage B itself, unchanged.
+RWTexture2D<float4>       gRdGiTex     : register(u13);
+// gRdAoTex: r = rtSkyOcclusionTemporal's occlusion, g/b/a unused (a is 1 on every write so the texel is
+// never left at a defined-but-meaningless alpha). Written by CSRdSkyOcc only in the two cases where
+// PSRayDriven's own rdAo is still its un-gathered initial 1.0 -- ReSTIR supplies diffuse, or there is
+// no voxel GI at all -- because in cone-GI mode the occlusion rides the cone gather's own accumulator
+// and stays in the shade pass. See CSRdSkyOcc's own header for the exact gate.
+RWTexture2D<float4>       gRdAoTex     : register(u14);
+
 // The surface PSRayDriven reconstructs from a ray hit, minus everything that hit computed for itself
 // (bary, dir, N before its face-the-ray flip): what Stage S and Stage B's AVER_RD_SPLIT branch both
 // need afterward, and nothing they don't -- dpx/dpy (the shadow-ray footprint) and L (the light
@@ -2177,8 +2200,17 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // here the way PSMainVoxi's copy has to guard for.
     if (gVoxelParams.w > 0.5) {
         if (gGiRestirParams.x > 0.5) {
+#if AVER_RD_SPLIT
+            // STAGE B: read CSRdGi's already-resolved diffuse estimate instead of calling
+            // giRestirIndirect itself -- CSRdGi ran that same call for this pixel (see its own body,
+            // further down this file). rdAo is left untouched, at its own initial 1.0: that is exactly
+            // what giRestirIndirect's own `ao` out-param would have set it to too (see that function's
+            // header), so this branch and the #else below leave rdAo in the same state either way.
+            ind.diffuse = gRdGiTex[uint2(i.pos.xy)].rgb;
+#else
             ind.diffuse = giRestirIndirect(wpos, N, mul(float4(wpos, 1.0), gViewProj).w,
                                            i.pos.xy, (uint)gRtHistParams.z, rdAo);
+#endif
             giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind.diffuse);
             rdRestirSuppliedDiffuse = true;
         } else {
@@ -2350,6 +2382,19 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     }
 #elif AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     ind.occlusion    = gAmbientParams.x > 0.5
+#if AVER_RD_SPLIT
+                     // STAGE B: in the two cases CSRdSkyOcc actually ran for (ReSTIR supplies diffuse,
+                     // or there is no voxel GI at all -- CSRdSkyOcc's own header has the exact gate),
+                     // read its already-resolved answer instead of tracing again. In CONE-GI mode
+                     // CSRdSkyOcc never wrote this pixel's texel (occlusion rides the cone gather's own
+                     // accumulator instead), so this falls through to the SAME rtSkyOcclusionTemporal
+                     // call the non-split branch below makes -- the shade pass, not a dedicated stage,
+                     // is what answers sky occlusion for that estimator.
+                     ? ((gGiRestirParams.x > 0.5 || gVoxelParams.w <= 0.5)
+                        ? gRdAoTex[uint2(i.pos.xy)].r
+                        : rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo,
+                                                 rdAoGathered, false))
+#else
                      // false: THIS pass runs with the G-buffer OFF -- that is what selects it -- so
                      // gNrdAo was reprojected against motion vectors and depth this pass never
                      // wrote, and its answer is not about this frame. Reading it anyway was the
@@ -2358,6 +2403,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
                      // interior surface. Measured in rtSkyOcclusionTemporal's own header.
                      ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo,
                                               rdAoGathered, false)
+#endif
                      : rdAo;
 #else
     // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below
@@ -2487,6 +2533,41 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     return o;
 }
 
+// ---- STAGED RAY-DRIVEN COMPUTE STAGES: pixel -> NDC -> primary-ray direction, ONE PLACE ------------
+//
+// Pixel-centre NDC, the exact inverse of the ndc->pixel mapping this file and voxi_rt.hlsli already
+// use everywhere (this file's own rtReprojectReflection; voxi_rt.hlsli's rtReprojectHistory/
+// rtReprojectAo/rtAoSpatial/rtShadowSpatial): px = viewport.xy + float2(ndc.x*0.5+0.5,
+// 0.5-ndc.y*0.5) * viewport.zw. Solved for ndc at this pixel's CENTRE (pixel + 0.5), it equals what
+// VSky/SkyOut (modules/rhi/shaders/shared_prelude.hlsl:967-975) interpolates there: VSky emits
+// o.ndc = uv*2-1 with o.pos = float4(o.ndc, 1, 1), so the rasteriser's own NDC-to-viewport transform
+// is exactly the forward direction of the formula above, and this is its inverse.
+//
+// gSceneViewportCur, NOT gSceneViewport: the latter is LAST frame's rect (paired with gPrevViewProj,
+// for reprojection), and on any frame the docked view is resized or rescaled it would map a stage onto
+// the old pixel grid while Stage B shades the new one. The rect the rasteriser used for i.ndc/i.pos.xy
+// THIS frame is this one. (A shadow-ray FOOTPRINT still needs LAST frame's grid on purpose -- see
+// CSRdShadow's own neighbour-ray step, which keeps gSceneViewport separately and is untouched by this
+// helper.)
+//
+// FACTORED OUT OF CSRdVisibility AND CSRdShadow, which each inlined this exact sequence before this
+// task -- ONE function now, used by all four staged compute stages (CSRdVisibility, CSRdShadow,
+// CSRdGi, CSRdSkyOcc, all further down this file), so a future change to the mapping cannot update
+// three of the four and silently disagree in the fourth. The math is byte-for-byte what each of the
+// first two already computed. `ndc` comes back alongside `dir` because CSRdShadow's own shadow-ray
+// footprint (and PSRayDriven's) needs it for the neighbour-ray reconstruction, not because this
+// function does anything with it itself.
+float3 rdPrimaryRayDir(uint2 pixel, out float2 ndc) {
+    const float2 pxC = float2(pixel) + 0.5;
+    ndc.x = (pxC.x - gSceneViewportCur.x) / max(gSceneViewportCur.z, 1.0) * 2.0 - 1.0;
+    ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
+
+    // Same NDC-to-world-ray reconstruction as PSRayDriven's own primary ray (and PSVoxelDebug's),
+    // through the same gInvViewProj.
+    float4 far = mul(float4(ndc, 1.0, 1.0), gInvViewProj);
+    return normalize(far.xyz / far.w - gCamPos.xyz);
+}
+
 // ---- STAGE A: CSRdVisibility -- trace the primary ray, write the visibility record -----------------
 //
 // The visibility-only half of PSRayDriven's own trace block above (AVER_RD_SPLIT==0 branch): same
@@ -2508,28 +2589,8 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
 
-    // Pixel-centre NDC, the exact inverse of the ndc->pixel mapping this file and voxi_rt.hlsli already
-    // use everywhere (this file's own rtReprojectReflection; voxi_rt.hlsli's rtReprojectHistory/
-    // rtReprojectAo/rtAoSpatial/rtShadowSpatial): px = viewport.xy + float2(ndc.x*0.5+0.5,
-    // 0.5-ndc.y*0.5) * viewport.zw. Solved for ndc at this pixel's CENTRE (pixel + 0.5), it equals what
-    // VSky/SkyOut (modules/rhi/shaders/shared_prelude.hlsl:967-975) interpolates there: VSky emits
-    // o.ndc = uv*2-1 with o.pos = float4(o.ndc, 1, 1), so the rasteriser's own NDC-to-viewport transform
-    // is exactly the forward direction of the formula above, and this is its inverse.
-    //
-    // gSceneViewportCur, NOT gSceneViewport: the latter is LAST frame's rect (paired with
-    // gPrevViewProj, for reprojection), and on any frame the docked view is resized or rescaled it
-    // would map this dispatch onto the old pixel grid while Stage B shades the new one. The rect the
-    // rasteriser used for i.ndc/i.pos.xy this frame is this one. (CSRdShadow's shadow FOOTPRINT keeps
-    // gSceneViewport on purpose -- that is what PSRayDriven's own copy uses.)
-    const float2 pxC = float2(pixel) + 0.5;
     float2 ndc;
-    ndc.x = (pxC.x - gSceneViewportCur.x) / max(gSceneViewportCur.z, 1.0) * 2.0 - 1.0;
-    ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
-
-    // Same NDC-to-world-ray reconstruction as PSRayDriven's own primary ray (and PSVoxelDebug's),
-    // through the same gInvViewProj.
-    float4 far = mul(float4(ndc, 1.0, 1.0), gInvViewProj);
-    float3 dir = normalize(far.xyz / far.w - gCamPos.xyz);
+    float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RayDesc r;
     r.Origin    = gCamPos.xyz;
@@ -2582,15 +2643,11 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see that function's
-    // own comment for the derivation. Needed again here (not carried in the record) to rebuild `dir`
+    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
+    // own header for the derivation. Needed again here (not carried in the record) to rebuild `dir`
     // for rdSurfaceFromRecord's face-the-ray normal flip and for this shadow ray's own footprint.
-    const float2 pxC = float2(pixel) + 0.5;
     float2 ndc;
-    ndc.x = (pxC.x - gSceneViewportCur.x) / max(gSceneViewportCur.z, 1.0) * 2.0 - 1.0;
-    ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
-    float4 far = mul(float4(ndc, 1.0, 1.0), gInvViewProj);
-    float3 dir = normalize(far.xyz / far.w - gCamPos.xyz);
+    float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
@@ -2622,6 +2679,155 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
                                            (uint)max(gRtParams.y, 1.0));
 #endif
     gRdSunVisTex[pixel] = float4(sunVis, 1.0);
+}
+
+// ---- STAGE G: CSRdGi -- reconstruct the surface, resolve ReSTIR GI's diffuse estimate ---------------
+//
+// MILESTONE 2. Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the
+// same reconstruction Stage S and Stage B use), and runs the SAME giRestirIndirect call PSRayDriven's
+// single pass makes when ReSTIR GI is the active diffuse estimator -- same pixel-centre argument, so
+// the reservoir and surface-history buffers giRestirIndirect reads and writes (gGiReservoirs/
+// gGiSurfPosHist/gGiSurfNrmHist, u6/u7/u8, plus the NRD GI pair u9/t15 and the half-res visibility pair
+// u10/t16) mean the same thing whichever path is running.
+//
+// ONLY MEANINGFULLY DISPATCHED WHEN ReSTIR GI IS ACTUALLY THE CHOSEN ESTIMATOR THIS FRAME
+// (VoxiRenderer::recordStagedRayDriven mirrors the same `gVoxelParams.w > 0.5 && gGiRestirParams.x >
+// 0.5` test on the CPU before issuing this dispatch, from the SAME cb_ values uploaded to this shader).
+// The cone-traced branch of PSRayDriven's GI block is UNTOUCHED by this stage and still runs inside
+// Stage B itself: coneTracedIndirect has no per-pixel history of its own to split out this way.
+//
+// COMPILED AT SM 6.6 (VoxiRenderer), same defines as CSRdShadow. giRestirIndirect and everything it
+// calls (giTraceInitialCandidate, the RAB_* adapter, the vendored RTXDI resampling headers) use no
+// derivative intrinsic themselves -- every texture fetch on a traced hit goes through averRtSampleSlot
+// with an explicit SampleLevel/gradient, never implicit ddx/ddy -- so this stage does not strictly need
+// 6.6 for that reason the way CSRdShadow does; it is dispatched through the same staged pipeline object
+// as the other three stages regardless, so it shares their shader model rather than inventing a fourth.
+[numthreads(8, 8, 1)]
+void CSRdGi(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    const uint pitch = (uint)gViewParams.w;
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    const uint4 rec = gRdVisBuf[idx];
+    if (rec.x == 0xFFFFFFFFu) {
+        // A sky pixel has no surface for ReSTIR to bounce a candidate off. Stage B's own miss branch
+        // (PSRayDriven's #if AVER_RD_SPLIT trace block, above) already writes the GI surface-history
+        // sentinel (gGiSurfNrmHistOut) for a miss -- this stage only has to leave its own texel in a
+        // defined state, not whatever the previous frame's HIT left there.
+        gRdGiTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
+    // own header for the derivation.
+    float2 ndc;
+    float3 dir = rdPrimaryRayDir(pixel, ndc);
+
+    RdSurface s = rdSurfaceFromRecord(rec, dir);
+
+    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's own copy of this line gives (search "a
+    // blended (glass/water) draw never reaches the ray-driven primary"): every history write
+    // giRestirIndirect makes below is always live for this pass.
+    gAverHistoryWrite = true;
+
+#if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    // ablated: no ReSTIR GI candidate -- matches PSRayDriven's own ablated GI block (a comment, no
+    // assignment: search "ablated: no cone gather"). gRdGiTex is never read back under this ablation
+    // either -- PSRayDriven's own AVER_RD_SPLIT read of it lives INSIDE that same outer ablation guard
+    // (further up this file), so leaving this texel untouched costs nothing.
+#else
+    // EXACTLY THE ARGUMENTS PSRayDriven'S OWN (non-split) COPY PASSES -- see that call, further up
+    // this file, for why each one is what it is. `ao` is discarded here the same way PSRayDriven
+    // discards `rdAo` for this branch: giRestirIndirect sets it to 1.0 on its first line and never
+    // touches it again (see that function's own header), so Stage B's rdAo stays at its own initial
+    // 1.0 whether it calls giRestirIndirect itself or reads this texture instead.
+    if (gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5) {
+        float ao;
+        const float3 d = giRestirIndirect(s.wpos, s.N, mul(float4(s.wpos, 1.0), gViewProj).w,
+                                          float2(pixel) + 0.5, (uint)gRtHistParams.z, ao);
+        gRdGiTex[pixel] = float4(d, 1.0);
+    }
+#endif
+}
+
+// ---- STAGE O: CSRdSkyOcc -- reconstruct the surface, resolve the traced sky-occlusion answer --------
+//
+// MILESTONE 2. Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord, and
+// runs the SAME rtSkyOcclusionTemporal call PSRayDriven's single pass makes in the two cases where its
+// own cone gather did not already measure occlusion -- same pixel-centre argument, so the AO history
+// pair (gAoHist/gAoHistOut, t11/u4) and the NRD AO hand-off (gAoHitDistOut, u5) mean the same thing
+// whichever path is running.
+//
+// COMPILED AT SM 6.6 (VoxiRenderer), same defines as CSRdShadow: rtSkyOcclusionTemporal's own spatial
+// filter (rtAoSpatial) takes ddx/ddy of depth exactly as rtShadowTemporal's does, so this stage needs
+// the same derivative-capable compute shader model, 8x8 threads forming 2x2 quads.
+[numthreads(8, 8, 1)]
+void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
+#if AVER_AO_UNIFIED
+    // A NO-OP IN THIS BUILD. PSRayDriven's AVER_AO_UNIFIED branch computes occlusion itself through
+    // rtAmbientTraced (and writes u5 itself) and never reads gRdAoTex, so running rtSkyOcclusionTemporal
+    // here would only race that branch on u4/u5. The CPU still dispatches; this makes it empty.
+    return;
+#endif
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    const uint pitch = (uint)gViewParams.w;
+    if (pitch == 0u) return;
+
+    // MIRRORS PSRayDriven's OWN GATE FOR READING THIS TEXTURE (its sky-occlusion ternary, further up
+    // this file): gGiRestirParams.x > 0.5 (ReSTIR supplies diffuse, so rdAo is still its un-gathered
+    // initial 1.0) or gVoxelParams.w <= 0.5 (no voxel GI at all, same reason). In CONE-GI mode
+    // (gGiRestirParams.x <= 0.5 && gVoxelParams.w > 0.5) the cone gather already measured occlusion and
+    // PSRayDriven never reads this texture for that pixel, so returning without writing here is safe,
+    // not merely cheap -- that texel is never read back either. VoxiRenderer::recordStagedRayDriven
+    // mirrors this same test on the CPU before issuing the dispatch at all; this check is the shader's
+    // own defence, not a duplicate of work the CPU has already decided.
+    if (!(gAmbientParams.x > 0.5 && (gGiRestirParams.x > 0.5 || gVoxelParams.w <= 0.5))) return;
+
+    const uint idx = pixel.y * pitch + pixel.x;
+    const uint4 rec = gRdVisBuf[idx];
+    if (rec.x == 0xFFFFFFFFu) {
+        // A sky pixel is unoccluded by definition -- the same sentinel meaning as rdAo's own initial
+        // 1.0, and Stage B's own miss branch returns before ever reaching the occlusion read.
+        gRdAoTex[pixel] = float4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
+
+    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
+    // own header for the derivation.
+    float2 ndc;
+    float3 dir = rdPrimaryRayDir(pixel, ndc);
+
+    RdSurface s = rdSurfaceFromRecord(rec, dir);
+
+    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's and CSRdGi's own copies of this line give.
+    gAverHistoryWrite = true;
+
+    // HONOURS THE SKY-OCCLUSION ABLATION EXACTLY AS PSRayDriven's OWN #elif AVER_RT && AVER_RD_ABLATE
+    // != AVER_RD_ABL_SKYOCC BRANCH DOES (further up this file, same condition, deliberately not also
+    // excluding AVER_RD_ABL_ALL -- that asymmetry is PSRayDriven's existing behaviour, not introduced
+    // here): this stage skips tracing in precisely the build where that branch's AVER_RD_SPLIT read of
+    // gRdAoTex is itself compiled out and falls back to `ind.occlusion = rdAo`. AVER_AO_UNIFIED's own
+    // sky-occlusion branch (the #if just above that #elif) is untouched by this stage -- AVER_AO_UNIFIED
+    // is 0 by default and this task leaves whatever it compiles to alone.
+#if AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
+    // EXACTLY THE ARGUMENTS PSRayDriven'S OWN (non-split) COPY PASSES for this case: coneAo=1.0,
+    // coneAoIsGather=false (rdAo was never gathered on this branch), nrdAoUsable=false (same reason
+    // that call gives -- this pass runs with the G-buffer off, so gNrdAo was reprojected against
+    // motion vectors and depth this pass never wrote).
+    const float occ = rtSkyOcclusionTemporal(s.wpos, s.N, float2(pixel) + 0.5, (uint)gAmbientParams.x,
+                                             1.0, false, false);
+    gRdAoTex[pixel] = float4(occ, 0.0, 0.0, 1.0);
+#else
+    // ablated: matches PSRayDriven's own fallback for this same condition (`ind.occlusion = rdAo`,
+    // rdAo's un-gathered initial 1.0) -- never read back under this ablation, same reasoning as the
+    // miss case above.
+    gRdAoTex[pixel] = float4(1.0, 0.0, 0.0, 1.0);
+#endif
 }
 #endif  // AVER_RT
 

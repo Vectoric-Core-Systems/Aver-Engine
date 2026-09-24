@@ -184,7 +184,12 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // than only allocated when wanted: Tier 1 hardware needs a valid descriptor of the declared KIND in
 // every slot the pipeline layout reserves, staged or not, so a placeholder stands in exactly like
 // voxelAccumPlaceholder_ does for u1 when the real resource does not exist.
-constexpr u32 kVoxiUavCount = kGiUavCount + 9;
+//
+// +11, NOT +9, AS OF MILESTONE 2: u13/u14 are CSRdGi's and CSRdSkyOcc's own outputs (rdGiTex_/
+// rdAoTex_) -- the lighting-stage twins of u11/u12 immediately above, bound in EVERY Voxi binding set
+// on the identical "declared unconditionally, placeholder when the real resource is absent" contract,
+// for the identical Tier 1 reason.
+constexpr u32 kVoxiUavCount = kGiUavCount + 11;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -269,7 +274,15 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // no SRV twin exists for either, which is why kVoxiSrvCount above did not have to move.
     uav[11] = rhi::SlotKind::StructuredBuffer;      // u11 ray-driven visibility record buffer
     uav[12] = rhi::SlotKind::Texture2D;             // u12 ray-driven sun visibility (RW)
-    static_assert(kVoxiSrvCount == 17 && kVoxiUavCount == 13 && kGiSrvCount == 9 && kGiUavCount == 4,
+    // u13/u14: MILESTONE 2's own lighting-stage outputs -- CSRdGi's indirect-diffuse result
+    // (rdGiTex_, RGBA16F, rgb = ReSTIR GI's diffuse) and CSRdSkyOcc's transmittance (rdAoTex_,
+    // RGBA16F, r = occlusion). Same "always declared, placeholder when the real resource is absent"
+    // contract as u11/u12 above, and the same "no SRV twin" shape -- both are RW-only, read and
+    // written through these UAV registers alone by CSRdGi/CSRdSkyOcc and the AVER_RD_SPLIT branch of
+    // PSRayDriven.
+    uav[13] = rhi::SlotKind::Texture2D;             // u13 ray-driven GI indirect diffuse (RW)
+    uav[14] = rhi::SlotKind::Texture2D;             // u14 ray-driven sky occlusion (RW)
+    static_assert(kVoxiSrvCount == 17 && kVoxiUavCount == 15 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -296,7 +309,8 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
                                    // reservoir buffer, u7/u8 GI-restir surface position/normal
                                    // history, u9 ReSTIR GI radiance, u10 ReSTIR visibility half-res
                                    // history, u11/u12 the staged ray-driven visibility record buffer
-                                   // and sun visibility texture (all this frame's)
+                                   // and sun visibility texture, u13/u14 the staged ray-driven GI
+                                   // indirect diffuse and sky occlusion outputs (all this frame's)
     // Table 1: the material's textures, based at t(kVoxiSrvCount) -- the root-signature builder
     // accumulates srvBase across tables, so a register number derived from a comment instead of this
     // value goes wrong the moment kVoxiSrvCount grows past kGiSrvCount.
@@ -525,11 +539,12 @@ void VoxiRenderer::shutdown() {
                                         rayDrivenTexPso_, sceneRtBlendedTexPso_,
                                         rayDrivenTexGbufPso_,
                                         rayDrivenGbufPso_,
-                                        // STAGED RAY-DRIVEN PASSES (milestone 1): the two compute
-                                        // pipelines and Stage B's two AVER_RD_SPLIT graphics twins --
-                                        // added here, not after, for the identical reason the comment
-                                        // above gives for rayDrivenTexPso_/sceneRtBlendedTexPso_.
-                                        rdVisCsPso_, rdShadowCsPso_,
+                                        // STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone
+                                        // 2's rdGiCsPso_/rdSkyOccCsPso_): the four compute pipelines
+                                        // and Stage B's two AVER_RD_SPLIT graphics twins -- added here,
+                                        // not after, for the identical reason the comment above gives
+                                        // for rayDrivenTexPso_/sceneRtBlendedTexPso_.
+                                        rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdSkyOccCsPso_,
                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
@@ -543,7 +558,7 @@ void VoxiRenderer::shutdown() {
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
-    rdVisCsPso_ = rdShadowCsPso_ = 0;
+    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdSkyOccCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
@@ -588,14 +603,19 @@ void VoxiRenderer::shutdown() {
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
-    // STAGED RAY-DRIVEN PASSES (milestone 1): rdVisBuf_/rdSunVisTex_ and their placeholders. Not
-    // owned by any binding-set slot's lifetime the way voxelAccumTex_ itself is thought about, same
-    // reason voxelAccumPlaceholder_'s own destroy above needs an explicit line rather than being
-    // implied by anything else here.
+    // STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's rdGiTex_/rdAoTex_ pair):
+    // rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_ and their placeholders. Not owned by any binding-set
+    // slot's lifetime the way voxelAccumTex_ itself is thought about, same reason
+    // voxelAccumPlaceholder_'s own destroy above needs an explicit line rather than being implied by
+    // anything else here.
     if (rdVisBuf_)    { res_->destroyBuffer(rdVisBuf_);  rdVisBuf_ = 0; }
     if (rdSunVisTex_) { res_->destroyTexture(rdSunVisTex_); rdSunVisTex_ = 0; }
+    if (rdGiTex_)     { res_->destroyTexture(rdGiTex_);     rdGiTex_ = 0; }
+    if (rdAoTex_)     { res_->destroyTexture(rdAoTex_);     rdAoTex_ = 0; }
     if (rdVisBufPlaceholder_)  { res_->destroyBuffer(rdVisBufPlaceholder_);  rdVisBufPlaceholder_ = 0; }
     if (rdSunVisPlaceholder_) { res_->destroyTexture(rdSunVisPlaceholder_); rdSunVisPlaceholder_ = 0; }
+    if (rdGiPlaceholder_)     { res_->destroyTexture(rdGiPlaceholder_);     rdGiPlaceholder_ = 0; }
+    if (rdAoPlaceholder_)     { res_->destroyTexture(rdAoPlaceholder_);     rdAoPlaceholder_ = 0; }
     rdVisBufElemCapacity_ = 0;
     rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
     rdStagedFallbackLogged_ = false;
@@ -3724,8 +3744,9 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ctx.drawFullscreen();
 }
 
-// STAGED RAY-DRIVEN PASSES (milestone 1): records CSRdVisibility, then CSRdShadow, then the
-// AVER_RD_SPLIT fullscreen draw -- three GPU spans in place of the single "Voxi ray-driven primary"
+// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's lighting-stage trio): records
+// CSRdVisibility, then CSRdShadow/CSRdGi/CSRdSkyOcc back to back with no barrier between them, then
+// the AVER_RD_SPLIT fullscreen draw -- GPU spans in place of the single "Voxi ray-driven primary"
 // span scenePass() otherwise records. Called only once scenePass() has already confirmed
 // rdStagedActive(), so every existence/backend check that decides whether to call this lives there,
 // not here.
@@ -3744,16 +3765,26 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
 //      reconfigures the whole root signature and calls bindDeclaredRootCbvs() again, and this function
 //      re-issues setBindingSet/setBindlessTable/setConstantBuffer for Stage B exactly as the
 //      single-pass code does for its one draw -- so Stage B's root bindings are freshly set, not
-//      inherited from either compute dispatch.
+//      inherited from any compute dispatch.
 //   3. D3D12RenderContext::dispatch is `cmdList_->Dispatch(gx, gy, gz)` with no render-target-state
 //      precondition -- Dispatch does not touch OMSetRenderTargets/RSSetViewports at all, so recording
 //      it between draws while the scene's colour/depth targets stay bound is legal.
 //   4. uavBarrierBuffer/uavBarrierTexture emit a plain D3D12_RESOURCE_BARRIER_TYPE_UAV against the
 //      resource -- the correct and sufficient barrier between a compute UAV write and a later UAV
 //      read of the SAME resource in a different shader stage. No resource-state transition is needed
-//      here specifically because gRdVisBuf/gRdSunVisTex stay in UnorderedAccess and are read back
-//      through the SAME UAV registers in PSRayDriven's AVER_RD_SPLIT branch (contract: no SRV slot
-//      exists for either) -- never through an SRV, which is the only case that would need one.
+//      here specifically because gRdVisBuf/gRdSunVisTex/gRdGiTex/gRdAoTex stay in UnorderedAccess and
+//      are read back through the SAME UAV registers in PSRayDriven's AVER_RD_SPLIT branch (contract:
+//      no SRV slot exists for any of them) -- never through an SRV, which is the only case that would
+//      need one.
+//
+// NO BARRIER, NO TIMESTAMP, BETWEEN CSRdShadow/CSRdGi/CSRdSkyOcc (milestone 2's own contract): the
+// three write DISJOINT resources -- shadow: u2/u12, GI: u6-u10/u13, sky occlusion: u4/u5/u14 -- and
+// read only the visibility record (already fenced by the uavBarrierBuffer right before this trio),
+// last frame's own histories, and this frame's NRD outputs (produced earlier in prePass), so nothing
+// here has a hazard against anything else here. A GPU timestamp dropped BETWEEN two dispatches can
+// make some GPUs drain the pipe to take the reading, serialising work that would otherwise overlap --
+// which is exactly why all three sit inside ONE ScopedGpuStat ("Voxi RD lighting stages") rather than
+// each opening its own span the way CSRdVisibility above and the Stage B draw below still do.
 void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const bool gbufBound = pickGbuf(rayDrivenPso_, rayDrivenGbufPso_) == rayDrivenGbufPso_;
     const rhi::PipelineHandle stageBPso = gbufBound ? rayDrivenSplitTexGbufPso_ : rayDrivenSplitTexPso_;
@@ -3763,14 +3794,14 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // which prePass() already calls before scenePass() runs). Dispatching over the whole render
     // target would trace rays for letterboxed pixels no draw ever covers; the compute shaders
     // themselves early-out any thread outside gSceneViewport.zw for the same reason. rdVisBuf_/
-    // rdSunVisTex_ are still sized to the FULL render target (rdStagedRowPitch_), because i.pos.xy in
-    // Stage B is a render-target-space pixel centre, not a viewport-local one.
+    // rdSunVisTex_/rdGiTex_/rdAoTex_ are still sized to the FULL render target (rdStagedRowPitch_),
+    // because i.pos.xy in Stage B is a render-target-space pixel centre, not a viewport-local one.
     const u32 dispatchW = curSceneViewport_[2] > 0.0f ? static_cast<u32>(curSceneViewport_[2]) : 0u;
     const u32 dispatchH = curSceneViewport_[3] > 0.0f ? static_cast<u32>(curSceneViewport_[3]) : 0u;
-    const u32 gx = (dispatchW + 7u) / 8u;   // CSRdVisibility/CSRdShadow both declare [numthreads(8,8,1)]
+    const u32 gx = (dispatchW + 7u) / 8u;   // every staged compute stage declares [numthreads(8,8,1)]
     const u32 gy = (dispatchH + 7u) / 8u;
 
-    // THE ROW PITCH RIDES viewParams.w FOR THESE THREE UPLOADS ONLY, and goes back to 0 after them.
+    // THE ROW PITCH RIDES viewParams.w FOR THESE UPLOADS ONLY, and goes back to 0 after them.
     // Written here rather than in prePass because this is the one place that has already decided to
     // record the staged passes: a prePass copy was computed before beginShadowHistory refreshes
     // curSceneViewport_, so the two could disagree on a frame the view appeared or went away. No
@@ -3789,15 +3820,64 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     ctx.uavBarrierBuffer(rdVisBuf_);   // Stage S's read of gRdVisBuf must see Stage A's writes
 
     {
-        rhi::ScopedGpuStat stat(ctx, "Voxi RD shadow");
+        rhi::ScopedGpuStat stat(ctx, "Voxi RD lighting stages");   // wraps all three dispatches below --
+                                                                    // see this function's own comment on
+                                                                    // why no barrier or timestamp sits
+                                                                    // between them.
         ctx.setPipeline(rdShadowCsPso_);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
+
+        // CSRdGi: the CPU mirror of PSRayDriven's own GI-block condition and CSRdGi's own body gate
+        // (voxi.hlsl) -- ReSTIR GI is the chosen estimator AND the cone trace is gated on. Reads the
+        // SAME cb_ fields the shader tests this frame, never a separately-tracked flag, so the two can
+        // never disagree. rdStagedActive() already refused this frame if the condition holds but
+        // rdGiCsPso_ is 0, so reaching here with the condition true means the pipeline exists.
+        if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f) {
+            ctx.setPipeline(rdGiCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
+        }
+
+        // CSRdSkyOcc: the CPU mirror of PSRayDriven's own sky-occlusion condition -- the cases where
+        // rdAo would otherwise still read its initial 1.0 and rdAoGathered stays false, because ReSTIR
+        // supplied the diffuse term instead of the cone gather, or there is no voxel GI running at
+        // all. Cone-GI mode's own sky occlusion depends on the cone gather and stays in the shade
+        // pass, so it never reaches this dispatch.
+        if (cb_.ambientParams[0] > 0.5f &&
+            (cb_.giRestirParams[0] > 0.5f || cb_.voxelParams[3] <= 0.5f)) {
+            ctx.setPipeline(rdSkyOccCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
+        }
     }
-    ctx.uavBarrierTexture(rdSunVisTex_);   // Stage B's read of gRdSunVisTex must see Stage S's writes
+    // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex must see whichever of the three dispatches
+    // above wrote them -- all three barriers sit here, unconditionally, rather than only behind each
+    // dispatch's own `if`: a barrier against a texture nothing wrote this frame is a harmless no-op
+    // (the resource is already in UnorderedAccess, see point 4 above), while conditioning the barrier
+    // on the SAME test the dispatch used would duplicate that test for no safety this already has.
+    ctx.uavBarrierTexture(rdSunVisTex_);
+    ctx.uavBarrierTexture(rdGiTex_);
+    ctx.uavBarrierTexture(rdAoTex_);
+    // THE GI SURFACE-NORMAL HISTORY (u8) HAS TWO WRITERS NOW: CSRdGi (hit pixels, inside
+    // giRestirIndirect) and Stage B's own miss branch (the sky sentinel). The texels are disjoint and
+    // the barriers above already drain the GPU in practice, but the order between a dispatch and a
+    // draw writing one UAV is stated here rather than left to that side effect.
+    // 1 - rtHistWriteIdx_, NOT rtHistWriteIdx_: endShadowHistory() already flipped the index at the end
+    // of prePass, so by scenePass the texture bound at u8 THIS frame is the other one. (Staged mode
+    // requires shadowHistoryActive(), so that flip always happened.)
+    const u32 giNrmWrite = 1u - rtHistWriteIdx_;
+    if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && giSurfNrmHist_[giNrmWrite])
+        ctx.uavBarrierTexture(giSurfNrmHist_[giNrmWrite]);
 
     {
         rhi::ScopedGpuStat stat(ctx, "Voxi ray-driven primary");   // same span name the single pass
@@ -4234,27 +4314,28 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     return true;
 }
 
-// STAGED RAY-DRIVEN PASSES (milestone 1): (re)creates or releases rdVisBuf_/rdSunVisTex_ at the
-// given render-target size. Shaped like ensureShadowHistory just above -- same two call sites
-// (onRenderTargetsChanged and setSettings' own on/off edge), same "release everything when not
-// wanted" branch first -- but simpler, since there is exactly one buffer and one texture here, no
-// ping-pong pair, and the texture is recreated outright on any size change rather than resized in
-// place: nothing here reprojects a previous frame's contents the way the shadow/reflection/ambient
-// histories do, so there is no stale content worth preserving across a resize.
+// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's rdGiTex_/rdAoTex_ pair):
+// (re)creates or releases rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_ at the given render-target size.
+// Shaped like ensureShadowHistory just above -- same two call sites (onRenderTargetsChanged and
+// setSettings' own on/off edge), same "release everything when not wanted" branch first -- but
+// simpler, since there is exactly one buffer and three textures here, no ping-pong pair, and every
+// texture is recreated outright on any size change rather than resized in place: nothing here
+// reprojects a previous frame's contents the way the shadow/reflection/ambient histories do, so
+// there is no stale content worth preserving across a resize.
 bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     if (!res_ || !bindings_) return false;
 
-    // NOT WANTED, OR NOTHING TO SIZE AGAINST YET: release both resources and fall back to the
+    // NOT WANTED, OR NOTHING TO SIZE AGAINST YET: release every resource and fall back to the
     // placeholders, the identical shape ensureShadowHistory's own "!rayTracingWanted()" branch
     // follows for its four textures and one buffer -- except THOSE rebind nothing before destroying
     // (t6/u2 etc. are simply left null-filled again by the SAME idiom bindings_ was created with, and
-    // never re-read until the next time they are populated). u11/u12 cannot do that: setUav/
+    // never re-read until the next time they are populated). u11-u14 cannot do that: setUav/
     // setUavBuffer refuse a 0 handle outright (D3D12ResourceFactory::setUav/setUavBuffer), so once a
     // slot has ever pointed at a real resource, releasing that resource without rebinding the slot
     // first leaves a descriptor naming freed memory -- exactly what voxelAccumPlaceholder_ exists to
     // avoid for u1, and the reason a placeholder exists here too.
     if (!rdStagedResourcesWanted() || width == 0 || height == 0) {
-        const bool had = rdVisBuf_ != 0 || rdSunVisTex_ != 0;
+        const bool had = rdVisBuf_ != 0 || rdSunVisTex_ != 0 || rdGiTex_ != 0 || rdAoTex_ != 0;
         if (had) {
             if (!rdVisBufPlaceholder_) {
                 rhi::BufferDesc pd;
@@ -4275,12 +4356,39 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
                 pd.debugName    = "Voxi ray-driven sun visibility placeholder";
                 rdSunVisPlaceholder_ = res_->createTexture(pd);
             }
+            // MILESTONE 2's OWN PAIR, the identical 1x1 RGBA16F UAV placeholder shape as
+            // rdSunVisPlaceholder_ immediately above -- two independent textures, not a ping-pong
+            // pair, so two independent placeholder handles rather than one shared between them.
+            if (!rdGiPlaceholder_) {
+                rhi::TextureDesc pd;
+                pd.dim    = rhi::TextureDim::Tex2D;
+                pd.width  = 1; pd.height = 1; pd.mips = 1;
+                pd.format = rhi::Format::RGBA16F;
+                pd.bind   = rhi::ResourceBind::UnorderedAccess;
+                pd.initialState = rhi::ResourceState::UnorderedAccess;
+                pd.debugName    = "Voxi ray-driven GI indirect diffuse placeholder";
+                rdGiPlaceholder_ = res_->createTexture(pd);
+            }
+            if (!rdAoPlaceholder_) {
+                rhi::TextureDesc pd;
+                pd.dim    = rhi::TextureDim::Tex2D;
+                pd.width  = 1; pd.height = 1; pd.mips = 1;
+                pd.format = rhi::Format::RGBA16F;
+                pd.bind   = rhi::ResourceBind::UnorderedAccess;
+                pd.initialState = rhi::ResourceState::UnorderedAccess;
+                pd.debugName    = "Voxi ray-driven sky occlusion placeholder";
+                rdAoPlaceholder_ = res_->createTexture(pd);
+            }
             // REBIND BEFORE DESTROY, always -- aver-view-outlives-its-buffer.md, and the identical
             // reasoning voxelAccumPlaceholder_'s own call site gives for itself.
             if (rdVisBufPlaceholder_) res_->setUavBuffer(bindings_, 11, rdVisBufPlaceholder_, kRdVisElemBytes, 1, 0);
             if (rdSunVisPlaceholder_) res_->setUav(bindings_, 12, rdSunVisPlaceholder_, 0);
+            if (rdGiPlaceholder_)     res_->setUav(bindings_, 13, rdGiPlaceholder_, 0);
+            if (rdAoPlaceholder_)     res_->setUav(bindings_, 14, rdAoPlaceholder_, 0);
             if (rdVisBuf_)    { res_->destroyBuffer(rdVisBuf_);  rdVisBuf_ = 0; }
             if (rdSunVisTex_) { res_->destroyTexture(rdSunVisTex_); rdSunVisTex_ = 0; }
+            if (rdGiTex_)     { res_->destroyTexture(rdGiTex_);     rdGiTex_ = 0; }
+            if (rdAoTex_)     { res_->destroyTexture(rdAoTex_);     rdAoTex_ = 0; }
             rdVisBufElemCapacity_ = 0;
             rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
             AVER_INFO("[Voxi] staged ray-driven resources released");
@@ -4288,11 +4396,12 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
         return true;
     }
 
-    // Row pitch is the render target's own width, exactly -- see kRdVisElemBytes' own comment. Both
-    // resources already match: nothing to do, the common case on every frame between resizes.
+    // Row pitch is the render target's own width, exactly -- see kRdVisElemBytes' own comment. Every
+    // resource already matches: nothing to do, the common case on every frame between resizes.
     const u32 pitch = width;
     const u32 elemCount = pitch * height;
-    if (rdStagedW_ == width && rdStagedH_ == height && rdSunVisTex_ && rdVisBufElemCapacity_ >= elemCount)
+    if (rdStagedW_ == width && rdStagedH_ == height && rdSunVisTex_ && rdGiTex_ && rdAoTex_ &&
+        rdVisBufElemCapacity_ >= elemCount)
         return true;
 
     // THE TEXTURE HAS NO GROWTH HEADROOM, UNLIKE THE BUFFER BELOW: a Texture2D UAV view is exactly
@@ -4321,6 +4430,46 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
         rdSunVisTex_ = res_->createTexture(d);
         if (!rdSunVisTex_) return false;
         res_->setUav(bindings_, 12, rdSunVisTex_, 0);
+    }
+
+    // MILESTONE 2's OWN PAIR, the identical "recreated outright on any size change" shape as
+    // rdSunVisTex_ immediately above -- UAV ONLY, NO ShaderResource, for the identical "no SRV twin
+    // at any register" reason (giTableKinds' u13/u14 comment).
+    if (rdGiTex_ && (rdStagedW_ != width || rdStagedH_ != height)) {
+        res_->destroyTexture(rdGiTex_);
+        rdGiTex_ = 0;
+    }
+    if (!rdGiTex_) {
+        rhi::TextureDesc d;
+        d.dim    = rhi::TextureDim::Tex2D;
+        d.width  = width;
+        d.height = height;
+        d.mips   = 1;
+        d.format = rhi::Format::RGBA16F;
+        d.bind   = rhi::ResourceBind::UnorderedAccess;
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName    = "Voxi ray-driven GI indirect diffuse";
+        rdGiTex_ = res_->createTexture(d);
+        if (!rdGiTex_) return false;
+        res_->setUav(bindings_, 13, rdGiTex_, 0);
+    }
+    if (rdAoTex_ && (rdStagedW_ != width || rdStagedH_ != height)) {
+        res_->destroyTexture(rdAoTex_);
+        rdAoTex_ = 0;
+    }
+    if (!rdAoTex_) {
+        rhi::TextureDesc d;
+        d.dim    = rhi::TextureDim::Tex2D;
+        d.width  = width;
+        d.height = height;
+        d.mips   = 1;
+        d.format = rhi::Format::RGBA16F;
+        d.bind   = rhi::ResourceBind::UnorderedAccess;
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName    = "Voxi ray-driven sky occlusion";
+        rdAoTex_ = res_->createTexture(d);
+        if (!rdAoTex_) return false;
+        res_->setUav(bindings_, 14, rdAoTex_, 0);
     }
 
     // GROWN, NOT ALWAYS REBUILT -- the identical "just enough" rule giReservoirs_ above applies to
@@ -5211,9 +5360,9 @@ rhi::PipelineHandle VoxiRenderer::pickGbuf(rhi::PipelineHandle plain, rhi::Pipel
     return gbuf;
 }
 
-// STAGED RAY-DRIVEN PASSES (milestone 1): whether THIS frame's ray-driven primary runs as the three
-// staged passes rather than the single PSRayDriven draw -- see the header's own comment on every
-// condition checked here and on `reason`.
+// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's rdGiCsPso_/rdSkyOccCsPso_ checks):
+// whether THIS frame's ray-driven primary runs as the staged passes rather than the single
+// PSRayDriven draw -- see the header's own comment on every condition checked here and on `reason`.
 bool VoxiRenderer::rdStagedActive(const char** reason) const {
     if (!rdStagedWanted()) return false;
     if (!rayDrivenActive()) return false;   // nothing to stage: the rasteriser or the debug raymarch
@@ -5232,8 +5381,9 @@ bool VoxiRenderer::rdStagedActive(const char** reason) const {
         if (reason) *reason = "the staged compute pipelines (CSRdVisibility/CSRdShadow) did not compile";
         return false;
     }
-    if (!rdVisBuf_ || !rdSunVisTex_) {
-        if (reason) *reason = "the visibility record buffer or the sun visibility texture is absent";
+    if (!rdVisBuf_ || !rdSunVisTex_ || !rdGiTex_ || !rdAoTex_) {
+        if (reason) *reason = "the visibility record buffer or one of the sun visibility/GI/sky "
+                              "occlusion textures is absent";
         return false;
     }
     // beginShadowHistory() refreshes curSceneViewport_ (the dispatch size, and gSceneViewportCur the
@@ -5258,6 +5408,22 @@ bool VoxiRenderer::rdStagedActive(const char** reason) const {
     }
     if (!splitPso) {
         if (reason) *reason = "Stage B's AVER_RD_SPLIT pipeline variant did not compile";
+        return false;
+    }
+    // MILESTONE 2's OWN, CONDITIONAL requirement -- checked only when THIS frame's cb_ values say the
+    // matching dispatch would actually fire in recordStagedRayDriven() (the SAME two conditions,
+    // mirroring the SAME shader-side gates PSRayDriven's AVER_RD_SPLIT branch tests before trusting
+    // gRdGiTex/gRdAoTex). A project that never turns ReSTIR GI or sky occlusion on is never blocked
+    // by CSRdGi/CSRdSkyOcc failing to compile; one that does and finds the matching pipeline missing
+    // falls back for the whole frame, because Stage B would otherwise read a texture nothing wrote
+    // this frame while believing, from the identical cb_ fields, that it had.
+    if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && !rdGiCsPso_) {
+        if (reason) *reason = "ReSTIR GI is active this frame but CSRdGi did not compile";
+        return false;
+    }
+    if (cb_.ambientParams[0] > 0.5f && (cb_.giRestirParams[0] > 0.5f || cb_.voxelParams[3] <= 0.5f) &&
+        !rdSkyOccCsPso_) {
+        if (reason) *reason = "sky occlusion is active this frame but CSRdSkyOcc did not compile";
         return false;
     }
     return true;
@@ -5459,11 +5625,11 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     // two: the ambient one arrived with temporal sky occlusion and this list is the kind that
     // quietly goes one short.
     //
-    // u11/u12 (rdVisBuf_/rdSunVisTex_, STAGED RAY-DRIVEN PASSES) are populated the SAME way, by
-    // ensureRdStagedResources once onRenderTargetsChanged calls it a few lines below -- except once
-    // populated they are rebound to a PLACEHOLDER rather than left null-filled if staged mode is ever
-    // turned back off, since a UAV slot cannot be cleared the way clearSrv clears an SRV one; see
-    // ensureRdStagedResources' own comment.
+    // u11/u12 (rdVisBuf_/rdSunVisTex_, STAGED RAY-DRIVEN PASSES) and u13/u14 (rdGiTex_/rdAoTex_,
+    // MILESTONE 2) are populated the SAME way, by ensureRdStagedResources once onRenderTargetsChanged
+    // calls it a few lines below -- except once populated they are rebound to a PLACEHOLDER rather
+    // than left null-filled if staged mode is ever turned back off, since a UAV slot cannot be cleared
+    // the way clearSrv clears an SRV one; see ensureRdStagedResources' own comment.
 
     // The clear and the resolve get UAV-only sets: while they run every mip of the volume is in
     // UnorderedAccess, so no SRV descriptor over it may be live.
@@ -5738,11 +5904,12 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rayDrivenTexPso_, sceneRtBlendedTexPso_,
                                          rayDrivenTexGbufPso_,
                                          rayDrivenGbufPso_,
-                                         // STAGED RAY-DRIVEN PASSES (milestone 1): the identical
+                                         // STAGED RAY-DRIVEN PASSES (milestone 1, extended by
+                                         // milestone 2's rdGiCsPso_/rdSkyOccCsPso_): the identical
                                          // "this function overwrites every member a few lines down"
                                          // reasoning the comment above already gives for
                                          // rayDrivenTexPso_/sceneRtBlendedTexPso_.
-                                         rdVisCsPso_, rdShadowCsPso_,
+                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdSkyOccCsPso_,
                                          rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
@@ -5754,7 +5921,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
-    rdVisCsPso_ = rdShadowCsPso_ = 0;
+    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdSkyOccCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
 
     ShaderScope compile(*res_);
@@ -5966,7 +6133,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             AVER_WARN("[Voxi] textured G-buffer ray-driven pass unavailable; --gbuffer will fall back "
                       "to the flat-albedo G-buffer pipeline");
 
-        // ---- STAGED RAY-DRIVEN PASSES (milestone 1): Stage A/S compute, Stage B's split twin ----
+        // ---- STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's CSRdGi/CSRdSkyOcc):
+        // Stage A/S compute, the milestone 2 lighting stages, Stage B's split twin ----
         //
         // Same layout (giTex) and the SAME defines as psTex/psTexGbuf just above -- CSRdVisibility/
         // CSRdShadow (voxi.hlsl) read gRtInstances/gRtVerts/gRtMaterials/the bindless texture table
@@ -5996,6 +6164,29 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.cs = csShadow;
             p.layout = giTex;
             rdShadowCsPso_ = res_->createComputePipeline(p);
+        }
+        // MILESTONE 2: CSRdGi and CSRdSkyOcc, the two lighting-stage twins dispatched alongside
+        // csShadow out of recordStagedRayDriven()'s single "Voxi RD lighting stages" span. Same SM
+        // 6.6 requirement as csShadow immediately above for the identical reason -- giRestirIndirect/
+        // rtSkyOcclusionTemporal (voxi_restir.hlsli/voxi_rt.hlsli) take ddx/ddy of depth exactly like
+        // rtShadowTemporal does, and [numthreads(8,8,1)] forms the same 2x2 quads csShadow relies on
+        // for that -- and the same layout/defines, so a device that compiled csShadow has everything
+        // these two need too, and one that can't reach 6.6 fails all three identically.
+        const rhi::ShaderHandle csGi = compile("CSRdGi", rhi::ShaderStage::Compute, 66,
+                                               rasterDefs(csDefs.c_str()).c_str());
+        if (csGi) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csGi;
+            p.layout = giTex;
+            rdGiCsPso_ = res_->createComputePipeline(p);
+        }
+        const rhi::ShaderHandle csSkyOcc = compile("CSRdSkyOcc", rhi::ShaderStage::Compute, 66,
+                                                   rasterDefs(csDefs.c_str()).c_str());
+        if (csSkyOcc) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csSkyOcc;
+            p.layout = giTex;
+            rdSkyOccCsPso_ = res_->createComputePipeline(p);
         }
         // Stage B: the SAME textured pixel shader psTex/psTexGbuf were compiled from, with
         // ";AVER_RD_SPLIT=1" appended -- it reads gRdVisBuf/gRdSunVisTex instead of tracing and
@@ -6040,9 +6231,15 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         // output says which requirement was not met at the one point that matters -- when a project
         // actually asks for voxi.rayDrivenStages 1. Unconditional, like every other optional pipeline
         // in this function: createScenePipelines() only reruns on a real rebuild, never per frame.
+        // rdGiCsPso_/rdSkyOccCsPso_ are reported alongside the rest, even though rdStagedActive() only
+        // requires either of them the frames its own matching cb_ condition holds -- a project that
+        // never turns those on would otherwise never see whether the two milestone 2 shaders compiled
+        // at all.
         if (rdVisCsPso_ && rdShadowCsPso_ && rayDrivenSplitTexPso_)
             AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
-                      "G-buffer twin {})", kRtTextureCapacity, rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable");
+                      "G-buffer twin {}, GI stage {}, sky occlusion stage {})", kRtTextureCapacity,
+                      rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
+                      rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable");
         else
             AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
                       "split pixel shader {}); voxi.rayDrivenStages 1 falls back to the single pass",
