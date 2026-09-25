@@ -107,6 +107,8 @@ function Note([string] $msg) { Write-Host "[stage] $msg" }
 # why it stays separate now that this is its only caller.
 . (Join-Path $PSScriptRoot 'PeImports.ps1')
 $osProvided = $AverOsProvidedDlls
+# The NVIDIA section of THIRD-PARTY-NOTICES.txt (step 5), shared with stage-game.ps1.
+. (Join-Path $PSScriptRoot 'NvidiaNotices.ps1')
 
 if (-not (Test-Path -LiteralPath $bin)) {
     throw "[stage] no build tree at $bin -- run ./scripts/build.ps1 $(if ($Config -ne 'Debug') {'-Release'}) first"
@@ -411,6 +413,10 @@ foreach ($c in $components) {
     [void]$notices.AppendLine((Get-Content -LiteralPath $p -Raw).TrimEnd())
     [void]$notices.AppendLine('')
 }
+# NRD (compiled in), RTXDI and SHaRC (HLSL source under shaders\), MathLib -- whichever this tree
+# actually carries, with the NVIDIA notice and attribution ahead of their licences. See
+# NvidiaNotices.ps1 and docs/NVIDIA-SDK-COMPLIANCE.md.
+Add-AverNvidiaNotices -Notices $notices -Root $root -StagedDir $outFull -Options $options
 [void]$notices.AppendLine('=' * 78)
 [void]$notices.AppendLine('Microsoft DirectX Shader Compiler - dxcompiler.dll, dxil.dll')
 [void]$notices.AppendLine('=' * 78)

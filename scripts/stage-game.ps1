@@ -117,6 +117,8 @@ function Fail([string] $msg) { $script:failures.Add($msg); Write-Host "[game] ER
 function Note([string] $msg) { Write-Host "[game] $msg" }
 
 . (Join-Path $PSScriptRoot 'PeImports.ps1')
+# The NVIDIA section of THIRD-PARTY-NOTICES.txt (step 7), shared with stage-payload.ps1.
+. (Join-Path $PSScriptRoot 'NvidiaNotices.ps1')
 
 if (-not (Test-Path -LiteralPath $bin))     { throw "[game] no build tree at $bin -- run ./scripts/build.ps1 first" }
 if (-not (Test-Path -LiteralPath $Project)) { throw "[game] no project manifest at $Project" }
@@ -578,6 +580,10 @@ foreach ($c in $components) {
     [void]$notices.AppendLine((Get-Content -LiteralPath $p -Raw).TrimEnd())
     [void]$notices.AppendLine('')
 }
+# NRD (compiled into the runtime), RTXDI and SHaRC (HLSL source under shaders\), MathLib -- whichever
+# this game actually carries, with the NVIDIA notice and attribution ahead of their licences. See
+# NvidiaNotices.ps1 and docs/NVIDIA-SDK-COMPLIANCE.md.
+Add-AverNvidiaNotices -Notices $notices -Root $root -StagedDir $outFull -Options $options
 [void]$notices.AppendLine('Microsoft DirectX Shader Compiler - dxcompiler.dll, dxil.dll')
 [void]$notices.AppendLine('Redistributed from the Windows SDK under the Microsoft Windows SDK licence terms.')
 [void]$notices.AppendLine('')

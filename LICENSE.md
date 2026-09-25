@@ -98,10 +98,12 @@ SDK code:
   * MathLib and ShaderMake are NVIDIA-authored and MIT-licensed. Their own copyright and permission
     notices are reproduced in their directories and travel with them.
 
-  * RTXGI is vendored in this repository but is NOT currently built, linked, deployed, or
-    referenced by any shader or source file. It is listed for completeness of what this repository
-    CONTAINS, which is what this section is about. Wiring it would not change the terms below; they
-    already apply through NRD and RTXDI.
+  * RTXGI's SHaRC headers are distributed VERBATIM: they are copied into the shaders directory of
+    every build and every package, although no engine shader includes them yet. RTXGI is not
+    built or linked. The terms below apply to it as they do to RTXDI.
+
+Packaged builds carry this same notice, the list of NVIDIA SDKs they use, and each SDK's licence in
+full, in THIRD-PARTY-NOTICES.txt (written by scripts/NvidiaNotices.ps1).
 
 WHAT NVIDIA REQUIRES. The full text governs and is reproduced unmodified in each directory
 (third_party/nrd/LICENSE.txt, third_party/rtxdi/LICENSE.txt, third_party/rtxgi/License.md). The
