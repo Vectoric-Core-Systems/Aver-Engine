@@ -1530,7 +1530,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // the bit table and Voxi.hpp for what each one trades. Packed HERE, unconditionally, every frame:
     // fitGiShadow() (below, inside the GI rebuild gate) no longer touches [3] at all, precisely so a
     // frame that skips the gate -- and so never calls fitGiShadow -- still carries the bits, same
-    // reasoning as ambientParams[1]/[2] a few lines up.
+    // reasoning as ambientParams[1]/[2] a few lines up. FROM SCRATCH, NOT A MERGE, and that is what
+    // gives bit 16 (Settings::blendedReuseStagedLighting) its self-clearing property: recordStagedRayDriven,
+    // LATER this same frame, ORs that bit in on top of whatever this line wrote, and only on a frame
+    // that actually reaches it -- see that OR's own comment.
     cb_.giShadowParams[3] = static_cast<f32>((settings_.rtSecondaryShadowOpaque ? 1u : 0u) |
                                               (settings_.rtSkyOcclusionHalfRate ? 2u : 0u) |
                                               (settings_.rtReflectionHalfRate  ? 4u : 0u) |
@@ -4035,6 +4038,20 @@ bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
     return true;
 }
 
+// Whether the blended draw this material belongs to reads the backend's captured backdrop -- see the
+// base class's own comment for why the backend asks at all. Only two things in a Voxi material make
+// the shader sample it (voxi.hlsl's averBlendedOutputBackdrop gate, ~1997): a non-zero attenuation
+// distance (the material is a volume the backdrop is seen THROUGH), or a node graph driving the
+// material (graphId != 0 -- a graph can compute attenuation per pixel, so this has to assume yes
+// rather than read a distance a graph never wrote). Everything else -- the common case, a decal like
+// NewSponza's floor dirt -- draws a flat blended colour over the backdrop's own hardware blend and
+// never touches the texture at all.
+bool VoxiRenderer::blendedDrawReadsBackdrop(const void* materialConstants, u32 bytes) const {
+    if (bytes < sizeof(pbr::MaterialConstants) || !materialConstants) return true;   // unknown layout: assume yes
+    const auto& mat = *static_cast<const pbr::MaterialConstants*>(materialConstants);
+    return mat.attenuationDistance > 0.0f || mat.graphId != 0;
+}
+
 // True once the feature is up: shadowing and the bounce are terms inside Voxi's lit pixel shader.
 bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 
@@ -4554,6 +4571,21 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     cb_.viewParams[3] = giCbWrittenThisFrame_
                       ? static_cast<f32>((1u << 17) | ((nrdFrame_ & 1u) << 16))
                       : 0.0f;
+
+    // BIT 16, SET LAST: tells the blended replay (D3D12Device::endFrame, which picks cb_ up through
+    // sceneConstants() after scenePass returns) that gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex hold
+    // THIS frame's values, so a translucent pixel sitting on the opaque surface the staged passes
+    // already lit may reuse them instead of paying its own rays -- see
+    // Settings::blendedReuseStagedLighting's own comment for the shape of that reuse. SELF-CLEARING:
+    // this is the ONLY place that sets the bit, and prePass (top of this frame, before this function
+    // even runs) already repacked giShadowParams[3] from scratch with it absent (bits 1/2/4/8 only,
+    // see that assignment's own comment) -- so a frame that does not reach this line, because
+    // rdStagedActive() was false, carries prePass's 0 straight through to the replay untouched. Keep
+    // it that way: the bit must never be set anywhere else, or a frame that falls back from staged to
+    // single-pass mid-frame could leave it on over textures nothing wrote this frame.
+    if (settings_.blendedReuseStagedLighting) {
+        cb_.giShadowParams[3] = static_cast<f32>(static_cast<u32>(cb_.giShadowParams[3]) | 16u);
+    }
 }
 
 // Rebuilds the pipelines that bake the sample count and the target formats, and resizes the

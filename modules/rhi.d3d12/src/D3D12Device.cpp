@@ -1657,23 +1657,36 @@ private:
     TextureHandle blendBackdropTex_ = 0;
     u32           blendBackdropW_ = 0, blendBackdropH_ = 0;
     bool          blendBackdropCopyLogged_ = false;
-    // Per-layer backdrop re-capture: how many extra MSAA resolves one frame's translucency may buy.
-    // EIGHT IS A BUDGET, NOT AN ALGORITHM LIMIT -- each re-capture is a full-target resolve, so this
-    // keeps "correct stacked glass" from turning a hundred panes into a hundred resolves. Eight
-    // covers every arrangement seen so far (water under a glass walkway under a rail is three);
-    // surfaces beyond it degrade to the single-capture behaviour that shipped before -- a known
-    // approximation, not a new failure.
+    // Per-layer backdrop RE-capture: how many extra MSAA resolves one frame's translucency may buy,
+    // on top of the one capture that is never counted here (see resolveBlendBackdrop's call sites in
+    // endFrame). EIGHT IS A BUDGET, NOT AN ALGORITHM LIMIT -- each re-capture is a full-target
+    // resolve, so this keeps "correct stacked glass" from turning a hundred panes into a hundred
+    // resolves. Eight covers every arrangement seen so far (water under a glass walkway under a rail
+    // is three); surfaces beyond it degrade to the single-capture behaviour that shipped before -- a
+    // known approximation, not a new failure.
+    //
+    // ONLY COUNTS CAPTURES A DRAW ACTUALLY NEEDED. A capture (first or repeat) now only happens ahead
+    // of a draw whose material reads the backdrop (IRenderFeature::blendedDrawReadsBackdrop) -- a
+    // frame of pure decals never calls resolveBlendBackdrop at all, let alone this many times, so this
+    // budget is spent only by the surfaces it was ever meant for (glass, water, anything refractive or
+    // attenuating).
     static constexpr u32 kMaxBlendLayerResolves = 8;
     bool          blendLayerCapWarned_ = false;
     // M3: a cheap on-change log of what the blended replay actually did, so a session's log can
     // answer "is this frame even doing translucency work" without turning on GPU timing. Widened
     // rather than once-per-change (a scene that gains and loses one pane of glass every other frame
     // would otherwise log every other frame forever): see the log site for the power-of-two gate.
-    // ~0u is not a real (draws, resolves) pair -- it forces the FIRST comparison after startup to
-    // count as a change and log once, rather than requiring the accidental case drawn==0 && resolves
-    // ==0 to already match.
+    // ~0u is not a real (draws, resolves, captures) triple -- it forces the FIRST comparison after
+    // startup to count as a change and log once, rather than requiring the accidental all-zero case
+    // to already match.
     u32 blendStatDrawsLogged_ = ~0u;
     u32 blendStatResolvesLogged_ = ~0u;
+    // Total backdrop captures this frame (the uncounted first one AND every counted re-capture) --
+    // logged alongside blendStatResolvesLogged_ because the two can now differ even when neither
+    // changes: a frame whose translucent draws are all decals captures 0 regardless of how many draws
+    // there are, which the draws/resolves pair alone does not distinguish from "captured once, up
+    // front, the old way".
+    u32 blendStatCapturesLogged_ = ~0u;
     u32 blendStatChanges_ = 0;
     // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
     // PSComposite then tonemaps an image that is already the right size, so its own resample
@@ -4967,6 +4980,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
     const bool autoExp = post_.autoExposure && caps_.computeShaders;
     ID3D12Resource* scene = msaa ? sceneResolved_.Get() : msaaColor_.Get();
+    // THE SCENE IS READ BY COMPUTE HERE, NOT ONLY BY PIXEL SHADERS: CSHistogram and CSLocalGrid meter
+    // it before the composite samples it, so it has to sit in both read states. It used to go to
+    // PIXEL_SHADER_RESOURCE alone, which D3D12 does not allow a compute read from. The blended replay's
+    // backdrop copy (COPY_SOURCE, just before this) happened to leave the target in a layout compute
+    // reads correctly, which hid it on any frame with a translucent draw on screen; on every other
+    // frame auto-exposure metered the scene wrong.
+    const D3D12_RESOURCE_STATES kSceneRead =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     if (!expSeeded_) {
         const u32 zeros[258] = {};
@@ -4997,10 +5018,10 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         };
         cmdList_->ResourceBarrier(1, pre);
         cmdList_->ResolveSubresource(scene, 0, msaaColor_.Get(), 0, kSceneColorFormat);
-        auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RESOLVE_DEST, kSceneRead);
         cmdList_->ResourceBarrier(1, &toSrv);
     } else {
-        auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, kSceneRead);
         cmdList_->ResourceBarrier(1, &toSrv);
     }
 
@@ -5253,13 +5274,13 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
             // SOURCE, so it transitions to COPY_SOURCE -- not CopyDest, which is the destination's
             // state and would be a validation error and a wrong barrier.
             D3D12_RESOURCE_BARRIER pre[2] = {
-                transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition(scene, kSceneRead, D3D12_RESOURCE_STATE_COPY_SOURCE),
                 transition(srcT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
             };
             cmdList_->ResourceBarrier(2, pre);
             cmdList_->CopyResource(srcT->res.Get(), scene);
             D3D12_RESOURCE_BARRIER post[2] = {
-                transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, kSceneRead),
                 transition(srcT->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
             };
             cmdList_->ResourceBarrier(2, post);
@@ -5381,8 +5402,8 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         cmdList_->ResourceBarrier(1, &expBack);
     }
     auto sceneBack = msaa
-        ? transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RESOLVE_DEST)
-        : transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ? transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RESOLVE_DEST)
+        : transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
     cmdList_->ResourceBarrier(1, &sceneBack);
     if (msaa) {
         auto msaaBack = transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
@@ -5468,8 +5489,12 @@ void D3D12Device::endFrame() {
         // "sky+post+ui", that span still reported 4.7ms exclusive -- more than those four combined,
         // and this replay was the only unmarked thing left. The glass was the cost, not "sky and post".
 
-        // The backdrop copy runs only when there are blended draws, before the first translucent
-        // draw so it captures the opaque scene exactly. Copies FROM msaaColor_, not `scene`: `scene`
+        // The backdrop copy runs only ahead of a draw whose material actually reads it
+        // (IRenderFeature::blendedDrawReadsBackdrop, checked per draw in the loop below) -- a decal
+        // like NewSponza's floor dirt never triggers this at all. When it does run, it captures
+        // whatever the target holds AT THAT POINT -- the opaque scene for the very first capture,
+        // or everything drawn since the previous one for a later re-capture -- so it is not simply
+        // "before the first translucent draw" any more. Copies FROM msaaColor_, not `scene`: `scene`
         // is the resolve destination and the resolve hasn't run yet.
         //
         // The size check is load-bearing -- omitting it removed the device on every resize.
@@ -5524,10 +5549,18 @@ void D3D12Device::endFrame() {
             }
         };
 
-        // The first capture, in the position and for the reason the one-shot version had: after the
-        // opaque scene and the sky, before any translucent draw.
-        resolveBlendBackdrop();
+        // NO CAPTURE HERE ANY MORE -- the one-shot pre-loop resolve this used to be is now the first
+        // backdrop-reading draw's own capture (blendBackdropCaptured starts false), so a frame whose
+        // translucent draws never read the backdrop takes zero captures instead of one.
         u32 blendLayerResolves = 0;
+        // Whether ANY capture has happened yet this frame -- the first one is never counted against
+        // kMaxBlendLayerResolves/blendLayerResolves, exactly as the old unconditional pre-loop capture
+        // never was.
+        bool blendBackdropCaptured = false;
+        // Total captures this frame (the uncounted first plus every counted re-capture) -- separate
+        // from blendLayerResolves so the log line can say "captured nothing" honestly rather than
+        // conflating it with "captured once, for free".
+        u32 blendBackdropCaptures = 0;
         // M3 counters -- see blendStatDrawsLogged_'s own comment for why these are logged on change
         // rather than every frame. `blendDrawsDone` counts draws that survive the stale-handle check
         // below, not blendedDraws_.size(): a capture can outlive its mesh within the same frame, and
@@ -5589,7 +5622,6 @@ void D3D12Device::endFrame() {
             // feature and material cheap. It IS force-invalidated after the loop: runPostChain right
             // after sets pipelines directly on the command list, and a stale "true" would describe
             // state about to be overwritten.
-            bool blendDrewAny = false;
             for (const BlendedDraw& bd : blendedDraws_) {
                 // A capture can outlive its mesh within the SAME frame (destroyMesh() called between
                 // capture and flush) -- the same "stale handle draws nothing" rule drawMesh() applies
@@ -5597,20 +5629,31 @@ void D3D12Device::endFrame() {
                 if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
                 ++blendDrawsDone;
 
-                // Re-capture so this surface sees the ones behind it: everything drawn so far this
-                // flush is further from the camera, exactly what this draw's correction needs to
-                // cancel against. Skipped for the first surviving draw, whose capture already ran.
-                //
-                // Capped: each re-capture is a full-target MSAA resolve, so a hundred panes would pay
-                // a hundred of them. Beyond the cap, later surfaces fall back to the pre-fix
-                // approximation; logged once so an over-cap scene says so.
-                if (blendDrewAny) {
-                    if (blendLayerResolves < kMaxBlendLayerResolves) {
-                        ++blendLayerResolves;
-                        // NO OMSetRenderTargets AFTERWARDS -- not an omission. The resolve moves
-                        // msaaColor_ to RESOLVE_SOURCE and back; a resource BARRIER changes state, it
-                        // doesn't unbind, so the targets set before this loop are still bound.
+                // ONLY A DRAW THAT SAMPLES THE BACKDROP NEEDS IT CAPTURED -- a decal like NewSponza's
+                // floor dirt blends flat over whatever is already there and never reads
+                // gBlendBackdrop. See IRenderFeature::blendedDrawReadsBackdrop for what makes a
+                // material say yes.
+                if (owner->blendedDrawReadsBackdrop(bd.binding.constants, bd.binding.bytes)) {
+                    if (!blendBackdropCaptured) {
+                        // The first capture this frame, taken just before the first draw that reads
+                        // it -- so it already holds every non-reading layer drawn before it. Never
+                        // counted against the cap, like the old unconditional pre-loop capture.
                         resolveBlendBackdrop();
+                        ++blendBackdropCaptures;
+                        blendBackdropCaptured = true;
+                    } else if (blendLayerResolves < kMaxBlendLayerResolves) {
+                        // Re-capture so this surface sees every layer drawn since the last capture
+                        // (all further away, by the sort above) -- there is always at least one: the
+                        // draw that took the previous capture. Capped: each re-capture is a
+                        // full-target copy/resolve, so a hundred panes would pay a hundred of them;
+                        // beyond the cap later surfaces fall back to the pre-fix approximation.
+                        //
+                        // NO OMSetRenderTargets AFTERWARDS -- not an omission. The resolve moves
+                        // msaaColor_ to RESOLVE_SOURCE and back; a resource BARRIER changes state,
+                        // it doesn't unbind, so the targets set before this loop are still bound.
+                        ++blendLayerResolves;
+                        resolveBlendBackdrop();
+                        ++blendBackdropCaptures;
                     } else {
                         blendCapReached = true;
                         if (!blendLayerCapWarned_) {
@@ -5622,7 +5665,6 @@ void D3D12Device::endFrame() {
                         }
                     }
                 }
-                blendDrewAny = true;
 
                 const BindingSetHandle bs = owner->sceneBindingSet();
                 const void* cb = nullptr; u32 cbBytes = 0;
@@ -5668,17 +5710,21 @@ void D3D12Device::endFrame() {
 
         // M3: logged on CHANGE, not every frame -- see blendStatDrawsLogged_'s own comment. Reached
         // for BOTH branches above: the !blendedPso branch left blendDrawsDone/blendLayerResolves/
-        // blendCapReached at their initial 0/0/false, which is the honest answer ("nothing replayed")
-        // and still worth a log line the first time a frame queues blended draws no feature can take.
-        if (blendDrawsDone != blendStatDrawsLogged_ || blendLayerResolves != blendStatResolvesLogged_) {
+        // blendBackdropCaptures/blendCapReached at their initial 0/0/0/false, which is the honest
+        // answer ("nothing replayed") and still worth a log line the first time a frame queues blended
+        // draws no feature can take.
+        if (blendDrawsDone != blendStatDrawsLogged_ || blendLayerResolves != blendStatResolvesLogged_ ||
+            blendBackdropCaptures != blendStatCapturesLogged_) {
             ++blendStatChanges_;
             if ((blendStatChanges_ & (blendStatChanges_ - 1)) == 0) {
-                AVER_INFO("[RHI.D3D12] blended replay: {} translucent draw(s), {} layer re-capture(s) (cap {}){}",
+                AVER_INFO("[RHI.D3D12] blended replay: {} translucent draw(s), {} layer re-capture(s) "
+                          "(cap {}){}, {} backdrop capture(s)",
                           blendDrawsDone, blendLayerResolves, kMaxBlendLayerResolves,
-                          blendCapReached ? ", cap reached" : "");
+                          blendCapReached ? ", cap reached" : "", blendBackdropCaptures);
             }
             blendStatDrawsLogged_ = blendDrawsDone;
             blendStatResolvesLogged_ = blendLayerResolves;
+            blendStatCapturesLogged_ = blendBackdropCaptures;
         }
         endGpuSpan();   // "blended replay"
     }

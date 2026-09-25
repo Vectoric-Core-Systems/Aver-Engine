@@ -1053,6 +1053,15 @@ public:
     virtual BindingSetHandle sceneBindingSet() const { return 0; }
     virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }
 
+    // Whether a BLENDED draw whose material constants are `materialConstants`/`bytes` actually
+    // SAMPLES the pre-draw backdrop the backend captures for it (IDevice::sceneColorBackdropTexture)
+    // -- a decal never does, a refractive/attenuating surface does. The backend uses this to skip the
+    // capture (a full-target MSAA resolve) for draws that cannot read it. DEFAULTED true: an unknown
+    // feature, or a caller that passes no constants to check, keeps today's always-capture behaviour.
+    virtual bool blendedDrawReadsBackdrop(const void* materialConstants, u32 bytes) const {
+        (void)materialConstants; (void)bytes; return true;
+    }
+
     // Whether this feature draws the scene GEOMETRY itself, so the device's own drawMesh path
     // should stand aside. Says nothing about the rest of the frame -- see suppressesWholeFrame.
     //

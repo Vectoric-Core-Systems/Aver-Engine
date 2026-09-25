@@ -830,7 +830,13 @@ struct Settings {
     // component of the GI-only shadow map's params row -- see FrameConstants::giShadowParams's own
     // comment (VoxiRenderer.hpp), which used to say that component was unused. VoxiRenderer::prePass
     // packs these bools into cb_.giShadowParams[3] every frame (bit 1/2/4/8 below); the HLSL side
-    // decodes it as `uint bits = (uint)gGiShadowParams.w`. T1-T3 ARE ON BY DEFAULT since they were
+    // decodes it as `uint bits = (uint)gGiShadowParams.w`. A FIFTH BIT LIVES IN THE SAME ROW, bit 16
+    // (blendedReuseStagedLighting, below T1-T4) -- shaped differently from these four on purpose: it
+    // is not packed by prePass alongside them, it is ORed in afterwards by
+    // VoxiRenderer::recordStagedRayDriven only on a frame that actually runs the staged path, so it
+    // answers a question these four never need to ("are the staged lighting textures even THIS
+    // frame's, right now") rather than trading quality for cost. See its own comment for the shape.
+    // T1-T3 ARE ON BY DEFAULT since they were
     // measured on the owner's NewSponza view (staged mode 1, 300 frames, --gpu-timing): together
     // 15.6 -> 13.9 ms/frame. Still image vs all off: MAD 0.46. Moving camera (--cam-wobble 40 24,
     // stopped at frame 100, compared with the settled pose): error 4.58 -> 4.70 MAD, pixels > 16
@@ -876,6 +882,29 @@ struct Settings {
     // under the column capitals and at the column bases that the ray blocks. A smaller normal offset
     // did not change that. OFF by default until judged in the editor. Console: voxi.rtGiHitShadowMap.
     bool rtGiHitShadowMap = false;
+
+    // ---- BIT 16: REUSE THE STAGED RAY-DRIVEN LIGHTING FOR A TRANSLUCENT DRAW ON THE SAME SURFACE ----
+    // Rides the same cb_.giShadowParams[3]/gGiShadowParams.w row as T1-T4 above but is shaped
+    // differently -- see the toggle-block header's own note on why. What it trades: a translucent
+    // pixel drawn over an opaque surface the staged passes (Stage S/G/O/R) already lit THIS frame --
+    // NewSponza's floor dirt decal is exactly this shape, a BLEND-translucent, alpha-0.35 layer sitting
+    // a fraction of a centimetre above the floor -- would otherwise have PSMainVoxi's translucent
+    // branch re-light it from scratch (its own sun-shadow ray, a ReSTIR GI candidate ray plus its
+    // shadow ray, a sky-occlusion ray and, for a rough surface, a reflection ray) for lighting the
+    // ray-driven passes already computed at that same screen pixel a few instructions earlier in the
+    // frame. ON lets PSMainVoxi read gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex instead of re-tracing,
+    // gated PER PIXEL in the shader on the depth gRdSunVisTex.a stores agreeing with this pixel's own
+    // depth -- i.e. the translucent surface actually sits on the one the staged passes lit, not merely
+    // near it in screen space. A draw whose material reads the captured backdrop instead (glass,
+    // water -- anything with attenuationDistance or a material graph; see
+    // IRenderFeature::blendedDrawReadsBackdrop) is excluded regardless of this setting: it wants its
+    // own lighting, not the opaque floor's underneath it.
+    //
+    // ON BY DEFAULT. MEASURED (NewSponza, staged mode 1, two floor-decal draws on screen): blended
+    // replay 0.39 -> 0.17 ms at the level's saved camera and 0.18 -> 0.14 ms at the standard view,
+    // still image difference 0.01 / 0.04 against it off. The reuse is quad-uniform in the shader, so
+    // a 2x2 quad straddling a decal's edge traces as a whole. Console: voxi.blendedReuseStagedLighting.
+    bool blendedReuseStagedLighting = true;
 
     // ---- the acceleration-structure "unchanged" gate ------------------------------------------
     // MEASURED on the owner's static NewSponza scene: the "Voxi acceleration structures" GPU span

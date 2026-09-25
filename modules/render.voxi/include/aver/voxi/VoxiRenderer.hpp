@@ -330,6 +330,13 @@ public:
     // Hands the backend Voxi's per-frame constant block.
     bool sceneConstants(const void** data, u32* bytes) const override;
 
+    // Whether a blended draw's material actually samples the backdrop the backend captures for it --
+    // see the base class's own comment for what this saves. Voxi's answer is a straight read of the
+    // pbr::MaterialConstants block every material-shaded draw already carries: `bytes` too small to
+    // BE one means the caller isn't passing Voxi's own layout (an unknown draw, or none at all), which
+    // this feature cannot answer for, so it says yes -- the conservative default. Defined in the .cpp.
+    bool blendedDrawReadsBackdrop(const void* materialConstants, u32 bytes) const override;
+
     // Returns the lit pipeline for this frame, or 0 to let the backend use its own. `depthPrepassed`
     // selects the LessEqual/no-write depth-state variant for an instance depthPrepassPipeline()
     // already wrote depth for this frame -- see IRenderFeature's own comment on the contract, and
@@ -1484,9 +1491,14 @@ private:
         // bit-field toggles, decoded in HLSL as `uint bits = (uint)gGiShadowParams.w` -- bit 1
         // Settings::rtSecondaryShadowOpaque, bit 2 Settings::rtSkyOcclusionHalfRate, bit 4
         // Settings::rtReflectionHalfRate, bit 8 Settings::rtGiHitShadowMap (Voxi.hpp has each one's
-        // own comment). Packed every frame in
-        // VoxiRenderer::prePass, not by fitGiShadow() -- a frame that skips fitGiShadow (the GI
-        // rebuild gate) must still carry the bits.
+        // own comment). Bits 1/2/4/8 packed every frame in VoxiRenderer::prePass, not by
+        // fitGiShadow() -- a frame that skips fitGiShadow (the GI rebuild gate) must still carry the
+        // bits. Bit 16 is DIFFERENT IN KIND, not another toggle in that same row: it means "the
+        // staged textures this frame's translucent draws might reuse (gRdSunVisTex/gRdGiTex/
+        // gRdAoTex/gRdReflTex) actually hold this frame's values AND Settings::
+        // blendedReuseStagedLighting is on" -- see VoxiRenderer::recordStagedRayDriven, the only place
+        // that ORs it in, and only on a frame that runs the staged path at all; prePass's from-scratch
+        // write above leaves it 0 on every other frame, which is what makes it self-clearing.
         f32 giShadowParams[4] = {};
         // The SPATIAL shadow denoiser -- mirrored as gRtDenoiseParams. x = filter radius in
         // pixels (0 = off), y = how much of the filtered value to take (0 discards it while

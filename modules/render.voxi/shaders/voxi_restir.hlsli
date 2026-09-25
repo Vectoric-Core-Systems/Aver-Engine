@@ -963,7 +963,6 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     //
     // T4 (Settings::rtGiHitShadowMap): the GI-only shadow map answers instead of either ray wherever
     // it can -- see giHitShadowMapVisibility, above -- and a -1 (no answer) falls through to them.
-    // An `if`, for the same reason: HLSL's ?: evaluates both sides, which would sample the map always.
     float mapVis = -1.0;
     if ((rtGiShadowBits() & 8u) != 0u) mapVis = giHitShadowMapVisibility(hitPos, s.N, L);
     if (mapVis >= 0.0) {

@@ -1128,6 +1128,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "let bounce light under column capitals and bases.",
         []{ return vBool(Renderer::get().settings().rtGiHitShadowMap); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtGiHitShadowMap = on; }); }});
+    t.push_back({"voxi.blendedReuseStagedLighting", VarType::Bool, false,
+        "A translucent pixel over an opaque surface the staged ray-driven passes already lit this "
+        "frame (a decal, e.g.) reuses their sun/GI/AO/reflection textures instead of re-tracing its "
+        "own rays, gated per pixel on that surface's depth matching. A draw that reads the blended "
+        "backdrop (glass, water) always keeps its own lighting regardless. ON by default.",
+        []{ return vBool(Renderer::get().settings().blendedReuseStagedLighting); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->blendedReuseStagedLighting = on; }); }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },
