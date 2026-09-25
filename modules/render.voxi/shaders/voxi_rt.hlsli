@@ -826,6 +826,73 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
     return rtShadowEx(wpos, N, L, pixel, dpx, dpy, rays, frameJitter, 0u);
 }
 
+// Decodes gGiShadowParams.w's runtime bit-field -- see that cbuffer field's own header comment
+// (voxi.hlsl) for what each bit means and who reads it. One accessor so T1 below, T2
+// (rtSkyOcclusionTemporal, further down this file) and T3 (rtReflectionTemporalEx, voxi.hlsl) all
+// decode the same field the same way rather than three independent (uint) casts that could drift if
+// the field is ever renumbered.
+uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
+
+// The ray a single rtShadowEx sample would build at rays=1, kFirst=0, zero footprint (dpx=dpy=0 --
+// what every caller of rtShadowOpaque below passes). Factored out so rtShadowOpaque cannot drift from
+// rtShadowEx's own formula: same T/B frame around L, same ang0 = rtHash(pixel)*2pi+frameJitter, same
+// rtDiscSample(0, ang0), same bias. rtShadowEx does NOT call this -- its own loop already IS this
+// formula at k=0, and reaching into the wave-bound hot loop this file's own cost comments measure
+// (aver-raydriven-pass-cost) to make it call out, for a caller that only ever wants n=1, would risk
+// every OTHER caller's measured cost for this one's benefit.
+void rtShadowRay0(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitter,
+                  out float3 dir, out float3 origin, out float bias) {
+    float3 up = abs(L.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 T  = normalize(cross(up, L));
+    float3 B  = cross(L, T);
+    const float tanR  = max(gRtParams.x, 0.0);
+    const float ang0  = rtHash(pixel) * 6.2831853 + frameJitter;
+    const float2 disc = rtDiscSample(0, ang0);
+    dir    = normalize(L + (T * disc.x + B * disc.y) * tanR);
+    bias   = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    origin = wpos + N * bias + dir * bias;
+}
+
+// T1 (Settings::rtSecondaryShadowOpaque, console voxi.rtSecondaryShadowOpaque): the cheap sun-shadow
+// ray for a SECONDARY hit -- rtReflection's own hit (below in this file) and the ReSTIR GI candidate's
+// hit (giTraceInitialCandidate, voxi_restir.hlsli) -- where rtShadow's transmittance walk buys detail
+// neither caller can resolve. ONE ray, ACCEPT_FIRST_HIT_AND_END_SEARCH, against the same opaque-
+// including-cutouts lane CSRdVisibility's own primary ray traces (AVER_RT_MASK_OPAQUE_ALL -- not the
+// bare AVER_RT_MASK_OPAQUE that ray uses, since the owner-hidden exclusion that's for is a property of
+// the VIEWER's own primary ray, not a secondary one), resolved through averRtProceedSolid exactly as
+// that ray resolves a cutout -- a leaf still casts the shadow of its alpha-tested SHAPE, not its
+// bounding rectangle.
+//
+// THE TRADE, STATED PLAINLY: a translucent instance (glass, water -- AVER_RT_MASK_TRANSLUCENT) is
+// excluded by mask here, not walked and attenuated the way rtShadow's own transmittance loop does, so
+// it casts NO shadow for these two callers. A reflection bounce or a GI candidate loses the coloured
+// tint a pane would have cast on it; the PRIMARY sun shadow (rtShadowTemporalEx / CSRdShadow /
+// CSRdShadowProbe) is untouched by this function and keeps the tint. That lost walk -- up to 8
+// transmittance steps against the whole scene, RAY_FLAG_NONE against AVER_RT_MASK_ALL -- is the whole
+// saving; this ray pays one BVH traversal to the first opaque hit (or none) and stops.
+//
+// Builds the identical ray rtShadowEx(rays=1, kFirst=0, dpx=dpy=0) would, via rtShadowRay0 above, so a
+// caller flipping this bit on sees the same ray it always traced, just without the walk behind it.
+// Returns float3 (0 or 1 per channel, never fractional) so it drops into either call site unchanged --
+// both already carry a float3 result through to a tinted shading term.
+float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitter) {
+    float3 dir, origin;
+    float  bias;
+    rtShadowRay0(wpos, N, L, pixel, frameJitter, dir, origin, bias);
+
+    RayDesc r;
+    r.Origin    = origin;
+    r.Direction = dir;
+    r.TMin      = bias;
+    r.TMax      = 100000.0;
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
+    averRtProceedSolid(q);
+
+    return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? float3(0, 0, 0) : float3(1, 1, 1);
+}
+
 // The fraction of the hemisphere above `N` from which the SKY is actually reachable: 1 fully open,
 // 0 fully enclosed. This is the scalar `diffAmbient` multiplies the sky irradiance by, traced
 // instead of estimated.
@@ -1401,27 +1468,86 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 // ReSTIR GI (giMode 1) or with GI off, the caller's `ao` is still the 1.0 it was initialised with.
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo,
                              bool coneAoIsGather, bool nrdAoUsable) {
-    // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
-    // distance: the wrapper exists to throw away everything but `.open`, and this function is now
-    // one of the callers its own comment describes as "meaning to use them". Identical cost -- the
-    // wrapper was a field select, not a second trace.
-    const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
-    const float fresh = amb.open;
     // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
     // reflection pairs exist at every ray-tracing tier, but this one is allocated only while a sky
     // occlusion ray is wanted (VoxiRenderer::aoHistoryWanted), and touching a null UAV is undefined
     // rather than merely wasteful. With rays > 0 that means a TRANSITIONAL frame -- the first after
     // a resize, a render-scale change or sky occlusion being switched on, before the pair exists --
-    // or an allocation that failed.
+    // or an allocation that failed. T2 (rtSkyOcclusionHalfRate, below) never applies here: there is no
+    // AO history pair to reproject against on a transitional frame, so this branch always traces.
     //
     // THE CONE'S ANSWER ONLY WHEN THE CONE ANSWERED. A real gather is smooth and beats a lone binary
     // ray. Under ReSTIR GI `coneAo` is the constant 1.0, and returning it painted full sky ambient on
     // every enclosed surface for that frame -- the same "fully open" constant whose use as the
     // reprojection prior below was the ray-driven motion wash. This pixel's own trace is right in
     // expectation instead.
-    if (gRtDenoiseParams.w < 0.5) return coneAoIsGather ? coneAo : fresh;
+    if (gRtDenoiseParams.w < 0.5) {
+        // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
+        // distance: the wrapper exists to throw away everything but `.open`, and this function is one
+        // of the callers its own comment describes as "meaning to use them". Identical cost -- the
+        // wrapper was a field select, not a second trace.
+        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
+        return coneAoIsGather ? coneAo : amb.open;
+    }
 
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
+
+    // ---- T2 (Settings::rtSkyOcclusionHalfRate, console voxi.rtSkyOcclusionHalfRate) -- DECIDED
+    // BEFORE THE TRACE, NOT AFTER, so a skip actually avoids the ray rather than discarding it ----
+    //
+    // Reprojection is hoisted up here from where it used to sit (just above the blend, further down)
+    // for exactly that reason: `rtReprojectAo` is a texture lookup, not a ray, so evaluating it before
+    // the trace decision costs nothing extra -- it is the SAME call this function always made, only
+    // earlier in program order. With the bit clear, `skipTrace` is always false below and every line
+    // from here to the trace computes exactly what it did before this task.
+    //
+    // A WHOLE 8x8 TILE (one staged compute thread group -- CSRdSkyOcc dispatches this grid) shares the
+    // skip decision, viewport-relative (gSceneViewportCur.xy) so the tile lines up with the group that
+    // actually dispatched it. Parity alternates by gRtHistParams.z (the frame index), so a tile that
+    // skips this frame traces next -- half the tiles trace every frame, not the same half forever.
+    //
+    // SKIPPING ONLY WHEN THIS PIXEL'S OWN HISTORY REPROJECTS VALIDLY is the whole safety condition: a
+    // disoccluded pixel always traces, whatever its tile's parity says. That is the ray-driven motion-
+    // wash lesson the paragraph below (SEEDED FROM THIS PIXEL'S OWN TRACE) already paid for once --
+    // standing on a prior for a newly revealed surface reads as a grey wash that takes ~33 frames of
+    // history to clear. A tile skip is only safe where there is real history to stand on instead.
+    float histV = 0.0;
+    float2 velocityPx = 0.0;
+    const bool haveHist = gRtHistParams.y > 0.25 && rtReprojectAo(wpos, pixel, histV, velocityPx);
+
+    bool skipTrace = false;
+    if ((rtGiShadowBits() & 2u) != 0u && haveHist) {
+        const uint2 tile = (uint2(pixel) - (uint2)gSceneViewportCur.xy) / 8u;
+        skipTrace = ((tile.x ^ tile.y ^ (uint)gRtHistParams.z) & 1u) != 0u;
+    }
+
+    // `tracedNow` GATES THE HIT-DISTANCE WRITE, FURTHER DOWN. gAoHitDistOut (u5) is not ping-ponged --
+    // there is no history texture for it in this shader, only NRD's own external accumulation reads it
+    // back -- so a skipped pixel simply leaves it UNWRITTEN: NRD keeps reading whatever this same texel
+    // held after its last real trace, at most one frame old under this checkerboard (a tile that skips
+    // this frame traced last frame and will trace next). That is the "last value" this function keeps
+    // well-defined on a skipped pixel; there is no reprojected hit distance to keep instead -- gAoHist
+    // (the AO reprojection source above) carries (openness, depth), not hit distance.
+    float fresh;
+    float hitDist = 0.0;
+    bool  tracedNow;
+    if (skipTrace) {
+        // The reprojected history IS this frame's fresh estimate -- see the SEEDED FROM comment just
+        // below: `vis = fresh` followed by `vis = lerp(fresh, histV, weight)` reduces to `histV`
+        // exactly, for any weight, because lerp(a, a, t) == a. The temporal blend "keeps it" without
+        // needing a special case, and the spatial filter at the end of this function still runs.
+        fresh = histV;
+        tracedNow = false;
+    } else {
+        // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
+        // distance: the wrapper exists to throw away everything but `.open`, and this function is one
+        // of the callers its own comment describes as "meaning to use them". Identical cost -- the
+        // wrapper was a field select, not a second trace.
+        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
+        fresh = amb.open;
+        hitDist = amb.hitDist;
+        tracedNow = true;
+    }
     // ---- SEEDED FROM THIS PIXEL'S OWN TRACE. IT USED TO BE SEEDED FROM `coneAo`, AND THE ARGUMENT
     // FOR THAT WAS SOUND RIGHT UP UNTIL THE PREMISE STOPPED HOLDING ----
     //
@@ -1482,9 +1608,9 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // THE SIBLING CASE, the early-out above for a frame with no AO pair bound, now makes the same
     // choice -- see coneAoIsGather there.
     float vis = fresh;
-    float histV = 0.0;
-    float2 velocityPx = 0.0;
-    if (gRtHistParams.y > 0.25 && rtReprojectAo(wpos, pixel, histV, velocityPx)) {
+    // haveHist/histV/velocityPx: the SAME rtReprojectAo call this function always made here, just
+    // hoisted above (see the T2 comment) so the skip decision could see it before tracing.
+    if (haveHist) {
         const float t      = saturate(length(velocityPx) / 32.0);
         // THE SHADOW PATH'S OWN WEIGHTS, and 0.95 was tried rather than assumed. Doubling the
         // effective sample count to ~20 moved dark-region local roughness from 0.4509 to 0.4486 --
@@ -1573,7 +1699,10 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // writes this file's own comment used to call inconsistent-if-only-one-were-guarded (gAoHistOut
     // just above, this one, and gRtShadowHistOut further down) are gated identically now, so none of
     // them can disagree about which fragment last wrote them.
-    if (gAverHistoryWrite) gAoHitDistOut[uint2(pixel)] = amb.hitDist;
+    //
+    // tracedNow &&: T2's own gate, see its header comment above -- a skipped pixel has no fresh
+    // hitDist to offer and leaves this texel exactly as its last real trace left it.
+    if (tracedNow && gAverHistoryWrite) gAoHitDistOut[uint2(pixel)] = hitDist;
     return rtAoSpatial(vis, wpos, N, pixel, curDepth);
 }
 
@@ -2085,7 +2214,16 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     // inner one behind. MEASURED consequence: of the isolated bright outliers left in a shadowed
     // frame, 60.7% sit on the SAME pixels two frames running, and 98.0% of the dark ones do -- the
     // signature of a deterministic per-pixel error rather than of sampling noise.
-    float3 shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
+    //
+    // T1 (Settings::rtSecondaryShadowOpaque): hitPos is a SECONDARY hit, exactly what rtShadowOpaque
+    // exists for -- see its own header comment for the ray it builds and the translucent-tint trade it
+    // makes. if/else, not ?:, so the bit is the one and only thing selecting which ray runs.
+    float3 shadow;
+    if ((rtGiShadowBits() & 1u) != 0u) {
+        shadow = rtShadowOpaque(hitPos, nWS, L, pixel, frameJitter);
+    } else {
+        shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
+    }
 
     // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance's reference:
     //     E = sunIrradiance*ndl + PI*skyRadiance*ambient;   return albedo * E / PI;

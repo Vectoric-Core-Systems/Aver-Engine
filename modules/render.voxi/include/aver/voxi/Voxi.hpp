@@ -825,6 +825,43 @@ struct Settings {
     // rayDrivenStages is 1 or 2. Console: voxi.rayDrivenReflSplit.
     bool rayDrivenReflSplit = true;
 
+    // ---- staged ray-driven bit-field toggles (cb_.giShadowParams.w / gGiShadowParams.w) ---------
+    // Three independent RUNTIME toggles packed into one integer bit-field riding the fourth
+    // component of the GI-only shadow map's params row -- see FrameConstants::giShadowParams's own
+    // comment (VoxiRenderer.hpp), which used to say that component was unused. VoxiRenderer::prePass
+    // packs these three bools into cb_.giShadowParams[3] every frame (bit 1/2/4 below); the HLSL side
+    // decodes it as `uint bits = (uint)gGiShadowParams.w`. Each is OFF BY DEFAULT in this change --
+    // they will be A/B-measured headlessly on the owner's NewSponza view and only flipped on if they
+    // measure well.
+
+    // T1 (bit 1): the sun-shadow ray fired FROM A SECONDARY HIT -- rtReflection's hit and ReSTIR GI's
+    // candidate hit -- normally walks rtShadow's full transmittance loop (up to 8 steps, RAY_FLAG_NONE,
+    // AVER_RT_MASK_ALL) so it can tint light through glass. With this on, both call sites fire ONE ray
+    // instead (RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH against the opaque-including-cutouts mask the
+    // primary/visibility rays already use). TRADE: translucent (glass/water) instances stop casting a
+    // shadow for these two secondary rays -- they read fully lit through glass rather than tinted.
+    // Primary shadows (the camera cascades, the shadow probe pass) are not touched. Console:
+    // voxi.rtSecondaryShadowOpaque.
+    bool rtSecondaryShadowOpaque = false;
+
+    // T2 (bit 2): rtSkyOcclusionTemporal skips its rtAmbientTraced call for an entire 8x8 TILE on this
+    // frame's skip parity, wherever that tile's reprojected history is valid this frame -- the
+    // temporal blend keeps the reprojection as the fresh estimate instead, still written back to
+    // history and still spatially filtered. Whole tiles skip together (a whole compute wave), not a
+    // per-pixel checkerboard -- a per-pixel pattern leaves every wave half occupied and saves nothing,
+    // the same lesson half-rate GI measured before its own compaction. A pixel with no valid history
+    // always traces. MEASURED: sky occlusion costs 0.73 ms of the staged mode 1, 15.4 ms frame.
+    // Console: voxi.rtSkyOcclusionHalfRate.
+    bool rtSkyOcclusionHalfRate = false;
+
+    // T3 (bit 4): rtReflectionTemporalEx skips its rtReflection trace for a ROUGH pixel (lobeRough > 0
+    // -- mirrors always retrace, since a reprojected mirror reflection is visibly wrong the instant
+    // the camera moves) on a skip-parity tile whose reflection history reprojects validly: the
+    // reprojected history becomes this frame's colour, same as the existing tiled "not my turn"
+    // branch already does. MEASURED: reflection trace costs 3.11 ms (+0.39 ms filter) of the staged
+    // mode 1, 15.4 ms frame. Console: voxi.rtReflectionHalfRate.
+    bool rtReflectionHalfRate = false;
+
     // ---- the acceleration-structure "unchanged" gate ------------------------------------------
     // MEASURED on the owner's static NewSponza scene: the "Voxi acceleration structures" GPU span
     // costs 0.42 ms every single frame -- a from-scratch ctx.buildTlas (PREFER_FAST_TRACE, no update

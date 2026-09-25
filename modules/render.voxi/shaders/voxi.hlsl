@@ -49,7 +49,28 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // what PSMainVoxi samples.
     float4x4 gGiShadowViewProj;
     // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable (0 = fall back to unshadowed
-    // indirect), z = normal-offset bias in world units, w unused.
+    // indirect), z = normal-offset bias in world units.
+    //
+    // w WAS UNUSED, and is now a RUNTIME BIT-FIELD, not a float value -- decode with
+    // `uint bits = (uint)gGiShadowParams.w`, never compared or lerped as a float. C++ assembles it
+    // every frame (VoxiRenderer.cpp, after fitGiShadow -- see that function's own comment for why it
+    // no longer zeroes this field) from three independent Settings toggles, each OFF by default and
+    // each an A/B-measured trade against the staged ray-driven cost breakdown, not a correctness fix:
+    //   bit 1 (Settings::rtSecondaryShadowOpaque, console voxi.rtSecondaryShadowOpaque): rtReflection's
+    //     hit and giTraceInitialCandidate's hit (voxi_restir.hlsli) call rtShadowOpaque (voxi_rt.hlsli)
+    //     instead of rtShadow for their own sun-shadow ray -- one first-hit-terminated ray against the
+    //     opaque-including-cutouts lane, trading away the tinted shadow a translucent pane would cast
+    //     on a SECONDARY hit. Primary shadows (rtShadowTemporalEx / CSRdShadow / CSRdShadowProbe) are
+    //     untouched.
+    //   bit 2 (Settings::rtSkyOcclusionHalfRate, console voxi.rtSkyOcclusionHalfRate):
+    //     rtSkyOcclusionTemporal (voxi_rt.hlsli) skips its rtAmbientTraced ray on half of this frame's
+    //     8x8 tiles (alternating which half by frame), wherever that pixel's reprojected AO history is
+    //     valid -- the reprojected value stands in as this frame's fresh estimate.
+    //   bit 4 (Settings::rtReflectionHalfRate, console voxi.rtReflectionHalfRate): rtReflectionTemporalEx
+    //     (voxi.hlsl) skips its rtReflection ray the same tiled way, for a ROUGH pixel only -- a mirror
+    //     (lobeRough == 0) always retraces, since a reprojected mirror reflection is wrong under motion.
+    // With all three bits clear this field reads 0.0, exactly as it always has, and every shader above
+    // computes exactly what it did before these existed.
     float4   gGiShadowParams;
     // The SPATIAL shadow denoiser. x = filter radius in pixels (0 = off); y = how much of the
     // filtered value to take (0 = none: taps still run and the result is discarded -- the
@@ -1025,19 +1046,62 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
         // runs. Used to trace/write/return with NO temporal blend -- correct for a deterministic
         // mirror, wrong once the lobe opened. Blend added HERE, only where variance was introduced:
         // rough=0 still takes the fresh value outright, unchanged for glass, chrome and water.
-        bool curHit;
-        float3 fresh = rtReflection(wpos, N, R, L, pixel, lobeRough, frameJitter, curHit);
-        float3 col = fresh;
 
-        if (lobeRough > 0.0 && curHit) {
-            float3 hist = 0.0;
-            float2 velocityPx = 0.0;
-            if (gRtHistParams.y > 0.75 && rtReprojectReflection(wpos, pixel, hist, velocityPx)) {
-                // Same velocity-discounted shape as rtShadowTemporal: a far-slid sample is the same
-                // surface but not the same point, and full trust smears a comet tail behind motion.
-                // Still camera: full weight. Fast pan: falls back to this frame's spatial filter.
-                const float t = saturate(length(velocityPx) / 6.0);
-                col = lerp(hist, fresh, lerp(0.15, 1.0, t));
+        // ---- T3 (Settings::rtReflectionHalfRate, console voxi.rtReflectionHalfRate) -- DECIDED
+        // BEFORE THE TRACE, the same shape as T2's own comment (voxi_rt.hlsli's
+        // rtSkyOcclusionTemporal) ----
+        //
+        // Gated on lobeRough > 0.0 up front: a MIRROR (lobeRough == 0, tanCone == 0 inside
+        // rtReflection) always retraces, because a reprojected mirror reflection is wrong the instant
+        // the camera moves -- there is no lobe variance for a stand-in history to be trading against,
+        // only a wrong answer.
+        //
+        // THE REPROJECTION CALL BELOW IS GATED ON THE BIT, UNLIKE T2's: T2 hoisted its own
+        // rtReprojectAo call unconditionally because that function already ran every frame regardless
+        // of whether the trace hit anything. This one does not -- today it only runs AFTER a
+        // successful trace (`if (lobeRough > 0.0 && curHit)`, in the `else` branch below), so hoisting
+        // it here unconditionally would add a reprojection lookup to every rough pixel whether or not
+        // this bit is even set. Gating it behind the bit keeps this branch's cost identical to today's
+        // whenever the bit is clear, at the price of one possible SECOND rtReprojectReflection call
+        // below on the rare pixel whose tile is skip-eligible but whose history has just gone invalid
+        // (a fresh disocclusion): a texture lookup, not a ray, and the non-skip path already pays for
+        // one of these every frame it runs anyway.
+        //
+        // Tile math is T2's, verbatim: an 8x8, viewport-relative tile (one staged compute thread
+        // group), parity alternating by gRtHistParams.z so a tile that skips this frame traces next.
+        bool   skipTrace = false;
+        float3 skipCol   = 0.0;
+        if ((rtGiShadowBits() & 4u) != 0u && lobeRough > 0.0) {
+            const uint2 tile = (uint2(pixel) - (uint2)gSceneViewportCur.xy) / 8u;
+            if (((tile.x ^ tile.y ^ (uint)gRtHistParams.z) & 1u) != 0u) {
+                float2 skipVelocityPx = 0.0;
+                skipTrace = gRtHistParams.y > 0.75 &&
+                            rtReprojectReflection(wpos, pixel, skipCol, skipVelocityPx);
+            }
+        }
+
+        bool   curHit;
+        float3 col;
+        if (skipTrace) {
+            // Exactly what the tiled branch's own "not my turn" case (below, the tileBits != 0u
+            // path) already does: reuse the reprojected history outright, no ray this frame. The
+            // unchanged history write and spatial filter, further down, take it from here.
+            col    = skipCol;
+            curHit = true;
+        } else {
+            float3 fresh = rtReflection(wpos, N, R, L, pixel, lobeRough, frameJitter, curHit);
+            col = fresh;
+
+            if (lobeRough > 0.0 && curHit) {
+                float3 hist = 0.0;
+                float2 velocityPx = 0.0;
+                if (gRtHistParams.y > 0.75 && rtReprojectReflection(wpos, pixel, hist, velocityPx)) {
+                    // Same velocity-discounted shape as rtShadowTemporal: a far-slid sample is the same
+                    // surface but not the same point, and full trust smears a comet tail behind motion.
+                    // Still camera: full weight. Fast pan: falls back to this frame's spatial filter.
+                    const float t = saturate(length(velocityPx) / 6.0);
+                    col = lerp(hist, fresh, lerp(0.15, 1.0, t));
+                }
             }
         }
 

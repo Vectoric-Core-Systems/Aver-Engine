@@ -931,7 +931,16 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // reason a reservoir stores a POSITION -- so reusing it would read another pixel's history
     // under a different surface. RTXDI's own temporal resampling is what amortises THIS ray across
     // frames instead, the same way it amortises the rest of the candidate.
-    sun.visibility = rtShadow(hitPos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
+    //
+    // T1 (Settings::rtSecondaryShadowOpaque): hitPos is this candidate's SECONDARY hit -- exactly
+    // what rtShadowOpaque (voxi_rt.hlsli, included before this file) exists for; see its own header
+    // comment for the ray it builds and the translucent-tint trade it makes. if/else, not ?:, so the
+    // bit is the one and only thing selecting which ray runs.
+    if ((rtGiShadowBits() & 1u) != 0u) {
+        sun.visibility = rtShadowOpaque(hitPos, s.N, L, pixel, frameJitter);
+    } else {
+        sun.visibility = rtShadow(hitPos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
+    }
     sun.visibility *= 1.0 + averCausticFocus(hitPos);
 
     // 0.0, NOT s.emissive: averShadeIndirect below adds s.emissive itself (its own header comment,

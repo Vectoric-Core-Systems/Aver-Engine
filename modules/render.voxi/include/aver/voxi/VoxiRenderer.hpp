@@ -1480,7 +1480,12 @@ private:
         // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
         f32 giShadowViewProj[16] = {};
         // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable at all (0 falls back to
-        // fully-lit indirect), z = normal-offset bias in world units, w unused.
+        // fully-lit indirect), z = normal-offset bias in world units. w = the staged ray-driven
+        // bit-field toggles, decoded in HLSL as `uint bits = (uint)gGiShadowParams.w` -- bit 1
+        // Settings::rtSecondaryShadowOpaque, bit 2 Settings::rtSkyOcclusionHalfRate, bit 4
+        // Settings::rtReflectionHalfRate (Voxi.hpp has each one's own comment). Packed every frame in
+        // VoxiRenderer::prePass, not by fitGiShadow() -- a frame that skips fitGiShadow (the GI
+        // rebuild gate) must still carry the bits.
         f32 giShadowParams[4] = {};
         // The SPATIAL shadow denoiser -- mirrored as gRtDenoiseParams. x = filter radius in
         // pixels (0 = off), y = how much of the filtered value to take (0 discards it while

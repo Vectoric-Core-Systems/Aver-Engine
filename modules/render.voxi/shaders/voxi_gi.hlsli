@@ -74,6 +74,12 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     float4   gCausticMin;
     float4   gCausticMax;
     float4x4 gGiShadowViewProj;
+    // Mirrors voxi.hlsl's gGiShadowParams field for field, including w -- now a runtime bit-field
+    // (T1/T2/T3's rtSecondaryShadowOpaque/rtSkyOcclusionHalfRate/rtReflectionHalfRate toggles; see
+    // that file's own comment on the field for what each bit decodes to and who reads it: rtReflection
+    // and giTraceInitialCandidate for bit 1, rtSkyOcclusionTemporal for bit 2, rtReflectionTemporalEx
+    // for bit 4, all in voxi_rt.hlsli/voxi_restir.hlsli/voxi.hlsl). NOTHING IN THIS PRELUDE READS ANY
+    // OF IT -- declared for layout only, same as gShadowDraw/gRtParams/gRtHistParams above.
     float4   gGiShadowParams;
     // THE TAIL THIS MIRROR WAS MISSING. The comment above calls this block byte for byte
     // FrameConstants, and it stopped three float4s short of being that -- harmless while nothing

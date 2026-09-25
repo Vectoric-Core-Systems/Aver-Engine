@@ -1526,6 +1526,15 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // without changing whether the passes below actually run.
     cb_.voxelParams[3] = (giEnabled() && !debugView_ && coneTraceEnabled_) ? 1.0f : 0.0f;
 
+    // THE STAGED RAY-DRIVEN BIT-FIELD TOGGLES -- see FrameConstants::giShadowParams's own comment for
+    // the bit table and Voxi.hpp for what each one trades. Packed HERE, unconditionally, every frame:
+    // fitGiShadow() (below, inside the GI rebuild gate) no longer touches [3] at all, precisely so a
+    // frame that skips the gate -- and so never calls fitGiShadow -- still carries the bits, same
+    // reasoning as ambientParams[1]/[2] a few lines up.
+    cb_.giShadowParams[3] = static_cast<f32>((settings_.rtSecondaryShadowOpaque ? 1u : 0u) |
+                                              (settings_.rtSkyOcclusionHalfRate ? 2u : 0u) |
+                                              (settings_.rtReflectionHalfRate  ? 4u : 0u));
+
     // Five passes below (acceleration structures, cascades, GI-only shadow box, voxelise, mip filter)
     // used to each open their own top-level GPU marker, so the timing report saw five unrelated
     // siblings instead of one feature's frame. This outer scope makes each pushMarker call a CHILD of
@@ -3211,7 +3220,9 @@ void VoxiRenderer::fitGiShadow() {
     cb_.giShadowParams[0] = 1.0f / static_cast<f32>(kGiShadowSize);
     cb_.giShadowParams[1] = 1.0f;          // usable; giShadowPass zeroes it when it cannot run
     cb_.giShadowParams[2] = texel * 1.5f;  // normal-offset bias, world units
-    cb_.giShadowParams[3] = 0.0f;
+    // [3] is NOT written here: it carries the staged ray-driven bit-field toggles, packed once per
+    // frame in prePass (see that assignment's own comment) -- this function only runs on the GI
+    // rebuild gate's cadence, and clobbering [3] here used to zero those bits out on every rebuild.
 }
 
 // Concatenates every referenced mesh's vertices and indices into two flat buffers, and writes the

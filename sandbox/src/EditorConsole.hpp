@@ -1098,6 +1098,29 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "forces a real rebuild regardless of this setting's own key match.",
         []{ return vBool(Renderer::get().settings().rtSkipUnchangedTlas); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSkipUnchangedTlas = on; }); }});
+    t.push_back({"voxi.rtSecondaryShadowOpaque", VarType::Bool, false,
+        "Fires the sun-shadow ray from a secondary hit (reflection, ReSTIR GI candidate) as one "
+        "RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH ray against the opaque-including-cutouts mask "
+        "instead of rtShadow's full glass-tinting transmittance walk. Trade: glass/water stops "
+        "casting a shadow for these two secondary rays. Primary shadows are untouched. OFF by "
+        "default pending an A/B measurement.",
+        []{ return vBool(Renderer::get().settings().rtSecondaryShadowOpaque); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSecondaryShadowOpaque = on; }); }});
+    t.push_back({"voxi.rtSkyOcclusionHalfRate", VarType::Bool, false,
+        "Skips rtSkyOcclusionTemporal's traced sample for a whole 8x8 tile on this frame's skip "
+        "parity wherever that tile's reprojected history is valid, reusing the reprojection as the "
+        "fresh estimate instead. Whole tiles skip together, not a per-pixel checkerboard. A pixel "
+        "with no valid history always traces. MEASURED at 0.73 ms of the staged mode 1, 15.4 ms frame. "
+        "OFF by default pending an A/B measurement.",
+        []{ return vBool(Renderer::get().settings().rtSkyOcclusionHalfRate); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSkyOcclusionHalfRate = on; }); }});
+    t.push_back({"voxi.rtReflectionHalfRate", VarType::Bool, false,
+        "Skips rtReflectionTemporalEx's traced reflection for a rough pixel (mirrors always retrace) "
+        "on a skip-parity tile whose reflection history reprojects validly, reusing that reprojection "
+        "as this frame's colour. MEASURED at 3.11 ms trace + 0.39 ms filter of the staged mode 1, "
+        "15.4 ms frame. OFF by default pending an A/B measurement.",
+        []{ return vBool(Renderer::get().settings().rtReflectionHalfRate); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtReflectionHalfRate = on; }); }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },
