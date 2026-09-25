@@ -2370,6 +2370,11 @@ private:
     f32  rtHistSunIntensity_ = -1.0f;   // negative so the first frame always counts as a change
     // True when this frame's sun differs from the one above; see beginShadowHistory.
     bool rtHistSunMoved() const;
+    // True when it differs by MORE than one slider-drag step: the direction turned by over
+    // kGiSunJumpDeg, or the colour/intensity changed by over kGiSunJumpRel. The ReSTIR reservoir void
+    // keys on this rather than on rtHistSunMoved -- see the giRestirParams[1] write in
+    // beginShadowHistory for why a drag must keep its reuse and a jump must not.
+    bool rtHistSunJumped() const;
     // This frame's camera view-projection, captured where fitCascades() already reads the camera,
     // and copied into prevViewProj_ at the end of prePass for NEXT frame's cb_.prevViewProj.
     f32  curViewProj_[16] = {};

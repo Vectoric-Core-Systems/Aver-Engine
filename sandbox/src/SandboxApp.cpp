@@ -2028,6 +2028,17 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         AVER_INFO("[Sandbox] --sun-set-at: sun moved to elevation {:.1f} deg, azimuth {:.1f} deg",
                   sunSetElevDeg_, sunSetAzimDeg_);
     }
+    // --sun-sweep: once the countdown reaches 1 it stays there, and every frame from then on turns the
+    // sun -- the same setSunAngles write the Directional Light panel's sliders make while dragged.
+    if (sunSweepFrames_ > 0) {
+        if (sunSweepFrames_ > 1) {
+            --sunSweepFrames_;
+        } else {
+            f32 el = 0.0f, az = 0.0f;
+            sky_.sunAngles(el, az);
+            sky_.setSunAngles(el, az + sunSweepDeg_);
+        }
+    }
 #if AVER_MODULE_VOXI
     // --gi-history-reset-at: the resetgihistory and resetnrdhistory console commands' own requests.
     if (giHistoryResetAtFrames_ > 0 && --giHistoryResetAtFrames_ == 0) {

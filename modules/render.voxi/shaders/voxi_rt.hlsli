@@ -1260,7 +1260,7 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
 // visibility, which is what makes the reprojected centre the right place to gather around.
 float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
     const int radius = (int)gRtDenoiseParams.x;
-    if (radius <= 0 || gRtHistParams.y < 0.5 || gRtDenoiseParams.w < 0.5) return centre;
+    if (radius <= 0 || gRtHistParams.y < 0.25 || gRtDenoiseParams.w < 0.5) return centre;
 
     float texW, texH;
     gAoHist.GetDimensions(texW, texH);
@@ -1484,7 +1484,7 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     float vis = fresh;
     float histV = 0.0;
     float2 velocityPx = 0.0;
-    if (gRtHistParams.y > 0.5 && rtReprojectAo(wpos, pixel, histV, velocityPx)) {
+    if (gRtHistParams.y > 0.25 && rtReprojectAo(wpos, pixel, histV, velocityPx)) {
         const float t      = saturate(length(velocityPx) / 32.0);
         // THE SHADOW PATH'S OWN WEIGHTS, and 0.95 was tried rather than assumed. Doubling the
         // effective sample count to ~20 moved dark-region local roughness from 0.4509 to 0.4486 --
@@ -1587,7 +1587,7 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
 // footprint, so neighbours on one flat receiver already sample different points of the same surface.
 float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
     const int radius = (int)gRtDenoiseParams.x;
-    if (radius <= 0 || gRtHistParams.y < 0.5) return centre;
+    if (radius <= 0 || gRtHistParams.y < 0.75) return centre;
 
     float texW, texH;
     gRtShadowHist.GetDimensions(texW, texH);
@@ -1610,7 +1610,7 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 
     float2 centrePx = pixel;
     bool   reproj   = false;
-    if (gRtHistParams.y > 0.5 && pdepth > 1e-4) {
+    if (gRtHistParams.y > 0.75 && pdepth > 1e-4) {
         const float3 pndc = pclip.xyz / pdepth;
         if (pndc.z >= 0.0 && pndc.z <= 1.0) {
             centrePx = gSceneViewport.xy +
@@ -1886,7 +1886,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
         // sub-texel alignment, and that error is bounded by half a texel at ANY speed because the
         // lookup is nearest-neighbour. Reusing 6 here throttled the weight to 0.1 at the six-degree
         // wobble's 24.7 px/frame, i.e. switched accumulation off in exactly the case it was added for.
-        if (gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, pixel, histV, velocityPx)) {
+        if (gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, histV, velocityPx)) {
             // 0.9 is an exponential average over ~1/(1-w) = 10 frames, the effective sample count
             // that makes a one-ray trace behave roughly like a ten-ray one, falling to 0.5 (two
             // samples) as the reprojection stretches. BOTH ENDS MEASURED rather than reasoned:
@@ -1933,7 +1933,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
 
     float hist = 0.0;
     float2 velocityPx = 0.0;
-    const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, pixel, hist, velocityPx);
+    const bool haveHist = gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, hist, velocityPx);
 
     float vis;
     // WHITE WHEN NOT TRACED: a reused-history frame has no fresh colour and the history stores none,

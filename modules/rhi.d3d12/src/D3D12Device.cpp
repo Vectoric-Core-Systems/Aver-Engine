@@ -1775,11 +1775,27 @@ struct RhiPipeline {
 
 // One suballocated descriptor range plus the kind declared for each of its slots. Slots past the
 // end of the kinds arrays are null-filled as a 2D texture.
+//
+// VERSIONED: every write (setSrv/setUav/clearSrv/setSrvTlas/setSrvBuffer/setUavBuffer/nullFill)
+// lands in `stageBase`, a range in a CPU-only staging heap, and bumps `version`. `stageBase` is
+// authoritative; nothing ever reads it directly on the GPU. There is one shader-visible copy per
+// frame in flight (`gpuBase[f]`), and setBindingSet refreshes gpuBase[fi] from stageBase only when
+// gpuVersion[fi] is behind version. This is what makes an in-place-write into a live shader-visible
+// heap (the previous scheme) safe again: with kFrameCount=2 and beginFrame waiting only on the
+// fence for THIS backbuffer, the CPU can be recording frame N+1 while the GPU still executes frame
+// N against gpuBase[N]'s contents -- a set rewritten for frame N+1 must not touch what frame N's
+// not-yet-retired dispatches will read. gpuBase[fi] is only ever rewritten once beginFrame has
+// waited for the frame that last used slot fi, so the copy can never race a GPU read of that slot.
 struct RhiBindingSet {
     u32 srvCount = 0, uavCount = 0;
     // The run of shader registers the set was built for.
     u32 srvBaseRegister = 0, uavBaseRegister = 0;
-    u32 heapBase = 0;   // SRVs occupy [heapBase, heapBase+srvCount), the UAVs follow immediately
+    u32 stageBase = 0;              // range in the CPU-only staging heap; SRVs then UAVs, as before
+    u32 gpuBase[kFrameCount] = {};  // one shader-visible range per frame in flight
+    u64 version = 0;                // bumped on every write into stageBase
+    // The version each gpuBase[f] last received. Starts at 0 so the very first setBindingSet for a
+    // freshly created set (version already >=1 from nullFill) always copies before it is bound.
+    u64 gpuVersion[kFrameCount] = {};
     SlotKind srvKinds[kMaxBindingSlots] = {};
     SlotKind uavKinds[kMaxBindingSlots] = {};
     bool alive = false;
@@ -2003,17 +2019,32 @@ private:
     RhiTlas*       tlas(TlasHandle h);
 
     const RootSigEntry* rootSignature(const PipelineLayout& layout, bool mesh, bool instanced = false);
-    // Descriptor slot `heapBase + index`, CPU side (for writing) and GPU side (for binding).
+    // Descriptor slot `heapBase + index`, CPU side (for writing) and GPU side (for binding), in the
+    // shared SHADER-VISIBLE heap.
     D3D12_CPU_DESCRIPTOR_HANDLE cpuSlot(u32 index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuSlot(u32 index) const;
-    void nullFill(const RhiBindingSet& s);
+    // CPU handle of descriptor slot `index` in the CPU-only STAGING heap -- see RhiBindingSet's
+    // comment. Binding sets are the only customer; the bindless table writes straight into cpuSlot.
+    D3D12_CPU_DESCRIPTOR_HANDLE stagingCpu(u32 index) const;
+    // Every write into a binding set's staging range ends here: bumps the version setBindingSet
+    // compares, AND drops the device's two "same set as last draw, skip the rebind" caches if they
+    // hold this set. Before versioning a write landed in the very slots the bound table pointed at,
+    // so skipping the rebind was harmless; now the write reaches the GPU range only through
+    // setBindingSet's copy, and a cache that skipped it would draw with the old descriptors.
+    void noteBindingSetWritten(BindingSetHandle set, RhiBindingSet& s);
+    void nullFill(RhiBindingSet& s);
     // The null view for ONE slot of a given kind. Shared by nullFill (which writes every slot at
     // creation) and clearSrv (which returns one slot to that state later), so the two can never
     // disagree about what "null" means for a kind -- a divergence that would show up only as a
     // device removal on whichever path was not updated.
     D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc(SlotKind kind);
     // Reuses a retired range large enough for `count`, or bump-allocates. False when exhausted.
+    // Shared by the bindless table and a binding set's per-frame SHADER-VISIBLE ranges.
     bool allocRange(u32 count, u32& outFirst);
+    // Same allocator shape as allocRange, over the CPU-only staging heap's own free list. A binding
+    // set's staging range is the ONE customer; kept as a separate list rather than parameterising
+    // allocRange because the two heaps must never hand out overlapping slot numbers from one budget.
+    bool allocStageRange(u32 count, u32& outFirst);
 
     // The fence value at which work recorded right now can be considered retired.
     u64  retireFence() const;
@@ -2024,6 +2055,12 @@ private:
     ComPtr<ID3D12DescriptorHeap> heap_;
     u32 heapStride_ = 0;
     u32 heapUsed_ = 0;
+    // CPU-only descriptor heap (D3D12_DESCRIPTOR_HEAP_FLAG_NONE) binding sets stage their writes
+    // into before setBindingSet copies them to the shader-visible heap -- see RhiBindingSet's
+    // comment for why. Same increment size as heap_ (GetDescriptorHandleIncrementSize depends on
+    // heap TYPE, not the shader-visible flag), so heapStride_ serves both.
+    ComPtr<ID3D12DescriptorHeap> stageHeap_;
+    u32 stageHeapUsed_ = 0;
 
     std::vector<RhiTexture>    textures_;
     std::vector<RhiBuffer>     buffers_;
@@ -2053,8 +2090,10 @@ private:
     std::vector<RhiTlas>       tlases_;
     std::vector<RootSigEntry>  rootSigs_;
     std::vector<RetiredObject> retired_;
-    std::vector<RetiredRange>  pendingRanges_;   // returned, still behind the fence
-    std::vector<RetiredRange>  freeRanges_;      // reusable now
+    std::vector<RetiredRange>  pendingRanges_;   // returned, still behind the fence (shader-visible heap)
+    std::vector<RetiredRange>  freeRanges_;      // reusable now (shader-visible heap)
+    std::vector<RetiredRange>  stagePendingRanges_;   // same, for the CPU-only staging heap
+    std::vector<RetiredRange>  stageFreeRanges_;
 
     friend class D3D12RenderContext;
     friend class D3D12Device;
@@ -5989,7 +6028,9 @@ D3D12ResourceFactory::~D3D12ResourceFactory() {
     retired_.clear();
 }
 
-// Creates the one shader-visible descriptor heap every binding set suballocates from.
+// Creates the one shader-visible descriptor heap every binding set and the bindless table
+// suballocate from, plus the CPU-only staging heap binding sets stage their writes into (see
+// RhiBindingSet's comment).
 bool D3D12ResourceFactory::init() {
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.NumDescriptors = kRhiHeapSize;
@@ -5997,6 +6038,12 @@ bool D3D12ResourceFactory::init() {
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!hrOk(dev_->device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap_)), "rhi descriptor heap")) return false;
     heapStride_ = dev_->device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC sd{};
+    sd.NumDescriptors = kRhiHeapSize;
+    sd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (!hrOk(dev_->device_->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&stageHeap_)), "rhi staging descriptor heap")) return false;
     return true;
 }
 
@@ -6054,6 +6101,18 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12ResourceFactory::gpuSlot(u32 index) const {
     h.ptr += static_cast<UINT64>(index) * heapStride_;
     return h;
 }
+// CPU handle of descriptor slot `index` in the CPU-only staging heap.
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12ResourceFactory::stagingCpu(u32 index) const {
+    D3D12_CPU_DESCRIPTOR_HANDLE h = stageHeap_->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(index) * heapStride_;
+    return h;
+}
+
+void D3D12ResourceFactory::noteBindingSetWritten(BindingSetHandle set, RhiBindingSet& s) {
+    ++s.version;
+    if (dev_->fovSet_ == set) dev_->fovValid_ = false;
+    if (dev_->dbSet_  == set) dev_->dbValid_  = false;
+}
 
 // Writes a null view of the declared dimension into every slot of a set. Tier 1 hardware reads
 // undefined data from any descriptor in a bound table that was never written.
@@ -6107,10 +6166,14 @@ D3D12_SHADER_RESOURCE_VIEW_DESC D3D12ResourceFactory::nullSrvDesc(SlotKind kind)
     return sv;
 }
 
-void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
+// Writes into the STAGING heap, like every other writer below -- see RhiBindingSet's comment.
+// Takes `s` by non-const reference (its only caller, createBindingSet, owns a fresh local) so it can
+// bump `version` itself: a set nullFill has just touched must copy to its shader-visible range on
+// the very first setBindingSet, the same as any other write.
+void D3D12ResourceFactory::nullFill(RhiBindingSet& s) {
     for (u32 i = 0; i < s.srvCount; ++i) {
         const D3D12_SHADER_RESOURCE_VIEW_DESC sv = nullSrvDesc(s.srvKinds[i]);
-        dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s.heapBase + i));
+        dev_->device_->CreateShaderResourceView(nullptr, &sv, stagingCpu(s.stageBase + i));
     }
 
     for (u32 i = 0; i < s.uavCount; ++i) {
@@ -6133,8 +6196,9 @@ void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
             uv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         }
-        dev_->device_->CreateUnorderedAccessView(nullptr, nullptr, &uv, cpuSlot(s.heapBase + s.srvCount + i));
+        dev_->device_->CreateUnorderedAccessView(nullptr, nullptr, &uv, stagingCpu(s.stageBase + s.srvCount + i));
     }
+    ++s.version;
 }
 
 // Reserves `count` contiguous descriptors: first fit over the free list, then bump-allocation.
@@ -6161,6 +6225,31 @@ bool D3D12ResourceFactory::allocRange(u32 count, u32& outFirst) {
     return true;
 }
 
+// Same shape as allocRange, over the CPU-only staging heap's own free list -- see stageFreeRanges_'s
+// comment for why this is a separate list rather than allocRange taking a heap parameter.
+bool D3D12ResourceFactory::allocStageRange(u32 count, u32& outFirst) {
+    for (usize i = 0; i < stageFreeRanges_.size(); ++i) {
+        if (stageFreeRanges_[i].count < count) continue;
+        outFirst = stageFreeRanges_[i].first;
+        if (stageFreeRanges_[i].count > count) {
+            stageFreeRanges_[i].first += count;
+            stageFreeRanges_[i].count -= count;
+        } else {
+            stageFreeRanges_[i] = stageFreeRanges_.back();
+            stageFreeRanges_.pop_back();
+        }
+        return true;
+    }
+    if (stageHeapUsed_ + count > kRhiHeapSize) {
+        AVER_ERROR("[RHI.D3D12] binding-set staging heap exhausted: {} of {} slots used, {} more wanted",
+                   stageHeapUsed_, kRhiHeapSize, count);
+        return false;
+    }
+    outFirst = stageHeapUsed_;
+    stageHeapUsed_ += count;
+    return true;
+}
+
 // The fence value at which work recorded right now can be considered retired. Taken past the
 // completed value too, because createSwapchainResources rewinds the frame counter.
 u64 D3D12ResourceFactory::retireFence() const {
@@ -6176,7 +6265,7 @@ void D3D12ResourceFactory::retire(ComPtr<IUnknown> obj) {
 
 // Releases every retired object and descriptor range whose fence has passed.
 void D3D12ResourceFactory::collect() {
-    if (!dev_->fence_ || (retired_.empty() && pendingRanges_.empty())) return;
+    if (!dev_->fence_ || (retired_.empty() && pendingRanges_.empty() && stagePendingRanges_.empty())) return;
     const u64 done = dev_->fence_->GetCompletedValue();
     for (usize i = 0; i < retired_.size();) {
         if (retired_[i].fence <= done) { retired_[i] = std::move(retired_.back()); retired_.pop_back(); }
@@ -6187,6 +6276,13 @@ void D3D12ResourceFactory::collect() {
             freeRanges_.push_back({pendingRanges_[i].first, pendingRanges_[i].count, 0});
             pendingRanges_[i] = pendingRanges_.back();
             pendingRanges_.pop_back();
+        } else ++i;
+    }
+    for (usize i = 0; i < stagePendingRanges_.size();) {
+        if (stagePendingRanges_[i].fence <= done) {
+            stageFreeRanges_.push_back({stagePendingRanges_[i].first, stagePendingRanges_[i].count, 0});
+            stagePendingRanges_[i] = stagePendingRanges_.back();
+            stagePendingRanges_.pop_back();
         } else ++i;
     }
 }
@@ -7064,7 +7160,20 @@ BindingSetHandle D3D12ResourceFactory::createBindingSet(const BindingSetDesc& d)
     s.srvBaseRegister = d.srvBaseRegister;
     s.uavBaseRegister = d.uavBaseRegister;
     for (u32 i = 0; i < kMaxBindingSlots; ++i) { s.srvKinds[i] = d.srvKinds[i]; s.uavKinds[i] = d.uavKinds[i]; }
-    if (!allocRange(count, s.heapBase)) return 0;
+    // One staging range (the authoritative one) plus one shader-visible range per frame in flight --
+    // see RhiBindingSet's comment. Nothing has touched the GPU with any of these yet, so a failure
+    // partway through hands the ranges already taken straight back to the free lists rather than
+    // leaking them behind a fence that will never retire them.
+    if (!allocStageRange(count, s.stageBase)) return 0;
+    u32 framesAllocated = 0;
+    for (; framesAllocated < kFrameCount; ++framesAllocated) {
+        if (!allocRange(count, s.gpuBase[framesAllocated])) break;
+    }
+    if (framesAllocated < kFrameCount) {
+        for (u32 f = 0; f < framesAllocated; ++f) freeRanges_.push_back({s.gpuBase[f], count, 0});
+        stageFreeRanges_.push_back({s.stageBase, count, 0});
+        return 0;
+    }
     s.alive = true;
     nullFill(s);
     bindingSets_.push_back(s);
@@ -7245,11 +7354,14 @@ void D3D12ResourceFactory::destroyPipeline(PipelineHandle h) {
     collect();
 }
 
-// Returns a binding set's descriptor range, reusable once the fence passes.
+// Returns a binding set's descriptor ranges -- the staging range and every per-frame shader-visible
+// range -- reusable once the fence passes.
 void D3D12ResourceFactory::destroyBindingSet(BindingSetHandle h) {
     RhiBindingSet* s = bindingSet(h);
     if (!s) return;
-    pendingRanges_.push_back({s->heapBase, s->srvCount + s->uavCount, retireFence()});
+    const u32 count = s->srvCount + s->uavCount;
+    stagePendingRanges_.push_back({s->stageBase, count, retireFence()});
+    for (u32 f = 0; f < kFrameCount; ++f) pendingRanges_.push_back({s->gpuBase[f], count, retireFence()});
     s->alive = false;
     collect();
 }
@@ -7280,7 +7392,11 @@ void D3D12ResourceFactory::setSrv(BindingSetHandle set, u32 slot, TextureHandle 
         sv.Texture2D.MostDetailedMip = whole ? 0 : mip;
         sv.Texture2D.MipLevels = whole ? t->desc.mips : 1;
     }
-    dev_->device_->CreateShaderResourceView(t->res.Get(), &sv, cpuSlot(s->heapBase + slot));
+    // Written into the STAGING heap -- see RhiBindingSet's comment. Never read by the GPU directly;
+    // setBindingSet copies it to whichever shader-visible range the current frame needs, gated on
+    // the fence beginFrame already waited for.
+    dev_->device_->CreateShaderResourceView(t->res.Get(), &sv, stagingCpu(s->stageBase + slot));
+    noteBindingSetWritten(set, *s);
 }
 
 // Writes a texture UAV for one mip into one slot of a binding set.
@@ -7319,23 +7435,28 @@ void D3D12ResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle 
         uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         uv.Texture2D.MipSlice = mip;
     }
-    dev_->device_->CreateUnorderedAccessView(t->res.Get(), nullptr, &uv, cpuSlot(s->heapBase + s->srvCount + slot));
+    // Staging heap, same reason as setSrv above.
+    dev_->device_->CreateUnorderedAccessView(t->res.Get(), nullptr, &uv, stagingCpu(s->stageBase + s->srvCount + slot));
+    noteBindingSetWritten(set, *s);
 }
 
 // Writes an acceleration-structure SRV into one slot of a binding set.
 // Returns one SRV slot to null. See IResourceFactory::clearSrv for why a stale descriptor is a
 // device removal rather than a wrong pixel.
 //
-// The heap write is immediate, safe for the same reason every setSrv here is: descriptors are
-// written between frames, not while the GPU reads them. What it must NOT do is nothing -- the caller
-// reaches this because the texture it was showing is being destroyed, and leaving the old descriptor
-// is the one outcome that crashes.
+// The write lands in the STAGING heap, never the shader-visible one the GPU can be reading mid-frame
+// -- see RhiBindingSet's comment. It cannot race a GPU read because nothing reads the staging heap;
+// setBindingSet is the only thing that ever copies out of it, into whichever frame's range is safe to
+// touch. What this must NOT do is nothing -- the caller reaches this because the texture it was
+// showing is being destroyed, and leaving the old descriptor live in the eventual GPU copy is the one
+// outcome that crashes.
 void D3D12ResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
     RhiBindingSet* s = bindingSet(set);
     if (!s) { AVER_ERROR("[RHI.D3D12] clearSrv with an invalid set"); return; }
     if (slot >= s->srvCount) { AVER_ERROR("[RHI.D3D12] clearSrv slot {} past the {} declared", slot, s->srvCount); return; }
     const D3D12_SHADER_RESOURCE_VIEW_DESC sv = nullSrvDesc(s->srvKinds[slot]);
-    dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s->heapBase + slot));
+    dev_->device_->CreateShaderResourceView(nullptr, &sv, stagingCpu(s->stageBase + slot));
+    noteBindingSetWritten(set, *s);
 }
 
 void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle h) {
@@ -7348,7 +7469,9 @@ void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle
     sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.RaytracingAccelerationStructure.Location = t->as->GetGPUVirtualAddress();
-    dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s->heapBase + slot));
+    // Staging heap, same reason as setSrv above.
+    dev_->device_->CreateShaderResourceView(nullptr, &sv, stagingCpu(s->stageBase + slot));
+    noteBindingSetWritten(set, *s);
 }
 
 // True when a structured view of `count` elements of `stride` starting at `firstElement` fits
@@ -7393,7 +7516,9 @@ void D3D12ResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferHa
     sv.Buffer.FirstElement = firstElement;
     sv.Buffer.NumElements = count;
     sv.Buffer.StructureByteStride = stride;
-    dev_->device_->CreateShaderResourceView(buffers_[bh - 1].res.Get(), &sv, cpuSlot(s->heapBase + slot));
+    // Staging heap, same reason as setSrv above.
+    dev_->device_->CreateShaderResourceView(buffers_[bh - 1].res.Get(), &sv, stagingCpu(s->stageBase + slot));
+    noteBindingSetWritten(set, *s);
 }
 
 // Puts a structured-buffer UAV in a slot.
@@ -7414,8 +7539,10 @@ void D3D12ResourceFactory::setUavBuffer(BindingSetHandle set, u32 slot, BufferHa
     uv.Buffer.FirstElement = firstElement;
     uv.Buffer.NumElements = count;
     uv.Buffer.StructureByteStride = stride;
+    // Staging heap, same reason as setSrv above.
     dev_->device_->CreateUnorderedAccessView(buffers_[bh - 1].res.Get(), nullptr, &uv,
-                                             cpuSlot(s->heapBase + s->srvCount + slot));
+                                             stagingCpu(s->stageBase + s->srvCount + slot));
+    noteBindingSetWritten(set, *s);
 }
 
 // Copies `bytes` out of a readback buffer. Does no synchronisation; see the interface.
@@ -7547,10 +7674,15 @@ void D3D12ResourceFactory::selfTest() {
     if (set && tex) setUav(set, 0, tex, 0);
     AVER_INFO("[RHI.D3D12] factory self-test: binding set {}", set ? "ok" : "FAILED");
 
-    const u32 firstBase = set ? bindingSets_[set - 1].heapBase : 0;
+    // Probes the STAGING allocator's free list, not the shader-visible one: stageBase is the one
+    // range every binding set always has exactly one of, so it is the unambiguous proxy for "does
+    // this allocator hold a destroyed range behind the fence rather than handing it straight back".
+    // The shader-visible allocator (pendingRanges_/freeRanges_, shared with the bindless table) is
+    // the SAME allocator code and fence discipline, so this remains a faithful check of both.
+    const u32 firstBase = set ? bindingSets_[set - 1].stageBase : 0;
     destroyBindingSet(set);
     const BindingSetHandle early = createBindingSet(bsd);
-    const bool heldBack = early && bindingSets_[early - 1].heapBase != firstBase;
+    const bool heldBack = early && bindingSets_[early - 1].stageBase != firstBase;
     AVER_INFO("[RHI.D3D12] factory self-test: descriptor reclaim {} (returned range held behind the fence)",
               heldBack ? "ok" : "FAILED");
 
@@ -7755,13 +7887,26 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
         }
     }
 
+    // fi is the SAME backbuffer index beginFrame just waited a fence for, so gpuBase[fi] is a range
+    // the GPU has finished reading (or never touched) -- rewriting it here can never race a dispatch
+    // that is still in flight. Copied only when this set changed since fi's range last received a
+    // copy (kFrameCount frames ago, i.e. the last time this same backbuffer was recorded); a set
+    // that is untouched between two uses of the same backbuffer costs nothing here. See
+    // RhiBindingSet's comment for the full account of why the OLD single-range scheme raced the GPU.
+    const u32 fi = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+    if (s->gpuVersion[fi] != s->version) {
+        dev_->device_->CopyDescriptorsSimple(s->srvCount + s->uavCount, res_->cpuSlot(s->gpuBase[fi]),
+                                             res_->stagingCpu(s->stageBase), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        s->gpuVersion[fi] = s->version;
+    }
+
     if (s->srvCount && pipe_->srvParam[table] >= 0) {
-        const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->heapBase);
+        const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->gpuBase[fi]);
         if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->srvParam[table]), h);
         else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->srvParam[table]), h);
     }
     if (s->uavCount && pipe_->uavParam[table] >= 0) {
-        const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->heapBase + s->srvCount);
+        const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(s->gpuBase[fi] + s->srvCount);
         if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->uavParam[table]), h);
         else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->uavParam[table]), h);
     }

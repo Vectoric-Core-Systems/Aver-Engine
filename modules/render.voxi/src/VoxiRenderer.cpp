@@ -5296,7 +5296,14 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // with this and reuse history 1 (voxi_restir.hlsli) the same move read 9.7 / 2.6 / 1.7 at
         // +3 / +17 / +42 frames against 12.2 / 8.7 / 3.8 before. What is left in the first frames is
         // NRD's own history, deliberately not reset, so a drag stays denoised.
-        cb_.giRestirParams[1] = (giHistValid_ && !rtHistSunMoved()) ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
+        //
+        // A JUMP, NOT EVERY CHANGE (rtHistSunJumped). Voiding on ANY change made a slider DRAG a run of
+        // no-history frames: every frame restarted every pixel from one fresh candidate, so the
+        // indirect light was raw one-sample noise -- bright sky hits as white speckle all over the
+        // arcade, which is what the owner saw while moving the light. One drag step moves the sun a
+        // few degrees, so the radiance a reused reservoir carries is off by that much for about one
+        // frame at reuse history 1. The measurement above was a 24.5-degree jump, which still voids.
+        cb_.giRestirParams[1] = (giHistValid_ && !rtHistSunJumped()) ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);  // this frame's reservoir array slice
         // giRestirParams[3] (the poison-view flag; was "spare", repurposed rather than a new field --
         // see setGiPoisonView's own comment and giRestirIndirect's POISON DEBUG VIEW block,
@@ -5842,7 +5849,13 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // which is exactly what a disocclusion already does.
     const bool sunMoved = rtHistSunMoved();
     cb_.rtHistParams[0] = 1.0f;                                        // t6/u2 are bound to real textures
-    cb_.rtHistParams[1] = (rtHistValid_ && haveViewport && !sunMoved) ? 1.0f : 0.0f; // ...and t6 + gSceneViewport are usable
+    // THREE STATES, NOT TWO: 1 = history usable; 0.5 = usable, but the sun changed this frame; 0 = not
+    // usable. A sun change voids only the histories whose CONTENT depends on the sun -- shadow and
+    // reflection (they compare against > 0.75) -- not sky occlusion, which measures geometry against
+    // the sky and is identical under any sun (it compares against > 0.25). Voiding that too, as the
+    // old 0/1 flag did, restarted a one-ray AO estimate from scratch on every frame of a slider drag,
+    // which is one of the things that read as white speckle while the owner moved the light.
+    cb_.rtHistParams[1] = (rtHistValid_ && haveViewport) ? (sunMoved ? 0.5f : 1.0f) : 0.0f; // ...and t6 + gSceneViewport are usable
     cb_.rtHistParams[2] = static_cast<f32>(rtFrameIndex_);
     // The TILE EDGE (rtPixelsPerRayTile_) as its bit count, not the edge itself: the shader masks
     // and shifts by this rather than multiplying or taking a modulo. rtPixelsPerRayTile_ is always
@@ -5889,6 +5902,35 @@ bool VoxiRenderer::rtHistSunMoved() const {
         if (sky.sunColor[i]     != rtHistSunColor_[i]) return true;
     }
     return sky.sunIntensity != rtHistSunIntensity_;
+}
+
+bool VoxiRenderer::rtHistSunJumped() const {
+    // ONE FRAME'S WORTH OF SUN CHANGE, not any change. A slider drag moves the sun a few degrees per
+    // frame; a typed value, a level load or --sun-set-at moves it tens of degrees at once. 10 degrees
+    // separates the two with room to spare at editor frame rates, and 20% does the same for colour
+    // temperature and intensity drags. The first frame (intensity sentinel -1) always counts.
+    constexpr f32 kGiSunJumpDeg = 10.0f;
+    constexpr f32 kGiSunJumpRel = 0.2f;
+    if (!dev_) return false;
+    if (rtHistSunIntensity_ < 0.0f) return true;
+    const rhi::SkyAtmosphere sky = dev_->skyAtmosphere();
+    f32 dotDir = 0.0f, lenA = 0.0f, lenB = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        dotDir += sky.sunDirection[i] * rtHistSunDir_[i];
+        lenA   += sky.sunDirection[i] * sky.sunDirection[i];
+        lenB   += rtHistSunDir_[i] * rtHistSunDir_[i];
+    }
+    const f32 lens = std::sqrt(lenA * lenB);
+    if (lens < 1e-12f) return true;
+    if (dotDir / lens < std::cos(kGiSunJumpDeg * 3.14159265f / 180.0f)) return true;
+    auto relChange = [](f32 now, f32 was) {
+        const f32 base = std::max(std::abs(was), 1e-4f);
+        return std::abs(now - was) / base;
+    };
+    if (relChange(sky.sunIntensity, rtHistSunIntensity_) > kGiSunJumpRel) return true;
+    for (int i = 0; i < 3; ++i)
+        if (relChange(sky.sunColor[i], rtHistSunColor_[i]) > kGiSunJumpRel) return true;
+    return false;
 }
 
 void VoxiRenderer::endShadowHistory() {

@@ -330,6 +330,10 @@ void SandboxApp::setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg) {
     sunSetAtFrames_ = framesIn; sunSetElevDeg_ = elevDeg; sunSetAzimDeg_ = azimDeg;
 }
 
+void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame) {
+    sunSweepFrames_ = framesIn; sunSweepDeg_ = degPerFrame;
+}
+
 void SandboxApp::setGiHistoryResetAt(int framesIn) { giHistoryResetAtFrames_ = framesIn; }
 
 #if AVER_MODULE_SR

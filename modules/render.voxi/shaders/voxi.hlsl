@@ -20,6 +20,9 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gRtParams;
     // x = 1 while t6/u2 (gRtShadowHist / gRtShadowHistOut) are bound to real textures this frame;
     // y = 1 once gRtShadowHist ALSO holds a real previous frame (0 right after creation/resize);
+    //     0.5 = it does, but the sun changed this frame (VoxiRenderer::beginShadowHistory), so the
+    //     sun-DEPENDENT histories (shadow, reflection) test > 0.75 and skip it while the sun-INDEPENDENT
+    //     one (sky occlusion) tests > 0.25 and keeps accumulating;
     // z = the current frame index, a pure per-frame count, never wall-clock;
     // w = the pixels-per-ray tile edge as its BIT COUNT (0 = no tiling, every pixel traces).
     float4   gRtHistParams;
@@ -925,7 +928,7 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
     // deliberately conservative: too wide smears detail, too narrow just leaves noise for the
     // temporal history). Capped at 3 (7x7 gather): cost is quadratic in radius.
     const int radius = (int)clamp(floor(rough * 6.0), 0.0, 3.0);
-    if (radius <= 0 || gRtHistParams.y < 0.5) return centre;
+    if (radius <= 0 || gRtHistParams.y < 0.75) return centre;
 
     float texW, texH;
     gRtReflHist.GetDimensions(texW, texH);
@@ -1029,7 +1032,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
         if (lobeRough > 0.0 && curHit) {
             float3 hist = 0.0;
             float2 velocityPx = 0.0;
-            if (gRtHistParams.y > 0.5 && rtReprojectReflection(wpos, pixel, hist, velocityPx)) {
+            if (gRtHistParams.y > 0.75 && rtReprojectReflection(wpos, pixel, hist, velocityPx)) {
                 // Same velocity-discounted shape as rtShadowTemporal: a far-slid sample is the same
                 // surface but not the same point, and full trust smears a comet tail behind motion.
                 // Still camera: full weight. Fast pan: falls back to this frame's spatial filter.
@@ -1078,7 +1081,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
 
     float3 hist = 0.0;
     float2 velocityPx = 0.0;
-    const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectReflection(wpos, pixel, hist, velocityPx);
+    const bool haveHist = gRtHistParams.y > 0.75 && rtReprojectReflection(wpos, pixel, hist, velocityPx);
 
     float3 col;
     bool curHit;

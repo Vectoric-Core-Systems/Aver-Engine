@@ -1448,6 +1448,7 @@ public:
     void setPtSceneToggleOnAuto(int framesIn);
     void setPtSceneToggleOffAuto(int framesIn);
     void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg);
+    void setSunSweep(int framesIn, f32 degPerFrame);
     void setGiHistoryResetAt(int framesIn);
 #if AVER_MODULE_SR
     void setAverSrCycleAuto(int framesIn);   // --aversr-cycle [N]
@@ -4173,6 +4174,11 @@ private:
     // first frame) can never show. Countdowns from process start, the same shape as the two above.
     int sunSetAtFrames_ = 0;
     f32 sunSetElevDeg_ = 0.0f, sunSetAzimDeg_ = 0.0f;
+    // --sun-sweep START DEG: the DRAG, not the jump -- counts down like sunSetAtFrames_, then turns the
+    // sun's azimuth by sunSweepDeg_ every frame for the rest of the run, so the frames a capture lands
+    // on are mid-drag, where every frame is a "sun moved" frame.
+    int sunSweepFrames_ = 0;
+    f32 sunSweepDeg_ = 0.0f;
     int giHistoryResetAtFrames_ = 0;
     // True while a stored non-unity render scale is on trial this session; see the prefs-apply site.
     bool renderScaleCookieArmed_ = false;
