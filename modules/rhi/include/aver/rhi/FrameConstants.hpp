@@ -127,7 +127,16 @@ struct PostCB {
     // row are where localExposureShadows/Highlights landed for the same reason -- an already-spare
     // slot on the same cbuffer row, rather than growing the struct for two more scalars.
     f32 clampRadiance[4];
+    // THE DOCKED-VIEWPORT SUB-RECT, in the post chain's own normalised source UV space -- (0,0,1,1)
+    // identity (the whole source texture) whenever no sub-rect is set, which is what keeps every
+    // pass that does not opt in byte-for-byte unchanged from before this field existed. xy is the
+    // sub-rect's uv origin, zw its uv size. Both backends derive this from vpX_/vpY_/vpW_/vpH_
+    // (already SCENE-space -- see D3D12Device::setViewportRect's own comment) divided by
+    // sceneWidth_/sceneHeight_, the same space the post chain's own source texture is sampled in.
+    // Mirrors `gPostRegion` in shaders/post.hlsl, appended here for the same reason clampRadiance's
+    // own fields were: an already-open cbuffer row is cheaper than growing the struct twice.
+    f32 region[4];
 };
-static_assert(sizeof(PostCB) == 112, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 128, "the HLSL cbuffer mirrors this byte for byte");
 
 } // namespace aver::rhi

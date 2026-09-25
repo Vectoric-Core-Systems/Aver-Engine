@@ -3732,6 +3732,20 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         cb.clampRadiance[1] = post_.localExposureShadows;
         cb.clampRadiance[2] = post_.localExposureHighlights;
         cb.clampRadiance[3] = 0.0f;
+
+        // gPostRegion: the docked editor's viewport sub-rect, in the post chain's own normalised
+        // SOURCE space. The twin of D3D12Device's identical fill -- see there for why normalising by
+        // sceneWidth_/sceneHeight_ (NOT width_/height_) is what vpX_/vpY_/vpW_/vpH_ actually need:
+        // setViewportRect stores them already scaled into scene space, not present space, on both
+        // backends. (0,0,1,1) identity whenever no sub-rect is set (undocked / game runtime).
+        if (vpW_ > 0 && vpH_ > 0 && sceneWidth_ > 0 && sceneHeight_ > 0) {
+            cb.region[0] = std::fmin(std::fmax(f32(vpX_) / f32(sceneWidth_),  0.0f), 1.0f);
+            cb.region[1] = std::fmin(std::fmax(f32(vpY_) / f32(sceneHeight_), 0.0f), 1.0f);
+            cb.region[2] = std::fmin(std::fmax(f32(vpW_) / f32(sceneWidth_),  0.0f), 1.0f);
+            cb.region[3] = std::fmin(std::fmax(f32(vpH_) / f32(sceneHeight_), 0.0f), 1.0f);
+        } else {
+            cb.region[0] = 0.0f; cb.region[1] = 0.0f; cb.region[2] = 1.0f; cb.region[3] = 1.0f;
+        }
     };
     auto bindSetFor = [&](VkPipelineBindPoint bp, u32 slot) {
         const ConstantAllocation ca = postConstants(&cb, sizeof cb);
@@ -3739,15 +3753,23 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         const VkDescriptorSet set = slotSet(slot);
         api_.CmdBindDescriptorSets(cmd, bp, postPipelineLayout_, kVkSetConstants, 1, &set, 1, &offset);
     };
-    auto fullscreen = [&](VkPipeline pso, u32 slot, u32 w, u32 h, VkImageView rtv) {
+    // vx/vy: the destination's top-left offset, default 0 for every pass that always fills its whole
+    // target (bloom's pyramid, the histogram). Only the composite passes it non-zero, to confine the
+    // draw -- AND THE RENDER AREA ITSELF, not just the raster viewport -- to the docked viewport's
+    // sub-rect. Shrinking renderArea matters here in a way it does not for D3D12's scissor alone:
+    // loadOp/storeOp apply to the whole renderArea, so leaving it at the full destination size with
+    // LOAD_OP_DONT_CARE would let the implementation treat pixels the draw never rasterizes into as
+    // fair game to discard too, rather than simply leaving them untouched.
+    auto fullscreen = [&](VkPipeline pso, u32 slot, u32 w, u32 h, VkImageView rtv, u32 vx = 0, u32 vy = 0) {
         VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         att.imageView = rtv; att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        ri.renderArea = {{0, 0}, {w, h}}; ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &att;
+        ri.renderArea = {{int32_t(vx), int32_t(vy)}, {w, h}};
+        ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &att;
         const bool postScope = pushRenderScope(cmd, ri);
-        VkViewport vp{0.0f, 0.0f, f32(w), f32(h), 0.0f, 1.0f};
-        VkRect2D sc{{0, 0}, {w, h}};
+        VkViewport vp{f32(vx), f32(vy), f32(w), f32(h), 0.0f, 1.0f};
+        VkRect2D sc{{int32_t(vx), int32_t(vy)}, {w, h}};
         api_.CmdSetViewport(cmd, 0, 1, &vp);
         api_.CmdSetScissor(cmd, 0, 1, &sc);
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso);
@@ -3774,9 +3796,15 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // ---- eye adaptation ----
     // hw/hh (downscaled dispatch grid) and src dims derive from the SCENE target (sceneWidth_/
     // sceneHeight_, not present width_/height_) -- mirrors D3D12's identical block.
+    //
+    // DOCKED: metered over the sub-rect's own scene-pixel extent (vpW_/vpH_, already scene-space),
+    // not the whole scene target -- see D3D12Device::runPostChain's identical comment. Full scene
+    // extent, unchanged, when undocked (vpW_/vpH_ == 0).
     if (autoExp) {
-        const u32 hw = sceneWidth_ / kHistogramDownscale > 1 ? sceneWidth_ / kHistogramDownscale : 1;
-        const u32 hh = sceneHeight_ / kHistogramDownscale > 1 ? sceneHeight_ / kHistogramDownscale : 1;
+        const u32 regionW = vpW_ ? vpW_ : sceneWidth_;
+        const u32 regionH = vpH_ ? vpH_ : sceneHeight_;
+        const u32 hw = regionW / kHistogramDownscale > 1 ? regionW / kHistogramDownscale : 1;
+        const u32 hh = regionH / kHistogramDownscale > 1 ? regionH / kHistogramDownscale : 1;
         fillCommon(hw, hh, sceneWidth_, sceneHeight_);
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPso_);
         bindSetFor(VK_PIPELINE_BIND_POINT_COMPUTE, kPostSlotHistogram);
@@ -3958,6 +3986,23 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // size its grid was built at, which is always the scene's. The twin of D3D12Device.cpp's fill.
     fillCommon(width_, height_, sceneWidth_, sceneHeight_);
 
+    // THE COMPOSITE'S OWN DESTINATION RECT, confined to the docked sub-rect gPostRegion (just written
+    // above by fillCommon) already describes in normalised source space -- scaled back up into
+    // PRESENT-space pixels here since the destination (viewport texture or swapchain image) is
+    // present-sized, unlike gPostRegion's scene-space source. Full canvas (0,0,width_,height_)
+    // whenever region is the (0,0,1,1) identity, so this is byte-identical to before this feature
+    // existed on every undocked path. Mirrors D3D12Device::runPostChain's identical derivation.
+    u32 compositeX = static_cast<u32>(cb.region[0] * static_cast<f32>(width_)  + 0.5f);
+    u32 compositeY = static_cast<u32>(cb.region[1] * static_cast<f32>(height_) + 0.5f);
+    u32 compositeW = static_cast<u32>(cb.region[2] * static_cast<f32>(width_)  + 0.5f);
+    u32 compositeH = static_cast<u32>(cb.region[3] * static_cast<f32>(height_) + 0.5f);
+    if (compositeX > width_)  compositeX = width_;
+    if (compositeY > height_) compositeY = height_;
+    if (compositeW < 1) compositeW = 1;
+    if (compositeH < 1) compositeH = 1;
+    if (compositeX + compositeW > width_)  compositeW = width_  - compositeX;
+    if (compositeY + compositeH > height_) compositeH = height_ - compositeY;
+
     // WHERE THE COMPOSITE LANDS: the swapchain image normally, or the viewport texture when the
     // editor asked for one -- only the destination changes (same pipeline/source/extent), since the
     // texture is created at width_ x height_ in the swapchain's format (see ensureViewportTexture).
@@ -3970,14 +4015,27 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         else vpTex = nullptr;
     }
 
-    // UNDEFINED as the old layout is right for both: swapchain image and viewport texture are fully
-    // overwritten here -- neither's previous contents are read by this pass.
+    // UNDEFINED as the old layout is right for the swapchain image always, and for the viewport
+    // texture whenever it is fully overwritten (undocked, or docked with no sub-rect narrower than
+    // the whole canvas) -- neither's previous contents are read by this pass.
+    //
+    // DOCKED WITH A NARROWER SUB-RECT: renderArea below (see fullscreen's own comment) confines the
+    // RENDER PASS itself to the sub-rect, so loadOp/storeOp never touch pixels outside it -- those
+    // keep whatever vpTex held before this barrier, exactly like D3D12's untouched scissor region.
+    // This OUTER layout transition is still whole-image (Vulkan has no sub-rect barrier), which
+    // technically permits the implementation to treat the WHOLE image's contents as undefined from
+    // here on, not just the sub-rect -- broader than the render pass itself claims. Left as UNDEFINED
+    // rather than threading a tracked "last known layout" through resize/texture-recreation (a bigger
+    // change than this feature needs) because it is provably inert either way: SandboxShell's "Level"
+    // ImGui::Image is vpTex's ONLY reader, and its uv0/uv1 crop to this exact same sub-rect (see the
+    // D3D12 composite's identical note), so nothing ever samples the part left "undefined" here.
     VkImageMemoryBarrier2 toRt = imgBarrier(dstImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                             VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
     pipelineBarrier(api_, cmd, &toRt, 1);
     fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0],
-              srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite, width_, height_, dstView);
+              srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite,
+              compositeW, compositeH, dstView, compositeX, compositeY);
 
     // Back to SHADER_READ so the UI can sample it in the overlay pass that follows. Only for the
     // texture -- the swapchain image's own transition to PRESENT is endFrame's business.

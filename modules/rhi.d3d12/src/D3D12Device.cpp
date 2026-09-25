@@ -5057,14 +5057,44 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         cb.clampRadiance[1] = post_.localExposureShadows;
         cb.clampRadiance[2] = post_.localExposureHighlights;
         cb.clampRadiance[3] = 0.0f;
+
+        // gPostRegion: the docked editor's viewport sub-rect, in the post chain's own normalised
+        // SOURCE space -- gPostSceneTex/gPostBloomTex/the local-exposure grid, all of which are sized
+        // off sceneWidth_/sceneHeight_ (or, on the AverSR path, presentHdrTex_ -- see the composite's
+        // own comment for why the same normalised rect still applies there).
+        //
+        // vpX_/vpY_/vpW_/vpH_ ARE ALREADY SCENE-SPACE, NOT PRESENT-SPACE -- setViewportRect converts
+        // the caller's present-space pixels via scaleToSceneW/H before storing them (see its own
+        // comment two screens up), so normalising by sceneWidth_/sceneHeight_ here, not width_/
+        // height_, is what turns them into gPostSceneTex's own uv. Dividing by width_/height_ instead
+        // would undershoot whenever renderScale_ < 1 (sceneWidth_ < width_), reading the wrong,
+        // smaller fraction of the scene texture than the docked panel actually covers.
+        //
+        // (0,0,1,1) identity whenever no sub-rect is set (undocked editor / game runtime, vpW_==0),
+        // so every pass on that path samples exactly what it did before this field existed. The
+        // sceneWidth_/sceneHeight_ > 0 guards are belt-and-braces against a division by zero: vpW_/
+        // vpH_ each floor to 1 in setViewportRect even if scaleToSceneW/H returned 0, so a 0-sized
+        // scene target (window not yet sized) could otherwise pair a nonzero vpW_ with a zero divisor.
+        if (vpW_ > 0 && vpH_ > 0 && sceneWidth_ > 0 && sceneHeight_ > 0) {
+            cb.region[0] = std::fmin(std::fmax(static_cast<f32>(vpX_) / static_cast<f32>(sceneWidth_),  0.0f), 1.0f);
+            cb.region[1] = std::fmin(std::fmax(static_cast<f32>(vpY_) / static_cast<f32>(sceneHeight_), 0.0f), 1.0f);
+            cb.region[2] = std::fmin(std::fmax(static_cast<f32>(vpW_) / static_cast<f32>(sceneWidth_),  0.0f), 1.0f);
+            cb.region[3] = std::fmin(std::fmax(static_cast<f32>(vpH_) / static_cast<f32>(sceneHeight_), 0.0f), 1.0f);
+        } else {
+            cb.region[0] = 0.0f; cb.region[1] = 0.0f; cb.region[2] = 1.0f; cb.region[3] = 1.0f;
+        }
     };
 
+    // vx/vy: the destination's top-left offset, default 0 for every pass that always fills its whole
+    // target (bloom's pyramid, the histogram). Only the composite passes it non-zero, to confine the
+    // draw to the docked viewport's sub-rect -- see the composite call sites below.
     auto fullscreen = [&](ID3D12PipelineState* pso, u32 triple, u32 w, u32 h,
-                          const D3D12_CPU_DESCRIPTOR_HANDLE* rtv) {
+                          const D3D12_CPU_DESCRIPTOR_HANDLE* rtv, u32 vx = 0, u32 vy = 0) {
         cmdList_->SetPipelineState(pso);
         cmdList_->OMSetRenderTargets(1, rtv, FALSE, nullptr);
-        D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<f32>(w), static_cast<f32>(h), 0.0f, 1.0f};
-        D3D12_RECT sc{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+        D3D12_VIEWPORT vp{static_cast<f32>(vx), static_cast<f32>(vy), static_cast<f32>(w), static_cast<f32>(h), 0.0f, 1.0f};
+        D3D12_RECT sc{static_cast<LONG>(vx), static_cast<LONG>(vy),
+                      static_cast<LONG>(vx + w), static_cast<LONG>(vy + h)};
         cmdList_->RSSetViewports(1, &vp);
         cmdList_->RSSetScissorRects(1, &sc);
         cmdList_->SetGraphicsRootConstantBufferView(0, postConstants(&cb, sizeof cb));
@@ -5091,9 +5121,17 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // ---- eye adaptation ----
     // hw/hh (the downscaled dispatch grid) and the src dims below both derive from the SCENE target
     // this samples -- sceneWidth_/sceneHeight_, not the present width_/height_.
+    //
+    // DOCKED: metered over the sub-rect's OWN scene-pixel extent (vpW_/vpH_, already scene-space --
+    // see fillCommon's gPostRegion comment), not the whole scene target, so auto-exposure stops
+    // averaging in the black dead zone outside the 3D viewport panel that CSHistogram's uv mapping
+    // (gPostRegion, below) now confines the actual sampling to. Full scene extent, unchanged, when
+    // undocked (vpW_/vpH_ == 0).
     if (autoExp) {
-        const u32 hw = sceneWidth_ / kHistogramDownscale > 1 ? sceneWidth_ / kHistogramDownscale : 1;
-        const u32 hh = sceneHeight_ / kHistogramDownscale > 1 ? sceneHeight_ / kHistogramDownscale : 1;
+        const u32 regionW = vpW_ ? vpW_ : sceneWidth_;
+        const u32 regionH = vpH_ ? vpH_ : sceneHeight_;
+        const u32 hw = regionW / kHistogramDownscale > 1 ? regionW / kHistogramDownscale : 1;
+        const u32 hh = regionH / kHistogramDownscale > 1 ? regionH / kHistogramDownscale : 1;
         fillCommon(hw, hh, sceneWidth_, sceneHeight_);
 
         cmdList_->SetComputeRootSignature(postRootSig_.Get());
@@ -5285,6 +5323,23 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // grid was built at, which is always the scene's.
     fillCommon(width_, height_, sceneWidth_, sceneHeight_);
     const u32 compositeTriple = srUpscaled ? kPostTripleCompositeUpscaled : kPostTripleComposite;
+
+    // THE COMPOSITE'S OWN VIEWPORT/SCISSOR, confined to the docked sub-rect gPostRegion (just written
+    // above by fillCommon) already describes in normalised source space -- scaled back up into
+    // PRESENT-space pixels here since the destination (viewport texture or backbuffer) is present-
+    // sized, unlike gPostRegion's scene-space source. Full canvas (0,0,width_,height_) whenever
+    // region is the (0,0,1,1) identity -- vx==0, vy==0, compositeW==width_, compositeH==height_ --
+    // so this is byte-identical to before this feature existed on every undocked path.
+    u32 compositeX = static_cast<u32>(cb.region[0] * static_cast<f32>(width_)  + 0.5f);
+    u32 compositeY = static_cast<u32>(cb.region[1] * static_cast<f32>(height_) + 0.5f);
+    u32 compositeW = static_cast<u32>(cb.region[2] * static_cast<f32>(width_)  + 0.5f);
+    u32 compositeH = static_cast<u32>(cb.region[3] * static_cast<f32>(height_) + 0.5f);
+    if (compositeX > width_)  compositeX = width_;
+    if (compositeY > height_) compositeY = height_;
+    if (compositeW < 1) compositeW = 1;
+    if (compositeH < 1) compositeH = 1;
+    if (compositeX + compositeW > width_)  compositeW = width_  - compositeX;
+    if (compositeY + compositeH > height_) compositeH = height_ - compositeY;
     {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmdList_->ResourceBarrier(1, &toRt);
@@ -5300,16 +5355,22 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
             auto toRtTex = transition(vt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
             cmdList_->ResourceBarrier(1, &toRtTex);
+            // OUTSIDE the sub-rect, vt keeps whatever it held before this draw -- no clear precedes
+            // it, and the confined viewport/scissor below means DrawInstanced's fullscreen triangle
+            // never rasterizes there. That is fine, not merely tolerated: the ONLY reader of vt is
+            // SandboxShell's "Level" ImGui::Image, and its uv0/uv1 crop to this exact same present-
+            // space sub-rect (at.x/DisplaySize.x etc.), so nothing ever samples the untouched area --
+            // it is stale content, never garbage, and never displayed either way.
             D3D12_CPU_DESCRIPTOR_HANDLE trtv = vt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
             fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
-                       width_, height_, &trtv);
+                       compositeW, compositeH, &trtv, compositeX, compositeY);
             auto backToSrv = transition(vt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         } else {
             fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
-                       width_, height_, &bbRtv);
+                       compositeW, compositeH, &bbRtv, compositeX, compositeY);
         }
     }
 

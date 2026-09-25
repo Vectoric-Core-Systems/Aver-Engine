@@ -825,6 +825,25 @@ struct Settings {
     // rayDrivenStages is 1 or 2. Console: voxi.rayDrivenReflSplit.
     bool rayDrivenReflSplit = true;
 
+    // ---- the acceleration-structure "unchanged" gate ------------------------------------------
+    // MEASURED on the owner's static NewSponza scene: the "Voxi acceleration structures" GPU span
+    // costs 0.42 ms every single frame -- a from-scratch ctx.buildTlas (PREFER_FAST_TRACE, no update
+    // flags; the RHI has no refit verb) plus an unconditional instance-buffer rewrite and upload,
+    // recomputing the identical answer on a scene that has not moved. Same trick as the GI rebuild
+    // gate (Settings has no equivalent field for that one; giUpdateInterval only amortises it): hash
+    // what buildAccelerationStructures() reads from the draw list, and if nothing moved, leave tlas_,
+    // rtInstanceData_ and every SRV bound to them exactly as they are. See
+    // VoxiRenderer::rtAccelSnapshotUnchanged()'s own comment for exactly what "unchanged" checks and
+    // the two things that force a real rebuild regardless (a compute-skinned mesh present, since its
+    // BLAS is refreshed every frame; a cached BLAS handle the resource factory no longer attributes to
+    // its mesh).
+    //
+    // ON BY DEFAULT: it can only ever skip work whose output would be bit-identical, the same
+    // "only ever skips an identical answer" guarantee the GI gate gives, so unlike a staged/split
+    // dial this is not a quality trade to weigh -- turning it off costs frame time and buys nothing
+    // measurable in return. Console: voxi.rtSkipUnchangedTlas.
+    bool rtSkipUnchangedTlas = true;
+
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS, because this file already draws that line
     // and this setting was on the wrong side of it. RAY TRACING is discrete rays answering a

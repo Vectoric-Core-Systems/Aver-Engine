@@ -11,6 +11,11 @@ cbuffer AverPost : register(b0) {
     float4 gPostMisc;    // x middle grey, y auto-exposure on, z bloom filter radius, w tonemap mode
     float4 gPostClamp;   // x pre-tonemap radiance ceiling (0 = no clamp), y local exposure shadows
                          // [0,1], z local exposure highlights [0,1] (see PostSettings), w spare
+    // THE DOCKED-VIEWPORT SUB-RECT: xy is this pass's source uv origin, zw its uv size, both already
+    // in the post chain's own normalised source space (see FrameConstants.hpp's PostCB::region for
+    // the C++-side derivation). (0,0,1,1) identity when no sub-rect applies -- every read below is
+    // then gPostRegion.xy + uv*gPostRegion.zw == uv, so this is a no-op on that path.
+    float4 gPostRegion;
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
@@ -141,7 +146,11 @@ void CSHistogram(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
 
     if (tid.x < (uint)gPostDst.x && tid.y < (uint)gPostDst.y) {
-        float2 uv = (tid.xy + 0.5) * gPostDst.zw;
+        // gPostDst is THIS DISPATCH's own downscaled grid (sized off the sub-rect in scene pixels
+        // when docked -- see runPostChain), so uvLocal alone is 0..1 over the whole scene only when
+        // undocked; gPostRegion maps it into the sub-rect actually being metered either way.
+        float2 uvLocal = (tid.xy + 0.5) * gPostDst.zw;
+        float2 uv = gPostRegion.xy + uvLocal * gPostRegion.zw;
         float lum = averLuminance(gPostSceneTex.SampleLevel(gPostSamp, uv, 0).rgb);
         uint bin = 0;
         if (lum > 1e-4) {
@@ -380,7 +389,14 @@ void averLocalGridSample(float2 tileXY, float bin, uint gridW, uint gridH, out f
 // ---- composite -----------------------------------------------------------------------------
 // Exposure, bloom, tonemap and gamma in one pass; the frame becomes a display image here.
 float4 PSComposite(AverPostVSOut i) : SV_TARGET {
-    float3 cRaw = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, i.uv, 0).rgb);
+    // i.uv is 0..1 over WHATEVER the raster viewport this pass drew into was set to -- the whole
+    // present canvas when undocked, or just the docked sub-rect when runPostChain confined the
+    // composite's own viewport/scissor to it (see its own comment). Either way it is NOT yet a
+    // valid uv into the source texture: gPostRegion maps it there. Computed once and reused for
+    // every source read below -- the scene sample, the bloom sample and the local-exposure lookup --
+    // so all three agree on which part of the (possibly larger) source textures this pixel belongs to.
+    float2 srcUv = gPostRegion.xy + i.uv * gPostRegion.zw;
+    float3 cRaw = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, srcUv, 0).rgb);
 #ifdef AVER_POST_AUTOEXPOSURE
     float currentExposure = asfloat(gPostExpRead.Load(0));
 #else
@@ -399,7 +415,10 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
             uint gridW = averLocalGridDim((uint)gPostSrc.x);
             uint gridH = averLocalGridDim((uint)gPostSrc.y);
 
-            float2 tileXY = i.uv * gPostSrc.xy / (float)AVER_LOCALEXP_TILE;
+            // srcUv, NOT i.uv: the grid was built (CSLocalGrid) over the WHOLE scene, unconfined by
+            // any sub-rect -- see runPostChain's comment on why that pass is left alone -- so the
+            // lookup into it needs the same source-space uv the scene sample above just used.
+            float2 tileXY = srcUv * gPostSrc.xy / (float)AVER_LOCALEXP_TILE;
             float t = saturate((log2(lPre) - gPostAdapt.x) * gPostAdapt.y);
             float binCoord = t * (float)AVER_LOCALEXP_BINS;
 
@@ -417,7 +436,8 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     }
 
 #ifdef AVER_POST_BLOOM
-    c += gPostBloomTex.SampleLevel(gPostSamp, i.uv, 0).rgb * gPostTone.y;
+    // srcUv again: the bloom pyramid, like the local-exposure grid, is built over the whole scene.
+    c += gPostBloomTex.SampleLevel(gPostSamp, srcUv, 0).rgb * gPostTone.y;
 #endif
     return float4(toGamma(averTonemap(c, gPostMisc.w)), 1.0);
 }

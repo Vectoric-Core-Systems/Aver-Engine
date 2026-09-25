@@ -751,6 +751,13 @@ void VoxiRenderer::shutdown() {
     // Acceleration structures are released with the factory itself: only the handles are dropped.
     blas_.clear();
     tlas_ = 0;
+    // THE UNCHANGED GATE'S OWN SNAPSHOT, invalidated here for the reason blas_/tlas_ themselves are
+    // cleared above: init() rebuilds both from nothing (a device reset, a resize that reaches this
+    // path, or simply the editor cycling the feature), so a key matching whatever drawsPrev_ looked
+    // like before this shutdown() must NOT be trusted to mean tlas_ (now zero, about to be recreated)
+    // is still the answer -- see rtAccelSnapshotUnchanged()'s own force-rebuild conditions, none of
+    // which would otherwise catch "the TLAS itself was thrown away without a single draw changing".
+    rtAccelSnapValid_ = false;
 
     voxelMips_ = voxelResBuilt_ = 0;
     giReady_ = rtSupported_ = rtActive_ = rtLogged_ = false;
@@ -1768,11 +1775,36 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
 }
 
 // Builds a bottom-level structure for every referenced mesh, then one top-level structure over the
-// replayed draw list. Publishes shadowParams.z so the lit pass knows whether it may trace.
+// replayed draw list. Publishes shadowParams.z so the lit pass knows whether it may trace. Settings::
+// rtSkipUnchangedTlas gates all of that on rtAccelSnapshotUnchanged() -- see the "THE UNCHANGED GATE"
+// block just below for what it skips.
 void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtActive_ = false;
     cb_.shadowParams[2] = 0.0f;
     if (!rtSupported_ || settings_.rayTracing == Quality::Off || drawsPrev_.empty()) return;
+
+    // ---- THE UNCHANGED GATE (Settings::rtSkipUnchangedTlas) ----
+    //
+    // See rtAccelSnapshotUnchanged()'s own comment for what "unchanged" checks. A MATCH means
+    // tlas_, rtInstanceData_ and every SRV bound to them (bindings_ slots 2/3/4/5/9, all set the last
+    // time this function actually ran its per-draw loop) are still exactly correct -- so the whole
+    // body below is skipped: no BLAS/TLAS work, no instance-buffer rewrite or upload, no material
+    // re-upload. What is NOT skipped is everything below that is NOT a function of drawsPrev_ and
+    // that other code reads every frame regardless -- rtActive_, cb_.shadowParams[2], cb_.rtParams
+    // (updateRtParamsPerFrame(), factored out for exactly this reuse) and cb_.rtParams[3], read from
+    // rtGeometryReady_ rather than a fresh buildGeometryTable() call since that call is one of the
+    // things being skipped and rtGeometryReady_ already says whether the UNCHANGED geometry table is
+    // valid for the UNCHANGED rtInstanceData_ sitting behind it.
+    if (settings_.rtSkipUnchangedTlas && rtAccelSnapshotUnchanged()) {
+        ++rtAccelSkipped_;
+        rtActive_ = true;
+        cb_.shadowParams[2] = 1.0f;
+        updateRtParamsPerFrame();
+        cb_.rtParams[3] = rtGeometryReady_ ? 1.0f : 0.0f;
+        reportRtAccelGate();
+        return;
+    }
+    if (settings_.rtSkipUnchangedTlas) ++rtAccelRebuilt_;
 
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
     tlasTranslucentThisBuild_ = 0;
@@ -2057,6 +2089,12 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // gpuStat's destructor closes the marker here -- used to be `ctx.popMarker(); return;`, one of
     // two exits that both had to remember to pop by hand. See ScopedGpuStat's comment for the bug
     // that duplication caused, which this class exists to make impossible.
+    //
+    // rtAccelKey_/rtAccelSnapValid_ are deliberately left untouched on this exit rather than
+    // invalidated: this function reached here because the gate above already said "rebuild" (a key
+    // mismatch, a forced condition, or no snapshot yet), so whatever they held describes the LAST
+    // build that actually ran ctx.buildTlas below -- which this exit does not reach, so tlas_ is
+    // exactly as that last build left it, still correctly described by them.
     if (tlasInstScratch_.empty()) return;
 
     ctx.buildTlas(tlas_, tlasInstScratch_.data(), static_cast<u32>(tlasInstScratch_.size()));
@@ -2074,16 +2112,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtActive_ = true;
     cb_.shadowParams[2] = 1.0f;
 
-    // How fast a ray-traced shadow edge softens is the SUN's angular size, not a tuned constant --
-    // the disc subtends about half a degree, and rtShadow spreads its rays across exactly that.
-    // Taken from the sky model rather than duplicated, so a scene that moves the sun or widens the
-    // disc gets penumbrae that agree with its own sky.
-    const f32 halfAngle = dev_->skyAtmosphere().sunAngularDiameterDeg * 0.5f * 0.01745329252f;
-    cb_.rtParams[0] = std::tan(halfAngle);
-    cb_.rtParams[1] = static_cast<f32>(rtShadowRays_);
-    // Base ray bias in centimetres, scaled by view distance in the shader. Small enough not to
-    // detach a contact shadow, large enough that a surface does not intersect its own rays.
-    cb_.rtParams[2] = 0.05f;
+    // cb_.rtParams[0..2]: NOT a function of drawsPrev_ -- see updateRtParamsPerFrame()'s own comment.
+    // Factored out so the gate's skip branch above can set the identical values without duplicating
+    // them.
+    updateRtParamsPerFrame();
     // MATERIAL TABLE FIRST, AND THE ORDER IS THE WHOLE POINT. buildGeometryTable() below uploads
     // rtInstanceData_ to the GPU; buildMaterialTable() fills in every materialIndex, which the
     // per-draw loop leaves at a placeholder 0. Called the other way round, as this stood until now,
@@ -2122,6 +2154,189 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                   static_cast<u32>(blas_.size()));
         lastBlasRebuilds_ = rebuilds;
     }
+
+    // THE GATE'S OWN BOOKKEEPING, kept warm regardless of whether Settings::rtSkipUnchangedTlas is on
+    // right now: a build that reaches here always leaves tlas_/rtInstanceData_ in a state
+    // rtAccelDrawsKey() can describe, so recording it costs one more pass over drawsPrev_ (negligible
+    // next to the TLAS build and buffer uploads this build already paid for) and means turning the
+    // setting on mid-session, or back on after a frame it was off, never has to wait an extra frame
+    // to prime. Only the SKIPPED/REBUILT counters and the report itself are gated on the setting --
+    // see reportRtAccelGate()'s own comment -- so the ratio it prints describes ticks the gate was
+    // actually consulted for, not ticks it was switched off.
+    takeRtAccelSnapshot();
+    if (settings_.rtSkipUnchangedTlas) reportRtAccelGate();
+}
+
+// cb_.rtParams[0..2]: the sun's angular size (as a tangent, so the shader multiplies rather than
+// re-derives it), the shadow ray count and the ray bias -- none of them a function of drawsPrev_, all
+// three read every frame by shadowPass()/PSRayDriven regardless of whether buildAccelerationStructures
+// rebuilt anything this frame. Split out of that function's own tail so its gate's skip branch can set
+// them without duplicating the derivation.
+void VoxiRenderer::updateRtParamsPerFrame() {
+    // How fast a ray-traced shadow edge softens is the SUN's angular size, not a tuned constant --
+    // the disc subtends about half a degree, and rtShadow spreads its rays across exactly that.
+    // Taken from the sky model rather than duplicated, so a scene that moves the sun or widens the
+    // disc gets penumbrae that agree with its own sky.
+    const f32 halfAngle = dev_->skyAtmosphere().sunAngularDiameterDeg * 0.5f * 0.01745329252f;
+    cb_.rtParams[0] = std::tan(halfAngle);
+    cb_.rtParams[1] = static_cast<f32>(rtShadowRays_);
+    // Base ray bias in centimetres, scaled by view distance in the shader. Small enough not to
+    // detach a contact shadow, large enough that a surface does not intersect its own rays.
+    cb_.rtParams[2] = 0.05f;
+}
+
+// True when buildAccelerationStructures() MUST run its real per-draw loop this frame, regardless of
+// what rtAccelDrawsKey() says -- the two things in that loop no key can make safe to skip, checked
+// here the CHEAP way instead: an unordered_map lookup and (at most) one virtual call per draw, none
+// of the BLAS creation, instance population or material resolution the real loop also does.
+bool VoxiRenderer::rtAccelMustForceRebuild() const {
+    for (const Draw& d : drawsPrev_) {
+        // A compute-skinned mesh's BLAS is rebuilt INSIDE the per-draw loop every single call (see
+        // that check's own comment, just above where the loop calls ctx.buildBlas a second time) --
+        // freezing the structure here would show a shadow or reflection at whatever pose it last
+        // held, silently, for as long as the rest of the draw list held still. Its mere presence in
+        // this frame's draw list is reason enough; nothing about ITS key changing is required.
+        if (dev_ && dev_->meshVertexBuffer(d.mesh)) return true;
+        // THE SAME "destroyed-and-reused mesh handle" CHECK THE REAL LOOP MAKES (see its own comment,
+        // just above where it erases the stale entry), run here instead of trusted to the key: a BLAS
+        // cached under this mesh handle that the resource factory no longer attributes to it is dead,
+        // and a gate that matched on the key alone would leave the TLAS pointing straight at it.
+        const auto it = blas_.find(d.mesh);
+        if (it != blas_.end() && it->second && res_->blasMesh(it->second) != d.mesh) return true;
+    }
+    return false;
+}
+
+// ORDER-INDEPENDENT, for the identical reason giDrawsKey() is (see its own comment further down this
+// file): occlusion culling reorders drawsPrev_ every frame, so this sums a per-draw hash rather than
+// folding one in list order, the only way a reshuffled-but-otherwise-identical draw list still matches.
+//
+// COVERS EVERYTHING THE PER-DRAW LOOP AND THE TWO TABLES BELOW IT READ to decide an instance's TLAS
+// entry, its RtInstance record and its row in the material table: the mesh, its world transform, the
+// two flags that pick its mask/ForceNonOpaque lane (translucent, hiddenFromOwner), and its material.
+u64 VoxiRenderer::rtAccelDrawsKey() const {
+    u64 key = 0;
+    u64 counted = 0;
+    for (const Draw& d : drawsPrev_) {
+        u64 h = 1469598103934665603ull;
+        h ^= static_cast<u64>(d.mesh); h *= 1099511628211ull;
+        for (u32 i = 0; i < 16; ++i) {
+            u32 bits = 0;
+            std::memcpy(&bits, &d.world[i], sizeof(bits));
+            h ^= static_cast<u64>(bits);
+            h *= 1099511628211ull;
+        }
+        // The two flags i.mask/i.flags are built from, hashed as the bools the loop actually branches
+        // on rather than the mask/flag bits they produce -- cheaper, and the two can never disagree.
+        h ^= (d.translucent ? 1ull : 0ull) | (d.hiddenFromOwner ? 2ull : 0ull);
+        h *= 1099511628211ull;
+
+        // ---- material identity: d.matSet alone is not enough ----
+        // MaterialSystem::gpuMaterialRevision()'s own comment (MaterialSystem.hpp) says why plainly:
+        // "touch()/MaterialLibrary::update() on a material's own factors or textures never moves its
+        // row, only its CONTENTS at the row it already has, so an ordinary edit does not bump this".
+        // pbr::materialGraphs().revision() does not help either -- it moves only when a GRAPH's
+        // generated HLSL changes, not when a factor or a texture reference does. Neither catches an
+        // in-place material edit, which the per-draw loop's OWN matKey (d.matSet alone, for an
+        // authored draw) would silently miss too. So this hashes what that loop actually reads instead
+        // of trusting a handle: d.mat -- the MaterialConstants submitDraw() re-captured THIS frame
+        // from whatever the caller currently holds for the material, live edits included, regardless
+        // of whether this gate exists -- plus the resolved texture set materials_.textures() reports
+        // for it. d.mat ALONE is not enough for the texture half: packMaterial() always leaves
+        // texIndex at the unbound placeholder (MaterialGpu.cpp) since only THIS renderer's own
+        // residentTexture() ever fills it, downstream of where a gate would already have decided -- so
+        // reassigning a material's texture changes none of d.mat's bytes.
+        const bool authored = materials_.ownsBindingSet(d.matSet) &&
+                               d.matSet != materials_.fallbackBindingSet();
+        h ^= static_cast<u64>(d.matSet); h *= 1099511628211ull;
+        h ^= authored ? 1ull : 0ull; h *= 1099511628211ull;
+        if (authored) {
+            for (usize i = 0; i < sizeof(d.mat); ++i) {
+                h ^= static_cast<u64>(d.mat[i]);
+                h *= 1099511628211ull;
+            }
+            if (const auto* tex = materials_.textures(d.matSet)) {
+                for (u32 t = 0; t < pbr::kTextureSlotCount; ++t) {
+                    h ^= static_cast<u64>((*tex)[t]);
+                    h *= 1099511628211ull;
+                }
+            }
+        } else {
+            // UNAUTHORED: the per-draw loop builds its constants from colour/metallic/roughness alone
+            // (synthMaterialKey), the same three fields giDrawsKey() hashes, for the identical reason.
+            for (u32 i = 0; i < 4; ++i) {
+                u32 bits = 0;
+                std::memcpy(&bits, &d.color[i], sizeof(bits));
+                h ^= static_cast<u64>(bits);
+                h *= 1099511628211ull;
+            }
+            u32 mb = 0, rb = 0;
+            std::memcpy(&mb, &d.metallic, sizeof(mb));
+            std::memcpy(&rb, &d.roughness, sizeof(rb));
+            h ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
+            h *= 1099511628211ull;
+        }
+
+        // FINALISE BEFORE ADDING -- the same avalanche giDrawsKey() uses and for the identical reason:
+        // FNV's last step leaves neighbouring inputs correlated in the low bits, and plain addition of
+        // correlated values collides far more readily than addition of decorrelated ones.
+        h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
+        h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
+        h ^= h >> 33;
+        key += h;
+        ++counted;
+    }
+    // THE COUNT, mixed in rather than added -- see giDrawsKey()'s own comment on exactly what this
+    // does and does not catch; the same true here for the identical reason.
+    key ^= counted * 1099511628211ull;
+    return key;
+}
+
+// True when nothing buildAccelerationStructures() would read from drawsPrev_ -- or from the BLAS
+// cache and dynamic-mesh state its per-draw loop also consults -- has changed since the last build
+// that actually ran, so that build's tlas_, rtInstanceData_ and every SRV bound to them are still
+// exactly correct as they stand. MODELLED ON giSnapshotUnchanged() (read it first): same "reject once
+// per reason, log it" shape, same split between this const check and the caller taking a fresh
+// snapshot (takeRtAccelSnapshot()) only once it has decided a rebuild is actually going to run.
+bool VoxiRenderer::rtAccelSnapshotUnchanged() const {
+    const auto reject = [this](u32 bit, const char* which) {
+        if (!(rtAccelGateWhyMask_ & (1u << bit))) {
+            rtAccelGateWhyMask_ |= (1u << bit);
+            AVER_INFO("[Voxi] RT accel-structure gate rejected on: {}", which);
+        }
+        return false;
+    };
+    if (!rtAccelSnapValid_) return reject(0, "no snapshot yet (expected once)");
+    if (rtAccelMustForceRebuild())
+        return reject(1, "compute-skinned mesh present or a cached BLAS handle went stale");
+    if (rtAccelDrawsKey() != rtAccelKey_) return reject(2, "draw list changed");
+    return true;
+}
+
+// Records what the build about to run (or that just ran -- see buildAccelerationStructures' own call
+// site) was computed from. Mirrors takeGiSnapshot(): the non-const half of the gate, called once a
+// build has actually happened rather than from inside the const check above.
+void VoxiRenderer::takeRtAccelSnapshot() {
+    rtAccelKey_ = rtAccelDrawsKey();
+    rtAccelSnapValid_ = true;
+}
+
+// The widening-interval "N rebuilt / M skipped" report, same shape as the GI rebuild gate's own (see
+// prePass(), the block right after giSnapshotUnchanged()) and for the identical reason stated there:
+// a window whose first report lands mid-load-in describes the phase nobody is asking about, so this
+// reports both the lifetime ratio and the ratio since the last report, at doubling tick counts.
+void VoxiRenderer::reportRtAccelGate() {
+    const u64 ticks = rtAccelSkipped_ + rtAccelRebuilt_;
+    if (ticks < rtAccelGateNextReport_) return;
+    const u64 winTicks = ticks - rtAccelGateLastTicks_;
+    const u64 winSkipped = rtAccelSkipped_ - rtAccelGateLastSkipped_;
+    AVER_INFO("[Voxi] RT accel-structure gate: {} rebuilt / {} skipped of {} tick(s) "
+              "-- {}% avoided overall, {}% since the last report",
+              rtAccelRebuilt_, rtAccelSkipped_, ticks, (rtAccelSkipped_ * 100) / ticks,
+              winTicks ? (winSkipped * 100) / winTicks : 0);
+    rtAccelGateLastTicks_ = ticks;
+    rtAccelGateLastSkipped_ = rtAccelSkipped_;
+    rtAccelGateNextReport_ = ticks * 2;   // 64, 128, 256, ... -- a handful of lines, not a flood
 }
 
 // Groups a previous-transform key by (mesh, drawBinding) -- see the long comment above this method's

@@ -426,7 +426,9 @@ private:
     void shadowPass(rhi::IRenderContext& ctx);
     // The GI-only depth pass: one box over the GI volume, run on the frames voxelizePass runs.
     void giShadowPass(rhi::IRenderContext& ctx);
-    // Builds a BLAS per referenced mesh and one TLAS over the replayed draw list.
+    // Builds a BLAS per referenced mesh and one TLAS over the replayed draw list. Settings::
+    // rtSkipUnchangedTlas gates the whole body on rtAccelSnapshotUnchanged() -- see that function's
+    // own comment, and the "THE UNCHANGED GATE" members below, for what it skips and why it is safe.
     void buildAccelerationStructures(rhi::IRenderContext& ctx);
     // Clears the accumulator, rasterises the scene into the volume with direct light, resolves it.
     void voxelizePass(rhi::IRenderContext& ctx);
@@ -632,6 +634,50 @@ private:
     // What the last frame's pass over the draw list actually cost, in structures. Logged only when
     // it CHANGES: a number this important should be visible, and a line every frame is noise.
     u32 lastBlasRebuilds_ = 0xFFFFFFFFu;
+
+    // ---- THE UNCHANGED GATE (Settings::rtSkipUnchangedTlas): skip a rebuild whose result would be
+    // ---- bit-identical to the one already sitting in tlas_/rtInstanceData_ ----------------------
+    //
+    // Same trick as the GI rebuild gate much further down this file (giSnapshotUnchanged/
+    // giDrawsKey/takeGiSnapshot -- read those first, this is modelled on them line for line): hash
+    // everything buildAccelerationStructures()'s per-draw loop and the two tables below it read from
+    // drawsPrev_, and if nothing moved, leave tlas_, rtInstanceData_ and every SRV bound to them
+    // exactly as they are rather than recomputing the identical answer. MEASURED at 0.42 ms/frame on
+    // the owner's static NewSponza scene -- see Settings::rtSkipUnchangedTlas' own comment (Voxi.hpp)
+    // for what that 0.42 ms actually buys: a from-scratch ctx.buildTlas plus an unconditional
+    // instance-buffer rewrite and upload, every frame, whether or not the scene moved.
+    //
+    // rtAccelSnapshotUnchanged() is the const check (mirrors giSnapshotUnchanged()); it calls
+    // rtAccelMustForceRebuild() first (the two conditions no key can make safe to skip: a compute-
+    // skinned mesh present, whose BLAS the per-draw loop refreshes every single call, or a cached
+    // BLAS handle the resource factory no longer attributes to its mesh) and rtAccelDrawsKey() second
+    // (mirrors giDrawsKey(): the same commutative, order-independent hash shape, for the same reason
+    // -- occlusion culling reorders drawsPrev_ every frame). takeRtAccelSnapshot() (mirrors
+    // takeGiSnapshot()) is the non-const half, called by buildAccelerationStructures() after every
+    // build that actually ran, whether or not the gate itself is on -- see its own call sites.
+    bool rtAccelSnapshotUnchanged() const;
+    bool rtAccelMustForceRebuild() const;
+    u64  rtAccelDrawsKey() const;
+    void takeRtAccelSnapshot();
+    // The one-time-per-reason "why" log (mirrors giSnapshotUnchanged's reject lambda) plus the
+    // widening-interval "N rebuilt / M skipped" report (mirrors the GI gate's own, in prePass()) --
+    // factored into one method since, unlike the GI gate, this one has two call sites (the skip
+    // branch returns early; a real build reaches the same report from its own tail) that must agree.
+    void reportRtAccelGate();
+    // cb_.rtParams[0..2] (the sun's angular size as a tangent, the shadow ray count, the ray bias):
+    // NOT a function of drawsPrev_, so a frame the gate skips still has to set them -- shadowPass()
+    // and PSRayDriven read cb_ every frame regardless of whether a rebuild happened this one. Factored
+    // out of buildAccelerationStructures' own tail so the skip branch does not duplicate it.
+    void updateRtParamsPerFrame();
+
+    u64  rtAccelKey_ = 0;
+    // False until the first successful build (mirrors giSnapExtent_'s negative-means-unset shape, as
+    // a separate bool rather than a sentinel value since 0 is otherwise a perfectly legal key).
+    bool rtAccelSnapValid_ = false;
+    u64  rtAccelSkipped_ = 0, rtAccelRebuilt_ = 0;   // ticks the gate actually ran; for the report only
+    mutable u32 rtAccelGateWhyMask_ = 0;   // one bit per rejection reason already reported, ever
+    u64  rtAccelGateNextReport_ = 64;      // doubles each time, so the steady state gets reported too
+    u64  rtAccelGateLastTicks_ = 0, rtAccelGateLastSkipped_ = 0;
 
     // ---- W10: buildAccelerationStructures' own per-build scratch, hoisted out of the function ----
     // USED TO BE TWO LOCALS -- `std::vector<rhi::TlasInstance> inst` and
@@ -2503,7 +2549,10 @@ public:
     //
     // rayDrivenActive() is the racy half being fixed. It reads rtActive_, and rtActive_ is reset to
     // false at the TOP of buildAccelerationStructures() and set true only after a successful TLAS
-    // build over drawsPrev_ -- and buildAccelerationStructures() runs from prePass(), which runs
+    // build over drawsPrev_ -- OR, since Settings::rtSkipUnchangedTlas, after
+    // rtAccelSnapshotUnchanged() confirms the TLAS an earlier call already built is still correct for
+    // it; either way it means "the TLAS is usable this frame", which is all this race cares about --
+    // and buildAccelerationStructures() runs from prePass(), which runs
     // inside THIS frame's beginFrame(), AFTER beginScene() (called immediately before prePass(), over
     // every feature, in that same beginFrame()) has already done `drawsPrev_.swap(draws_);
     // draws_.clear();`. So the drawsPrev_ this frame's build is about to consume is NOT the member's
