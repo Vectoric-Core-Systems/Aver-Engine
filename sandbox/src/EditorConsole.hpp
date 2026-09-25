@@ -1121,6 +1121,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "image MAD 0.04, no tile pattern in motion.",
         []{ return vBool(Renderer::get().settings().rtReflectionHalfRate); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtReflectionHalfRate = on; }); }});
+    t.push_back({"voxi.rtGiHitShadowMap", VarType::Bool, false,
+        "The sun visibility at a ReSTIR GI bounce hit comes from the GI-only shadow map instead of a "
+        "shadow ray (the ray still fires where the map cannot answer). OFF by default: measured GI "
+        "trace 3.38 -> 2.68 ms, still image MAD 1.61, about 1% brighter where the map's coarse texels "
+        "let bounce light under column capitals and bases.",
+        []{ return vBool(Renderer::get().settings().rtGiHitShadowMap); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtGiHitShadowMap = on; }); }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },

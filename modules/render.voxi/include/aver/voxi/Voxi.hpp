@@ -826,11 +826,11 @@ struct Settings {
     bool rayDrivenReflSplit = true;
 
     // ---- staged ray-driven bit-field toggles (cb_.giShadowParams.w / gGiShadowParams.w) ---------
-    // Three independent RUNTIME toggles packed into one integer bit-field riding the fourth
+    // Four independent RUNTIME toggles packed into one integer bit-field riding the fourth
     // component of the GI-only shadow map's params row -- see FrameConstants::giShadowParams's own
     // comment (VoxiRenderer.hpp), which used to say that component was unused. VoxiRenderer::prePass
-    // packs these three bools into cb_.giShadowParams[3] every frame (bit 1/2/4 below); the HLSL side
-    // decodes it as `uint bits = (uint)gGiShadowParams.w`. ALL THREE ON BY DEFAULT since they were
+    // packs these bools into cb_.giShadowParams[3] every frame (bit 1/2/4/8 below); the HLSL side
+    // decodes it as `uint bits = (uint)gGiShadowParams.w`. T1-T3 ARE ON BY DEFAULT since they were
     // measured on the owner's NewSponza view (staged mode 1, 300 frames, --gpu-timing): together
     // 15.6 -> 13.9 ms/frame. Still image vs all off: MAD 0.46. Moving camera (--cam-wobble 40 24,
     // stopped at frame 100, compared with the settled pose): error 4.58 -> 4.70 MAD, pixels > 16
@@ -866,6 +866,16 @@ struct Settings {
     // mode 1, 15.4 ms frame. Console: voxi.rtReflectionHalfRate. MEASURED alone: reflection trace
     // 3.14 -> 2.17 ms; still image MAD 0.04.
     bool rtReflectionHalfRate = true;
+
+    // T4 (bit 8): the sun visibility at ReSTIR GI's candidate HIT (giTraceInitialCandidate) comes from
+    // the GI-only shadow map -- the same box over the GI volume light injection samples through
+    // giShadowFactor -- instead of a shadow ray; the ray still fires wherever the map cannot answer
+    // (hit outside its box, or the map unusable this frame). MEASURED as a prototype on NewSponza,
+    // staged mode 1: GI trace 3.38 -> 2.68 ms (mode 2: 1.65 -> 1.28 ms); still image MAD 1.61, +1.2
+    // brighter -- at this volume the map's texels are 19 cm, and it lets a little bounce light through
+    // under the column capitals and at the column bases that the ray blocks. A smaller normal offset
+    // did not change that. OFF by default until judged in the editor. Console: voxi.rtGiHitShadowMap.
+    bool rtGiHitShadowMap = false;
 
     // ---- the acceleration-structure "unchanged" gate ------------------------------------------
     // MEASURED on the owner's static NewSponza scene: the "Voxi acceleration structures" GPU span

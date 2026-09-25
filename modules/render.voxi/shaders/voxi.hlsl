@@ -54,8 +54,9 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // w WAS UNUSED, and is now a RUNTIME BIT-FIELD, not a float value -- decode with
     // `uint bits = (uint)gGiShadowParams.w`, never compared or lerped as a float. C++ assembles it
     // every frame (VoxiRenderer.cpp, after fitGiShadow -- see that function's own comment for why it
-    // no longer zeroes this field) from three independent Settings toggles, each OFF by default and
-    // each an A/B-measured trade against the staged ray-driven cost breakdown, not a correctness fix:
+    // no longer zeroes this field) from four independent Settings toggles (bits 1/2/4 ON by default
+    // since 896c5187, bit 8 OFF), each an A/B-measured trade against the staged ray-driven cost
+    // breakdown, not a correctness fix:
     //   bit 1 (Settings::rtSecondaryShadowOpaque, console voxi.rtSecondaryShadowOpaque): rtReflection's
     //     hit and giTraceInitialCandidate's hit (voxi_restir.hlsli) call rtShadowOpaque (voxi_rt.hlsli)
     //     instead of rtShadow for their own sun-shadow ray -- one first-hit-terminated ray against the
@@ -69,7 +70,10 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //   bit 4 (Settings::rtReflectionHalfRate, console voxi.rtReflectionHalfRate): rtReflectionTemporalEx
     //     (voxi.hlsl) skips its rtReflection ray the same tiled way, for a ROUGH pixel only -- a mirror
     //     (lobeRough == 0) always retraces, since a reprojected mirror reflection is wrong under motion.
-    // With all three bits clear this field reads 0.0, exactly as it always has, and every shader above
+    //   bit 8 (Settings::rtGiHitShadowMap, console voxi.rtGiHitShadowMap): giTraceInitialCandidate's hit
+    //     takes its sun visibility from this GI-only shadow map (giHitShadowMapVisibility,
+    //     voxi_restir.hlsli) instead of a ray, falling back to the ray where the map cannot answer.
+    // With all four bits clear this field reads 0.0, exactly as it always has, and every shader above
     // computes exactly what it did before these existed.
     float4   gGiShadowParams;
     // The SPATIAL shadow denoiser. x = filter radius in pixels (0 = off); y = how much of the

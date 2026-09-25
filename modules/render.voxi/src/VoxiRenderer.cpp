@@ -1533,7 +1533,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // reasoning as ambientParams[1]/[2] a few lines up.
     cb_.giShadowParams[3] = static_cast<f32>((settings_.rtSecondaryShadowOpaque ? 1u : 0u) |
                                               (settings_.rtSkyOcclusionHalfRate ? 2u : 0u) |
-                                              (settings_.rtReflectionHalfRate  ? 4u : 0u));
+                                              (settings_.rtReflectionHalfRate  ? 4u : 0u) |
+                                              (settings_.rtGiHitShadowMap      ? 8u : 0u));
 
     // Five passes below (acceleration structures, cascades, GI-only shadow box, voxelise, mip filter)
     // used to each open their own top-level GPU marker, so the timing report saw five unrelated
@@ -4264,6 +4265,15 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
                   "CSRdRefl (said once)");
     }
 
+    // T4 (Settings::rtGiHitShadowMap): the GI candidate's hit samples the GI-only shadow map from the
+    // COMPUTE stages below (CSRdGiTrace, or CSRdGi when unsplit), but giShadowPass leaves it in
+    // ShaderResource, the pixel-shader state the voxelise pass reads it in. It visits
+    // NonPixelShaderResource for this group only and goes straight back afterwards, so every pixel-
+    // shader reader (next frame's voxelise, the blended replay) still finds it where it expects.
+    const bool giHitShadowMap = settings_.rtGiHitShadowMap && giShadowTex_ != 0;
+    if (giHitShadowMap)
+        ctx.textureBarrier(giShadowTex_, rhi::ResourceState::ShaderResource,
+                           rhi::ResourceState::NonPixelShaderResource);
     {
         // Wraps every dispatch below -- see this function's own comment on why no barrier or
         // timestamp sits between the four milestone-2/3 stages (S1/G1, immediately below, are the one
@@ -4472,6 +4482,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         }
         if (!perStage) ctx.popMarker();
     }
+    if (giHitShadowMap)
+        ctx.textureBarrier(giShadowTex_, rhi::ResourceState::NonPixelShaderResource,
+                           rhi::ResourceState::ShaderResource);
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
     // dispatches above wrote them -- all four barriers sit here, unconditionally, rather than only
     // behind each dispatch's own `if`: a barrier against a texture nothing wrote this frame is a

@@ -1483,7 +1483,8 @@ private:
         // fully-lit indirect), z = normal-offset bias in world units. w = the staged ray-driven
         // bit-field toggles, decoded in HLSL as `uint bits = (uint)gGiShadowParams.w` -- bit 1
         // Settings::rtSecondaryShadowOpaque, bit 2 Settings::rtSkyOcclusionHalfRate, bit 4
-        // Settings::rtReflectionHalfRate (Voxi.hpp has each one's own comment). Packed every frame in
+        // Settings::rtReflectionHalfRate, bit 8 Settings::rtGiHitShadowMap (Voxi.hpp has each one's
+        // own comment). Packed every frame in
         // VoxiRenderer::prePass, not by fitGiShadow() -- a frame that skips fitGiShadow (the GI
         // rebuild gate) must still carry the bits.
         f32 giShadowParams[4] = {};

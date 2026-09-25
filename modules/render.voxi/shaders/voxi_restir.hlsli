@@ -689,6 +689,30 @@ GiVisRecon giVisReconstruct(float3 wpos, float3 N, float2 pixel, uint frameIdx) 
     return rec;
 }
 
+// ---- T4 (Settings::rtGiHitShadowMap): sun visibility at a GI hit from the GI-only shadow map ----
+// giShadowFactor's own lookup (voxi.hlsl, defined after this file is included, so repeated here rather
+// than called), with one difference: it returns -1 where the map cannot answer instead of "fully lit".
+// A GI ray can leave the GI volume the map's box covers, and the map can be unusable for a frame; the
+// caller then fires the shadow ray it would have fired anyway. MEASURED (NewSponza, staged mode 1):
+// the GI trace 3.38 -> 2.68 ms, image about 1% brighter where the map's 19 cm texels let bounce light
+// under column capitals -- see Settings::rtGiHitShadowMap. gGiShadowTex/gShadowSamp/gGiShadowViewProj/
+// gGiShadowParams are declared at the top of voxi.hlsl, before this file.
+float giHitShadowMapVisibility(float3 wpos, float3 N, float3 L) {
+    if (gGiShadowParams.y < 0.5) return -1.0;
+    const float  slope = saturate(1.0 - saturate(dot(N, L)));
+    const float3 p0    = wpos + N * (gGiShadowParams.z * (1.0 + slope));
+    const float4 lp    = mul(float4(p0, 1.0), gGiShadowViewProj);
+    const float3 p     = lp.xyz / lp.w;
+    const float2 uv    = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0 || p.z < 0.0) return -1.0;
+    const float t = gGiShadowParams.x;
+    float s = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+        s += gGiShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * t, p.z);
+    return s / 9.0;
+}
+
 // ---- the initial candidate: ONE cosine ray, traced and shaded through machinery this file already has ----
 // Traces off (wpos, N) along a cosine-weighted hemisphere direction and shades whatever it hits
 // through the SAME RayQuery + flat geometry table + gRtMaterials + averShadeDirect machinery
@@ -936,7 +960,15 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // what rtShadowOpaque (voxi_rt.hlsli, included before this file) exists for; see its own header
     // comment for the ray it builds and the translucent-tint trade it makes. if/else, not ?:, so the
     // bit is the one and only thing selecting which ray runs.
-    if ((rtGiShadowBits() & 1u) != 0u) {
+    //
+    // T4 (Settings::rtGiHitShadowMap): the GI-only shadow map answers instead of either ray wherever
+    // it can -- see giHitShadowMapVisibility, above -- and a -1 (no answer) falls through to them.
+    // An `if`, for the same reason: HLSL's ?: evaluates both sides, which would sample the map always.
+    float mapVis = -1.0;
+    if ((rtGiShadowBits() & 8u) != 0u) mapVis = giHitShadowMapVisibility(hitPos, s.N, L);
+    if (mapVis >= 0.0) {
+        sun.visibility = mapVis;
+    } else if ((rtGiShadowBits() & 1u) != 0u) {
         sun.visibility = rtShadowOpaque(hitPos, s.N, L, pixel, frameJitter);
     } else {
         sun.visibility = rtShadow(hitPos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
