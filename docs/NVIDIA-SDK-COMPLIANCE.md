@@ -180,11 +180,13 @@ run. It listed all four components and wrote the notice, the attribution and the
 ### 3.1 Packaging is STILL BLOCKED — lifting it is the owner's call
 
 **§3 is closed, but the gate below is deliberately still in place.** Removing it is a separate
-decision, not a side effect of adding the notices. Until someone makes that call, two things hold:
+decision, not a side effect of adding the notices. Until someone makes that call:
 
 - Staging still needs `-IAcceptNvidiaRedistribution`.
-- The gate's own log line still says the package is built "WITHOUT the third-party notices". That
-  is no longer true: the notices are written either way.
+- The gate's log lines no longer claim the package is built "WITHOUT the third-party notices" --
+  that stale wording (both stagers' blocked-exit message and their `-IAcceptNvidiaRedistribution`
+  log line) was corrected alongside this section on 2026-09-25. The notices are written either way;
+  what `-IAcceptNvidiaRedistribution` skips is the owner's sign-off, not the notices themselves.
 
 **Decision, 2026-09-21: rather than produce packages that are not clear to distribute, the
 packaging path refuses.** The engine is in beta and nothing is shipping, so stopping costs nothing

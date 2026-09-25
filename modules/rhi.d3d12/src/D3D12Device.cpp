@@ -5064,8 +5064,8 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         // own comment for why the same normalised rect still applies there).
         //
         // vpX_/vpY_/vpW_/vpH_ ARE ALREADY SCENE-SPACE, NOT PRESENT-SPACE -- setViewportRect converts
-        // the caller's present-space pixels via scaleToSceneW/H before storing them (see its own
-        // comment two screens up), so normalising by sceneWidth_/sceneHeight_ here, not width_/
+        // the caller's present-space pixels via scaleToSceneW/H before storing them (see that
+        // function's own comment), so normalising by sceneWidth_/sceneHeight_ here, not width_/
         // height_, is what turns them into gPostSceneTex's own uv. Dividing by width_/height_ instead
         // would undershoot whenever renderScale_ < 1 (sceneWidth_ < width_), reading the wrong,
         // smaller fraction of the scene texture than the docked panel actually covers.

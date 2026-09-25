@@ -1421,8 +1421,8 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // ANY K*M -- the runaway this margin analysis was defending against can no longer arise
         // through the Jacobian at all. That is what made dropping to 1 a free choice rather than a
         // stability trade -- see the measurement at the top of this block.
-        // voxi.giRestirMaxHistory, default 1 -- the value 602d1b06 measured and shipped. See
-        // Settings::giRestirMaxHistory for what raising it is meant to prove.
+        // voxi.giRestirMaxHistory, default 0 -- the camera-motion fade fix; 602d1b06's value of 1 is
+        // what raising it restores. See Settings::giRestirMaxHistory (Voxi.hpp) for the measurement.
         stparams.maxHistoryLength      = maxHistory;
         // ---- 0, AND THE 1 IT REPLACES WAS DISARMING EVERY SPATIAL TAP ----
         //

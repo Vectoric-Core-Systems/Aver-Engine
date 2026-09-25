@@ -54,43 +54,40 @@ $ErrorActionPreference = 'Stop'
 
 # ---- PACKAGING IS BLOCKED PENDING NVIDIA CLEARANCE (2026-09-21) --------------------------------
 #
-# THIS IS DELIBERATE AND IT IS NOT A BUG. A staged engine payload redistributes NVIDIA SDK code and
-# currently ships NO third-party notice of any kind with it, which the NVIDIA RTX SDKs Licence does
-# not allow. Rather than produce packages that are not clear to distribute, the staging path
-# refuses until that is settled. The engine is in beta; nothing is shipping today, so the cheap and
-# honest answer is to stop rather than to paper over it.
+# THIS IS DELIBERATE AND IT IS NOT A BUG. A staged engine payload redistributes NVIDIA SDK code, and
+# the NVIDIA RTX SDKs Licence requires a source notice, clause 6.1(c) attribution and the MIT
+# components' copyright notices to travel with it. Rather than produce packages that were not clear
+# to distribute, the staging path refused until that was settled. The engine is in beta; nothing is
+# shipping today, so the cheap and honest answer was to stop rather than to paper over it.
 #
-# WHAT IS ACTUALLY OUTSTANDING, all recorded in docs/NVIDIA-SDK-COMPLIANCE.md:
-#   * NRD is compiled into the runtime, and RTXDI's HLSL ships as VERBATIM NVIDIA SOURCE TEXT under
-#     shaders/Rtxdi. The licence requires the notice "This software contains source code provided
-#     by NVIDIA Corporation." to accompany distributed source.
-#   * Clause 6.1(c) of the RTX Supplement routes attribution, for a product with no credit screen,
-#     to "end user documentation for the application". LICENSE.md is the source repository's
-#     documentation; a packaged game carries none of it.
-#   * The MIT components (NVIDIA MathLib, ShaderMake, Dear ImGui, stb, meshoptimizer, Jolt, DXC)
-#     each require their copyright and permission notices to travel with a binary distribution.
-#     The $components list further down this script, which builds THIRD-PARTY-NOTICES.txt, names
-#     none of them.
+# THAT WORK IS DONE -- closed 2026-09-25, docs/NVIDIA-SDK-COMPLIANCE.md section 3.
+# scripts/NvidiaNotices.ps1, dot-sourced below, appends the source notice, the clause 6.1(c)
+# attribution list and every shipped component's licence to THIRD-PARTY-NOTICES.txt: NRD and MathLib
+# whenever compiled in, RTXDI and SHaRC whenever their shader directories are staged.
 #
-# TO LIFT THIS: settle the notices, then delete this block. -IAcceptNvidiaRedistribution exists so
-# that somebody who HAS obtained clearance can proceed without editing the script, and it prints a
-# loud line into the log when used so a package built that way is identifiable afterwards. It is
-# not a way to skip the work.
+# THE BLOCK STAYS UP ANYWAY. Closing the notices gap did not remove it -- lifting the block is a
+# separate decision the compliance doc leaves to the owner (section 3.1), not a side effect of the
+# notices existing. -IAcceptNvidiaRedistribution exists so that somebody who HAS that sign-off can
+# proceed without editing the script, and it prints a loud line into the log when used so a package
+# built that way is identifiable afterwards. It is not a way to skip the work.
+#
+# TO LIFT THIS: get the owner's sign-off (section 3.1), then delete this block.
 if (-not $IAcceptNvidiaRedistribution) {
     Write-Host ""
-    Write-Host "PAYLOAD STAGING BLOCKED -- pending NVIDIA redistribution clearance." -ForegroundColor Yellow
+    Write-Host "PAYLOAD STAGING BLOCKED -- pending owner sign-off to lift NVIDIA redistribution clearance." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  A staged engine payload redistributes NVIDIA SDK code (NRD, compiled in; RTXDI, as"
-    Write-Host "  verbatim HLSL source under shaders/Rtxdi) and currently ships no third-party"
-    Write-Host "  notice with it. See docs/NVIDIA-SDK-COMPLIANCE.md section 3."
+    Write-Host "  A staged engine payload redistributes NVIDIA SDK code (NRD, compiled in; RTXDI and"
+    Write-Host "  SHaRC, as verbatim HLSL source under shaders\). THIRD-PARTY-NOTICES.txt already"
+    Write-Host "  carries its notice, attribution and licences -- see docs/NVIDIA-SDK-COMPLIANCE.md section 3.1."
     Write-Host ""
     Write-Host "  This is a deliberate block while the engine is in beta, not a failure."
     Write-Host "  Re-run with -IAcceptNvidiaRedistribution once clearance is in hand."
     Write-Host ""
     exit 2
 }
-Write-Host "[stage] -IAcceptNvidiaRedistribution was passed: this package is being built WITHOUT" -ForegroundColor Yellow
-Write-Host "[stage] the third-party notices described in docs/NVIDIA-SDK-COMPLIANCE.md section 3." -ForegroundColor Yellow
+Write-Host "[stage] -IAcceptNvidiaRedistribution was passed: proceeding without the owner's sign-off" -ForegroundColor Yellow
+Write-Host "[stage] to lift docs/NVIDIA-SDK-COMPLIANCE.md section 3.1's block. THIRD-PARTY-NOTICES.txt" -ForegroundColor Yellow
+Write-Host "[stage] carries the NVIDIA notice, attribution and licences either way." -ForegroundColor Yellow
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $BuildDir) {
     $BuildDir = if ($Config -eq 'Debug') { 'build' } else { "build-$($Config.ToLower())" }

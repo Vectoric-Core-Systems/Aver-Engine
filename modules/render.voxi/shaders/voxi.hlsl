@@ -547,10 +547,10 @@ RWTexture2D<float4>       gRdAoTex     : register(u14);
 // A FOURTH ALPHA, ONLY UNDER AVER_RD_REFL_SPLIT (Settings::rayDrivenReflSplit): alpha < -0.5 is PENDING,
 // written by CSRdRefl's own R1 compile in place of composing, when a history was bound to defer
 // rtReflectionSpatial's gather into CSRdReflFilter's own R2 pass rather than pay it here -- rgb carries
-// that pixel's skyR and alpha carries `-1.0 - rough` (rough is always in [0, 0.75], so this is always
-// < -0.5, never colliding with a real 0.0/1.0/2.0 output). CSRdReflFilter overwrites every PENDING texel
-// with a real one before Stage B ever reads this texture; see CSRdRefl's and CSRdReflFilter's own
-// comments, further down this file, for the full two-pass contract.
+// that pixel's skyR and alpha is a plain -1.0 flag (never colliding with a real 0.0/1.0/2.0 output).
+// CSRdReflFilter overwrites every PENDING texel with a real one before Stage B ever reads this texture;
+// see CSRdRefl's and CSRdReflFilter's own comments, further down this file, for the full two-pass
+// contract.
 RWTexture2D<float4>       gRdReflTex   : register(u15);
 
 // gViewParams.w carries the staged buffers' row pitch as an exact integer (see gRdVisBuf's own header
@@ -3696,10 +3696,11 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
             // PENDING MARKER, NOT A COMPOSE: CSRdReflFilter finishes this pixel once it has gathered
             // rtReflectionSpatial against gRtReflHistOut's write just above -- see gRdReflTex's own
             // header comment for why alpha < -0.5 is unambiguous against the three real outcomes
-            // (0/1/2) a fully-composed pixel ever carries. `rough`, not `refl`, rides the alpha channel
-            // (R2 gets its own `refl` back off gRtReflHistOut) -- `specHit` doesn't need to travel
-            // either, R2 derives the same fact from that texel's own alpha (see its own comment).
-            gRdReflTex[pixel] = float4(skyR, -1.0 - rough);
+            // (0/1/2) a fully-composed pixel ever carries. The alpha carries nothing but that flag --
+            // R2 recomputes roughness itself (rdSurfaceRoughness) rather than reading it back, and gets
+            // its own `refl` off gRtReflHistOut, not off this texel -- `specHit` doesn't need to travel
+            // either, R2 derives the same fact from that other texel's own alpha (see its own comment).
+            gRdReflTex[pixel] = float4(skyR, -1.0);
         } else {
             // CLAMPED, same ceiling PSRayDriven's own copy applies and for the same reason (see that
             // function's own comment, just above its identical line, for the unbounded-term incident
@@ -3781,12 +3782,14 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
     const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
 
-    // ROUGHNESS AND DEPTH ARE RECOMPUTED, NOT READ BACK. Both reached this stage only through RGBA16F
-    // texels: the marker's alpha (-1 - rough, a ~0.001 step, enough to move floor(rough * 6) -- the
-    // filter radius -- across a boundary) and the history's alpha (curClip.w in half precision, which
-    // overflows to inf past 65504 cm and then disables the filter's depth test outright). R1 had both
-    // in full float, so this stage rebuilds them from the same inputs: the same roughness sample CSRdRefl
-    // gated on, and the same mul(wpos, gViewProj).w rtReflectionTemporalEx wrote as curClip.w.
+    // ROUGHNESS AND DEPTH ARE RECOMPUTED, NOT READ BACK. Roughness never reached this stage at all --
+    // the PENDING marker (gRdReflTex's own header comment) is a plain -1.0 flag, nothing else encoded in
+    // it -- so it has no choice but to be rebuilt. Depth reached this stage only through the history's
+    // alpha (curClip.w in half precision, which overflows to inf past 65504 cm and then disables the
+    // filter's depth test outright), so it is rebuilt too rather than trusted through that lossy channel.
+    // R1 had both in full float, so this stage rebuilds them from the same inputs: the same roughness
+    // sample CSRdRefl gated on, and the same mul(wpos, gViewProj).w rtReflectionTemporalEx wrote as
+    // curClip.w.
     const float rough    = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
     const float curDepth = mul(float4(s.wpos, 1.0), gViewProj).w;
 
