@@ -1083,6 +1083,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "unsplit GI pass if either pipeline fails to compile. Only while voxi.rayDrivenStages is 1 or 2.",
         []{ return vBool(Renderer::get().settings().rayDrivenGiSplit); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rayDrivenGiSplit = on; }); }});
+    t.push_back({"voxi.rayDrivenReflSplit", VarType::Bool, false,
+        "Splits CSRdRefl's own register-heavy ray from its bandwidth-heavy spatial history gather "
+        "(rtReflectionSpatial) into two compute passes. Same image as the unsplit reflection stage, not "
+        "a quality trade; falls back to the unsplit CSRdRefl if either pipeline fails to compile. Only "
+        "while voxi.rayDrivenStages is 1 or 2.",
+        []{ return vBool(Renderer::get().settings().rayDrivenReflSplit); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rayDrivenReflSplit = on; }); }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },

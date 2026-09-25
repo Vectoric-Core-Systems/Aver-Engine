@@ -963,6 +963,22 @@ private:
     rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
     rhi::PipelineHandle rdGiSplitCsPso_   = 0;
     rhi::PipelineHandle rdGiSplitCbCsPso_ = 0;
+    // SUB-STAGE C (Settings::rayDrivenReflSplit): CSRdRefl's own register-heavy ray plus its bandwidth-
+    // heavy rtReflectionSpatial gather, split the same "an optional pair on top of an already-staged
+    // path" way A/B above are -- rdStagedActive() never inspects either member below, so a device that
+    // cannot build one simply keeps recordStagedRayDriven() on the unsplit rdReflCsPso_ it already had
+    // -- see that function's own reflSplit decision.
+    //
+    // rdReflSplitCsPso_ (R1): CSRdRefl recompiled with AVER_RD_REFL_SPLIT=1 -- traces the ray exactly as
+    // rdReflCsPso_ does and writes gRdReflTex a PENDING marker in place of composing wherever a history
+    // is bound to gather against (see gRdReflTex's own header comment, voxi.hlsl, for the fourth alpha
+    // this adds). Same layout/csDefs/SM 6.6 as rdReflCsPso_ above -- only the one extra define differs.
+    rhi::PipelineHandle rdReflSplitCsPso_  = 0;
+    // rdReflFilterCsPso_ (R2): CSRdReflFilter, the new entry point that reruns rtReflectionSpatial
+    // against R1's own gRtReflHistOut write this same frame and finishes the compose. Same layout/
+    // csDefs/SM 6.6 as rdReflCsPso_/rdReflSplitCsPso_ -- CSRdReflFilter's own header comment (voxi.hlsl)
+    // states it needs no compile-time guard of its own.
+    rhi::PipelineHandle rdReflFilterCsPso_ = 0;
     // Stage B: rayDrivenTexPso_/rayDrivenTexGbufPso_ recompiled with ";AVER_RD_SPLIT=1" appended to
     // their own defines -- same bindlessDefs/rdAblateDefs/render-target formats, so these are built
     // right beside their untextured twins rather than in a function of their own. 0 on a device that
@@ -2041,6 +2057,12 @@ private:
     // otherwise (a miss, an out-of-bounds/zero-pitch pixel, or a surface too rough to reflect). Stage
     // B's AVER_RD_SPLIT branch reads that alpha rather than re-deciding with its own roughness -- see
     // PSRayDriven's own comment on gRdReflTex for why.
+    //
+    // A FOURTH ALPHA UNDER SUB-STAGE C (Settings::rayDrivenReflSplit, rdReflSplitCsPso_/
+    // rdReflFilterCsPso_ below): alpha < -0.5 is R1's PENDING marker, rgb carrying that pixel's skyR --
+    // CSRdReflFilter (R2) overwrites every PENDING texel with a real 0.0/1.0/2.0 one before Stage B ever
+    // reads this texture, so Stage B's own contract above is unchanged. See gRdReflTex's own header
+    // comment (voxi.hlsl) for the full four-alpha account.
     rhi::TextureHandle rdReflTex_ = 0;
     // ---- SUB-STAGE SPLITS' OWN BUFFERS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): u17/u18,
     // sharing rdVisBuf_'s EXACT "StructuredBuffer, grown but never always rebuilt" shape immediately
@@ -2183,6 +2205,13 @@ private:
     bool rdShadowTilesFallbackLogged_ = false;
     bool rdGiSplitRunLogged_ = false;
     bool rdGiSplitFallbackLogged_ = false;
+    // SUB-STAGE C's OWN PAIR (Settings::rayDrivenReflSplit), the identical "said once, each half of the
+    // story" shape as the two pairs above: rdReflSplitRunLogged_ the first frame the reflection register/
+    // filter split actually dispatches CSRdReflFilter, rdReflSplitFallbackLogged_ the first frame the
+    // setting is on but the split did not run because a pipeline was missing -- see
+    // recordStagedRayDriven for where each fires.
+    bool rdReflSplitRunLogged_ = false;
+    bool rdReflSplitFallbackLogged_ = false;
 
     // THE ENGINE GAP THE TASK BRIEF NAMED: RAB_GetGBufferSurface(idx, /*prevFrame*/true) needs a
     // PREVIOUS frame's primary surface, and nothing in Voxi carried one before this pair existed --

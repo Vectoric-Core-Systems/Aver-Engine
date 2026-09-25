@@ -660,8 +660,12 @@ float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float st
 // function of the pixel for the gate oracle's bit-exact probes. Only rtShadowTemporal passes a
 // nonzero value, and only when pixel tiling is on -- that's what lets tiling converge instead of
 // repeating one sample forever.
-float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
-               float frameJitter) {
+//
+// `kFirst` (rtShadowEx only) starts the walk at sample kFirst instead of 0. It exists for
+// CSRdShadowProbe, which traces ONE of this pixel's real samples and has to be able to pick which
+// (see that stage). Every other caller goes through rtShadow below, which passes 0.
+float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
+                  float frameJitter, uint kFirst) {
     const uint  n    = max(rays, 1u);
     const float tanR = max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
@@ -686,7 +690,7 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         // Sample k, independent of n: it sits in the same place whatever the ray count, so raising
         // the count refines the estimate rather than replacing it. The same rotated pattern serves
         // both the sun disc and the pixel footprint.
-        float2 disc = rtDiscSample(k, ang0);
+        float2 disc = rtDiscSample(k + kFirst, ang0);
 
         float3 dir = normalize(L + (T * disc.x + B * disc.y) * tanR);
         // Half the footprint, so samples stay inside the pixel they are estimating.
@@ -815,6 +819,11 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         vis += through;
     }
     return vis / (float)n;
+}
+
+float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
+               float frameJitter) {
+    return rtShadowEx(wpos, N, L, pixel, dpx, dpy, rays, frameJitter, 0u);
 }
 
 // The fraction of the hemisphere above `N` from which the SKY is actually reachable: 1 fully open,
@@ -1772,8 +1781,12 @@ float3 averShadowTint(float3 v, float lum) {
 // own AVER_RD_SHADOW_TILES compile, voxi.hlsl: a 3x3 probe-tile neighbourhood that agrees "fully lit" or
 // "fully blocked") hand that classification in directly and skip the ray loop below -- while still
 // running every temporal/spatial step this function already does with it (accumulation, history write,
-// rtShadowSpatial), so the denoised result is unchanged whether the visibility came from a ray traced
-// here or one CSRdShadowProbe already traced for the whole tile. `false`/anything is the ordinary path:
+// rtShadowSpatial). THE SKIP IS EXACT ONLY WHERE THE NEIGHBOURHOOD TRULY IS UNIFORM, and that is a
+// sampling claim, not an identity: at one ray the probe IS this pixel's only ray, but at 4 or 8 the
+// probe sees one rotated sample per pixel, and "every probe in 576 pixels agreed" stands in for "every
+// sample of this pixel would agree". CSRdShadowProbe rotates which sample each pixel traces so that
+// every disc radius the real trace uses is represented in every tile -- see its own comment for the
+// fixed-radius version that failed this. `false`/anything is the ordinary path:
 // every `if (!haveFresh) ... rtShadow(...)` below then reduces to the plain rtShadow(...) call it
 // replaced, which is exactly what rtShadowTemporal's own one-line wrapper, just past this function's
 // end, asks for -- so nothing that already calls rtShadowTemporal changes behaviour.

@@ -808,6 +808,23 @@ struct Settings {
     // Console: voxi.rayDrivenGiSplit.
     bool rayDrivenGiSplit = true;
 
+    // SUB-STAGE SPLIT C: CSRdRefl's own register-heavy ray plus its bandwidth-heavy spatial history
+    // gather (rtReflectionSpatial, up to a 7x7 depth-tested gather of last frame's history), in two
+    // passes instead of one. MEASURED: the reflection stage costs 3.65 ms of the same frame the other
+    // two splits' own comments measure, one thread paying for a reflection ray, a nested sun-shadow ray
+    // and a full material shade at the hit AND the dense spatial gather -- the exact shape that made
+    // splitting shade out of the megakernel pay (34 -> 1.8 ms) in the first place. CSRdRefl compiled a
+    // second time (AVER_RD_REFL_SPLIT=1) traces the ray and writes a PENDING marker instead of
+    // composing wherever a history is bound to gather against; CSRdReflFilter then runs
+    // rtReflectionSpatial alone and finishes the compose. SAME IMAGE as the unsplit CSRdRefl -- the
+    // centre value round-trips through the same RGBA16F reflection history texture it is already
+    // written to, same precision as the neighbours and the final RGBA16F output -- not a quality trade
+    // the way rayDrivenStages == 2 is. ON BY DEFAULT for the identical A/B-visibility reason
+    // rayDrivenShadowTiles/rayDrivenGiSplit give above; falls back to the unsplit CSRdRefl (never the
+    // single-pass primary) whenever either new pipeline fails to compile. Only meaningful while
+    // rayDrivenStages is 1 or 2. Console: voxi.rayDrivenReflSplit.
+    bool rayDrivenReflSplit = true;
+
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS, because this file already draws that line
     // and this setting was on the wrong side of it. RAY TRACING is discrete rays answering a

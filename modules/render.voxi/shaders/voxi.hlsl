@@ -519,6 +519,14 @@ RWTexture2D<float4>       gRdAoTex     : register(u14);
 // between the traced answer and its OWN cone/sky fallback -- see PSRayDriven's AVER_RD_SPLIT branch,
 // further down this file, and rdSurfaceRoughness's own header for why the roughness test cannot simply
 // be repeated there instead.
+//
+// A FOURTH ALPHA, ONLY UNDER AVER_RD_REFL_SPLIT (Settings::rayDrivenReflSplit): alpha < -0.5 is PENDING,
+// written by CSRdRefl's own R1 compile in place of composing, when a history was bound to defer
+// rtReflectionSpatial's gather into CSRdReflFilter's own R2 pass rather than pay it here -- rgb carries
+// that pixel's skyR and alpha carries `-1.0 - rough` (rough is always in [0, 0.75], so this is always
+// < -0.5, never colliding with a real 0.0/1.0/2.0 output). CSRdReflFilter overwrites every PENDING texel
+// with a real one before Stage B ever reads this texture; see CSRdRefl's and CSRdReflFilter's own
+// comments, further down this file, for the full two-pass contract.
 RWTexture2D<float4>       gRdReflTex   : register(u15);
 
 // gViewParams.w carries the staged buffers' row pitch as an exact integer (see gRdVisBuf's own header
@@ -973,8 +981,14 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
 // roughness (s.rough <= 0.5 in PSMainVoxi) -- not re-checked here.
 // `hit`: true for a real reflection colour (fresh or reused from history; haveHist is already
 // conditioned on a real hit, never a miss), false when the caller should fall back to sky.
-float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
-                            float dzdx, float dzdy, out bool hit) {
+//
+// SUB-STAGE SPLIT C (Settings::rayDrivenReflSplit): `doSpatial` lets CSRdRefl (Register, R1) call this
+// for the ray/history half alone and leave rtReflectionSpatial's dense 7x7 history gather to
+// CSRdReflFilter (Filter, R2) in its own pass -- the register-heavy trace and the bandwidth-heavy
+// filter no longer share one thread. false ONLY from CSRdRefl's own AVER_RD_REFL_SPLIT branch; every
+// other caller goes through the rtReflectionTemporal() wrapper just below, which always asks for both.
+float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
+                              float dzdx, float dzdy, bool doSpatial, out bool hit) {
     // ---- THE MIRROR CUTOFF: ONE predicate, three consumers ----
     // Below AVER_REFL_MIRROR_ROUGH a surface is a mirror throughout: no jitter, no temporal history,
     // no spatial filter. tan(cone)=rough^2, so at 0.1 the ray is displaced one part in a hundred of
@@ -1036,10 +1050,25 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pi
         // names for the RT shadow/AO histories (voxi_rt.hlsli) and the ReSTIR GI histories
         // (voxi_restir.hlsli). voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the
         // old unconditional write, byte-identical, for A/B.
+        //
+        // CLAMPED BEFORE IT IS STORED, not only where the caller composes the answer. rtReflection
+        // returns reflAlbedo * (direct + ambient) with nothing bounding it (PSRayDriven's own "ONLY
+        // UNBOUNDED TERM" comment), and before this line the raw value went into the history: next
+        // frame's reprojection takes it back at 85% weight and rtReflectionSpatial gathers it into a
+        // 7x7 neighbourhood, so one runaway ray -- a spike, a negative ambient undershoot, a NaN --
+        // stayed on screen for many frames and spread. clamp(), not min(), for the reason the callers'
+        // own clamp gives (a negative radiance is a recorded incident class here; clamp also maps NaN
+        // to a bound on this hardware). The spatial centre below uses the same bounded value, so the
+        // split CSRdReflFilter (which reads this texel back) and the unsplit path agree.
+        col = clamp(col, 0.0, AVER_VOX_MAXRAD);
         if (gAverHistoryWrite)
             gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
         hit = curHit;
-        return curHit ? rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy) : col;
+        if (curHit && doSpatial) {
+            return rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy);
+        } else {
+            return col;
+        }
     }
 
     const uint tileMask = (1u << tileBits) - 1u;
@@ -1073,10 +1102,39 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pi
     // Raw, not filtered -- see the untiled branch's own note on why feeding the spatial result back
     // into the history makes it a compounding filter.
     //
-    // W6/M5: same gate, same reason, as the untiled branch's own copy of this write above.
+    // W6/M5: same gate, same reason, as the untiled branch's own copy of this write above -- and the
+    // same clamp before it, for the same reason.
+    col = clamp(col, 0.0, AVER_VOX_MAXRAD);
     if (gAverHistoryWrite)
         gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
-    return curHit ? rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy) : col;
+    if (curHit && doSpatial) {
+        return rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy);
+    } else {
+        return col;
+    }
+}
+
+// The wrapper every caller but CSRdRefl's own split branch uses -- always asks for the spatial gather,
+// so PSRayDriven's single pass, PSMainVoxi and CSRdRefl's own unsplit path stay byte-for-byte the same
+// call they made before rtReflectionTemporalEx existed.
+float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
+                            float dzdx, float dzdy, out bool hit) {
+    return rtReflectionTemporalEx(wpos, N, R, L, pixel, rough, dzdx, dzdy, true, hit);
+}
+
+// THE "NO DATA" SENTINEL FOR A PIXEL THE REFLECTION GATE ROUTED AWAY FROM TRACING THIS FRAME.
+// Every caller traces only where `rough <= 0.75` (and RT reflections are on), and rtReflectionTemporalEx
+// is the only writer of gRtReflHistOut -- so a pixel that failed the gate used to leave its texel
+// holding whatever it last traced, however many frames ago. Roughness is resampled every frame from a
+// footprint-chosen mip (and can be animated), so a pixel can flip across 0.75. When it requalified,
+// rtReprojectReflection found a positive depth that passed its tolerance, and blended that old colour
+// in at up to 85% weight as though it were last frame's. The same miss sentinel rtReflectionTemporalEx
+// already writes makes both the reprojection and rtReflectionSpatial's neighbour gather skip it.
+// Guarded exactly as that function's own writes are: only while the history pair is bound, and only
+// for a fragment allowed to write history (PSMainVoxi's blended replay is not).
+void rtReflectionHistoryVacate(float2 pixel) {
+    if (gRtHistParams.x >= 0.5 && gAverHistoryWrite)
+        gRtReflHistOut[uint2(pixel)] = float4(0.0, 0.0, 0.0, -1.0);
 }
 #endif
 
@@ -1771,7 +1829,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     //
     // The fade is only a seam-hider across the last quarter (0 at 0.5 rough, 1 at 0.75): nothing
     // pops crossing the cutoff, everything below 0.5 is the traced answer at full strength.
-    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75) {
+    const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75;
+    if (!rtReflTraced) rtReflectionHistoryVacate(i.pos.xy);   // see that function: no stale history
+    if (rtReflTraced) {
         bool specHit = false;
         float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, s.rough,
                                            rtDzdx, rtDzdy, specHit);
@@ -2617,7 +2677,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         ind.specular        = skyColor(R);
     }
 #else
-    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75) {
+    const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75;
+    if (!rtReflTraced) rtReflectionHistoryVacate(i.pos.xy);   // see that function: no stale history
+    if (rtReflTraced) {
         const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
         const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
         bool specHit = false;
@@ -3042,7 +3104,21 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             // would be classifying a DIFFERENT sample than the one it is standing in for.
             const float jitter = (gRtHistParams.x < 0.5) ? 0.0
                                 : (float)((uint)gRtHistParams.z) * 2.39996323;
-            const float3 fresh = rtShadow(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter);
+            // WHICH OF THE PIXEL'S OWN SAMPLES THE PROBE TRACES -- ROTATED, NOT ALWAYS THE FIRST.
+            // Sample 0 sits at a FIXED radius, sqrt(0.5) of the sun disc, whatever the pixel or frame
+            // (rtDiscSample; the same trap the F1 comment in voxi_rt.hlsli records for the GI and sky
+            // rays). A probe that only ever traced it could not see an occluder covering less than
+            // ~9% of the disc at the ends of a soft penumbra. Every probe in a 3x3-tile neighbourhood
+            // would then agree, and at High/Epic CSRdShadow would skip rays that DO see it,
+            // hardening the edge tile-by-tile. Rotating through samples 0..rays-1 by pixel and frame
+            // puts every radius the real trace uses (0.25 to 0.94 of the disc at 8 rays) into every
+            // tile. The probe is then always one of the real trace's own rays: identical to it at 1
+            // ray, and covering its radii at 4 and 8. The (x + 3y) step keeps neighbours in a row and
+            // in a column on different samples.
+            const uint rays   = (uint)max(gRtParams.y, 1.0);
+            const uint kProbe = (pixel.x + 3u * pixel.y + (uint)gRtHistParams.z) % rays;
+            const float3 fresh = rtShadowEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter,
+                                            kProbe);
 
             if (all(fresh == 0.0))      bit = 1u;   // fully blocked
             else if (all(fresh == 1.0)) bit = 2u;   // fully lit
@@ -3427,6 +3503,23 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
 // calls rtReflectionSpatial, which takes ddx/ddy of depth exactly as rtShadowTemporal's own spatial
 // filter does, so this stage needs the same derivative-capable compute shader model, 8x8 threads
 // forming 2x2 quads.
+//
+// C: REFLECTION TRACE/FILTER SPLIT (Settings::rayDrivenReflSplit), the same shape as A/B above. This
+// entry point compiled a second time with AVER_RD_REFL_SPLIT=1 becomes R1: when a reflection history is
+// actually bound (gRtHistParams.x >= 0.5, rtReflectionTemporalEx's own no-history early-out otherwise
+// has nothing for a filter pass to defer), it calls rtReflectionTemporalEx with doSpatial=false --
+// tracing the ray, shading the hit and writing this frame's gRtReflHistOut exactly as the non-split
+// compile does, but skipping rtReflectionSpatial's dense 7x7 history gather -- and writes gRdReflTex a
+// PENDING marker (alpha < -0.5, unreachable by any real output; see gRdReflTex's own header comment for
+// the 0/1/2 alphas this leaves unambiguous) instead of composing. CSRdReflFilter, immediately below, is
+// R2: it reruns rtReflectionSpatial against gRtReflHistOut's write from R1 -- the two passes round-trip
+// through the SAME RWTexture2D a C++ UAV barrier separates -- then finishes the exact same compose R1
+// would have. Splitting the register-heavy trace from the bandwidth-heavy gather is the point (see
+// this file's own rtReflectionTemporalEx comment); the default (AVER_RD_REFL_SPLIT undefined) compile
+// takes none of this and stays byte-for-byte today's CSRdRefl.
+#ifndef AVER_RD_REFL_SPLIT
+#define AVER_RD_REFL_SPLIT 0
+#endif
 [numthreads(8, 8, 1)]
 void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
@@ -3485,12 +3578,39 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     // cannot be dropped from the compute stage and left for Stage B to re-apply: Stage B reads this
     // gate's OUTCOME off gRdReflTex's alpha channel instead of repeating the roughness test itself --
     // see PSRayDriven's AVER_RD_SPLIT reflection branch, above, and gRdReflTex's own header comment.
-    if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75) {
+    const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75;
+    if (!rtReflTraced) rtReflectionHistoryVacate(float2(pixel) + 0.5);   // see that function
+    if (rtReflTraced) {
         const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
         const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
         bool specHit = false;
+        // PENDING iff this is R1 (AVER_RD_REFL_SPLIT) AND a history is actually bound to defer the
+        // gather against -- with none bound rtReflectionTemporalEx's own early-out already skips
+        // rtReflectionSpatial (see that function's own comment), so there is nothing for R2 to add and
+        // R1 composes here exactly as the non-split compile does. FALSE under the refl ablation
+        // (AVER_RD_ABL_REFL/ALL) even when split: this contract's own "no mirror ray" branch just below
+        // has no ray to defer either, so the ablated pixel keeps today's behaviour -- compose in R1, no
+        // pending marker.
+#if AVER_RD_REFL_SPLIT && AVER_RD_ABLATE != AVER_RD_ABL_REFL && AVER_RD_ABLATE != AVER_RD_ABL_ALL
+        const bool pending = gRtHistParams.x >= 0.5;
+#else
+        const bool pending = false;
+#endif
 #if AVER_RD_ABLATE == AVER_RD_ABL_REFL || AVER_RD_ABLATE == AVER_RD_ABL_ALL
         float3 refl = float3(0.0, 0.0, 0.0);   // ablated: no mirror ray -- matches PSRayDriven's own copy
+#elif AVER_RD_REFL_SPLIT
+        // R1's own half of rtReflectionTemporal: doSpatial=false still traces, blends against history
+        // and WRITES gRtReflHistOut exactly as the wrapper below does -- only the dense spatial gather
+        // is skipped, left for CSRdReflFilter to run against this same write. if/else, not `?:` across
+        // the two calls -- same reason rtReflectionTemporalEx's own two returns spell it that way.
+        float3 refl;
+        if (pending) {
+            refl = rtReflectionTemporalEx(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
+                                          rdReflDzdx, rdReflDzdy, false, specHit);
+        } else {
+            refl = rtReflectionTemporal(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
+                                        rdReflDzdx, rdReflDzdy, specHit);
+        }
 #else
         float3 refl = rtReflectionTemporal(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
@@ -3505,24 +3625,140 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
 #else
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
 #endif
-        // CLAMPED, same ceiling PSRayDriven's own copy applies and for the same reason (see that
-        // function's own comment, just above its identical line, for the unbounded-term incident this
-        // guards against) -- clamp() rather than min(), so a NEGATIVE radiance floors to 0 rather than
-        // reading through unclamped on the low side.
-        const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
-        // THE .a CHANNEL IS THE STAGE'S DECISION (gRdReflTex's own header comment) -- nonzero here, and
-        // ONLY here, marks this pixel as one CSRdRefl actually traced. 2.0 rather than 1.0 additionally
-        // carries B1 (F5)'s PRE-clamp ceiling test, `>=` for PSMainVoxi's NaN-safe reason: the clamp
-        // below discards specRaw, so Stage B cannot recompute the test from rgb (a clamped, half-float
-        // value) and still agree with the single pass's own test against the unclamped one.
-        gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
-                                   any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
+        if (pending) {
+            // PENDING MARKER, NOT A COMPOSE: CSRdReflFilter finishes this pixel once it has gathered
+            // rtReflectionSpatial against gRtReflHistOut's write just above -- see gRdReflTex's own
+            // header comment for why alpha < -0.5 is unambiguous against the three real outcomes
+            // (0/1/2) a fully-composed pixel ever carries. `rough`, not `refl`, rides the alpha channel
+            // (R2 gets its own `refl` back off gRtReflHistOut) -- `specHit` doesn't need to travel
+            // either, R2 derives the same fact from that texel's own alpha (see its own comment).
+            gRdReflTex[pixel] = float4(skyR, -1.0 - rough);
+        } else {
+            // CLAMPED, same ceiling PSRayDriven's own copy applies and for the same reason (see that
+            // function's own comment, just above its identical line, for the unbounded-term incident
+            // this guards against) -- clamp() rather than min(), so a NEGATIVE radiance floors to 0
+            // rather than reading through unclamped on the low side.
+            const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
+            // THE .a CHANNEL IS THE STAGE'S DECISION (gRdReflTex's own header comment) -- nonzero here,
+            // and ONLY here, marks this pixel as one CSRdRefl actually traced. 2.0 rather than 1.0
+            // additionally carries B1 (F5)'s PRE-clamp ceiling test, `>=` for PSMainVoxi's NaN-safe
+            // reason: the clamp below discards specRaw, so Stage B cannot recompute the test from rgb (a
+            // clamped, half-float value) and still agree with the single pass's own test against the
+            // unclamped one.
+            gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
+                                       any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
+        }
     } else {
         // Roughness (or the outer gate) routed this pixel to Stage B's own cone/sky fallback instead --
         // 0 in every channel, alpha included, so PSRayDriven's AVER_RD_SPLIT branch takes that fallback
         // rather than reading a stale or zeroed colour as if it were a traced miss.
         gRdReflTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
     }
+}
+
+// ---- STAGE R2: CSRdReflFilter -- finish a PENDING reflection with the spatial history gather --------
+//
+// R1's other half (Settings::rayDrivenReflSplit, AVER_RD_REFL_SPLIT -- see CSRdRefl's own header,
+// immediately above, for the full split contract). Dispatched over the SAME (gx, gy) grid and the SAME
+// pixel mapping as CSRdRefl, after a C++ UAV barrier on the reflection history texture R1 just wrote
+// (gRtReflHistOut) and before Stage B reads gRdReflTex: every pixel this pass finishes was marked
+// PENDING by R1 a moment ago, on the SAME frame -- there is no cross-frame reasoning here, only a
+// same-frame round trip through gRtReflHistOut for the pixels wide enough to need the spatial gather.
+//
+// COMPILED AT SM 6.6 (VoxiRenderer), same layout and defines as CSRdRefl -- see gRtReflHist/
+// gRtReflHistOut's own declarations (voxi_rt.hlsli, unconditional inside this same #if AVER_RT region)
+// for why nothing here needs its own compile guard. rtReflectionSpatial takes dzdx/dzdy as plain
+// parameters rather than calling ddx/ddy() itself, and neither it nor anything it calls touches
+// gAverHistoryWrite (that flag only gates rtReflectionTemporal(Ex)'s OWN write to gRtReflHistOut, which
+// already happened in R1) -- so, unlike CSRdRefl, this stage has no static to set up before it starts.
+[numthreads(8, 8, 1)]
+void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    const uint pitch = rdRowPitch();
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    // NOTHING TO DO for every pixel but a PENDING one: a sky pixel, a roughness-gated-out pixel, and a
+    // pixel R1 already composed in full (no history bound, or the refl ablation) all left one of the
+    // three real alphas here (0, 1 or 2 -- gRdReflTex's own header comment, above) and this stage leaves
+    // them untouched. Only alpha < -0.5, R1's PENDING marker (CSRdRefl's own comment on that write),
+    // means a gather is still owed.
+    const float4 t = gRdReflTex[pixel];
+    if (t.a > -0.5) return;
+    const float3 skyR  = t.rgb;
+
+    // Same pixel-centre NDC/primary-ray/record reconstruction as CSRdRefl -- see rdPrimaryRayDir's own
+    // header for the derivation. gRdVisBuf's record is re-read rather than carried through gRdReflTex:
+    // a PENDING pixel is by construction one CSRdRefl already found a surface for, so this can't itself
+    // turn up a miss.
+    float2 ndc;
+    float3 dir = rdPrimaryRayDir(pixel, ndc);
+
+    const uint4 rec = gRdVisBuf[idx];
+    RdSurface s = rdSurfaceFromRecord(rec, dir);
+
+    // THE SAME FOOTPRINT RECONSTRUCTION CSRdRefl BUILDS FOR ITS OWN REFLECTION CALL, byte-for-byte --
+    // see that stage's own comment for the derivation. `R` is not rebuilt: rtReflectionSpatial never
+    // reads it, only rtReflection/rtReflectionTemporal(Ex)'s own ray-tracing half does, and that half
+    // already ran, in R1.
+    const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
+                                       2.0 / max(gSceneViewport.w, 1.0));
+    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
+    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
+    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
+    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    const float3 rdRayDx = (dirDx - dir) * s.hitT;
+    const float3 rdRayDy = (dirDy - dir) * s.hitT;
+    const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
+    const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
+
+    // ROUGHNESS AND DEPTH ARE RECOMPUTED, NOT READ BACK. Both reached this stage only through RGBA16F
+    // texels: the marker's alpha (-1 - rough, a ~0.001 step, enough to move floor(rough * 6) -- the
+    // filter radius -- across a boundary) and the history's alpha (curClip.w in half precision, which
+    // overflows to inf past 65504 cm and then disables the filter's depth test outright). R1 had both
+    // in full float, so this stage rebuilds them from the same inputs: the same roughness sample CSRdRefl
+    // gated on, and the same mul(wpos, gViewProj).w rtReflectionTemporalEx wrote as curClip.w.
+    const float rough    = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
+    const float curDepth = mul(float4(s.wpos, 1.0), gViewProj).w;
+
+    // SAME MIRROR CUTOFF rtReflectionTemporal(Ex) applies before it ever calls rtReflectionSpatial --
+    // see that function's own "THE MIRROR CUTOFF" comment -- from the same `rough` R1 traced with, so
+    // the filter radius rtReflectionSpatial derives from it agrees.
+    const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
+
+    // R1's OWN WRITE TO THIS SAME UAV, THIS SAME FRAME: gRtReflHistOut (u3) is normally read as last
+    // frame's history through the gRtReflHist SRV (t7) -- rtReprojectReflection/rtReflectionSpatial's
+    // own gather both read that copy -- but R1 (CSRdRefl's AVER_RD_REFL_SPLIT compile) just wrote THIS
+    // pixel's fresh answer straight into the RWTexture2D itself, and the C++ side barriers R1's write
+    // against this read (recordStagedRayDriven's own comment) before dispatching this stage. Reading it
+    // back here stands in for the `col`/`curHit` rtReflectionTemporalEx would otherwise still be holding
+    // in registers, had R1 not already returned.
+    //
+    // THE INVARIANT THIS DEPENDS ON: rtReflectionTemporalEx writes gRtReflHistOut[pixel] as
+    // float4(col, curClip.w) on a hit or float4(0,0,0,-1) on a miss, IDENTICALLY in its untiled and
+    // tiled branches (this file, above -- both of that function's own `if (gAverHistoryWrite)` writes).
+    // curClip.w is a positive perspective-divide w for any wpos in front of the camera, so alpha > 0
+    // means hit and alpha <= 0 (exactly -1 on a miss) means miss, with no value written in between.
+    const float4 h = gRtReflHistOut[pixel];
+    const bool specHit = h.a > 0.0;
+
+    float3 refl;
+    if (specHit) {
+        refl = rtReflectionSpatial(h.rgb, s.wpos, s.N, float2(pixel) + 0.5, curDepth, lobeRough,
+                                   rdReflDzdx, rdReflDzdy);
+    } else {
+        refl = float3(0.0, 0.0, 0.0);
+    }
+
+    // THE EXACT SAME COMPOSE CSRdRefl's OWN NON-SPLIT TAIL WRITES -- see that block's own comments,
+    // above, for the skyW lerp and the clamp/ceiling-alpha reasoning; repeated verbatim here rather than
+    // factored out so this stage's control flow reads the same as R1's, pixel for pixel.
+    const float skyW = smoothstep(0.5, 0.75, rough);
+    const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
+    gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
+                               any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
 }
 #endif  // AVER_RT
 
