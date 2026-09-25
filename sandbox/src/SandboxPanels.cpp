@@ -1964,9 +1964,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         buildWaterPanel(e);
     } else if (sel_==-4){
         ImGui::TextUnformatted("Post Process"); ImGui::Separator();
-        ImGui::BeginDisabled(post_.autoExposure);
         ImGui::SliderFloat("Exposure", &post_.exposure, 0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(post_.autoExposure
+                ? "Exposure compensation on top of Auto Exposure:\n1 = as metered, 2 = one stop brighter, 0.5 = one stop darker."
+                : "Linear multiplier on scene radiance, applied before the tone curve.");
         ImGui::Checkbox("Auto Exposure", &post_.autoExposure);
         if (post_.autoExposure) {
             ImGui::SliderFloat("Middle Grey", &post_.exposureKey, 0.02f, 0.6f, "%.3f");

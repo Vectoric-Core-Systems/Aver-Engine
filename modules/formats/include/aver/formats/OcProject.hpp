@@ -208,7 +208,7 @@ struct ProjectDesc {
     // default stands; 0 means the author said zero, and it must come back a zero.
     f32 postExposure     = -1.0f; // RENDER.EXPOSURE      linear pre-tonemap multiplier; < 0 = unstated
     f32 postBloom        = -1.0f; // RENDER.BLOOM         bloom intensity; 0 = no bloom pass at all
-    int postAutoExposure = -1;    // RENDER.AUTOEXPOSURE  0/1; when on it overrides EXPOSURE per frame
+    int postAutoExposure = -1;    // RENDER.AUTOEXPOSURE  0/1; when on, EXPOSURE is compensation on it
     // RENDER.TONEMAP: a genuine SELECTOR rather than a fourth exposure knob, which is the only
     // reason it earns a key of its own -- rhi::PostSettings::tonemap (RHI.hpp:217) chooses between
     // the per-channel Narkowicz/Hill approximation (0), the same curve applied between the ACES

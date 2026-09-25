@@ -160,8 +160,9 @@ u32  simulatedDeviceLoss();
 
 // Camera post-processing: exposure, bloom and eye adaptation.
 struct PostSettings {
-    // Linear multiplier on scene radiance, applied BEFORE the tonemap. Overridden every frame by
-    // the adaptation when autoExposure is on.
+    // Linear multiplier on scene radiance, applied BEFORE the tonemap. With autoExposure on it
+    // multiplies the adapted value instead, as exposure compensation (1 = as metered, 2 = one stop
+    // brighter); exposureMin/Max clamp the adaptation before it is applied.
     f32 exposure = 1.0f;
 
     // Bloom. Zero intensity builds no pyramid and records no pass at all.

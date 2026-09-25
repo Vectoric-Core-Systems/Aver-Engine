@@ -1522,8 +1522,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                       0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic,
                       "project.post.exposure",
                       "Linear multiplier on scene radiance, applied before the tone\n"
-                      "curve. Auto exposure below overrides it every frame while it\n"
-                      "is on.\n\nRound-trips as RENDER.EXPOSURE.");
+                      "curve. With auto exposure below on, it is compensation on the\n"
+                      "adapted value: 1 = as metered, 2 = one stop brighter.\n\n"
+                      "Round-trips as RENDER.EXPOSURE.");
             postFloat("bloom", "Bloom", &project_.postBloom, &post_.bloomIntensity,
                       0.0f, 1.0f, "%.3f", 0, "project.post.bloom",
                       "ZERO IS A REAL ANSWER HERE, which is why the key's sentinel is\n"

@@ -1194,7 +1194,7 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
         return [mem]{ rhi::IDevice* d = consoleDevice(); return vF32(d ? d->postProcess().*mem : 0.0f); };
     };
 
-    t.push_back({"post.exposure", VarType::F32, false, "Linear pre-tonemap radiance multiplier (clamped >= 0)",
+    t.push_back({"post.exposure", VarType::F32, false, "Linear pre-tonemap radiance multiplier; with auto-exposure on, compensation on the adapted value (clamped >= 0)",
         readField(&rhi::PostSettings::exposure), stageClamped(&rhi::PostSettings::exposure, 0.0f, 1e6f)});
     t.push_back({"post.bloomIntensity", VarType::F32, false, "Bloom contribution; 0 records no bloom pass at all (clamped >= 0)",
         readField(&rhi::PostSettings::bloomIntensity), stageClamped(&rhi::PostSettings::bloomIntensity, 0.0f, 1e6f)});

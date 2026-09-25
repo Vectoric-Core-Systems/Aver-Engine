@@ -3,7 +3,8 @@
 
 // Constants for every pass in the chain.
 cbuffer AverPost : register(b0) {
-    float4 gPostTone;    // x exposure, y bloom intensity, z bloom threshold, w bloom knee
+    float4 gPostTone;    // x exposure (compensation on the adapted value under auto-exposure),
+                         // y bloom intensity, z bloom threshold, w bloom knee
     float4 gPostDst;     // xy destination size in texels, zw its reciprocal
     float4 gPostSrc;     // xy source size in texels,      zw its reciprocal
     float4 gPostAdapt;   // x min log2 luminance, y 1/log2 range, z adaption alpha, w pixels sampled
@@ -38,9 +39,10 @@ RWByteAddressBuffer   gPostLocalGridBlur : register(u3);
 // Karis' firefly weight, applied only on the first downsample.
 float3 averBloomKaris(float3 c) { return c / (1.0 + averLuminance(c)); }
 
-// The exposure this frame settled on; the authored value when auto-exposure is off.
+// The exposure this frame displays at. Auto-exposure off: the authored value. On: the adapted value
+// times the authored one, which then acts as exposure compensation (1 = as metered, 2 = a stop up).
 float averPostExposure() {
-    return gPostMisc.y > 0.5 ? asfloat(gPostExpRead.Load(0)) : gPostTone.x;
+    return gPostMisc.y > 0.5 ? asfloat(gPostExpRead.Load(0)) * gPostTone.x : gPostTone.x;
 }
 
 // Soft-knee threshold: the quadratic ramp that decides how much of a pixel bloom takes.
@@ -168,7 +170,10 @@ void CSHistogram(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 // Reduces the histogram to one exposure value and damps towards it in log space.
 [numthreads(1, 1, 1)]
 void CSExposure() {
-    float target = gPostTone.x;
+    // 1, NOT THE AUTHORED EXPOSURE: that is applied where the exposure is read (averPostExposure,
+    // PSComposite) as compensation on this value, so storing it here too would square it. A frame
+    // with nothing metered (all black) therefore still displays at exactly the authored value.
+    float target = 1.0;
 
     if (gPostMisc.y > 0.5) {
         // BIN 0 IS READ AND DELIBERATELY NOT COUNTED, and getting that wrong disabled half of this
@@ -398,9 +403,15 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     float2 srcUv = gPostRegion.xy + i.uv * gPostRegion.zw;
     float3 cRaw = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, srcUv, 0).rgb);
 #ifdef AVER_POST_AUTOEXPOSURE
+    // The adapted exposure, with the authored one as COMPENSATION applied after local exposure.
+    // Kept apart because local exposure decides what is dark against the metered exposure alone:
+    // folded in, it would pull shadows back toward middle grey and undo half of every stop the
+    // compensation adds (at the default shadow strength 0.5).
     float currentExposure = asfloat(gPostExpRead.Load(0));
+    float compensation = gPostTone.x;
 #else
     float currentExposure = gPostTone.x;
+    float compensation = 1.0;
 #endif
     float3 c = cRaw * currentExposure;
 
@@ -434,6 +445,7 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
             }
         }
     }
+    c *= compensation;
 
 #ifdef AVER_POST_BLOOM
     // srcUv again: the bloom pyramid, like the local-exposure grid, is built over the whole scene.

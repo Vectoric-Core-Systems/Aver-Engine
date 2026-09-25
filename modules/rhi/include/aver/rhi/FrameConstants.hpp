@@ -108,7 +108,7 @@ static_assert(offsetof(PerFrameCB, wave)      == 608, "the wave set follows time
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().
 struct PostCB {
-    f32 tone[4];    // exposure, bloom intensity, bloom threshold, bloom knee
+    f32 tone[4];    // exposure (compensation under auto-exposure), bloom intensity, threshold, knee
     f32 dst[4];     // destination width, height, 1/width, 1/height
     f32 src[4];     // source width, height, 1/width, 1/height
     f32 adapt[4];   // min log2 luminance, 1/log2 range, adaption alpha, unused
