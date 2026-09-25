@@ -1062,6 +1062,27 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 2) { err = "rayDrivenStages must be 0 (single pass), 1 (staged) or 2 (staged + half-rate GI)"; return false; }
             return true;
         }});
+    t.push_back({"voxi.rayDrivenStageTiming", VarType::Bool, false,
+        "Diagnostic: time each staged lighting pass (shadow, GI, sky occlusion, reflections) in its "
+        "own GPU span, with a barrier after each, instead of the one shared 'Voxi RD lighting stages' "
+        "span. The barriers stop the passes overlapping, so the sum reads a little higher than the "
+        "shared span. No effect on the image; only while voxi.rayDrivenStages is 1 or 2.",
+        []{ return vBool(Renderer::get().settings().rayDrivenStageTiming); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rayDrivenStageTiming = on; }); }});
+    t.push_back({"voxi.rayDrivenShadowTiles", VarType::Bool, false,
+        "Splits the sun-shadow trace into a cheap per-8x8-tile probe pass plus the existing per-pixel "
+        "pass, which skips its own ray wherever its tile's 3x3 neighbourhood agrees. Near-identical "
+        "image, not a quality trade; falls back to the unsplit shadow pass if either pipeline fails to "
+        "compile. Only while voxi.rayDrivenStages is 1 or 2.",
+        []{ return vBool(Renderer::get().settings().rayDrivenShadowTiles); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rayDrivenShadowTiles = on; }); }});
+    t.push_back({"voxi.rayDrivenGiSplit", VarType::Bool, false,
+        "Splits the ReSTIR GI candidate trace into its own compute pass (compacted to the traced half "
+        "in checkerboard mode) feeding the resample/shade pass. Same image as voxi.rayDrivenStages == "
+        "1 in every mode -- an occupancy/compaction saving, not a quality trade; falls back to the "
+        "unsplit GI pass if either pipeline fails to compile. Only while voxi.rayDrivenStages is 1 or 2.",
+        []{ return vBool(Renderer::get().settings().rayDrivenGiSplit); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rayDrivenGiSplit = on; }); }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },

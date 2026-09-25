@@ -456,6 +456,22 @@ RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
 // Stage S to Stage B.
 RWTexture2D<float4>       gRdSunVisTex : register(u12);
 
+// A: SUN SHADOW SPLIT (Settings::rayDrivenShadowTiles) -- CSRdShadowProbe's OWN OUTPUT, further down
+// this file: one uint per 8x8 tile of the FULL render target (same W/H/pitch ensureRdStagedResources
+// sizes rdVisBuf_ from), classifying that tile's shadow answer as it looked to one probe ray per pixel
+// -- bit 1 set if EVERY probed pixel in the tile was fully blocked, bit 2 if EVERY one was fully lit,
+// bit 4 if any pixel disagreed (a real penumbra, an alpha-tinted hit, or a mix of the two). 0 means
+// nothing in the tile had a surface to test (every pixel out of viewport or sky). CSRdShadow's own
+// AVER_RD_SHADOW_TILES compile ORs its 3x3 tile neighbourhood's worth of these and skips its ray loop
+// only where that OR is EXACTLY 1 or EXACTLY 2 -- see that compile's own header for why 3x3, not 1x1.
+//
+// kVoxiUavCount 17 -> 19, u17/u18 (VoxiRenderer.cpp, not this file) -- gRdGiCand (voxi_restir.hlsli, B1)
+// takes u17 first since that file is #included above this point; this is the next free slot after it.
+#ifndef AVER_RD_SHADOW_TILES
+#define AVER_RD_SHADOW_TILES 0
+#endif
+RWStructuredBuffer<uint> gRdShadowTiles : register(u18);
+
 // gRdGiTex / gRdAoTex -- MILESTONE 2's pair, splitting PSRayDriven's own diffuse-GI and sky-occlusion
 // answers the same way milestone 1 split its shadow answer above: one RGBA16F texel per pixel, each
 // written once by its own dedicated compute stage (CSRdGi / CSRdSkyOcc, further down this file, under
@@ -2961,6 +2977,90 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
                            asuint(bary.x), asuint(bary.y));
 }
 
+// THE SHADOW-RAY FOOTPRINT, factored out of CSRdShadow so CSRdShadowProbe (below) can build the exact
+// same dpx/dpy a fresh probe ray needs, rather than a third copy of this derivation (PSRayDriven's own
+// "THE SHADOW-RAY FOOTPRINT" comment, and CSRdShadow's copy below it before this factoring, are the
+// other two). gSceneViewport, not Cur -- matches PSRayDriven's own copy of this step exactly.
+void rdShadowFootprint(float2 ndc, float3 dir, RdSurface s, out float3 dpx, out float3 dpy) {
+    const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
+                                       2.0 / max(gSceneViewport.w, 1.0));
+    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
+    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
+    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
+    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    const float3 rdRayDx = (dirDx - dir) * s.hitT;
+    const float3 rdRayDy = (dirDy - dir) * s.hitT;
+    dpx = rdRayDx - s.N * dot(rdRayDx, s.N);
+    dpy = rdRayDy - s.N * dot(rdRayDy, s.N);
+}
+
+// A: SUN SHADOW SPLIT'S OWN GROUP REDUCTION -- one mask per 8x8 thread group (== one gRdShadowTiles
+// tile), zeroed and OR'd by CSRdShadowProbe below. groupshared storage has to sit at file scope in
+// HLSL, not inside the function that uses it.
+groupshared uint gRdShadowProbeMask;
+
+// ---- STAGE S0: CSRdShadowProbe -- one ray per pixel, reduced to one lit/blocked/mixed mask per tile ---
+//
+// A (Settings::rayDrivenShadowTiles). Dispatched over the SAME (gx, gy) grid as CSRdShadow, immediately
+// before it: one thread GROUP is one 8x8 tile of the viewport (tile = SV_GroupID.xy, matching
+// gRdShadowTiles' own tileIdx layout), and every thread in it traces at most one probe ray -- always
+// ONE ray, never the Epic-tier disc CSRdShadow's own AVER_RD_SHADOW_TILES compile traces per pixel --
+// then the group reduces its 64 answers to one mask. CSRdShadow's tiled compile ORs this tile's mask
+// together with its 3x3 neighbourhood and skips its own ray loop wherever every probe in that
+// neighbourhood agrees: see that compile's own header comment for why 3x3, not this tile alone.
+//
+// NO EARLY RETURN ANYWHERE IN THIS FUNCTION, BEFORE OR BETWEEN THE TWO GroupMemoryBarrierWithGroupSync
+// CALLS BELOW: an out-of-viewport thread, a pitch-0 frame, and a sky pixel are all real cases (the
+// viewport is rarely an exact multiple of 8), and a `return` before a barrier every OTHER thread in the
+// group still executes is undefined behaviour, not merely "this thread's own contribution is skipped".
+// Each of those cases instead leaves `bit` at its 0 default and falls through to the same reduction as
+// every other thread -- 0 ORs into the group mask as a no-op, so it costs nothing but a branch.
+[numthreads(8, 8, 1)]
+void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
+    uint bit = 0u;   // 0 = this thread has no vote (out of viewport / pitch 0 / sky pixel)
+
+    const bool inView = all(tid.xy < (uint2)gSceneViewportCur.zw);
+    const uint pitch   = rdRowPitch();
+    if (inView && pitch != 0u) {
+        const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+        const uint  idx   = pixel.y * pitch + pixel.x;
+        const uint4 rec   = gRdVisBuf[idx];
+        if (rec.x != 0xFFFFFFFFu) {
+#if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+            bit = 2u;   // ablated: fully lit, no ray -- matches CSRdShadow's own ablated branch
+#else
+            float2 ndc;
+            const float3 dir = rdPrimaryRayDir(pixel, ndc);
+            const RdSurface s = rdSurfaceFromRecord(rec, dir);
+            float3 dpx, dpy;
+            rdShadowFootprint(ndc, dir, s, dpx, dpy);
+
+            const float3 L = normalize(gLightDir.xyz);
+            // THE SAME JITTER rtShadowTemporal's OWN NON-TILED BRANCH PASSES (voxi_rt.hlsli) for this
+            // exact (gRtHistParams.x, frame index) pair -- this probe ray has to agree with what
+            // CSRdShadow's own fresh trace would have drawn, or a tile's "every probe agrees" verdict
+            // would be classifying a DIFFERENT sample than the one it is standing in for.
+            const float jitter = (gRtHistParams.x < 0.5) ? 0.0
+                                : (float)((uint)gRtHistParams.z) * 2.39996323;
+            const float3 fresh = rtShadow(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter);
+
+            if (all(fresh == 0.0))      bit = 1u;   // fully blocked
+            else if (all(fresh == 1.0)) bit = 2u;   // fully lit
+            else                        bit = 4u;   // a real penumbra, or a tinted (glass/water) hit
+#endif
+        }
+    }
+
+    if (gidx == 0u) gRdShadowProbeMask = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    if (bit != 0u) InterlockedOr(gRdShadowProbeMask, bit);
+    GroupMemoryBarrierWithGroupSync();
+    if (gidx == 0u) {
+        const uint tilesX = ((uint)gSceneViewportCur.z + 7u) / 8u;
+        gRdShadowTiles[gid.y * tilesX + gid.x] = gRdShadowProbeMask;
+    }
+}
+
 // ---- STAGE S: CSRdShadow -- reconstruct the surface, resolve the sun shadow -------------------------
 //
 // Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the same
@@ -2998,19 +3098,11 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // THE SAME SHADOW-RAY FOOTPRINT PSRayDriven builds for its own shadow call -- see that function's
-    // "THE SHADOW-RAY FOOTPRINT" comment for the derivation. gSceneViewport, not Cur -- matches
-    // PSRayDriven's own copy of this step exactly.
-    const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
-                                       2.0 / max(gSceneViewport.w, 1.0));
-    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
-    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
-    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
-    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
-    const float3 rdRayDx = (dirDx - dir) * s.hitT;
-    const float3 rdRayDy = (dirDy - dir) * s.hitT;
-    const float3 dpx = rdRayDx - s.N * dot(rdRayDx, s.N);
-    const float3 dpy = rdRayDy - s.N * dot(rdRayDy, s.N);
+    // THE SAME SHADOW-RAY FOOTPRINT PSRayDriven builds for its own shadow call -- see rdShadowFootprint's
+    // own header for the derivation (factored out, above, so CSRdShadowProbe can build the identical
+    // footprint for its own probe ray without a third copy of this block).
+    float3 dpx, dpy;
+    rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
     const float3 L = normalize(gLightDir.xyz);
 
@@ -3022,10 +3114,121 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     const float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray -- matches PSRayDriven's own ablated branch
 #else
+#if AVER_RD_SHADOW_TILES
+    // A3: PROBE-GUIDED SKIP -- OR the 3x3 tile neighbourhood CSRdShadowProbe already classified around
+    // THIS pixel's own tile (tid.xy is viewport-local, so /8 is the tile the primary dispatch grid --
+    // shared with CSRdShadowProbe's own -- already puts this thread in). The mask depends only on
+    // SV_GroupID, not on any per-thread data, so this branch is wave-uniform: every lane in the tile
+    // takes the same side of it. Exactly 2 (every probe in the neighbourhood lit) or exactly 1 (every
+    // probe blocked) skips the ray loop and hands the probes' own verdict straight to the SAME temporal
+    // accumulation, history write and spatial filter every other pixel still runs -- see
+    // rtShadowTemporalEx's own header for why that is safe. Anything else (a probe disagreed, or the
+    // 3x3 OR mixes lit and blocked tiles) falls through to today's unabridged path.
+    const uint tilesX = ((uint)gSceneViewportCur.z + 7u) / 8u;
+    const uint tilesY = ((uint)gSceneViewportCur.w + 7u) / 8u;
+    const uint2 tile  = tid.xy / 8u;
+    uint m = 0u;
+    [unroll] for (int oy = -1; oy <= 1; ++oy) {
+        [unroll] for (int ox = -1; ox <= 1; ++ox) {
+            const uint nx = (uint)clamp((int)tile.x + ox, 0, (int)tilesX - 1);
+            const uint ny = (uint)clamp((int)tile.y + oy, 0, (int)tilesY - 1);
+            m |= gRdShadowTiles[ny * tilesX + nx];
+        }
+    }
+    // ONE call with the verdict as a runtime flag, not a ?: between two calls: two call sites would
+    // inline the whole temporal/spatial/trace body twice into a pass that is already register-bound.
+    const bool   probeAgrees = (m == 2u || m == 1u);
+    const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
+                                             (uint)max(gRtParams.y, 1.0), probeAgrees,
+                                             float3(1.0, 1.0, 1.0) * (m == 2u ? 1.0 : 0.0));
+#else
     const float3 sunVis = rtShadowTemporal(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
                                            (uint)max(gRtParams.y, 1.0));
 #endif
+#endif
     gRdSunVisTex[pixel] = float4(sunVis, 1.0);
+}
+
+// ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's own resample to read back
+//
+// B: GI CANDIDATE TRACE/RESAMPLE SPLIT (Settings::rayDrivenGiSplit). Runs giTraceInitialCandidate for
+// every pixel CSRdGi's own (non-split) copy would have traced it for -- same surface reconstruction,
+// same frameJitter, and the SAME f2Path/rho2 giDecodePaths (voxi_restir.hlsli, B2) computes for this
+// pixel there too -- and stores every one of its out params in gRdGiCand (voxi_restir.hlsli, B1).
+// CSRdGi's own AVER_GI_SPLIT=1 compile then reads that record back inside giRestirIndirect instead of
+// tracing again: see that compile's own header, and giRestirIndirect's AVER_GI_SPLIT branch, for why
+// the two agree bit-for-bit (full float precision through the hand-off, no quantisation).
+//
+// NON-CHECKERBOARD COMPILE: one thread per pixel, the same (gx, gy) grid and pixel mapping CSRdGi
+// itself dispatches over.
+//
+// AVER_GI_CHECKERBOARD COMPILE (milestone 4): COMPACTED, not the full grid with half its lanes idle --
+// CSRdGi's own checkerboard branch only traces the pixels satisfying (x ^ y ^ parity) & 1 == 0, so this
+// dispatch is issued over ceil(w/2) x h threads instead and reconstructs exactly that half's pixel
+// coordinates from tid, the SAME `parity` bit CSRdGi reads out of gViewParams.w (see that compile's own
+// comment on why it is packed there). gGiCbSkip is forced false for every dispatched thread: unlike
+// CSRdGi, which runs over every pixel and reads gGiCbSkip to decide whether IT traces, this dispatch by
+// construction only ever covers the half that does.
+[numthreads(8, 8, 1)]
+void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
+#if AVER_GI_CHECKERBOARD
+    const uint parity = ((uint)gViewParams.w >> 16) & 1u;
+    const uint y       = (uint)gSceneViewportCur.y + tid.y;
+    const uint xBase   = (uint)gSceneViewportCur.x + 2u * tid.x;
+    const uint x       = xBase + ((xBase ^ y ^ parity) & 1u);
+    if (x >= (uint)gSceneViewportCur.x + (uint)gSceneViewportCur.z ||
+        y >= (uint)gSceneViewportCur.y + (uint)gSceneViewportCur.w) return;
+    const uint2 pixel = uint2(x, y);
+    gGiCbSkip = false;
+#else
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+#endif
+
+    const uint pitch = rdRowPitch();
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    if (!(gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5)) return;
+
+#if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    return;   // ablated: no ReSTIR GI candidate -- matches CSRdGi's own ablated branch
+#else
+    const uint4 rec = gRdVisBuf[idx];
+    if (rec.x == 0xFFFFFFFFu) return;   // sky pixel: no surface, nothing for CSRdGi to read back
+
+    float2 ndc;
+    const float3 dir = rdPrimaryRayDir(pixel, ndc);
+    const RdSurface s = rdSurfaceFromRecord(rec, dir);
+
+    // NO gAverHistoryWrite HERE, UNLIKE CSRdShadow/CSRdGi's OWN COPIES OF THIS LINE: this dispatch
+    // never calls giRestirIndirect (only giTraceInitialCandidate, whose one shadow ray is a plain
+    // rtShadow call and reads no history), so the flag has nothing to gate in this function. CSRdGi's
+    // own AVER_GI_SPLIT compile still sets it, unconditionally, before ITS call to giRestirIndirect --
+    // see that call site for why.
+    const uint frameIdx = (uint)gRtHistParams.z;
+    const GiPathDecode gd = giDecodePaths(s.wpos, s.N, float2(pixel) + 0.5, frameIdx);
+
+    float3 pos, nrm, rad;
+    bool   nonFinite   = false;
+    float  f2LumTraced = 0.0, f2LumSky = 0.0;
+    bool   f2Observed  = false;
+    const bool ok = giTraceInitialCandidate(s.wpos, s.N, float2(pixel) + 0.5, frameIdx * 2.39996323,
+                                            pos, nrm, rad, nonFinite, gd.f2Path, gd.rho2,
+                                            f2LumTraced, f2LumSky, f2Observed);
+
+    // EVERY OUT PARAM PLUS THE BOOL, ALWAYS -- whatever giTraceInitialCandidate returned, so CSRdGi's
+    // own AVER_GI_SPLIT read (voxi_restir.hlsli) has a defined record for every pixel it might read,
+    // not only the ones that produced a usable candidate.
+    RdGiCand cand;
+    cand.pos         = pos;
+    cand.flags       = (ok ? 1u : 0u) | (nonFinite ? 2u : 0u) | (f2Observed ? 4u : 0u);
+    cand.nrm         = nrm;
+    cand.f2LumTraced = f2LumTraced;
+    cand.rad         = rad;
+    cand.f2LumSky    = f2LumSky;
+    gRdGiCand[idx] = cand;
+#endif
 }
 
 // ---- STAGE G: CSRdGi -- reconstruct the surface, resolve ReSTIR GI's diffuse estimate ---------------
@@ -3114,6 +3317,13 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
     // 1.0 whether it calls giRestirIndirect itself or reads this texture instead.
     if (gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5) {
         float ao;
+#if AVER_GI_SPLIT
+        // B4: THE SAME ROW-PITCH INDEX CSRdGiTrace WROTE gRdGiCand UNDER -- a `static`, not a
+        // parameter, so giRestirIndirect's signature stays shared with PSMainVoxi/PSRayDriven's own
+        // non-split call sites (voxi_restir.hlsli's own header comment on gGiCandIdx, right beside
+        // gGiCbSkip's identical contract just above).
+        gGiCandIdx = idx;
+#endif
         const float3 d = giRestirIndirect(s.wpos, s.N, mul(float4(s.wpos, 1.0), gViewProj).w,
                                           float2(pixel) + 0.5, (uint)gRtHistParams.z, ao);
         gRdGiTex[pixel] = float4(d, 1.0);

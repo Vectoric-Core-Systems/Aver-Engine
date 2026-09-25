@@ -939,6 +939,30 @@ private:
     // compile, or under the same conditions that leave rdVisCsPso_/rdShadowCsPso_ at 0 -- SM 6.6, same
     // layout and defines as rdGiCsPso_/rdSkyOccCsPso_ above.
     rhi::PipelineHandle rdReflCsPso_   = 0;
+    // ---- SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): a probe/trace pass
+    // that writes a candidate buffer, feeding a second pass over the identical pixels the unsplit
+    // shader already covers. OPTIONAL ON TOP OF AN ALREADY-STAGED PATH, the same shape rdGiCbCsPso_
+    // immediately above is: rdStagedActive() never inspects any of the six handles below, so a device
+    // that cannot build one simply keeps recordStagedRayDriven() on the unsplit CSRdShadow/CSRdGi it
+    // already had -- see that function's own shadowTiles/giSplit decisions. ----
+    //
+    // SUB-STAGE A: rdShadowProbeCsPso_ (CSRdShadowProbe) traces ONE ray per 8x8 tile and writes its
+    // verdict to gRdShadowTiles (u18, one group = one tile); rdShadowTiledCsPso_ is CSRdShadow itself
+    // recompiled with AVER_RD_SHADOW_TILES=1, ORing its own tile's 3x3 neighbourhood from that buffer
+    // and skipping the per-pixel ray wherever every probe in it agrees. Same layout/csDefs/SM 6.6 as
+    // rdShadowCsPso_ above -- see that member's own comment for why 6.6 (derivatives).
+    rhi::PipelineHandle rdShadowProbeCsPso_ = 0;
+    rhi::PipelineHandle rdShadowTiledCsPso_ = 0;
+    // SUB-STAGE B: rdGiTraceCsPso_ (CSRdGiTrace) traces the fresh ReSTIR GI candidate
+    // (giTraceInitialCandidate plus the material eval) and writes it to gRdGiCand (u17) -- COMPACTED
+    // to the traced half's pixels alone when compiled with AVER_GI_CHECKERBOARD=1 (rdGiTraceCbCsPso_,
+    // dispatched alongside rdGiCbCsPso_'s own checkerboard pass). rdGiSplitCsPso_/rdGiSplitCbCsPso_
+    // are CSRdGi itself (plain/checkerboard) recompiled with AVER_GI_SPLIT=1, loading that stored
+    // candidate instead of tracing its own. Same layout/csDefs/SM 6.6 as rdGiCsPso_/rdGiCbCsPso_ above.
+    rhi::PipelineHandle rdGiTraceCsPso_   = 0;
+    rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
+    rhi::PipelineHandle rdGiSplitCsPso_   = 0;
+    rhi::PipelineHandle rdGiSplitCbCsPso_ = 0;
     // Stage B: rayDrivenTexPso_/rayDrivenTexGbufPso_ recompiled with ";AVER_RD_SPLIT=1" appended to
     // their own defines -- same bindlessDefs/rdAblateDefs/render-target formats, so these are built
     // right beside their untextured twins rather than in a function of their own. 0 on a device that
@@ -2018,6 +2042,26 @@ private:
     // B's AVER_RD_SPLIT branch reads that alpha rather than re-deciding with its own roughness -- see
     // PSRayDriven's own comment on gRdReflTex for why.
     rhi::TextureHandle rdReflTex_ = 0;
+    // ---- SUB-STAGE SPLITS' OWN BUFFERS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): u17/u18,
+    // sharing rdVisBuf_'s EXACT "StructuredBuffer, grown but never always rebuilt" shape immediately
+    // above -- NOT rdSunVisTex_'s "recreated outright on any size change" one, since these are buffers
+    // with no fixed view the way a Texture2D UAV has. Allocated UNCONDITIONALLY alongside every other
+    // staged resource here, in lockstep with rdVisBuf_, whether or not either setting is currently on --
+    // the same "declared and sized whenever staged mode is, not gated on the narrower feature that
+    // consumes it" reasoning rdGiTex_/rdAoTex_/rdReflTex_ already give for themselves -- so a project
+    // that flips voxi.rayDrivenShadowTiles/rayDrivenGiSplit on mid-session never finds an undersized
+    // buffer, and recordStagedRayDriven()'s own shadowTiles/giSplit gates never need to check for one. ----
+    //
+    // rdGiCandBuf_: one RdGiCand (48 bytes, voxi_restir.hlsli) per pixel of the render target, the
+    // SAME pitch rdVisBuf_ itself uses -- CSRdGiTrace writes it, the AVER_GI_SPLIT branch of CSRdGi
+    // reads it back at the identical index.
+    rhi::BufferHandle rdGiCandBuf_ = 0;
+    u32  rdGiCandBufElemCapacity_ = 0;
+    // rdShadowTileBuf_: one uint mask per 8x8 tile of the render target (ceil(W/8) x ceil(H/8) tiles) --
+    // CSRdShadowProbe writes it, the AVER_RD_SHADOW_TILES branch of CSRdShadow ORs its own 3x3
+    // neighbourhood from it.
+    rhi::BufferHandle rdShadowTileBuf_ = 0;
+    u32  rdShadowTileElemCapacity_ = 0;
     // The render-target size rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/rdReflTex_ were last (re)created at, and
     // rdVisBuf_'s row pitch in pixels -- the SAME number cb_.viewParams.w carries into the shaders (set
     // around the staged uploads in recordStagedRayDriven, 0 otherwise) and
@@ -2051,11 +2095,16 @@ private:
     rhi::TextureHandle rdAoPlaceholder_     = 0;
     // MILESTONE 3's own placeholder, the identical shape rdGiPlaceholder_/rdAoPlaceholder_ already are.
     rhi::TextureHandle rdReflPlaceholder_   = 0;
-    // (Re)creates or releases rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/rdReflTex_ for the given
-    // render-target size, rebinding u11/u12/u13/u14/u15 to the placeholders above when staged mode is
-    // not wanted or the size is 0. Called from onRenderTargetsChanged (a resize) and from setSettings
-    // on the rayDrivenStages on/off edge, the identical two call sites ensureShadowHistory itself has
-    // and for the identical reason: neither alone sees every edge that changes what this should hold.
+    // SUB-STAGE SPLITS' OWN PLACEHOLDERS, the identical 1-element StructuredBuffer shape
+    // rdVisBufPlaceholder_ already is (both are index-addressed buffers, never texture views).
+    rhi::BufferHandle rdGiCandBufPlaceholder_     = 0;
+    rhi::BufferHandle rdShadowTileBufPlaceholder_ = 0;
+    // (Re)creates or releases rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/rdReflTex_/rdGiCandBuf_/
+    // rdShadowTileBuf_ for the given render-target size, rebinding u11/u12/u13/u14/u15/u17/u18 to the
+    // placeholders above when staged mode is not wanted or the size is 0. Called from
+    // onRenderTargetsChanged (a resize) and from setSettings on the rayDrivenStages on/off edge, the
+    // identical two call sites ensureShadowHistory itself has and for the identical reason: neither
+    // alone sees every edge that changes what this should hold.
     bool ensureRdStagedResources(u32 width, u32 height);
     // Whether Settings::rayDrivenStages asks for the staged split at all -- NOT whether it will
     // actually run this frame, see rdStagedActive() for that. >= 1u, not == 1u: MILESTONE 4 adds
@@ -2124,6 +2173,16 @@ private:
     // where each fires.
     bool rdGiCbRunLogged_ = false;
     bool rdGiCbFallbackLogged_ = false;
+    // SUB-STAGE SPLITS' OWN PAIR (Settings::rayDrivenShadowTiles / rayDrivenGiSplit), the identical
+    // "said once, each half of the story" shape as the two above: rdShadowTilesRunLogged_/
+    // rdGiSplitRunLogged_ the first frame each split actually dispatches its own probe/trace pass,
+    // rdShadowTilesFallbackLogged_/rdGiSplitFallbackLogged_ the first frame the matching setting is on
+    // but the split did not run because a pipeline was missing -- see recordStagedRayDriven for where
+    // each fires.
+    bool rdShadowTilesRunLogged_ = false;
+    bool rdShadowTilesFallbackLogged_ = false;
+    bool rdGiSplitRunLogged_ = false;
+    bool rdGiSplitFallbackLogged_ = false;
 
     // THE ENGINE GAP THE TASK BRIEF NAMED: RAB_GetGBufferSurface(idx, /*prevFrame*/true) needs a
     // PREVIOUS frame's primary surface, and nothing in Voxi carried one before this pair existed --

@@ -57,6 +57,17 @@
 #define AVER_GI_CHECKERBOARD 0
 #endif
 
+// GI candidate-trace/resample split (Settings::rayDrivenGiSplit): CSRdGiTrace (voxi.hlsl) traces and
+// shades giTraceInitialCandidate's ray in its own dispatch and stores every out param in gRdGiCand
+// (below); CSRdGi's own AVER_GI_SPLIT=1 compile then reads that record back inside giRestirIndirect
+// instead of tracing again -- same guard convention as AVER_GI_CHECKERBOARD just above, so every compile
+// that never sets it (PSMainVoxi, PSRayDriven, CSRdGi's own default compile) sees a plain 0 and takes
+// the untouched, byte-for-byte original branch at this file's one AVER_GI_SPLIT site, in giRestirIndirect
+// below. See CSRdGi (voxi.hlsl) for the compile that defines this to 1.
+#ifndef AVER_GI_SPLIT
+#define AVER_GI_SPLIT 0
+#endif
+
 // ================= RTXDI ReSTIR GI (Settings::giMode == 1) =================
 //
 // *** USES THE VENDORED SDK -- third_party/rtxdi -- RATHER THAN HAND-ROLLING A RESERVOIR UPDATE
@@ -176,6 +187,27 @@ RWTexture2D<float2> gGiSurfNrmHistOut : register(u8);
 // AverSR-Quality figures.
 Texture2D<float4>   gGiVisHist    : register(t16);  // r = F3 reuse visibility EMA, g = F2 traced-lum EMA,
 RWTexture2D<float4> gGiVisHistOut : register(u10);  // b = F2 unoccluded-sky-lum EMA, a = 1 written / 0 never
+
+// ---- CSRdGiTrace/CSRdGi CANDIDATE HAND-OFF (Settings::rayDrivenGiSplit) -- ONE FRAME, ONE PIXEL EACH ----
+// gRdGiCand ferries giTraceInitialCandidate's full output from CSRdGiTrace's own dispatch (voxi.hlsl,
+// which traces the ray) to CSRdGi's AVER_GI_SPLIT=1 compile (which resamples it) -- not a history
+// buffer, like gRdGiTex/gRdSunVisTex and the rest of the staged hand-off textures further up voxi.hlsl,
+// just a same-frame relay between two passes. Declared here, in voxi_restir.hlsli rather than voxi.hlsl
+// alongside its siblings, because this file is #included (voxi.hlsl L419) BEFORE the staged declarations
+// (~L450) -- so CSRdGiTrace and CSRdGi, both further down voxi.hlsl, already have it in scope; putting it
+// there instead would need a forward declaration this file's own ordering contract (this file's header
+// comment, above) already warns against inventing.
+// 48 BYTES, STRIDE 48: two float3+scalar pairs pack cleanly into 16-byte lanes each without a manual pad
+// field. flags bit 0 = giTraceInitialCandidate's own return value (a candidate exists at all), bit 1 =
+// nonFiniteCandidate, bit 2 = f2Observed -- the three bools giTraceInitialCandidate reports alongside its
+// six float outputs, packed into the one field with room to spare.
+struct RdGiCand { float3 pos; uint flags; float3 nrm; float f2LumTraced; float3 rad; float f2LumSky; };
+RWStructuredBuffer<RdGiCand> gRdGiCand : register(u17);
+// Set by CSRdGi, per invocation, before its own call to giRestirIndirect -- the row-pitch pixel index
+// (idx = pixel.y * pitch + pixel.x) CSRdGiTrace wrote this same candidate under. A `static`, not a
+// parameter, for the identical reason gGiPoisonPdfHit and gGiCbSkip already are: giRestirIndirect's
+// signature is shared with PSMainVoxi/PSRayDriven's non-split call sites, which must not change.
+static uint gGiCandIdx = 0;
 
 // RTXDI's own RAB_Surface contract. `linearDepth` is carried on the struct rather than re-derived by
 // RAB_GetSurfaceLinearDepth from a hardcoded view-projection, because the SAME accessor is called on
@@ -1104,30 +1136,40 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
 // expects fresh data from this frame, or the half REBLUR is about to reconstruct instead.
 static bool gGiCbSkip = false;
 #endif
-float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixel, uint frameIdx,
-                        out float ao) {
-    ao = 1.0;
+
+// ---- U1 (2.10 A) / B2: THE VISIBILITY-MODE + F2/F3 PATH DECODE, FACTORED OUT OF giRestirIndirect -----
+// Moved out whole, unchanged, so CSRdGiTrace (voxi.hlsl, Settings::rayDrivenGiSplit) can compute the
+// exact same f2Path/rho2 giRestirIndirect would for the SAME pixel before giRestirIndirect itself ever
+// runs -- the split's whole premise is that the trace pass and the resample pass agree on which path a
+// pixel takes without either one re-deriving it differently. giRestirIndirect (below) calls this once
+// and unpacks the result into locals of the same names this block used to declare directly, so nothing
+// past the decode has to change.
+//
+// visMode is settings_.giRestirVisibility as the C++ side clamped and packed it
+// (VoxiRenderer::beginShadowHistory, givis::packAmbientW) -- 0 No ray, 1 Reconstructed,
+// 2 HalfResolution, 3 Full. halfBound additionally requires the half-res pair actually be bound
+// THIS frame (bit 4): an allocation failure (2.11) leaves visMode == 2 but the pair unbound, and
+// that must behave as Full, not silently read a null descriptor. tracedPx is THIS pixel's own
+// verdict from the phase table (giVisTracedPixel) when Half is active; it is trivially true
+// (every pixel "traces") for every other mode, so the f2Path/f3Path arithmetic below needs no
+// separate branch per mode.
+//
+// giVisReconstruct is called HERE, once, rather than separately for F2 and F3: both rays share
+// one reconstruction (2.10 D's own header note), and calling it twice would trace the same four
+// taps twice for no new information.
+struct GiPathDecode {
+    uint       visMode;
+    bool       halfBound;
+    bool       tracedPx;
+    GiVisRecon rec;
+    uint       spatialSamples;
+    uint       maxHistory;
+    uint       f2Path;
+    uint       f3Path;
+    float      rho2;
+};
+GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
     const uint2 pixelPos = uint2(pixel);
-    const RTXDI_ReservoirBufferParameters resParams = giReservoirBufferParams();
-    const float frameJitter = (float)frameIdx * 2.39996323;
-
-    // Reset THIS invocation's poison-view flag before anything below can set it -- see its own
-    // declaration for why it is a `static` rather than a parameter.
-    gGiPoisonPdfHit = false;
-
-    // ---- U1 (2.10 A): DECODE THE VISIBILITY MODE AND THE TWO RAYS' PATHS, ONCE, UP FRONT ----
-    // visMode is settings_.giRestirVisibility as the C++ side clamped and packed it
-    // (VoxiRenderer::beginShadowHistory, givis::packAmbientW) -- 0 No ray, 1 Reconstructed,
-    // 2 HalfResolution, 3 Full. halfBound additionally requires the half-res pair actually be bound
-    // THIS frame (bit 4): an allocation failure (2.11) leaves visMode == 2 but the pair unbound, and
-    // that must behave as Full, not silently read a null descriptor. tracedPx is THIS pixel's own
-    // verdict from the phase table (giVisTracedPixel) when Half is active; it is trivially true
-    // (every pixel "traces") for every other mode, so the f2Path/f3Path arithmetic below needs no
-    // separate branch per mode.
-    //
-    // giVisReconstruct is called HERE, once, rather than separately for F2 and F3: both rays share
-    // one reconstruction (2.10 D's own header note), and calling it twice would trace the same four
-    // taps twice for no new information.
     const uint visMode   = (uint)gAmbientParams.w & 3u;
     const bool halfBound = visMode == 2u && ((uint)gAmbientParams.w & 4u) != 0u;
     const bool tracedPx  = !halfBound || giVisTracedPixel(pixelPos, frameIdx);
@@ -1188,6 +1230,39 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // Computed here, once, rather than inside giTraceInitialCandidate, since F2 is the only reader.
     const float rho2 = (rec.b > 1e-4) ? (rec.g / rec.b) : 1.0;
 
+    GiPathDecode d;
+    d.visMode = visMode; d.halfBound = halfBound; d.tracedPx = tracedPx; d.rec = rec;
+    d.spatialSamples = spatialSamples; d.maxHistory = maxHistory;
+    d.f2Path = f2Path; d.f3Path = f3Path; d.rho2 = rho2;
+    return d;
+}
+
+float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixel, uint frameIdx,
+                        out float ao) {
+    ao = 1.0;
+    const uint2 pixelPos = uint2(pixel);
+    const RTXDI_ReservoirBufferParameters resParams = giReservoirBufferParams();
+    const float frameJitter = (float)frameIdx * 2.39996323;
+
+    // Reset THIS invocation's poison-view flag before anything below can set it -- see its own
+    // declaration for why it is a `static` rather than a parameter.
+    gGiPoisonPdfHit = false;
+
+    // ---- U1 (2.10 A) / B2: DECODE THE VISIBILITY MODE AND THE TWO RAYS' PATHS, ONCE, UP FRONT ----
+    // See giDecodePaths, just above, for the decode itself and its own header comment -- factored out
+    // so CSRdGiTrace's own dispatch (voxi.hlsl) can compute an identical f2Path/rho2 for the candidate
+    // it traces on this function's behalf when Settings::rayDrivenGiSplit is on (AVER_GI_SPLIT, below).
+    const GiPathDecode gd     = giDecodePaths(wpos, N, pixel, frameIdx);
+    const uint         visMode        = gd.visMode;
+    const bool         halfBound      = gd.halfBound;
+    const bool         tracedPx       = gd.tracedPx;
+    const GiVisRecon   rec            = gd.rec;
+    const uint         spatialSamples = gd.spatialSamples;
+    const uint         maxHistory     = gd.maxHistory;
+    const uint         f2Path         = gd.f2Path;
+    const uint         f3Path         = gd.f3Path;
+    const float        rho2           = gd.rho2;
+
     float3 samplePos, sampleNormal, sampleRadiance;
     bool nonFiniteCandidate = false;
     float f2LumTraced = 0.0, f2LumSky = 0.0;
@@ -1198,6 +1273,35 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // past this block still runs for EVERY pixel regardless, so a skipped pixel's reservoir is still
     // re-projected and re-stored from last frame's temporal/spatial reservoirs, keeping the reuse
     // chain valid under motion even on the frame it traces nothing new.
+#if AVER_GI_SPLIT
+    // B4: THE CANDIDATE IS ALREADY TRACED -- CSRdGiTrace (voxi.hlsl) ran giTraceInitialCandidate for
+    // THIS pixel in its own dispatch, with the identical f2Path/rho2 giDecodePaths just computed above
+    // (both call sites decode from the same gAmbientParams/gGiCbSkip inputs), and stored every out
+    // param in gRdGiCand[gGiCandIdx] -- gGiCandIdx set by CSRdGi, just before this call, to the same
+    // row-pitch index CSRdGiTrace wrote under. Reading it back and taking the identical cosTheta/
+    // RTXDI_MakeGIReservoir branch below reproduces the non-split branch's `initial` bit-for-bit (full
+    // float precision throughout, no quantisation in the hand-off) -- only which dispatch pays for the
+    // ray moves. Skipped exactly as the trace itself is skipped today: gGiCbSkip pixels never had a
+    // candidate traced in EITHER compile, so there is nothing in gRdGiCand[gGiCandIdx] for them to read.
+#if AVER_GI_CHECKERBOARD
+    if (!gGiCbSkip)
+#endif
+    {
+        const RdGiCand cand = gRdGiCand[gGiCandIdx];
+        samplePos          = cand.pos;
+        sampleNormal       = cand.nrm;
+        sampleRadiance     = cand.rad;
+        nonFiniteCandidate = (cand.flags & 2u) != 0u;
+        f2LumTraced        = cand.f2LumTraced;
+        f2LumSky           = cand.f2LumSky;
+        f2Observed         = (cand.flags & 4u) != 0u;
+        if ((cand.flags & 1u) != 0u) {
+            const float cosTheta = saturate(dot(normalize(samplePos - wpos), N));
+            if (cosTheta > AVER_GI_MIN_COS)
+                initial = RTXDI_MakeGIReservoir(samplePos, sampleNormal, sampleRadiance, cosTheta / PI);
+        }
+    }
+#else
 #if AVER_GI_CHECKERBOARD
     if (!gGiCbSkip)
 #endif
@@ -1211,6 +1315,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         if (cosTheta > AVER_GI_MIN_COS)
             initial = RTXDI_MakeGIReservoir(samplePos, sampleNormal, sampleRadiance, cosTheta / PI);
     }
+#endif
 
     // ---- F3's OWN COPY OF THIS FRAME'S FRESH CANDIDATE, TAKEN BEFORE RESAMPLING CAN REPLACE IT ----
     // `initial` is about to be handed to RTXDI_GISpatioTemporalResampling below, which is free to

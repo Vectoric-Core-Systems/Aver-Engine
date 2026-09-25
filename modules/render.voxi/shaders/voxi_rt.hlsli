@@ -1767,10 +1767,26 @@ float3 averShadowTint(float3 v, float lum) {
     return (lum > 1e-4) ? (v / lum) : float3(1.0, 1.0, 1.0);
 }
 
-float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
+// A: SUN SHADOW SPLIT (Settings::rayDrivenShadowTiles) -- EVERY CALLER'S SHAPE, PLUS ONE ESCAPE HATCH.
+// `haveFresh`/`freshIn` let a caller that has ALREADY CLASSIFIED this pixel's fresh trace (CSRdShadow's
+// own AVER_RD_SHADOW_TILES compile, voxi.hlsl: a 3x3 probe-tile neighbourhood that agrees "fully lit" or
+// "fully blocked") hand that classification in directly and skip the ray loop below -- while still
+// running every temporal/spatial step this function already does with it (accumulation, history write,
+// rtShadowSpatial), so the denoised result is unchanged whether the visibility came from a ray traced
+// here or one CSRdShadowProbe already traced for the whole tile. `false`/anything is the ordinary path:
+// every `if (!haveFresh) ... rtShadow(...)` below then reduces to the plain rtShadow(...) call it
+// replaced, which is exactly what rtShadowTemporal's own one-line wrapper, just past this function's
+// end, asks for -- so nothing that already calls rtShadowTemporal changes behaviour.
+float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
+                          bool haveFresh, float3 freshIn) {
     // gRtHistParams.x is 0 when t6/u2 aren't bound this frame (VoxiRenderer::beginShadowHistory) --
     // an unbound slot is Tier 1 null-filled, so touching either would hit a null descriptor.
-    if (gRtHistParams.x < 0.5) return rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+    // IF/ELSE, NOT ?:, at all three sites: the whole point of haveFresh is that the ray loop does not
+    // run, so the skip is spelled as control flow rather than left to the language's evaluation rules.
+    if (gRtHistParams.x < 0.5) {
+        if (haveFresh) return freshIn;
+        return rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+    }
 
     // THIS frame's linear depth at wpos (mul(wp, gViewProj).w, as VSMain computes it) since the
     // shadow pass has no depth buffer to read back. Written alongside visibility below so next
@@ -1814,7 +1830,8 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
         // as a disproven fix). This is an angular offset, not a sequence index, and here the stride
         // is 1. Recorded RT gate values move; they are re-recorded, not suppressed.
         const float frameJitter = (float)((uint)gRtHistParams.z) * 2.39996323;
-        const float3 fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
+        float3 fresh3 = freshIn;
+        if (!haveFresh) fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         const float  fresh   = averShadowLum(fresh3);
         const float3 tint    = averShadowTint(fresh3, fresh);
 
@@ -1915,7 +1932,8 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
         // 2^(2*tileBits) turns converge toward what that many spatial rays give in one frame
         // (rtDiscSample). frameJitter=0 would repeat the same ray forever -- why tiling needs this.
         const float frameJitter = (float)frameIdx * 2.39996323;
-        const float3 vis3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
+        float3 vis3 = freshIn;
+        if (!haveFresh) vis3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         vis  = averShadowLum(vis3);
         tint = averShadowTint(vis3, vis);
         if (haveHist) {
@@ -1946,6 +1964,14 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
     if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
     // The same saturate, and for the same reason -- see the tiled branch above.
     return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
+}
+
+// The ordinary entry point every caller before this task used, and still the only one most of them
+// need: haveFresh=false makes every `if (!haveFresh)` above take its rtShadow(...)
+// branch, so this is rtShadowTemporalEx exactly as it read before A (this file's own comment on that
+// function, just above) split the trace out from under it.
+float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
+    return rtShadowTemporalEx(wpos, N, L, pixel, dpx, dpy, rays, false, float3(0.0, 0.0, 0.0));
 }
 
 // Traces one reflection ray and shades what it hits. Global, unlike the cone tracer it replaced,

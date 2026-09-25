@@ -773,6 +773,41 @@ struct Settings {
     // Resolution::rayDrivenStages). Console: voxi.rayDrivenStages.
     u32 rayDrivenStages = 0;
 
+    // DIAGNOSTIC ONLY: times each staged lighting pass (shadow, GI, sky occlusion, reflections) in
+    // its own GPU span with a UAV barrier after it, in place of the one "Voxi RD lighting stages"
+    // span they normally share. The barriers stop the four overlapping, so the per-stage sum reads
+    // somewhat HIGHER than the shared span -- this answers "which stage costs what", never "what
+    // does the frame cost". No effect on the image. Console: voxi.rayDrivenStageTiming.
+    bool rayDrivenStageTiming = false;
+
+    // SUB-STAGE SPLIT A: the sun-shadow trace, in two passes instead of one. MEASURED (staged mode
+    // 1, Epic): the shadow stage alone costs 4.47 ms of a 19.6 ms frame, tracing rtShadowRays (8 at
+    // Epic) disc rays for every non-sky pixel -- but most of a frame is fully lit or fully blocked,
+    // where all 8 rays would agree. CSRdShadowProbe traces ONE ray per 8x8 tile first; CSRdShadow
+    // then ORs its own tile's 3x3 neighbourhood and skips its per-pixel rays entirely wherever every
+    // probe in it agrees, reusing that single verdict instead. NEAR-IDENTICAL IMAGE, not a quality
+    // trade the way rayDrivenStages == 2 is: a uniformly-lit or uniformly-blocked region's temporal/
+    // spatial filter sees one ray's worth of noise in place of eight's, invisible in practice. ON BY
+    // DEFAULT so the split is what ships, not what has to be opted into; falls back to the unsplit
+    // CSRdShadow (never the single-pass primary) whenever either new pipeline fails to compile. Only
+    // meaningful while rayDrivenStages is 1 or 2. Console: voxi.rayDrivenShadowTiles.
+    bool rayDrivenShadowTiles = true;
+
+    // SUB-STAGE SPLIT B: CSRdGi's own candidate trace, in two passes instead of one. MEASURED: the GI
+    // stage costs 5.38 ms (4.43 ms already, half-rate via rayDrivenStages == 2's checkerboard) of the
+    // same 19.6 ms frame, and checkerboard mode still dispatches every lane -- half of them return
+    // immediately, so the wave is never compacted. CSRdGiTrace carries the candidate trace
+    // (giTraceInitialCandidate plus the material eval) into its own pass, over a COMPACTED dispatch in
+    // checkerboard mode (only the traced half's pixels, not every lane of a half-idle wave); CSRdGi
+    // then resamples/shades from that stored candidate instead of tracing its own. SAME IMAGE as
+    // rayDrivenStages == 1 in every mode -- this changes which pass traces the ray, not the estimator
+    // -- so the saving is occupancy/compaction, not a quality trade. ON BY DEFAULT for the identical
+    // A/B-visibility reason rayDrivenShadowTiles gives above; falls back to the unsplit CSRdGi (never
+    // the single-pass primary) whenever the matching trace/split pipeline pair for this frame's mode
+    // (plain or checkerboard) fails to compile. Only meaningful while rayDrivenStages is 1 or 2.
+    // Console: voxi.rayDrivenGiSplit.
+    bool rayDrivenGiSplit = true;
+
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS, because this file already draws that line
     // and this setting was on the wrong side of it. RAY TRACING is discrete rays answering a

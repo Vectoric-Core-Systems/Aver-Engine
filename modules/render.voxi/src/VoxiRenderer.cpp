@@ -70,6 +70,17 @@ u32 giReservoirElemCount(u32 width, u32 height) {
 // catches that without needing a coarser "did the ROUNDED pitch change" test.
 constexpr u32 kRdVisElemBytes = 16;
 
+// ---- SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): the two candidate
+// buffers CSRdShadowProbe/CSRdGiTrace write and CSRdShadow/CSRdGi read back ----
+// kRdGiCandElemBytes: sizeof(RdGiCand) (voxi_restir.hlsli) -- float3 pos, uint flags, float3 nrm,
+// f2LumTraced, float3 rad, f2LumSky -- 12*4 = 48 bytes, one element per pixel of the render target,
+// the SAME row pitch rdVisBuf_ itself uses (see kRdVisElemBytes' own comment for why no block
+// rounding applies here either).
+constexpr u32 kRdGiCandElemBytes = 48;
+// kRdShadowTileElemBytes: one uint mask per 8x8 tile -- sized ceil(W/8) * ceil(H/8) tiles, not per
+// pixel, so this buffer is orders of magnitude smaller than rdVisBuf_/rdGiCandBuf_.
+constexpr u32 kRdShadowTileElemBytes = 4;
+
 // Cascade split blend: 0 is uniform slabs, 1 is logarithmic (equal ratios).
 constexpr f32 kCascadeSplitLambda = 0.85f;
 
@@ -208,7 +219,15 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // passes read it through gAirVis at t17 while CSAirVis itself only ever writes it). Bound to the
 // SAME 1x1x1 placeholder t17 falls back to whenever the real texture does not exist, so a Tier 1
 // device always has a valid UAV descriptor here regardless of voxi.fogOcclusion.
-constexpr u32 kVoxiUavCount = kGiUavCount + 13;
+//
+// +15, NOT +13, AS OF THE SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): u17
+// is CSRdGiTrace's own candidate buffer (gRdGiCand, RdGiCand, 48 bytes/element -- voxi_restir.hlsli),
+// read back by the AVER_GI_SPLIT branch of CSRdGi; u18 is CSRdShadowProbe's own per-8x8-tile verdict
+// buffer (gRdShadowTiles, one uint/tile), read back by the AVER_RD_SHADOW_TILES branch of CSRdShadow.
+// Same "always declared, allocated unconditionally alongside u11-u16" contract as the rest of the
+// staged group -- see rdGiCandBuf_/rdShadowTileBuf_'s own comment (VoxiRenderer.hpp) for why neither
+// is gated on the narrower setting that consumes it.
+constexpr u32 kVoxiUavCount = kGiUavCount + 15;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -313,7 +332,12 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[15] = rhi::SlotKind::Texture2D;             // u15 ray-driven reflection (RW)
     // u16: CSAirVis's own write side, t17's UAV twin -- see kVoxiUavCount's own comment above.
     uav[16] = rhi::SlotKind::Texture3D;             // u16 air sky-visibility volume (write, CSAirVis)
-    static_assert(kVoxiSrvCount == 18 && kVoxiUavCount == 17 && kGiSrvCount == 9 && kGiUavCount == 4,
+    // u17/u18: THE SUB-STAGE SPLITS' OWN BUFFERS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit) --
+    // see kVoxiUavCount's own comment above for what each holds. Both StructuredBuffer, like u11 and
+    // u6, and no SRV twin, exactly like u11-u15.
+    uav[17] = rhi::SlotKind::StructuredBuffer;      // u17 GI-trace candidate buffer (gRdGiCand)
+    uav[18] = rhi::SlotKind::StructuredBuffer;      // u18 shadow-probe tile verdicts (gRdShadowTiles)
+    static_assert(kVoxiSrvCount == 18 && kVoxiUavCount == 19 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -343,7 +367,9 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
                                    // and sun visibility texture, u13/u14 the staged ray-driven GI
                                    // indirect diffuse and sky occlusion outputs, u15 the staged
                                    // ray-driven reflection output (all this frame's), u16 the air
-                                   // sky-visibility volume CSAirVis writes (t17's UAV twin)
+                                   // sky-visibility volume CSAirVis writes (t17's UAV twin), u17/u18
+                                   // the sub-stage splits' own GI-trace candidate and shadow-probe
+                                   // tile buffers
     // Table 1: the material's textures, based at t(kVoxiSrvCount) -- the root-signature builder
     // accumulates srvBase across tables, so a register number derived from a comment instead of this
     // value goes wrong the moment kVoxiSrvCount grows past kGiSrvCount.
@@ -601,6 +627,13 @@ void VoxiRenderer::shutdown() {
                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                         rdSkyOccCsPso_, rdReflCsPso_,
                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
+                                        // SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles /
+                                        // rayDrivenGiSplit): the four extra compute pipelines, added
+                                        // here for the identical reason the milestone comment
+                                        // immediately above gives for its own six.
+                                        rdShadowProbeCsPso_, rdShadowTiledCsPso_,
+                                        rdGiTraceCsPso_, rdGiTraceCbCsPso_,
+                                        rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         // OCCLUSION-AWARE FOG: airVisPso_, created alongside mipPso_
                                         // in createPipelines() and never touched by
                                         // createScenePipelines()'s own hot-reload -- same lifetime as
@@ -621,6 +654,8 @@ void VoxiRenderer::shutdown() {
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
+    rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     // W12: the placeholder that stands in for voxelAccumTex_ while it is freed -- see
@@ -687,7 +722,15 @@ void VoxiRenderer::shutdown() {
     if (rdGiPlaceholder_)     { res_->destroyTexture(rdGiPlaceholder_);     rdGiPlaceholder_ = 0; }
     if (rdAoPlaceholder_)     { res_->destroyTexture(rdAoPlaceholder_);     rdAoPlaceholder_ = 0; }
     if (rdReflPlaceholder_)   { res_->destroyTexture(rdReflPlaceholder_);   rdReflPlaceholder_ = 0; }
+    // SUB-STAGE SPLITS' OWN BUFFERS AND PLACEHOLDERS (Settings::rayDrivenShadowTiles /
+    // rayDrivenGiSplit), the identical "not owned by any binding-set slot's lifetime" reasoning as
+    // the rest of this block immediately above.
+    if (rdGiCandBuf_) { res_->destroyBuffer(rdGiCandBuf_); rdGiCandBuf_ = 0; }
+    if (rdShadowTileBuf_) { res_->destroyBuffer(rdShadowTileBuf_); rdShadowTileBuf_ = 0; }
+    if (rdGiCandBufPlaceholder_) { res_->destroyBuffer(rdGiCandBufPlaceholder_); rdGiCandBufPlaceholder_ = 0; }
+    if (rdShadowTileBufPlaceholder_) { res_->destroyBuffer(rdShadowTileBufPlaceholder_); rdShadowTileBufPlaceholder_ = 0; }
     rdVisBufElemCapacity_ = 0;
+    rdGiCandBufElemCapacity_ = rdShadowTileElemCapacity_ = 0;
     rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
     rdStagedFallbackLogged_ = false;
     rdStagedRunLogged_ = false;
@@ -3857,9 +3900,11 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ctx.drawFullscreen();
 }
 
-// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's lighting-stage trio and milestone
-// 3's own CSRdRefl): records CSRdVisibility, then CSRdShadow/CSRdGi/CSRdSkyOcc/CSRdRefl back to back
-// with no barrier between them, then the AVER_RD_SPLIT fullscreen draw -- GPU spans in place of the
+// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's lighting-stage trio, milestone 3's
+// own CSRdRefl, and the sub-stage splits' own S1/G1 probe/trace passes): records CSRdVisibility, then
+// (when Settings::rayDrivenShadowTiles/rayDrivenGiSplit ask for them) S1/G1, then
+// CSRdShadow/CSRdGi/CSRdSkyOcc/CSRdRefl back to back with no barrier between THEM, then the
+// AVER_RD_SPLIT fullscreen draw -- GPU spans in place of the
 // single "Voxi ray-driven primary" span scenePass() otherwise records. Called only once scenePass() has
 // already confirmed rdStagedActive(), so every existence/backend check that decides whether to call
 // this lives there, not here.
@@ -3902,6 +3947,14 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
 // serialising work that would otherwise overlap -- which is exactly why all four sit inside ONE
 // ScopedGpuStat ("Voxi RD lighting stages") rather than each opening its own span the way
 // CSRdVisibility above and the Stage B draw below still do.
+//
+// SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit) ARE THE ONE EXCEPTION TO "NO
+// BARRIER" ABOVE: S1 (CSRdShadowProbe) and G1 (CSRdGiTrace) run FIRST, inside the same span, and
+// their own outputs (gRdShadowTiles/gRdGiCand) get an explicit uavBarrierBuffer before CSRdShadow's
+// tiled branch or CSRdGi's split branch reads them back a few lines later -- these are NOT disjoint
+// resources the way the rest of the group's argument above relies on, so the barrier-free reasoning
+// does not extend to them, and the barrier is recorded unconditionally, whether or not
+// voxi.rayDrivenStageTiming is on.
 void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const bool gbufBound = pickGbuf(rayDrivenPso_, rayDrivenGbufPso_) == rayDrivenGbufPso_;
     const rhi::PipelineHandle stageBPso = gbufBound ? rayDrivenSplitTexGbufPso_ : rayDrivenSplitTexPso_;
@@ -3937,23 +3990,38 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     }
     ctx.uavBarrierBuffer(rdVisBuf_);   // Stage S's read of gRdVisBuf must see Stage A's writes
 
+    // voxi.rayDrivenStageTiming (DIAGNOSTIC, Settings::rayDrivenStageTiming): each stage below gets
+    // its own span and a UAV barrier on its own output before the span closes, so a span holds that
+    // stage alone. Off (the default), the one shared span and the barrier-free overlap are exactly as
+    // this function's own comment describes; the push/pop pairs below are then no-ops.
+    const bool perStage = settings_.rayDrivenStageTiming;
+    auto stageBegin = [&](const char* label) { if (perStage) ctx.pushMarker(label); };
+    auto stageEnd = [&](rhi::TextureHandle written) {
+        if (!perStage) return;
+        ctx.uavBarrierTexture(written);
+        ctx.popMarker();
+    };
+    // THE BUFFER OVERLOAD S1/G1 (below) NEED: identical shape, uavBarrierBuffer in place of
+    // uavBarrierTexture, since gRdShadowTiles/gRdGiCand are StructuredBuffers, not textures.
+    auto stageEndBuffer = [&](rhi::BufferHandle written) {
+        if (!perStage) return;
+        ctx.uavBarrierBuffer(written);
+        ctx.popMarker();
+    };
     {
-        rhi::ScopedGpuStat stat(ctx, "Voxi RD lighting stages");   // wraps all three dispatches below --
-                                                                    // see this function's own comment on
-                                                                    // why no barrier or timestamp sits
-                                                                    // between them.
-        ctx.setPipeline(rdShadowCsPso_);
-        ctx.setBindingSet(bindings_);
-        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-        ctx.setBindlessTable(rtTexTable_);
-        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-        if (gx && gy) ctx.dispatch(gx, gy, 1);
+        // Wraps every dispatch below -- see this function's own comment on why no barrier or
+        // timestamp sits between the four milestone-2/3 stages (S1/G1, immediately below, are the one
+        // exception -- see that same comment's own trailing paragraph).
+        if (!perStage) ctx.pushMarker("Voxi RD lighting stages");
 
-        // CSRdGi: the CPU mirror of PSRayDriven's own GI-block condition and CSRdGi's own body gate
-        // (voxi.hlsl) -- ReSTIR GI is the chosen estimator AND the cone trace is gated on. Reads the
-        // SAME cb_ fields the shader tests this frame, never a separately-tracked flag, so the two can
-        // never disagree. rdStagedActive() already refused this frame if the condition holds but
-        // rdGiCsPso_ is 0, so reaching here with the condition true means the pipeline exists.
+        // CSRdGi's OWN dispatch decision, HOISTED ABOVE THE SHADOW STAGE (it used to sit between the
+        // shadow and GI dispatches): SUB-STAGE SPLIT B's own trace pass (G1, below) needs giCb before
+        // the shadow stage even runs, since G1 is now recorded ahead of CSRdShadow. The CPU mirror of
+        // PSRayDriven's own GI-block condition and CSRdGi's own body gate (voxi.hlsl) -- ReSTIR GI is
+        // the chosen estimator AND the cone trace is gated on. Reads the SAME cb_ fields the shader
+        // tests this frame, never a separately-tracked flag, so the two can never disagree.
+        // rdStagedActive() already refused this frame if the condition holds but rdGiCsPso_ is 0, so
+        // reaching here with the condition true means the pipeline exists.
         const bool giDispatch = cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
         // MILESTONE 4: half-rate ReSTIR GI via NRD's checkerboard, gated on three things beyond
         // giDispatch itself -- the setting actually asking for it (rayDrivenStages == 2; rdStagedWanted()
@@ -3987,8 +4055,103 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             AVER_INFO("[Voxi] voxi.rayDrivenStages 2 requested half-rate ReSTIR GI, but {}; behaving as "
                       "rayDrivenStages 1 for the GI stage (said once)", why);
         }
+
+        // ---- SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit) ----
+        //
+        // shadowTiles: the setting plus BOTH new shadow pipelines -- a failed compile of either one
+        // falls back to the unsplit CSRdShadow below, never to the single-pass primary (rdStagedActive()
+        // never inspects these two members -- see their own header comment).
+        const bool shadowTiles = settings_.rayDrivenShadowTiles && rdShadowProbeCsPso_ && rdShadowTiledCsPso_;
+        // giSplit: giDispatch (nothing to split when CSRdGi itself would not run this frame) plus the
+        // setting plus whichever plain/checkerboard trace+split PAIR this frame's giCb decision needs
+        // -- the checkerboard trace pass is useless without the checkerboard split pass to read it and
+        // vice versa, so both members of the pair are required together.
+        const bool giSplit = giDispatch && settings_.rayDrivenGiSplit &&
+                              (giCb ? (rdGiTraceCbCsPso_ && rdGiSplitCbCsPso_)
+                                    : (rdGiTraceCsPso_ && rdGiSplitCsPso_));
+        // ONE-SHOT LOGS, the identical "said once, each half of the story" shape the half-rate GI pair
+        // immediately above already uses.
+        if (shadowTiles && !rdShadowTilesRunLogged_) {
+            rdShadowTilesRunLogged_ = true;
+            AVER_INFO("[Voxi] shadow probe/tile split running: CSRdShadowProbe traces one ray per 8x8 "
+                      "tile, CSRdShadow skips its own ray wherever its tile's 3x3 neighbourhood agrees");
+        } else if (settings_.rayDrivenShadowTiles && !shadowTiles && !rdShadowTilesFallbackLogged_) {
+            rdShadowTilesFallbackLogged_ = true;
+            AVER_WARN("[Voxi] voxi.rayDrivenShadowTiles requested the shadow probe/tile split, but the "
+                      "probe or tiled shadow pipeline did not compile; behaving as the unsplit "
+                      "CSRdShadow (said once)");
+        }
+        if (giSplit && !rdGiSplitRunLogged_) {
+            rdGiSplitRunLogged_ = true;
+            AVER_INFO("[Voxi] GI candidate-trace split running: CSRdGiTrace traces the fresh ReSTIR GI "
+                      "candidate, CSRdGi resamples/shades from the stored result");
+        } else if (giDispatch && settings_.rayDrivenGiSplit && !giSplit && !rdGiSplitFallbackLogged_) {
+            rdGiSplitFallbackLogged_ = true;
+            AVER_WARN("[Voxi] voxi.rayDrivenGiSplit requested the GI candidate-trace split, but the {} "
+                      "GI-trace/split pipeline pair did not compile; behaving as the unsplit CSRdGi "
+                      "(said once)", giCb ? "checkerboard" : "plain");
+        }
+
+        // S1: CSRdShadowProbe, one 8x8-tile group per probe, dispatched over the SAME (gx, gy) as the
+        // shadow stage below -- writes gRdShadowTiles (u18).
+        if (shadowTiles) {
+            stageBegin("Voxi RD shadow probe stage");
+            ctx.setPipeline(rdShadowProbeCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            stageEndBuffer(rdShadowTileBuf_);
+        }
+        // G1: CSRdGiTrace, writing gRdGiCand (u17) -- COMPACTED to the traced half's pixels alone in
+        // checkerboard mode (giCb), the identical parity bit CSRdGi's own checkerboard dispatch below
+        // carries. Copied here rather than shared: this upload happens strictly before that one, and
+        // both restore the plain pitch immediately after so no later upload this frame ever sees it.
+        if (giSplit) {
+            stageBegin("Voxi RD GI trace stage");
+            ctx.setPipeline(giCb ? rdGiTraceCbCsPso_ : rdGiTraceCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            u32 g1x = gx;
+            if (giCb) {
+                // HALF THE COLUMNS, ROUNDED UP, NOT HALF THE THREADS: the compacted dispatch covers
+                // ceil(dispatchW/2) columns of 8x8 groups, each thread handling ONE of the traced
+                // half's pixels (see CSRdGiTrace's own x = xBase + ((xBase ^ y ^ parity) & 1u) decode).
+                g1x = ((dispatchW + 1u) / 2u + 7u) / 8u;
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | ((nrdFrame_ & 1u) << 16));
+                ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
+            } else {
+                ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            }
+            if (g1x && gy) ctx.dispatch(g1x, gy, 1);
+            stageEndBuffer(rdGiCandBuf_);
+        }
+        // THE BARRIER BETWEEN S1/G1 AND THEIR OWN CONSUMERS, UNCONDITIONALLY -- needed whether or not
+        // voxi.rayDrivenStageTiming is on, unlike stageEnd/stageEndBuffer's own barriers (which only
+        // fire under perStage): CSRdShadow's tiled branch and CSRdGi's split branch, a few lines below,
+        // read gRdShadowTiles/gRdGiCand back inside the SAME barrier-free group this function's own
+        // header comment says the rest of the milestone-2/3 stages share -- but S1/G1's outputs are
+        // NOT disjoint from their readers the way that reasoning requires, so a real barrier replaces
+        // it here instead.
+        if (shadowTiles) ctx.uavBarrierBuffer(rdShadowTileBuf_);
+        if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);
+
+        stageBegin("Voxi RD shadow stage");
+        ctx.setPipeline(shadowTiles ? rdShadowTiledCsPso_ : rdShadowCsPso_);
+        ctx.setBindingSet(bindings_);
+        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+        ctx.setBindlessTable(rtTexTable_);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+        if (gx && gy) ctx.dispatch(gx, gy, 1);
+        stageEnd(rdSunVisTex_);
+
         if (giDispatch) {
-            ctx.setPipeline(giCb ? rdGiCbCsPso_ : rdGiCsPso_);
+            stageBegin("Voxi RD GI stage");
+            ctx.setPipeline(giSplit ? (giCb ? rdGiSplitCbCsPso_ : rdGiSplitCsPso_)
+                                     : (giCb ? rdGiCbCsPso_     : rdGiCsPso_));
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
@@ -4013,6 +4176,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             }
             if (gx && gy) ctx.dispatch(gx, gy, 1);
+            stageEnd(rdGiTex_);
         }
 
         // CSRdSkyOcc: the CPU mirror of PSRayDriven's own sky-occlusion condition -- the cases where
@@ -4022,12 +4186,14 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // pass, so it never reaches this dispatch.
         if (cb_.ambientParams[0] > 0.5f &&
             (cb_.giRestirParams[0] > 0.5f || cb_.voxelParams[3] <= 0.5f)) {
+            stageBegin("Voxi RD sky occlusion stage");
             ctx.setPipeline(rdSkyOccCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             if (gx && gy) ctx.dispatch(gx, gy, 1);
+            stageEnd(rdAoTex_);
         }
 
         // MILESTONE 3: CSRdRefl, the CPU mirror of PSRayDriven's own reflection-block condition's
@@ -4039,13 +4205,16 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // disagree. rdStagedActive() already refused this frame if the condition holds but rdReflCsPso_
         // is 0, so reaching here with the condition true means the pipeline exists.
         if (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) {
+            stageBegin("Voxi RD reflection stage");
             ctx.setPipeline(rdReflCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             if (gx && gy) ctx.dispatch(gx, gy, 1);
+            stageEnd(rdReflTex_);
         }
+        if (!perStage) ctx.popMarker();
     }
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
     // dispatches above wrote them -- all four barriers sit here, unconditionally, rather than only
@@ -4510,14 +4679,15 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     return true;
 }
 
-// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's rdGiTex_/rdAoTex_ pair and
-// milestone 3's rdReflTex_): (re)creates or releases rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/
-// rdReflTex_ at the given render-target size. Shaped like ensureShadowHistory just above -- same two
-// call sites (onRenderTargetsChanged and setSettings' own on/off edge), same "release everything when
-// not wanted" branch first -- but simpler, since there is exactly one buffer and four textures here, no
-// ping-pong pair, and every texture is recreated outright on any size change rather than resized in
-// place: nothing here reprojects a previous frame's contents the way the shadow/reflection/ambient
-// histories do, so there is no stale content worth preserving across a resize.
+// STAGED RAY-DRIVEN PASSES (milestone 1, extended by milestone 2's rdGiTex_/rdAoTex_ pair, milestone
+// 3's rdReflTex_, and the sub-stage splits' own rdGiCandBuf_/rdShadowTileBuf_): (re)creates or
+// releases rdVisBuf_/rdSunVisTex_/rdGiTex_/rdAoTex_/rdReflTex_/rdGiCandBuf_/rdShadowTileBuf_ at the
+// given render-target size. Shaped like ensureShadowHistory just above -- same two call sites
+// (onRenderTargetsChanged and setSettings' own on/off edge), same "release everything when not
+// wanted" branch first -- but simpler, since there is no ping-pong pair, every texture is recreated
+// outright on any size change rather than resized in place, and every buffer is grown rather than
+// always rebuilt: nothing here reprojects a previous frame's contents the way the shadow/reflection/
+// ambient histories do, so there is no stale content worth preserving across a resize.
 bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     if (!res_ || !bindings_) return false;
 
@@ -4532,7 +4702,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     // avoid for u1, and the reason a placeholder exists here too.
     if (!rdStagedResourcesWanted() || width == 0 || height == 0) {
         const bool had = rdVisBuf_ != 0 || rdSunVisTex_ != 0 || rdGiTex_ != 0 || rdAoTex_ != 0 ||
-                         rdReflTex_ != 0;
+                         rdReflTex_ != 0 || rdGiCandBuf_ != 0 || rdShadowTileBuf_ != 0;
         if (had) {
             if (!rdVisBufPlaceholder_) {
                 rhi::BufferDesc pd;
@@ -4588,6 +4758,24 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
                 pd.debugName    = "Voxi ray-driven reflection placeholder";
                 rdReflPlaceholder_ = res_->createTexture(pd);
             }
+            // SUB-STAGE SPLITS' OWN PAIR, the identical 1-element StructuredBuffer placeholder shape
+            // rdVisBufPlaceholder_ immediately above already is.
+            if (!rdGiCandBufPlaceholder_) {
+                rhi::BufferDesc pd;
+                pd.bytes = kRdGiCandElemBytes;
+                pd.kind  = rhi::BufferKind::Default;
+                pd.allowUnorderedAccess = true;
+                pd.debugName = "Voxi ray-driven GI-trace candidate buffer placeholder";
+                rdGiCandBufPlaceholder_ = res_->createBuffer(pd);
+            }
+            if (!rdShadowTileBufPlaceholder_) {
+                rhi::BufferDesc pd;
+                pd.bytes = kRdShadowTileElemBytes;
+                pd.kind  = rhi::BufferKind::Default;
+                pd.allowUnorderedAccess = true;
+                pd.debugName = "Voxi ray-driven shadow-probe tile buffer placeholder";
+                rdShadowTileBufPlaceholder_ = res_->createBuffer(pd);
+            }
             // REBIND BEFORE DESTROY, always -- aver-view-outlives-its-buffer.md, and the identical
             // reasoning voxelAccumPlaceholder_'s own call site gives for itself.
             if (rdVisBufPlaceholder_) res_->setUavBuffer(bindings_, 11, rdVisBufPlaceholder_, kRdVisElemBytes, 1, 0);
@@ -4595,12 +4783,17 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
             if (rdGiPlaceholder_)     res_->setUav(bindings_, 13, rdGiPlaceholder_, 0);
             if (rdAoPlaceholder_)     res_->setUav(bindings_, 14, rdAoPlaceholder_, 0);
             if (rdReflPlaceholder_)   res_->setUav(bindings_, 15, rdReflPlaceholder_, 0);
+            if (rdGiCandBufPlaceholder_)     res_->setUavBuffer(bindings_, 17, rdGiCandBufPlaceholder_, kRdGiCandElemBytes, 1, 0);
+            if (rdShadowTileBufPlaceholder_) res_->setUavBuffer(bindings_, 18, rdShadowTileBufPlaceholder_, kRdShadowTileElemBytes, 1, 0);
             if (rdVisBuf_)    { res_->destroyBuffer(rdVisBuf_);  rdVisBuf_ = 0; }
             if (rdSunVisTex_) { res_->destroyTexture(rdSunVisTex_); rdSunVisTex_ = 0; }
             if (rdGiTex_)     { res_->destroyTexture(rdGiTex_);     rdGiTex_ = 0; }
             if (rdAoTex_)     { res_->destroyTexture(rdAoTex_);     rdAoTex_ = 0; }
             if (rdReflTex_)   { res_->destroyTexture(rdReflTex_);   rdReflTex_ = 0; }
+            if (rdGiCandBuf_)     { res_->destroyBuffer(rdGiCandBuf_);     rdGiCandBuf_ = 0; }
+            if (rdShadowTileBuf_) { res_->destroyBuffer(rdShadowTileBuf_); rdShadowTileBuf_ = 0; }
             rdVisBufElemCapacity_ = 0;
+            rdGiCandBufElemCapacity_ = rdShadowTileElemCapacity_ = 0;
             rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
             AVER_INFO("[Voxi] staged ray-driven resources released");
         }
@@ -4611,8 +4804,14 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     // resource already matches: nothing to do, the common case on every frame between resizes.
     const u32 pitch = width;
     const u32 elemCount = pitch * height;
+    // Tile count for rdShadowTileBuf_ -- one uint per 8x8 tile of the FULL render target, the SAME
+    // ceil(W/8) x ceil(H/8) shape CSRdShadowProbe's own dispatch and tileIdx math use.
+    const u32 tilesX = (width + 7u) / 8u;
+    const u32 tilesY = (height + 7u) / 8u;
+    const u32 tileElemCount = tilesX * tilesY;
     if (rdStagedW_ == width && rdStagedH_ == height && rdSunVisTex_ && rdGiTex_ && rdAoTex_ &&
-        rdReflTex_ && rdVisBufElemCapacity_ >= elemCount)
+        rdReflTex_ && rdVisBufElemCapacity_ >= elemCount &&
+        rdGiCandBufElemCapacity_ >= elemCount && rdShadowTileElemCapacity_ >= tileElemCount)
         return true;
 
     // THE TEXTURE HAS NO GROWTH HEADROOM, UNLIKE THE BUFFER BELOW: a Texture2D UAV view is exactly
@@ -4723,6 +4922,42 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
                   static_cast<f64>(bd.bytes) / (1024.0 * 1024.0), width, height, pitch);
     }
     res_->setUavBuffer(bindings_, 11, rdVisBuf_, kRdVisElemBytes, rdVisBufElemCapacity_, 0);
+
+    // SUB-STAGE SPLITS' OWN BUFFERS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): the identical
+    // "grown, not always rebuilt" shape rdVisBuf_ immediately above already is, allocated here
+    // UNCONDITIONALLY -- neither setting gates this, so a project that flips one on mid-session never
+    // finds an undersized buffer (see rdGiCandBuf_'s own comment, VoxiRenderer.hpp).
+    if (rdGiCandBufElemCapacity_ < elemCount) {
+        if (rdGiCandBuf_) res_->destroyBuffer(rdGiCandBuf_);
+        rhi::BufferDesc bd;
+        bd.bytes = static_cast<u64>(elemCount) * kRdGiCandElemBytes;
+        bd.kind  = rhi::BufferKind::Default;
+        bd.allowUnorderedAccess = true;
+        bd.debugName = "Voxi ray-driven GI-trace candidates";
+        rdGiCandBuf_ = res_->createBuffer(bd);
+        rdGiCandBufElemCapacity_ = rdGiCandBuf_ ? elemCount : 0;
+        if (!rdGiCandBuf_) return false;
+        AVER_INFO("[Voxi] ray-driven GI-trace candidate buffer: {} element(s) x {} B = {:.1f} MiB for "
+                  "{}x{} (row pitch {})", elemCount, kRdGiCandElemBytes,
+                  static_cast<f64>(bd.bytes) / (1024.0 * 1024.0), width, height, pitch);
+    }
+    res_->setUavBuffer(bindings_, 17, rdGiCandBuf_, kRdGiCandElemBytes, rdGiCandBufElemCapacity_, 0);
+
+    if (rdShadowTileElemCapacity_ < tileElemCount) {
+        if (rdShadowTileBuf_) res_->destroyBuffer(rdShadowTileBuf_);
+        rhi::BufferDesc bd;
+        bd.bytes = static_cast<u64>(tileElemCount) * kRdShadowTileElemBytes;
+        bd.kind  = rhi::BufferKind::Default;
+        bd.allowUnorderedAccess = true;
+        bd.debugName = "Voxi ray-driven shadow-probe tiles";
+        rdShadowTileBuf_ = res_->createBuffer(bd);
+        rdShadowTileElemCapacity_ = rdShadowTileBuf_ ? tileElemCount : 0;
+        if (!rdShadowTileBuf_) return false;
+        AVER_INFO("[Voxi] ray-driven shadow-probe tile buffer: {} tile(s) x {} B = {:.1f} KiB for "
+                  "{}x{} ({}x{} tiles)", tileElemCount, kRdShadowTileElemBytes,
+                  static_cast<f64>(bd.bytes) / 1024.0, width, height, tilesX, tilesY);
+    }
+    res_->setUavBuffer(bindings_, 18, rdShadowTileBuf_, kRdShadowTileElemBytes, rdShadowTileElemCapacity_, 0);
 
     rdStagedW_ = width;
     rdStagedH_ = height;
@@ -6360,7 +6595,14 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          // rayDrivenTexPso_/sceneRtBlendedTexPso_.
                                          rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                          rdSkyOccCsPso_, rdReflCsPso_,
-                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_};
+                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
+                                         // SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles /
+                                         // rayDrivenGiSplit): the identical "this function overwrites
+                                         // every member a few lines down" reasoning, for the four extra
+                                         // compute pipelines.
+                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_,
+                                         rdGiTraceCsPso_, rdGiTraceCbCsPso_,
+                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
@@ -6373,6 +6615,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
+    rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
 
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
@@ -6615,6 +6859,31 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.layout = giTex;
             rdShadowCsPso_ = res_->createComputePipeline(p);
         }
+        // SUB-STAGE SPLIT A (Settings::rayDrivenShadowTiles): CSRdShadowProbe, dispatched over the
+        // SAME (gx, gy) as csShadow -- one group per 8x8 tile -- writing its verdict to
+        // gRdShadowTiles (u18). Same layout/csDefs/SM 6.6 as csShadow immediately above, since it
+        // reconstructs the identical surface and traces through the identical rtShadow footprint.
+        const rhi::ShaderHandle csShadowProbe = compile("CSRdShadowProbe", rhi::ShaderStage::Compute, 66,
+                                                        rasterDefs(csDefs.c_str()).c_str());
+        if (csShadowProbe) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csShadowProbe;
+            p.layout = giTex;
+            rdShadowProbeCsPso_ = res_->createComputePipeline(p);
+        }
+        // CSRdShadow recompiled with AVER_RD_SHADOW_TILES=1 -- ORs gRdShadowTiles' own 3x3
+        // neighbourhood around its tile and skips the per-pixel ray wherever every probe in it
+        // agrees. Same layout/csDefs/SM 6.6 as csShadow; the default compile (csShadow itself, no
+        // define) stays byte-for-byte unchanged.
+        const rhi::ShaderHandle csShadowTiled =
+            compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
+                    rasterDefs((csDefs + ";AVER_RD_SHADOW_TILES=1").c_str()).c_str());
+        if (csShadowTiled) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csShadowTiled;
+            p.layout = giTex;
+            rdShadowTiledCsPso_ = res_->createComputePipeline(p);
+        }
         // MILESTONE 2: CSRdGi and CSRdSkyOcc, the two lighting-stage twins dispatched alongside
         // csShadow out of recordStagedRayDriven()'s single "Voxi RD lighting stages" span. Same SM
         // 6.6 requirement as csShadow immediately above for the identical reason -- giRestirIndirect/
@@ -6643,6 +6912,50 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.cs = csGiCb;
             p.layout = giTex;
             rdGiCbCsPso_ = res_->createComputePipeline(p);
+        }
+        // SUB-STAGE SPLIT B (Settings::rayDrivenGiSplit): CSRdGiTrace, the candidate trace CSRdGi
+        // itself used to run inline -- writes gRdGiCand (u17). Same layout/csDefs/SM 6.6 as csGi
+        // above. The checkerboard twin (rdGiTraceCbCsPso_) adds AVER_GI_CHECKERBOARD=1, pairing with
+        // csGiCb's own checkerboard dispatch, and is COMPACTED to the traced half's pixels alone
+        // (recordStagedRayDriven's own dispatch shape, not a shader-side early return).
+        const rhi::ShaderHandle csGiTrace = compile("CSRdGiTrace", rhi::ShaderStage::Compute, 66,
+                                                    rasterDefs(csDefs.c_str()).c_str());
+        if (csGiTrace) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csGiTrace;
+            p.layout = giTex;
+            rdGiTraceCsPso_ = res_->createComputePipeline(p);
+        }
+        const rhi::ShaderHandle csGiTraceCb =
+            compile("CSRdGiTrace", rhi::ShaderStage::Compute, 66,
+                    rasterDefs((csDefs + ";AVER_GI_CHECKERBOARD=1").c_str()).c_str());
+        if (csGiTraceCb) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csGiTraceCb;
+            p.layout = giTex;
+            rdGiTraceCbCsPso_ = res_->createComputePipeline(p);
+        }
+        // CSRdGi recompiled with AVER_GI_SPLIT=1 -- loads gRdGiCand instead of tracing its own
+        // candidate; the plain/checkerboard pair mirrors csGi/csGiCb's own pair exactly, so a project
+        // that compiled the checkerboard variant of one has everything the other needs too. The
+        // default compiles (csGi/csGiCb themselves, no define) stay byte-for-byte unchanged.
+        const rhi::ShaderHandle csGiSplit =
+            compile("CSRdGi", rhi::ShaderStage::Compute, 66,
+                    rasterDefs((csDefs + ";AVER_GI_SPLIT=1").c_str()).c_str());
+        if (csGiSplit) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csGiSplit;
+            p.layout = giTex;
+            rdGiSplitCsPso_ = res_->createComputePipeline(p);
+        }
+        const rhi::ShaderHandle csGiSplitCb =
+            compile("CSRdGi", rhi::ShaderStage::Compute, 66,
+                    rasterDefs((csDefs + ";AVER_GI_SPLIT=1;AVER_GI_CHECKERBOARD=1").c_str()).c_str());
+        if (csGiSplitCb) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csGiSplitCb;
+            p.layout = giTex;
+            rdGiSplitCbCsPso_ = res_->createComputePipeline(p);
         }
         const rhi::ShaderHandle csSkyOcc = compile("CSRdSkyOcc", rhi::ShaderStage::Compute, 66,
                                                    rasterDefs(csDefs.c_str()).c_str());
@@ -6716,11 +7029,14 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         if (rdVisCsPso_ && rdShadowCsPso_ && rayDrivenSplitTexPso_)
             AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
                       "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {}, "
-                      "half-rate GI checkerboard stage {})",
+                      "half-rate GI checkerboard stage {}, shadow-tile sub-stage {}, GI-trace "
+                      "sub-stage {})",
                       kRtTextureCapacity,
                       rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
                       rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable",
-                      rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable");
+                      rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable",
+                      (rdShadowProbeCsPso_ && rdShadowTiledCsPso_) ? "ready" : "unavailable",
+                      (rdGiTraceCsPso_ && rdGiSplitCsPso_) ? "ready" : "unavailable");
         else
             AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
                       "split pixel shader {}); voxi.rayDrivenStages 1 or 2 falls back to the single pass",
