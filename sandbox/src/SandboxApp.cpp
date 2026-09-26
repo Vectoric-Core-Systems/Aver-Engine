@@ -2057,6 +2057,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             f32 el = 0.0f, az = 0.0f;
             sky_.sunAngles(el, az);
             sky_.setSunAngles(el, az + sunSweepDeg_);
+            if (sunSweepTurnsLeft_ > 0 && --sunSweepTurnsLeft_ == 0) {
+                sunSweepFrames_ = 0;
+                sky_.sunAngles(el, az);
+                AVER_INFO("[Sandbox] --sun-sweep-frames: the drag let go at frame {}, sun at elevation "
+                          "{:.3f} deg, azimuth {:.3f} deg", t.frame, el, az);
+            }
         }
     }
 #if AVER_MODULE_VOXI

@@ -1448,7 +1448,7 @@ public:
     void setPtSceneToggleOnAuto(int framesIn);
     void setPtSceneToggleOffAuto(int framesIn);
     void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg);
-    void setSunSweep(int framesIn, f32 degPerFrame);
+    void setSunSweep(int framesIn, f32 degPerFrame, int turns);
     void setGiHistoryResetAt(int framesIn);
 #if AVER_MODULE_SR
     void setAverSrCycleAuto(int framesIn);   // --aversr-cycle [N]
@@ -4216,6 +4216,10 @@ private:
     // on are mid-drag, where every frame is a "sun moved" frame.
     int sunSweepFrames_ = 0;
     f32 sunSweepDeg_ = 0.0f;
+    // --sun-sweep-frames N: the drag LETS GO after N turns (0 = never), and the final angles are
+    // logged -- so a capture k frames later measures how long lighting takes to catch up with a sun
+    // that has stopped, against a --sun-set-at run to those same angles.
+    int sunSweepTurnsLeft_ = 0;
     int giHistoryResetAtFrames_ = 0;
     // True while a stored non-unity render scale is on trial this session; see the prefs-apply site.
     bool renderScaleCookieArmed_ = false;

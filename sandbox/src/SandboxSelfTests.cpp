@@ -330,8 +330,8 @@ void SandboxApp::setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg) {
     sunSetAtFrames_ = framesIn; sunSetElevDeg_ = elevDeg; sunSetAzimDeg_ = azimDeg;
 }
 
-void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame) {
-    sunSweepFrames_ = framesIn; sunSweepDeg_ = degPerFrame;
+void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame, int turns) {
+    sunSweepFrames_ = framesIn; sunSweepDeg_ = degPerFrame; sunSweepTurnsLeft_ = turns;
 }
 
 void SandboxApp::setGiHistoryResetAt(int framesIn) { giHistoryResetAtFrames_ = framesIn; }

@@ -5319,6 +5319,16 @@ void VoxiRenderer::applyReblurTuning() {
     t.fastHistoryClampingSigmaScale = settings_.reblurFastHistoryClampSigma;
     t.maxFastAccumulatedFrameNum    = settings_.reblurMaxFastAccumulatedFrameNum;
     t.historyFixFrameNum            = settings_.reblurHistoryFixFrameNum;
+    // THE SUN IS MOVING (nrdSunClampApplied_): cap the history depth -- see Settings::
+    // reblurSunMovingFrameNum. The stabilized and fast depths follow it down so NRD still gets
+    // historyFix < fast <= main, the same ordering Settings' own clamp keeps.
+    if (nrdSunClampApplied_ && settings_.reblurSunMovingFrameNum < t.maxAccumulatedFrameNum) {
+        t.maxAccumulatedFrameNum     = settings_.reblurSunMovingFrameNum;
+        t.maxStabilizedFrameNum      = std::min(t.maxStabilizedFrameNum, t.maxAccumulatedFrameNum);
+        t.maxFastAccumulatedFrameNum = std::min(t.maxFastAccumulatedFrameNum, t.maxAccumulatedFrameNum);
+        t.historyFixFrameNum = t.maxFastAccumulatedFrameNum == 0u ? 0u
+            : std::min(t.historyFixFrameNum, t.maxFastAccumulatedFrameNum - 1u);
+    }
     t.minBlurRadius                 = settings_.reblurMinBlurRadius;
     t.maxBlurRadius                 = settings_.reblurMaxBlurRadius;
     // ---- INDEX 0 (ReblurDiffuseOcclusion) IS TUNED TOO, AND THE COMMENT SAYING IT NEED NOT BE WAS
@@ -5572,8 +5582,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // depth, so the lag was never the denoiser's. Treating this frame as having no history restarts
         // each pixel from its fresh candidate, traced under the new sun, and the next frame reuses those:
         // with this and reuse history 1 (voxi_restir.hlsli) the same move read 9.7 / 2.6 / 1.7 at
-        // +3 / +17 / +42 frames against 12.2 / 8.7 / 3.8 before. What is left in the first frames is
-        // NRD's own history, deliberately not reset, so a drag stays denoised.
+        // +3 / +17 / +42 frames against 12.2 / 8.7 / 3.8 before. NRD's own history is not reset, so a
+        // drag stays denoised, but it is kept short while the sun moves (Settings::
+        // reblurSunMovingFrameNum) -- at full depth it was the rest of the lag after a drag let go.
         //
         // A JUMP, NOT EVERY CHANGE (rtHistSunJumped). Voiding on ANY change made a slider DRAG a run of
         // no-history frames: every frame restarted every pixel from one fresh candidate, so the
@@ -6004,8 +6015,14 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 // on a CHANGE (nrdGiCbApplied_ caches the last value pushed) so a steady frame does not
                 // re-call setReblurTuning() -- and its WARN-once rejection path -- every single frame.
                 const u8 wantCb = (giSignal && nrdGiInputCheckerboard_) ? 1u : 0u;
-                if (wantCb != nrdGiCbApplied_) {
+                // The sun-moving history clamp (Settings::reblurSunMovingFrameNum): on for the frames
+                // the sun moves and one after, since this dispatch reads last frame's GI write.
+                if (rtHistSunMoved()) nrdSunMovingHold_ = 2u;
+                else if (nrdSunMovingHold_ > 0u) --nrdSunMovingHold_;
+                const bool sunClamp = nrdSunMovingHold_ > 0u;
+                if (wantCb != nrdGiCbApplied_ || sunClamp != nrdSunClampApplied_) {
                     nrdGiCbApplied_ = wantCb;
+                    nrdSunClampApplied_ = sunClamp;
                     applyReblurTuning();
                 }
                 {

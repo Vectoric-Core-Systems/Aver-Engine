@@ -321,13 +321,16 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--gpu-validation")) aver::rhi::setGpuValidationEnabled(true);
     // --sun-sweep START DEG_PER_FRAME: verification-only, see sunSweepFrames_. A slider DRAG rather than
     // --sun-set-at's single jump: the sun's azimuth turns by DEG_PER_FRAME every frame from frame START on.
-    int sunSweepAtArg = 0;
+    // --sun-sweep-frames N: let go after N turns (see sunSweepTurnsLeft_); absent = the old endless drag.
+    int sunSweepAtArg = 0, sunSweepTurnsArg = 0;
     f32 sunSweepDegArg = 0.0f;
     for (int i = 1; i + 2 < argc; ++i)
         if (!std::strcmp(argv[i], "--sun-sweep")) {
             sunSweepAtArg  = std::atoi(argv[i + 1]);
             sunSweepDegArg = static_cast<f32>(std::atof(argv[i + 2]));
         }
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--sun-sweep-frames")) sunSweepTurnsArg = std::atoi(argv[i + 1]);
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--gi-history-reset-at")) giHistoryResetAtArg = std::atoi(argv[i + 1]);
 
@@ -1583,7 +1586,7 @@ Application* createApplication(int argc, char** argv) {
     if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
     if (sunSetAtArg > 0)         app->setSunSetAt(sunSetAtArg, sunSetElevArg, sunSetAzimArg);
-    if (sunSweepAtArg > 0)       app->setSunSweep(sunSweepAtArg, sunSweepDegArg);
+    if (sunSweepAtArg > 0)       app->setSunSweep(sunSweepAtArg, sunSweepDegArg, sunSweepTurnsArg);
     if (giHistoryResetAtArg > 0) app->setGiHistoryResetAt(giHistoryResetAtArg);
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);

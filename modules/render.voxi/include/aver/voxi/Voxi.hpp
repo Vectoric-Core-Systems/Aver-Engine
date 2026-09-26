@@ -603,6 +603,17 @@ struct Settings {
     float reblurFastHistoryClampSigma = 2.0f;
     u32   reblurMaxFastAccumulatedFrameNum = 6;
     u32   reblurHistoryFixFrameNum = 3;
+    // REBLUR_DIFFUSE's history depth (and its stabilized and fast depths, capped to it) on every
+    // frame the sun moves and the one after. With the full 30 + stabilization the ReSTIR GI kept
+    // the old sun's bounce light for about a second after a drag let go -- MEASURED on NewSponza
+    // (40-degree azimuth drag at 1 deg/frame, linear radiance, vs settled at the final angle): mean
+    // +3.6 on 14.6 one frame after, +1.9 at 11, +1.1 at 26, +0.5 at 61; with the denoiser off
+    // +0.25 / +0.07, and voxel cone GI showed none, so the lag was NRD's history alone. REBLUR
+    // clamps each pixel's accumulated count to this every frame and grows it by one after, so the
+    // history restarts short under the new sun instead of being thrown away: the drag stays
+    // denoised, just less smoothly. 63 (or anything at or above reblurMaxAccumulatedFrameNum)
+    // turns it off. Console: voxi.reblurSunMovingFrameNum.
+    u32   reblurSunMovingFrameNum = 4;
     float reblurMinBlurRadius = 1.0f;
     // 10, NOT NRD's 30 -- THE ONE DIAL HERE THAT MEASURED A WIN. REBLUR spreads a fresh history over
     // this radius with a sparse kernel, and after motion that sparse pattern is the grain. PTTest

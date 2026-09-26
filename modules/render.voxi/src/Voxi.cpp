@@ -247,6 +247,7 @@ void Renderer::setSettings(const Settings& s) {
         std::min(n.reblurMaxFastAccumulatedFrameNum, n.reblurMaxAccumulatedFrameNum);
     n.reblurHistoryFixFrameNum = n.reblurMaxFastAccumulatedFrameNum == 0u ? 0u
         : std::min(n.reblurHistoryFixFrameNum, n.reblurMaxFastAccumulatedFrameNum - 1u);
+    n.reblurSunMovingFrameNum = std::min(n.reblurSunMovingFrameNum, 63u);
     n.reblurMinBlurRadius = std::clamp(n.reblurMinBlurRadius, 0.0f, 100.0f);
     n.reblurMaxBlurRadius = std::clamp(n.reblurMaxBlurRadius, n.reblurMinBlurRadius, 100.0f);
 

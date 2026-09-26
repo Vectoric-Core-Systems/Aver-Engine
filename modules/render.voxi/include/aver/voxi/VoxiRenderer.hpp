@@ -2079,6 +2079,13 @@ private:
     // toggle re-applies it. NRD's docs list checkerboardMode as one of the settings safe to change on
     // any frame, so no history reset accompanies a change -- see applyReblurTuning()'s own comment.
     u8                    nrdGiCbApplied_ = 0;
+    // WHILE THE SUN MOVES, REBLUR_DIFFUSE KEEPS A SHORT HISTORY -- see Settings::
+    // reblurSunMovingFrameNum. nrdSunMovingHold_ counts down from 2 on every frame the sun moved:
+    // the NRD dispatch denoises LAST frame's GI write, so the frame after the sun stops still carries
+    // a moving-sun input. nrdSunClampApplied_ is what applyReblurTuning() reads, set in
+    // beginShadowHistory's NRD block and re-applied only when it changes, like nrdGiCbApplied_.
+    u32                   nrdSunMovingHold_ = 0;
+    bool                  nrdSunClampApplied_ = false;
 
     // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
     //

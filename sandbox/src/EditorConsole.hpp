@@ -1010,6 +1010,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "NRD default 3",
         []{ return vU32(Renderer::get().settings().reblurHistoryFixFrameNum); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurHistoryFixFrameNum = n; }); }});
+    t.push_back({"voxi.reblurSunMovingFrameNum", VarType::U32, false,
+        "REBLUR_DIFFUSE history depth while the sun moves (and one frame after), so a drag's bounce "
+        "light does not lag the sun. 63 or at/above voxi.reblurMaxAccumulatedFrameNum turns it off. "
+        "Default 4",
+        []{ return vU32(Renderer::get().settings().reblurSunMovingFrameNum); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurSunMovingFrameNum = n; }); }});
     t.push_back({"voxi.reblurMinBlurRadius", VarType::F32, false,
         "REBLUR_DIFFUSE spatial radius once converged, in pixels. NRD default 1",
         []{ return vF32(Renderer::get().settings().reblurMinBlurRadius); },
