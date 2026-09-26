@@ -552,9 +552,8 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     raster.lineWidth = 1.0f;
     // D3D12 additionally disables conservative rasterisation for mesh pipelines specifically on
     // WARP, its software rasteriser (D3D12Device.cpp's warpMeshConservative carve-out). This backend
-    // has no WARP analogue at all -- VulkanDevice::softwareAdapter_ is hardcoded false, honestly,
-    // since there is no OS-shipped Vulkan software rasteriser the way WARP ships with D3D12 -- so
-    // that carve-out has nothing to mirror here.
+    // has no WARP analogue at all -- there is no OS-shipped Vulkan software rasteriser -- so that
+    // carve-out has nothing to mirror here.
     if (d.conservativeRaster && dev_->cachedCaps().conservativeRaster) raster.pNext = &consRaster;
 
     VkPipelineMultisampleStateCreateInfo msaa{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};

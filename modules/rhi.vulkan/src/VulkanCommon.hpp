@@ -1011,11 +1011,6 @@ struct RhiTexture {
 #if AVER_RHI_TRACK_STATE
     std::vector<ResourceState> states;       // one entry per mip; a subresource index is a mip index here
 #endif
-    // The descriptor handed to the UI, cast to u64 -- see uiDescriptor()'s own note that this stays
-    // unused while VulkanDevice does not override IDevice's ui* methods (see the CMakeLists note on
-    // why imgui_impl_vulkan is a deliberately deferred decision). Kept so the field exists the day
-    // it is wired up, rather than adding it to this struct's ABI later.
-    u64 uiDescriptor = 0;
     // True for a record WRAPPING a VkImage/VkDeviceMemory this factory did NOT allocate -- today
     // only adoptExternalDepthTexture's republication of VulkanDevice::depthBuffer_/depthMemory_
     // (IDevice::sceneDepthTexture's contract, RHI.hpp). VulkanDevice owns and tears those down
@@ -1754,12 +1749,6 @@ private:
     bool nextDrawPrepassed_ = false;
     // Mesh drawMeshDepthOnly() last actually depth-drew, or 0; see D3D12Device's twin.
     MeshHandle depthOnlyMesh_ = 0;
-    // Draws issued by drawMeshDepthPrepass this frame -- NOT wired to a log line the way D3D12's
-    // depthPrepassDrawsLastFrame_/depthPrepassDrawsThisFrame_ pair is (that pair only exists to
-    // feed an AVER_INFO on change, which nothing in this backend's endFrame does yet); kept as one
-    // counter rather than the D3D12 last/this pair since there is no per-frame log comparison here
-    // to drive off it. A future port of that diagnostic can split it into the same pair D3D12 uses.
-    u32 depthPrepassDrawsThisFrame_ = 0;
 
     bool skyEnabled_ = false;
     bool sceneSuppressed_ = false;   // set in beginFrame when a feature suppressed the scene; read in endFrame so the deferred sky draw doesn't run over it
@@ -1930,10 +1919,6 @@ private:
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};   // the same colour as the scene radiance that tonemaps back to it
     std::string adapterName_ = "Vulkan Device";
-    // Always false, honestly: there is no OS-shipped software rasteriser the way WARP ships with
-    // D3D12 (DeviceDesc::useWarp has no Vulkan analogue). A caller asking for it gets a WARNING at
-    // init(), not a silent ignore -- see the contract's note on this.
-    bool softwareAdapter_ = false;
 
     bool viewportToTex_ = false;
     TextureHandle viewportTex_ = 0;
@@ -2017,9 +2002,6 @@ public:
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
 
-    // Backs IDevice::uiTextureId -- unused while VulkanDevice does not override the ui* methods
-    // (see VulkanDevice's own note); kept so the surface exists the day that changes.
-    u64 uiDescriptor(TextureHandle h);
     // The raw handle for VulkanRenderContext's copy/barrier/vertex-bind paths -- mirrors D3D12's
     // D3D12ResourceFactory::bufferResource() exactly, including "null on a bad handle".
     VkBuffer bufferResource(BufferHandle h) const;

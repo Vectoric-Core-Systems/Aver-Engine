@@ -83,9 +83,7 @@ private:
     Probe probes_[kProbes];
     u64   subject_ = 0;      // the animated entity, as a scene::Entity widened
     u64   reference_ = 0;    // the same mesh, no CSkeletalMesh, never posed
-    u64   clipId_ = 0;
     Vec3  restMin_{0, 0, 0}, restMax_{0, 0, 0};
-    u64   offscreen_ = 0;        // a third entity, parked far outside the frustum
     u32   maxCulled_ = 0;        // the most the host culled in any one frame of the run
     // The subject's published bounds, sampled once per phase. The pose is what should move them; a
     // box that never changes is a character culled and picked against its bind pose.

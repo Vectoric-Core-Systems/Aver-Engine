@@ -104,7 +104,6 @@ bool SkinSceneTest::setup(Engine& e, const std::string& dir,
     *outMeshId = 0x5C1'0001ull;
     *outSkelId = 0x5C1'0002ull;
     *outClipId = 0x5C1'0003ull;
-    clipId_ = *outClipId;
 
     // ---- the two entities ----
     scene::World& w = scene::World::instance();
@@ -160,7 +159,6 @@ bool SkinSceneTest::setup(Engine& e, const std::string& dir,
     }
     Transform to{}; to.position = Vec3{0.0f, 0.0f, -100000.0f}; to.scale = Vec3{1,1,1};
     w.setLocalTransform(off, to);
-    offscreen_ = off;
 
     subject_ = a;
     reference_ = c;

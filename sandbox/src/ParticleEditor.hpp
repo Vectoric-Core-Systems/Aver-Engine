@@ -127,8 +127,6 @@ public:
     void tickPreview(f32 dt);
     void restartPreview();
     const std::vector<particles::Particle>& previewParticles() const { return preview_; }
-    bool previewPlaying() const { return previewPlaying_; }
-    void setPreviewPlaying(bool on) { previewPlaying_ = on; }
 
 private:
     void loadFromDisk();

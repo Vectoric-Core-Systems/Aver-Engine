@@ -1389,13 +1389,6 @@ RhiTlas* VulkanResourceFactory::tlas(TlasHandle h) {
 VkBuffer VulkanResourceFactory::bufferResource(BufferHandle h) const {
     return (h == 0 || h > buffers_.size()) ? VK_NULL_HANDLE : buffers_[h - 1].buffer;
 }
-u64 VulkanResourceFactory::uiDescriptor(TextureHandle h) {
-    // Unused while VulkanDevice does not override IDevice's ui* methods (see its own note in
-    // VulkanCommon.hpp) -- a harmless always-0 stub so the surface exists the day imgui_impl_vulkan
-    // is wired up, mirroring D3D12ResourceFactory::uiDescriptor's own #else branch.
-    (void)h;
-    return 0;
-}
 
 // ================================================================================================
 // 5. Descriptor-set-layout / pipeline-layout cache, sampler cache

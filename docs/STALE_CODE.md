@@ -68,12 +68,11 @@ to, at the time.
 | ~~`sandbox/src/SandboxApp.cpp:5093` — `worldSpace_` affects nothing but the button label~~ — **FIXED.** `gizmoBasis()` and the gizmo's draw matrix (`SandboxApp.cpp` ~10861, ~11192) both branch on `worldSpace_` now (with an explicit, commented exception: Scale always draws local, matching Unreal). The coordinate-space switch is live. |
 | ~~`modules/audio/include/aver/audio/Mixer.hpp:167` — `lisFwd_` stored and never used, so listener orientation does not affect panning~~ — **FIXED.** `Mixer.cpp` (~line 324) now reads `lisFwd_` to compute a front/back dot product and applies a 3 dB cut when a source is behind the listener; the code comment there narrates the same fix. |
 | ~~`sandbox/src/SkinSceneTest.hpp:90` — `ok_` set once, never read, so the test's pass/fail flag is ignored~~ — **FIXED.** `passed()` (which reads `ok_`) is now called from `SandboxApp::exitCode` (`SandboxApp.cpp:6527`) so `--skin-scene-test`'s exit code reflects it; the header's own comment narrates the same fix. |
-| `sandbox/src/SkinSceneTest.hpp:86`, `:88` | `clipId_`, `offscreen_` — still assigned once in `SkinSceneTest.cpp` and never read anywhere. These two are the ones from this row still genuinely dead. |
+| ~~`sandbox/src/SkinSceneTest.hpp:86`, `:88` — `clipId_`, `offscreen_` assigned once, never read~~ — **REMOVED 2026-09-27.** |
 
 Four of the six original findings above turned out to have been fixed since the sweep — each one
-found by its own successor comment narrating the bug in the past tense, then confirmed by grep. Only
-`clipId_`/`offscreen_` (and the already-resolved `ambient_`/`sunColor_` row, fixed a different way)
-remain from this section.
+found by its own successor comment narrating the bug in the past tense, then confirmed by grep. The
+last two, `clipId_`/`offscreen_`, were removed 2026-09-27, so nothing remains from this section.
 
 ## B. Documentation that actively misleads (8 confirmed + 7 of the 8 unverified)
 

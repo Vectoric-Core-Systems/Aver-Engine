@@ -1958,7 +1958,7 @@ private:
     Vec3 pieCamRef_{0, 0, 0};
     f32  pieCamRefYaw_ = 0.0f, pieCamRefPitch_ = 0.0f;
     f32  pieCamMaxPos_ = 0.0f, pieCamMaxYaw_ = 0.0f, pieCamMaxPitch_ = 0.0f;
-    bool pieCamLooked_ = false, pieCamKeptYaw_ = false, pieCamKeptPitch_ = false;
+    bool pieCamKeptYaw_ = false, pieCamKeptPitch_ = false;
     bool pieCamPendingLook_ = false;
     f32  pieCamWantYaw_ = 0.0f, pieCamWantPitch_ = 0.0f;
 
@@ -4473,9 +4473,6 @@ private:
     bool defaultPawnPlay_ = false;
     struct PlaySavedTransform { scene::Entity e; Transform xf; bool visible = true; };
     std::vector<PlaySavedTransform> playWorldSnapshot_;
-    // Every entity alive when Play began. Anything alive at Stop that is NOT in here was created
-    // during play and is taken back down.
-    std::vector<scene::Entity> playPreexisting_;
     bool playWorldCaptured_ = false;
 
     std::vector<scene::Entity> levelEntities_;
@@ -4602,7 +4599,6 @@ private:
     // which then stamps it -- see logSink for why the sink cannot take the time itself.
     struct GraphPrint { std::string text; f64 at; u32 count; };
     std::deque<GraphPrint> graphPrints_;
-    bool                   graphPrintOverlay_ = true;
     bool                logAutoScroll_ = true;
     int                 logLevelFilter_ = 0;      // 0 = all, 1 = Info+, 2 = Warn+
     // Console: its OWN scrollback, never logLines_ -- sharing the engine-wide log firehose would

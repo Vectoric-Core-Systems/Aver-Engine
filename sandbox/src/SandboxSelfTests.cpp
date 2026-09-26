@@ -767,7 +767,7 @@ void SandboxApp::maybePieCameraTest() {
     }
 
     // ---- phase 2: one look, then settle. ----
-    if (pieCamFrame_ == 40) { pieCamPendingLook_ = true; pieCamLooked_ = true; return; }
+    if (pieCamFrame_ == 40) { pieCamPendingLook_ = true; return; }
     if (pieCamFrame_ == 41) return;                    // the look lands in the fly block here
     if (pieCamFrame_ == 42) {
         // DID THE LOOK SURVIVE THE ROUND TRIP? drivePlayCamera recomputes yaw_/pitch_ from the

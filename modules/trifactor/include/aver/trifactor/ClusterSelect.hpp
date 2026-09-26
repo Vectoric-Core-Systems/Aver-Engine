@@ -163,8 +163,8 @@ struct Frustum {
     // A default-constructed Frustum (all-zero planes) intersects every sphere of radius >= 0 -- see
     // the .cpp for why that is exact, not approximate. That makes `Frustum{}` a correct, deliberate
     // "cull nothing" value for a caller that does not want frustum culling at all, with no separate
-    // enable flag needed on this type (selectVisibleClusters below still takes one, for clarity at
-    // the call site).
+    // enable flag needed on this type (selectVisibleClustersWithStats below still takes one, for
+    // clarity at the call site).
     static Frustum fromViewProj(const Mat4& viewProj);
 
     // Conservative: a sphere straddling a plane counts as inside. False means "definitely fully
@@ -258,14 +258,6 @@ bool inCut(const ClusterView& c, const std::vector<ClusterView>& clusters, f32 t
 bool selectCluster(const ClusterView& c, const std::vector<ClusterView>& clusters, f32 thresholdPx,
                     const View& view, const Frustum& frustum);
 
-// Convenience: runs selectCluster over every entry of `clusters`, returning the ids selected. This is
-// NOT the "global pass" the brief warns a correct design should not need -- every iteration is still
-// the same O(1), independent-of-every-other-cluster decision; the loop exists only so a test (or an
-// early single-threaded adapter) does not have to hand-roll it. A real GPU path calls the equivalent
-// of selectCluster once per cluster/thread and never needs this function.
-std::vector<u32> selectVisibleClusters(const std::vector<ClusterView>& clusters, f32 thresholdPx,
-                                        const View& view, bool useFrustum = true);
-
 // ---------------------------------------------------------------------------------------- Counted select
 // The counts are as much the deliverable of this slice as the selection itself -- this is how anyone
 // (a reviewer, a future GPU-indirect-draw path, a regression test) proves the selector is actually
@@ -302,11 +294,12 @@ struct SelectionStats {
 };
 
 struct SelectionResult {
-    std::vector<u32> drawnIds;   // same contents selectVisibleClusters would return
+    std::vector<u32> drawnIds;   // the ids selectCluster selected
     SelectionStats stats;
 };
 
-// Same selection as selectVisibleClusters, plus the counts above. Still not a "global pass": the
+// Runs selectCluster over every entry of `clusters`, returning the ids selected plus the counts above.
+// A real GPU path calls selectCluster once per cluster/thread instead. Still not a "global pass": the
 // stats are accumulated incrementally, one cluster at a time, from decisions each cluster already
 // makes independently -- no second reconciliation step, no sort.
 SelectionResult selectVisibleClustersWithStats(const std::vector<ClusterView>& clusters, f32 thresholdPx,

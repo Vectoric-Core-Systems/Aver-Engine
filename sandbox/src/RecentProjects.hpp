@@ -103,7 +103,6 @@ public:
 
     int  selection() const { return sel_; }
     void select(int index);
-    void clearSelection() { sel_ = -1; }
 
     // The selected card's path, or empty when nothing is selected.
     //

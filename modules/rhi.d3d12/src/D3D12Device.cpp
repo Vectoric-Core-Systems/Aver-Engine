@@ -1509,10 +1509,6 @@ private:
     // handle: that mesh's posed vertex buffer IS its vbv, so the depth-only draw and the colour draw
     // read the same bytes. Consumed (zeroed) by every drawMesh() and by beginFrame, like the flag.
     MeshHandle depthOnlyMesh_ = 0;
-    // How many drawMeshDepthPrepass() draws this frame actually issued -- logged on change only,
-    // same discipline as lastSceneDrawn_ below, so --depth-prepass with nothing eligible on screen is
-    // diagnosable from the log rather than looking identical to the flag being ignored.
-    u32 depthPrepassDrawsLastFrame_ = 0, depthPrepassDrawsThisFrame_ = 0;
 
     bool skyEnabled_ = false;
     // Set in beginFrame when a feature suppressed the scene (its own scenePass replaced the whole
@@ -3995,15 +3991,10 @@ void D3D12Device::beginFrame() {
     depthOnlyMesh_ = 0;     // drawMesh consumes it; this is the backstop for an unpaired depth-only draw
     // Cleared here, not right after endFrame's flush drains it: both leave an empty list (nothing
     // between a flush and the next beginFrame calls drawMesh), but clearing only here keeps ONE place
-    // deciding "a new frame's captures start empty" -- the same discipline drawBinding_,
-    // nextDrawPrepassed_ and the depth-prepass counters below all follow.
+    // deciding "a new frame's captures start empty" -- the same discipline drawBinding_ and
+    // nextDrawPrepassed_ below follow.
     blendedDraws_.clear();
     blendedPipelineMissingWarned_ = false;   // said at most once per frame; see its own member comment
-    // Carried into *_Last so anything that wants "did --depth-prepass draw anything last frame" can
-    // read a settled number rather than one still being accumulated -- same handoff shape as
-    // lastSceneDrawn_ in SandboxApp.cpp -- then zeroed for the frame about to record.
-    depthPrepassDrawsLastFrame_ = depthPrepassDrawsThisFrame_;
-    depthPrepassDrawsThisFrame_ = 0;
     nextDrawPrepassed_ = false;   // a reset command list has consumed nothing from last frame either
 
     // The fence above has retired whatever last used this slice, so its timestamps are readable
@@ -4245,10 +4236,10 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
 // interleaved per-instance with colour draws -- that would split one contiguous "depth prepass" GPU
 // span into hundreds of one-draw slivers, and this engine's GPU stat tree budgets 64 open spans a
 // frame, not one per entity.
-// The frame-wide prepass: gated on its switch, and counted -- that count is the pass's own census.
+// The frame-wide prepass, gated on its switch.
 void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     if (!depthPrepassEnabled_) return;
-    if (depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false)) ++depthPrepassDrawsThisFrame_;
+    depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false);
 }
 
 // One draw's own depth, for an alpha-masked draw -- see IDevice::drawMeshDepthOnly. NOT gated on the

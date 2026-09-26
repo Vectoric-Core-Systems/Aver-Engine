@@ -86,7 +86,7 @@ u32 levelTriangleCount(const fmt::OcMeshData& mesh, u32 level);
 // requirement) -- but see the file header: `error`, `parents` and `children` are all left at their
 // defaults (0.0f / empty / empty) on purpose, because LOD collapse already happened one level up, in
 // chooseLevel. Every ClusterView this produces trivially passes `inCut` (error 0.0 <= any threshold,
-// no parents to disqualify it); running it through selectVisibleClusters/selectVisibleClustersWithStats
+// no parents to disqualify it); running it through selectVisibleClustersWithStats
 // therefore does PURE frustum + cone culling, nothing else. Appends to `out`; does not clear it first.
 void buildLevelClusterViews(const fmt::OcMeshData& mesh, u32 level, std::vector<ClusterView>& out);
 

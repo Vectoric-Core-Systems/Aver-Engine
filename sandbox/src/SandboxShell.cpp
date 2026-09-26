@@ -2622,8 +2622,6 @@ void SandboxApp::buildUI(Engine& e) {
 // transient feed of the last few, so it answers "what just happened" without becoming something
 // to scroll. Oldest at the top, so a burst reads in the order it fired.
 void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
-    if (!graphPrintOverlay_) return;
-
     const f64 now = ImGui::GetTime();
     std::vector<std::pair<std::string, f32>> visible;   // text, alpha
     {

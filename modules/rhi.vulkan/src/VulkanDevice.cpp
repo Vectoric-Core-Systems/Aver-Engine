@@ -577,7 +577,7 @@ bool deviceHasExtension(const VulkanApi& api, VkPhysicalDevice phys, const char*
 bool VulkanDevice::init(const DeviceDesc& desc) {
     if (desc.useWarp) {
         // Honest, not silent: DeviceDesc::useWarp has no Vulkan analogue (no OS-shipped software
-        // rasteriser the way D3D12 ships WARP) -- see softwareAdapter_'s own comment.
+        // rasteriser the way D3D12 ships WARP).
         AVER_WARN("[RHI.Vulkan] useWarp was requested; Vulkan has no software-rasteriser adapter to "
                   "select, so hardware selection proceeds as normal");
     }
@@ -702,7 +702,6 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     graphicsQueueFamily_ = bestQueueFamily;
     api_.GetPhysicalDeviceMemoryProperties(physicalDevice_, &memoryProps_);
     adapterName_ = physicalDeviceProps_.deviceName;
-    softwareAdapter_ = false;   // see the field's own comment; always false here, honestly
     minUboAlignment_ = physicalDeviceProps_.limits.minUniformBufferOffsetAlignment;
     minStorageAlignment_ = physicalDeviceProps_.limits.minStorageBufferOffsetAlignment;
     maxPushConstantsSize_ = physicalDeviceProps_.limits.maxPushConstantsSize;
@@ -2570,7 +2569,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
 // (IDevice::drawMeshDepthOnly, for alpha-masked draws) is neither, and both share one body.
 void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     if (!depthPrepassEnabled_) return;
-    if (depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false)) ++depthPrepassDrawsThisFrame_;
+    depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false);
 }
 bool VulkanDevice::drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     const bool wrote = depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/true);

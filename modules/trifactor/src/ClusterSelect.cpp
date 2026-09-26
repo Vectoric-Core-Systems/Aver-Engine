@@ -137,20 +137,6 @@ bool selectCluster(const ClusterView& c, const std::vector<ClusterView>& cluster
     return inCut(c, clusters, thresholdPx, view);
 }
 
-std::vector<u32> selectVisibleClusters(const std::vector<ClusterView>& clusters, f32 thresholdPx,
-                                        const View& view, bool useFrustum) {
-    // Frustum{} (all-zero planes) intersects everything -- see Frustum::intersectsSphere's comment --
-    // so building one only when useFrustum is requested, and leaving it default otherwise, is enough;
-    // no separate "skip the test" branch is needed in the loop below.
-    const Frustum frustum = useFrustum ? Frustum::fromViewProj(view.viewProj) : Frustum{};
-
-    std::vector<u32> selected;
-    selected.reserve(clusters.size());
-    for (const ClusterView& c : clusters)
-        if (selectCluster(c, clusters, thresholdPx, view, frustum)) selected.push_back(c.id);
-    return selected;
-}
-
 SelectionResult selectVisibleClustersWithStats(const std::vector<ClusterView>& clusters, f32 thresholdPx,
                                                 const View& view, bool useFrustum) {
     const Frustum frustum = useFrustum ? Frustum::fromViewProj(view.viewProj) : Frustum{};
