@@ -1933,6 +1933,11 @@ private:
     // has passed it. So a bake schedules the copy, waits kGiCacheReadbackDelay frames -- longer than
     // the deepest frame-in-flight -- and only then reads and writes the file.
     static constexpr u32 kGiCacheReadbackDelay = 4;
+    // HOW LONG A VOLUME MUST STAY SETTLED BEFORE IT IS WORTH A FILE: quiet gate ticks after the bounces
+    // converge (~2 s at 60 fps). Settling alone takes ~6 ticks, so every pause in a sun drag or a camera
+    // flight used to queue a 19 MB entry for a state nobody returns to -- one owner session wrote 11
+    // files on exit, 7 of them intermediate drag positions. A state held this long is one worth keeping.
+    static constexpr u32 kGiCacheDwellTicks = 120;
     rhi::BufferHandle giCacheReadback_ = 0;
     rhi::BufferHandle giCacheUpload_ = 0;
     u64  giCacheBufBytes_ = 0;

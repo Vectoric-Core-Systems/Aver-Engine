@@ -1681,9 +1681,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                 // answer (giConvergeTicks_ > 0) is busy work the snapshot gate alone happened to skip,
                 // not an idle accumulator waiting to be freed.
                 if (giConvergeTicks_ == 0) ++giQuietTicks_;
-                // The volume has settled: inputs unchanged and the bounces converged. The one moment
-                // it is worth caching -- see giCacheSettlePending_.
-                if (giCacheSettlePending_ && giCacheScheduleDump(ctx)) giCacheSettlePending_ = false;
+                // The volume has settled -- inputs unchanged, bounces converged -- and stayed that way
+                // for kGiCacheDwellTicks: the one moment it is worth caching (giCacheSettlePending_).
+                if (giCacheSettlePending_ && giQuietTicks_ >= kGiCacheDwellTicks && giCacheScheduleDump(ctx))
+                    giCacheSettlePending_ = false;
             } else {
                 giQuietTicks_ = 0;
                 // W12: the accumulator may have been freed since the last rebuild. A rebuild this gate
