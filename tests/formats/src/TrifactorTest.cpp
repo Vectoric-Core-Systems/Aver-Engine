@@ -95,6 +95,54 @@ static fmt::OcMeshData makeSkinnedGridMesh(u32 n, f32 spacing = 100.0f) {
     return m;
 }
 
+// Two folded, textured, normal-mapped-shaped panels sharing ONE mesh, each its own submesh and
+// material slot with its own UV range -- the shape the --lod 0.25 bug report was filed against
+// (NewSponza_Curtains_glTF's curtain meshes: a cloth primitive plus a metal_door primitive sharing
+// one glTF mesh). "Folded" rather than flat, deliberately: a flat panel's per-vertex normal always
+// exactly equals its face normal, which would make the hemisphere check below pass even if
+// simplifyMesh started blending or flipping normals -- a sinusoidal fold gives every vertex its own,
+// analytically-known normal that only agrees with its face's if nothing along the way corrupted it.
+// panelIndex only changes the panel's UV origin and X offset, kept far enough apart (UV origin 5.0,
+// world offset 10000 units) that no vertex of one panel can be mistaken for the other's by position
+// OR by UV, which is what lets the per-submesh checks below tell "stayed in its own material" apart
+// from "coincidentally still looks right".
+static fmt::OcMeshData makeFoldedTwoMaterialMesh(u32 n, f32 spacing = 50.0f) {
+    fmt::OcMeshData m;
+    const auto addPanel = [&](f32 originX, f32 uvOrigin, f32 foldAmplitude) {
+        const u32 base = m.vertexCount();
+        for (u32 y = 0; y < n; ++y) {
+            for (u32 x = 0; x < n; ++x) {
+                const f32 fx = static_cast<f32>(x), fy = static_cast<f32>(y);
+                const f32 z = foldAmplitude * std::sin(fx * 0.9f);
+                m.positions.insert(m.positions.end(), {originX + fx * spacing, fy * spacing, z});
+                // Analytic normal of z = A*sin(0.9x): tangent along X is (1, 0, 0.9*A*cos(0.9x)),
+                // tangent along Y is (0, 1, 0); normal is their cross product, normalized.
+                const f32 dzdx = foldAmplitude * 0.9f * std::cos(fx * 0.9f);
+                const Vec3 nrm = cross(Vec3{1.0f, 0.0f, dzdx}, Vec3{0.0f, 1.0f, 0.0f}).getSafeNormal();
+                m.normals.insert(m.normals.end(), {nrm.x, nrm.y, nrm.z});
+                m.uvs.insert(m.uvs.end(), {uvOrigin + fx / f32(n - 1), uvOrigin + fy / f32(n - 1)});
+            }
+        }
+        const u32 indexStart = static_cast<u32>(m.indices.size());
+        for (u32 y = 0; y + 1 < n; ++y) {
+            for (u32 x = 0; x + 1 < n; ++x) {
+                const u32 i00 = base + y * n + x, i10 = base + y * n + x + 1;
+                const u32 i01 = base + (y + 1) * n + x, i11 = base + (y + 1) * n + x + 1;
+                for (u32 idx : {i00, i10, i11, i00, i11, i01}) m.indices.push_back(idx);
+            }
+        }
+        return std::pair<u32, u32>{indexStart, static_cast<u32>(m.indices.size()) - indexStart};
+    };
+
+    const auto [start0, count0] = addPanel(0.0f, 0.0f, 30.0f);          // "cloth": big, floppy folds
+    const auto [start1, count1] = addPanel(10000.0f, 5.0f, 2.0f);       // "metal_door": far away, barely folded
+
+    m.submeshes.push_back(fmt::OcMeshSubmesh{"cloth", 0, start0, count0, 0, m.vertexCount()});
+    m.submeshes.push_back(fmt::OcMeshSubmesh{"metal_door", 1, start1, count1, 0, m.vertexCount()});
+    m.materialSlots = {"M_Cloth", "M_MetalDoor"};
+    return m;
+}
+
 // A single triangle: the smallest possible input, well under one meshlet's 64-vertex/124-triangle
 // capacity. Exercises "cluster this" degenerating gracefully to "one cluster, no hierarchy above it".
 static fmt::OcMeshData makeSingleTriangle() {
@@ -411,6 +459,127 @@ int main() {
               "joints and weights survive the round trip byte for byte");
         std::error_code rmec;
         std::filesystem::remove(out, rmec);
+    }
+
+    AVER_INFO("=== simplifyMesh keeps every submesh inside its own material ===");
+    {
+        // THE BUG. A multi-submesh mesh -- one glTF primitive per material, exactly the shape
+        // NewSponza_Curtains_glTF's curtain meshes are (a cloth primitive plus a metal_door
+        // primitive sharing one mesh) -- used to be simplified as ONE global index buffer with no
+        // regard for where its submeshes' [indexStart, indexCount) ranges fell. mesh.submeshes was
+        // never updated to match the reshuffled result, so Runtime/src/GameContent.cpp's
+        // buildMeshParts either skipped a now-out-of-range submesh outright or cut a range that no
+        // longer held that material's triangles at all -- and once fewer than two parts survived,
+        // buildMeshParts gave up on splitting and drew the WHOLE mesh under one material, which for
+        // the curtains was the metal door's dark, glossy material. This reproduces the shape at the
+        // reported ratio (0.25), hard enough that the old whole-buffer code would certainly have
+        // shuffled triangles across the two panels' ranges.
+        fmt::OcMeshData mesh = makeFoldedTwoMaterialMesh(24);
+        const usize beforeTris = mesh.indices.size() / 3;
+        check(mesh.submeshes.size() == 2, "the fixture starts with two submeshes");
+
+        // Snapshot each submesh's own source UV range BEFORE simplifying. The two panels' UV
+        // origins (0.0 and 5.0) are far enough apart that one panel's UVs cannot possibly land
+        // inside the other's range by coincidence -- so after simplifying, a submesh whose
+        // triangles still fall within ITS OWN pre-simplify UV range could not have picked up any
+        // triangle that used to belong to the other material.
+        struct UvRange { f32 uMin, uMax, vMin, vMax; };
+        std::vector<UvRange> sourceRange(mesh.submeshes.size());
+        for (usize s = 0; s < mesh.submeshes.size(); ++s) {
+            const fmt::OcMeshSubmesh& sm = mesh.submeshes[s];
+            UvRange r{std::numeric_limits<f32>::max(), -std::numeric_limits<f32>::max(),
+                      std::numeric_limits<f32>::max(), -std::numeric_limits<f32>::max()};
+            for (usize k = sm.indexStart; k < usize(sm.indexStart) + sm.indexCount; ++k) {
+                const u32 vi = mesh.indices[k];
+                r.uMin = std::min(r.uMin, mesh.uvs[usize(vi) * 2]);
+                r.uMax = std::max(r.uMax, mesh.uvs[usize(vi) * 2]);
+                r.vMin = std::min(r.vMin, mesh.uvs[usize(vi) * 2 + 1]);
+                r.vMax = std::max(r.vMax, mesh.uvs[usize(vi) * 2 + 1]);
+            }
+            sourceRange[s] = r;
+        }
+
+        std::string why;
+        check(trifactor::simplifyMesh(mesh, 0.25f, &why), "simplifyMesh at the reported ratio (0.25): " + why);
+        check(mesh.indices.size() / 3 < beforeTris, "the triangle count actually fell (" +
+              std::to_string(beforeTris) + " -> " + std::to_string(mesh.indices.size() / 3) + ")");
+        check(mesh.submeshes.size() == 2, "still two submeshes after simplifying");
+
+        // 1) SUBMESH RANGES: exactly, contiguously cover the NEW (shrunk) index buffer -- the direct
+        // fix for the reported bug. The old code left indexStart/indexCount describing the OLD,
+        // larger buffer; buildMeshParts (Runtime/src/GameContent.cpp) needs this to hold exactly, or
+        // it either skips a submesh (a range past the end) or cuts the wrong triangles (a range that
+        // still fits but no longer means what it used to).
+        usize covered = 0;
+        bool contiguous = true;
+        for (const fmt::OcMeshSubmesh& sm : mesh.submeshes) {
+            if (sm.indexStart != covered) contiguous = false;
+            covered += sm.indexCount;
+        }
+        check(contiguous, "submesh ranges are contiguous and in order, with no gap or overlap");
+        check(covered == mesh.indices.size(),
+              "submesh ranges cover the whole simplified index buffer exactly (" +
+              std::to_string(covered) + " vs " + std::to_string(mesh.indices.size()) + " indices)");
+
+        // 2) MATERIAL ISOLATION: every triangle a submesh's range now names still has UVs inside
+        // THAT submesh's own pre-simplify UV range -- i.e. no triangle that used to belong to the
+        // OTHER material (whose UV range starts 5.0 away) ended up drawn under this one.
+        for (usize s = 0; s < mesh.submeshes.size(); ++s) {
+            const fmt::OcMeshSubmesh& sm = mesh.submeshes[s];
+            const UvRange& r = sourceRange[s];
+            bool staysInOwnMaterial = true;
+            for (usize k = sm.indexStart; k < usize(sm.indexStart) + sm.indexCount; ++k) {
+                const u32 vi = mesh.indices[k];
+                const f32 u = mesh.uvs[usize(vi) * 2], v = mesh.uvs[usize(vi) * 2 + 1];
+                if (u < r.uMin - 1e-4f || u > r.uMax + 1e-4f || v < r.vMin - 1e-4f || v > r.vMax + 1e-4f)
+                    staysInOwnMaterial = false;
+            }
+            check(staysInOwnMaterial, "submesh " + std::to_string(s) + " ('" + sm.name + "')'s triangles "
+                  "all stay within its own material's source UV range after simplifying -- none of the "
+                  "other material's triangles landed in this range");
+        }
+
+        // 3) NORMALS: unit length, and in the same hemisphere as their own triangle's geometric face
+        // normal -- ruling out "normals wrongly interpolated/blended after collapse" the bug report
+        // also named as a suspect. meshopt_remapVertexBuffer only ever SELECTS an existing vertex's
+        // normal, never blends one, so this should hold exactly; a hemisphere disagreement would
+        // mean something walked off that guarantee.
+        bool allUnitLength = true, allSameHemisphere = true;
+        usize normalsChecked = 0;
+        const auto pos = [&](u32 i) {
+            return Vec3{mesh.positions[usize(i) * 3], mesh.positions[usize(i) * 3 + 1], mesh.positions[usize(i) * 3 + 2]};
+        };
+        for (usize t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            const u32 ia = mesh.indices[t], ib = mesh.indices[t + 1], ic = mesh.indices[t + 2];
+            const Vec3 a = pos(ia), b = pos(ib), c = pos(ic);
+            const Vec3 faceN = cross(b - a, c - a);
+            if (faceN.size() < 1e-8f) continue;   // degenerate triangle: no face normal to compare against
+            const Vec3 faceNn = faceN.getSafeNormal();
+            for (u32 i : {ia, ib, ic}) {
+                const Vec3 n{mesh.normals[usize(i) * 3], mesh.normals[usize(i) * 3 + 1], mesh.normals[usize(i) * 3 + 2]};
+                if (std::abs(n.size() - 1.0f) > 1e-3f) allUnitLength = false;
+                if (dot(n, faceNn) <= 0.0f) allSameHemisphere = false;
+                ++normalsChecked;
+            }
+        }
+        check(normalsChecked > 0, "at least one non-degenerate triangle was actually checked");
+        check(allUnitLength, "every surviving vertex normal is still unit length after simplifying");
+        check(allSameHemisphere, "every surviving vertex normal stays in the same hemisphere as its "
+              "own triangle's geometric face normal");
+
+        // 4) UVs: every surviving vertex's UV still falls within the SOURCE mesh's overall UV range
+        // (both panels together) -- ruling out "UV seams collapsed" producing a UV that never
+        // existed in the source, e.g. from an averaged/blended pair.
+        const f32 wholeUMin = std::min(sourceRange[0].uMin, sourceRange[1].uMin) - 1e-4f;
+        const f32 wholeUMax = std::max(sourceRange[0].uMax, sourceRange[1].uMax) + 1e-4f;
+        const f32 wholeVMin = std::min(sourceRange[0].vMin, sourceRange[1].vMin) - 1e-4f;
+        const f32 wholeVMax = std::max(sourceRange[0].vMax, sourceRange[1].vMax) + 1e-4f;
+        bool allUvInRange = true;
+        for (usize i = 0; i < mesh.vertexCount(); ++i) {
+            const f32 u = mesh.uvs[i * 2], v = mesh.uvs[i * 2 + 1];
+            if (u < wholeUMin || u > wholeUMax || v < wholeVMin || v > wholeVMax) allUvInRange = false;
+        }
+        check(allUvInRange, "every surviving vertex's UV stays within the source mesh's UV range");
     }
 
     AVER_INFO("=== buildLodHierarchy: multiple levels, monotonic error, acyclic ===");

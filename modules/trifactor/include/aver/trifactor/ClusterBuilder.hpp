@@ -634,8 +634,8 @@ bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErro
 bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why = nullptr);
 
 // Reduces `mesh` in place to roughly `ratio` of its triangles (0 < ratio < 1), rewriting positions,
-// normals, UVs and indices. Returns false and leaves the mesh UNTOUCHED if the input is unusable or
-// the simplifier could not reach anywhere near the target.
+// normals, UVs, indices AND (see below) mesh.submeshes. Returns false and leaves the mesh UNTOUCHED
+// if the input is unusable or the simplifier could not reach anywhere near the target.
 //
 // WHY THIS EXISTS, and what it is not. It is not virtualized geometry -- it is the blunt instrument
 // that makes photogrammetry usable before virtualized geometry lands. Measured on this tree: frame
@@ -647,12 +647,31 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why = nul
 //
 // The real fix is picking a LOD per cluster on the GPU (that plan's slices 1-5), for which
 // buildLodHierarchy above already computes the hierarchy and the error metric. This function is the
-// stopgap that does not need any of it: ONE decimation, at cook time, for the whole mesh.
+// stopgap that does not need any of it: ONE decimation, at cook time, per SUBMESH (see below) rather
+// than virtualized per-cluster LOD.
 //
-// SEAMS ARE NOT PROTECTED HERE, deliberately. buildLodHierarchy locks group borders because
-// neighbouring clusters must still meet; a whole-mesh decimation has no neighbour to meet, so
-// locking its outer border would only prevent the silhouette from ever simplifying. If this is ever
-// used on something that tiles against another mesh, that assumption stops holding.
+// PER-SUBMESH, NOT WHOLE-MESH, and this is not optional: a mesh with more than one OcMeshSubmesh (one
+// per glTF primitive/material) partitions `indices` into per-material ranges that
+// Runtime/src/GameContent.cpp's buildMeshParts later cuts verbatim to draw each material
+// separately. meshopt_simplify only sees positions, with no idea two triangles belong to different
+// materials, so simplifying everything as one buffer (this function's behaviour before it went
+// submesh-aware) reshuffled triangles across those ranges while mesh.submeshes kept describing the
+// OLD layout -- the on-disk file this then produced looked fine and loaded without error, but
+// buildMeshParts either dropped a now-out-of-range submesh or drew the wrong triangles under its
+// material, and once fewer than two ranges survived that it gave up on splitting entirely and drew
+// the WHOLE mesh under one material. (Observed on NewSponza's curtain meshes -- cloth plus a
+// metal_door primitive sharing one mesh -- as the whole curtain going dark and glossy-black once
+// --lod was used.) This function now simplifies each submesh's own index range independently, so a
+// material's triangles can never end up inside another material's range no matter how meshopt
+// reorders within its own submesh, and rewrites mesh.submeshes' indexStart/indexCount to match
+// afterward. A mesh with no submesh table at all (mesh.submeshes.empty()) keeps the old, whole-buffer
+// behaviour exactly, since there is no partition to protect.
+//
+// SEAMS -- INSIDE one submesh -- ARE NOT PROTECTED, deliberately. buildLodHierarchy locks group
+// borders because neighbouring clusters must still meet; a submesh's own outer border has no
+// neighbour outside this mesh to meet either, so locking it would only prevent the silhouette from
+// ever simplifying. If this is ever used on something that tiles against another mesh, that
+// assumption stops holding.
 bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why = nullptr);
 
 } // namespace aver::trifactor

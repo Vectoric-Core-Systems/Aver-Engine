@@ -183,6 +183,31 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     if (in.submeshes.size() > 255) return fail(why, ".ocmesh: more than 255 submeshes");
     if (in.lodCount() > 255) return fail(why, ".ocmesh: more than 255 LODs");
 
+    // LOD 0's SubmeshRange table (§5.6) is trusted as-is by every reader -- most importantly
+    // Runtime/src/GameContent.cpp's buildMeshParts, which cuts md.indices[indexStart, indexStart+
+    // indexCount) verbatim and binds whatever lands in that slice to the submesh's own material. A
+    // table that no longer matches `in.indices` (a range that overshoots it, or ranges that leave a
+    // gap or overlap) used to write and load without a single error and only misbehave once a
+    // renderer tried to draw it -- either dropping a submesh outright or shading the WRONG
+    // triangles under its material (aver::trifactor::simplifyMesh reshuffling `indices` without
+    // updating `submeshes` to match was exactly this, before it became submesh-aware). Caught here
+    // instead: a mesh whose submeshes do not exactly, contiguously account for every LOD-0 index
+    // cannot be written at all, so this can never again reach a file silently.
+    {
+        usize covered = 0;
+        for (const OcMeshSubmesh& s : in.submeshes) {
+            if (usize(s.indexStart) != covered)
+                return fail(why, ".ocmesh: submesh '" + s.name + "' starts at index " +
+                                      std::to_string(s.indexStart) + ", but the submesh(es) before it "
+                                      "cover indices [0, " + std::to_string(covered) + ") -- submeshes "
+                                      "must contiguously partition the index buffer with no gap or overlap");
+            covered += s.indexCount;
+        }
+        if (covered != in.indices.size())
+            return fail(why, ".ocmesh: submeshes cover " + std::to_string(covered) + " of the mesh's " +
+                                  std::to_string(in.indices.size()) + " indices");
+    }
+
     OcMeshData m = in;
     m.computeBounds();
 
