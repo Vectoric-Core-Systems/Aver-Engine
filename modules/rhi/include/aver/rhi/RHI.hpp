@@ -158,6 +158,22 @@ void clampCaps(DeviceCaps& caps);
 void setSimulatedDeviceLoss(u32 afterPresentedFrames);
 u32  simulatedDeviceLoss();
 
+// D3D12 DRED (Device Removed Extended Data), forced on via --dred. SAME SHAPE OF PROBLEM as
+// setSimulatedDeviceLoss just above: the D3D12 backend has to ask for DRED off the debug interface
+// BEFORE D3D12CreateDevice runs, which is earlier than SandboxApp's DeviceDesc reaches it (that
+// struct is filled from the app's own config, itself built after argv parsing but read only once
+// device creation starts) -- so this is a plain pre-device flag, not a DeviceDesc field.
+// Header-only: RHI.cpp is not where this pairing lives, so there is no matching definition there;
+// the D3D12 backend is the only reader.
+inline bool g_dredEnabled = false;
+inline void setDredEnabled(bool enabled) { g_dredEnabled = enabled; }
+inline bool dredEnabled() { return g_dredEnabled; }
+// --gpu-validation: D3D12 GPU-based validation (checks every descriptor and resource state a shader
+// actually touches). Needs --debug-layer as well, and is far slower; for diagnosing device loss only.
+inline bool g_gpuValidationEnabled = false;
+inline void setGpuValidationEnabled(bool enabled) { g_gpuValidationEnabled = enabled; }
+inline bool gpuValidationEnabled() { return g_gpuValidationEnabled; }
+
 // Camera post-processing: exposure, bloom and eye adaptation.
 struct PostSettings {
     // Linear multiplier on scene radiance, applied BEFORE the tonemap. With autoExposure on it

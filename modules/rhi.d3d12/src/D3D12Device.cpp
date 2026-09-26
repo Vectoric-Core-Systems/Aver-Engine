@@ -752,6 +752,110 @@ void setDebugName(ID3D12Object* obj, const char* name) {
     obj->SetName(w.c_str());
 }
 
+// ---- DRED (--dred) name decoding -----------------------------------------------------------
+// Both used only by D3D12Device::dumpDredOnDeviceRemoved, after the device that would otherwise
+// answer these enums with something friendlier is already gone.
+
+// Readable name for a DRED breadcrumb op. Covers the ops this engine's own recording can produce
+// (draws, dispatches, mesh dispatches, RT AS builds, the barriers/clears/copies/markers around
+// them) plus ExecuteIndirect; an op outside that set is printed by its raw D3D12_AUTO_BREADCRUMB_OP
+// value in the caller rather than guessed at here.
+const char* dredOpName(D3D12_AUTO_BREADCRUMB_OP op) {
+    switch (op) {
+    case D3D12_AUTO_BREADCRUMB_OP_SETMARKER:                            return "SetMarker";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT:                           return "BeginEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT:                             return "EndEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED:                        return "DrawInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED:                 return "DrawIndexedInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH:                             return "Dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH:                         return "DispatchMesh";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE:                         return "CopyResource";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE:                   return "ResolveSubresource";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER:                      return "ResourceBarrier";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW:                return "ClearRenderTargetView";
+    case D3D12_AUTO_BREADCRUMB_OP_BUILDRAYTRACINGACCELERATIONSTRUCTURE: return "BuildRaytracingAccelerationStructure";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT:                      return "ExecuteIndirect";
+    default: return nullptr;
+    }
+}
+
+// Readable name for a DRED page-fault allocation's type. Covers what this renderer actually
+// allocates (RESOURCE covers every buffer/texture; STATE_OBJECT is the RT pipelines' own kind, not
+// a PIPELINE_STATE); anything else is printed by its raw D3D12_DRED_ALLOCATION_TYPE value.
+const char* dredAllocTypeName(D3D12_DRED_ALLOCATION_TYPE t) {
+    switch (t) {
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE:     return "CommandQueue";
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_ALLOCATOR: return "CommandAllocator";
+    case D3D12_DRED_ALLOCATION_TYPE_PIPELINE_STATE:    return "PipelineState";
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_LIST:      return "CommandList";
+    case D3D12_DRED_ALLOCATION_TYPE_FENCE:             return "Fence";
+    case D3D12_DRED_ALLOCATION_TYPE_DESCRIPTOR_HEAP:   return "DescriptorHeap";
+    case D3D12_DRED_ALLOCATION_TYPE_HEAP:              return "Heap";
+    case D3D12_DRED_ALLOCATION_TYPE_QUERY_HEAP:        return "QueryHeap";
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_SIGNATURE: return "CommandSignature";
+    case D3D12_DRED_ALLOCATION_TYPE_RESOURCE:          return "Resource";
+    case D3D12_DRED_ALLOCATION_TYPE_STATE_OBJECT:      return "StateObject (RT pipeline)";
+    default: return nullptr;
+    }
+}
+
+// Narrows a possibly-null wide debug name to UTF-8-ish ASCII for AVER_* logging, which is
+// char-only. Best-effort: wcstombs on a non-ASCII name just drops what it can't represent, which is
+// fine for a diagnostic dump and matches how adapter names are already narrowed above in init().
+std::string dredNarrow(const wchar_t* w) {
+    if (!w) return "<unnamed>";
+    char buf[256];
+    const usize n = std::wcstombs(buf, w, sizeof(buf) - 1);
+    buf[n == static_cast<usize>(-1) ? 0 : n] = '\0';
+    return buf;
+}
+
+// Logs one DRED breadcrumb node IF it did not finish (*pLastBreadcrumbValue < BreadcrumbCount, or
+// no completed-count at all) -- returns false without logging anything for a node that finished
+// cleanly, so the caller can tally those into a one-line count instead of a wall of "this list was
+// fine" noise. Templated over NodeT (D3D12_AUTO_BREADCRUMB_NODE1 or the older, context-free
+// D3D12_AUTO_BREADCRUMB_NODE) so both DRED versions share this walk; `contextFor(i)` supplies the
+// breadcrumb-context string for op index i (or "" when the interface doesn't have one).
+template <typename NodeT, typename ContextFn>
+bool logBreadcrumbNodeIfUnfinished(u32 nodeIndex, const NodeT* node, ContextFn&& contextFor) {
+    const UINT count = node->BreadcrumbCount;
+    const UINT* lastPtr = node->pLastBreadcrumbValue;
+    if (lastPtr && *lastPtr >= count) return false;   // every recorded op reported complete
+    const UINT last = lastPtr ? *lastPtr : 0;
+    AVER_ERROR("[RHI.D3D12][DRED] node {}: command list '{}' on queue '{}' -- {} of {} recorded ops "
+               "completed{}", nodeIndex, dredNarrow(node->pCommandListDebugNameW),
+               dredNarrow(node->pCommandQueueDebugNameW), last, count,
+               lastPtr ? "" : " (driver never reported a completed count for this list)");
+    // A few ops before the last completed one, through the first one that did not complete --
+    // not the whole rest of the list, which is typically the bulk of a frame's draws and tells you
+    // nothing extra once you already know where it stopped.
+    const UINT windowStart = last > 3 ? last - 3 : 0;
+    const UINT windowEnd = (count == 0) ? 0 : (last < count ? last : count - 1);
+    for (UINT i = windowStart; i <= windowEnd && i < count; ++i) {
+        const D3D12_AUTO_BREADCRUMB_OP op = node->pCommandHistory[i];
+        const char* opName = dredOpName(op);
+        const std::string ctx = contextFor(i);
+        const char* tag = (lastPtr && i >= last) ? "  <-- DID NOT COMPLETE" : "";
+        if (opName) AVER_ERROR("[RHI.D3D12][DRED]   [{}] {}{}{}", i, opName, ctx, tag);
+        else        AVER_ERROR("[RHI.D3D12][DRED]   [{}] op#{}{}{}", i, static_cast<int>(op), ctx, tag);
+    }
+    return true;
+}
+
+// Logs one DRED page-fault allocation list (the existing-allocations list or the recently-freed
+// one) -- one line per node, or a single "none reported" line when the list is empty/null.
+// Templated the same way and for the same reason as logBreadcrumbNodeIfUnfinished above.
+template <typename AllocNodeT>
+void logDredAllocationList(const char* label, const AllocNodeT* head) {
+    u32 n = 0;
+    for (const AllocNodeT* a = head; a; a = a->pNext, ++n) {
+        const char* typeName = dredAllocTypeName(a->AllocationType);
+        if (typeName) AVER_ERROR("[RHI.D3D12][DRED]   {} #{}: '{}' ({})", label, n, dredNarrow(a->ObjectNameW), typeName);
+        else          AVER_ERROR("[RHI.D3D12][DRED]   {} #{}: '{}' (type {})", label, n, dredNarrow(a->ObjectNameW), static_cast<int>(a->AllocationType));
+    }
+    if (n == 0) AVER_INFO("[RHI.D3D12][DRED]   {}: none reported", label);
+}
+
 class D3D12Device;
 class D3D12ResourceFactory;
 class D3D12RenderContext;
@@ -1122,6 +1226,9 @@ private:
     bool waitFence(u64 value);
     // Records a device removal once, with the reason decoded. See the definition.
     bool noteDeviceRemoved(const char* where, HRESULT hr);
+    // Logs whatever DRED (--dred) captured about the hang: auto-breadcrumbs and page faults. A
+    // no-op unless --dred armed the interfaces in init(). See the definition.
+    void dumpDredOnDeviceRemoved();
 
     // ---- the camera post chain (rhi::PostSettings) ----
     bool createPostPipelines();          // root signature, PSOs and the constant ring: once, at init
@@ -1588,6 +1695,7 @@ private:
     // ---- Debug layer message drain ----
     ComPtr<ID3D12InfoQueue> infoQueue_;
     std::vector<u32> seenMessageIds_;   // first occurrence only; the totals carry the rest
+    std::vector<std::string> seenGbvTexts_;   // GPU-based validation: deduped by text, see drainDebugMessages
     u32 dbgCorruption_ = 0, dbgError_ = 0, dbgWarning_ = 0;
     void drainDebugMessages();
 
@@ -2199,6 +2307,41 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             dbg->EnableDebugLayer();
             factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
             AVER_TRACE("[RHI.D3D12] debug layer enabled");
+            if (gpuValidationEnabled()) {
+                ComPtr<ID3D12Debug1> dbg1;
+                if (SUCCEEDED(dbg.As(&dbg1))) {
+                    dbg1->SetEnableGPUBasedValidation(TRUE);
+                    AVER_INFO("[RHI.D3D12] --gpu-validation: GPU-based validation on (slow)");
+                } else {
+                    AVER_WARN("[RHI.D3D12] --gpu-validation: ID3D12Debug1 unavailable, GPU-based validation off");
+                }
+            }
+        }
+    }
+    // DRED (--dred, rhi::dredEnabled): must be requested off the DEBUG interface before either
+    // D3D12CreateDevice call below runs -- turning it on after the device exists is a no-op. A
+    // SEPARATE interface from ID3D12Debug above, so this works with no --debug-layer at all, which
+    // matters here: the debug layer's own per-call validation tax is exactly what you don't want
+    // running while trying to reproduce a TDR that may be timing-sensitive.
+    if (dredEnabled()) {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dredSettings1;
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings1)))) {
+            dredSettings1->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dredSettings1->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            // Breadcrumb CONTEXT is the piece that makes the dump legible -- it attaches whatever
+            // string was passed to BeginEvent/SetMarker on the command list to the breadcrumb index
+            // that was open when it hung. Settings1-only; the plain interface can't ask for it.
+            dredSettings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            AVER_INFO("[RHI.D3D12] --dred: DRED forced on (auto-breadcrumbs + page faults + breadcrumb context)");
+        } else if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings)))) {
+            dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            AVER_INFO("[RHI.D3D12] --dred: DRED forced on (auto-breadcrumbs + page faults; no breadcrumb "
+                      "context -- ID3D12DeviceRemovedExtendedDataSettings1 unavailable on this driver/SDK)");
+        } else {
+            AVER_WARN("[RHI.D3D12] --dred requested, but no DRED settings interface is available "
+                      "(driver/SDK too old) -- a device loss will not be able to dump breadcrumbs");
         }
     }
     if (!hrOk(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory_)), "CreateDXGIFactory2")) return false;
@@ -2252,6 +2395,9 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
+    // Named so a DRED breadcrumb dump (pCommandQueueDebugNameW) has something better to print than
+    // null -- cheap, harmless, and otherwise this queue is unnamed for the life of the process.
+    setDebugName(queue_.Get(), "Aver main direct queue");
     initGpuTiming();
 
     // Logged once, here rather than left to whatever periodic caller polls videoMemory() later,
@@ -2341,11 +2487,22 @@ void D3D12Device::drainDebugMessages() {
             default: continue;
         }
         const u32 id = static_cast<u32>(m->ID);
-        bool seen = false;
-        for (u32 s : seenMessageIds_) if (s == id) { seen = true; break; }
-        if (seen) continue;
-        seenMessageIds_.push_back(id);
         const std::string text(m->pDescription, m->DescriptionByteLength ? m->DescriptionByteLength - 1 : 0);
+        // ONE LINE PER ID, EXCEPT GPU-BASED VALIDATION: its messages all share one ID (e.g. 1358,
+        // "incompatible barrier layout") and differ only in the resource and dispatch they name, so
+        // deduping on the ID alone hid every offender after the first. Those are deduped on their
+        // text instead, capped so a per-draw flood stays readable.
+        const bool gbv = text.rfind("GPU-BASED VALIDATION", 0) == 0;
+        bool seen = false;
+        if (gbv) {
+            for (const std::string& s : seenGbvTexts_) if (s == text) { seen = true; break; }
+            if (seen || seenGbvTexts_.size() >= 48) continue;
+            seenGbvTexts_.push_back(text);
+        } else {
+            for (u32 s : seenMessageIds_) if (s == id) { seen = true; break; }
+            if (seen) continue;
+            seenMessageIds_.push_back(id);
+        }
         if (m->Severity == D3D12_MESSAGE_SEVERITY_WARNING)
             AVER_WARN("[RHI.D3D12] debug layer #{}: {}", id, text);
         else
@@ -3038,6 +3195,10 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
     }
     if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
+    // Same reasoning as the queue's name just above: this is the ONE command list every draw and
+    // dispatch in a frame records onto, so it is also the one a DRED breadcrumb dump most needs to
+    // be able to name (pCommandListDebugNameW).
+    setDebugName(cmdList_.Get(), "Aver main direct command list");
     cmdList_.As(&cmdList4_);
     cmdList_.As(&cmdList6_);
     cmdList_->Close();
@@ -5973,7 +6134,105 @@ bool D3D12Device::noteDeviceRemoved(const char* where, HRESULT hr) {
                   "further will be drawn -- this engine cannot recreate a device, so the editor has "
                   "to be restarted. The last frame stays on screen.",
                   where, static_cast<u32>(reason), what);
+    // A no-op unless --dred armed the interfaces in init() -- see dredEnabled()'s own comment for
+    // why that has to happen before device creation rather than here.
+    dumpDredOnDeviceRemoved();
     return true;
+}
+
+// Logs whatever DRED (--dred) captured about the hang: GetDeviceRemovedReason, the auto-breadcrumb
+// trail (which command list/queue, which recorded op it stopped at, and the marker names attached
+// to that op if breadcrumb context was available), and the page-fault allocation lists.
+//
+// RUNS AFTER THE DEVICE IS ALREADY GONE, from noteDeviceRemoved -- every pointer this touches,
+// including device_ itself, is a COM object that may now answer everything with E_FAIL/garbage
+// rather than crash, so every step is a SUCCEEDED() check, never an assumption.
+void D3D12Device::dumpDredOnDeviceRemoved() {
+    if (!dredEnabled()) return;   // --dred was never passed; nothing was armed to capture this
+    if (!device_) {
+        AVER_WARN("[RHI.D3D12][DRED] --dred was on, but there is no device left to query");
+        return;
+    }
+    AVER_ERROR("[RHI.D3D12][DRED] GetDeviceRemovedReason = 0x{:08X}",
+               static_cast<u32>(device_->GetDeviceRemovedReason()));
+
+    ComPtr<ID3D12DeviceRemovedExtendedData1> dred1;
+    ComPtr<ID3D12DeviceRemovedExtendedData>  dred;
+    const bool have1 = SUCCEEDED(device_.As(&dred1));
+    if (!have1 && FAILED(device_.As(&dred))) {
+        AVER_WARN("[RHI.D3D12][DRED] the device-removed-extended-data interface is unavailable -- "
+                  "was --dred actually in effect before this device was created?");
+        return;
+    }
+
+    // ---- Auto-breadcrumbs: which command list/queue was mid-flight, and where in it. ----------
+    u32 finished = 0, unfinished = 0;
+    if (have1) {
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 out{};
+        if (SUCCEEDED(dred1->GetAutoBreadcrumbsOutput1(&out))) {
+            u32 idx = 0;
+            for (const D3D12_AUTO_BREADCRUMB_NODE1* node = out.pHeadAutoBreadcrumbNode; node; node = node->pNext, ++idx) {
+                // Breadcrumb context is where a BeginEvent/SetMarker string on this node's command
+                // list ends up -- see pushMarker/popMarker (D3D12RenderContext), which DO call
+                // cmdList_->BeginEvent/EndEvent, so any feature that wraps its draws in a marker
+                // shows up here by name. beginGpuSpan/endGpuSpan (this class, "scene draw" /
+                // "sky+post+ui" / the other phase labels) do NOT -- those are CPU-side timestamp-
+                // query bookkeeping only and never touch the command list, so they will never
+                // appear as a breadcrumb context string no matter how long DRED is left on.
+                auto contextFor = [node](UINT i) -> std::string {
+                    for (UINT c = 0; c < node->BreadcrumbContextsCount; ++c)
+                        if (node->pBreadcrumbContexts[c].BreadcrumbIndex == i)
+                            return " [" + dredNarrow(node->pBreadcrumbContexts[c].pContextString) + "]";
+                    return "";
+                };
+                if (logBreadcrumbNodeIfUnfinished(idx, node, contextFor)) ++unfinished; else ++finished;
+            }
+        } else {
+            AVER_WARN("[RHI.D3D12][DRED] GetAutoBreadcrumbsOutput1 failed");
+        }
+    } else {
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT out{};
+        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&out))) {
+            auto noContext = [](UINT) { return std::string(); };
+            u32 idx = 0;
+            for (const D3D12_AUTO_BREADCRUMB_NODE* node = out.pHeadAutoBreadcrumbNode; node; node = node->pNext, ++idx) {
+                if (logBreadcrumbNodeIfUnfinished(idx, node, noContext)) ++unfinished; else ++finished;
+            }
+            AVER_INFO("[RHI.D3D12][DRED] no breadcrumb context on this driver/SDK "
+                      "(ID3D12DeviceRemovedExtendedDataSettings1 was unavailable at init) -- marker "
+                      "names above are not attributed to an op");
+        } else {
+            AVER_WARN("[RHI.D3D12][DRED] GetAutoBreadcrumbsOutput failed");
+        }
+    }
+    if (finished) AVER_INFO("[RHI.D3D12][DRED] {} command list(s) reported every op complete -- not where this hung", finished);
+    if (unfinished == 0)
+        AVER_WARN("[RHI.D3D12][DRED] no unfinished command list in the breadcrumb trail -- the hang "
+                  "may be outside anything this device recorded (Present itself, a driver-side "
+                  "kernel, or a different queue than the main direct one)");
+
+    // ---- Page faults: only meaningful if `reason` above decoded as a real fault. ---------------
+    if (have1) {
+        D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
+        if (SUCCEEDED(dred1->GetPageFaultAllocationOutput1(&pf))) {
+            AVER_ERROR("[RHI.D3D12][DRED] page-fault VA = 0x{:016X}{}", pf.PageFaultVA,
+                       pf.PageFaultVA == 0 ? " (zero -- this device loss was not a page fault)" : "");
+            logDredAllocationList("existing allocation", pf.pHeadExistingAllocationNode);
+            logDredAllocationList("recently freed allocation", pf.pHeadRecentFreedAllocationNode);
+        } else {
+            AVER_WARN("[RHI.D3D12][DRED] GetPageFaultAllocationOutput1 failed");
+        }
+    } else {
+        D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
+        if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf))) {
+            AVER_ERROR("[RHI.D3D12][DRED] page-fault VA = 0x{:016X}{}", pf.PageFaultVA,
+                       pf.PageFaultVA == 0 ? " (zero -- this device loss was not a page fault)" : "");
+            logDredAllocationList("existing allocation", pf.pHeadExistingAllocationNode);
+            logDredAllocationList("recently freed allocation", pf.pHeadRecentFreedAllocationNode);
+        } else {
+            AVER_WARN("[RHI.D3D12][DRED] GetPageFaultAllocationOutput failed");
+        }
+    }
 }
 
 bool D3D12Device::waitFence(u64 value) {
