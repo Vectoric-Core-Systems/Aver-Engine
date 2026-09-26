@@ -2454,40 +2454,59 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    if (dropButton(wireframe_ ? "Wireframe" : (unlit_ ? "Unlit" : "Lit"))) ImGui::OpenPopup("viewMode");
+    // WIREFRAME/A G-BUFFER DEBUG VIEW FORCE THE RASTERISER; A RAY-HIT/TRIANGLES DEBUG VIEW FORCES
+    // RAY-DRIVEN PRIMARY VISIBILITY -- onUpdate's own scratch-copy override (SandboxApp.cpp), never
+    // written back to the project. "authoredRayDriven" is whether that override is actually A
+    // FALLBACK from what the project asked for, which is the only case worth a "(raster)" note: a
+    // project already on the rasteriser shows Wireframe/a G-buffer view exactly as authored.
+    bool authoredRayDriven = false;
+#if AVER_MODULE_VOXI
+    authoredRayDriven = voxi::Renderer::get().settings().rtRenderMode == 1u;
+#endif
+    std::string viewModeLabel = "Lit";
+#if AVER_MODULE_VOXI
+    if (debugView_ != voxi::VoxiRenderer::ViewDebug::None) {
+        switch (debugView_) {
+            case voxi::VoxiRenderer::ViewDebug::RayHitInstance: viewModeLabel = "Ray Hit: Instances"; break;
+            case voxi::VoxiRenderer::ViewDebug::RayHitMaterial: viewModeLabel = "Ray Hit: Materials"; break;
+            case voxi::VoxiRenderer::ViewDebug::RayHitDistance: viewModeLabel = "Ray Hit: Distance"; break;
+            case voxi::VoxiRenderer::ViewDebug::Triangles:      viewModeLabel = "Triangles"; break;
+            default: break;
+        }
+    } else
+#endif
+    if (wireframe_) {
+        viewModeLabel = authoredRayDriven ? "Wireframe (raster)" : "Wireframe";
+    } else if (gbufferDebugView_ != GBufferDebugFeature::Mode::Off) {
+        using GDM = GBufferDebugFeature::Mode;
+        viewModeLabel = gbufferDebugView_ == GDM::Velocity ? "G-Buffer: Velocity" :
+                        gbufferDebugView_ == GDM::ViewZ ? "G-Buffer: View-Space Depth" : "G-Buffer: Normal + Roughness";
+        if (authoredRayDriven) viewModeLabel += " (raster)";
+    } else if (unlit_) {
+        viewModeLabel = "Unlit";
+    }
+    if (dropButton(viewModeLabel.c_str())) ImGui::OpenPopup("viewMode");
     if (ImGui::BeginPopup("viewMode")) {
         if (ImGui::Selectable("Lit", !wireframe_ && !unlit_)) { wireframe_=false; unlit_=false; }
-        // WIREFRAME NEEDS THE RASTERISER; UNLIT NO LONGER DOES, and the split is the point.
-        // Both used to be gated here, on a probe showing the same pixel byte-identical with
-        // and without --unlit under the default settings. That measurement was right and
-        // the conclusion drawn from it -- that the mode was impossible here -- was not: it
-        // showed only that the mode was a per-draw flag on a draw call ray-driven never
-        // makes. Given a pass-level one (gViewParams.x) PSRayDriven answers it directly.
-        //
-        // Wireframe is genuinely different and stays disabled with its reason shown, which
-        // is still better than enabled-and-inert. docs/rendering/VIEW_MODES_PLAN.md calls
-        // it "structurally impossible in ray-driven primary visibility as currently built";
-        // that verdict now applies to wireframe alone.
-        bool rasterModes = true;
-#if AVER_MODULE_VOXI
-        // suppressesScene() rather than rayDrivenActive(): it is the public predicate for
-        // exactly this question -- 'the raster scene pass will not run this frame' -- and it
-        // covers the GI debug raymarch too, which replaces the image for the same reason.
-        rasterModes = !voxiRenderer_.suppressesScene();
-#endif
-        // UNLIT IS NO LONGER GATED ON THE RASTERISER. It was, correctly, while the mode
-        // existed only as a per-draw flag that ray-driven never sees. PSRayDriven honours
-        // gViewParams.x itself now, so the mode works in the DEFAULT renderer.
+        // UNLIT IS NOT GATED ON THE RASTERISER: PSRayDriven honours gViewParams.x itself, so the
+        // mode works in the default (ray-driven) renderer as well as under Wireframe's forced fallback.
         if (ImGui::Selectable("Unlit", unlit_ && !wireframe_)) { unlit_ = true; wireframe_ = false; }
-        // WIREFRAME STILL IS, for a reason unlit no longer shares: it needs a different
-        // RASTERISER STATE rather than a different shading branch, and in ray-driven mode
-        // there is no rasteriser in the loop to put into that state.
-        ImGui::BeginDisabled(!rasterModes);
-        if (ImGui::Selectable("Wireframe", wireframe_)) { wireframe_=true; unlit_=false; }
-        ImGui::EndDisabled();
         uiReg_.track("viewMode.unlit");
-        if (!rasterModes && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Ray-driven primary visibility draws the image without the rasteriser,\nso wireframe cannot apply. Turn it off in Settings > Rendering, or run with --no-rt.");
+        // WIREFRAME ALWAYS SELECTABLE. It used to be BeginDisabled whenever ray-driven primary
+        // visibility suppressed the raster scene pass, with a tooltip sending the user to Settings
+        // > Rendering to turn ray tracing off -- SandboxApp::onUpdate's own scratch-copy override
+        // (needRaster in its Voxi settings block) now does that for THIS VIEWPORT ONLY, every frame,
+        // so there is nothing left to disable here.
+        if (ImGui::Selectable("Wireframe", wireframe_)) {
+            wireframe_ = true; unlit_ = false;
+#if AVER_MODULE_VOXI
+            debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+#endif
+        }
+        uiReg_.track("viewMode.wireframe");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Switches this viewport to the rasteriser while selected, and back when\n"
+                              "you leave it. Project Settings > Rendering > Ray Tracing is unchanged.");
         ImGui::Selectable("Detail Lighting", false, ImGuiSelectableFlags_Disabled);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Needs a flat-albedo shading override the shader does not have yet.");
@@ -2515,12 +2534,23 @@ void SandboxApp::buildViewportOverlay() {
         // the ALREADY-active one turns it off (same toggle-back idiom the GI entry uses);
         // selecting a different one switches directly. Turning the G-buffer itself on is not this
         // dropdown's job -- onUpdate ORs gbufferOverride_ with this value, so picking any entry here is already sufficient.
+        // SAME RASTER-ONLY NOTE AS WIREFRAME: these hang the GPU under ray-driven primary
+        // visibility, so onUpdate's scratch-copy override falls back to the rasteriser for these
+        // too, and engaging one here clears an active ray-hit/triangles debug view for the same
+        // "needs the ray-driven path" reason selecting Wireframe does.
         ImGui::Separator();
         {
             using GDM = GBufferDebugFeature::Mode;
             auto gbufItem = [&](const char* label, GDM m) {
-                if (ImGui::Selectable(label, gbufferDebugView_ == m))
+                if (ImGui::Selectable(label, gbufferDebugView_ == m)) {
                     gbufferDebugView_ = (gbufferDebugView_ == m) ? GDM::Off : m;
+#if AVER_MODULE_VOXI
+                    if (gbufferDebugView_ != GDM::Off) debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+#endif
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Switches this viewport to the rasteriser while selected, and back\n"
+                                      "when you leave it. Project Settings > Rendering > Ray Tracing is unchanged.");
             };
             // Scale documented once, in the label, rather than left for a reader to find in the
             // shader: a debug view whose scale is undocumented is decorative, not diagnostic.
@@ -2528,6 +2558,51 @@ void SandboxApp::buildViewportOverlay() {
             gbufItem("G-Buffer: View-Space Depth (debug)", GDM::ViewZ);
             gbufItem("G-Buffer: Normal + Roughness (debug)", GDM::NormalRoughness);
         }
+#if AVER_MODULE_VOXI
+        // "Debug": the ray-hit/triangles views PSRayDriven alone knows how to paint (voxi.hlsl) --
+        // see ViewDebug's own comment (VoxiRenderer.hpp). Radio-like against wireframe_/
+        // gbufferDebugView_ as well as against each other: re-selecting the active one turns it
+        // off, selecting any of the four clears wireframe_ and gbufferDebugView_ (they need the
+        // rasteriser, this needs ray-driven primary visibility -- the two are mutually exclusive
+        // by construction, see onUpdate's own needRaster/needRayDriven). Disabled, with a reason
+        // tooltip, whenever ray-driven primary visibility could not actually engage even if
+        // forced -- see rayDrivenAvailable's own comment for the hardware/pipeline preconditions.
+        ImGui::Separator();
+        const bool rdAvailable = voxiRenderer_.rayDrivenAvailable();
+        using VD = voxi::VoxiRenderer::ViewDebug;
+        auto debugItem = [&](const char* label, VD m, const char* trackName) {
+            ImGui::BeginDisabled(!rdAvailable);
+            if (ImGui::Selectable(label, debugView_ == m)) {
+                debugView_ = (debugView_ == m) ? VD::None : m;
+                if (debugView_ != VD::None) {
+                    wireframe_ = false;
+                    gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+                }
+            }
+            ImGui::EndDisabled();
+            uiReg_.track(trackName);
+            if (!rdAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Needs ray tracing: Settings > Rendering > Ray Tracing.");
+            else if (rdAvailable && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Switches this viewport to ray-driven primary visibility while selected\n"
+                                  "if the project is set to the rasteriser, and back when you leave it.");
+        };
+        debugItem("Ray Hit: Instances", VD::RayHitInstance, "viewMode.rayHitInstance");
+        debugItem("Ray Hit: Materials", VD::RayHitMaterial, "viewMode.rayHitMaterial");
+        debugItem("Ray Hit: Distance", VD::RayHitDistance, "viewMode.rayHitDistance");
+        debugItem("Triangles", VD::Triangles, "viewMode.triangles");
+#endif
+        // UNDENOISED: independent of every mode above -- it stays on across a Lit/Unlit/Wireframe/
+        // debug-view switch, and combines with any of them. See onUpdate's own UNDENOISED comment
+        // (SandboxApp.cpp, the Voxi scratch-copy block) for the exact knobs this bundles.
+        ImGui::Separator();
+        if (ImGui::Selectable("Undenoised", undenoised_)) undenoised_ = !undenoised_;
+        uiReg_.track("viewMode.undenoised");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Turns off NRD, the RT sun-shadow spatial filter and ReSTIR GI's spatial\n"
+                              "reuse, forces every pixel to trace every frame, and resets GI/RT/NRD\n"
+                              "history every frame (no temporal accumulation). The reflection and\n"
+                              "sky-occlusion spatial filters have no runtime knob and stay on.");
         ImGui::EndPopup();
     }
     ImGui::SameLine();

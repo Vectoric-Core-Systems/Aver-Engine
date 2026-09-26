@@ -1487,7 +1487,14 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // by 2.79% of pixels at an unchanged mean luminance -- the raster chrome moving, not the
     // scene. A view mode that "does something" is not evidence it did the RIGHT something.
     // prePass runs every frame before the constants are uploaded, which is what this needs.
-    cb_.viewParams[0] = unlit_ ? 1.0f : 0.0f;
+    //
+    // viewDebug_ takes priority over unlit_, not OR'd with it: they are two dropdown families the
+    // editor already keeps mutually exclusive (selecting a ray-hit/triangles view clears Unlit's
+    // own selection state and vice versa -- see SandboxViewport.cpp), and both pack into this one
+    // float, so encoding "both at once" has no image to produce anyway. See ViewDebug's own
+    // comment (VoxiRenderer.hpp) for the 2-5 values this sends and PSRayDriven (voxi.hlsl) for
+    // the decode.
+    cb_.viewParams[0] = viewDebug_ != ViewDebug::None ? static_cast<f32>(viewDebug_) : (unlit_ ? 1.0f : 0.0f);
     // THE LIVE GI RADIANCE CEILING (AVER_VOX_MAXRAD in voxi.hlsl/voxi_gi.hlsli) -- see
     // Settings::giRadianceCeiling's own comment for what this caps and why, and FrameConstants::
     // viewParams's comment (VoxiRenderer.hpp) for why .y is safe to repurpose. Sent every frame from

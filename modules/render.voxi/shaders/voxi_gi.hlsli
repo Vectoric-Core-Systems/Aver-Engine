@@ -126,8 +126,10 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // reused sample and no blended-replay concept of its own -- U1 and W6/M5 are both entirely
     // voxi.hlsl's PSMainVoxi/PSRayDriven and voxi_restir.hlsli's own concern.
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x = unlit. NOTHING IN THIS
-    // PRELUDE READS x, same as gAmbientParams above it -- declared for size only.
+    // Editor view modes the ray-driven path honours itself. x is a small integer view-debug mode
+    // (0 = normal, 1 = Unlit, 2-5 = ViewDebug's ray-hit/triangle views -- see voxi.hlsl's own
+    // gViewParams comment, the field this cbuffer mirrors byte-for-byte, for the full legend).
+    // NOTHING IN THIS PRELUDE READS x, same as gAmbientParams above it -- declared for size only.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     // y WAS SPARE; NOW the live GI radiance ceiling -- THIS PRELUDE DOES READ IT, via

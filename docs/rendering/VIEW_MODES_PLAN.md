@@ -50,6 +50,34 @@ run — every behavioural claim is a trace through source, not a screenshot.
 > the `:5450` cited below) still guards on `sceneSuppressed()`, exactly the bug §1b describes. This
 > remains a plan, not a report.
 
+> **STATUS, 2026-09-26: §1a's Wireframe fix has LANDED, through a DIFFERENT mechanism than this
+> section describes -- there is no `wireframeForced_`/`VoxiRenderer::setWireframeForced(bool)`
+> anywhere in the tree, and none is planned. Instead, `SandboxApp::onUpdate` builds a PER-FRAME
+> SCRATCH COPY of `voxi::Settings` already (for `frameBudgetTick`, well before this work) and now
+> also forces `vs.rtRenderMode = 0` on that copy whenever Wireframe or a G-buffer debug view
+> (`gbufferDebugView_`) is selected -- never written back to `voxi::Renderer::get()`'s singleton, so
+> Project Settings and `editor.ini` still show whatever was actually authored, and the override is
+> released the instant the mode is left. Wireframe is no longer greyed out in the dropdown at all
+> (§1a's "greying the option out... was considered and rejected" verdict stands, but the OTHER
+> option this plan rejected in the same paragraph -- silently doing nothing -- was never shipped
+> either; the third option, auto-switching, is what landed and neither paragraph considered it).
+>
+> **Four new debug views also shipped, which this plan's §2/§4 do not describe at all**: Ray Hit:
+> Instances/Materials/Distance and Triangles, a `voxi::VoxiRenderer::ViewDebug` enum (VoxiRenderer.hpp)
+> reusing the SAME pass-level float this plan's `gViewOverride` proposal would have added
+> (`cb_.viewParams[0]`/`gViewParams.x` in `voxi.hlsl`, already carrying Unlit's `0`/`1` before this
+> work) rather than a new cbuffer field -- `gViewOverride` was never added. Implemented ONLY in
+> `PSRayDriven`, symmetrically with Wireframe: a ray-hit/triangles view needs ray-driven primary
+> visibility the same way Wireframe needs the rasteriser, so onUpdate's scratch copy forces
+> `vs.rtRenderMode = 1` (only when the project's own hardware/pipeline preconditions -- see
+> `VoxiRenderer::rayDrivenAvailable()` -- allow it) the same way it forces `0` for Wireframe. This is
+> NOT the `ViewMode` enum / `ShadingOverride` / "Shader Complexity" design §2 and §4 propose below --
+> `bool wireframe_` and `bool unlit_` are both still exactly that, unchanged, sitting beside the new
+> `debugView_` and an independent `bool undenoised_` (a bundle of existing NRD/ray-tile/spatial-filter/
+> history-reset knobs, unrelated to any view mode and combinable with all of them). None of §2's
+> preference-migration or §4's Shader Complexity work has shipped; this status note only covers what
+> actually landed, not a revision of the plan below.
+
 ---
 
 ## 1. The two bugs

@@ -1647,6 +1647,14 @@ public:
     void setScriptsDir(std::string d);            // --scripts <dir>
     void setSpawnTest(std::string cls);      // --spawn-test <ClassName>
     void setUnlitMode(bool on);                                  // --unlit
+    // --view-mode lit|unlit|wireframe|rayhit-instance|rayhit-material|rayhit-distance|triangles|
+    // undenoised: headless-verifiable twin of the viewport dropdown's view-mode popup (SandboxViewport.cpp).
+    // "undenoised" is the independent toggle -- it sets undenoised_ and touches nothing else -- every
+    // other name sets exactly the state that name's Selectable does, clearing whichever of
+    // wireframe_/unlit_/debugView_ the dropdown's own mutual-exclusion rules say it clears. An
+    // unrecognised name logs an error and changes nothing. Applied at startup exactly like --unlit
+    // is (main() calls this once, before the first frame); logs one INFO line naming the mode applied.
+    void setViewMode(const std::string& mode);
     void setPlayTest();                                       // --play-test
     void setProjectPath(std::string p);          // <path>.ocproject
     void setStartMode(std::string m);
@@ -4016,9 +4024,34 @@ private:
     bool worldSpace_=true;
     bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // cm
     bool giConeTraceOff_=false;   // --no-gi-cone: see setGiConeTraceOff's own comment
+    // --view-mode undenoised / the viewport dropdown's independent "Undenoised" toggle: forces a
+    // bundle of EXISTING runtime knobs off on the per-frame Voxi scratch copy -- see onUpdate's own
+    // UNDENOISED comment for the exact list. NOT PERSISTED, same reason giDebugView_ above is not:
+    // a same-session diagnostic aid, reasserted every frame rather than read back from a project file.
+    bool undenoised_=false;
+    // True when --view-mode or --unlit set the view for this run: the stored viewport.wireframe/
+    // viewport.unlit neither override it on load nor are overwritten by it on save
+    // (SandboxSettings.cpp) -- autoCompileFromCli_'s precedence. Without it the stored Lit silently
+    // replaced --view-mode wireframe before the first frame.
+    bool viewModeFromCli_=false;
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_=false;
+    // The viewport's ray-hit/triangles debug view (Ray Hit: Instances/Materials/Distance,
+    // Triangles), or None -- the dropdown's "Debug" section / --view-mode rayhit-*|triangles. Its
+    // type IS voxi::VoxiRenderer::ViewDebug (VoxiRenderer.hpp), so this has to sit inside the module
+    // guard unlike undenoised_ above. NOT PERSISTED, same reason giDebugView_ is not: reasserted
+    // onto voxiRenderer_ every frame from onUpdate (beside setUnlit's own call site -- see its
+    // comment for why) rather than saved to a project or to editor.ini.
+    voxi::VoxiRenderer::ViewDebug debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+    // Last frame's EFFECTIVE voxi::Settings::rtRenderMode -- i.e. after onUpdate's own auto-switch
+    // (wireframe_/a G-buffer debug view forcing raster, a ray-hit/triangles debug view forcing
+    // ray-driven), not the authored project value. Lets onUpdate tell "the mode a debug view just
+    // switched INTO/OUT OF" apart from "an ordinary frame where nothing here changed anything", so
+    // history is reset only on an actual transition -- see onUpdate's own comment beside where this
+    // is compared and written. -1 is "no frame has run yet"; it never legitimately equals either
+    // rtRenderMode value (0 or 1), so the very first frame gets exactly one (harmless) reset.
+    i32 lastEffectiveRtRenderMode_ = -1;
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // Registration is non-owning, same contract as voxiRenderer_ just above: particleRenderer_ must
@@ -4158,6 +4191,10 @@ private:
     // fired once). Read by the Path Tracing page's Quality-combo tag (see PtRenderConflict.hpp's
     // choosePtViewTag) so the UI says why the combo does nothing, instead of nothing at all.
     bool ptSceneViewSuppressedByRayDriven_ = false;
+    // Wireframe/a G-buffer debug view withdrew the path-traced view's want (syncPtSceneView's
+    // "A RASTER-ONLY VIEW MODE HAS THE FRAME" block) -- remembered so leaving the view mode gives
+    // it back, and only then.
+    bool ptSceneViewSuppressedByViewMode_ = false;
     // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: VERIFICATION ONLY. Simulates a human flipping
     // the Path Tracing settings-page Quality combo N frames into a bounded run, proving the RUNTIME
     // toggle (register/unregister mid-session, not just --pt-scene's register-before-frame-1 path)

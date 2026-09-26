@@ -22,7 +22,6 @@ void SandboxApp::loadEditorPreferences() {
     if (!autoCompileFromCli_) autoCompile_ = prefBool("scripting.autoCompile", autoCompile_);
     showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
     showColliders_      = prefBool ("viewport.showColliders",        showColliders_);
-    wireframe_          = prefBool ("viewport.wireframe",            wireframe_);
     // Toggled from the Window menu rather than the Preferences panel, so these ride
     // onShutdown's sync rather than buildEditorPrefs' own save-on-close.
     showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
@@ -36,9 +35,14 @@ void SandboxApp::loadEditorPreferences() {
     // block above gives at length: they change the IMAGE, --unlit and the Show menu can set
     // them, and a stored one reaching a --frames run would move all twenty gate probes on one
     // machine and not another. Snap is not gated -- nothing on the command line touches it and
-    // it cannot alter a pixel.
+    // it cannot alter a pixel. Wireframe is one of these view flags too (it was loaded ungated,
+    // above this block, until --view-mode wireframe exposed that the stored value replaced the
+    // flag's); --view-mode/--unlit given for this run win over both (viewModeFromCli_).
     if (maxFrames_ == 0) {
-        unlit_            = prefBool("viewport.unlit",              unlit_);
+        if (!viewModeFromCli_) {
+            wireframe_    = prefBool("viewport.wireframe",          wireframe_);
+            unlit_        = prefBool("viewport.unlit",              unlit_);
+        }
         showStaticMeshes_ = prefBool("viewport.showStaticMeshes",   showStaticMeshes_);
         showAtmosphere_   = prefBool("viewport.showAtmosphere",     showAtmosphere_);
     }
@@ -2361,7 +2365,6 @@ void SandboxApp::saveEditorPreferences() {
     if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
     setPrefBool ("viewport.showGrid",            showGrid_);
     setPrefBool ("viewport.showColliders",       showColliders_);
-    setPrefBool ("viewport.wireframe",           wireframe_);
     setPrefBool ("panels.worldOutliner",         showOutliner_);
     setPrefBool ("panels.details",               showDetails_);
     setPrefFloat("viewport.flySpeed",            flySpeed_);
@@ -2370,7 +2373,10 @@ void SandboxApp::saveEditorPreferences() {
     // Guarded exactly as the load is: a --frames run that wrote its --unlit back would leave
     // the next interactive session unlit, and the run after that with moved gates.
     if (maxFrames_ == 0) {
-        setPrefBool("viewport.unlit",             unlit_);
+        if (!viewModeFromCli_) {
+            setPrefBool("viewport.wireframe",     wireframe_);
+            setPrefBool("viewport.unlit",         unlit_);
+        }
         setPrefBool("viewport.showStaticMeshes",  showStaticMeshes_);
         setPrefBool("viewport.showAtmosphere",    showAtmosphere_);
     }

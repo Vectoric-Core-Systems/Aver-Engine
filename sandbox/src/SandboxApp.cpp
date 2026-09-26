@@ -1855,6 +1855,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // FIRST in the frame, so everything downstream (view matrix, gPrevViewProj reprojection,
     // shadow history) sees one consistent camera. Latched base yaw rather than accumulating onto
     // yaw_: accumulating would drift with floating-point error and never return exactly to the start.
+    // Set inside `#if AVER_MODULE_VOXI` just below, beside setViewDebug -- a build without the
+    // module never reaches that block, so this stays false and the post-process push far below
+    // (which runs unconditionally) never applies the debug-view exposure override.
+    bool debugViewActiveThisFrame = false;
 #if AVER_MODULE_VOXI
     // THE VIEW MODE REACHES VOXI FROM onUpdate, NOT FROM THE SCENE PASS, and the difference
     // is the whole reason unlit did nothing under ray-driven. Its twin, device()->setUnlit,
@@ -1865,6 +1869,22 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // just cleared, so gViewParams.x was permanently 0 and PSRayDriven never took the branch.
     // No clear is needed here for the same reason: nothing else draws through this pass.
     voxiRenderer_.setUnlit(unlit_);
+    // debugView_'s own twin: Wireframe/a G-buffer debug view need the rasteriser, so a ray-hit/
+    // triangles debug view can only actually draw while ray-driven primary visibility is both
+    // selected AND available -- see ViewDebug's and setViewDebug's own comments
+    // (VoxiRenderer.hpp). Reasserted HERE, beside setUnlit, for the identical "before prePass"
+    // reason its comment above gives. The onUpdate scratch-copy block further down (this frame's
+    // Voxi settings) recomputes the SAME two conditions, independently, to decide vs.rtRenderMode
+    // -- see that block's own comment for why this is not simply read back from there instead.
+    const bool viewModeNeedsRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+    // A raster-only mode wins and CLEARS a ray-hit/triangles view rather than merely outranking it:
+    // wireframe_ can also be ticked from Settings and Preferences, which know nothing of debugView_,
+    // and leaving it set would keep its name on the dropdown button over a raster frame.
+    if (viewModeNeedsRaster) debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+    const bool viewModeNeedsRayDriven = !viewModeNeedsRaster &&
+        debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
+    voxiRenderer_.setViewDebug(viewModeNeedsRayDriven ? debugView_ : voxi::VoxiRenderer::ViewDebug::None);
+    debugViewActiveThisFrame = viewModeNeedsRayDriven;
 #endif
     // --cam-wobble-stop N: the wobble above runs only while the frame counter is below N, then the
     // camera simply stays where that last update left it. Measuring an artifact that appears WHILE
@@ -2792,6 +2812,62 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         voxi::Settings vs = voxi::Renderer::get().settings();
         frameBudgetTick(t.dt, vs);
         const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
+        // AUTO-SWITCH: a ray-hit/triangles debug view cannot draw through the rasteriser, and
+        // Wireframe/a G-buffer debug view cannot draw through ray-driven primary visibility --
+        // see ViewDebug's own comment (VoxiRenderer.hpp) for why they share one pass-level float.
+        // Applied to THIS SCRATCH COPY ONLY, exactly like frameBudgetTick just above: never
+        // written back into voxi::Renderer::get()'s singleton, so Project Settings and prefs
+        // still show whatever was actually authored, and the override is released the very next
+        // frame the raster- or ray-driven-only mode is left. See setViewDebug's own call site
+        // (just above, beside setUnlit) for why these two conditions are recomputed here rather
+        // than read back from there.
+        const bool needRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+        const bool needRayDriven = !needRaster &&
+            debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
+        if (needRaster) vs.rtRenderMode = 0;
+        else if (needRayDriven) vs.rtRenderMode = 1;
+        // A renderer just switched INTO starts from stale history otherwise -- e.g. leaving
+        // Wireframe (which forced raster) back to a ray-driven project would show a few frames of
+        // the old raster image ghosting through ray-driven's own reprojection. Compared against
+        // last frame's EFFECTIVE mode (lastEffectiveRtRenderMode_), not the authored one, so an
+        // ordinary frame where neither override is active -- vs.rtRenderMode already equals what
+        // was authored -- never resets anything.
+        if (static_cast<i32>(vs.rtRenderMode) != lastEffectiveRtRenderMode_) {
+            voxiRenderer_.resetRtHistory(true);
+            voxiRenderer_.resetAoHistory();
+            voxiRenderer_.resetGiHistory(true);
+            voxiRenderer_.resetNrdHistory(true);
+            lastEffectiveRtRenderMode_ = static_cast<i32>(vs.rtRenderMode);
+        }
+        // UNDENOISED (--view-mode undenoised / the viewport dropdown's independent "Undenoised"
+        // toggle): a bundle of EXISTING runtime knobs, applied to this SAME scratch copy and
+        // never persisted, exactly like the auto-switch above -- see undenoised_'s own
+        // declaration (SandboxApp.hpp) for why it is not saved. Turns off:
+        //   - NRD entirely (denoiser)
+        //   - the ray-tile amortisation, so every pixel traces every frame (rtPixelsPerRayTile 1
+        //     -- see that field's own comment: "bit-identical to no denoiser at all: no tiling,
+        //     no reprojected history, no temporal blend")
+        //   - the RT sun-shadow SPATIAL filter (rtShadowDenoise 0 -- the radius/take pair packed
+        //     into cb_.rtDenoiseParams.xy)
+        //   - ReSTIR GI's spatial reuse (giRestirSpatialSamples 0 -- 15 is AUTO; 0 "disables
+        //     spatial reuse OUTRIGHT" per that field's own comment)
+        // Temporal accumulation is turned off below, beside voxi.debugResetHistoryEveryFrame,
+        // rather than here.
+        //
+        // NO RUNTIME KNOB EXISTS for the reflection spatial filter (rtReflectionSpatial,
+        // CSRdReflFilter) or a sky-occlusion spatial filter -- neither is gated by any Settings
+        // field today (checked against Voxi.hpp/VoxiRenderer.cpp: rtReflectionSpatial runs
+        // unconditionally as part of the reflection compose, split or not, and sky occlusion has
+        // no spatial pass at all, only the TEMPORAL rtSkyOcclusionHalfRate toggle). Undenoised
+        // cannot turn either off without inventing a Settings field nothing else reads, so it
+        // leaves both running -- noted here, and in the EDITOR agent's report, rather than
+        // silently claimed as handled.
+        if (undenoised_) {
+            vs.denoiser = false;
+            vs.rtPixelsPerRayTile = 1;
+            vs.rtShadowDenoise = 0;
+            vs.giRestirSpatialSamples = 0;
+        }
         voxiRenderer_.setSettings(vs);
         // Consume-and-forward for the five reset* console commands (EditorConsole.hpp) -- one
         // request flag per history, raised on voxi::Renderer (the settings singleton the console
@@ -2802,12 +2878,16 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
         if (voxi::Renderer::get().consumeAoHistoryResetRequest())  voxiRenderer_.resetAoHistory();
         if (voxi::Renderer::get().consumeNrdHistoryResetRequest()) voxiRenderer_.resetNrdHistory();
-        // voxi.debugResetHistoryEveryFrame: the same resets, every frame, quietly -- see
-        // editor::consoleResetHistoryEveryFrameSlot()'s own comment.
-        if (const u32 everyFrame = editor::consoleResetHistoryEveryFrameSlot()) {
-            if (everyFrame & 1u) voxiRenderer_.resetGiHistory(/*quiet=*/true);
-            if (everyFrame & 2u) voxiRenderer_.resetRtHistory(/*quiet=*/true);
-            if (everyFrame & 4u) voxiRenderer_.resetNrdHistory(/*quiet=*/true);
+        // voxi.debugResetHistoryEveryFrame, OR'd with Undenoised (undenoised_ resets the SAME
+        // three histories every frame it is on, for the identical "no temporal accumulation"
+        // reason -- see the UNDENOISED comment above): the console slot's own STORED value is
+        // only ever READ here, never written, so turning Undenoised off leaves whatever the
+        // console last set untouched.
+        const u32 everyFrame = editor::consoleResetHistoryEveryFrameSlot();
+        if (everyFrame || undenoised_) {
+            if ((everyFrame & 1u) || undenoised_) voxiRenderer_.resetGiHistory(/*quiet=*/true);
+            if ((everyFrame & 2u) || undenoised_) voxiRenderer_.resetRtHistory(/*quiet=*/true);
+            if ((everyFrame & 4u) || undenoised_) voxiRenderer_.resetNrdHistory(/*quiet=*/true);
         }
         voxiRenderer_.setVolume(c, giExtent_);
         // WHERE A BAKED VOLUME MAY BE REMEMBERED. Pushed every frame like everything else here,
@@ -2943,8 +3023,26 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // adopt that into post_ (so the Post panel shows it and prefs save it), then push as usual.
     if (postPushedValid_ && !rhi::postSettingsEqual(e.device()->postProcess(), postPushed_))
         post_ = e.device()->postProcess();
-    e.device()->setPostProcess(post_);
-    postPushed_ = post_;
+    // A ray-hit/triangles debug view paints a flat diagnostic colour, not a lit scene -- auto
+    // exposure would chase that flat colour's luminance and bloom/local exposure would smear or
+    // re-grade it, defeating the point of a debug view (an unambiguous, comparable colour per
+    // pixel). Pushed as a COPY of post_, with postPushed_ set to that SAME copy rather than
+    // post_ itself: the adopt-if-changed check just above compares against postPushed_ next
+    // frame, so the override reading back from the device is never mistaken for something the
+    // user changed and folded into post_ -- and prefs, which only ever save post_, never see it.
+    if (debugViewActiveThisFrame) {
+        rhi::PostSettings dbg = post_;
+        dbg.autoExposure = false;
+        dbg.exposure = 1.0f;
+        dbg.bloomIntensity = 0.0f;
+        dbg.localExposureShadows = 0.0f;
+        dbg.localExposureHighlights = 0.0f;
+        e.device()->setPostProcess(dbg);
+        postPushed_ = dbg;
+    } else {
+        e.device()->setPostProcess(post_);
+        postPushed_ = post_;
+    }
     postPushedValid_ = true;
 }
 

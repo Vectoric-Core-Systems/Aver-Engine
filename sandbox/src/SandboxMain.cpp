@@ -364,6 +364,12 @@ Application* createApplication(int argc, char** argv) {
     std::string restirVisibilityArg;   // empty = absent; none|reconstructed|half|full otherwise
     bool giVisPathViewArg = false;     // --gi-vis-path-view
     std::string blendedGiArg;          // empty = absent; restir|cone otherwise
+    // --view-mode: headless twin of the viewport dropdown's view-mode popup (SandboxViewport.cpp) --
+    // see SandboxApp::setViewMode's own comment for the full name list and what each one does.
+    // Applied straight to app->setViewMode below, which does its own parsing/logging/error
+    // reporting, the same "stored as a string here so an unrecognised name gets a clear error"
+    // shape --mesh-heap uses just below.
+    std::string viewModeArg;           // empty = absent
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -401,6 +407,9 @@ Application* createApplication(int argc, char** argv) {
         // --blended-gi restir|cone: section 4(a)'s W6/M5 pricing switch -- see
         // consoleBlendedGiConeSlot()'s own comment (EditorConsole.hpp).
         if (!std::strcmp(argv[i],"--blended-gi") && i+1<argc) { blendedGiArg = argv[++i]; continue; }
+        // --view-mode lit|unlit|wireframe|rayhit-instance|rayhit-material|rayhit-distance|triangles|
+        // undenoised: see viewModeArg's own comment above.
+        if (!std::strcmp(argv[i],"--view-mode") && i+1<argc) { viewModeArg = argv[++i]; continue; }
         // --mesh-heap default|upload: W4. A string, not a 0/1 int, so an unrecognised spelling can be
         // reported by name at the application site below rather than silently misread as a number.
         if (!std::strcmp(argv[i],"--mesh-heap") && i+1<argc) {
@@ -1275,6 +1284,7 @@ Application* createApplication(int argc, char** argv) {
     if (!wantBackend.empty()) app->setBackend(wantBackend);
     app->setDebugLayer(debugLayer);
     app->setUnlitMode(unlitArg);
+    if (!viewModeArg.empty()) app->setViewMode(viewModeArg);
     app->setSaveLevelTo(saveLevelArg);
     if (rayProbeArg) app->setRayProbe(rayProbeXArg, rayProbeYArg);
     app->setProjectPath(project);

@@ -177,7 +177,12 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          bisection this is one half of; gViewParams.z/.w below are the other half (the RTXDI
     //          reuse-similarity tolerances, too continuous a value to pack into bits here).
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x = unlit.
+    // Editor view modes the ray-driven path honours itself. x is a small integer VIEW-DEBUG MODE
+    // (VoxiRenderer::ViewDebug, VoxiRenderer.hpp): 0 = normal shading, 1 = Unlit (this field's
+    // original, sole value -- see PSRayDriven's `vmode == 1u` read), 2 = RayHitInstance,
+    // 3 = RayHitMaterial, 4 = RayHitDistance, 5 = Triangles -- PSRayDriven's own ray-hit/triangle
+    // debug visualisations, further down this file (search "vmode"); PSMainVoxi never reads this
+    // field, so none of the four has a rasterised equivalent.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     // y WAS SPARE; NOW the live GI radiance ceiling (Settings::giRadianceCeiling) -- see
@@ -2220,6 +2225,98 @@ struct RayDrivenOut {
     float  depth : SV_DEPTH;
 };
 
+// ---- PSRayDriven's VIEW-DEBUG COLOUR HELPERS (vmode 2-5, ViewDebug in VoxiRenderer.hpp) ----------
+//
+// Small, self-contained, and kept next to the one entry point that calls them (PSMainVoxi never
+// reads gViewParams.x past 1.0/Unlit). NO DERIVATIVES (ddx/ddy/fwidth) ANYWHERE BELOW: PSRayDriven
+// can return before these run (the sky-miss branches, above every trace), so any derivative here
+// would read whatever neighbouring lane last computed -- undefined at best, a hang at worst on some
+// drivers. Every input is a scalar/vector already in hand at the call site instead.
+
+// A well-mixing 32-bit integer hash (Chris Wellons' "lowbias32", a small PCG/Wang-family mix): three
+// xorshift/multiply rounds are enough that adjacent instance/material/triangle indices -- exactly
+// what RtInstance/RtMaterial arrays and CommittedPrimitiveIndex hand this file, packed tightly by a
+// mesh importer or a material list authored in order -- land on unrelated hues instead of a smooth,
+// misleadingly-gradient-like ramp.
+uint viewDebugHash(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+// Combines two hashed ids into one (Triangles mode: instance index and primitive index need to both
+// move the colour, not just the coarser of the two). Feeding the first hash's OUTPUT back through
+// viewDebugHash with the second id XORed in is the same "hash the running state" shape rtHash's own
+// callers use for combining a pixel with a per-call salt, just on integers instead of rtHash's floats.
+uint viewDebugHashCombine(uint a, uint b) {
+    return viewDebugHash(viewDebugHash(a) ^ b);
+}
+
+// Hash -> hue (fixed saturation/value) -> linear RGB in [0,1]. Saturation/value are constants, not
+// hashed: only the hue varies per id, so every id is equally legible instead of some hashing near-
+// black or near-white. Standard six-sector HSV->RGB; no derivatives, no dynamic array indexing.
+float3 viewDebugHueColor(uint h) {
+    const float hue = (float)(h & 0xFFFFu) * (6.0 / 65536.0);   // [0, 6)
+    const float s = 0.65;
+    const float v = 0.85;
+    const float c = v * s;
+    const float x = c * (1.0 - abs(fmod(hue, 2.0) - 1.0));
+    const float m = v - c;
+    float3 rgb;
+    if      (hue < 1.0) rgb = float3(c, x, 0.0);
+    else if (hue < 2.0) rgb = float3(x, c, 0.0);
+    else if (hue < 3.0) rgb = float3(0.0, c, x);
+    else if (hue < 4.0) rgb = float3(0.0, x, c);
+    else if (hue < 5.0) rgb = float3(x, 0.0, c);
+    else                rgb = float3(c, 0.0, x);
+    return rgb + m;
+}
+
+// RayHitDistance's log ramp: blue (near) -> cyan -> green -> yellow -> red (far) over ~50 cm to
+// ~20000 cm (this file's units are centimetres -- see hitT's own declaration, further down). Log,
+// not linear, because a linear ramp over that 400x span would crush every near-camera surface (a
+// character, a prop) into the same blue with nothing left to distinguish them.
+float3 viewDebugHeatRamp(float t) {
+    const float3 stops[5] = {
+        float3(0.0, 0.0, 1.0),   // blue
+        float3(0.0, 1.0, 1.0),   // cyan
+        float3(0.0, 1.0, 0.0),   // green
+        float3(1.0, 1.0, 0.0),   // yellow
+        float3(1.0, 0.0, 0.0),   // red
+    };
+    const float scaled = saturate(t) * 4.0;
+    const uint  i0 = (uint)floor(scaled);
+    const uint  i1 = min(i0 + 1u, 4u);
+    return lerp(stops[i0], stops[i1], scaled - (float)i0);
+}
+
+float3 viewDebugDistanceColor(float hitTCm) {
+    const float kNearCm = 50.0;
+    const float kFarCm  = 20000.0;
+    const float t = saturate(log2(max(hitTCm, kNearCm) / kNearCm) / log2(kFarCm / kNearCm));
+    return viewDebugHeatRamp(t);
+}
+
+// The one dispatch every hit-pixel call site in PSRayDriven uses (vmode already checked >= 2 by the
+// caller). RayHitInstance/RayHitMaterial/Triangles share a hashed-hue shape cue,
+// 0.55 + 0.45 * saturate(dot(N, -rayDir)) -- cheap, derivative-free, and just enough of a normal-
+// facing term that neighbouring same-hue triangles/instances still read as separate faces instead of
+// a flat poster. RayHitDistance (4) ignores N/rayDir entirely: a heat ramp already reads as depth
+// without a shading cue, and modulating it would make the ramp's own colours ambiguous with lighting.
+float3 viewDebugColor(uint vmode, uint instanceIndex, uint materialIndex, uint primIndex,
+                       float hitTCm, float3 N, float3 rayDir) {
+    if (vmode == 4u)
+        return viewDebugDistanceColor(hitTCm);   // RayHitDistance
+
+    const float shapeCue = 0.55 + 0.45 * saturate(dot(N, -rayDir));
+    if (vmode == 2u)      return viewDebugHueColor(viewDebugHash(instanceIndex)) * shapeCue;              // RayHitInstance
+    else if (vmode == 3u) return viewDebugHueColor(viewDebugHash(materialIndex)) * shapeCue;              // RayHitMaterial
+    else                  return viewDebugHueColor(viewDebugHashCombine(instanceIndex, primIndex)) * shapeCue; // Triangles (5)
+}
+
 // PSRayDriven's own G-buffer bundle: same contract as GBufferOut (field comments up by PSMainVoxi)
 // plus SV_DEPTH, which this pass writes itself since it answers visibility with a ray and has no
 // rasteriser depth to inherit -- same as RayDrivenOut already does without this define.
@@ -2267,6 +2364,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     r.TMin      = 0.0;
     r.TMax      = 1.0e7;
 
+    // gViewParams.x as a small integer mode -- see that field's own cbuffer comment, above, for the
+    // full 0-5 legend. Read once, here, before either trace branch below: BOTH branches' own miss
+    // handling needs it (a debug view paints its own flat non-surface colour instead of the sky), not
+    // only the hit-pixel colour override near this function's return, further down.
+    const uint vmode = (uint)(gViewParams.x + 0.5);
+
 #if AVER_RD_SPLIT
     // STAGE B: read CSRdVisibility's record instead of tracing. Everything from here to the miss
     // check below mirrors the #else branch's shape; the two must be kept in step by hand since a
@@ -2281,7 +2384,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     if (rdRec.x == 0xFFFFFFFFu) {
         // THE SAME MISS HANDLING AS THE #else BRANCH'S OWN COPY BELOW -- see that copy for why each
         // field is set the way it is. Duplicated rather than shared for the reason given above.
-        o.col   = float4(skyColorFull(dir), 1.0);
+        // vmode >= 2 (a ray-hit/triangle debug view): paint one flat, obviously-not-a-surface colour
+        // instead of the sky, so a miss reads as "no hit" rather than looking like real geometry did
+        // hit and happened to sample sky-blue. An explicit if/else, not a ternary, so this branch
+        // actually skips the atmosphere march below (see the #else branch's copy of this comment for
+        // what that march costs) instead of leaving the compiler free to evaluate both sides.
+        if (vmode >= 2u) {
+            o.col = float4(0.02, 0.02, 0.04, 1.0);
+        } else {
+            o.col = float4(skyColorFull(dir), 1.0);
+        }
         o.depth = 1.0;
 #if AVER_GBUFFER
         o.velocity        = float2(0.0, 0.0);
@@ -2302,6 +2414,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     RtMaterial mat = rdS.mat;
     const float hitT = rdS.hitT;
     float3 wpos    = rdS.wpos;
+    // vmode 2/5's instance/triangle ids: CSRdVisibility packs q.CommittedInstanceID() into rdRec.x
+    // and q.CommittedPrimitiveIndex() into rdRec.y verbatim (see that stage's own gRdVisBuf write,
+    // further down this file) -- the array index IS the instance id, RtInstance has no id field of
+    // its own to read instead.
+    const uint rdInstanceIndex = rdRec.x;
+    const uint rdPrimIndex     = rdRec.y;
 #else
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Opaque lane. THE ONE RAY USING THE NARROW LANE: AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL -- it
@@ -2328,7 +2446,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // honouring the physical model.
         // WHAT CHANGES: nothing, with a sky enabled (every normal frame, overwritten either way).
         // With the sky DISABLED, the background is the authored gradient, not a marched atmosphere.
-        o.col   = float4(skyColorFull(dir), 1.0);
+        // vmode >= 2 (a ray-hit/triangle debug view): same flat non-surface colour and same
+        // march-skipping if/else as the #if AVER_RD_SPLIT branch's identical miss check, above.
+        if (vmode >= 2u) {
+            o.col = float4(0.02, 0.02, 0.04, 1.0);
+        } else {
+            o.col = float4(skyColorFull(dir), 1.0);
+        }
         o.depth = 1.0;
 #if AVER_GBUFFER
         // No real surface for a miss, so no true velocity or normal. Velocity 0 (matches
@@ -2381,6 +2505,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
     const float hitT = q.CommittedRayT();
     float3 wpos = gCamPos.xyz + dir * hitT;
+    // vmode 2/5's instance/triangle ids -- same pair the #if AVER_RD_SPLIT branch above pulls out of
+    // its visibility record, read directly off this branch's own live RayQuery instead.
+    const uint rdInstanceIndex = q.CommittedInstanceID();
+    const uint rdPrimIndex     = q.CommittedPrimitiveIndex();
 #endif
     float3 L    = normalize(gLightDir.xyz);
 
@@ -3134,7 +3262,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // SV_DEPTH unwritten -- the exact "fills only some outputs" fault the struct's own comment warns
     // both return sites about. s.albedo is the SAMPLED base colour; shading a base-colour CONSTANT
     // is what made this mode pure white on every textured mesh.
-    o.col   = float4(gViewParams.x > 0.5 ? s.albedo : radiance, 1.0);
+    o.col   = float4(vmode == 1u ? s.albedo : radiance, 1.0);   // vmode 1 == Unlit (see gViewParams's
+                                                                  // own cbuffer comment for the legend)
     // B1 (F5): applied LAST, after the unlit substitution just above and after fog/shading upstream,
     // so this is unconditionally the final colour whenever it fires -- see PSMainVoxi's identical
     // override for the precedence against giDiffusePoisoned (a giRestirIndirect colour on the diffuse
@@ -3143,6 +3272,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // it should not go dark just because unlit view is also active.
     if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
         o.col.rgb = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
+    // vmode 2-5 (ViewDebug's ray-hit/triangle views): replace the final colour LAST, after both the
+    // unlit substitution and the GI-poison violet override above, so selecting one of these always
+    // shows exactly that debug encoding -- never silently mixed with either. Every other output
+    // below (G-buffer MRTs, depth, history writes above) is untouched: NRD/history still see valid
+    // geometry, only what lands on screen changes -- see viewDebugColor's own header comment.
+    if (vmode >= 2u)
+        o.col.rgb = viewDebugColor(vmode, rdInstanceIndex, inst.materialIndex, rdPrimIndex, hitT, N, dir);
 #if AVER_GBUFFER
     // clip.w IS the view-space linear depth viewZ wants, reused from o.depth's divide above rather
     // than a second mul. Velocity uses the SAME static-geometry function as PSMainVoxi (see

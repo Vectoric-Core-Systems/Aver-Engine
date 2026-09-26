@@ -2885,6 +2885,33 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
         ptSceneViewSuppressedByRayDriven_ = false;   // A1: same re-arm trigger as the log message
     }
 
+    // ---- A RASTER-ONLY VIEW MODE HAS THE FRAME ----
+    // Wireframe and the G-buffer debug views force rtRenderMode 0 for the frame (onUpdate's view-mode
+    // auto-switch) so the rasteriser draws them -- but rtRenderMode 0 is also what hands the frame to
+    // THIS view, which wins the device's suppressesScene() election over raster. Without this block
+    // the path tracer, not the wireframe, filled the viewport whenever RENDER.PATHTRACING was on.
+    // After the ray-driven block on purpose: that block's release (rtRenderMode just went to 0)
+    // restores the want on the same frame this one withdraws it. Released the same way: the want
+    // comes back only if the view mode was why it went false and the request is still live, and if
+    // ray-driven is painting by then, the hold passes to ray-driven's own flag instead.
+    const bool rasterViewMode = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+    if (rasterViewMode) {
+        if (ptSceneViewWantEnabled_) ptSceneViewSuppressedByViewMode_ = true;
+        ptSceneViewWantEnabled_ = false;
+    } else if (ptSceneViewSuppressedByViewMode_) {
+        ptSceneViewSuppressedByViewMode_ = false;
+        if (rayDrivenPaints) {
+            ptSceneViewSuppressedByRayDriven_ = true;
+        } else {
+#if AVER_MODULE_VOXI
+            if (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_)
+                ptSceneViewWantEnabled_ = true;
+#else
+            ptSceneViewWantEnabled_ = true;
+#endif
+        }
+    }
+
     if (ptSceneViewWantEnabled_ == (ptSceneView_ != nullptr)) return;
 
     if (ptSceneViewWantEnabled_) {

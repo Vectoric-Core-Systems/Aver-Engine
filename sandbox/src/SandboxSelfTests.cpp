@@ -582,7 +582,53 @@ void SandboxApp::setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }
 
 void SandboxApp::setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }
 
-void SandboxApp::setUnlitMode(bool on) { unlit_ = on; }
+// Called on every launch (SandboxMain passes the parsed flag, false when absent), so only a real
+// --unlit latches viewModeFromCli_.
+void SandboxApp::setUnlitMode(bool on) { unlit_ = on; if (on) viewModeFromCli_ = true; }
+
+// --view-mode: see its own declaration comment (SandboxApp.hpp) for the full contract. Lowercased
+// here, case-insensitively, the same courtesy every other string flag in this file gets (--aversr,
+// --gbuffer-debug, --restir-visibility, ...). "undenoised" is independent of everything else this
+// sets and returns early; every other name mirrors what the matching viewport dropdown Selectable
+// does (SandboxViewport.cpp's "viewMode" popup) -- Lit/Unlit/Wireframe clear debugView_, since a
+// debug view did not exist as a concept before this flag and there is no old behaviour of leaving
+// it set to preserve; a ray-hit/triangles name clears wireframe_ and gbufferDebugView_, mirroring
+// that Selectable's own "needs the ray-driven path" clear.
+void SandboxApp::setViewMode(const std::string& mode) {
+    std::string m = mode;
+    for (char& c : m) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (m == "undenoised") {
+        undenoised_ = true;
+        AVER_INFO("[Sandbox] --view-mode undenoised");
+        return;
+    }
+    if (m == "lit" || m == "unlit" || m == "wireframe") {
+        unlit_ = (m == "unlit");
+        wireframe_ = (m == "wireframe");
+#if AVER_MODULE_VOXI
+        debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+#endif
+    } else if (m == "rayhit-instance" || m == "rayhit-material" || m == "rayhit-distance" || m == "triangles") {
+#if AVER_MODULE_VOXI
+        if (m == "rayhit-instance")      debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitInstance;
+        else if (m == "rayhit-material") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitMaterial;
+        else if (m == "rayhit-distance") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitDistance;
+        else                             debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
+        wireframe_ = false;
+        gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+#else
+        AVER_WARN("[Sandbox] --view-mode {} was given but this build has no Voxi module "
+                  "(-DAVER_MODULE_VOXI=ON to include it); there is no ray-driven path to show it through", m);
+        return;
+#endif
+    } else {
+        AVER_ERROR("[Sandbox] --view-mode '{}' not recognised (lit|unlit|wireframe|rayhit-instance|"
+                   "rayhit-material|rayhit-distance|triangles|undenoised)", mode);
+        return;
+    }
+    viewModeFromCli_ = true;
+    AVER_INFO("[Sandbox] --view-mode {}", m);
+}
 
 void SandboxApp::setPlayTest() { playTest_ = true; }
 

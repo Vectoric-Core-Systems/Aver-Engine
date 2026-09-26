@@ -151,6 +151,34 @@ public:
     // told separately or the mode silently does nothing in the default renderer.
     void setUnlit(bool on) { unlit_ = on; }
 
+    // The editor's ray-driven-only debug views -- viewport dropdown entries beside Unlit that
+    // PSRayDriven (voxi.hlsl) alone knows how to paint; PSMainVoxi (the raster path) never reads
+    // them, which is why the editor has to fall back to the rasteriser for Wireframe/G-buffer
+    // views and to ray-driven for these. Packed into the SAME float, cb_.viewParams[0], that
+    // unlit_ already used -- see that field's comment on FrameConstants further down for the
+    // packing and PSRayDriven for how each value is drawn. 1 is reserved for Unlit (unlit_'s own
+    // bool below, not a member here: it has its own raster-path mirror, RhiDevice::setUnlit, that
+    // these debug-only views do not).
+    enum class ViewDebug : u32 {
+        None           = 0,
+        RayHitInstance = 2,   // hash(TLAS instance index) -> colour
+        RayHitMaterial = 3,   // hash(hit instance's materialIndex) -> colour
+        RayHitDistance = 4,   // hit distance (cm) on a log heat ramp
+        Triangles      = 5,   // hash(instance index, primitive index) -> colour
+    };
+
+    // Selects one of the debug views above (None turns them off). Reasserted every frame from
+    // SandboxApp::onUpdate, next to setUnlit's own call site -- see setUnlit's comment for why
+    // that has to happen before prePass every frame rather than once when the dropdown changes.
+    void setViewDebug(ViewDebug m) { viewDebug_ = m; }
+
+    // Whether forcing Settings::rtRenderMode to 1 THIS frame would actually engage ray-driven
+    // primary visibility -- the same hardware/pipeline preconditions rayDrivenActive() tests,
+    // MINUS the mode check itself (rtRenderMode_ == 1u), since the caller is asking "if I set
+    // it" rather than "is it already set". The editor uses this to grey out a ray-driven-only
+    // debug view and to decide whether an auto-switch to rtRenderMode 1 is worth attempting.
+    bool rayDrivenAvailable() const { return rtActive_ && rayDrivenPso_ != 0; }
+
     // A/B MEASUREMENT TOGGLE, not a quality setting: OFF forces cb_.voxelParams.w to 0, the same
     // "gates the cone trace" flag prePass already computes from giEnabled(), so PSMainVoxi's
     // `if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(...)` (VoxiShaders.hpp) and
@@ -1556,8 +1584,16 @@ private:
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
         // reads fine for a week and then costs an afternoon.
         f32 ambientParams[4] = {};
-        // EDITOR VIEW MODES that the ray-driven path has to honour itself. x = unlit (flat
-        // authored albedo, no lighting).
+        // EDITOR VIEW MODES that the ray-driven path has to honour itself. x is now a small
+        // integer MODE, not a bool: 0 = normal shading, 1 = unlit (flat authored albedo, no
+        // lighting -- unlit_/setUnlit), 2-5 = the ViewDebug enum above (RayHitInstance/
+        // RayHitMaterial/RayHitDistance/Triangles) -- see that enum's own comment for what each
+        // paints. Composed as `viewDebug_ != ViewDebug::None ? f32(viewDebug_) : (unlit_ ? 1 : 0)`
+        // (VoxiRenderer.cpp, same per-frame block that always wrote this), so the two dropdown
+        // families stay mutually exclusive on this single float the way the editor's dropdown
+        // already treats them (selecting one clears the other). PSRayDriven (voxi.hlsl) decodes
+        // it back with `(uint)(gViewParams.x + 0.5)`; PSMainVoxi (the raster path) never reads
+        // this field at all, which is exactly why these are ray-driven-only debug views.
         //
         // A PASS-LEVEL FIELD, not a per-draw one, because a ray hit has no per-draw cbuffer
         // to read: gShadingModel rides in the b1 block that the raster path sets per mesh,
@@ -2651,6 +2687,9 @@ private:
     // giRestirParams.w every frame regardless of whether anyone has ever touched it.
     u32 lightingLegacyBits_ = 0;
     bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit
+    // See setViewDebug's own comment. None (0) is bit-identical to every build before this view
+    // existed: cb_.viewParams[0]'s composition falls straight through to unlit_ below it.
+    ViewDebug viewDebug_ = ViewDebug::None;
     // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build
     // before this toggle existed -- nobody who never calls the setter sees any difference at all.
     bool coneTraceEnabled_ = true;
