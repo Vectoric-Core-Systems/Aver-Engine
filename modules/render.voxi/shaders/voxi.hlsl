@@ -264,6 +264,14 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // off for an A/B without touching anything else.
 #define AVER_VOX_FEEDBACK 3.0
 
+// The ceiling on albedo x AVER_VOX_FEEDBACK, per channel. Every rebuild re-reads the previous bake, so
+// the bake is an iteration and its per-bounce gain must stay below 1 in EVERY channel or it runs away
+// instead of settling: with the x3 compensation, anything reflecting over a third of one channel (red
+// cloth in red) gained energy each rebuild, and a sun drag -- a rebuild per frame -- drove NewSponza's
+// curtains room to a solid red that the GI cache then kept. Below the cap (stone, most albedos) the
+// calibrated gain is unchanged.
+#define AVER_VOX_MAX_BOUNCE_GAIN 0.8
+
 // Edge, in pixels, of the tile that shares one sky-occlusion ray direction. See rtSkyOcclusion for
 // why coherence rather than ray count is the lever here. 1 = a fresh rotation per pixel, which is
 // what this shader did before the dial existed and is bit-identical to it.
@@ -4741,9 +4749,9 @@ void PSVoxel(VoxOut i) {
     // voxel there), so what it reads is the previous bake, still intact in mips 1..N.
     //
     // WHAT IT COSTS AND WHY IT CONVERGES: one cone per injected fragment, against the thirteen the
-    // forward gather already runs per pixel. Each rebuild adds albedo x (light already in the room),
-    // and albedo < 1, so the series is geometric and settles -- the same argument radiosity has
-    // always rested on. AVER_VOX_MAXRAD still bounds it if a scene ever tries to break that.
+    // forward gather already runs per pixel. Each rebuild adds gain x (light already in the room),
+    // gain = min(albedo x AVER_VOX_FEEDBACK, AVER_VOX_MAX_BOUNCE_GAIN) < 1 per channel, so the series
+    // is geometric and settles. Albedo < 1 alone does NOT guarantee that once the x3 is applied.
     const float4 room = traceCone(i.wpos, N, AVER_VOX_INJECT_APERTURE);
     // A cone that terminated on solid geometry saw no sky; one that ran out of volume saw all of it.
     // traceCone accumulates occlusion in .a and treats leaving the volume as unoccluded, which is
@@ -4774,9 +4782,10 @@ void PSVoxel(VoxOut i) {
     // Exitant radiance, not radiosity: the sun term is an irradiance so it takes the 1/PI, the sky
     // term is already a radiance so it does not, and the feedback term is already exitant radiance
     // gathered from surfaces that have themselves been through this same shader.
+    const float3 bounceGain = min(albedo * AVER_VOX_FEEDBACK, AVER_VOX_MAX_BOUNCE_GAIN);
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility / PI
-                                + averSkyIrradiance(N) * gAmbient.r * skyVis * skyInject
-                                + room.rgb * AVER_VOX_FEEDBACK);
+                                + averSkyIrradiance(N) * gAmbient.r * skyVis * skyInject)
+                    + room.rgb * bounceGain;
     // A LAMP'S OWN GLOW. Without it an emissive surface injected nothing and could never light a
     // room through voxel GI. Added after the albedo multiply because emission is light the surface
     // makes, not light it reflects, and s.emissive is already exitant radiance like the bracket

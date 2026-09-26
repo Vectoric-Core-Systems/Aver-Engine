@@ -1051,7 +1051,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // legacy value above. gVoxelParams.y (giIntensity) is deliberately NOT applied on this branch: it
     // is applied exactly once, to the WHOLE estimate, at giRestirIndirect's own `est` -- applying it
     // here too would double it on this one bounce alone. Approximation carried over unchanged from the
-    // volume's own injection: the value already contains AVER_VOX_FEEDBACK 3.0. It contains NO SKY
+    // volume's own injection: the value already carries PSVoxel's capped feedback gain. It contains NO SKY
     // while ReSTIR GI runs (PSVoxel's own comment says why): the sky reaches this bounce only through
     // this ray's miss, which is the one place its visibility is actually traced.
     //

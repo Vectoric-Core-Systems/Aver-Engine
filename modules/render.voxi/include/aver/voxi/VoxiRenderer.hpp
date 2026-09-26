@@ -2843,8 +2843,9 @@ private:
     // No sunColor_ and no ambient_ here on purpose. See setSunDirection.
 
     // HOW MANY EXTRA BAKES A CHANGE BUYS. PSVoxel's feedback term adds one bounce per rebuild, so
-    // this is literally the bounce depth the volume converges to after the scene settles. 5 puts the
-    // residual of a 0.5-albedo room at 3% -- past the point anything is visible -- and each tick is
+    // this is the bounce depth the volume reaches after the scene settles. The per-bounce gain is
+    // min(albedo x 3, 0.8) per channel (AVER_VOX_MAX_BOUNCE_GAIN): 5 ticks leave 2% of a stone room's
+    // (gain ~0.45) residual and a third of a capped one's, which later rebuilds finish. Each tick is
     // one voxelise, paid only in the frames right after something actually moved.
     static constexpr u32 kGiConvergeTicks = 5;
     u32  giConvergeTicks_ = 0;

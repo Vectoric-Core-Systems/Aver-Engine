@@ -2785,6 +2785,12 @@ fmt::GiCacheKey VoxiRenderer::giCacheKey() const {
     // otherwise be restored as if it matched. Only for the sky-less bake, so every key written before
     // this existed -- all of them sky-injected -- still hits.
     if (!giSnapVoxelSky_) { h ^= 0x5Cu; h *= 1099511628211ull; }
+    // THE BAKE RULE'S VERSION: a volume is a function of PSVoxel's injection as much as of its inputs,
+    // so a change to what a settled volume holds must miss every older entry rather than restore it as
+    // current. 2 = per-channel bounce gain capped; volumes baked before it could hold a red runaway
+    // (NewSponza_Night after a sun drag), which a matching key would reload on every open.
+    constexpr u64 kGiBakeRuleVersion = 2;
+    h ^= kGiBakeRuleVersion; h *= 1099511628211ull;
     k.skyKey = h;
     for (u32 i = 0; i < 3; ++i) k.centre[i] = giSnapCenter_[i];
     k.extent     = giSnapExtent_;
