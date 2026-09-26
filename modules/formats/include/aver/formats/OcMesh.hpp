@@ -286,6 +286,15 @@ struct OcMeshData {
     void computeBounds();
 };
 
+// True when `m.submeshes` accounts for every LOD-0 index exactly once, in whole triangles: every range
+// inside `indices`, a multiple of 3 long, no gap, no overlap (table order does not matter).
+// Runtime/src/GameContent.cpp's buildMeshParts cuts indices[indexStart, indexStart + indexCount)
+// verbatim and binds that slice to the submesh's material, so a table that fails this draws some
+// triangles under the wrong material or not at all. A LONE submesh is exempt in practice: nothing
+// reads its range (buildMeshParts draws a one-submesh mesh whole), so writeOcMesh writes it as the
+// whole mesh and aver::trifactor::simplifyMesh treats it so; both refuse any other failing table.
+bool submeshesPartitionIndices(const OcMeshData& m, std::string* why = nullptr);
+
 // Reads and writes .ocmesh on disk. `why` is set on failure and untouched on success.
 bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why = nullptr);
 bool saveOcMesh(const std::string& path, const OcMeshData& in, std::string* why = nullptr);

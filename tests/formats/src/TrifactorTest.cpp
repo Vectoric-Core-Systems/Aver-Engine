@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace aver;
@@ -95,51 +96,64 @@ static fmt::OcMeshData makeSkinnedGridMesh(u32 n, f32 spacing = 100.0f) {
     return m;
 }
 
-// Two folded, textured, normal-mapped-shaped panels sharing ONE mesh, each its own submesh and
-// material slot with its own UV range -- the shape the --lod 0.25 bug report was filed against
-// (NewSponza_Curtains_glTF's curtain meshes: a cloth primitive plus a metal_door primitive sharing
-// one glTF mesh). "Folded" rather than flat, deliberately: a flat panel's per-vertex normal always
-// exactly equals its face normal, which would make the hemisphere check below pass even if
-// simplifyMesh started blending or flipping normals -- a sinusoidal fold gives every vertex its own,
-// analytically-known normal that only agrees with its face's if nothing along the way corrupted it.
-// panelIndex only changes the panel's UV origin and X offset, kept far enough apart (UV origin 5.0,
-// world offset 10000 units) that no vertex of one panel can be mistaken for the other's by position
-// OR by UV, which is what lets the per-submesh checks below tell "stayed in its own material" apart
-// from "coincidentally still looks right".
-static fmt::OcMeshData makeFoldedTwoMaterialMesh(u32 n, f32 spacing = 50.0f) {
+// The shape the --lod bug hit (NewSponza's curtains): one mesh, several materials. Two folded fabric
+// panels of different materials stitched along one edge, plus a one-triangle trim submesh too small
+// to simplify. Each panel has its OWN vertices along the stitch, as separate glTF primitives do; the
+// stitch positions are bit-identical because both panels compute them from the same global column.
+// The fold (z = A sin(0.9 g), g the global column) gives every vertex its own analytic normal, so a
+// scrambled normal stream cannot pass by matching a flat face; the panels' UVs start 5.0 apart, so a
+// triangle's UVs say which material it came from.
+static constexpr u32 kClothN       = 24;
+static constexpr f32 kClothSpacing = 50.0f;
+static constexpr f32 kClothFold    = 30.0f;
+
+static fmt::OcMeshData makeStitchedClothMesh() {
     fmt::OcMeshData m;
-    const auto addPanel = [&](f32 originX, f32 uvOrigin, f32 foldAmplitude) {
+    const auto addPanel = [&](u32 firstColumn, f32 uvOrigin) {
         const u32 base = m.vertexCount();
-        for (u32 y = 0; y < n; ++y) {
-            for (u32 x = 0; x < n; ++x) {
-                const f32 fx = static_cast<f32>(x), fy = static_cast<f32>(y);
-                const f32 z = foldAmplitude * std::sin(fx * 0.9f);
-                m.positions.insert(m.positions.end(), {originX + fx * spacing, fy * spacing, z});
-                // Analytic normal of z = A*sin(0.9x): tangent along X is (1, 0, 0.9*A*cos(0.9x)),
-                // tangent along Y is (0, 1, 0); normal is their cross product, normalized.
-                const f32 dzdx = foldAmplitude * 0.9f * std::cos(fx * 0.9f);
-                const Vec3 nrm = cross(Vec3{1.0f, 0.0f, dzdx}, Vec3{0.0f, 1.0f, 0.0f}).getSafeNormal();
+        for (u32 y = 0; y < kClothN; ++y) {
+            for (u32 x = 0; x < kClothN; ++x) {
+                const f32 g = static_cast<f32>(firstColumn + x);
+                m.positions.insert(m.positions.end(),
+                                   {g * kClothSpacing, static_cast<f32>(y) * kClothSpacing,
+                                    kClothFold * std::sin(g * 0.9f)});
+                // dz/dX per WORLD unit (the column step is kClothSpacing), so the normal is the
+                // surface's own: (-dz/dX, 0, 1), normalised.
+                const f32 dzdx = kClothFold * 0.9f * std::cos(g * 0.9f) / kClothSpacing;
+                const Vec3 nrm = Vec3{-dzdx, 0.0f, 1.0f}.getSafeNormal();
                 m.normals.insert(m.normals.end(), {nrm.x, nrm.y, nrm.z});
-                m.uvs.insert(m.uvs.end(), {uvOrigin + fx / f32(n - 1), uvOrigin + fy / f32(n - 1)});
+                m.uvs.insert(m.uvs.end(), {uvOrigin + static_cast<f32>(x) / f32(kClothN - 1),
+                                           uvOrigin + static_cast<f32>(y) / f32(kClothN - 1)});
             }
         }
-        const u32 indexStart = static_cast<u32>(m.indices.size());
-        for (u32 y = 0; y + 1 < n; ++y) {
-            for (u32 x = 0; x + 1 < n; ++x) {
-                const u32 i00 = base + y * n + x, i10 = base + y * n + x + 1;
-                const u32 i01 = base + (y + 1) * n + x, i11 = base + (y + 1) * n + x + 1;
+        const u32 start = static_cast<u32>(m.indices.size());
+        for (u32 y = 0; y + 1 < kClothN; ++y) {
+            for (u32 x = 0; x + 1 < kClothN; ++x) {
+                const u32 i00 = base + y * kClothN + x, i10 = i00 + 1;
+                const u32 i01 = i00 + kClothN,          i11 = i01 + 1;
                 for (u32 idx : {i00, i10, i11, i00, i11, i01}) m.indices.push_back(idx);
             }
         }
-        return std::pair<u32, u32>{indexStart, static_cast<u32>(m.indices.size()) - indexStart};
+        return std::pair<u32, u32>{start, static_cast<u32>(m.indices.size()) - start};
     };
 
-    const auto [start0, count0] = addPanel(0.0f, 0.0f, 30.0f);          // "cloth": big, floppy folds
-    const auto [start1, count1] = addPanel(10000.0f, 5.0f, 2.0f);       // "metal_door": far away, barely folded
+    const auto [start0, count0] = addPanel(0, 0.0f);
+    const auto [start1, count1] = addPanel(kClothN - 1, 5.0f);   // shares column kClothN-1: the stitch
 
-    m.submeshes.push_back(fmt::OcMeshSubmesh{"cloth", 0, start0, count0, 0, m.vertexCount()});
-    m.submeshes.push_back(fmt::OcMeshSubmesh{"metal_door", 1, start1, count1, 0, m.vertexCount()});
-    m.materialSlots = {"M_Cloth", "M_MetalDoor"};
+    const u32 t = m.vertexCount();
+    const f32 trim[3][2] = {{0.0f, 0.0f}, {40.0f, 0.0f}, {0.0f, 40.0f}};   // off to one side, flat
+    for (const auto& p : trim) {
+        m.positions.insert(m.positions.end(), {-1000.0f + p[0], p[1], 0.0f});
+        m.normals.insert(m.normals.end(), {0.0f, 0.0f, 1.0f});
+        m.uvs.insert(m.uvs.end(), {9.0f + p[0] / 40.0f, 9.0f + p[1] / 40.0f});
+    }
+    const u32 start2 = static_cast<u32>(m.indices.size());
+    m.indices.insert(m.indices.end(), {t, t + 1, t + 2});
+
+    m.submeshes.push_back(fmt::OcMeshSubmesh{"cloth_red", 0, start0, count0, 0, m.vertexCount()});
+    m.submeshes.push_back(fmt::OcMeshSubmesh{"cloth_green", 1, start1, count1, 0, m.vertexCount()});
+    m.submeshes.push_back(fmt::OcMeshSubmesh{"trim", 2, start2, 3, 0, m.vertexCount()});
+    m.materialSlots = {"M_ClothRed", "M_ClothGreen", "M_Trim"};
     return m;
 }
 
@@ -463,123 +477,147 @@ int main() {
 
     AVER_INFO("=== simplifyMesh keeps every submesh inside its own material ===");
     {
-        // THE BUG. A multi-submesh mesh -- one glTF primitive per material, exactly the shape
-        // NewSponza_Curtains_glTF's curtain meshes are (a cloth primitive plus a metal_door
-        // primitive sharing one mesh) -- used to be simplified as ONE global index buffer with no
-        // regard for where its submeshes' [indexStart, indexCount) ranges fell. mesh.submeshes was
-        // never updated to match the reshuffled result, so Runtime/src/GameContent.cpp's
-        // buildMeshParts either skipped a now-out-of-range submesh outright or cut a range that no
-        // longer held that material's triangles at all -- and once fewer than two parts survived,
-        // buildMeshParts gave up on splitting and drew the WHOLE mesh under one material, which for
-        // the curtains was the metal door's dark, glossy material. This reproduces the shape at the
-        // reported ratio (0.25), hard enough that the old whole-buffer code would certainly have
-        // shuffled triangles across the two panels' ranges.
-        fmt::OcMeshData mesh = makeFoldedTwoMaterialMesh(24);
-        const usize beforeTris = mesh.indices.size() / 3;
-        check(mesh.submeshes.size() == 2, "the fixture starts with two submeshes");
+        // THE --lod BUG. simplifyMesh ran one pass over the whole index buffer and left the submesh
+        // table describing the old one, so GameContent's buildMeshParts dropped the ranges that now
+        // overshot and drew whole curtains under their metal_door slot. At the reported ratio (0.25)
+        // the old code fails check 1; simplifying per submesh without locking the stitch fails
+        // check 3; keeping a too-small submesh without copying its indices fails check 4.
+        fmt::OcMeshData mesh = makeStitchedClothMesh();
+        const fmt::OcMeshData source = mesh;
+        check(mesh.submeshes.size() == 3, "the fixture starts with three submeshes");
 
-        // Snapshot each submesh's own source UV range BEFORE simplifying. The two panels' UV
-        // origins (0.0 and 5.0) are far enough apart that one panel's UVs cannot possibly land
-        // inside the other's range by coincidence -- so after simplifying, a submesh whose
-        // triangles still fall within ITS OWN pre-simplify UV range could not have picked up any
-        // triangle that used to belong to the other material.
-        struct UvRange { f32 uMin, uMax, vMin, vMax; };
-        std::vector<UvRange> sourceRange(mesh.submeshes.size());
-        for (usize s = 0; s < mesh.submeshes.size(); ++s) {
-            const fmt::OcMeshSubmesh& sm = mesh.submeshes[s];
-            UvRange r{std::numeric_limits<f32>::max(), -std::numeric_limits<f32>::max(),
-                      std::numeric_limits<f32>::max(), -std::numeric_limits<f32>::max()};
-            for (usize k = sm.indexStart; k < usize(sm.indexStart) + sm.indexCount; ++k) {
-                const u32 vi = mesh.indices[k];
-                r.uMin = std::min(r.uMin, mesh.uvs[usize(vi) * 2]);
-                r.uMax = std::max(r.uMax, mesh.uvs[usize(vi) * 2]);
-                r.vMin = std::min(r.vMin, mesh.uvs[usize(vi) * 2 + 1]);
-                r.vMax = std::max(r.vMax, mesh.uvs[usize(vi) * 2 + 1]);
+        const auto pos = [](const fmt::OcMeshData& m, u32 i) {
+            return Vec3{m.positions[usize(i) * 3], m.positions[usize(i) * 3 + 1], m.positions[usize(i) * 3 + 2]};
+        };
+        const auto rangeOf = [](const fmt::OcMeshSubmesh& sm) {
+            return std::pair<usize, usize>{sm.indexStart, usize(sm.indexStart) + sm.indexCount};
+        };
+
+        // Each submesh's source UV box. The panels start 5.0 apart and the trim at 9.0, so a
+        // triangle still inside its own submesh's box cannot have come from another material.
+        struct UvBox { f32 uMin, uMax, vMin, vMax; };
+        std::vector<UvBox> uvBox;
+        for (const fmt::OcMeshSubmesh& sm : source.submeshes) {
+            UvBox b{std::numeric_limits<f32>::max(), -std::numeric_limits<f32>::max(),
+                    std::numeric_limits<f32>::max(), -std::numeric_limits<f32>::max()};
+            const auto [k0, k1] = rangeOf(sm);
+            for (usize k = k0; k < k1; ++k) {
+                const u32 vi = source.indices[k];
+                b.uMin = std::min(b.uMin, source.uvs[usize(vi) * 2]);
+                b.uMax = std::max(b.uMax, source.uvs[usize(vi) * 2]);
+                b.vMin = std::min(b.vMin, source.uvs[usize(vi) * 2 + 1]);
+                b.vMax = std::max(b.vMax, source.uvs[usize(vi) * 2 + 1]);
             }
-            sourceRange[s] = r;
+            uvBox.push_back(b);
         }
+
+        // The stitch as submesh `s` sees it: the Y of every vertex it uses on the shared column.
+        const f32 stitchX = static_cast<f32>(kClothN - 1) * kClothSpacing;
+        const auto stitchOf = [&](const fmt::OcMeshData& m, usize s) {
+            std::vector<f32> ys;
+            const auto [k0, k1] = rangeOf(m.submeshes[s]);
+            for (usize k = k0; k < k1; ++k) {
+                const Vec3 p = pos(m, m.indices[k]);
+                if (p.x == stitchX) ys.push_back(p.y);
+            }
+            std::sort(ys.begin(), ys.end());
+            ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+            return ys;
+        };
+
+        // What the renderer shades the cloth with. awayNormals: triangles with a vertex normal
+        // pointing away from the face (a scrambled or misaligned normal stream). mirroredUv:
+        // triangles whose UVs wind against the geometry -- the ray path derives each hit's tangent
+        // from its triangle's positions and UVs, so this is the tangent frame's handedness.
+        struct Shading { usize tris = 0, awayNormals = 0, mirroredUv = 0; bool allUnit = true; };
+        const auto shadingOf = [&](const fmt::OcMeshData& m) {
+            Shading sh;
+            for (usize s = 0; s < 2; ++s) {   // the two cloth panels
+                const auto [k0, k1] = rangeOf(m.submeshes[s]);
+                for (usize k = k0; k + 2 < k1; k += 3) {
+                    const u32 ia = m.indices[k], ib = m.indices[k + 1], ic = m.indices[k + 2];
+                    const Vec3 faceN = cross(pos(m, ib) - pos(m, ia), pos(m, ic) - pos(m, ia));
+                    if (faceN.size() < 1e-6f) continue;
+                    ++sh.tris;
+                    bool away = false;
+                    for (const u32 i : {ia, ib, ic}) {
+                        const Vec3 n{m.normals[usize(i) * 3], m.normals[usize(i) * 3 + 1], m.normals[usize(i) * 3 + 2]};
+                        if (std::abs(n.size() - 1.0f) > 1e-3f) sh.allUnit = false;
+                        if (dot(n, faceN) <= 0.0f) away = true;
+                    }
+                    if (away) ++sh.awayNormals;
+                    const f32* ua = &m.uvs[usize(ia) * 2];
+                    const f32* ub = &m.uvs[usize(ib) * 2];
+                    const f32* uc = &m.uvs[usize(ic) * 2];
+                    const f32 uvArea = (ub[0] - ua[0]) * (uc[1] - ua[1]) - (ub[1] - ua[1]) * (uc[0] - ua[0]);
+                    // The cloth's UVs run with X and Y, so an up-facing triangle has a positive UV
+                    // area; the opposite sign is a mirrored frame.
+                    if (uvArea * faceN.z < 0.0f) ++sh.mirroredUv;
+                }
+            }
+            return sh;
+        };
+
+        const Shading before = shadingOf(source);
+        check(before.tris > 0 && before.allUnit && before.awayNormals == 0 && before.mirroredUv == 0,
+              "the fixture itself shades cleanly: unit normals facing their triangles, UVs unmirrored");
+        check(stitchOf(source, 0) == stitchOf(source, 1) && stitchOf(source, 0).size() == kClothN,
+              "the fixture's two panels meet along the whole stitch");
 
         std::string why;
         check(trifactor::simplifyMesh(mesh, 0.25f, &why), "simplifyMesh at the reported ratio (0.25): " + why);
-        check(mesh.indices.size() / 3 < beforeTris, "the triangle count actually fell (" +
-              std::to_string(beforeTris) + " -> " + std::to_string(mesh.indices.size() / 3) + ")");
-        check(mesh.submeshes.size() == 2, "still two submeshes after simplifying");
+        check(mesh.indices.size() < source.indices.size(), "the triangle count actually fell (" +
+              std::to_string(source.indices.size() / 3) + " -> " + std::to_string(mesh.indices.size() / 3) + ")");
+        check(mesh.submeshes.size() == 3, "still three submeshes after simplifying");
 
-        // 1) SUBMESH RANGES: exactly, contiguously cover the NEW (shrunk) index buffer -- the direct
-        // fix for the reported bug. The old code left indexStart/indexCount describing the OLD,
-        // larger buffer; buildMeshParts (Runtime/src/GameContent.cpp) needs this to hold exactly, or
-        // it either skips a submesh (a range past the end) or cuts the wrong triangles (a range that
-        // still fits but no longer means what it used to).
-        usize covered = 0;
-        bool contiguous = true;
-        for (const fmt::OcMeshSubmesh& sm : mesh.submeshes) {
-            if (sm.indexStart != covered) contiguous = false;
-            covered += sm.indexCount;
-        }
-        check(contiguous, "submesh ranges are contiguous and in order, with no gap or overlap");
-        check(covered == mesh.indices.size(),
-              "submesh ranges cover the whole simplified index buffer exactly (" +
-              std::to_string(covered) + " vs " + std::to_string(mesh.indices.size()) + " indices)");
+        // 1) The table describes the NEW buffer: every index covered exactly once.
+        std::string partWhy;
+        check(fmt::submeshesPartitionIndices(mesh, &partWhy),
+              "the submesh table covers the simplified index buffer exactly: " + partWhy);
 
-        // 2) MATERIAL ISOLATION: every triangle a submesh's range now names still has UVs inside
-        // THAT submesh's own pre-simplify UV range -- i.e. no triangle that used to belong to the
-        // OTHER material (whose UV range starts 5.0 away) ended up drawn under this one.
+        // 2) No triangle changed material: every UV a submesh uses is inside its own source box.
         for (usize s = 0; s < mesh.submeshes.size(); ++s) {
-            const fmt::OcMeshSubmesh& sm = mesh.submeshes[s];
-            const UvRange& r = sourceRange[s];
-            bool staysInOwnMaterial = true;
-            for (usize k = sm.indexStart; k < usize(sm.indexStart) + sm.indexCount; ++k) {
+            const UvBox& b = uvBox[s];
+            bool own = true;
+            const auto [k0, k1] = rangeOf(mesh.submeshes[s]);
+            for (usize k = k0; k < k1; ++k) {
                 const u32 vi = mesh.indices[k];
                 const f32 u = mesh.uvs[usize(vi) * 2], v = mesh.uvs[usize(vi) * 2 + 1];
-                if (u < r.uMin - 1e-4f || u > r.uMax + 1e-4f || v < r.vMin - 1e-4f || v > r.vMax + 1e-4f)
-                    staysInOwnMaterial = false;
+                if (u < b.uMin - 1e-4f || u > b.uMax + 1e-4f || v < b.vMin - 1e-4f || v > b.vMax + 1e-4f)
+                    own = false;
             }
-            check(staysInOwnMaterial, "submesh " + std::to_string(s) + " ('" + sm.name + "')'s triangles "
-                  "all stay within its own material's source UV range after simplifying -- none of the "
-                  "other material's triangles landed in this range");
+            check(own, "submesh '" + mesh.submeshes[s].name + "' holds only its own material's triangles");
         }
 
-        // 3) NORMALS: unit length, and in the same hemisphere as their own triangle's geometric face
-        // normal -- ruling out "normals wrongly interpolated/blended after collapse" the bug report
-        // also named as a suspect. meshopt_remapVertexBuffer only ever SELECTS an existing vertex's
-        // normal, never blends one, so this should hold exactly; a hemisphere disagreement would
-        // mean something walked off that guarantee.
-        bool allUnitLength = true, allSameHemisphere = true;
-        usize normalsChecked = 0;
-        const auto pos = [&](u32 i) {
-            return Vec3{mesh.positions[usize(i) * 3], mesh.positions[usize(i) * 3 + 1], mesh.positions[usize(i) * 3 + 2]};
-        };
-        for (usize t = 0; t + 2 < mesh.indices.size(); t += 3) {
-            const u32 ia = mesh.indices[t], ib = mesh.indices[t + 1], ic = mesh.indices[t + 2];
-            const Vec3 a = pos(ia), b = pos(ib), c = pos(ic);
-            const Vec3 faceN = cross(b - a, c - a);
-            if (faceN.size() < 1e-8f) continue;   // degenerate triangle: no face normal to compare against
-            const Vec3 faceNn = faceN.getSafeNormal();
-            for (u32 i : {ia, ib, ic}) {
-                const Vec3 n{mesh.normals[usize(i) * 3], mesh.normals[usize(i) * 3 + 1], mesh.normals[usize(i) * 3 + 2]};
-                if (std::abs(n.size() - 1.0f) > 1e-3f) allUnitLength = false;
-                if (dot(n, faceNn) <= 0.0f) allSameHemisphere = false;
-                ++normalsChecked;
-            }
-        }
-        check(normalsChecked > 0, "at least one non-degenerate triangle was actually checked");
-        check(allUnitLength, "every surviving vertex normal is still unit length after simplifying");
-        check(allSameHemisphere, "every surviving vertex normal stays in the same hemisphere as its "
-              "own triangle's geometric face normal");
+        // 3) The stitch did not crack: both panels still use every stitch vertex.
+        const std::vector<f32> stitch0 = stitchOf(mesh, 0), stitch1 = stitchOf(mesh, 1);
+        check(stitch0 == stitch1, "both panels still meet at the same stitch vertices (no crack between materials)");
+        check(stitch0.size() == kClothN, "every stitch vertex survived (" + std::to_string(stitch0.size()) +
+                                         " of " + std::to_string(kClothN) + ")");
 
-        // 4) UVs: every surviving vertex's UV still falls within the SOURCE mesh's overall UV range
-        // (both panels together) -- ruling out "UV seams collapsed" producing a UV that never
-        // existed in the source, e.g. from an averaged/blended pair.
-        const f32 wholeUMin = std::min(sourceRange[0].uMin, sourceRange[1].uMin) - 1e-4f;
-        const f32 wholeUMax = std::max(sourceRange[0].uMax, sourceRange[1].uMax) + 1e-4f;
-        const f32 wholeVMin = std::min(sourceRange[0].vMin, sourceRange[1].vMin) - 1e-4f;
-        const f32 wholeVMax = std::max(sourceRange[0].vMax, sourceRange[1].vMax) + 1e-4f;
-        bool allUvInRange = true;
-        for (usize i = 0; i < mesh.vertexCount(); ++i) {
-            const f32 u = mesh.uvs[i * 2], v = mesh.uvs[i * 2 + 1];
-            if (u < wholeUMin || u > wholeUMax || v < wholeVMin || v > wholeVMax) allUvInRange = false;
+        // 4) The trim, too small to simplify at this ratio, is kept exactly -- not emptied, not zeroed.
+        const fmt::OcMeshSubmesh& trimAfter = mesh.submeshes[2];
+        const fmt::OcMeshSubmesh& trimBefore = source.submeshes[2];
+        bool trimIntact = trimAfter.indexCount == 3;
+        for (u32 k = 0; trimIntact && k < 3; ++k) {
+            const Vec3 got  = pos(mesh, mesh.indices[trimAfter.indexStart + k]);
+            const Vec3 want = pos(source, source.indices[trimBefore.indexStart + k]);
+            trimIntact = got.x == want.x && got.y == want.y && got.z == want.z;
         }
-        check(allUvInRange, "every surviving vertex's UV stays within the source mesh's UV range");
+        check(trimIntact, "the one-triangle trim submesh is kept exactly as it was");
+
+        // 5) The shading inputs came through: the source has none of these faults, so allow 1% for
+        // what a coarser surface may legitimately do and no more.
+        const Shading after = shadingOf(mesh);
+        check(after.tris > 0 && after.allUnit, "every surviving normal is still unit length");
+        check(after.awayNormals * 100 <= after.tris, "normals face their own triangles (" +
+              std::to_string(after.awayNormals) + " of " + std::to_string(after.tris) + " face away)");
+        check(after.mirroredUv * 100 <= after.tris, "UVs wind with the geometry (" +
+              std::to_string(after.mirroredUv) + " of " + std::to_string(after.tris) + " mirrored)");
+
+        // 6) And the writer, which now refuses a stale table, accepts it.
+        std::vector<u8> bytes;
+        check(fmt::writeOcMesh(mesh, bytes, &why), "the simplified mesh writes: " + why);
     }
 
     AVER_INFO("=== buildLodHierarchy: multiple levels, monotonic error, acyclic ===");

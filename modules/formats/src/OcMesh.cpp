@@ -4,6 +4,7 @@
 
 #include "aver/formats/Avr1.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include "aver/platform/FileSystem.hpp"
@@ -176,6 +177,32 @@ void OcMeshData::computeBounds() {
     boundsMin = lo; boundsMax = hi;
 }
 
+bool submeshesPartitionIndices(const OcMeshData& m, std::string* why) {
+    // Walked in indexStart order through a sorted list of positions into the table, so a table
+    // listed out of order still passes: coverage is the rule, not ordering.
+    std::vector<usize> order(m.submeshes.size());
+    for (usize i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](usize a, usize b) {
+        return m.submeshes[a].indexStart < m.submeshes[b].indexStart;
+    });
+    usize covered = 0;
+    for (const usize i : order) {
+        const OcMeshSubmesh& s = m.submeshes[i];
+        if (s.indexCount % 3 != 0)
+            return fail(why, "submesh '" + s.name + "' has " + std::to_string(s.indexCount) +
+                             " indices, which is not a whole number of triangles");
+        if (usize(s.indexStart) != covered)
+            return fail(why, "submesh '" + s.name + "' starts at index " + std::to_string(s.indexStart) +
+                             (usize(s.indexStart) > covered ? ", leaving a gap after index " : ", overlapping indices before ") +
+                             std::to_string(covered) + " -- submeshes must cover the index buffer exactly once");
+        covered += s.indexCount;
+    }
+    if (covered != m.indices.size())
+        return fail(why, "submeshes cover " + std::to_string(covered) + " indices but the mesh has " +
+                         std::to_string(m.indices.size()));
+    return true;
+}
+
 // Encodes a mesh into an .ocmesh container. Returns false with `why` set on invalid input.
 bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     if (!in.valid()) return fail(why, ".ocmesh: mesh has no vertices, no indices, or mismatched attribute counts");
@@ -183,33 +210,25 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     if (in.submeshes.size() > 255) return fail(why, ".ocmesh: more than 255 submeshes");
     if (in.lodCount() > 255) return fail(why, ".ocmesh: more than 255 LODs");
 
-    // LOD 0's SubmeshRange table (§5.6) is trusted as-is by every reader -- most importantly
-    // Runtime/src/GameContent.cpp's buildMeshParts, which cuts md.indices[indexStart, indexStart+
-    // indexCount) verbatim and binds whatever lands in that slice to the submesh's own material. A
-    // table that no longer matches `in.indices` (a range that overshoots it, or ranges that leave a
-    // gap or overlap) used to write and load without a single error and only misbehave once a
-    // renderer tried to draw it -- either dropping a submesh outright or shading the WRONG
-    // triangles under its material (aver::trifactor::simplifyMesh reshuffling `indices` without
-    // updating `submeshes` to match was exactly this, before it became submesh-aware). Caught here
-    // instead: a mesh whose submeshes do not exactly, contiguously account for every LOD-0 index
-    // cannot be written at all, so this can never again reach a file silently.
-    {
-        usize covered = 0;
-        for (const OcMeshSubmesh& s : in.submeshes) {
-            if (usize(s.indexStart) != covered)
-                return fail(why, ".ocmesh: submesh '" + s.name + "' starts at index " +
-                                      std::to_string(s.indexStart) + ", but the submesh(es) before it "
-                                      "cover indices [0, " + std::to_string(covered) + ") -- submeshes "
-                                      "must contiguously partition the index buffer with no gap or overlap");
-            covered += s.indexCount;
-        }
-        if (covered != in.indices.size())
-            return fail(why, ".ocmesh: submeshes cover " + std::to_string(covered) + " of the mesh's " +
-                                  std::to_string(in.indices.size()) + " indices");
-    }
-
     OcMeshData m = in;
     m.computeBounds();
+
+    // A submesh table that no longer matches `indices` used to write and load without an error and
+    // only misbehave once drawn: simplifyMesh, before it became submesh-aware, shrank and reordered
+    // `indices` under an unchanged table, and the loader drew whole curtains under their metal_door
+    // material. Refused here, so a table like that can never reach a file again. A lone submesh is
+    // written as the whole mesh instead, because that is the only way anything draws it -- which also
+    // lets a one-material mesh cooked by that old --lod (range still at the pre-decimation count)
+    // be re-saved rather than stranded.
+    if (m.submeshes.size() == 1) {
+        m.submeshes[0].indexStart = 0;
+        m.submeshes[0].indexCount = static_cast<u32>(m.indices.size());
+    }
+    {
+        std::string partWhy;
+        if (!submeshesPartitionIndices(m, &partWhy))
+            return fail(why, ".ocmesh: " + partWhy + " (re-import the source to rebuild the table)");
+    }
 
     const u32 vcount = m.vertexCount();
     const bool index32 = vcount > 0xFFFF;

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <utility>
 
 using namespace aver;
 
@@ -266,6 +267,41 @@ int main() {
         check(fmt::writeOcMesh(ok, bytes, &why), "control mesh writes");
         fmt::OcMeshData m;
         check(fmt::parseOcMesh(bytes.data(), bytes.size(), m, &why), "control mesh reads");
+
+        // The submesh table must cover every index exactly once. simplifyMesh once shrank `indices`
+        // under an unchanged table, the file wrote cleanly, and the loader drew whole meshes under
+        // one material.
+        fmt::OcMeshData overshoot = makeCube();
+        overshoot.submeshes[1].indexCount = 18;
+        check(!fmt::writeOcMesh(overshoot, bytes, &why), "a submesh running past the index buffer is refused");
+        fmt::OcMeshData gap = makeCube();
+        gap.submeshes[1].indexStart = 27;
+        gap.submeshes[1].indexCount = 9;
+        check(!fmt::writeOcMesh(gap, bytes, &why), "a table that leaves indices uncovered is refused");
+        fmt::OcMeshData overlap = makeCube();
+        overlap.submeshes[1].indexStart = 18;
+        overlap.submeshes[1].indexCount = 18;
+        check(!fmt::writeOcMesh(overlap, bytes, &why), "overlapping submeshes are refused");
+        fmt::OcMeshData reordered = makeCube();
+        std::swap(reordered.submeshes[0], reordered.submeshes[1]);
+        check(fmt::writeOcMesh(reordered, bytes, &why),
+              "a complete table listed out of index order still writes: " + why);
+        fmt::OcMeshData split = makeCube();
+        split.submeshes[0].indexCount = 25;
+        split.submeshes[1].indexStart = 25;
+        split.submeshes[1].indexCount = 11;
+        check(!fmt::writeOcMesh(split, bytes, &why), "a submesh boundary inside a triangle is refused");
+
+        // One submesh is drawn whole whatever its range says, so a stale lone range (what the old
+        // --lod left in every one-material mesh) is written as the whole mesh, not refused.
+        fmt::OcMeshData lone = makeCube();
+        lone.submeshes.pop_back();
+        lone.submeshes[0].indexCount = 999;
+        check(fmt::writeOcMesh(lone, bytes, &why), "a stale lone submesh still writes: " + why);
+        fmt::OcMeshData loneBack;
+        check(fmt::parseOcMesh(bytes.data(), bytes.size(), loneBack, &why), "and reads back: " + why);
+        check(loneBack.submeshes.size() == 1 && loneBack.submeshes[0].indexStart == 0 &&
+              loneBack.submeshes[0].indexCount == 36, "as one submesh covering all 36 indices");
     }
 
     AVER_INFO("=== 32-bit index path ===");

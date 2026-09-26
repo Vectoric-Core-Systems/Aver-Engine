@@ -1780,43 +1780,62 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         return fail("mesh has no triangles to simplify");
     const usize targetIndices = usize(f64(mesh.indices.size()) * f64(ratio)) / 3 * 3;
     if (targetIndices < 3) return fail("ratio leaves fewer than one triangle");
+    // Checked, not assumed: every array below is indexed by these, and meshopt only asserts.
+    for (const u32 i : mesh.indices)
+        if (i >= vcount) return fail("an index points past the end of the vertex buffer");
 
-    // SUBMESH-AWARE, and this used not to be. mesh.submeshes (one entry per glTF primitive, i.e.
-    // per material -- GltfImport.cpp/ObjImport.cpp/UsdImport.cpp/mergeAll all produce the same
-    // shape) partitions `indices` into contiguous, per-material ranges that
-    // Runtime/src/GameContent.cpp's buildMeshParts later slices VERBATIM to split a multi-material
-    // mesh into one draw per material. meshopt_simplify only ever sees positions -- it has no idea
-    // two triangles belong to different materials -- so simplifying the WHOLE buffer as one unit
-    // (what this function used to do) reorders and shrinks it with no regard for those ranges,
-    // while mesh.submeshes kept describing the OLD, larger buffer's layout. buildMeshParts skips
-    // any range that no longer fits (GameContent.cpp's own overshoot guard) and, once fewer than
-    // two ranges survive that, gives up on splitting entirely and draws the WHOLE mesh under a
-    // single material -- observed on NewSponza's curtain meshes (a cloth primitive plus a
-    // metal_door primitive sharing one mesh) as the entire curtain rendering dark and
-    // glossy-black, under the door's material, once --lod was used. Simplifying each submesh's own
-    // range independently, then reassembling them in the same order, keeps every material's
-    // triangles inside its own range no matter how meshopt reorders within it.
-    const std::vector<fmt::OcMeshSubmesh> originalSubmeshes = mesh.submeshes;
-    if (!originalSubmeshes.empty()) {
-        usize expect = 0;
-        for (const fmt::OcMeshSubmesh& s : originalSubmeshes) {
-            if (usize(s.indexStart) != expect)
-                return fail("submeshes do not contiguously partition the index buffer");
-            expect += s.indexCount;
+    // ONE SIMPLIFICATION PER SUBMESH, never one across the whole buffer. mesh.submeshes partitions
+    // `indices` into per-material ranges that Runtime/src/GameContent.cpp's buildMeshParts cuts
+    // verbatim, one draw per material. meshopt_simplify sees positions only, so one pass over the
+    // whole buffer shuffled triangles between those ranges and shrank the buffer under an unchanged
+    // table: buildMeshParts dropped the ranges that now overshot, gave up on splitting, and drew the
+    // whole mesh under slot 0 -- NewSponza's curtains, cloth plus a metal_door primitive in one mesh,
+    // went dark and glossy under the metal after --lod 0.25. Simplifying each range on its own
+    // keeps every triangle in its own material; the table is rewritten below to match.
+    if (mesh.submeshes.size() > 1) {
+        std::string partWhy;
+        if (!fmt::submeshesPartitionIndices(mesh, &partWhy)) {
+            if (why) *why = "cannot simplify per submesh: " + partWhy;
+            return false;
         }
-        if (expect != mesh.indices.size()) return fail("submeshes do not cover the whole index buffer");
     }
 
-    // One range per submesh (material-boundary-safe), or the whole buffer as a single range when
-    // there is no submesh table to preserve -- which reproduces the old, whole-mesh behaviour
-    // exactly for a mesh that never named more than one material to begin with.
+    // No table, or one submesh (drawn whole whatever its range says -- see fmt::
+    // submeshesPartitionIndices), means nothing to keep apart: the whole buffer is one range, exactly
+    // the old behaviour, and a lone submesh is rewritten below to cover the result.
     struct Range { usize start, count; };
     std::vector<Range> ranges;
-    if (originalSubmeshes.empty()) {
+    if (mesh.submeshes.size() <= 1) {
         ranges.push_back({0, mesh.indices.size()});
     } else {
-        ranges.reserve(originalSubmeshes.size());
-        for (const fmt::OcMeshSubmesh& s : originalSubmeshes) ranges.push_back({s.indexStart, s.indexCount});
+        ranges.reserve(mesh.submeshes.size());
+        for (const fmt::OcMeshSubmesh& s : mesh.submeshes) ranges.push_back({s.indexStart, s.indexCount});
+    }
+
+    // MATERIAL BORDERS ARE LOCKED, or separate simplification cracks the mesh open along them. Where
+    // two submeshes meet (trim welded to cloth, two fabric panels sewn together), each range sees
+    // that seam as its own open border and would collapse it on its own schedule,
+    // so the two sides stop sharing vertices. Every vertex whose POSITION is used by more than one
+    // range is locked -- by position, through the same meshopt_generatePositionRemap
+    // computeShellIds uses, because glTF primitives never share vertex ids, only positions. A true
+    // open border (one range only) stays free to simplify, as it always was.
+    std::vector<u8> lock;
+    if (ranges.size() > 1) {
+        std::vector<u32> posRemap(vcount);
+        meshopt_generatePositionRemap(posRemap.data(), mesh.positions.data(), vcount, sizeof(f32) * 3);
+        constexpr u32 kUnused = ~0u, kShared = ~0u - 1u;
+        std::vector<u32> user(vcount, kUnused);   // per canonical position: the one range using it
+        for (usize r = 0; r < ranges.size(); ++r)
+            for (usize k = ranges[r].start; k < ranges[r].start + ranges[r].count; ++k) {
+                u32& u = user[posRemap[mesh.indices[k]]];
+                if (u == kUnused) u = static_cast<u32>(r);
+                else if (u != static_cast<u32>(r)) u = kShared;
+            }
+        bool anyShared = false;
+        lock.assign(vcount, 0);
+        for (u32 v = 0; v < vcount; ++v)
+            if (user[posRemap[v]] == kShared) { lock[v] = meshopt_SimplifyVertex_Lock; anyShared = true; }
+        if (!anyShared) lock.clear();
     }
 
     // FLT_MAX rather than a small bound, deliberately: the caller asked for a triangle COUNT, and a
@@ -1833,16 +1852,18 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         usize got = count;
         if (target >= 3 && count >= 3) {
             f32 rErr = 0.0f;
-            got = meshopt_simplify(
+            // meshopt_simplify is exactly this call with no attributes and no locks.
+            got = meshopt_simplifyWithAttributes(
                 rOut.data(), mesh.indices.data() + start, count,
-                mesh.positions.data(), vcount, sizeof(f32) * 3,
+                mesh.positions.data(), vcount, sizeof(f32) * 3, nullptr, 0, nullptr, 0,
+                lock.empty() ? nullptr : lock.data(),
                 target, std::numeric_limits<f32>::max(), 0, &rErr);
             resultError = std::max(resultError, rErr);
+        } else {
+            // Too small a range to ask for even one triangle at this ratio (a small accent
+            // submesh): kept whole rather than emptied.
+            std::copy_n(mesh.indices.data() + start, count, rOut.data());
         }
-        // Too few triangles in this ONE submesh to ask the simplifier for a real target (a small
-        // accent submesh against a steep ratio), or the simplifier declined: keep this range
-        // exactly as it was rather than asking meshopt_simplify for zero triangles or dropping
-        // triangles it never agreed to remove.
         rOut.resize(got);
         newIndexStart[r] = static_cast<u32>(out.size());
         newIndexCount[r] = static_cast<u32>(got);
@@ -1858,10 +1879,8 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
 
     // The reduced index buffer still addresses the ORIGINAL vertex array, so most of those vertices
     // are now unreferenced. Compact, or the file keeps every vertex of the source mesh and the whole
-    // point -- less data -- is lost while the triangle count alone goes down. Still whole-mesh and
-    // submesh-oblivious, which is fine here: this step only ever DROPS vertices no surviving
-    // triangle references and renumbers what is left, never moves a triangle from one submesh's
-    // range into another's the way simplifying across the whole buffer at once could.
+    // point -- less data -- is lost while the triangle count alone goes down. Whole-mesh is safe
+    // here: it renumbers vertices and never moves a triangle between submesh ranges.
     std::vector<u32> remap(vcount);
     const usize newVerts = meshopt_optimizeVertexFetchRemap(remap.data(), out.data(), got, vcount);
 
@@ -1915,20 +1934,16 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     mesh.computeBounds();    // positions changed; writeOcMesh recomputes this too, but an in-memory
                               // caller that reads boundsMin/Max before saving deserves a live value
 
-    // mesh.submeshes: rewritten with the SAME ranges computed above -- each submesh kept its own
-    // material's triangles from start to finish, just relocated to wherever the reassembled buffer
-    // actually put them. Everything else about an entry (name, materialSlot, baseVertex,
-    // vertexCount) is left untouched: baseVertex is always 0 for every importer this engine has
-    // (GltfImport.cpp/ObjImport.cpp/UsdImport.cpp all hard-code it; mergeAll's non-zero values are
-    // already baked straight into `indices`, never applied at draw time), and vertexCount is read
-    // by no consumer in this tree either -- only indexStart/indexCount are load-bearing, at
-    // Runtime/src/GameContent.cpp's buildMeshParts.
-    if (!originalSubmeshes.empty()) {
-        mesh.submeshes = originalSubmeshes;
-        for (usize i = 0; i < mesh.submeshes.size(); ++i) {
-            mesh.submeshes[i].indexStart = newIndexStart[i];
-            mesh.submeshes[i].indexCount = newIndexCount[i];
-        }
+    // Each range was reassembled in table order, so its new place is known exactly. baseVertex /
+    // vertexCount become the importers' own "the whole vertex buffer" form (0, newVerts): indices
+    // stay global, and after compaction any narrower vertex span a table carried (mergeAll writes
+    // one per merged piece) no longer describes anything, and the old count would name vertices
+    // that no longer exist.
+    for (usize i = 0; i < mesh.submeshes.size(); ++i) {
+        mesh.submeshes[i].indexStart  = newIndexStart[i];
+        mesh.submeshes[i].indexCount  = newIndexCount[i];
+        mesh.submeshes[i].baseVertex  = 0;
+        mesh.submeshes[i].vertexCount = static_cast<u32>(newVerts);
     }
 
     if (why) {
