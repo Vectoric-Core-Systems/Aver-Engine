@@ -454,6 +454,16 @@ void SandboxApp::endTransformEdit() {
     if (sel_ == kSelScene) c.id = editIdFor(selEntity_); else
 #endif
     c.objIndex = sel_;
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+    // ON COMMIT, ONCE, not every frame of the drag -- a body refitted per frame would refit tens
+    // of times for one gesture. Undo/redo get the identical rebuild through applyXformTo, which
+    // replays this same before/after pair; see rebuildMovedBodies for why descendants need it too.
+    if (sel_ == kSelScene) rebuildMovedBodies(selEntity_);
+    for (const EditCmd::AlsoMoved& m : c.alsoMoved) {
+        const scene::Entity moved = entityForEdit(m.id);
+        if (moved != scene::kInvalidEntity) rebuildMovedBodies(moved);
+    }
+#endif
     pushEdit(std::move(c));
 }
 
@@ -491,6 +501,9 @@ void SandboxApp::applyXformTo(const EditCmd& c, const EditXform& x, bool undoing
             const scene::Entity e = entityForEdit(m.id);
             if (e == scene::kInvalidEntity || !w.valid(e)) continue;
             w.setLocalTransform(e, undoing ? m.beforeLocal : m.afterLocal);
+#if AVER_MODULE_PHYSICS
+            rebuildMovedBodies(e);
+#endif
         }
     }
     if (c.id) {
@@ -500,6 +513,12 @@ void SandboxApp::applyXformTo(const EditCmd& c, const EditXform& x, bool undoing
         // WORLD IN, LOCAL OUT. A Transform command's before/after come from selectedXform,
         // which is world-space, and this used to assign them to CLocal unconverted.
         w.setLocalTransform(e, localFromWorldFor(w, e, x));
+#if AVER_MODULE_PHYSICS
+        // UNDO AND REDO GET THE SAME REBUILD A LIVE COMMIT DOES (see endTransformEdit), so a body
+        // dragged, then undone, then redone ends up fitted to the SAME transform every time rather
+        // than accumulating whatever the live path skipped.
+        rebuildMovedBodies(e);
+#endif
         sel_ = kSelScene; selEntity_ = e;
         return;
     }
@@ -514,8 +533,10 @@ void SandboxApp::applyXformTo(const EditCmd& c, const EditXform& x, bool undoing
 
 #if AVER_MODULE_SCENE
 // Describes a live entity fully enough to rebuild it after a destroy: its outliner label, its
-// transform, its physics-body half-extent if any, and -- via captureEntity() -- its asset name,
-// persisted object id, and every OTHER component it carries. Shared by Delete (undo), Copy and Duplicate.
+// transform, whether it had a physics body, and -- via captureEntity() -- its asset name,
+// persisted object id, and every OTHER component it carries. Shared by Delete (undo), Copy and
+// Duplicate. NOT the body's shape: rebuildEntityBody derives that fresh from the mesh and the
+// transform above, every time it is called.
 SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
     scene::World& w = scene::World::instance();
     EditCmd c;
@@ -530,10 +551,7 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
     if (const scene::Entity par = w.parent(e); par != scene::kInvalidEntity)
         c.parentId = editIdFor(par);
 #if AVER_MODULE_PHYSICS
-    if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
-        c.hadBody = true;
-        c.bodyHalf = c.after.scale;
-    }
+    c.hadBody = entityBodies_.find(static_cast<u32>(e)) != entityBodies_.end();
 #endif
     // ABSENT MEANS "the default", exactly as saveLevel reads these maps: an entity created in the
     // editor has no entry and collides. Recording the absence as the default is what makes the
@@ -560,7 +578,7 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
 // spawnCube()/spawnFromAssetDrop() do NOT go through this: no prior snapshot to instantiate FROM,
 // and refactoring their working create tails is out of scope here.
 scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, const EditXform& xf,
-                               const std::string& label, bool hadBody, const Vec3& bodyHalf,
+                               const std::string& label, bool hadBody,
                                bool restoreObjectId,
                                scene::Entity parent,
                                bool collide, bool hasSnapZ, f32 snapZ) {
@@ -579,13 +597,11 @@ scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, co
     if (!collide) entityCollide_[static_cast<u32>(e)] = false;
     if (hasSnapZ) entitySnapZ_[static_cast<u32>(e)] = snapZ;
 #if AVER_MODULE_PHYSICS
-    if (hadBody && aver_phys_ready()) {
-        const int32_t body = aver_phys_add_static_box(t.position.x, t.position.y, t.position.z,
-                                                      bodyHalf.x, bodyHalf.y, bodyHalf.z);
-        if (body) aver_phys_set_entity(body, static_cast<int32_t>(e));
-        levelBodies_.push_back(body);
-        entityBodies_[static_cast<u32>(e)] = body;
-    }
+    // FITTED FRESH, not replayed from a stored half-extent -- rebuildEntityBody reads `e`'s own
+    // mesh bounds and its just-composed world transform, which is what makes this correct for a
+    // child (`t` above is parent-relative) and for a mesh whose bounds were unknown when the
+    // command carrying `hadBody` was captured.
+    if (hadBody) rebuildEntityBody(e);
 #endif
     sel_ = kSelScene; selEntity_ = e;
     return e;
@@ -605,7 +621,7 @@ void SandboxApp::recreateFrom(const EditCmd& c) {
         if (!scene::World::instance().valid(par)) par = scene::kInvalidEntity;
     }
 #endif
-    const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody, c.bodyHalf,
+    const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody,
                                             true, par, c.hadCollide, c.hadSnapZ, c.snapZ);
     if (e == scene::kInvalidEntity) return;
     rebindEdit(c.id, e);
@@ -644,7 +660,7 @@ void SandboxApp::spawnSubtreeUnder(scene::Entity root, const std::vector<EditCmd
         if (n.parent >= 0 && n.parent < static_cast<i32>(made.size()))
             par = made[static_cast<usize>(n.parent)];
         const scene::Entity ce =
-            spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, n.bodyHalf, restoreIds, par,
+            spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, restoreIds, par,
                             n.hadCollide, n.hadSnapZ, n.snapZ);
         made.push_back(ce);
         if (restoreIds && ce != scene::kInvalidEntity) rebindEdit(n.id, ce);
@@ -710,7 +726,10 @@ void SandboxApp::pushReparent(scene::Entity child, scene::Entity newParent) {
     // jump out from under the mouse. Undo and redo then REPLAY the captured local values rather
     // than running keepWorld a second time -- the decompose is not guaranteed bit-exact across
     // repeated cycles, and replaying stored ground truth is what applyXformTo and recreateFrom
-    // already do.
+    // already do. NO BODY REBUILD ANYWHERE IN THIS FUNCTION OR IN applyReparentTo, unlike a
+    // Transform command: keepWorld's whole job is to leave `child`'s WORLD transform exactly where
+    // it was, and undo/redo replay the identical local numbers under the identical rule -- a body
+    // fitted in world space never goes stale here, on the anchor or on any descendant.
     //
     // AND THE RETURN VALUE IS CHECKED, which no existing caller of setParent does. A refusal
     // here means the world declined the move; pushing a command for it would put an entry on
@@ -787,10 +806,7 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
             n.snapZ    = static_cast<f32>(si->second);
         }
 #  if AVER_MODULE_PHYSICS
-        if (entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end()) {
-            n.hadBody = true;
-            n.bodyHalf = n.xf.scale;
-        }
+        n.hadBody = entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end();
 #  endif
         indexOf.emplace(static_cast<u32>(d), static_cast<i32>(c.subtree.size()));
         c.subtree.push_back(std::move(n));
@@ -801,6 +817,61 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
 #endif
 
 #if AVER_MODULE_SCENE
+#if AVER_MODULE_PHYSICS
+// The static body `e`'s mesh and CURRENT world transform describe, replacing whatever body it had
+// before. THE ONE PLACE A BODY IS MADE OR REMADE: create (fresh or via undo/paste/duplicate) and
+// every transform-commit path below call this rather than keeping their own
+// aver_phys_add_static_box, so a body's shape can never drift from what fitStaticBox says right
+// now -- see aver::world::fitStaticBox for the fit itself, and EditCmd::hadBody's own comment for
+// why no shape is carried alongside that flag any more.
+//
+// THE OLD BODY IS DROPPED UNCONDITIONALLY, a fresh one made only if physics is running and `e` is
+// still live: a command replayed against a since-destroyed handle, or one running before
+// aver_phys_init, still has to let go of the stale body rather than leaving entityBodies_ pointing
+// at nothing.
+void SandboxApp::rebuildEntityBody(scene::Entity e) {
+    if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+        aver_phys_remove_body(it->second);
+        levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
+                           levelBodies_.end());
+        entityBodies_.erase(it);
+    }
+    scene::World& w = scene::World::instance();
+    if (!w.valid(e) || !aver_phys_ready()) return;
+
+    // UNKNOWN MESH GETS THE PLACEHOLDER'S OWN BOUNDS. fitStaticBox's own fallback to the unit cube
+    // is for a non-finite or inverted box; content_.boundsFor returning null is the different case
+    // of nothing having measured this mesh at all, and the built-in unit cube is the one shape
+    // every editor build is guaranteed to have registered.
+    Vec3 lmin{-world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm};
+    Vec3 lmax{ world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm};
+    if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
+        if (const auto* b = content_.boundsFor(mr->mesh)) { lmin = b->first; lmax = b->second; }
+    }
+
+    // COMPOSED UP THE PARENT CHAIN, not read from CWorld: worldTransformOf is correct the instant a
+    // create or a setLocalTransform lands, with no dependency on a later system pass recomposing
+    // it -- see worldTransformOf's own comment for why decomposing CWorld's matrix instead would
+    // not even be well-defined for the scales this editor allows.
+    const i32 body = world::addStaticBoxBody(worldTransformOf(w, e), lmin, lmax);
+    if (!body) return;
+    aver_phys_set_entity(body, static_cast<i32>(e));
+    entityBodies_[static_cast<u32>(e)] = body;
+    levelBodies_.push_back(body);
+}
+
+// rebuildEntityBody for `e` and then for every descendant that currently owns a body. A transform
+// edit on `e` leaves each descendant's LOCAL transform untouched -- that is the whole point of a
+// hierarchy -- but a body is fitted in WORLD space, and the descendant's world transform moved
+// right along with its ancestor.
+void SandboxApp::rebuildMovedBodies(scene::Entity e) {
+    std::vector<scene::Entity> nodes;
+    collectSubtree(scene::World::instance(), e, nodes);
+    for (const scene::Entity d : nodes)
+        if (entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end()) rebuildEntityBody(d);
+}
+#endif
+
 // Removes an entity and everything the editor hung off it, including its static body.
 //
 // THE WHOLE SUBTREE, because World::destroy retires the whole subtree and this function used to

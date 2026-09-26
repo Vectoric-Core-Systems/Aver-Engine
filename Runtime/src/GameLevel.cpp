@@ -100,6 +100,18 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // is the part that is genuinely the GAME's: which material cache to bind into, and what to keep.
     world::InstantiateOptions opt;
     if (!legacy) opt.groundHeightAt = hooks_.groundHeightAt;
+    // A mesh's local bounds, by the objectId CMeshRenderer::mesh carries -- see LevelInstance.hpp's
+    // own comment on why this is a host callback rather than something Aver.World looks up itself.
+    // GameContent already keys this exact table by this exact id (the level-bounds walk below reads
+    // it the same way), so this is a lookup, not new bookkeeping. Set unconditionally: boundsFor only
+    // needs AVER_MODULE_SCENE, which this whole function already requires, not AVER_MODULE_PBR.
+    opt.localBoundsFor = [&content](u64 meshId, Vec3& outLocalMin, Vec3& outLocalMax) {
+        const std::pair<Vec3, Vec3>* b = content.boundsFor(meshId);
+        if (!b) return false;
+        outLocalMin = b->first;
+        outLocalMax = b->second;
+        return true;
+    };
 #if AVER_MODULE_PBR
     // Bind the authored material, if the project has one for this surface token. Done at load rather
     // than per draw because materialForSurface stats up to three paths on a miss and caches the
@@ -108,8 +120,6 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         const pbr::MaterialHandle h = content.materialForSurface(surface);
         if (h) content.bindSurfaceMaterial(token, h);
     };
-#else
-    (void)content;
 #endif
 
     const world::LevelInstance inst = world::instantiate(w, opt);

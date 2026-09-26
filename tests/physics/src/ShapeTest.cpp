@@ -215,6 +215,38 @@ static void testCompoundOfBoxes() {
     aver_phys_shutdown();
 }
 
+// A ROTATED STATIC BOX'S AABB REFLECTS THE ROTATION -- the contract Aver.World's fitStaticBox leans
+// on: it hands this ABI a half-extent along the box's OWN axes plus a SEPARATE rotation
+// (aver_phys_add_static_box, then aver_phys_body_set_rotation), trusting the world-space footprint to
+// swing around with the rotation rather than staying reported along the shape's un-rotated axes.
+static void testRotatedStaticBoxAabb() {
+    AVER_INFO("=== a rotated static box's AABB swings with it ===");
+    aver_phys_init();
+
+    // Half (100, 10, 10) at the origin, then a 90-degree yaw about +Z: local X (half 100) rotates
+    // onto world Y, local Y (half 10) onto world X -- aver::Quat::rotate sends (x, y, z) to
+    // (-y, x, z) for exactly this rotation.
+    const int32_t box = aver_phys_add_static_box(0, 0, 0, 100.0f, 10.0f, 10.0f);
+    check(box != 0, "a static box is created");
+
+    const Quat q = Quat::fromAxisAngle(Vec3{0, 0, 1}, radians(90.0f));
+    check(aver_phys_body_set_rotation(box, q.x, q.y, q.z, q.w) == 1, "it takes a rotation");
+
+    float mn[3] = {0, 0, 0}, mx[3] = {0, 0, 0};
+    check(aver_phys_body_aabb(box, mn, mx) == 1, "its AABB can be read back");
+    const f32 exX = (mx[0] - mn[0]) * 0.5f;
+    const f32 exY = (mx[1] - mn[1]) * 0.5f;
+    // Tolerance covers Jolt's convex radius, which pads a box's collision geometry a little on every
+    // side; the point of this test is the axes SWAPPING, not their last millimetre.
+    check(near(exX, 10.0f, 1.0f),
+          "after a 90-degree yaw the AABB's X half-extent is ~10 (100 would mean the rotation did "
+          "nothing), got " + f2s(exX));
+    check(near(exY, 100.0f, 1.0f),
+          "...and its Y half-extent is ~100 (10 would mean the rotation did nothing), got " + f2s(exY));
+
+    aver_phys_shutdown();
+}
+
 // The new shapes must be ordinary bodies in every other respect -- the point of routing them through
 // the module's own addBody rather than a second creation path. If any of these fails, the shape was
 // built but not registered the way every other body is.
@@ -252,6 +284,7 @@ int main() {
     testCylinderHeightIsFull();
     testTaperedCapsule();
     testCompoundOfBoxes();
+    testRotatedStaticBoxAabb();
     testNewShapesAreOrdinaryBodies();
 
     AVER_INFO("==================================================");

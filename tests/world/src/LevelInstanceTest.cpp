@@ -22,6 +22,7 @@
 #include "aver/world/LevelTransform.hpp"
 
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -137,6 +138,94 @@ int main() {
         check(fmt::parseOcworld("OCWORLD 1\nNAME n\n", nw, &swhy), "a world with no CAMERA parses");
         check(fmt::writeOcworld(nw).find("CAMERA") == std::string::npos,
               "a level with no camera writes NO CAMERA line");
+    }
+
+    // ---- fitStaticBox: the collision box a placement's world transform implies --------------------
+    // Pure math, no scene or physics needed -- see LevelInstance.hpp's own comment on why
+    // fitStaticBox has neither as a dependency.
+    {
+        const Vec3 kUnitMin{-1, -1, -1}, kUnitMax{1, 1, 1};
+
+        // THE CASE EVERY LEVEL AUTHORED BEFORE THIS EXISTED ALREADY DEPENDS ON: the unit cube with an
+        // identity rotation must reproduce EXACTLY the old aver_phys_add_static_box(position, |scale|)
+        // call this function replaces.
+        {
+            const Vec3 p{500, -200, 30};
+            Transform xf;
+            xf.position = p;
+            xf.scale = Vec3{3, 4, 5};
+            const world::StaticBoxFit fit = world::fitStaticBox(xf, kUnitMin, kUnitMax);
+            checkNear(fit.centre.x, p.x, 0.0f, "unit cube: centre x is exactly position");
+            checkNear(fit.centre.y, p.y, 0.0f, "unit cube: centre y is exactly position");
+            checkNear(fit.centre.z, p.z, 0.0f, "unit cube: centre z is exactly position");
+            checkNear(fit.halfExtents.x, 3.0f, 0.0f, "unit cube: half-extent x is exactly scale x");
+            checkNear(fit.halfExtents.y, 4.0f, 0.0f, "unit cube: half-extent y is exactly scale y");
+            checkNear(fit.halfExtents.z, 5.0f, 0.0f, "unit cube: half-extent z is exactly scale z");
+            check(fit.rotation.x == 0.0f && fit.rotation.y == 0.0f && fit.rotation.z == 0.0f &&
+                      fit.rotation.w == 1.0f,
+                  "unit cube: an identity rotation passes through as identity");
+        }
+
+        // A negative scale mirrors the box, not its SIZE -- Jolt has no negative half-extent and this
+        // function must never hand it one.
+        {
+            Transform xf;
+            xf.scale = Vec3{-3, -4, -5};
+            const world::StaticBoxFit fit = world::fitStaticBox(xf, kUnitMin, kUnitMax);
+            checkNear(fit.halfExtents.x, 3.0f, 0.0f, "negative scale x still gives a positive half-extent");
+            checkNear(fit.halfExtents.y, 4.0f, 0.0f, "negative scale y still gives a positive half-extent");
+            checkNear(fit.halfExtents.z, 5.0f, 0.0f, "negative scale z still gives a positive half-extent");
+        }
+
+        // AN OFF-CENTRE LOCAL BOX UNDER SCALE AND A 90-DEGREE YAW, computed by hand: local centre
+        // (100, 0, 150), local half (100, 10, 150); scale 2 gives half-extents (200, 20, 300) IN THE
+        // BOX'S OWN AXES, untouched by rotation. The yaw then rotates the scaled centre offset
+        // (200, 0, 300) -- quatFromEulerDeg's 90-degree yaw sends (x, y, z) to (-y, x, z) -- to
+        // (0, 200, 300), landing the world centre at position + (0, 200, 300).
+        {
+            const Vec3 p{1000, 2000, 3000};
+            Transform xf;
+            xf.position = p;
+            xf.scale = Vec3{2, 2, 2};
+            xf.rotation = world::quatFromEulerDeg(Vec3{0, 0, 90});
+            const world::StaticBoxFit fit = world::fitStaticBox(xf, Vec3{0, -10, 0}, Vec3{200, 10, 300});
+            checkNear(fit.halfExtents.x, 200.0f, 1e-3f, "off-centre box: half-extent x in box axes");
+            checkNear(fit.halfExtents.y, 20.0f, 1e-3f, "off-centre box: half-extent y in box axes");
+            checkNear(fit.halfExtents.z, 300.0f, 1e-3f, "off-centre box: half-extent z in box axes");
+            checkNear(fit.centre.x, p.x, 0.05f, "off-centre box: rotated centre x");
+            checkNear(fit.centre.y, p.y + 200.0f, 0.05f, "off-centre box: rotated centre y");
+            checkNear(fit.centre.z, p.z + 300.0f, 0.05f, "off-centre box: rotated centre z");
+            checkNear(fit.rotation.x, xf.rotation.x, 1e-6f, "off-centre box: rotation passes through x");
+            checkNear(fit.rotation.y, xf.rotation.y, 1e-6f, "off-centre box: rotation passes through y");
+            checkNear(fit.rotation.z, xf.rotation.z, 1e-6f, "off-centre box: rotation passes through z");
+            checkNear(fit.rotation.w, xf.rotation.w, 1e-6f, "off-centre box: rotation passes through w");
+        }
+
+        // A PLANAR MESH -- zero thickness on Z, a floor quad -- must not become a razor-thin box.
+        {
+            Transform xf;
+            xf.scale = Vec3{1, 1, 1};
+            const world::StaticBoxFit fit = world::fitStaticBox(xf, Vec3{-50, -50, 0}, Vec3{50, 50, 0});
+            checkNear(fit.halfExtents.x, 50.0f, 0.0f, "planar mesh: X keeps its real half-extent");
+            checkNear(fit.halfExtents.y, 50.0f, 0.0f, "planar mesh: Y keeps its real half-extent");
+            checkNear(fit.halfExtents.z, 1.0f, 0.0f, "planar mesh: Z is floored to 1 cm, not left at 0");
+        }
+
+        // NON-FINITE OR INVERTED BOUNDS ARE NOT A BOX -- fall back to the unit cube exactly as a mesh
+        // whose bounds are simply unknown would.
+        {
+            Transform xf;
+            xf.scale = Vec3{7, 7, 7};
+            const f32 nan = std::numeric_limits<f32>::quiet_NaN();
+            const world::StaticBoxFit fitNan = world::fitStaticBox(xf, Vec3{0, 0, 0}, Vec3{nan, 1, 1});
+            checkNear(fitNan.halfExtents.x, 7.0f, 0.0f, "a non-finite bound falls back to the unit cube (x)");
+            checkNear(fitNan.halfExtents.y, 7.0f, 0.0f, "a non-finite bound falls back to the unit cube (y)");
+            checkNear(fitNan.halfExtents.z, 7.0f, 0.0f, "a non-finite bound falls back to the unit cube (z)");
+
+            const world::StaticBoxFit fitInverted =
+                world::fitStaticBox(xf, Vec3{5, 0, 0}, Vec3{-5, 1, 1});   // min.x > max.x
+            checkNear(fitInverted.halfExtents.x, 7.0f, 0.0f, "an inverted bound falls back to the unit cube too");
+        }
     }
 
     // ---- instantiation ---------------------------------------------------------------------------

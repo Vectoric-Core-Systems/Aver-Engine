@@ -722,6 +722,14 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         }
         levelEntities_.push_back(e);
         entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), kCubeAsset);
+#if AVER_MODULE_PHYSICS
+        // COLLIDES LIKE A LOADED PLACEMENT WOULD: `collide` for a fresh entity has no entry in
+        // entityCollide_, which reads as the default (true) everywhere else this map is
+        // consulted, so a primitive added from this menu gets the same body a level file's own
+        // placement gets, without a save and reload to pick it up. BEFORE describeEntity() below,
+        // so the pushed Create command's hadBody already agrees with what was actually built.
+        rebuildEntityBody(e);
+#endif
         sel_ = kSelScene; selEntity_ = e;
         {
             EditCmd c = describeEntity(e);
@@ -1011,6 +1019,13 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     }
     levelEntities_.push_back(ent);
     entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
+#if AVER_MODULE_PHYSICS
+    // COLLIDES LIKE A LOADED PLACEMENT WOULD -- see spawnPrimitive's identical call for why
+    // (`collide` defaults to true, and this is the mesh-drop branch only: the .ocparticle branch
+    // above has no CMeshRenderer and stays as it was). BEFORE describeEntity() below, so the
+    // pushed Create command's hadBody already agrees with what was actually built.
+    rebuildEntityBody(ent);
+#endif
     sel_ = kSelScene; selEntity_ = ent;
     {
         EditCmd c = describeEntity(ent);
@@ -1770,7 +1785,6 @@ void SandboxApp::copySelection() {
             ce.subtree = std::move(c.subtree);
             ce.xform = c.after;
             ce.hadBody = c.hadBody;
-            ce.bodyHalf = c.bodyHalf;
             clipboard_.entities.push_back(std::move(ce));
         }
         clipboard_.hasObject = false;
@@ -1785,7 +1799,6 @@ void SandboxApp::copySelection() {
         ce.subtree = std::move(c.subtree);
         ce.xform = c.after;
         ce.hadBody = c.hadBody;
-        ce.bodyHalf = c.bodyHalf;
         clipboard_.entities.assign(1, std::move(ce));
         clipboard_.hasObject  = false;
         return;
@@ -1822,7 +1835,7 @@ void SandboxApp::pasteClipboard() {
             EditXform x = ce.xform;
             x.pos = at + (ce.xform.pos - origin);
             const std::string label = makeEntityLabel(std::string(), ce.snap.asset);
-            const scene::Entity e = spawnEntityFrom(ce.snap, x, label, ce.hadBody, ce.bodyHalf, /*restoreObjectId=*/false);
+            const scene::Entity e = spawnEntityFrom(ce.snap, x, label, ce.hadBody, /*restoreObjectId=*/false);
             if (e == scene::kInvalidEntity) continue;
             spawnSubtreeUnder(e, ce.subtree, /*restoreIds=*/false);
             sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
@@ -1902,7 +1915,7 @@ void SandboxApp::duplicateSelection() {
             x.pos.x += delta; x.pos.y += delta;
             const std::string label = makeEntityLabel(std::string(), src.snap.asset);
             const scene::Entity e =
-                spawnEntityFrom(src.snap, x, label, src.hadBody, src.bodyHalf, /*restoreObjectId=*/false);
+                spawnEntityFrom(src.snap, x, label, src.hadBody, /*restoreObjectId=*/false);
             if (e == scene::kInvalidEntity) continue;
             spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
             EditCmd c = describeEntity(e);
@@ -1928,7 +1941,7 @@ void SandboxApp::duplicateSelection() {
         EditXform x = src.after;
         x.pos.x += delta; x.pos.y += delta;
         const std::string label = makeEntityLabel(std::string(), src.snap.asset);
-        const scene::Entity e = spawnEntityFrom(src.snap, x, label, src.hadBody, src.bodyHalf, /*restoreObjectId=*/false);
+        const scene::Entity e = spawnEntityFrom(src.snap, x, label, src.hadBody, /*restoreObjectId=*/false);
         if (e == scene::kInvalidEntity) return;
         spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
         sel_ = kSelScene; selEntity_ = e;

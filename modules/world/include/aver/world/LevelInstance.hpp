@@ -23,6 +23,45 @@
 #include "aver/core/Math.hpp"
 #include "aver/world/LevelTransform.hpp"
 
+namespace aver::world {
+
+// A static collision box fitted to a mesh's LOCAL bounds under a world TRS: world-space centre,
+// half-extents along the box's own axes, and its orientation.
+struct StaticBoxFit {
+    Vec3 centre;
+    Vec3 halfExtents;
+    Quat rotation;
+};
+
+// The built-in unit-cube placeholder's local bounds -- the fallback for a mesh whose bounds are
+// unknown.
+inline constexpr f32 kPlaceholderHalfExtentCm = 1.0f;
+
+// Fits a static collision box to a mesh's LOCAL bounds (`localMin`/`localMax`, centimetres) under a
+// placement's world transform `worldXf`. See LevelInstance.cpp for the exact rule; the short version
+// is that for the unit cube ([-1,1] cm on every axis) and an identity rotation this reproduces
+// EXACTLY the single old aver_phys_add_static_box(position, |scale|) call it replaces -- the case
+// every level authored before this existed already depends on.
+//
+// Header-only dependency is Math.hpp alone (no Scene, no Physics), so a host that never links
+// Aver.Physics can still ask what box a placement's transform implies -- the editor's collision
+// overlay, for one.
+StaticBoxFit fitStaticBox(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax);
+
+#if AVER_MODULE_PHYSICS
+// Creates fitStaticBox(worldXf, localMin, localMax) as a static body: aver_phys_add_static_box, then
+// aver_phys_body_set_rotation unless the fit's rotation is EXACTLY identity (x==0 && y==0 && z==0 &&
+// w==1) -- so an unrotated placement still makes the one call it always made, and every rotated one
+// makes the second call the old code never did.
+//
+// Returns the ABI's handle, or 0 if it refused. THE CALLER HAS ALREADY CHECKED aver_phys_ready() --
+// this does not call it, and does not call aver_phys_set_entity either: stamping the entity is the
+// caller's job, once, after it has decided the body exists.
+i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax);
+#endif
+
+} // namespace aver::world
+
 #if AVER_MODULE_SCENE
 #  include "aver/formats/OcWorld.hpp"
 #  include "aver/scene/World.hpp"
@@ -61,6 +100,18 @@ struct InstantiateOptions {
     // placement would fix that level and no other, and would break again the moment the terrain is
     // resculpted; asking for the ground at load does not.
     std::function<bool(f64 worldXCm, f64 worldYCm, f64& outGroundZCm)> groundHeightAt;
+
+    // A mesh's LOCAL bounds (centimetres), by the placement's objectId -- the id CMeshRenderer::mesh
+    // carries, and the same id GameContent/the editor's mesh cache already key their own bounds by.
+    // False, or no callback at all, means the bounds are unknown, and the placement collides as the
+    // unit-cube placeholder: the behaviour every level authored before fitStaticBox existed already
+    // depends on, now named rather than silent.
+    //
+    // A HOST CALLBACK, for the reason every other seam in this struct is one: the bounds live on
+    // GameContent (the game) or the editor's own mesh cache, and Aver.World must not learn to find
+    // them -- it does not depend on GameContent, which Runtime links on top of it, and it does not
+    // depend on a GPU device, which is what actually loaded the mesh that has them.
+    std::function<bool(u64 meshId, Vec3& outLocalMin, Vec3& outLocalMax)> localBoundsFor;
 };
 
 // The result, in placement order. `entities` holds only the placements that produced an entity, so

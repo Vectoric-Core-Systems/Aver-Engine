@@ -1,14 +1,97 @@
 #include "aver/world/LevelInstance.hpp"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
+#include <cmath>
+
+#if AVER_MODULE_PHYSICS
+#  include "aver/physics/physics_abi.h"
+#endif
+
+namespace aver::world {
+
+namespace {
+
+// Any LOCAL half-extent under this is a planar mesh -- a floor quad with zero thickness on that
+// axis -- not a box with one very thin side. Compared against the LOCAL half-extent, before scale,
+// so authoring a huge flat quad and scaling it up does not dodge the guard.
+constexpr f32 kThinLocalHalfExtentCm = 1e-3f;
+
+// The floor a thin axis gets scaled up to, so the box is not razor-thin. Named separately from
+// kPlaceholderHalfExtentCm (LevelInstance.hpp): that one is a MESH's frozen bounds, this one is a
+// WORLD-space minimum nothing authors, and the two happening to share a value is a coincidence, not
+// a contract.
+constexpr f32 kMinStaticHalfExtentCm = 1.0f;
+
+// One axis of fitStaticBox's half-extents: the local half-extent scaled into world space, floored to
+// kMinStaticHalfExtentCm when the axis was planar to begin with. `scaleAbs` is already abs()'d by the
+// caller -- see fitStaticBox's own comment on why the sign belongs to centre, not here.
+f32 scaledHalfExtent(f32 scaleAbs, f32 localHalf) {
+    const f32 scaled = scaleAbs * localHalf;
+    return localHalf < kThinLocalHalfExtentCm ? std::max(scaled, kMinStaticHalfExtentCm) : scaled;
+}
+
+} // namespace
+
+StaticBoxFit fitStaticBox(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax) {
+    // A NON-FINITE OR INVERTED BOUND IS NOT A BOX. Falls back to the unit-cube placeholder's own
+    // bounds -- the same box an unknown mesh has always collided as -- rather than building a box
+    // from garbage or asserting on it.
+    Vec3 lmin = localMin, lmax = localMax;
+    const bool usable = std::isfinite(lmin.x) && std::isfinite(lmin.y) && std::isfinite(lmin.z) &&
+                        std::isfinite(lmax.x) && std::isfinite(lmax.y) && std::isfinite(lmax.z) &&
+                        lmin.x <= lmax.x && lmin.y <= lmax.y && lmin.z <= lmax.z;
+    if (!usable) {
+        lmin = Vec3{-kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm};
+        lmax = Vec3{ kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm};
+    }
+
+    // lc/lh: the local box's own centre and half-extent, the same split every other bounds-consumer
+    // in this codebase uses (see GameLevel.cpp's level-bounds walk).
+    const Vec3 lc{(lmin.x + lmax.x) * 0.5f, (lmin.y + lmax.y) * 0.5f, (lmin.z + lmax.z) * 0.5f};
+    const Vec3 lh{(lmax.x - lmin.x) * 0.5f, (lmax.y - lmin.y) * 0.5f, (lmax.z - lmin.z) * 0.5f};
+    const Vec3& s = worldXf.scale;
+
+    StaticBoxFit fit;
+    // ABS ON THE HALF-EXTENT, NOT ON THE SCALE APPLIED TO THE CENTRE OFFSET: a negative scale mirrors
+    // where the box's centre sits (below), but the box itself -- half-extents along its own axes --
+    // has no sign to mirror. Getting this backwards would leave the unit cube's old behaviour (which
+    // never noticed, because its centre offset is zero either way) unchanged while every off-centre
+    // mesh got a half-extent that could go negative and get silently abs()'d back by the physics ABI.
+    fit.halfExtents = Vec3{scaledHalfExtent(std::fabs(s.x), lh.x),
+                           scaledHalfExtent(std::fabs(s.y), lh.y),
+                           scaledHalfExtent(std::fabs(s.z), lh.z)};
+    // The local centre, scaled (a negative scale DOES mirror an off-centre box through the pivot --
+    // that is what a negative scale means) then rotated into world space. Zero for the unit cube on
+    // every axis, which is exactly what makes the case below exact rather than approximate.
+    fit.centre = worldXf.position + worldXf.rotation.rotate(Vec3{s.x * lc.x, s.y * lc.y, s.z * lc.z});
+    fit.rotation = worldXf.rotation;
+    return fit;
+}
+
+#if AVER_MODULE_PHYSICS
+i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax) {
+    const StaticBoxFit fit = fitStaticBox(worldXf, localMin, localMax);
+    const i32 body = aver_phys_add_static_box(fit.centre.x, fit.centre.y, fit.centre.z,
+                                              fit.halfExtents.x, fit.halfExtents.y, fit.halfExtents.z);
+    if (!body) return body;
+    // EXACTLY IDENTITY, not "close to": the placement that is not rotated at all is the overwhelming
+    // common case (every level authored before rotation reached collision), and it must make the one
+    // call aver_phys_add_static_box already is -- a second ABI call per placement that never needed
+    // one is a cost this guard exists to avoid, not a correctness fix.
+    const Quat& q = fit.rotation;
+    if (!(q.x == 0.0f && q.y == 0.0f && q.z == 0.0f && q.w == 1.0f))
+        aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
+    return body;
+}
+#endif
+
+} // namespace aver::world
+
 #if AVER_MODULE_SCENE
 
 #  include "aver/scene/Components.hpp"
 #  include "aver/scene/scene_abi.h"
-
-#  if AVER_MODULE_PHYSICS
-#    include "aver/physics/physics_abi.h"
-#  endif
 
 namespace aver::world {
 
@@ -142,9 +225,20 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             // was; for a child the authored numbers are parent-relative and using them would put the
             // collision somewhere the mesh is not.
             const Transform& wx = worldXf[i];
-            body = aver_phys_add_static_box(
-                wx.position.x, wx.position.y, wx.position.z,
-                wx.scale.x, wx.scale.y, wx.scale.z);
+            // THE UNIT-CUBE PLACEHOLDER UNLESS THE HOST KNOWS BETTER. A placement's authored scale
+            // used to go straight into aver_phys_add_static_box as a half-extent -- exactly right for
+            // the built-in cube (local bounds exactly [-1,1] cm) and silently wrong for anything else:
+            // an imported mesh placed at scale 1 got a 2x2x2 cm box at its pivot, i.e. no collision an
+            // object of any real size could ever reach.
+            Vec3 lmin{-kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm};
+            Vec3 lmax{ kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm};
+            // Only trusted on a TRUE return, same as groundHeightAt above: a host that answers false
+            // has made no promise about what it left in the out-params.
+            if (opt.localBoundsFor) {
+                Vec3 hostMin, hostMax;
+                if (opt.localBoundsFor(p.objectId, hostMin, hostMax)) { lmin = hostMin; lmax = hostMax; }
+            }
+            body = addStaticBoxBody(wx, lmin, lmax);
             // The one line that makes this placement's body IDENTIFIABLE later -- a raycast that
             // hits it can now report `e`, not just an opaque physics handle nothing else understands.
             if (body) aver_phys_set_entity(body, static_cast<i32>(e));

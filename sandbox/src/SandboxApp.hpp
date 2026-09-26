@@ -2105,8 +2105,11 @@ private:
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
 #endif
+        // WHETHER TO GIVE THE RECREATED/PASTED/DUPLICATED ENTITY A BODY, not what SHAPE it is --
+        // rebuildEntityBody derives the shape fresh from the entity's mesh and transform every
+        // time, so there is no half-extent left to carry through undo/redo/copy/paste and no way
+        // for a carried one to go stale against a mesh or scale that changed since it was captured.
         bool hadBody = false;
-        Vec3 bodyHalf{0,0,0};
         // THE TWO AUTHORING FLAGS THAT ARE NOT COMPONENTS, and so are not in `snap`.
         //
         // nocollide and snapToGround are load-time instructions carried by the .ocworld PLACE record
@@ -2180,8 +2183,7 @@ private:
             EditXform xf{};
             std::string label;
             editor::EntitySnapshot snap;
-            bool hadBody = false;
-            Vec3 bodyHalf{0,0,0};
+            bool hadBody = false;   // see EditCmd::hadBody's own comment
             // See EditCmd's own copy above: not components, so not in snap.
             bool  hadCollide = true;
             bool  hadSnapZ   = false;
@@ -2280,7 +2282,7 @@ private:
     EditCmd describeEntity(scene::Entity e);
 
     scene::Entity spawnEntityFrom(const editor::EntitySnapshot& snap, const EditXform& xf,
-                                   const std::string& label, bool hadBody, const Vec3& bodyHalf,
+                                   const std::string& label, bool hadBody,
                                    bool restoreObjectId = true,
                                    scene::Entity parent = scene::kInvalidEntity,
                                    bool collide = true, bool hasSnapZ = false, f32 snapZ = 0.0f);
@@ -2308,6 +2310,22 @@ private:
     void applyReparentTo(const EditCmd& c, EditId parentEditId, const EditXform& xf);
 
     void captureSubtree(EditCmd& c, scene::Entity e);
+#endif
+
+#if AVER_MODULE_PHYSICS
+    // A body is a FUNCTION OF THE MESH AND THE CURRENT TRANSFORM, not a value carried through
+    // undo/redo/copy/paste -- see EditCmd::hadBody's own comment. THE ONE PLACE A BODY IS MADE:
+    // drops whatever `e` already owns in entityBodies_ (unconditionally -- a caller replaying a
+    // command against a since-destroyed handle, or running before aver_phys_init, still has to
+    // drop the stale one), then, if physics is up and `e` is still live, fits a fresh one from
+    // content_.boundsFor(its CMeshRenderer::mesh) (the placeholder unit cube when the mesh's
+    // bounds are unknown) and its CURRENT world transform via aver::world::addStaticBoxBody.
+    void rebuildEntityBody(scene::Entity e);
+
+    // rebuildEntityBody for `e` and every descendant that currently owns a body. A descendant's
+    // LOCAL transform does not change when an ancestor moves, so nothing else marks its body
+    // stale -- but a body is fitted in WORLD space, and the descendant's world transform just did.
+    void rebuildMovedBodies(scene::Entity e);
 #endif
 
     void destroyEntity(scene::Entity e);
@@ -3383,8 +3401,7 @@ private:
         std::vector<EditCmd::DestroyedNode> subtree;
 #endif
         EditXform xform{};
-        bool hadBody = false;
-        Vec3 bodyHalf{0, 0, 0};
+        bool hadBody = false;   // see EditCmd::hadBody's own comment -- no shape rides along with it
     };
 
     struct EditorClipboard {
