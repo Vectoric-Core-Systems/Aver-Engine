@@ -11,6 +11,10 @@
 
 namespace aver::render::preview {
 
+// Appends the built-in unit box (Meshes/cube.ocmesh): half-extent one, four vertices per face, each
+// face with its own 0..1 uv.
+void appendPreviewUnitBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx);
+
 // Resolves designer-file mesh paths to mesh handles, keyed by canonical path.
 class PreviewMeshCache {
 public:

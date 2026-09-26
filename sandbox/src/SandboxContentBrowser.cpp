@@ -2008,7 +2008,15 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                         // place in the level is exactly the set this can thumbnail.
                         const u64 meshId = fnv1a64(std::string_view(rel));
                         if (const rhi::MeshHandle meshHandle = content_.meshFor(meshId)) {
-                            thumbnails_.request(meshId, meshHandle);
+                            u32 thumbMaterial = 0;
+#if AVER_MODULE_PBR
+                            // The mesh's own slot-0 material, looked up only until the tile exists.
+                            if (!thumbnails_.textureId(meshId)) {
+                                const std::string& slot0 = content_.meshSlot0Name(meshId);
+                                if (!slot0.empty()) thumbMaterial = content_.materialForSurface(slot0);
+                            }
+#endif
+                            thumbnails_.request(meshId, meshHandle, thumbMaterial);
                             if (const u64 tex = thumbnails_.textureId(meshId)) {
                                 // Whole-texture, square: kThumbnailPx is fixed on both axes, so
                                 // this is blitTile with one tile of one. Nearly fills the preview

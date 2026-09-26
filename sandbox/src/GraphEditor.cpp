@@ -37,8 +37,9 @@
 #  include "aver/runtime/Engine.hpp"
 #  include "aver/render/preview/ActorPreview.hpp"
 #  include "aver/render/preview/PreviewMeshCache.hpp"
+#  include "PreviewChrome.hpp"   // drawPreviewToolbar/drawPreviewStats/drawPreviewAxes/formatCount
 #  if AVER_MODULE_PBR
-// The material-graph registry, for the Viewport tab of a DOMAIN material graph: the preview sphere
+// The material-graph registry, for the Viewport tab of a DOMAIN material graph: the preview shape
 // is shaded by the same compiled graph the renderer uses, so the two cannot drift. Nested inside the
 // ImGui guard because tests/editor compiles this file with neither.
 #    include "aver/pbr/MaterialGraphRegistry.hpp"
@@ -58,6 +59,7 @@
 
 #if AVER_WITH_IMGUI
 #  include "imgui.h"
+#  include "imgui_internal.h"   // GImGui/ImGuiLastItemData -- see drawMaterialShapeSelector below
 #endif
 
 namespace aver::editor {
@@ -3376,7 +3378,106 @@ void GraphEditor::renameComponent(const std::string& id, const std::string& newI
 
 #if AVER_WITH_IMGUI
 
-// The Viewport tab for a material graph: the sphere, and what the graph currently compiles to.
+namespace {
+
+// The mesh Meshes/<shape>.ocmesh names for the Viewport tab's shape dropdown. Sphere/cube already
+// exist in PreviewMeshCache; plane/cylinder are generated there the same way.
+const char* materialPreviewMeshPath(MaterialPreviewShape shape) {
+    switch (shape) {
+        case MaterialPreviewShape::Cube:     return "Meshes/cube.ocmesh";
+        case MaterialPreviewShape::Plane:    return "Meshes/plane.ocmesh";
+        case MaterialPreviewShape::Cylinder: return "Meshes/cylinder.ocmesh";
+        default:                             return "Meshes/sphere.ocmesh";
+    }
+}
+const char* materialPreviewShapeName(MaterialPreviewShape shape) {
+    switch (shape) {
+        case MaterialPreviewShape::Cube:     return "Cube";
+        case MaterialPreviewShape::Plane:    return "Plane";
+        case MaterialPreviewShape::Cylinder: return "Cylinder";
+        default:                             return "Sphere";
+    }
+}
+
+// The parent window's layout and last item, put back after an out-of-flow overlay child so it adds
+// no content size and leaves the image (not the overlay) as the last item for IsItemHovered below.
+// Mirrors PreviewChrome.cpp's own LayoutSnapshot, which is private to that file.
+struct LayoutSnapshot {
+    ImVec2 cursorPos, cursorPosPrevLine, cursorMaxPos, idealMaxPos, currLineSize, prevLineSize;
+    f32 currLineBase, prevLineBase;
+    bool isSameLine, isSetPos;
+    ImGuiLastItemData lastItem;
+    explicit LayoutSnapshot(const ImGuiWindow& w)
+        : cursorPos(w.DC.CursorPos), cursorPosPrevLine(w.DC.CursorPosPrevLine), cursorMaxPos(w.DC.CursorMaxPos),
+          idealMaxPos(w.DC.IdealMaxPos), currLineSize(w.DC.CurrLineSize), prevLineSize(w.DC.PrevLineSize),
+          currLineBase(w.DC.CurrLineTextBaseOffset), prevLineBase(w.DC.PrevLineTextBaseOffset),
+          isSameLine(w.DC.IsSameLine), isSetPos(w.DC.IsSetPos), lastItem(GImGui->LastItemData) {}
+    void restore(ImGuiWindow& w) const {
+        w.DC.CursorPos = cursorPos; w.DC.CursorPosPrevLine = cursorPosPrevLine;
+        w.DC.CursorMaxPos = cursorMaxPos; w.DC.IdealMaxPos = idealMaxPos;
+        w.DC.CurrLineSize = currLineSize; w.DC.PrevLineSize = prevLineSize;
+        w.DC.CurrLineTextBaseOffset = currLineBase; w.DC.PrevLineTextBaseOffset = prevLineBase;
+        w.DC.IsSameLine = isSameLine; w.DC.IsSetPos = isSetPos;
+        GImGui->LastItemData = lastItem;
+    }
+};
+
+// A translucent "Shape: X" dropdown at the image's top-right, styled like drawPreviewToolbar's own
+// mode/Show buttons -- the one control that shared toolbar has no slot for. Returns true on a change.
+bool drawMaterialShapeSelector(ImVec2 imageMin, ImVec2 imageMax, f32 dpi, MaterialPreviewShape& shape) {
+    if (imageMax.x - imageMin.x < 80.0f * dpi || imageMax.y - imageMin.y < 60.0f * dpi) return false;
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (!win || win->SkipItems) return false;
+
+    const ImGuiStyle& st = ImGui::GetStyle();
+    char label[24];
+    std::snprintf(label, sizeof label, "Shape: %s", materialPreviewShapeName(shape));
+    const f32 btnW = ImGui::CalcTextSize(label, nullptr, true).x + st.FramePadding.x * 2.0f + 16.0f * dpi;
+    const ImVec2 size(btnW + st.WindowPadding.x * 2.0f, ImGui::GetFrameHeight() + st.WindowPadding.y * 2.0f);
+    const f32 inset = 8.0f * dpi;
+
+    const LayoutSnapshot saved(*win);
+    ImGui::SetCursorScreenPos(ImVec2(imageMax.x - inset - size.x, imageMin.y + inset));
+    ImVec4 bg = st.Colors[ImGuiCol_WindowBg];
+    bg.w = 0.62f;   // the level viewport overlay's background alpha
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, st.WindowRounding);
+    const bool open = ImGui::BeginChild("##matShapeDrop", size, ImGuiChildFlags_AlwaysUseWindowPadding,
+                                        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                            ImGuiWindowFlags_NoNav);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    bool changed = false;
+    if (open) {
+        if (ImGui::Button(label, ImVec2(btnW, 0.0f))) ImGui::OpenPopup("matShape");
+        const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+        const f32 cx = mx.x - 8.0f * dpi - 2.0f * dpi, cy = (mn.y + mx.y) * 0.5f, s = 3.0f * dpi;
+        ImGui::GetWindowDrawList()->AddTriangleFilled(
+            ImVec2(cx - s, cy - s * 0.55f), ImVec2(cx + s, cy - s * 0.55f), ImVec2(cx, cy + s * 0.8f),
+            ImGui::GetColorU32(ImGuiCol_Text));
+        if (ImGui::BeginPopup("matShape")) {
+            static constexpr MaterialPreviewShape kShapes[] = {
+                MaterialPreviewShape::Sphere, MaterialPreviewShape::Cube,
+                MaterialPreviewShape::Plane, MaterialPreviewShape::Cylinder,
+            };
+            for (MaterialPreviewShape opt : kShapes)
+                if (ImGui::Selectable(materialPreviewShapeName(opt), shape == opt) && shape != opt) {
+                    shape = opt;
+                    changed = true;
+                }
+            ImGui::EndPopup();
+        }
+    }
+    ImGui::EndChild();
+    saved.restore(*win);
+    return changed;
+}
+
+} // namespace
+
+// The Viewport tab for a material graph: a shape (Sphere/Cube/Plane/Cylinder, chosen via the
+// dropdown over the image) and what the graph currently compiles to.
 // DELIBERATELY NOT A SECOND EDITING SURFACE: everything an author changes about a material graph is
 // changed on the Event Graph tab, in the nodes; this tab exists to answer one question -- what does
 // it look like -- and the only other thing it says is why, when the answer is "nothing".
@@ -3387,7 +3488,7 @@ void GraphEditor::drawMaterialViewport(Engine& e, float dpi) {
 #if AVER_MODULE_PBR
     // The compile error, if there is one, ABOVE the picture rather than instead of it: a graph that
     // stopped compiling mid-edit still shows the last surface that worked (the id is kept), and an
-    // author needs to see both -- the message says what to fix, the sphere says what they had.
+    // author needs to see both -- the message says what to fix, the preview says what they had.
     if (materialPreviewGraphId_ == 0) {
         ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.35f, 1.0f),
                             "This graph does not compile yet -- see the log for which node.");
@@ -3411,8 +3512,24 @@ void GraphEditor::drawMaterialViewport(Engine& e, float dpi) {
     const f32 w = std::max(texW * fit, 16.0f * dpi);
     const f32 h = std::max(texH * fit, 16.0f * dpi);
     ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(w, h));
+    const ImVec2 imageMin = ImGui::GetItemRectMin();
+    const ImVec2 imageMax = ImGui::GetItemRectMax();
 
-    // THE SPHERE TURNS NOW. This viewport drew the image and stopped, so the preview sat at whatever
+    render::preview::PreviewViewMode mode = preview->viewMode();
+    render::preview::PreviewShowFlags show = preview->showFlags();
+    if (drawPreviewToolbar("##matViewportToolbar", imageMin, imageMax, dpi, mode, show)) {
+        preview->setViewMode(mode);
+        preview->setShowFlags(show);
+    }
+    // A shape change needs a fresh frameAll(): the new mesh's bounds are not the old one's.
+    if (drawMaterialShapeSelector(imageMin, imageMax, dpi, materialPreviewShape_)) previewFramed_ = false;
+
+    std::vector<std::string> stats{std::string("Shape: ") + materialPreviewShapeName(materialPreviewShape_)};
+    if (materialPreviewGraphId_ != 0) stats.push_back("Nodes: " + formatCount(graph_.nodes.size()));
+    drawPreviewStats(imageMin, dpi, stats);
+    drawPreviewAxes(imageMin, imageMax, dpi, preview->camera());
+
+    // THE SHAPE TURNS NOW. This viewport drew the image and stopped, so the preview sat at whatever
     // frameAll() picked once and never moved again -- and a material is exactly the thing you judge
     // by moving it, because roughness, anisotropy and a clear coat only declare themselves as the
     // highlight travels. Every sibling preview in this file and in AssetEditor already wires this
@@ -3767,17 +3884,18 @@ bool GraphEditor::buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& 
 #endif
 }
 
-// The Viewport tab for a MATERIAL graph: one sphere, shaded by this very graph.
+// The Viewport tab for a MATERIAL graph: one primitive, shaded by this very graph, picked by the
+// tab's own shape dropdown (materialPreviewShape_; Sphere by default).
 //
-// A sphere, not the component tree: a material graph has no entities, only a surface to see, and a
-// sphere shows every normal-to-view angle at once (Fresnel, roughness, normal maps), where a cube
-// shows exactly six.
+// A primitive, not the component tree: a material graph has no entities, only a surface to see. The
+// default sphere shows every normal-to-view angle at once (Fresnel, roughness, normal maps); the
+// other three matter for a graph whose look depends on flat faces or a seam.
 //
 // Compiled through the SAME registry the renderer uses, keyed on this file's path -- the preview is
 // literally the renderer's own generated function, not a separately-compiled approximation that could
 // drift. Recompiled only when the dirty flag AND the emitted text actually differ (an idle editor
 // asks nothing of the shader compiler), and a graph that fails to compile mid-edit keeps the last good
-// id -- the sphere shows the last thing that worked rather than going black between valid states.
+// id -- the preview shows the last thing that worked rather than going black between valid states.
 bool GraphEditor::buildMaterialPreview(Engine& e, render::preview::PreviewDraw& out) {
 #if AVER_MODULE_PBR
     if (path_.empty()) return false;
@@ -3798,11 +3916,12 @@ bool GraphEditor::buildMaterialPreview(Engine& e, render::preview::PreviewDraw& 
     if (materialPreviewGraphId_ == 0) return false;
 
     render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
-    out.mesh = meshes.resolve(*e.device(), "Meshes/sphere.ocmesh", &out.boundsRadius);
+    out.mesh = meshes.resolve(*e.device(), materialPreviewMeshPath(materialPreviewShape_), &out.boundsRadius);
     if (out.mesh == 0) return false;
 
-    // The unit sphere is radius 1; 60 makes it the size of the cubes the level editor places, which
-    // is the scale the orbit camera's own framing was tuned against.
+    // Every preview primitive here is unit-sized (the sphere's own original convention); 60 makes it
+    // the size of the cubes the level editor places, which is the scale the orbit camera's own
+    // framing was tuned against.
     for (int i = 0; i < 16; ++i) out.world[i] = 0.0f;
     out.world[0] = out.world[5] = out.world[10] = 60.0f;
     out.world[15] = 1.0f;
@@ -3827,15 +3946,15 @@ void GraphEditor::buildComponentPreview(Engine& e) {
     if (openGraphDomain() == kDomainMaterial) {
         std::vector<render::preview::PreviewDraw> draws;
         render::preview::PreviewDraw d;
-        const bool haveSphere = buildMaterialPreview(e, d);
-        if (haveSphere) draws.push_back(d);
+        const bool havePrimitive = buildMaterialPreview(e, d);
+        if (havePrimitive) draws.push_back(d);
         preview->setDrawList(std::move(draws));
         // FRAMED ONLY ONCE THERE IS SOMETHING TO FRAME. frameAll() fits the camera to the CURRENT
         // draw list, empty on the first frames since the tab opens before the graph is registered and
-        // its sphere resolved. Latching `previewFramed_` on an empty list burns the one automatic
+        // its shape resolved. Latching `previewFramed_` on an empty list burns the one automatic
         // framing on nothing, leaving the camera staring at empty space for the rest of the session --
         // reading as "the preview is broken" rather than "not yet aimed".
-        if (!previewFramed_ && haveSphere) {
+        if (!previewFramed_ && havePrimitive) {
             preview->frameAll();
             previewFramed_ = true;
         }

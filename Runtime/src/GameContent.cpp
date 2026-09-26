@@ -411,8 +411,10 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         // THE MESH'S OWN MATERIAL. .ocmesh has always carried a materialSlots table and nothing here
         // read it, so an entity that named no material drew flat grey even though the mesh said what
         // it was. See GameContent.hpp's meshDefaultMaterial for why 0 means "ask the mesh".
-        if (!md.materialSlots.empty() && !md.materialSlots[0].empty())
+        if (!md.materialSlots.empty() && !md.materialSlots[0].empty()) {
             meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
+            meshSlot0Name_[id] = md.materialSlots[0];
+        }
         // THE PER-SUBMESH SPLIT. .ocmesh has always carried a submeshes table alongside
         // materialSlots, and until now nothing here read it either: a mesh naming several materials
         // (bark and leaves, say) drew as one mesh in slot 0's material end to end. See MeshPart's own
@@ -654,6 +656,7 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
         }
         meshBounds_.erase(id);
         meshSlot0Material_.erase(id);
+        meshSlot0Name_.erase(id);
         collisionMeshCache_.erase(id);
     }
     projectMeshIds_.clear();
@@ -921,6 +924,12 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
 i32 GameContent::meshDefaultMaterial(u64 meshId) const {
     const auto it = meshSlot0Material_.find(meshId);
     return it == meshSlot0Material_.end() ? 0 : it->second;
+}
+
+const std::string& GameContent::meshSlot0Name(u64 meshId) const {
+    static const std::string kNone;
+    const auto it = meshSlot0Name_.find(meshId);
+    return it == meshSlot0Name_.end() ? kNone : it->second;
 }
 #endif
 

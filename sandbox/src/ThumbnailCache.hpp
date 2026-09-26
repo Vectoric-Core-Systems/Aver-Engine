@@ -74,8 +74,9 @@ public:
     bool ready() const { return ready_; }
 
     // Asks for `assetId`'s thumbnail, rendering `mesh` if it is not cached yet. Cheap and idempotent
-    // -- the browser calls it for every visible tile, every frame.
-    void request(u64 assetId, rhi::MeshHandle mesh);
+    // -- the browser calls it for every visible tile, every frame. `material` is the mesh's own
+    // pbr::MaterialHandle (0 = the plain preview shader).
+    void request(u64 assetId, rhi::MeshHandle mesh, u32 material = 0);
 
     // The ImGui texture id for a finished thumbnail, or 0 when it is not ready. Zero is the normal
     // answer for the first few frames after a request and means "draw the typed glyph instead", not
@@ -162,6 +163,8 @@ private:
 
     std::unordered_map<u64, Entry> entries_;
     std::vector<std::pair<u64, rhi::MeshHandle>> pending_;
+    std::unordered_map<u64, u32> pendingMaterial_;   // assetId -> material, for queued meshes
+    bool resolversApplied_ = false;
     // The asset the preview was pointed at this frame, and therefore the one the copy must write
     // into. Zero when the preview was not driven this frame and no copy should happen at all.
     u64 inFlight_ = 0;

@@ -238,7 +238,7 @@ int main() {
               "created in the state every frame LEAVES it in, so the first barrier is honest");
         check(f.textures[1].format == rhi::Format::D32Float, "a real depth buffer, not a shared one");
 
-        check(f.pipelines.size() == 1, "one pipeline");
+        check(f.pipelines.size() == 5, "the mesh pipeline, then wireframe, backdrop, grid and bounds");
         const rhi::GraphicsPipelineDesc& gp = f.pipelines[0];
         check(gp.depth.test && gp.depth.write, "depth tested and written: parts occlude each other");
         check(gp.cull == rhi::CullMode::Back, "back faces culled");
@@ -254,7 +254,7 @@ int main() {
         check(gp.layout.constantDwords[rhi::kObjectConstantRegister] == rhi::kObjectConstantDwords,
               "and b1 declares exactly the per-draw block the shared prelude does");
 
-        check(f.shaders.size() == 2, "a vertex and a pixel shader");
+        check(f.shaders.size() == 6, "the mesh's vertex and pixel shaders plus the chrome's four");
         check(f.shaders[0].prelude != nullptr, "compiled against the shared prelude");
         const std::string hlsl = actorPreviewShaderSource();
         check(hlsl.find("register(b4)") != std::string::npos, "the camera cbuffer is at b4");
@@ -266,6 +266,12 @@ int main() {
         check(p->uiTextureId() != 0, "the colour target is reachable from the UI");
         check(p->ready(), "and the feature reports ready");
     }
+
+    // The floor grid is its own draw; the per-mesh call counts below are checked without it, and the
+    // grid itself at the end of this file.
+    PreviewShowFlags noGrid;
+    noGrid.grid = false;
+    p->setShowFlags(noGrid);
 
     AVER_INFO("=== an empty actor ===");
     {
@@ -303,7 +309,7 @@ int main() {
         p->prePass(ctx);
 
         check(ctx.count(Call::Kind::DrawMesh) == 3, "three meshes drawn, and the unresolved one skipped");
-        check(ctx.count(Call::Kind::Pipeline) == 1, "one pipeline bind for the whole pass");
+        check(ctx.count(Call::Kind::Pipeline) == 2, "two pipeline binds: the backdrop, then one for every mesh");
 
         const std::vector<Call> vp = ctx.ofKind(Call::Kind::Viewport);
         check(vp.size() == 1 && vp[0].c == 1024 && vp[0].d == 1024, "the viewport is the whole target");
@@ -492,8 +498,8 @@ int main() {
         const MockFactory& f = dev.factory;
 
         // NOTHING HAS REGISTERED A GRAPH YET, in this process or anywhere earlier in this file --
-        // the two shaders and the one pipeline "what init creates" checked above are the whole
-        // story, and neither shader's recorded text mentions the material system at all. This is
+        // the shaders and pipelines "what init creates" checked above are the whole
+        // story, and no shader's recorded text mentions the material system at all. This is
         // "a project with no graphs is completely unaffected", checked BEFORE the block below
         // registers one so it cannot be an accident of ordering.
         check(pbr::materialGraphs().count() == 0, "no material graph exists yet in this process");
@@ -503,7 +509,7 @@ int main() {
                 (!sd.prelude || std::string(sd.prelude).find("AVER_MATERIAL_GRAPH") == std::string::npos);
             check(clean, "no recorded shader's source or prelude mentions AVER_MATERIAL_GRAPH");
         }
-        check(f.pipelines.size() == 1, "and still just the one pipeline");
+        check(f.pipelines.size() == 5, "and still just the five from init");
 
         const usize shadersBefore = f.shaders.size();
         const usize pipelinesBefore = f.pipelines.size();
@@ -547,15 +553,29 @@ int main() {
               "and its ShaderDesc declares the material texture registers");
 
         const std::vector<Call> pipe = ctx.ofKind(Call::Kind::Pipeline);
-        check(pipe.size() == 2, "two pipeline binds: the plain draw, then the graph-shaded one");
-        if (pipe.size() == 2) {
-            // Handle 1 is MockFactory's very first pipeline -- the simple one "what init creates"
-            // built, and the only pipeline that has ever existed until this block.
-            check(pipe[0].a == 1, "a draw with materialGraphId 0 still selects the simple pipeline");
-            check(pipe[1].a != pipe[0].a, "and the graph-shaded draw selects the new one");
+        check(pipe.size() == 3, "three pipeline binds: the backdrop, the plain draw, the graph-shaded one");
+        if (pipe.size() == 3) {
+            // Handle 1 is MockFactory's very first pipeline -- the simple mesh one "what init
+            // creates" built first.
+            check(pipe[1].a == 1, "a draw with materialGraphId 0 still selects the simple pipeline");
+            check(pipe[2].a != pipe[1].a, "and the graph-shaded draw selects the new one");
         }
     }
 #endif
+
+    AVER_INFO("=== the floor grid ===");
+    {
+        PreviewShowFlags withGrid;
+        withGrid.grid = true;
+        p->setShowFlags(withGrid);
+        PreviewDraw d;
+        d.mesh = 1;
+        MockContext ctx;
+        p->setDrawList({d});
+        p->prePass(ctx);
+        check(ctx.count(Call::Kind::DrawMesh) == 2, "the mesh and the grid quad are drawn");
+        check(ctx.count(Call::Kind::Pipeline) == 3, "backdrop, mesh, then the grid's own pipeline");
+    }
 
     AVER_INFO("=== teardown ===");
     {

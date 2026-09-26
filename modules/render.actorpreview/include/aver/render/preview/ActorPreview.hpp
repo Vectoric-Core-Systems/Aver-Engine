@@ -61,6 +61,15 @@ struct PreviewDraw {
     u32 materialHandle = 0;
 };
 
+// How the preview shades its draws, as the asset editors' view-mode dropdown names them.
+enum class PreviewViewMode : u8 { Lit = 0, Unlit = 1, Wireframe = 2, Normals = 3 };
+
+// Which helpers the preview draws around the meshes.
+struct PreviewShowFlags {
+    bool grid = true;     // the floor grid under the draw list
+    bool bounds = false;  // the draw list's world AABB as a thin box
+};
+
 // The preview's orbit camera: yaw, pitch and distance about a pivot.
 struct PreviewCamera {
     f32 yawDeg = 35.0f;
@@ -95,6 +104,17 @@ public:
 
     // The matrix the pass will use this frame, so a gizmo can project through the same camera.
     void viewProj(f32 out[16]) const { buildViewProj(out); }
+
+    // Lit by default. Wireframe falls back to Lit if the backend refused the wireframe pipeline.
+    void setViewMode(PreviewViewMode m) { viewMode_ = m; }
+    PreviewViewMode viewMode() const { return viewMode_; }
+    // Grid on, bounds off by default. The preview is shared, so an editor sets these when it claims it.
+    void setShowFlags(const PreviewShowFlags& f) { show_ = f; }
+    const PreviewShowFlags& showFlags() const { return show_; }
+
+    // The draw list's world-space AABB, from each mesh's own AABB where the backend measured one and
+    // its boundsRadius sphere otherwise. False when nothing in the list has a mesh.
+    bool worldBounds(f32 lo[3], f32 hi[3]) const;
 
     // The texture the panel draws. 0 before the first render.
     u64 uiTextureId() const { return uiTextureId_; }
@@ -149,6 +169,9 @@ private:
     bool createTargets(u32 width, u32 height);
     // Composes the orbit camera's view and projection.
     void buildViewProj(f32 out[16]) const;
+    // Builds the wireframe, backdrop, grid and bounds pipelines and their two meshes. Non-fatal:
+    // whatever fails is skipped and the preview draws without it.
+    void createChrome(const rhi::GraphicsPipelineDesc& meshDesc);
 
 #if AVER_MODULE_PBR
     // (Re)builds materialPipeline_ against whatever pbr::materialGraphs() currently holds. Called
@@ -174,6 +197,14 @@ private:
     u64 uiTextureId_ = 0;
     u32 width_ = 0, height_ = 0;
     bool everRendered_ = false;
+
+    // pipeline_'s shaders with FillMode::Wireframe: fill mode is per pipeline in this RHI.
+    rhi::PipelineHandle wirePipeline_ = 0;
+    rhi::PipelineHandle backdropPipeline_ = 0, gridPipeline_ = 0, boundsPipeline_ = 0;
+    rhi::ShaderHandle backdropVs_ = 0, backdropPs_ = 0, gridPs_ = 0, boundsPs_ = 0;
+    rhi::MeshHandle gridQuad_ = 0, boundsBox_ = 0;
+    PreviewViewMode viewMode_ = PreviewViewMode::Lit;
+    PreviewShowFlags show_{};
 
 #if AVER_MODULE_PBR
     // The SECOND pipeline: shades through averEvalMaterial instead of the fixed key-light-plus-fill

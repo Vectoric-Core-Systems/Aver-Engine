@@ -495,6 +495,32 @@ namespace {
 // all) -- kept exactly, so adopting the shared helper changes draggability and persistence only.
 constexpr f32 kDefaultListFraction = 0.32f;
 constexpr const char* kPrefListSplit = "soundEditor.listSplit";
+
+// A thin time ruler under the waveform plot: evenly spaced ticks from 0s to the render's duration,
+// as many as fit without the labels crowding each other.
+void drawWaveformRuler(ImVec2 plotMin, ImVec2 plotMax, f32 durationSec, f32 dpi) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    const f32 y = plotMax.y + 2.0f * dpi;
+    dl->AddLine(ImVec2(plotMin.x, y), ImVec2(plotMax.x, y), col);
+
+    char label[16];
+    std::snprintf(label, sizeof label, "%.2fs", static_cast<double>(durationSec));
+    const f32 labelSpan = ImGui::CalcTextSize(label).x + 14.0f * dpi;
+    const f32 width = plotMax.x - plotMin.x;
+    const int divisions = std::clamp(static_cast<int>(width / std::max(labelSpan, 1.0f)), 1, 10);
+
+    const f32 tickH = 4.0f * dpi;
+    for (int i = 0; i <= divisions; ++i) {
+        const f32 t = static_cast<f32>(i) / static_cast<f32>(divisions);
+        const f32 x = plotMin.x + t * width;
+        dl->AddLine(ImVec2(x, y), ImVec2(x, y + tickH), col);
+        std::snprintf(label, sizeof label, "%.2fs", static_cast<double>(t * durationSec));
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        const f32 lx = std::clamp(x - ts.x * 0.5f, plotMin.x, plotMax.x - ts.x);
+        dl->AddText(ImVec2(lx, y + tickH + 1.0f * dpi), col, label);
+    }
+}
 } // namespace
 
 void SoundEditor::playPreview() {
@@ -634,6 +660,10 @@ void SoundEditor::drawDetails() {
 }
 
 void SoundEditor::drawTransport() {
+    // draw() carries no dpi (see the header); the ruler below wants one, so it's taken from the
+    // font metrics the same way draw() itself does.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+
     if (ImGui::Button(ICON_PLAY " Preview")) playPreview();
     ImGui::SameLine();
     ImGui::BeginDisabled(previewVoice_ == 0 && previewSound_ == 0);
@@ -659,6 +689,14 @@ void SoundEditor::drawTransport() {
     }
 
     if (!previewPcm_.empty()) {
+        // UE-style stats, straight off the render above -- previewPcm_ IS the decoded audio, so
+        // nothing here decodes anything new: mono float PCM at the fixed rate renderPreview() always
+        // renders at. Duration is the ACTUAL render length, which can be shorter than durationSec
+        // asked for once the frame cap bites.
+        const f32 durationSec = static_cast<f32>(previewPcm_.size()) / 48000.0f;
+        ImGui::TextDisabled("Duration: %.2f s    Sample Rate: 48000 Hz    Channels: 1    Format: 32-bit float",
+                            static_cast<double>(durationSec));
+
         // DOWNSAMPLED FOR THE PLOT, taking the peak of each bucket rather than every Nth sample. A
         // stride would alias a 440 Hz tone into whatever beat frequency it happens to make with the
         // stride and draw a shape the sound does not have; peaks draw the envelope, which is what
@@ -679,6 +717,7 @@ void SoundEditor::drawTransport() {
                       previewPcm_.size(), previewSeed_);
         ImGui::PlotLines("##wave", plot.data(), kPlotPoints, 0, overlay, -1.0f, 1.0f,
                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 5.0f));
+        drawWaveformRuler(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), durationSec, dpi);
     } else {
         ImGui::TextDisabled("Press Preview to render and hear this graph.");
     }
@@ -742,7 +781,10 @@ void SoundEditor::draw(Engine& e) {
     // the header), so the scale is taken from the font metrics, which already have it.
     const f32 rowH    = ImGui::GetFrameHeightWithSpacing();
     const f32 plotH   = ImGui::GetTextLineHeight() * 5.0f;
-    const f32 reserve = rowH + plotH + ImGui::GetStyle().ItemSpacing.y * 4.0f;
+    // The stats line above the waveform and the time ruler below it (drawTransport()) add roughly
+    // two more text lines' worth of height once a preview has been rendered.
+    const f32 chromeH = ImGui::GetTextLineHeight() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
+    const f32 reserve = rowH + plotH + chromeH + ImGui::GetStyle().ItemSpacing.y * 4.0f;
     // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
     // file's own kDefaultListFraction comment for why 0.32f is not a new number. dpi is taken from
     // the font metrics, the same proxy the reserve above already relies on.

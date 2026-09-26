@@ -116,6 +116,9 @@ public:
     /// not saying "draw me flat", it is saying nothing -- and the mesh it points at already declares
     /// a material. A non-zero material stays an override, exactly as before.
     i32 meshDefaultMaterial(u64 meshId) const;
+    // The NAME a loaded mesh's materialSlots[0] carries, or empty -- for the editor's previews,
+    // which resolve it through materialForSurface.
+    const std::string& meshSlot0Name(u64 meshId) const;
 #endif
 
     // MESH LOOKUP, OUTSIDE THE SCENE BLOCK THE REST OF THIS SECTION IS IN. The name sceneMeshes_ is
@@ -270,6 +273,7 @@ private:
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
     // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
     std::unordered_map<u64, i32>                   meshSlot0Material_;
+    std::unordered_map<u64, std::string>           meshSlot0Name_;
     std::vector<u64>                               projectMeshIds_;
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
     // Depth proxy map: LOD meshes used instead of full detail in depth passes

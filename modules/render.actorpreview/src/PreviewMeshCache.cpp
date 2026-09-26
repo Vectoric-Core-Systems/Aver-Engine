@@ -58,7 +58,63 @@ void appendUnitSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, u3
         }
 }
 
+// Appends a unit plane, half-extent one, facing +Z. Same per-vertex layout as appendUnitBox's own
+// +Z face. Must match the engine's Meshes/plane.ocmesh.
+void appendUnitPlane(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
+    const f32 h = 1.0f;
+    const u32 base = static_cast<u32>(v.size());
+    const f32 c[4][3] = {{-h,-h,0},{h,-h,0},{h,h,0},{-h,h,0}};
+    for (int k = 0; k < 4; ++k)
+        v.push_back({c[k][0], c[k][1], c[k][2], 0.0f, 0.0f, 1.0f,
+                     static_cast<f32>(k == 1 || k == 2), static_cast<f32>(k >= 2)});
+    idx.push_back(base); idx.push_back(base + 1); idx.push_back(base + 2);
+    idx.push_back(base); idx.push_back(base + 2); idx.push_back(base + 3);
+}
+
+// Appends a unit cylinder, capped, radius one, height two (z in [-1,1]). Ring 0 sits at +Z and ring
+// 1 at -Z so the side sweep winds the same way appendUnitSphere's ring-to-pole sweep does (ring
+// increasing moves toward -Z there too); the two caps are wound opposite ways so both face outward.
+// Must match the engine's Meshes/cylinder.ocmesh.
+void appendUnitCylinder(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, u32 sectors) {
+    const f32 h = 1.0f;
+    const u32 sideBase = static_cast<u32>(v.size());
+    for (u32 ring = 0; ring <= 1; ++ring) {
+        const f32 z = ring == 0 ? h : -h;
+        for (u32 sec = 0; sec <= sectors; ++sec) {
+            const f32 th = 2.0f * kPi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
+            const f32 nx = std::cos(th), ny = std::sin(th);
+            v.push_back({nx, ny, z, nx, ny, 0.0f,
+                         static_cast<f32>(sec) / static_cast<f32>(sectors), static_cast<f32>(ring)});
+        }
+    }
+    const u32 stride = sectors + 1;
+    for (u32 sec = 0; sec < sectors; ++sec) {
+        const u32 a = sideBase + sec, b = a + stride;
+        idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
+        idx.push_back(a + 1); idx.push_back(b); idx.push_back(b + 1);
+    }
+    // Caps: a centre vertex plus the rim, one fan each.
+    for (int cap = 0; cap < 2; ++cap) {
+        const f32 z = cap == 0 ? h : -h;
+        const f32 nz = cap == 0 ? 1.0f : -1.0f;
+        const u32 centre = static_cast<u32>(v.size());
+        v.push_back({0.0f, 0.0f, z, 0.0f, 0.0f, nz, 0.5f, 0.5f});
+        const u32 rimBase = static_cast<u32>(v.size());
+        for (u32 sec = 0; sec <= sectors; ++sec) {
+            const f32 th = 2.0f * kPi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
+            const f32 x = std::cos(th), y = std::sin(th);
+            v.push_back({x, y, z, 0.0f, 0.0f, nz, x * 0.5f + 0.5f, y * 0.5f + 0.5f});
+        }
+        for (u32 sec = 0; sec < sectors; ++sec) {
+            if (cap == 0) { idx.push_back(centre); idx.push_back(rimBase + sec); idx.push_back(rimBase + sec + 1); }
+            else          { idx.push_back(centre); idx.push_back(rimBase + sec + 1); idx.push_back(rimBase + sec); }
+        }
+    }
+}
+
 } // namespace
+
+void appendPreviewUnitBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) { appendUnitBox(v, idx); }
 
 // Sets the content root. Clears the cache when it changes.
 void PreviewMeshCache::setContentRoot(rhi::IDevice& device, std::string root) {
@@ -186,11 +242,14 @@ rhi::MeshHandle PreviewMeshCache::resolve(rhi::IDevice& device, std::string_view
     }
 
     // The built-in primitives, which are generated names rather than files on disk.
-    if (key == "Meshes/cube.ocmesh" || key == "Meshes/sphere.ocmesh") {
+    if (key == "Meshes/cube.ocmesh" || key == "Meshes/sphere.ocmesh" ||
+        key == "Meshes/plane.ocmesh" || key == "Meshes/cylinder.ocmesh") {
         std::vector<rhi::MeshVertex> v;
         std::vector<u32> idx;
-        if (key == "Meshes/cube.ocmesh") appendUnitBox(v, idx);
-        else                             appendUnitSphere(v, idx, 24, 48);
+        if (key == "Meshes/cube.ocmesh")        appendUnitBox(v, idx);
+        else if (key == "Meshes/sphere.ocmesh")  appendUnitSphere(v, idx, 24, 48);
+        else if (key == "Meshes/plane.ocmesh")   appendUnitPlane(v, idx);
+        else                                     appendUnitCylinder(v, idx, 32);
         const rhi::MeshHandle h = device.createMesh(v.data(), static_cast<u32>(v.size()),
                                                     idx.data(), static_cast<u32>(idx.size()));
         meshes_[key] = h;

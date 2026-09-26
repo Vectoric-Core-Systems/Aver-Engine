@@ -27,6 +27,7 @@ add_executable(Sandbox WIN32
   src/SandboxMcp.cpp
   src/SandboxSelfTests.cpp
   src/AssetEditor.cpp
+  src/PreviewChrome.cpp
   src/ActorEditor.cpp
   src/AnimEditor.cpp
   src/SkinDrawTest.cpp
@@ -58,6 +59,7 @@ add_executable(Sandbox WIN32
   src/ParticleEditor.cpp
   src/FoliageTypeEditor.cpp
   src/InputSchemeEditor.cpp
+  src/TextureEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
   src/PhysicsSceneSync.cpp

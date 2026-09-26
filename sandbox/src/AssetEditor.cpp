@@ -7,10 +7,13 @@
 #include "aver/formats/OcMesh.hpp"
 #if AVER_WITH_IMGUI
 #include "ActorEditor.hpp"                                  // sharedPreview
+#include "EditorWidgets.hpp"                                 // SplitPane
+#include "PreviewChrome.hpp"                                 // drawPreviewToolbar/Stats/Axes
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/runtime/Engine.hpp"
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #endif
 
@@ -236,6 +239,13 @@ void AssetEditorHost::drawClosePrompt(float dpi) {
 
 namespace {
 
+#if AVER_WITH_IMGUI
+// The viewport/details split fraction -- see EditorWidgets.hpp's own SplitPane for why this is a
+// persisted FRACTION rather than a raw pixel width. 0.70f matches the brief's "~70% width" viewport.
+constexpr f32 kDefaultViewFraction = 0.70f;
+constexpr const char* kPrefViewSplit = "meshEditor.viewSplit";
+#endif
+
 // Viewer AND (as of ITEM 1.2) editor for one .ocmesh file: counts, bounds, an editable material-slot
 // list, a read-only UV-shell wireframe, and the submesh table.
 //
@@ -271,6 +281,12 @@ public:
     // are still read-only (no UI mutates them), so this can only ever be set from drawMaterialSlots().
     bool dirty() const override { return dirty_; }
 
+#if AVER_WITH_IMGUI
+    // Restores the viewport/details split to its default proportion -- see AssetEditor.hpp's own
+    // resetLayout() comment for why "Reset Tab Layout" needs every tab to implement this.
+    void resetLayout() override { resetSplitPane(split_, kPrefViewSplit, kDefaultViewFraction); }
+#endif
+
     // Writes `mesh_` back via the SAME fmt::saveOcMesh every other .ocmesh writer in this tree uses --
     // see this class's own header comment for why editing `mesh_` in place (rather than reconstructing
     // an OcMeshData from what the UI shows) is what keeps every chunk this editor never surfaces
@@ -285,7 +301,8 @@ public:
         return true;
     }
 
-    // Draws the mesh summary, or the load error.
+    // Draws the load error, or the UE-style split: a large preview viewport on the left and a
+    // scrollable Details panel on the right.
     void draw(Engine& e) override {
 #if AVER_WITH_IMGUI
         if (!loaded_) {
@@ -295,55 +312,69 @@ public:
             return;
         }
 
-        ImGui::TextDisabled("%s", path_.c_str());
-        ImGui::Separator();
+        const f32 dpi = ImGui::GetFontSize() / 16.0f;
+        const f32 avail = ImGui::GetContentRegionAvail().x;
+        const f32 minView = 240.0f * dpi, minDetails = 220.0f * dpi;
+        const f32 viewW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, avail,
+                                          minView, minDetails);
 
-        if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Text("Vertices   %u", mesh_.vertexCount());
-            ImGui::Text("Triangles  %zu", mesh_.indices.size() / 3);
-            ImGui::Text("Indices    %zu (%s)", mesh_.indices.size(),
-                        (mesh_.flags & fmt::kOcMeshIndex32) ? "32-bit" : "16-bit");
-        }
+        if (ImGui::BeginChild("##meshView", ImVec2(viewW, 0.0f), true)) drawPreview(e);
+        ImGui::EndChild();
+        drawSplitHandle(split_, "##meshsplit", kPrefViewSplit, avail, minView, minDetails, 6.0f * dpi);
 
-        if (ImGui::CollapsingHeader("Bounds", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const Vec3 lo = mesh_.boundsMin, hi = mesh_.boundsMax;
-            ImGui::Text("Min   %8.1f  %8.1f  %8.1f", lo.x, lo.y, lo.z);
-            ImGui::Text("Max   %8.1f  %8.1f  %8.1f", hi.x, hi.y, hi.z);
-            ImGui::Text("Size  %8.1f  %8.1f  %8.1f  cm", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
-        }
+        if (ImGui::BeginChild("##meshDetails", ImVec2(0.0f, 0.0f), true)) {
+            ImGui::TextDisabled("%s", path_.c_str());
+            ImGui::Separator();
 
-        if (ImGui::CollapsingHeader("Material Slots", ImGuiTreeNodeFlags_DefaultOpen)) {
-            drawMaterialSlots();
-        }
+            if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Text("Vertices   %u", mesh_.vertexCount());
+                ImGui::Text("Triangles  %zu", mesh_.indices.size() / 3);
+                ImGui::Text("Indices    %zu (%s)", mesh_.indices.size(),
+                            (mesh_.flags & fmt::kOcMeshIndex32) ? "32-bit" : "16-bit");
+            }
 
-        if (ImGui::CollapsingHeader("UV Layout")) {
-            drawUvWireframe();
-        }
+            if (ImGui::CollapsingHeader("LODs", ImGuiTreeNodeFlags_DefaultOpen)) {
+                drawLods();
+            }
 
-        if (ImGui::CollapsingHeader("Submeshes", ImGuiTreeNodeFlags_DefaultOpen)) {
-            if (ImGui::BeginTable("submeshes", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-                ImGui::TableSetupColumn("Name");
-                ImGui::TableSetupColumn("Material slot");
-                ImGui::TableSetupColumn("First index");
-                ImGui::TableSetupColumn("Indices");
-                ImGui::TableHeadersRow();
-                for (const fmt::OcMeshSubmesh& s : mesh_.submeshes) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn(); ImGui::TextUnformatted(s.name.c_str());
-                    ImGui::TableNextColumn();
-                    if (s.materialSlot < mesh_.materialSlots.size())
-                        ImGui::Text("%u  (%s)", s.materialSlot, mesh_.materialSlots[s.materialSlot].c_str());
-                    else
-                        ImGui::Text("%u", s.materialSlot);
-                    ImGui::TableNextColumn(); ImGui::Text("%u", s.indexStart);
-                    ImGui::TableNextColumn(); ImGui::Text("%u", s.indexCount);
+            if (ImGui::CollapsingHeader("Bounds", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const Vec3 lo = mesh_.boundsMin, hi = mesh_.boundsMax;
+                ImGui::Text("Min   %8.1f  %8.1f  %8.1f", lo.x, lo.y, lo.z);
+                ImGui::Text("Max   %8.1f  %8.1f  %8.1f", hi.x, hi.y, hi.z);
+                ImGui::Text("Size  %8.1f  %8.1f  %8.1f  cm", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+            }
+
+            if (ImGui::CollapsingHeader("Material Slots", ImGuiTreeNodeFlags_DefaultOpen)) {
+                drawMaterialSlots();
+            }
+
+            if (ImGui::CollapsingHeader("UV Layout")) {
+                drawUvWireframe();
+            }
+
+            if (ImGui::CollapsingHeader("Submeshes", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::BeginTable("submeshes", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn("Name");
+                    ImGui::TableSetupColumn("Material slot");
+                    ImGui::TableSetupColumn("First index");
+                    ImGui::TableSetupColumn("Indices");
+                    ImGui::TableHeadersRow();
+                    for (const fmt::OcMeshSubmesh& s : mesh_.submeshes) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn(); ImGui::TextUnformatted(s.name.c_str());
+                        ImGui::TableNextColumn();
+                        if (s.materialSlot < mesh_.materialSlots.size())
+                            ImGui::Text("%u  (%s)", s.materialSlot, mesh_.materialSlots[s.materialSlot].c_str());
+                        else
+                            ImGui::Text("%u", s.materialSlot);
+                        ImGui::TableNextColumn(); ImGui::Text("%u", s.indexStart);
+                        ImGui::TableNextColumn(); ImGui::Text("%u", s.indexCount);
+                    }
+                    ImGui::EndTable();
                 }
-                ImGui::EndTable();
             }
         }
-
-        ImGui::Separator();
-        drawPreview(e);
+        ImGui::EndChild();
 #endif
     }
 
@@ -375,14 +406,22 @@ private:
         }
         if (!gpuMesh_) { ImGui::TextDisabled("This mesh could not be uploaded for preview."); return; }
 
+        const f32 dpi = ImGui::GetFontSize() / 16.0f;
+
         // ONLY WHEN FOCUSED. ActorPreview is shared by every tab that draws into it, and the draw
         // list is whatever the last writer set this frame -- so an actor editor and a mesh viewer
         // both open would otherwise take turns showing each other's contents. Claiming it only on
         // focus keeps a background tab from stealing the image out of the one being looked at.
         const bool mine = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         if (mine) {
+            preview->setViewMode(viewMode_);
+            preview->setShowFlags(show_);
+
             std::vector<render::preview::PreviewDraw> draws(1);
             draws[0].mesh = gpuMesh_;
+            // Shaded with the mesh's own first material, as Unreal's mesh editor shows it.
+            if (!mesh_.submeshes.empty() && mesh_.submeshes[0].materialSlot < mesh_.materialSlots.size())
+                draws[0].materialHandle = previewMaterialFor(mesh_.materialSlots[mesh_.submeshes[0].materialSlot]);
             // Recentre on the mesh's own middle and give frameAll a real extent: at boundsRadius 0
             // it computes a zero span and falls back to a fixed distance, framing every mesh
             // identically regardless of size. Same reasoning ThumbnailCache writes out at length.
@@ -398,22 +437,35 @@ private:
             if (!framed_) { preview->frameAll(); framed_ = true; }
         }
 
-        // FIT, NEVER STRETCH. This drew the preview at ImVec2(avail.x, h) -- the panel's shape, not
-        // the target's -- so the mesh was squashed or elongated by however far the two aspects
-        // disagreed. Docking the tab tall or wide visibly deformed the model, which on the one view
-        // whose whole job is judging a mesh's proportions is the worst place for it.
-        //
-        // LETTERBOXED RATHER THAN RESIZING THE TARGET, which is the other way to fix this and is
-        // what ActorEditor and AnimEditor do. Not here: this preview is SHARED (sharedPreview), so a
-        // resize from this tab is a resize for every other one, and two docked tabs of different
-        // shapes would take turns resizing it every frame. Fitting costs nothing and cannot fight.
+        // FOLLOWS THE VIEWPORT'S OWN SIZE NOW, debounced exactly like AnimEditor's own resize of
+        // this same SHARED preview (AnimEditor.cpp) -- resize() costs a waitIdle, so doing it every
+        // frame of a drag would stall the editor; a quarter-second of stillness first is what that
+        // debounce buys. Gated on `mine` so a background tab never fights the focused one over the
+        // shared target's size the way two unrelated frame-by-frame resizes would.
         const ImVec2 avail = ImGui::GetContentRegionAvail();
-        const f32 h = std::max(160.0f, avail.y);
+        const f32 availW = std::max(64.0f, avail.x), availH = std::max(64.0f, avail.y);
+        if (mine) {
+            const u32 iw = static_cast<u32>(availW), ih = static_cast<u32>(availH);
+            if (iw != pendingW_ || ih != pendingH_) {
+                pendingW_ = iw; pendingH_ = ih;
+                resizeDue_ = ImGui::GetTime() + 0.25;
+            } else if (resizeDue_ > 0.0 && ImGui::GetTime() >= resizeDue_) {
+                resizeDue_ = 0.0;
+                preview->resize(pendingW_, pendingH_);
+            }
+        }
+
+        // FIT, NEVER STRETCH, still: resize() above is debounced and can lag a drag by a quarter
+        // second, so the target's aspect and the viewport's can disagree for a few frames even
+        // though they are now converging rather than permanently apart.
         const f32 texW = static_cast<f32>(preview->width());
         const f32 texH = static_cast<f32>(preview->height());
-        const f32 fit  = std::min(avail.x / std::max(texW, 1.0f), h / std::max(texH, 1.0f));
-        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()),
-                     ImVec2(std::max(texW * fit, 16.0f), std::max(texH * fit, 16.0f)));
+        const f32 fit  = std::min(availW / std::max(texW, 1.0f), availH / std::max(texH, 1.0f));
+        const ImVec2 imgSize(std::max(texW * fit, 16.0f), std::max(texH * fit, 16.0f));
+        const ImVec2 imageMin = ImGui::GetCursorScreenPos();
+        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), imgSize);
+        const ImVec2 imageMax(imageMin.x + imgSize.x, imageMin.y + imgSize.y);
+
         if (ImGui::IsItemHovered()) {
             const ImGuiIO& io = ImGui::GetIO();
             if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
@@ -429,8 +481,37 @@ private:
                 ImGui::ResetMouseDragDelta(b);
                 preview->camera().panPixels(d.x, d.y, static_cast<f32>(preview->height()));
             }
+            // F FRAMES THE MESH -- mirrors AnimEditor.cpp's own inline ImGuiKey_F handling: no
+            // repeat, and gated on WantCaptureKeyboard so a text field elsewhere in this tab does
+            // not lose an 'f' keystroke to the viewport underneath it.
+            if (!io.WantCaptureKeyboard && ImGui::IsKeyPressed(ImGuiKey_F, false)) preview->frameAll();
         }
-        if (!mine) ImGui::TextDisabled("Click this tab to take the preview.");
+
+        if (mine) {
+            PreviewShowItem extra[] = {{"UV Layout overlay", &showUvOverlay_}};
+            drawPreviewToolbar("##meshToolbar", imageMin, imageMax, dpi, viewMode_, show_, extra, 1);
+
+            std::vector<std::string> lines;
+            lines.push_back("LOD: 0");
+            lines.push_back("Triangles: " + formatCount(mesh_.indices.size() / 3));
+            lines.push_back("Vertices: " + formatCount(mesh_.vertexCount()));
+            lines.push_back("UV Channels: " + std::to_string(mesh_.uvs.empty() ? 0 : 1));
+            {
+                const Vec3 lo = mesh_.boundsMin, hi = mesh_.boundsMax;
+                char buf[64];
+                std::snprintf(buf, sizeof buf, "Approx Size: %dx%dx%d",
+                              static_cast<int>(std::lround(hi.x - lo.x)),
+                              static_cast<int>(std::lround(hi.y - lo.y)),
+                              static_cast<int>(std::lround(hi.z - lo.z)));
+                lines.push_back(buf);
+            }
+            lines.push_back("Materials: " + std::to_string(mesh_.materialSlots.size()));
+            drawPreviewStats(imageMin, dpi, lines);
+            drawPreviewAxes(imageMin, imageMax, dpi, preview->camera());
+            if (showUvOverlay_) drawUvOverlay(imageMin, imageMax, dpi);
+        } else {
+            ImGui::TextDisabled("Click this tab to take the preview.");
+        }
     }
 
     // The file's stream layout into the engine's interleaved vertex, then one createMesh.
@@ -497,46 +578,62 @@ private:
         }
     }
 
+    // The new LODs section: how many levels this mesh carries, and each one's own triangle count --
+    // LOD 0 from indices/meshlets as always, coarserLods[i] (i.e. LOD i+1) from its own index buffer.
+    // See OcMeshData::coarserLods' own comment for why a coarser level owns triangles but not
+    // vertices. Read-only: nothing here generates or strips a LOD, only reports what the file has.
+    void drawLods() {
+        ImGui::Text("LOD Count  %u", mesh_.lodCount());
+        if (!ImGui::BeginTable("lods", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) return;
+        ImGui::TableSetupColumn("LOD");
+        ImGui::TableSetupColumn("Triangles");
+        ImGui::TableHeadersRow();
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextUnformatted("0 (base)");
+        ImGui::TableNextColumn(); ImGui::TextUnformatted(formatCount(mesh_.indices.size() / 3).c_str());
+        for (usize i = 0; i < mesh_.coarserLods.size(); ++i) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::Text("%zu", i + 1);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(formatCount(mesh_.coarserLods[i].indices.size() / 3).c_str());
+        }
+        ImGui::EndTable();
+    }
+
     // ITEM 1.2 (ii): a READ-ONLY wireframe of every LOD-0 triangle's UV shell. mesh_.uvs is already
     // flat, per-vertex data (§5.2 UV0) -- no format change needed, only a new view onto data the
     // parser already captures. Judged by eye only: there is no oracle for "does this UV layout look
     // right", so this is never compared against a rendered image or a recorded baseline anywhere.
-    void drawUvWireframe() {
-        if (mesh_.uvs.size() < 2 || mesh_.indices.size() < 3) {
-            ImGui::TextDisabled("No UVs to show.");
-            return;
-        }
-        const f32 avail = std::max(64.0f, ImGui::GetContentRegionAvail().x);
-        const f32 side = std::min(avail, 420.0f);
-        ImGui::InvisibleButton("##uvcanvas", ImVec2(side, side));
-        const ImVec2 p0 = ImGui::GetItemRectMin();
-        const ImVec2 p1 = ImGui::GetItemRectMax();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p0, p1, IM_COL32(24, 24, 28, 255));
+    //
+    // SPLIT INTO A CORE (drawUvWireframeCore) PLUS TWO CALL SITES: the Details panel's own canvas
+    // below, and drawUvOverlay's on-demand copy over a corner of the 3D viewport -- same triangles,
+    // a different rect, and the overlay draws with no InvisibleButton of its own so it never steals
+    // the image's hover (orbit/zoom/pan/F all still read the image underneath it).
+    void drawUvWireframeCore(ImDrawList* dl, ImVec2 p0, ImVec2 p1) const {
+        dl->AddRectFilled(p0, p1, IM_COL32(24, 24, 28, 235));
         dl->AddRect(p0, p1, IM_COL32(90, 90, 100, 255));
+        const f32 sx = p1.x - p0.x, sy = p1.y - p0.y;
         // Quarter gridlines at 0/.25/.5/.75/1 on both axes, purely for orientation.
         for (int i = 1; i < 4; ++i) {
             const f32 t = static_cast<f32>(i) / 4.0f;
-            const f32 x = p0.x + t * side, y = p0.y + t * side;
+            const f32 x = p0.x + t * sx, y = p0.y + t * sy;
             dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p1.y), IM_COL32(60, 60, 68, 255));
             dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), IM_COL32(60, 60, 68, 255));
         }
 
-        // UV -> canvas, V flipped to the usual texture-space convention (V=0 at the top). Clipped to
-        // the canvas rect: a tiled UV set legitimately runs outside [0,1], and without a clip its
-        // edges would be drawn over whatever ImGui content sits next to this panel.
+        // UV -> rect, V flipped to the usual texture-space convention (V=0 at the top). Clipped: a
+        // tiled UV set legitimately runs outside [0,1], and without a clip its edges would be drawn
+        // over whatever sits next to (or, for the overlay, underneath) this rect.
         const u32 vcount = mesh_.vertexCount();
-        const f32 baseX = p0.x, baseY = p0.y;
-        const auto toPt = [baseX, baseY, side, this](u32 vi) {
+        const auto toPt = [p0, sx, sy, this](u32 vi) {
             const f32 u = mesh_.uvs[usize(vi) * 2 + 0], v = mesh_.uvs[usize(vi) * 2 + 1];
-            return ImVec2(baseX + u * side, baseY + (1.0f - v) * side);
+            return ImVec2(p0.x + u * sx, p0.y + (1.0f - v) * sy);
         };
 
         // A dense LOD-0 could be hundreds of thousands of edges; this is a debug view, not a
         // renderer, so triangles beyond the cap are simply not drawn rather than stalling the frame.
-        constexpr usize kMaxTris = 20000;
         const usize triCount = mesh_.indices.size() / 3;
-        const usize shown = std::min(triCount, kMaxTris);
+        const usize shown = std::min(triCount, kMaxUvTris);
         dl->PushClipRect(p0, p1, true);
         for (usize t = 0; t < shown; ++t) {
             const u32 ia = mesh_.indices[t * 3 + 0], ib = mesh_.indices[t * 3 + 1], ic = mesh_.indices[t * 3 + 2];
@@ -548,13 +645,49 @@ private:
             dl->AddLine(c, a, col);
         }
         dl->PopClipRect();
-        if (triCount > kMaxTris)
-            ImGui::TextDisabled("Showing %zu of %zu triangles (capped).", shown, triCount);
     }
+
+    // The Details panel's own UV canvas: a square sized to the column, laid out as an ordinary item.
+    void drawUvWireframe() {
+        if (mesh_.uvs.size() < 2 || mesh_.indices.size() < 3) {
+            ImGui::TextDisabled("No UVs to show.");
+            return;
+        }
+        const f32 avail = std::max(64.0f, ImGui::GetContentRegionAvail().x);
+        const f32 side = std::min(avail, 420.0f);
+        ImGui::InvisibleButton("##uvcanvas", ImVec2(side, side));
+        drawUvWireframeCore(ImGui::GetWindowDrawList(), ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        const usize triCount = mesh_.indices.size() / 3;
+        if (triCount > kMaxUvTris)
+            ImGui::TextDisabled("Showing %zu of %zu triangles (capped).", kMaxUvTris, triCount);
+    }
+
+    // The viewport's on-demand "UV Layout overlay" toggle (toolbar Show dropdown): the same wireframe,
+    // in the image's top-right corner, drawn straight onto the window's draw list with no layout item
+    // of its own -- exactly how drawPreviewStats/drawPreviewAxes sit over the image already.
+    void drawUvOverlay(ImVec2 imageMin, ImVec2 imageMax, f32 dpi) const {
+        if (mesh_.uvs.size() < 2 || mesh_.indices.size() < 3) return;
+        const f32 inset = 8.0f * dpi;
+        const f32 side = std::min(180.0f * dpi,
+                                   std::min(imageMax.x - imageMin.x, imageMax.y - imageMin.y) * 0.4f);
+        if (side < 48.0f * dpi) return;
+        const ImVec2 p0(imageMax.x - inset - side, imageMin.y + inset);
+        const ImVec2 p1(imageMax.x - inset, imageMin.y + inset + side);
+        drawUvWireframeCore(ImGui::GetWindowDrawList(), p0, p1);
+    }
+
+    static constexpr usize kMaxUvTris = 20000;
 
     rhi::MeshHandle gpuMesh_ = 0;
     bool uploadTried_ = false;
     bool framed_ = false;
+
+    SplitPane split_;
+    render::preview::PreviewViewMode viewMode_ = render::preview::PreviewViewMode::Lit;
+    render::preview::PreviewShowFlags show_{};
+    bool showUvOverlay_ = false;
+    u32 pendingW_ = 0, pendingH_ = 0;
+    double resizeDue_ = 0.0;   // ImGui::GetTime() deadline for the next preview->resize(); 0 = none due
 #endif
 
     std::string path_;

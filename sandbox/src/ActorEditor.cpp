@@ -7,6 +7,7 @@
 #include "ToolGlyphs.hpp"
 #include "EditorPrefs.hpp"
 #include "SnapshotUndo.hpp"
+#include "PreviewChrome.hpp"
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -168,7 +169,6 @@ void composeTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3],
 // here, and there must be only one place that answers the question or the gizmo and the mesh it is
 // drawn over can disagree again the way the rotate handle used to.
 void localAxisWorldDir(const f32 rotDeg[3], int axis, f32 out[3]) {
-    constexpr f32 kPi = 3.14159265358979f;
     const f32 y = rotDeg[0] * kPi / 180.0f, p = rotDeg[1] * kPi / 180.0f, r = rotDeg[2] * kPi / 180.0f;
     const f32 cy = std::cos(y), sy = std::sin(y);
     const f32 cp = std::cos(p), sp = std::sin(p);
@@ -286,6 +286,10 @@ public:
 private:
     // Rebuilds the preview's draw list from the live snapshot or the parsed source.
     void buildDrawList(Engine& e);
+
+    // Cheap triangle/vertex counts for the selected component's mesh (a PreviewMeshCache cache hit
+    // plus IDevice::meshGeometry, no reload), if it draws one. False for Root/Camera/PointLight.
+    bool selectedMeshCounts(Engine& e, u32& outTriangles, u32& outVertices) const;
 
     // Asks the shared preview to match the panel, debounced until the size settles. Only draw() ever
     // calls this, and draw() is itself a no-op with UI off, so an empty body with UI off is never
@@ -476,6 +480,11 @@ private:
     int selected_ = -1;
     bool framed_ = false;
     std::string status_;
+
+    // ---- preview chrome (view mode + Show toolbar) ----
+    render::preview::PreviewViewMode viewMode_ = render::preview::PreviewViewMode::Lit;
+    render::preview::PreviewShowFlags showFlags_{};
+    bool showWireframes_ = true;   // gates drawComponentWireframes; toggled from the Show dropdown
 };
 
 // Re-reads the file when it has changed on disk. Refused while the tab is dirty.
@@ -899,6 +908,41 @@ void ActorEditor::buildDrawList(Engine& e) {
     buildTree();
 }
 
+// Cheap triangle/vertex counts for the selected component's mesh (a PreviewMeshCache cache hit plus
+// IDevice::meshGeometry, no reload), if it draws one. False for Root/Camera/PointLight.
+bool ActorEditor::selectedMeshCounts(Engine& e, u32& outTriangles, u32& outVertices) const {
+    if (!e.device() || selectedNode_ < 0 || selectedNode_ >= static_cast<int>(tree_.size())) return false;
+    const ComponentNode& n = tree_[static_cast<usize>(selectedNode_)];
+
+    rhi::MeshHandle mesh = 0;
+    f32 radius = 0.0f;
+    if (live_) {
+        // buildTree adds live models directly under the root, in liveDraws_ order.
+        const int i = selectedNode_ - 1;
+        if (i < 0 || i >= static_cast<int>(liveDraws_.size())) return false;
+        mesh = liveDraws_[static_cast<usize>(i)].mesh;
+    } else if (n.kind == ComponentKind::StaticMesh) {
+        const std::string& path = (n.modelIndex >= 0)
+            ? script_.models[static_cast<usize>(n.modelIndex)].meshPath
+            : (activeInfo() ? activeInfo()->meshPath : std::string());
+        if (path.empty()) return false;
+        mesh = g_meshes.resolve(*e.device(), path, &radius);
+    } else if (n.kind == ComponentKind::Capsule) {
+        const fmt::ActorClassInfo* info = activeInfo();
+        if (!info) return false;
+        mesh = g_meshes.capsule(*e.device(), info->capsuleHeight, info->capsuleRadius, &radius);
+    } else {
+        return false;   // Root, Camera, PointLight draw no mesh
+    }
+    if (!mesh) return false;
+
+    u32 vc = 0, ic = 0;
+    if (!e.device()->meshGeometry(mesh, nullptr, nullptr, &vc, &ic)) return false;
+    outVertices = vc;
+    outTriangles = ic / 3;
+    return true;
+}
+
 // ---------------------------------------------------------------- the gizmo
 
 namespace {
@@ -1192,6 +1236,13 @@ void ActorEditor::draw(Engine& e) {
 
     buildDrawList(e);
 
+    // Only the active tab draws, so this claims the shared preview's chrome for this frame -- see
+    // sharedPreview's own comment on why there is one preview, not one per tab.
+    if (g_preview) {
+        g_preview->setViewMode(viewMode_);
+        g_preview->setShowFlags(showFlags_);
+    }
+
     // ---- the toolbar ----
     {
         if (g_hooks.drawCompileButton) {
@@ -1353,6 +1404,25 @@ void ActorEditor::draw(Engine& e) {
         const ImVec2 at = ImGui::GetCursorScreenPos();
         ImGui::Image(static_cast<ImTextureID>(g_preview->uiTextureId()), ImVec2(iw, ih));
         const ImVec2 s(iw, ih);
+        const ImVec2 imageMax(at.x + iw, at.y + ih);
+
+        // ---- chrome: view mode + Show toolbar, stats, axes gizmo ----
+        {
+            PreviewShowItem extraShow[] = {{"Component Wireframes", &showWireframes_}};
+            drawPreviewToolbar("##actorPreviewToolbar", at, imageMax, dpi, viewMode_, showFlags_,
+                               extraShow, 1);
+
+            std::vector<std::string> stats;
+            const u64 componentCount = tree_.empty() ? 0u : static_cast<u64>(tree_.size() - 1);
+            stats.push_back("Components: " + formatCount(componentCount));
+            u32 tris = 0, verts = 0;
+            if (selectedMeshCounts(e, tris, verts)) {
+                stats.push_back("Selected Triangles: " + formatCount(tris));
+                stats.push_back("Selected Vertices: " + formatCount(verts));
+            }
+            drawPreviewStats(at, dpi, stats);
+            drawPreviewAxes(at, imageMax, dpi, g_preview->camera());
+        }
 
         // Orbit, zoom, and the gizmo.
         if (ImGui::IsItemHovered() || draggingAxis_ >= 0) {
@@ -1413,7 +1483,7 @@ void ActorEditor::draw(Engine& e) {
                 g_preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f);
         }
 
-        drawComponentWireframes(at, s);
+        if (showWireframes_) drawComponentWireframes(at, s);
         if (!live_ && tool_ != ToolSelect && selected_ >= 0
             && selected_ < static_cast<int>(script_.models.size()))
             drawGizmo(at, s, script_.models[static_cast<usize>(selected_)]);
@@ -1627,6 +1697,32 @@ void setPreviewTextureResolver(pbr::MaterialSystem::TextureResolver fn, void* us
     if (g_preview) g_preview->setMaterialTextureResolver(fn, user);
 }
 #endif
+
+namespace {
+PreviewMaterialLookup g_previewMaterialLookup = nullptr;
+void* g_previewMaterialLookupUser = nullptr;
+}
+
+void setPreviewMaterialLookup(PreviewMaterialLookup fn, void* user) {
+    g_previewMaterialLookup = fn;
+    g_previewMaterialLookupUser = user;
+}
+
+u32 previewMaterialFor(const std::string& surface) {
+    if (!g_previewMaterialLookup || surface.empty()) return 0;
+    return g_previewMaterialLookup(surface, g_previewMaterialLookupUser);
+}
+
+bool applyPreviewResolvers(render::preview::ActorPreview& preview) {
+#if AVER_MODULE_PBR
+    if (!g_previewTexResolver) return false;
+    preview.setMaterialTextureResolver(g_previewTexResolver, g_previewTexResolverUser);
+    return true;
+#else
+    (void)preview;
+    return false;
+#endif
+}
 
 
 // Sets the content root that mesh paths in a designer file are relative to.

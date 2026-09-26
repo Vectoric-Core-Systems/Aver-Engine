@@ -38,10 +38,18 @@ float4 PreviewMaterialPS(PreviewOut i) : SV_TARGET {
 
     AverSurface s = averEvalMaterial(v, l);
 
-    float ndl = saturate(dot(s.N, l.direction));
-    float up = s.N.z * 0.5 + 0.5;
-    float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
-    float3 lit = s.albedo * (fill + ndl * gPreviewKey.w);
+    // The same view modes as PreviewPS; Normals shows the material's shading normal, maps included.
+    uint mode = (uint)gPreviewMode.x;
+    if (mode == kPreviewModeNormals) return float4(s.N * 0.5 + 0.5, 1.0);
+    if (mode == kPreviewModeWire) return float4(previewWireColor(s.albedo), 1.0);
+
+    float3 lit = s.albedo;
+    if (mode != kPreviewModeUnlit) {
+        float ndl = saturate(dot(s.N, l.direction));
+        float up = s.N.z * 0.5 + 0.5;
+        float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
+        lit = s.albedo * (fill + ndl * gPreviewKey.w);
+    }
 
     float rim = pow(1.0 - saturate(dot(s.N, v.V)), 3.0);
     lit += gPreviewAmbient.w * rim * float3(1.0, 0.62, 0.2);

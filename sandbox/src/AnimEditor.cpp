@@ -19,6 +19,7 @@
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorWidgets.hpp"
+#include "PreviewChrome.hpp"
 #include "SnapshotUndo.hpp"
 #include "AnimCurveGeometry.hpp"
 
@@ -241,6 +242,9 @@ public:
     bool ready() const { return ready_; }
     rhi::MeshHandle drawMesh() const { return drawMesh_; }
     f32 boundsRadius() const { return radius_; }
+    // For the preview's stats overlay.
+    u32 vertexCount() const { return vertexCount_; }
+    u32 triangleCount() const { return triangleCount_; }
     // The mesh's OWN slot-0 surface name (OcMeshData::materialSlots[0]), or empty when the mesh
     // named none. This is the one fact buildPreview's material resolution needs and the only reason
     // it still has the decoded OcMeshData around by the time bind() returns -- see bind()'s own
@@ -257,6 +261,8 @@ public:
         if (gpu_.valid()) pass_.destroyMesh(gpu_);
         gpu_ = {};
         drawMesh_ = 0;
+        vertexCount_ = 0;
+        triangleCount_ = 0;
         meshPath_ = meshPath;
         boneCount_ = boneCount;
         // CLEARED HERE, not only set on success: a rebind that fails partway (no skin streams, a
@@ -316,6 +322,8 @@ public:
         // A bounds radius for the preview's frameAll, from the rest mesh: the posed mesh moves, but
         // not far enough to matter for framing, and computing it per frame off GPU data we never read
         // back is not possible anyway.
+        vertexCount_ = static_cast<u32>(vcount);
+        triangleCount_ = static_cast<u32>(md.indices.size() / 3);
         radius_ = 1.0f;
         for (usize i = 0; i < vcount; ++i) {
             const f32 x = md.positions[i * 3 + 0], y = md.positions[i * 3 + 1], z = md.positions[i * 3 + 2];
@@ -348,6 +356,7 @@ private:
     rhi::MeshHandle         drawMesh_ = 0;
     std::string             meshPath_;
     u32                     boneCount_ = 0;
+    u32                     vertexCount_ = 0, triangleCount_ = 0;
     f32                     radius_ = 1.0f;
     bool                    ready_ = false;
     std::vector<Mat4>       staged_;
@@ -826,10 +835,15 @@ private:
     std::vector<Mat4> skin_;      // poseToSkinning output, handed to the GPU each frame
     // The bone boxes are an OVERLAY now, not the picture -- and, since buildPreview's first bind,
     // shown BY DEFAULT alongside a mesh rather than only in its absence. See buildPreview's own
-    // comment on why the earlier "mesh present -> bones off" default was wrong; both checkboxes
-    // below (draw(), the "Mesh"/"Bones" pair) still let an author turn either one off by hand.
-    bool showBones_ = false;
+    // comment on why the earlier "mesh present -> bones off" default was wrong. Bones/Sockets are
+    // Show-dropdown toggles now (PreviewChrome.hpp, draw()'s "view" child), not a checkbox row.
+    bool showBones_ = true;
+    bool showSockets_ = true;
     bool showMesh_ = true;
+    // The preview toolbar's own state, reasserted onto the shared ActorPreview every frame this tab
+    // draws -- see draw()'s own comment on why a shared preview needs that every frame.
+    render::preview::PreviewViewMode viewMode_ = render::preview::PreviewViewMode::Lit;
+    render::preview::PreviewShowFlags showFlags_{};
     bool skinBound_ = false;
     std::string meshPath_;         // <rig>.ocmesh beside the skeleton, if there is one
     bool framed_ = false;
@@ -1114,7 +1128,8 @@ void AnimEditor::buildPreview(Engine& e) {
         // spots a broken chain, and -- now that every chain has its own colour (see the palette
         // rebuild below) -- reads the rig's structure at a glance, none of which the skinned surface
         // shows by itself. A rig with a mesh now defaults to showing both, same as a rig with none
-        // always has; the "Mesh"/"Bones" checkboxes in draw() still let an author turn either off.
+        // always has; the "Mesh" checkbox and the toolbar's "Bones" Show item in draw() still let an
+        // author turn either off.
         showBones_ = true;
     }
 
@@ -1275,8 +1290,8 @@ void AnimEditor::buildPreview(Engine& e) {
     // SOCKETS, drawn whether or not the bones are. A socket is a thing an author is placing by
     // eye, so hiding it behind the "Bones" toggle would hide it exactly when the mesh is on and
     // the placement actually matters -- "is the grip inside the hand" is a question you ask with
-    // the hand visible.
-    for (usize i = 0; i < skel_.sockets.size(); ++i) {
+    // the hand visible. Its own Show toggle, showSockets_, is independent of showBones_.
+    for (usize i = 0; showSockets_ && i < skel_.sockets.size(); ++i) {
         Mat4 sm;
         if (!anim::socketModelMatrix(model_, skel_.sockets[i], sm)) continue;
         const Vec3 at{sm.m[3][0], sm.m[3][1], sm.m[3][2]};
@@ -2692,8 +2707,7 @@ void AnimEditor::draw(Engine& e) {
                                ? "No <skeleton>.ocmesh beside this rig."
                                : "That mesh has no skin streams, or the device has no compute.");
         }
-        ImGui::SameLine();
-        ImGui::Checkbox("Bones", &showBones_);
+        // Bones/Sockets: now in the preview toolbar's Show dropdown, below.
     }
 
     buildPreview(e);
@@ -2869,6 +2883,42 @@ void AnimEditor::draw(Engine& e) {
             }
             const f32 iw = avail.x, ih = avail.y;
             ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(iw, ih));
+
+            // Preview chrome (PreviewChrome.hpp): toolbar, stats, axes gizmo. Reasserted onto the
+            // preview every frame, since it is shared across every asset tab that has one.
+            const ImVec2 imageMin = ImGui::GetItemRectMin(), imageMax = ImGui::GetItemRectMax();
+            const PreviewShowItem extraShow[] = {
+                {"Bones", &showBones_},
+                {"Sockets", &showSockets_},
+            };
+            drawPreviewToolbar("animPreviewToolbar", imageMin, imageMax, uiScale, viewMode_, showFlags_,
+                               extraShow, static_cast<int>(sizeof extraShow / sizeof extraShow[0]));
+            preview->setViewMode(viewMode_);
+            preview->setShowFlags(showFlags_);
+
+            std::vector<std::string> stats;
+            stats.push_back("Bones: " + formatCount(skel_.bones.size()));
+            AnimSkinFeature* skin = sharedSkin(e);
+            if (skin && showMesh_ && skin->drawMesh()) {
+                stats.push_back("Vertices: " + formatCount(skin->vertexCount()));
+                stats.push_back("Triangles: " + formatCount(skin->triangleCount()));
+            }
+            if (isClip_) {
+                char lenBuf[32];
+                std::snprintf(lenBuf, sizeof lenBuf, "Length: %.2f s", clip_.duration);
+                stats.push_back(lenBuf);
+                // sampleRate/Frames only mean anything for a baked clip (OcAnim.hpp).
+                if (clip_.storage == fmt::OcAnimStorage::BakedUniform && clip_.sampleRate > 0) {
+                    stats.push_back("FPS: " + std::to_string(clip_.sampleRate));
+                    const u32 frames = static_cast<u32>(std::lround(clip_.duration * clip_.sampleRate));
+                    stats.push_back("Frames: " + formatCount(frames));
+                }
+                stats.push_back("Notifies: " + formatCount(clip_.notifies.size()));
+                stats.push_back("Curves: " + formatCount(clip_.curves.size()));
+            }
+            drawPreviewStats(imageMin, uiScale, stats);
+            drawPreviewAxes(imageMin, imageMax, uiScale, preview->camera());
+
             // NAVIGATION, MADE TO MATCH THE MAIN VIEWPORT -- the second half of this task's brief.
             // GATED ON HOVER ALONE, exactly like the orbit this replaces: every gesture below fires
             // only while the mouse sits over the preview IMAGE itself, never merely somewhere inside

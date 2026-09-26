@@ -7,6 +7,7 @@
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
+#include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
 
@@ -605,6 +606,10 @@ void SandboxApp::onInit(Engine& e)  {
     // And again for .ocinput -- the ninth factory. Unconditional, like the foliage one just above:
     // see InputSchemeEditor.hpp/OcInput.hpp for why this tab needs no optional module either.
     assetEditors_.registerFactory(&editor::makeInputSchemeEditor);
+    // And again for the source image formats aver::decodeImage can actually read -- the tenth
+    // factory, read-only, unconditional. See TextureEditor.hpp for the two-line hook and for why
+    // .dds is not among the extensions it claims.
+    assetEditors_.registerFactory(&editor::makeTextureEditor);
     {
         // What the tab needs to answer "is this the project's Input Scheme?" and to make it one --
         // see InputSchemeEditorHooks' own comment (InputSchemeEditor.hpp) for why this is a hooks
@@ -1428,6 +1433,10 @@ void SandboxApp::onInit(Engine& e)  {
             // turned out to be. Set here rather than inside the preview because the resolver needs
             // content_, and ActorEditor.cpp has no business knowing what a project is.
             editor::setPreviewTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
+            editor::setPreviewMaterialLookup(
+                [](const std::string& surface, void* user) -> u32 {
+                    return static_cast<u32>(static_cast<game::GameContent*>(user)->materialForSurface(surface));
+                }, &content_);
 #endif
             // Installed unconditionally, even in a build with no Trifactor: depthProxy_ is then
             // simply empty, every lookup answers 0, and every pass draws what it drew before.

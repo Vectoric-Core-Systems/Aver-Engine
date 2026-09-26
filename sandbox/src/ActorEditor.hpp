@@ -63,6 +63,16 @@ render::preview::PreviewMeshCache& sharedPreviewMeshes();
 void setPreviewTextureResolver(pbr::MaterialSystem::TextureResolver fn, void* user);
 #endif
 
+// Resolves a material SLOT NAME (the surface name a level uses) to a pbr::MaterialHandle, or 0, so
+// a preview can shade a mesh with its own material. Set from SandboxApp for the same reason as the
+// texture resolver above; unset, previews keep the plain preview shader.
+using PreviewMaterialLookup = u32 (*)(const std::string& surface, void* user);
+void setPreviewMaterialLookup(PreviewMaterialLookup fn, void* user);
+u32 previewMaterialFor(const std::string& surface);
+// Applies the remembered texture resolver to a preview this file did not create (the thumbnails').
+// False when none is known yet, so the caller can try again later.
+bool applyPreviewResolvers(render::preview::ActorPreview& preview);
+
 
 // Creates an actor editor for a `.Designer.cs` that carries a generated region, else nullptr.
 std::unique_ptr<AssetEditor> makeActorEditor(const std::string& path);

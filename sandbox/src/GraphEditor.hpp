@@ -68,6 +68,10 @@ enum GraphNodeDomain : std::uint32_t;
 // monitor) takes effect on the next frame without needing every tab to be told individually.
 void setGraphEditorDpi(float dpi);
 
+// The shape the material graph's Viewport tab previews it on. Sphere shows every normal-to-view
+// angle at once; Cube/Plane/Cylinder matter for a graph whose look depends on flat faces or a seam.
+enum class MaterialPreviewShape : u8 { Sphere = 0, Cube = 1, Plane = 2, Cylinder = 3 };
+
 // One open .ocgraph tab: canvas, selection, undo, and load/save. See GraphEditor.cpp for the load/
 // save contract (byte-identical no-op round trip, unknown-record preservation, display-only
 // auto-layout) -- all three are explained where they are implemented, not just here.
@@ -263,18 +267,21 @@ public:
     // whose nodes then failed to compile, which is worse than offering none.
     GraphNodeDomain openGraphDomain() const;
 
-    // The Viewport tab's content for a MATERIAL graph: one sphere shaded by this graph itself. False
-    // when there is nothing to draw -- no path yet, or a graph that does not currently compile.
+    // The Viewport tab's content for a MATERIAL graph: one shape (materialPreviewShape_) shaded by
+    // this graph itself. False when there is nothing to draw -- no path yet, or a graph that does
+    // not currently compile.
     bool buildMaterialPreview(Engine& e, render::preview::PreviewDraw& out);
 
-    // The whole Viewport tab for a material graph -- the sphere and its compile state, with none of
-    // the component furniture a material graph cannot use.
+    // The whole Viewport tab for a material graph -- the preview shape and its compile state, with
+    // none of the component furniture a material graph cannot use.
     void drawMaterialViewport(Engine& e, float dpi);
 
-    // Which material-graph id the preview sphere is shading with, and the edit count it was compiled
+    // Which material-graph id the preview shape is shading with, and the edit count it was compiled
     // at. Kept apart so a graph that stops compiling mid-edit keeps showing the last one that did.
     u32 materialPreviewGraphId_ = 0;
     i64 materialPreviewDirtyMark_ = -1;
+    // Which primitive the Viewport tab's shape dropdown currently shows the graph on.
+    MaterialPreviewShape materialPreviewShape_ = MaterialPreviewShape::Sphere;
 
     // ---- functions ----------------------------------------------------------------------------
     // A .ocgraph holds ONE event graph and any number of named FUNCTIONS. They share a file, a node

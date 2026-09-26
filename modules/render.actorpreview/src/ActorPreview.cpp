@@ -1,5 +1,6 @@
 // The actor preview feature: orbit camera, its own targets, and the HLSL it draws with.
 #include "aver/render/preview/ActorPreview.hpp"
+#include "aver/render/preview/PreviewMeshCache.hpp"   // appendPreviewUnitBox, for the bounds box
 #include "aver/core/Log.hpp"
 
 #if AVER_MODULE_PBR
@@ -10,6 +11,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include "aver/rhi/ShaderFiles.hpp"   // the preview HLSL is deployed files
 
 namespace aver::render::preview {
@@ -64,6 +66,35 @@ void perspective(f32 fovDeg, f32 aspect, f32 nearZ, f32 farZ, f32 out[16]) {
         0, 0, -nearZ * farZ / (farZ - nearZ), 0,
     };
     std::memcpy(out, m, sizeof m);
+}
+
+// The largest axis scale of a row-major world matrix, 1 for a degenerate one.
+f32 maxAxisScale(const f32 w[16]) {
+    f32 sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        sx += w[0 + k] * w[0 + k];
+        sy += w[4 + k] * w[4 + k];
+        sz += w[8 + k] * w[8 + k];
+    }
+    const f32 s = std::sqrt(std::fmax(sx, std::fmax(sy, sz)));
+    return s > 0.0f ? s : 1.0f;
+}
+
+// Object constants for a scale-then-translate world matrix; everything past the matrix is zero.
+void scaleTranslate(f32 sx, f32 sy, f32 sz, f32 tx, f32 ty, f32 tz, f32 out[rhi::kObjectConstantDwords]) {
+    std::memset(out, 0, sizeof(f32) * rhi::kObjectConstantDwords);
+    out[0] = sx; out[5] = sy; out[10] = sz; out[15] = 1.0f;
+    out[12] = tx; out[13] = ty; out[14] = tz;
+}
+
+// A unit quad on Z = 0, half-extent one, facing +Z.
+void appendUnitQuad(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
+    v.push_back({-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f});
+    v.push_back({ 1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f});
+    v.push_back({ 1.0f,  1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f});
+    v.push_back({-1.0f,  1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f});
+    const u32 q[6] = {0, 1, 2, 0, 2, 3};
+    idx.insert(idx.end(), q, q + 6);
 }
 
 #if AVER_MODULE_PBR
@@ -167,8 +198,18 @@ ActorPreview::~ActorPreview() {
     if (!res_) return;
     res_->waitIdle();
     if (pipeline_) res_->destroyPipeline(pipeline_);
+    if (wirePipeline_) res_->destroyPipeline(wirePipeline_);
+    if (backdropPipeline_) res_->destroyPipeline(backdropPipeline_);
+    if (gridPipeline_) res_->destroyPipeline(gridPipeline_);
+    if (boundsPipeline_) res_->destroyPipeline(boundsPipeline_);
+    if (device_ && gridQuad_) device_->destroyMesh(gridQuad_);
+    if (device_ && boundsBox_) device_->destroyMesh(boundsBox_);
     if (vs_) res_->destroyShader(vs_);
     if (ps_) res_->destroyShader(ps_);
+    if (backdropVs_) res_->destroyShader(backdropVs_);
+    if (backdropPs_) res_->destroyShader(backdropPs_);
+    if (gridPs_) res_->destroyShader(gridPs_);
+    if (boundsPs_) res_->destroyShader(boundsPs_);
 #if AVER_MODULE_PBR
     if (materialPipeline_) res_->destroyPipeline(materialPipeline_);
     if (materialVs_) res_->destroyShader(materialVs_);
@@ -243,10 +284,77 @@ bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     gp.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;   // a root CBV
     pipeline_ = res_->createGraphicsPipeline(gp);
     if (!pipeline_) { AVER_ERROR("[Preview] the preview pipeline would not build"); return false; }
+    createChrome(gp);
 
     uiTextureId_ = device.uiTextureId(color_);
     AVER_INFO("[Preview] ready: {}x{} target, pipeline {}", width_, height_, pipeline_);
     return true;
+}
+
+// Builds the view-mode and helper pipelines beside pipeline_. Each piece that fails is left at 0 and
+// prePass draws without it, so a backend that refuses one still gets the plain preview.
+void ActorPreview::createChrome(const rhi::GraphicsPipelineDesc& meshDesc) {
+    rhi::GraphicsPipelineDesc wd = meshDesc;
+    wd.fill = rhi::FillMode::Wireframe;
+    wd.cull = rhi::CullMode::None;
+    wirePipeline_ = res_->createGraphicsPipeline(wd);
+    if (!wirePipeline_) AVER_WARN("[Preview] no wireframe pipeline; the Wireframe view mode shows Lit");
+
+    rhi::ShaderDesc sd;
+    sd.source = actorPreviewShaderSource();
+    sd.prelude = rhi::sharedShaderPrelude();
+    sd.entry = "PreviewBackdropVS";
+    sd.stage = rhi::ShaderStage::Vertex;
+    backdropVs_ = res_->createShader(sd);
+    sd.stage = rhi::ShaderStage::Pixel;
+    sd.entry = "PreviewBackdropPS";
+    backdropPs_ = res_->createShader(sd);
+    sd.entry = "PreviewGridPS";
+    gridPs_ = res_->createShader(sd);
+    sd.entry = "PreviewBoundsPS";
+    boundsPs_ = res_->createShader(sd);
+
+    if (backdropVs_ && backdropPs_) {
+        rhi::GraphicsPipelineDesc bd = meshDesc;
+        bd.vs = backdropVs_;
+        bd.ps = backdropPs_;
+        bd.cull = rhi::CullMode::None;
+        bd.depth = {false, false, rhi::CompareOp::Always};
+        backdropPipeline_ = res_->createGraphicsPipeline(bd);
+    }
+    // Through PreviewVS like the meshes; tested against their depth but never writing it.
+    if (gridPs_) {
+        rhi::GraphicsPipelineDesc gd = meshDesc;
+        gd.ps = gridPs_;
+        gd.cull = rhi::CullMode::None;
+        gd.depth = {true, false, rhi::CompareOp::Less};
+        gd.blend = rhi::BlendMode::AlphaBlend;
+        gridPipeline_ = res_->createGraphicsPipeline(gd);
+    }
+    // Untested, so the whole box reads through the mesh it encloses.
+    if (boundsPs_) {
+        rhi::GraphicsPipelineDesc xd = meshDesc;
+        xd.ps = boundsPs_;
+        xd.cull = rhi::CullMode::None;
+        xd.depth = {false, false, rhi::CompareOp::Always};
+        xd.blend = rhi::BlendMode::AlphaBlend;
+        boundsPipeline_ = res_->createGraphicsPipeline(xd);
+    }
+
+    std::vector<rhi::MeshVertex> v;
+    std::vector<u32> idx;
+    appendUnitQuad(v, idx);
+    if (gridPipeline_)
+        gridQuad_ = device_->createMesh(v.data(), static_cast<u32>(v.size()), idx.data(), static_cast<u32>(idx.size()));
+    v.clear();
+    idx.clear();
+    appendPreviewUnitBox(v, idx);
+    if (boundsPipeline_)
+        boundsBox_ = device_->createMesh(v.data(), static_cast<u32>(v.size()), idx.data(), static_cast<u32>(idx.size()));
+
+    if (!backdropPipeline_ || !gridQuad_ || !boundsBox_)
+        AVER_WARN("[Preview] preview chrome incomplete: backdrop {}, grid {}, bounds {}",
+                  backdropPipeline_ != 0, gridQuad_ != 0, boundsBox_ != 0);
 }
 
 #if AVER_MODULE_PBR
@@ -380,14 +488,7 @@ void ActorPreview::frameAll() {
     if (draws_.empty()) { camera_.distance = 400.0f; camera_.pivot[0] = camera_.pivot[1] = camera_.pivot[2] = 0.0f; return; }
     f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     for (const PreviewDraw& d : draws_) {
-        f32 sx = 0.0f, sy = 0.0f, sz = 0.0f;
-        for (int k = 0; k < 3; ++k) {
-            sx += d.world[0 + k] * d.world[0 + k];
-            sy += d.world[4 + k] * d.world[4 + k];
-            sz += d.world[8 + k] * d.world[8 + k];
-        }
-        const f32 scale = std::sqrt(std::fmax(sx, std::fmax(sy, sz)));
-        const f32 r = d.boundsRadius * (scale > 0.0f ? scale : 1.0f);
+        const f32 r = d.boundsRadius * maxAxisScale(d.world);
         for (int i = 0; i < 3; ++i) {
             const f32 v = d.world[12 + i];   // translation is the LAST ROW
             if (v - r < lo[i]) lo[i] = v - r;
@@ -400,6 +501,35 @@ void ActorPreview::frameAll() {
         span = std::fmax(span, hi[i] - lo[i]);
     }
     camera_.distance = clampf(std::fmax(span, 1.0f) * 1.8f, 2.0f, 500000.0f);
+}
+
+// The draw list's world-space AABB: each mesh's own AABB through its world matrix, or its bounding
+// sphere where the backend has no AABB (Vulkan today).
+bool ActorPreview::worldBounds(f32 lo[3], f32 hi[3]) const {
+    for (int i = 0; i < 3; ++i) { lo[i] = 1e30f; hi[i] = -1e30f; }
+    bool any = false;
+    for (const PreviewDraw& d : draws_) {
+        if (!d.mesh) continue;
+        any = true;
+        f32 mn[3] = {}, mx[3] = {};
+        if (device_ && device_->meshBoundsAabb(d.mesh, mn, mx)) {
+            for (int c = 0; c < 8; ++c) {
+                const f32 p[3] = {(c & 1) ? mx[0] : mn[0], (c & 2) ? mx[1] : mn[1], (c & 4) ? mx[2] : mn[2]};
+                for (int i = 0; i < 3; ++i) {
+                    const f32 w = p[0] * d.world[i] + p[1] * d.world[4 + i] + p[2] * d.world[8 + i] + d.world[12 + i];
+                    lo[i] = std::fmin(lo[i], w);
+                    hi[i] = std::fmax(hi[i], w);
+                }
+            }
+        } else {
+            const f32 r = d.boundsRadius * maxAxisScale(d.world);
+            for (int i = 0; i < 3; ++i) {
+                lo[i] = std::fmin(lo[i], d.world[12 + i] - r);
+                hi[i] = std::fmax(hi[i], d.world[12 + i] + r);
+            }
+        }
+    }
+    return any;
 }
 
 // Composes the orbit camera's view and projection into one matrix.
@@ -477,16 +607,24 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     ctx.setViewport(0, 0, width_, height_);
     ctx.setScissor(0, 0, width_, height_);
     ctx.clearDepth(depth_, 1.0f);
-    // THE COLOUR TARGET WAS NEVER CLEARED. Only depth was, so whatever the mesh did not cover kept
-    // every previous frame's pixels -- an actor with holes, or one that got smaller as its scale was
-    // dragged down, composited its own trail forever instead of showing background there. Same
-    // chrome grey as the level viewport (SandboxApp.cpp:1136), since this is the same kind of
-    // editor surface.
-    const f32 kChromeGrey[4] = {0.055f, 0.055f, 0.062f, 1.0f};
-    ctx.clearColor(color_, kChromeGrey);
+    // THE COLOUR TARGET MUST BE CLEARED, or whatever the meshes do not cover keeps earlier frames'
+    // pixels. The backdrop pass paints over this; the clear is its fallback, the gradient's floor
+    // colour in display values.
+    const f32 kBackdropFloor[4] = {0.10f, 0.10f, 0.11f, 1.0f};
+    ctx.clearColor(color_, kBackdropFloor);
 
-    ctx.setPipeline(pipeline_);
-    rhi::PipelineHandle activePipeline = pipeline_;
+    if (backdropPipeline_) {
+        ctx.setPipeline(backdropPipeline_);
+        ctx.drawFullscreen();
+    }
+
+    // Wireframe needs its own pipeline and draws every mesh through it, material or not.
+    const bool wire = viewMode_ == PreviewViewMode::Wireframe && wirePipeline_ != 0;
+    const PreviewViewMode shownMode =
+        (viewMode_ == PreviewViewMode::Wireframe && !wire) ? PreviewViewMode::Lit : viewMode_;
+    const rhi::PipelineHandle meshPipeline = wire ? wirePipeline_ : pipeline_;
+    ctx.setPipeline(meshPipeline);
+    rhi::PipelineHandle activePipeline = meshPipeline;
 
     // Mirrors the PreviewFrame cbuffer field for field.
     struct Frame {
@@ -494,6 +632,8 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
         f32 eye[4];
         f32 key[4];
         f32 ambient[4];
+        f32 mode[4];
+        f32 grid[4];
     } frame{};
     buildViewProj(frame.viewProj);
 
@@ -507,6 +647,25 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     frame.key[0] = -0.5481f; frame.key[1] = 0.3838f; frame.key[2] = 0.7431f; frame.key[3] = 1.6f;
     frame.ambient[0] = 0.26f; frame.ambient[1] = 0.30f; frame.ambient[2] = 0.36f;
     frame.ambient[3] = 0.0f;
+    frame.mode[0] = static_cast<f32>(static_cast<u8>(shownMode));
+
+    // The floor sits at the draw list's lowest point, its lines stepped to the scene's size: 10 cm
+    // for a prop, 1 m once the scene is several metres across, and so on by tens.
+    f32 lo[3] = {}, hi[3] = {};
+    const bool haveBounds = worldBounds(lo, hi);
+    f32 sceneRadius = 100.0f, floorZ = 0.0f;
+    if (haveBounds) {
+        const f32 ex = hi[0] - lo[0], ey = hi[1] - lo[1], ez = hi[2] - lo[2];
+        sceneRadius = std::fmax(0.5f * std::sqrt(ex * ex + ey * ey + ez * ez), 1.0f);
+        floorZ = lo[2];
+    }
+    f32 gridStep = 10.0f;
+    while (sceneRadius > gridStep * 50.0f && gridStep < 100000.0f) gridStep *= 10.0f;
+    const f32 gridReach = std::fmax(std::fmax(sceneRadius * 5.0f, camera_.distance * 1.5f), gridStep * 30.0f);
+    frame.grid[0] = camera_.pivot[0];
+    frame.grid[1] = camera_.pivot[1];
+    frame.grid[2] = gridStep;
+    frame.grid[3] = gridReach;
 
     for (const PreviewDraw& d : draws_) {
         if (!d.mesh) continue;
@@ -524,19 +683,19 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
         // once per frame and the bindings after it were the ones that counted. Adding a second is
         // what made the ordering load-bearing.
         //
-        // 0 IN BOTH FIELDS -- EVERY EXISTING CALLER's values -- selects pipeline_ unchanged. A
-        // non-zero materialGraphId OR a non-zero materialHandle selects the material pipeline
-        // instead, once one actually exists: a graph that has not compiled yet, a material asked for
+        // 0 IN BOTH FIELDS -- EVERY EXISTING CALLER's values -- selects pipeline_ unchanged (or its
+        // wireframe twin in that view mode). A non-zero materialGraphId OR a non-zero materialHandle
+        // selects the material pipeline instead, once one actually exists: a graph that has not compiled yet, a material asked for
         // before any draw needed the pipeline built (see prePass's own scan above), or a PBR=OFF
         // build (where materialPipeline_ does not exist as a member at all) all quietly fall back to
         // the simple shader rather than skipping the draw. materialHandle alone (materialGraphId
         // still 0) belongs here too: see actor_preview_material.hlsli's `default: break` arm, which
         // is already "run averStockAuthored and stop" -- exactly a real material's textures with no
         // graph on top.
-        rhi::PipelineHandle wanted = pipeline_;
+        rhi::PipelineHandle wanted = meshPipeline;
 #if AVER_MODULE_PBR
         const bool wantsMaterial =
-            (d.materialGraphId != 0 || d.materialHandle != 0) && materialPipeline_ != 0;
+            !wire && (d.materialGraphId != 0 || d.materialHandle != 0) && materialPipeline_ != 0;
         if (wantsMaterial) wanted = materialPipeline_;
 #endif
         if (wanted != activePipeline) {
@@ -590,6 +749,30 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
         obj[20] = d.metallic; obj[21] = d.roughness; obj[22] = 0.0f; obj[23] = 0.0f;
         ctx.setConstants(rhi::kObjectConstantRegister, obj, rhi::kObjectConstantDwords);
         ctx.drawMesh(d.mesh);
+    }
+
+    // After the meshes, so the grid depth-tests against them. Nudged below the floor so a mesh face
+    // lying on it (a plane, a slab) wins rather than z-fighting.
+    frame.ambient[3] = 0.0f;
+    if (show_.grid && gridPipeline_ && gridQuad_) {
+        ctx.setPipeline(gridPipeline_);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));
+        f32 obj[rhi::kObjectConstantDwords] = {};
+        scaleTranslate(gridReach, gridReach, 1.0f, camera_.pivot[0], camera_.pivot[1],
+                       floorZ - std::fmax(sceneRadius * 1e-3f, 0.05f), obj);
+        ctx.setConstants(rhi::kObjectConstantRegister, obj, rhi::kObjectConstantDwords);
+        ctx.drawMesh(gridQuad_);
+    }
+    if (show_.bounds && haveBounds && boundsPipeline_ && boundsBox_) {
+        ctx.setPipeline(boundsPipeline_);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));
+        f32 obj[rhi::kObjectConstantDwords] = {};
+        // A floor on each half-extent keeps a flat mesh's box from collapsing to a singular matrix.
+        scaleTranslate(std::fmax((hi[0] - lo[0]) * 0.5f, 0.01f), std::fmax((hi[1] - lo[1]) * 0.5f, 0.01f),
+                       std::fmax((hi[2] - lo[2]) * 0.5f, 0.01f),
+                       (lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f, obj);
+        ctx.setConstants(rhi::kObjectConstantRegister, obj, rhi::kObjectConstantDwords);
+        ctx.drawMesh(boundsBox_);
     }
 
     ctx.textureBarrier(color_, rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource);

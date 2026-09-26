@@ -10,6 +10,7 @@
 // that would unblock it. Everything else -- registration order, the queue, the cap, the destination
 // texture -- is implemented and correct on its own.
 #include "ThumbnailCache.hpp"
+#include "ActorEditor.hpp"   // applyPreviewResolvers
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -230,6 +231,11 @@ bool ThumbnailCache::init(rhi::IDevice& dev) {
         dev_ = nullptr;
         return false;
     }
+    // Thumbnails keep the studio backdrop but no floor grid, as Unreal's content browser tiles do, and
+    // shade with each mesh's own material through the same texture resolver the asset tabs use.
+    render::preview::PreviewShowFlags thumbShow;
+    thumbShow.grid = false;
+    preview_->setShowFlags(thumbShow);
 
     pass_ = new CopyPass(*this);
 
@@ -277,7 +283,7 @@ void ThumbnailCache::shutdown() {
     ready_ = false;
 }
 
-void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh) {
+void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh, u32 material) {
     if (!ready_) return;
     // RESIDENT MEANS FINISHED, NOT MERELY PRESENT. update() creates the entry before the copy runs,
     // so "in entries_" used to include "attempted once and failed" -- and because nothing ever
@@ -310,6 +316,7 @@ void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh) {
         return;
     }
     pending_.emplace_back(assetId, mesh);
+    pendingMaterial_[assetId] = material;
 }
 
 u64 ThumbnailCache::textureId(u64 assetId) const {
@@ -431,6 +438,13 @@ void ThumbnailCache::updateMeshPending() {
 
     std::vector<render::preview::PreviewDraw> draws(1);
     draws[0].mesh = mesh;
+    if (const auto mit = pendingMaterial_.find(assetId); mit != pendingMaterial_.end()) {
+        draws[0].materialHandle = mit->second;
+        pendingMaterial_.erase(mit);
+    }
+    // The project's texture resolver is registered after this cache is created, so it is applied on
+    // the first mesh thumbnail that finds it available rather than at init.
+    if (!resolversApplied_ && preview_) resolversApplied_ = applyPreviewResolvers(*preview_);
     // Centres the mesh on the preview's pivot and sizes frameAll's framing distance from its real
     // extent, rather than leaving PreviewDraw's defaults (identity world, boundsRadius 0.0f) -- at
     // boundsRadius 0 frameAll (ActorPreview.cpp) computes a zero span and falls back to its own
