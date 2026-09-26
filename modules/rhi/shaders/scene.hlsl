@@ -223,8 +223,7 @@ float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour, out
 
 // Procedural sky for a fullscreen triangle. The only place the full scattering integral runs.
 float4 PSky(SkyOut i) : SV_TARGET {
-    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
-    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
+    float3 ray = averViewRayDir(i.ndc);
     float3 L = normalize(gLightDir.xyz);
     float3 sky = averAtmoOn() ? averSkyPhysical(ray) : skyColor(ray);
     float sd = saturate(dot(ray, L));

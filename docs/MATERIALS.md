@@ -78,21 +78,32 @@ one, *is* the outgoing radiance — nothing more.
 a surface looks like; `lightIntensity` (`pbr::MaterialDesc::lightIntensity`, `PARAM lightIntensity`
 in `.ocmat`) is whether it *casts* light the way the sun does. 0, the default, leaves a material
 exactly as the paragraph above describes — bright to look at, dark to everything around it. A
-positive value, in the SUN's own units (`SkyAtmosphere::sunIntensity`, ~3 in the editor), turns every
-draw using that material into a small sphere light — its world bounding sphere
-(`Draw::boundsCentre`/`boundsRadius`), coloured by `EmissiveFactor` (normalised to max component 1;
-white if it is left at zero) — that the staged ray-driven local-light pass (`CSRdLocalLights`, D3D12
-only, `Settings::rayDrivenStages` 1 or 2) sums, shadows with one traced ray, and adds as direct
-diffuse light. **It is read nowhere else.** Raster, the single-pass megakernel
-(`AVER_RD_SINGLE_PASS`) and `PSMainVoxi`'s blended reuse all shade the material by its `Emissive`
-factor alone, so a lamp shows the same glow everywhere and only lights the room it sits in where
-ray-driven local lights are actually running. A lamp's own glass shade (a `BLEND translucent` bulb
-around the filament) does not block its own light — not because the pass tests for the material, but
-because translucent draws are not in the ray-traced scene at all (§10's blended-draw limitation
-applies here too), so the light simply has nothing of the bulb's own geometry to be shadowed by. An
-emissive surface with `lightIntensity` left at 0 still lights its surroundings only through GI —
-voxel GI and ReSTIR GI pick it up like any other radiance source — because there are still no point
-lights: `CLight` (`docs/SCENE_FRAMEWORK.md` §3.7) is authored data no renderer currently reads.
+positive value is a **multiplier** on the light the material's own glow and size already,
+physically, cast: `1` lights exactly what `EmissiveFactor` and the draw's world bounding sphere
+(`Draw::boundsCentre`/`boundsRadius`) cast at 1 metre in the sun's own units
+(`SkyAtmosphere::sunIntensity`), `2` lights twice that, and so on — the glow is treated as a
+Lambertian sphere's radiance, the size as that sphere's radius (`VoxiRenderer::buildLocalLights` does
+the math). Turns every draw using the material into a small sphere light — that same bounding
+sphere, coloured by `EmissiveFactor` (normalised to max component 1; white if it is left at zero) —
+that the staged ray-driven local-light pass (`CSRdLocalLights`, D3D12 only, `Settings::rayDrivenStages`
+1 or 2) sums, shadows with one traced ray, and adds as direct diffuse light. **It is read nowhere
+else.** Raster, the single-pass megakernel (`AVER_RD_SINGLE_PASS`) and `PSMainVoxi`'s blended reuse
+all shade the material by its `Emissive` factor alone, so a lamp shows the same glow everywhere and
+only lights the room it sits in where ray-driven local lights are actually running. A lamp's own
+glass shade (a `BLEND translucent` bulb around the filament) does not block its own light — not
+because the pass tests for the material, but because translucent draws are not in the ray-traced
+scene at all (§10's blended-draw limitation applies here too), so the light simply has nothing of the
+bulb's own geometry to be shadowed by. An emissive surface with `lightIntensity` left at 0 still
+lights its surroundings only through GI — voxel GI and ReSTIR GI pick it up like any other radiance
+source — because there are still no point lights: `CLight` (`docs/SCENE_FRAMEWORK.md` §3.7) is
+authored data no renderer currently reads.
+
+A lamp whose bounding sphere is bigger than its visible emitter — a whole fixture carrying the light
+material, rather than just the bulb — over-lights at `1`, since the sphere it is treated as is larger
+than the glow it actually shows; give it a lower multiplier or split the bulb into its own mesh.
+Content authored while `lightIntensity` meant an absolute brightness (a value like `2`, meaning
+"twice the sun") reads much dimmer under this multiplier meaning — `1` is the physically matched
+starting point to re-author from, not a like-for-like replacement for the old numbers.
 
 ---
 

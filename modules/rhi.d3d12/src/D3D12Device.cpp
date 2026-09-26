@@ -988,7 +988,7 @@ public:
         return h ? static_cast<f32>(w) / static_cast<f32>(h) : 0.0f;
     }
 
-    void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 camPos[3]) override {
+    void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) override {
         // Snapshot OUTGOING viewProj as "previous" before overwrite: frameCB_.viewProj still holds
         // the LAST setCamera's matrix here, the same value VoxiRenderer's curViewProj_ reads via
         // camera() -- capturing off the same field keeps one clock rather than a second gPrevViewProj
@@ -1001,13 +1001,13 @@ public:
         gbufCameraPrimed_ = true;
 
         std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
-        std::memcpy(frameCB_.invViewProj, invViewProj, sizeof(frameCB_.invViewProj));
+        std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
         frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
     }
-    bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const override {
-        if (viewProj)    std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
-        if (invViewProj) std::memcpy(invViewProj, frameCB_.invViewProj, sizeof(frameCB_.invViewProj));
-        if (cameraPos)   std::memcpy(cameraPos, frameCB_.camPos, 3 * sizeof(f32));
+    bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const override {
+        if (viewProj)       std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
+        if (invViewProjRel) std::memcpy(invViewProjRel, frameCB_.invViewProjRel, sizeof(frameCB_.invViewProjRel));
+        if (cameraPos)      std::memcpy(cameraPos, frameCB_.camPos, 3 * sizeof(f32));
         return true;
     }
     // Same rect beginFrame() sets as the D3D12 viewport (RSSetViewports below) -- vpW_ == 0 means no
@@ -1049,6 +1049,15 @@ public:
     void packAtmosphere(const SkyAtmosphere& s);
     void setPostProcess(const PostSettings& p) override { post_ = p; }
     PostSettings postProcess() const override { return post_; }
+    // See IDevice::postExposureReadout (RHI.hpp) for the contract. expReadoutValue_/
+    // expReadoutSeeded_ are filled a few frames late by collectExposureReadout, from a GPU copy
+    // runPostChain records only while auto exposure is actually running -- see expReadback_'s own
+    // comment for the whole pipeline.
+    bool postExposureReadout(f32& adaptedExposure) const override {
+        if (!expReadoutSeeded_) return false;
+        adaptedExposure = expReadoutValue_;
+        return true;
+    }
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
@@ -1176,6 +1185,7 @@ public:
     void initGpuTiming();
     u32  gpuStamp();
     void collectGpuTiming();
+    void collectExposureReadout();
     // Same span bookkeeping as pushMarker/popMarker, for phases NOT inside any render feature's
     // markers -- the opaque scene draw and the post/composite/UI chain -- without which the two
     // largest items in the frame land in "unmarked".
@@ -1539,6 +1549,24 @@ private:
     D3D12_RESOURCE_STATES bloomState_[kMaxBloomMips] = {};
     ComPtr<ID3D12Resource> histBuf_, expBuf_;    // 256-bin histogram, and the one adapted exposure
     bool expSeeded_ = false;
+    // Per-frame-slot READBACK copy of expBuf_'s first 8 bytes, for IDevice::postExposureReadout --
+    // a live UI number with no business stalling the frame on the GPU. runPostChain records the
+    // copy right after CSExposure runs (only while autoExp is true, so a slot never gets a copy of
+    // a value CSExposure did not just produce); collectExposureReadout maps and reads it back once
+    // THIS slot's fence has retired, same discipline as tsReadback_/collectGpuTiming above. Created
+    // in createPostTargets/released in releasePostTargets rather than alongside expBuf_ itself --
+    // fixed 8 bytes, so resize's waitForGpu() makes recreating it there exactly as safe, and it
+    // keeps the readback tied to the one function pair that already owns "the GPU is idle, drop
+    // anything mid-flight".
+    ComPtr<ID3D12Resource> expReadback_[kFrameCount];
+    // Set by runPostChain right after it records that slot's copy; cleared by collectExposureReadout
+    // once consumed, so a slot autoExp skipped (or one a resize just recreated) is never misread as
+    // holding a fresh value.
+    bool expReadbackPending_[kFrameCount] = {false, false};
+    // What postExposureReadout() hands back -- the last value actually read from a completed GPU
+    // copy, a few frames behind expBuf_ itself.
+    f32  expReadoutValue_ = 0.0f;
+    bool expReadoutSeeded_ = false;
     // Local exposure's bilateral grid, raw (u2) and blurred (u3) -- SCENE-SIZE DEPENDENT, unlike
     // histBuf_/expBuf_ above: (re)created in createPostTargets/releasePostTargets, not
     // createPostPipelines, sized for the CURRENT sceneWidth_/sceneHeight_. Null (and the passes that
@@ -3908,6 +3936,34 @@ GpuTimingReport D3D12Device::gpuTiming() const {
     return report;
 }
 
+// Reads back the metered-exposure slot THIS frame's beginFrame just fenced on, if runPostChain
+// filled it the LAST time this slot came round (kFrameCount frames ago) -- see expReadback_'s own
+// comment for the pipeline and collectGpuTiming just above for the identical "the fence wait above
+// already proved this is done" reasoning. A slot autoExp skipped last time (expReadbackPending_
+// false) is left alone: expReadoutValue_/expReadoutSeeded_ simply keep whatever they last held,
+// which is the correct "hasn't updated" state for a live UI readout.
+void D3D12Device::collectExposureReadout() {
+    const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
+    if (!expReadbackPending_[f] || !expReadback_[f]) return;
+    expReadbackPending_[f] = false;
+    D3D12_RANGE rd{0, 2 * sizeof(u32)};
+    void* p = nullptr;
+    if (FAILED(expReadback_[f]->Map(0, &rd, &p)) || !p) return;
+    f32 value = 0.0f; u32 seeded = 0;
+    std::memcpy(&value, p, sizeof value);
+    std::memcpy(&seeded, static_cast<const u8*>(p) + sizeof value, sizeof seeded);
+    D3D12_RANGE none{0, 0};
+    expReadback_[f]->Unmap(0, &none);
+    // Matches CSExposure's own contract (post.hlsl): byte 4 goes to 1 the first time it ever runs
+    // and stays there, so seeded == 0 here should never happen -- this frame's autoExp gate already
+    // guarantees CSExposure ran first in submission order. postExposureReadout's contract is
+    // "false", not "garbage", either way, so this checks rather than assumes.
+    if (seeded && std::isfinite(value) && value > 0.0f) {
+        expReadoutValue_ = value;
+        expReadoutSeeded_ = true;
+    }
+}
+
 // Opens the frame: waits out the current backbuffer's last frame, resets recording, clears targets.
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_ || deviceLost_) return;
@@ -3953,6 +4009,8 @@ void D3D12Device::beginFrame() {
     // The fence above has retired whatever last used this slice, so its timestamps are readable
     // now. Collect BEFORE resetting the counters that are about to be reused.
     collectGpuTiming();
+    // Same fence, same slot, same reasoning -- see collectExposureReadout's own comment.
+    collectExposureReadout();
     tsCount_ = 0;
     tsOpen_.clear();
     tsDropped_ = 0;
@@ -4896,6 +4954,17 @@ void D3D12Device::releasePostTargets() {
     sceneColorTexW_ = sceneColorTexH_ = presentHdrTexW_ = presentHdrTexH_ = 0;
     blendBackdropW_ = blendBackdropH_ = 0;
     bloomMips_ = bloomW_ = bloomH_ = 0;
+    // Exposure readout: fixed 8 bytes per slot, independent of scene resolution like histBuf_/
+    // expBuf_ themselves, but dropped and rebuilt here anyway -- see expReadback_'s own comment for
+    // why this function pair is where its lifetime lives instead. A pending copy a resize
+    // interrupted names a slot that no longer holds what it promised, so the flag goes with the
+    // buffer; every caller of releasePostTargets() (resize, the "!postReady_" first call) has
+    // already waited for the GPU to go idle, or has nothing in flight yet, so nothing is dropped
+    // that a later frame would have read.
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        expReadback_[i].Reset();
+        expReadbackPending_[i] = false;
+    }
     postReady_ = false;
 }
 
@@ -4936,6 +5005,22 @@ bool D3D12Device::createPostTargets() {
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&bloomTex_)), "bloom pyramid"))
         return false;
     for (u32 m = 0; m < kMaxBloomMips; ++m) bloomState_[m] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    // ---- exposure readout ----
+    // One small READBACK buffer per frame slot, holding a copy of expBuf_'s first 8 bytes for
+    // IDevice::postExposureReadout's live UI number -- see expReadback_'s own comment for the whole
+    // pipeline. Non-fatal on failure, same treatment AverSR's own targets get elsewhere in this
+    // function: a UI readout nothing else in the post chain depends on, so a failed alloc just
+    // leaves postExposureReadout returning false.
+    {
+        auto rbHeap = heapProps(D3D12_HEAP_TYPE_READBACK);
+        auto rbDesc = bufferDesc(2 * sizeof(u32));
+        for (u32 i = 0; i < kFrameCount; ++i) {
+            if (!hrOk(device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc,
+                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&expReadback_[i])), "post exposure readback"))
+                expReadback_[i].Reset();
+        }
+    }
 
     // ---- descriptors, all of them, once ----
     ID3D12Resource* scene = sceneResolved_ ? sceneResolved_.Get() : msaaColor_.Get();
@@ -5235,10 +5320,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         // y/z: local exposure's shadow/highlight strengths -- gPostClamp.y/z in post.hlsl's
         // PSComposite. FILLED HERE, UNCONDITIONALLY, same reasoning as misc/adapt above: every pass
         // shares this one fillCommon, so the composite and the two new compute passes all see the
-        // same values without a separate path. w stays spare.
+        // same values without a separate path. w: CSExposure's adaption alpha toward a DARKER view
+        // (adapt[2] above is the brighter direction's), same formula at the slower speed.
         cb.clampRadiance[1] = post_.localExposureShadows;
         cb.clampRadiance[2] = post_.localExposureHighlights;
-        cb.clampRadiance[3] = 0.0f;
+        cb.clampRadiance[3] = 1.0f - std::exp(-post_.exposureSpeedDark * frameSeconds_);
 
         // gPostRegion: the docked editor's viewport sub-rect, in the post chain's own normalised
         // SOURCE space -- gPostSceneTex/gPostBloomTex/the local-exposure grid, all of which are sized
@@ -5265,6 +5351,15 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         } else {
             cb.region[0] = 0.0f; cb.region[1] = 0.0f; cb.region[2] = 1.0f; cb.region[3] = 1.0f;
         }
+
+        // gPostEye: PostSettings' perceptual eye-adaptation dials, filled unconditionally same as
+        // every row above -- post.hlsl's CSExposure/CSHistogram/PSComposite all share this one
+        // fillCommon. y is the calibration constant, not a PostSettings field: see kLuminanceToCdm2's
+        // own comment (RHI.hpp, beside PostSettings) for its LevelSky.hpp derivation.
+        cb.eye[0] = post_.adaptationRealism;
+        cb.eye[1] = kLuminanceToCdm2;
+        cb.eye[2] = post_.nightVision;
+        cb.eye[3] = post_.meteringCenterWeight;
     };
 
     // vx/vy: the destination's top-left offset, default 0 for every pass that always fills its whole
@@ -5386,9 +5481,28 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     }
 
     {
-        auto expToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        cmdList_->ResourceBarrier(1, &expToSrv);
+        // Metered-exposure readout (IDevice::postExposureReadout): only while CSExposure actually
+        // ran THIS frame -- autoExp false leaves expBuf_ holding whatever a PREVIOUS frame wrote,
+        // and copying that would show a live "metered" number for a control that isn't running.
+        // Detours expBuf_ through COPY_SOURCE and back to the PIXEL_SHADER_RESOURCE state the
+        // composite below (and the restore block further down) already expect either way, so the
+        // transitions this block makes stay balanced on both paths.
+        const bool readExp = autoExp && expReadback_[frameIndex_ < kFrameCount ? frameIndex_ : 0];
+        if (readExp) {
+            const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
+            auto expToCopy = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        D3D12_RESOURCE_STATE_COPY_SOURCE);
+            cmdList_->ResourceBarrier(1, &expToCopy);
+            cmdList_->CopyBufferRegion(expReadback_[f].Get(), 0, expBuf_.Get(), 0, 2 * sizeof(u32));
+            auto copyToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList_->ResourceBarrier(1, &copyToSrv);
+            expReadbackPending_[f] = true;
+        } else {
+            auto expToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList_->ResourceBarrier(1, &expToSrv);
+        }
     }
 
     // ---- bloom ----

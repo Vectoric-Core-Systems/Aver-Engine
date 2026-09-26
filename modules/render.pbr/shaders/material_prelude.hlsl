@@ -103,9 +103,11 @@ cbuffer AverMaterial : register(b2) {
     float  gAttenuationDistance;
 
     // Lamp light, mirroring MaterialConstants::lightIntensity/_lightPad -- the row that took the
-    // block from 160 to 176. Brightness at 1 metre in the sun's own units; read only by the
-    // ray-driven local-light pass (CSRdLocalLights in VoxiRenderer.cpp), which this prelude does not
-    // itself touch -- it only transports the value, the same split gIor's own comment describes.
+    // block from 160 to 176. A multiplier on the light the material's own glow and size physically
+    // cast at 1 metre in the sun's own units, not a brightness by itself (VoxiRenderer::
+    // buildLocalLights does that math); read only by the ray-driven local-light pass (CSRdLocalLights
+    // in VoxiRenderer.cpp), which this prelude does not itself touch -- it only transports the value,
+    // the same split gIor's own comment describes.
     float  gLightIntensity;
     float3 gLightPad;
 };

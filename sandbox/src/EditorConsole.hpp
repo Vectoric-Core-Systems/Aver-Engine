@@ -1099,9 +1099,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     t.push_back({"voxi.localLights", VarType::Bool, false,
         "Lamps: a material with lightIntensity > 0 makes each draw using it a sphere light (its "
         "bounds, tinted by its emissive colour), shadowed by one stochastic ray per pixel and "
-        "accumulated over time like the sun's shadow. At most 32 per frame, nearest-and-brightest "
-        "first. No cost without lamps. Off forces the light count to 0 and frees the history. Only "
-        "while voxi.rayDrivenStages is 1 or 2 (D3D12); translucent draws get no lamp light.",
+        "accumulated over time like the sun's shadow, diffuse and specular. lightIntensity multiplies "
+        "the light the material's own glow and size already, physically, cast -- 1 is that output, "
+        "2 is twice it. At most 32 per frame, nearest-and-brightest first. No cost without lamps. Off "
+        "forces the light count to 0 and frees the history. Any mode with ray tracing on D3D12 "
+        "(staged, single pass, raster); translucent draws are lit unshadowed except where they sit on "
+        "a staged-lit surface.",
         []{ return vBool(Renderer::get().settings().localLights); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->localLights = on; }); }});
     t.push_back({"voxi.rtSkipUnchangedTlas", VarType::Bool, false,
@@ -1244,10 +1247,18 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
         readField(&rhi::PostSettings::exposureMin), stageClamped(&rhi::PostSettings::exposureMin, 0.0f, 1e6f)});
     t.push_back({"post.exposureMax", VarType::F32, false, "Upper clamp on the auto-exposure multiplier (clamped >= 0)",
         readField(&rhi::PostSettings::exposureMax), stageClamped(&rhi::PostSettings::exposureMax, 0.0f, 1e6f)});
-    t.push_back({"post.exposureSpeed", VarType::F32, false, "Auto-exposure adaptation rate, in e-folds per second (clamped >= 0)",
+    t.push_back({"post.exposureSpeed", VarType::F32, false, "Eye adaptation toward a BRIGHTER view, in e-folds per second (clamped >= 0)",
         readField(&rhi::PostSettings::exposureSpeed), stageClamped(&rhi::PostSettings::exposureSpeed, 0.0f, 1e6f)});
-    t.push_back({"post.exposureKey", VarType::F32, false, "Middle grey the average luminance is driven towards (clamped >= 0)",
+    t.push_back({"post.exposureSpeedDark", VarType::F32, false, "Eye adaptation toward a DARKER view, in e-folds per second -- slower than post.exposureSpeed, as eyes are (clamped >= 0)",
+        readField(&rhi::PostSettings::exposureSpeedDark), stageClamped(&rhi::PostSettings::exposureSpeedDark, 0.0f, 1e6f)});
+    t.push_back({"post.exposureKey", VarType::F32, false, "Target brightness: the average luminance eye adaptation holds the view at (clamped >= 0)",
         readField(&rhi::PostSettings::exposureKey), stageClamped(&rhi::PostSettings::exposureKey, 0.0f, 1e6f)});
+    t.push_back({"post.adaptationRealism", VarType::F32, false, "Krawczyk/Myszkowski/Seidel partial adaptation: 0 = every view settles at the same average brightness, 1 = bright scenes still look brighter than dark ones once adapted (clamped [0,1])",
+        readField(&rhi::PostSettings::adaptationRealism), stageClamped(&rhi::PostSettings::adaptationRealism, 0.0f, 1.0f)});
+    t.push_back({"post.nightVision", VarType::F32, false, "Scotopic (rod) night vision: below roughly 1 cd/m^2 colour drains and shifts blue-grey; 0 = off, 1 = full effect (clamped [0,1])",
+        readField(&rhi::PostSettings::nightVision), stageClamped(&rhi::PostSettings::nightVision, 0.0f, 1.0f)});
+    t.push_back({"post.meteringCenterWeight", VarType::F32, false, "How much more the centre of the view counts when metering exposure; 0 = the whole frame equally, 1 = centre weighted most heavily (clamped [0,1])",
+        readField(&rhi::PostSettings::meteringCenterWeight), stageClamped(&rhi::PostSettings::meteringCenterWeight, 0.0f, 1.0f)});
     t.push_back({"post.histogramLowPercent", VarType::F32, false, "Fraction of the exposure histogram discarded at the dark end (clamped [0,1])",
         readField(&rhi::PostSettings::histogramLowPercent), stageClamped(&rhi::PostSettings::histogramLowPercent, 0.0f, 1.0f)});
     t.push_back({"post.histogramHighPercent", VarType::F32, false, "Fraction of the exposure histogram discarded at the bright end (clamped [0,1])",

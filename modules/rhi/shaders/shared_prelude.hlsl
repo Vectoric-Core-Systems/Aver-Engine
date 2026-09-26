@@ -2,7 +2,11 @@
 // The engine's per-frame block. MIRRORS PerFrameCB field for field.
 cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     float4x4 gViewProj;
-    float4x4 gInvViewProj;
+    // Inverse of gViewProj with the view's translation removed -- rotation only, eye at the
+    // origin. Maps clip space to a world-space OFFSET FROM gCamPos, not an absolute world
+    // position; use averViewRayDir below rather than unprojecting through this and subtracting
+    // gCamPos back off.
+    float4x4 gInvViewProjRel;
     float4   gCamPos;      // xyz
     float4   gLightDir;    // xyz = direction TO light
     float4   gLightColor;  // rgb
@@ -56,6 +60,16 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     float4   gWave[3];
     float4   gWaveParams;
 };
+
+// The unit world-space view ray through one viewport-relative NDC point (y up).
+//
+// gInvViewProjRel maps clip space to an OFFSET FROM THE CAMERA, so the product's xyz is the view
+// ray itself -- view-space (x/xScale, y/yScale, 1) turned into world axes, the same for any depth
+// -- with no eye to subtract and nothing large to cancel. Its w is positive in front of the camera
+// and would only rescale the vector, so it is not divided out.
+float3 averViewRayDir(float2 ndc) {
+    return normalize(mul(float4(ndc, 1.0, 1.0), gInvViewProjRel).xyz);
+}
 
 // ---- THE WATER SURFACE, EVALUATED IN ONE PLACE ------------------------------------------------
 //

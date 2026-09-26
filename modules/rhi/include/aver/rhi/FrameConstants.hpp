@@ -30,7 +30,15 @@ namespace aver::rhi {
 // and in this order. A field added here must be added THERE, at the same position.
 struct PerFrameCB {
     f32 viewProj[16];
-    f32 invViewProj[16];
+    // The inverse of viewProj with the VIEW'S TRANSLATION REMOVED (rotation only, eye at the
+    // origin): clip space to a world-space OFFSET FROM camPos, not a world position. Every entry
+    // stays O(1) wherever the camera is. The absolute inverse's third and fourth rows each carry
+    // about +-eye/near (1e5 at 2 km with the 2 cm near plane), and the far-plane w is 1/far left
+    // over from +-1/near; a ray unprojected through it and then differenced against the eye kept
+    // a float32 residue that grows linearly with the eye's distance from the origin (estimated at
+    // around a pixel by 2 km) and changes every frame the eye moves -- the whole image shaking.
+    // Consumers take rays from averViewRayDir (shaders/shared_prelude.hlsl).
+    f32 invViewProjRel[16];
     f32 camPos[4];
     f32 lightDir[4];
     f32 lightColor[4];
@@ -111,14 +119,14 @@ struct PostCB {
     f32 tone[4];    // exposure (compensation under auto-exposure), bloom intensity, threshold, knee
     f32 dst[4];     // destination width, height, 1/width, 1/height
     f32 src[4];     // source width, height, 1/width, 1/height
-    f32 adapt[4];   // min log2 luminance, 1/log2 range, adaption alpha, unused
+    f32 adapt[4];   // min log2 luminance, 1/log2 range, adaption alpha toward a BRIGHTER view, unused
     f32 limit[4];   // exposure min, exposure max, histogram low cut, high cut
     f32 misc[4];    // middle grey, auto-exposure on, bloom filter radius, TONEMAP MODE
     // x = the ceiling scene radiance is clamped to just before the tonemap (0 disables it entirely).
     // y = PostSettings::localExposureShadows, z = localExposureHighlights (both [0,1], local
-    // exposure on when either > 0 -- see PostSettings' own comment). w is still spare, and every
-    // row in this struct that has ever been described as spare was claimed within a session or two,
-    // so do not read that word as a promise.
+    // exposure on when either > 0 -- see PostSettings' own comment). w = the adaption alpha toward a
+    // DARKER view (PostSettings::exposureSpeedDark; adapt.z is the other direction's) -- the row's
+    // last spare component, taken for the same reason y/z were.
     //
     // A NEW ROW RATHER THAN misc.w OR adapt.w. adapt.w looked free (this struct called it "unused")
     // but post.hlsl documents the same component as "pixels sampled", and a slot whose two sides
@@ -136,7 +144,18 @@ struct PostCB {
     // Mirrors `gPostRegion` in shaders/post.hlsl, appended here for the same reason clampRadiance's
     // own fields were: an already-open cbuffer row is cheaper than growing the struct twice.
     f32 region[4];
+    // EYE ADAPTATION REALISM (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in real-time
+    // tone mapping" -- see PostSettings::adaptationRealism for the model). x PostSettings::
+    // adaptationRealism [0,1]. y kLuminanceToCdm2 (declared in RHI.hpp beside PostSettings): the
+    // scene-linear-radiance-unit -> cd/m^2 constant the model needs a real luminance for, derived
+    // from LevelSky.hpp's sunIntensity calibration (sunIntensity = lux / kLuminanceToCdm2, so one
+    // engine radiance unit is kLuminanceToCdm2 cd/m^2 -- see that constant's own comment). z
+    // PostSettings::nightVision [0,1]. w PostSettings::meteringCenterWeight [0,1]. A new row at the
+    // END rather than a spare component: clampRadiance and region above already used up every slot
+    // either side called "unused", and mirrors `gPostEye` in shaders/post.hlsl -- a field added here
+    // must be added there too, at the same position.
+    f32 eye[4];
 };
-static_assert(sizeof(PostCB) == 128, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 144, "the HLSL cbuffer mirrors this byte for byte");
 
 } // namespace aver::rhi

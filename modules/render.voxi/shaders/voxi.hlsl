@@ -83,7 +83,8 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // below is NOT one of them -- it is OR'd in separately, afterward:
     //   bit 16 (Settings::blendedReuseStagedLighting, console voxi.blendedReuseStagedLighting): set by
     //     VoxiRenderer::recordStagedRayDriven itself, at the very end of that function, once Stage B
-    //     has written this frame's gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex. Tells the blended replay
+    //     has written this frame's gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex (and, with lamps lit,
+    //     CSRdLocalLights its gRdLocalOut visibility). Tells the blended replay
     //     pass (PSMainVoxi below) that those textures hold THIS frame's staged lighting and the setting
     //     is on, so a translucent fragment sitting on the opaque surface they already lit may read them
     //     back instead of re-tracing (see PSMainVoxi's own rdReuse for the full per-pixel contract).
@@ -585,17 +586,20 @@ RWTexture2D<float4>       gRdAoTex     : register(u14);
 // contract.
 RWTexture2D<float4>       gRdReflTex   : register(u15);
 
-// ---- LOCAL LIGHTS (lamps): the light list and CSRdLocalLights' own visibility history ----
+// ---- LOCAL LIGHTS (lamps): the light list, their visibility history, and the two halves that light ----
 //
 // gRdLocalLights: this frame's sphere lights, at most 32, rdLocalLightCount() of them live (gCameraMedium.z
 // -- see that field's own comment); the struct and what each field means are voxi_rt.hlsli's RdLocalLight.
 // gRdLocalHist/gRdLocalOut: one RGBA16F texel per pixel, the size of the sun's shadow history and
 // PING-PONGED WITH IT on the same index (VoxiRenderer's rtHistWriteIdx_), so last frame's lamp texel sits
-// at the same reprojected texel the sun's does. rgb = this frame's summed local diffuse IRRADIANCE times
-// the accumulated visibility, a = that accumulated visibility -- the only channel read back next frame.
-// Written once by CSRdLocalLights (below), read once by Stage B (rdLocalLightFiltered, below; a RW read,
-// exactly as gRdSunVisTex's) after it. Unlike gRdSunVisTex this pair IS a history, and it carries no
-// depth: CSRdLocalLights validates against the sun history's depth at the same texel (rtReprojectTexel).
+// at the same reprojected texel the sun's does. a = the accumulated visibility, the one channel any shader
+// reads back; rgb is written as 0 (RGBA16F only because it shares its creation path). Written by
+// rdLocalLightsVisibility (below) from whichever pass lights the frame's opaque surfaces -- CSRdLocalLights
+// (staged), the single-pass PSRayDriven, or PSMainVoxi's opaque draws (raster) -- and read back through
+// rdLocalVisFiltered (below; a RW read, exactly as gRdSunVisTex's) by Stage B and by a blended pane
+// reusing Stage B's surface. t19 is therefore read from compute (CSRdLocalLights) AND from pixel shaders.
+// Unlike gRdSunVisTex this pair IS a history, and it carries no depth: rdLocalLightsVisibility validates
+// against the sun history's depth at the same texel (rtReprojectTexel).
 //
 // kVoxiSrvCount 18 -> 20 (t18, t19) and kVoxiUavCount 19 -> 20 (u19) (VoxiRenderer.cpp, not this file) --
 // the next free slots after gAirVis's t17 and gRdShadowTiles' u18. Every slot holds a placeholder on any
@@ -604,42 +608,301 @@ StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
 Texture2D<float4>              gRdLocalHist   : register(t19);
 RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
-#if !AVER_RD_SINGLE_PASS
-// One arm of rdLocalLightFiltered's cross. The weight falls linearly to zero at the reprojection depth
+// AVER_RD_LAMPS (voxi_rt.hlsli): every compile but a single-pass one with AVER_RD_SINGLE_PASS_LAMPS 0.
+#if AVER_RD_LAMPS
+// One neighbour of rdLocalVisFiltered's 5x5. The weight falls linearly to zero at the reprojection depth
 // test's own tolerance (3% of the depth plus 1 cm, rtReprojectTexel) so a tap across a silhouette -- a
-// different surface, lit by a different share of the lamps -- contributes nothing. A sky tap (alpha
+// different surface, behind a different set of occluders -- contributes nothing. A sky tap (alpha
 // <= 0, gRdSunVisTex's own sentinel) is skipped outright. Clamped into THIS frame's viewport: texels
 // outside it are never written by the staged passes and may hold any earlier frame's values.
-void rdLocalLightTap(int2 p, int2 lo, int2 hi, float zc, inout float3 sum, inout float wsum) {
+void rdLocalVisTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout float wsum) {
     const uint2 q  = uint2(clamp(p, lo, hi));
     const float zt = gRdSunVisTex[q].a;
     const float w  = (zt > 0.0) ? saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
     // Skipped, not multiplied by a zero weight: a rejected neighbour can hold any value, and one that
     // is not finite would turn `* 0` into NaN.
     if (w > 0.0) {
-        sum  += gRdLocalOut[q].rgb * w;
+        sum  += gRdLocalOut[q].a * w;
         wsum += w;
     }
 }
 
-// Stage B's read of CSRdLocalLights' answer: this pixel plus its four +-1 px neighbours, weighted by
-// view-depth similarity (gRdSunVisTex.a is this frame's linear view depth, 0 for sky). One stochastic
-// shadow ray per pixel per frame leaves grain the temporal accumulation has not yet averaged, above all
-// on a moving camera where its history weight falls; five taps along the same surface take the edge off
-// it for ten texel reads. Returns IRRADIANCE times visibility -- the caller applies kdAlbedo/PI.
-float3 rdLocalLightFiltered(uint2 pixel) {
+// The staged read of CSRdLocalLights' VISIBILITY, for Stage B and for a blended pane reusing Stage B's
+// surface: the 5x5 around this pixel, weighted by view-depth similarity (gRdSunVisTex.a is this frame's
+// linear view depth, 0 for sky). One stochastic shadow ray per pixel per turn leaves grain the temporal
+// accumulation has not yet averaged, above all on a moving camera where its history weight falls. 5x5,
+// not 3x3: MEASURED on the penumbra a lantern's cap throws on the vault above it, the 3x3 left sparse
+// dots that the 5x5 takes down to the lamps-off noise floor (see rdLocalLightsVisibility's accumulation
+// comment for the numbers), for 48 texel reads per pixel. STAGED ONLY: gRdSunVisTex's depth exists only
+// on a frame the staged passes ran. 1 (unshadowed) where Stage S found no surface, which neither caller
+// reaches.
+float rdLocalVisFiltered(uint2 pixel) {
     const float zc = gRdSunVisTex[pixel].a;
-    if (zc <= 0.0) return float3(0.0, 0.0, 0.0);
+    if (zc <= 0.0) return 1.0;
     const int2 lo = int2(gSceneViewportCur.xy);
     const int2 hi = lo + max(int2(gSceneViewportCur.zw), int2(1, 1)) - 1;
     const int2 c  = int2(pixel);
-    float3 sum  = gRdLocalOut[pixel].rgb;
-    float  wsum = 1.0;
-    rdLocalLightTap(c + int2(-1,  0), lo, hi, zc, sum, wsum);
-    rdLocalLightTap(c + int2( 1,  0), lo, hi, zc, sum, wsum);
-    rdLocalLightTap(c + int2( 0, -1), lo, hi, zc, sum, wsum);
-    rdLocalLightTap(c + int2( 0,  1), lo, hi, zc, sum, wsum);
+    float sum  = gRdLocalOut[pixel].a;
+    float wsum = 1.0;
+    [unroll] for (int oy = -2; oy <= 2; ++oy) {
+        [unroll] for (int ox = -2; ox <= 2; ++ox) {
+            if (ox != 0 || oy != 0) rdLocalVisTap(c + int2(ox, oy), lo, hi, zc, sum, wsum);
+        }
+    }
     return sum / wsum;
+}
+
+// The lamp-HISTORY twin of rdLocalVisTap, one neighbour of rdLocalHistFiltered's 3x3: the same weight
+// shape and tolerance, but read against LAST frame's stored depth (gRtShadowHist.y, at the texel
+// gRdLocalHist ping-pongs on) rather than this frame's gRdSunVisTex.a -- depth validity belongs to the
+// surface, not the light, exactly as rtReprojectTexel's own header explains, which is why gRdLocalHist
+// carries none of its own. p is clamped into the rectangle the caller already intersected from the
+// history texture's bounds and last frame's viewport.
+void rdLocalHistTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout float wsum) {
+    const int2  q  = clamp(p, lo, hi);
+    const float zt = gRtShadowHist.Load(int3(q, 0)).y;
+    const float w  = (zt > 0.0) ? saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
+    // Skipped, not multiplied by a zero weight: see rdLocalVisTap above for why.
+    if (w > 0.0) {
+        sum  += gRdLocalHist.Load(int3(q, 0)).a * w;
+        wsum += w;
+    }
+}
+
+// THE HISTORY READ rdLocalLightsVisibility blends its fresh sample into, in every mode alike (raster,
+// single-pass and staged) -- unrelated to Stage B's THIS FRAME filter above. A depth-weighted 3x3 around
+// the REPROJECTED history texel (rtReprojectTexel's own `texel` out-param), against the SUN history's
+// stored depth (gRtShadowHist.y) rather than this frame's, because gRdLocalHist carries no depth of its
+// own. Bounds: gRtShadowHist's own dimensions (as rtReprojectTexel clamps into) intersected with the
+// PREVIOUS frame's viewport, gSceneViewport (xy origin, zw size) -- rtReprojectTexel maps its `pixel`
+// argument through this same rect, so a tap outside either lands on a texel an earlier, differently
+// sized frame wrote and nothing has touched since. Why the caller reads this average rather than the
+// bare texel: rdLocalLightsVisibility's own accumulation comment, below.
+float rdLocalHistFiltered(int2 texel) {
+    float texW, texH;
+    gRtShadowHist.GetDimensions(texW, texH);
+    const int2 lo = max(int2(gSceneViewport.xy), int2(0, 0));
+    const int2 hi = min(int2(gSceneViewport.xy) + max(int2(gSceneViewport.zw), int2(1, 1)) - 1,
+                         int2((int)texW, (int)texH) - 1);
+    const float zc = gRtShadowHist.Load(int3(texel, 0)).y;
+    float sum  = gRdLocalHist.Load(int3(texel, 0)).a;
+    float wsum = 1.0;
+    [unroll] for (int oy = -1; oy <= 1; ++oy) {
+        [unroll] for (int ox = -1; ox <= 1; ++ox) {
+            if (ox != 0 || oy != 0) rdLocalHistTap(texel + int2(ox, oy), lo, hi, zc, sum, wsum);
+        }
+    }
+    return sum / wsum;
+}
+
+// ---- THE VISIBILITY HALF: one shadow ray for every lamp, accumulated the way the sun's is ----
+//
+// At one surface point: the summed diffuse irradiance of every light in range (rdLocalIrradiance,
+// voxi_rt.hlsli), ONE light picked in proportion to its luminance share of that sum, ONE shadow ray toward
+// a jittered point on it (rdLocalShadow), and that 0/1 answer accumulated over frames. Returns the
+// accumulated visibility -- 1 where no light reaches, so a caller that shades anyway takes nothing away --
+// and, when writeHistory and gAverHistoryWrite both allow, stores it in gRdLocalOut[pixel] for next frame
+// (and, staged, for Stage B's filter). wpos/N: the surface and its normal FACING THE VIEWER, the side a
+// lamp lights; pixelC: the pixel centre (velocityPx is measured from it, as rtShadowTemporal's is).
+//
+// ONE VISIBILITY STANDS FOR EVERY LIGHT, and that is sound in expectation: picking light i with
+// probability w_i/wsum makes the expected visibility sum_i (w_i/wsum) v_i, so the summed irradiance times it is
+// sum_i E_i v_i in luminance -- one ray whatever the lamp count. Where it approximates is colour: a spot
+// one lamp shadows and a differently coloured one still lights comes out as the mix of both, dimmed,
+// rather than as the second lamp's colour (and the first lamp's highlight stays, dimmed, with it).
+//
+// THE SUN'S HISTORY MACHINERY: rtReprojectTexel is the sun's reprojection and depth test (its arithmetic
+// twin -- see its header for why a twin), against the sun history's stored depth at the same texel (depth
+// is a property of the surface, not of the light), and gRdLocalHist ping-pongs with gRtShadowHist on the
+// same index, so that texel is where last frame's lamp answer for this surface sits. That one texel alone
+// is a noisy read of it -- rdLocalHistFiltered (above, beside rdLocalVisTap/rdLocalVisFiltered) widens it
+// to a depth-weighted 3x3 around the same texel before this function blends its fresh sample in.
+//
+// DERIVATIVES: rtReprojectTexel takes ddx/ddy of depth, so it runs FIRST, ahead of every data-dependent
+// branch in here, behind a condition that reads only constant-buffer values. The callers hold the same
+// line: CSRdLocalLights (SM 6.6, 8x8 threads = 2x2 quads, as CSRdShadow's header explains) calls it after
+// only CSRdShadow's own early-outs, and the pixel shaders only behind rdLocalLightCount(), a constant.
+float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel, bool writeHistory) {
+    // gRtHistParams.x: t6/u2 are bound this frame. gRtHistParams.y > 0.25, not the shadow's > 0.75: t6
+    // holds a real previous frame, and its DEPTH stays valid on a frame only the sun moved (the
+    // sun-independent test sky occlusion uses) -- the lamps did not move. rdLocalHistValid(): t19 holds
+    // the same light set.
+    int2   texel      = int2(0, 0);
+    float2 velocityPx = float2(0.0, 0.0);
+    bool   haveHist   = false;
+    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
+        haveHist = rtReprojectTexel(wpos, pixelC, texel, velocityPx);
+    // prevVisC: the reprojected texel alone -- what gets STORED, so the spatial filter below is folded in
+    // once per turn rather than compounding on every carried frame. prevVisF: rdLocalHistFiltered's
+    // depth-weighted average around that same texel -- what gets RETURNED to shading and what this
+    // pixel's turn blends its fresh sample into.
+    float prevVisC = 1.0;
+    float prevVisF = 1.0;
+    if (haveHist) {
+        prevVisC = gRdLocalHist.Load(int3(texel, 0)).a;
+        prevVisF = rdLocalHistFiltered(texel);
+    }
+
+    // HALF RATE: a pixel with a usable history traces on alternate frames, in a checkerboard that swaps
+    // every frame, and carries its STORED visibility (prevVisC) forward untouched on the other -- no ray,
+    // and, for the compute stage's own call (which discards this function's return), no filter tap either.
+    // Raster and the single-pass PSRayDriven still shade that off turn with prevVisF, rdLocalHistFiltered's
+    // 3x3 -- see the HISTORY READ comment above for why a bare carried texel is not enough on its own.
+    // MEASURED on NewSponza's 22 lamps: tracing every pixel every frame cost ~1 ms of this pass, the rays
+    // toward different lamps being far less coherent than the sun's. A pixel WITHOUT history always
+    // traces, so a disocclusion never waits a frame for its first answer.
+    //
+    // THE PIXEL'S OWN TURN COUNT drives its sequences, not the frame index: its turns all fall on frames of
+    // ONE parity, so rtRadicalInverse2(frameIdx + 1) would only ever see odd arguments (always >= 0.5) or
+    // only even ones (always < 0.5) -- each pixel's pick confined to half the lights' cumulative weight, a
+    // lamp that shadows it never picked, and the neighbour that does pick it shadowed every turn: a fixed
+    // per-pixel speckle no accumulation removes. frameIdx >> 1 counts this pixel's turns one by one.
+    const uint frameIdx = (uint)gRtHistParams.z;
+    const bool myTurn   = !haveHist || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
+    const uint turn     = haveHist ? (frameIdx >> 1) : frameIdx;
+    float vis     = prevVisF;
+    float histVis = prevVisC;
+    if (myTurn) {
+        // LOOP 1: the unshadowed sum, and each light's luminance as its weight for the pick below.
+        // Recomputed in loop 2 rather than kept in a 32-entry local array: loop-indexed arrays spill out
+        // of registers (rtShadowEx's own measured 25% regression), and a light's irradiance is a few ALU
+        // ops.
+        const uint n = min(rdLocalLightCount(), 32u);
+        float wsum    = 0.0;
+        uint  lastLit = 0u;
+        [loop] for (uint i = 0u; i < n; ++i) {
+            const float w = averShadowLum(rdLocalIrradiance(gRdLocalLights[i], wpos, N));
+            wsum += w;
+            if (w > 0.0) lastLit = i;
+        }
+
+        // No light reaches this point (or a non-finite sum, which failing `> 0` also catches): nothing
+        // to trace, visibility 1 for the shading (there is nothing to shade), and the accumulated
+        // visibility carried forward so a lamp coming back into range this texel does not restart from
+        // one ray.
+        vis = 1.0;
+        if (wsum > 0.0) {
+            // LOOP 2: walk the cumulative weights to the light u lands in. u is the pixel's own hash
+            // (salted so it is not rdLocalShadow's disc angle) rotated by the radical inverse of its turn --
+            // exact, and evenly spread over turns, so each light's turns come in proportion to its share
+            // rather than in runs. lastLit, not n - 1, is the fallback: u * wsum can round up to wsum
+            // itself, and the last light may be one that contributes nothing here.
+            const float u      = frac(rtHash(pixelC + float2(0.37, 11.0)) + rtRadicalInverse2(turn + 1u));
+            const float target = u * wsum;
+            uint  pick = lastLit;
+            float acc  = 0.0;
+            [loop] for (uint j = 0u; j < n; ++j) {
+                acc += averShadowLum(rdLocalIrradiance(gRdLocalLights[j], wpos, N));
+                if (target < acc) { pick = j; break; }
+            }
+
+            // The sun's golden-angle jitter (rtShadowTemporalEx's untiled branch), stepped per TURN so the
+            // disc sample advances one golden angle each time this pixel traces.
+            const float frameJitter = (float)turn * 2.39996323;
+            const float v = rdLocalShadow(wpos, N, gRdLocalLights[pick], pixelC, frameJitter);
+
+            // Exponential accumulation, 0.95 history at rest (~20 of this pixel's turns) falling to 0.5 by
+            // 8 px/frame of motion. UNMEASURED: 8 px is tighter than the sun's measured 32 px budget
+            // (rtShadowTemporalEx) and is the first number to revisit if lamp shadows smear or crawl under
+            // a moving camera; the slow at-rest weight is the price of a quiet still image, paid as about
+            // a third of a second for a lamp shadow to settle after something moves through it.
+            //
+            // Blended into prevVisF, not the bare stored texel prevVisC: an EMA fed a Bernoulli 0/1 trace
+            // never settles, and its steady-state standard deviation is sqrt(alpha/(2-alpha) * p(1-p)) --
+            // about 11% of full visibility at a half-lit penumbra (p = 0.5) with alpha 0.1, 8% with 0.05.
+            // Folding rdLocalHistFiltered's roughly nine depth-similar neighbours into the read this turn
+            // blends into divides that variance by about the same nine; the resulting histVis (below) then
+            // carries that averaged value forward as prevVisC until this pixel's next turn folds nine more
+            // in. The cost is a penumbra widened by a pixel or two each time, which a lamp's soft shadow
+            // tolerates. MEASURED on NewSponza's lantern vault at dusk (high-pass RMS of an 8-bit crop in
+            // the cap's shadow, AverSR on): 11.0 with neither this filter nor the 0.05 and Stage B's 5x5,
+            // 3.7 with this filter alone, 2.0 with all three -- the scene's own 2.0 with lamps off.
+            vis = v;
+            if (haveHist) {
+                const float alpha = lerp(0.05, 0.5, saturate(length(velocityPx) / 8.0));
+                vis = lerp(prevVisF, v, alpha);
+            }
+            histVis = vis;
+        }
+    }
+    // Only .a is ever read back (rdLocalVisFiltered this frame; prevVisC and prevVisF, through
+    // rdLocalHistFiltered, next frame); the shading re-evaluates each lamp itself, so the irradiance sum
+    // is weights for the pick and nothing more.
+    if (writeHistory && gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, histVis);
+    return vis;
+}
+
+// ---- THE SHADING HALF: every lamp through the sun's own BRDF ----
+//
+// One lamp as the BRDF sees it from wpos: an AverLight toward its centre carrying rdLocalIrradiance's
+// falloff WITHOUT the N.L (averDirectTerms applies that itself), visibility 1 (the caller scales by the
+// shared one afterwards), and `s` RE-AIMED at it: s.H and s.F were built for the SUN, and a highlight
+// computed from them would sit where the sun's does. False past the range, tested before any sqrt or BRDF
+// work so an out-of-range lamp costs one dot product; `l`/`sL` then hold nothing to shade.
+//
+// THE SPHERE WIDENS THE LOBE: roughness + r/(2d) from the sphere's angular size, clamped to [rough, 1], so
+// a large, close bulb spreads its highlight rather than printing a point light's pinpoint.
+bool rdLocalLightAt(RdLocalLight ll, AverSurface s, float3 wpos, out AverLight l, out AverSurface sL) {
+    sL = s;
+    l.direction  = float3(0.0, 0.0, 1.0);
+    l.radiance   = float3(0.0, 0.0, 0.0);
+    l.visibility = float3(1.0, 1.0, 1.0);
+    const float3 toC   = ll.posRadius.xyz - wpos;
+    const float  d2    = dot(toC, toC);
+    const float  range = ll.radianceRange.w;
+    if (d2 >= range * range) return false;   // also the zero-range guard, as in rdLocalIrradiance
+    const float r    = ll.posRadius.w;
+    const float x2   = d2 / (range * range);
+    const float win  = saturate(1.0 - x2 * x2);
+    const float invD = rsqrt(max(d2, 1e-8));
+    l.direction = toC * invD;
+    l.radiance  = ll.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win);
+    sL.rough = clamp(s.rough + r * 0.5 * invD, s.rough, 1.0);
+    sL.H     = normalize(s.V + l.direction);
+    sL.F     = fresnelSchlick(saturate(dot(sL.H, s.V)), s.F0, s.f90);
+    return true;
+}
+
+// Every lamp in range through averShadeDirect -- the SAME Cook-Torrance GGX, multiscatter compensation and
+// subsurface terms the sun's direct term runs -- times the ONE visibility rdLocalLightsVisibility resolved
+// for this point (see its header for why one stands for all). Diffuse AND specular. Radiance, for the
+// caller to add beside the sun's.
+float3 rdLocalLightsShade(AverSurface s, float3 wpos, float vis) {
+    float3 acc = float3(0.0, 0.0, 0.0);
+    const uint n = min(rdLocalLightCount(), 32u);
+    [loop] for (uint i = 0u; i < n; ++i) {
+        AverLight   l;
+        AverSurface sL;
+        if (rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL))
+            acc = averShadeDirect(acc, sL, l);
+    }
+    return acc * vis;
+}
+
+// The same lamps for a BLENDED surface, kept in averShadeSplit's two buckets instead of summed: specular
+// into `specular` (full strength through the premultiplied blend), diffuse and subsurface into `diffuse`
+// (weighted by coverage) -- how averShadeSplit apportions the sun's direct term, from the same
+// averDirectTerms, so a pane composites its lamps as it composites its sun. Nothing for an unlit surface,
+// as averShadeSplit's own direct half adds nothing there either.
+void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
+                             inout float3 diffuse, inout float3 specular) {
+    if (s.model == AVER_MODEL_UNLIT) return;
+    float3 dAcc = float3(0.0, 0.0, 0.0);
+    float3 sAcc = float3(0.0, 0.0, 0.0);
+    const uint n = min(rdLocalLightCount(), 32u);
+    [loop] for (uint i = 0u; i < n; ++i) {
+        AverLight   l;
+        AverSurface sL;
+        if (!rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL)) continue;
+        float3 dDiffuse, dSpecular, dSubsurface;
+        float  ndl;
+        averDirectTerms(sL, l, dDiffuse, dSpecular, dSubsurface, ndl);
+        const float3 lightTerm = l.radiance * ndl;
+        dAcc += dDiffuse * lightTerm + dSubsurface * l.radiance;
+        sAcc += dSpecular * lightTerm;
+    }
+    diffuse  += dAcc * vis;
+    specular += sAcc * vis;
 }
 #endif
 
@@ -2161,6 +2424,18 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // one would, apportioned between "coverage-weighted" and "always full strength" before alpha.
         float3 dif, spc;
         averShadeSplit(s, sun, ind4, dif, spc);
+#if AVER_RT && AVER_RD_LAMPS
+        // LOCAL LIGHTS (lamps) on a pane, apportioned into the two buckets as the sun's direct term just
+        // was (rdLocalLightsShadeSplit). Shadowed only where this fragment reuses the staged surface under
+        // it (rdReuse above -- the same depth proof, so the lamps' visibility there is this pixel's too);
+        // anywhere else UNSHADOWED, since a pane has no lamp history of its own and must never write the
+        // opaque surfaces' one (u19).
+        if (rdLocalLightCount() > 0u) {
+            float lampVis = 1.0;
+            if (rdReuse) lampVis = rdLocalVisFiltered(uint2(i.pos.xy));
+            rdLocalLightsShadeSplit(s, i.wpos, lampVis, dif, spc);
+        }
+#endif
         // rgb = specular + diffuse*alpha, a = alpha (averBlendedOutput's contract) -- straight alpha
         // would multiply `spc` too, so a pane at 0.2 opacity showed its reflection at a fifth
         // strength. sceneBlendedPso_'s PremultipliedAlpha blend state expects it packed this way.
@@ -2236,6 +2511,17 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     float3 radiance = 0.0;
     radiance = averShadeDirect(radiance, s, sun);
+#if AVER_RT && AVER_RD_LAMPS
+    // LOCAL LIGHTS (lamps) on an opaque surface: this fragment resolves and accumulates their visibility
+    // itself (rdLocalLightsVisibility, the same pixel centre and texel as rtShadowTemporal's history, the
+    // same gAverHistoryWrite gate) and shades them beside the sun. vtx.N, not the raw N the sun's shadow
+    // ray takes: the normal FACING THE EYE, as the ray-driven paths' face-the-ray flip gives theirs, so a
+    // two-sided surface's visible side is the one that takes a lamp's light and shadow ray. A constant
+    // test ahead of the reprojection's derivatives, as rdLocalLightsVisibility requires.
+    if (rdLocalLightCount() > 0u)
+        radiance += rdLocalLightsShade(s, i.wpos,
+                                       rdLocalLightsVisibility(i.wpos, vtx.N, i.pos.xy, uint2(i.pos.xy), true));
+#endif
     radiance = averShadeIndirect(radiance, s, ind4);
     // OCCLUSION-AWARE: see the blended branch's identical comment, above.
     radiance = averApplyFogAirVis(radiance, i.wpos, true, voxiAirVisibility(i.wpos));
@@ -2417,10 +2703,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // and the AO hit-distance write further down) is therefore always live for this pass.
     gAverHistoryWrite = true;
 
-    // The same NDC-to-world-ray reconstruction PSVoxelDebug does, through the same gInvViewProj,
-    // so the primary ray and the debug raymarch cannot disagree about where a pixel looks.
-    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
-    float3 dir = normalize(far.xyz / far.w - gCamPos.xyz);
+    // The same NDC-to-world-ray reconstruction PSVoxelDebug does, through averViewRayDir, so the
+    // primary ray and the debug raymarch cannot disagree about where a pixel looks.
+    float3 dir = averViewRayDir(i.ndc);
 
     RayDesc r;
     r.Origin    = gCamPos.xyz;
@@ -2586,21 +2871,23 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // it because its ddx(i.wpos)/ddy(i.wpos) footprint is real.
     //
     // UNLIKE THE REFLECTED CASE, a primary ray's DIRECTION is a smooth analytic function of its pixel
-    // (`dir`, from i.ndc/gInvViewProj), so it can be evaluated for the NEIGHBOUR pixel directly --
+    // (`dir`, from i.ndc via averViewRayDir), so it can be evaluated for the NEIGHBOUR pixel directly --
     // no ddx/ddy, well-defined in any control flow. This is a RAY DIFFERENTIAL (Igehy 1999, the same
     // idea a ray-cone texture-LOD scheme uses): reconstruct the neighbour's primary-ray direction and
     // see how far it diverged by `hitT` -- a function of the CAMERA and pixel grid, never of what
     // either ray hit, unlike ddx(wpos) across a silhouette which would return a metres-wide gap.
+    //
+    // The differential is a tiny difference of two directions, so it is only as clean as they are:
+    // averViewRayDir builds them camera-relative, with nothing eye-sized to cancel however far the
+    // camera is from the world origin.
     //
     // NOTE THE PUNCTUATION: this shader lives inside a C++ raw string literal, so close-paren
     // double-quote ENDS IT. An earlier draft closed a quote right after a bracket here and produced
     // forty lines of C++ syntax errors. Keep brackets and quotes apart in this file.
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
-    float4 farDx = mul(float4(i.ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
-    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
-    float4 farDy = mul(float4(i.ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
-    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    float3 dirDx = averViewRayDir(i.ndc + float2(ndcPixelStep.x, 0.0));
+    float3 dirDy = averViewRayDir(i.ndc + float2(0.0, ndcPixelStep.y));
     // World-space displacement to the neighbour ray, at the SAME distance this ray travelled --
     // "pixel angular size times hit distance" -- widening with range, shrinking near the camera.
     const float3 rdRayDx = (dirDx - dir) * hitT;
@@ -2843,14 +3130,23 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
     float3 radiance = averShadeDirect(0.0, s, sun);
 
+    // LOCAL LIGHTS (lamps): every lamp in range through the sun's own BRDF (rdLocalLightsShade), diffuse
+    // and specular, times the lamps' accumulated shadow-ray visibility. Inside `radiance` and nowhere
+    // else, so it stays out of the NRD/AO/ind terms below and Unlit (vmode 1), which replaces `radiance`
+    // wholesale, drops it with the rest of the lighting. The count is a constant-buffer value, so each
+    // branch is uniform and costs nothing with no lamps.
 #if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
-    // LOCAL LIGHTS (lamps): CSRdLocalLights' irradiance x visibility, lit through the SAME diffuse lobe
-    // the sun's own term just used (averDirectTerms: kdAlbedo/PI) -- diffuse only, no specular highlight
-    // of the lamp. Inside `radiance` and nowhere else, so it stays out of the NRD/AO/ind terms below and
-    // Unlit (vmode 1), which replaces `radiance` wholesale, drops it with the rest of the lighting. The
-    // count is a constant-buffer value, so this branch is uniform and costs nothing with no lamps.
+    // Stage B: the visibility CSRdLocalLights already resolved for this pixel, filtered across its
+    // neighbours on the same surface.
     if (rdLocalLightCount() > 0u)
-        radiance += s.kdAlbedo / PI * rdLocalLightFiltered(uint2(i.pos.xy));
+        radiance += rdLocalLightsShade(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)));
+#elif !AVER_RD_SPLIT && AVER_RD_LAMPS
+    // The single pass resolves (and accumulates) it here, on its own hit -- the one call
+    // AVER_RD_SINGLE_PASS_LAMPS=0 (voxi_rt.hlsli) removes from the megakernel. `N` faces the ray, the side
+    // a lamp lights; the pixel centre and texel are the sun history's own (rtShadowTemporal above).
+    if (rdLocalLightCount() > 0u)
+        radiance += rdLocalLightsShade(s, wpos,
+                                       rdLocalLightsVisibility(wpos, N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
 
     // THE ENVIRONMENT THROUGH THE ENGINE'S OWN INDIRECT TERM, not a diffuse-only line. What stood
@@ -3307,8 +3603,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // light leaves the surface without bouncing off it), so a bounce that lands on a lamp bulb
         // carries its glow and not only its sunlit reflection. The factor alone, no emissive map.
         // NOT IN THE SINGLE-PASS COMPILE: that megakernel is at the AMD driver's register limit (see
-        // rtGiShadowBits() in voxi_rt.hlsli), and this loop only runs with GI off anyway. A lamp that
-        // CSRdLocalLights already lights directly adds nothing here (rdLocalCarriesEmitters), or the
+        // rtGiShadowBits() in voxi_rt.hlsli), and this loop only runs with GI off anyway. A lamp the
+        // lamp term above already lights directly adds nothing here (rdLocalCarriesEmitters), or the
         // first bounce would count its light twice -- the same rule as giTraceInitialCandidate's.
 #if !AVER_RD_SINGLE_PASS
         const RtMaterial bmat = gRtMaterials[bi.materialIndex];
@@ -3416,9 +3712,8 @@ float3 rdPrimaryRayDir(uint2 pixel, out float2 ndc) {
     ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
 
     // Same NDC-to-world-ray reconstruction as PSRayDriven's own primary ray (and PSVoxelDebug's),
-    // through the same gInvViewProj.
-    float4 far = mul(float4(ndc, 1.0, 1.0), gInvViewProj);
-    return normalize(far.xyz / far.w - gCamPos.xyz);
+    // through averViewRayDir.
+    return averViewRayDir(ndc);
 }
 
 // ---- STAGE A: CSRdVisibility -- trace the primary ray, write the visibility record -----------------
@@ -3474,10 +3769,8 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
 void rdShadowFootprint(float2 ndc, float3 dir, RdSurface s, out float3 dpx, out float3 dpy) {
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
-    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
-    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
-    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
-    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    float3 dirDx = averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0));
+    float3 dirDy = averViewRayDir(ndc + float2(0.0, ndcPixelStep.y));
     const float3 rdRayDx = (dirDx - dir) * s.hitT;
     const float3 rdRayDy = (dirDy - dir) * s.hitT;
     dpx = rdRayDx - s.N * dot(rdRayDx, s.N);
@@ -3665,30 +3958,17 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 // ---- STAGE L: CSRdLocalLights -- lamps lit the way the sun is -----------------------------------------
 //
 // Dispatched right after CSRdShadow, and only on a frame VoxiRenderer has lights for (a zero count skips
-// the dispatch, so a scene with no lamps pays nothing). Per pixel: the summed diffuse irradiance of every
-// light in range (rdLocalIrradiance, voxi_rt.hlsli), ONE light picked in proportion to its luminance
-// share of that sum, ONE shadow ray toward a jittered point on it (rdLocalShadow), and that 0/1 answer
-// accumulated over frames. Writes irradiance x accumulated visibility to gRdLocalOut; Stage B
-// (PSRayDriven's AVER_RD_SPLIT branch, via rdLocalLightFiltered) applies kdAlbedo/PI.
-//
-// ONE VISIBILITY STANDS FOR EVERY LIGHT, and that is sound in expectation: picking light i with
-// probability w_i/wsum makes the expected visibility sum_i (w_i/wsum) v_i, so Esum times it is
-// sum_i E_i v_i in luminance -- one ray whatever the lamp count. Where it approximates is colour: a spot
-// one lamp shadows and a differently coloured one still lights comes out as the mix of both, dimmed,
-// rather than as the second lamp's colour.
-//
-// THE SUN'S HISTORY MACHINERY: rtReprojectTexel is the sun's reprojection and depth test (its arithmetic
-// twin -- see its header for why a twin), against the sun history's stored depth at the same texel (depth
-// is a property of the surface, not of the light), and gRdLocalHist ping-pongs with gRtShadowHist on the
-// same index, so that texel is where last frame's lamp answer for this surface sits.
+// the dispatch, so a scene with no lamps pays nothing). Per pixel: rdLocalLightsVisibility (above, beside
+// gRdLocalOut) for the surface CSRdVisibility found -- one shadow ray toward one lamp, accumulated into
+// gRdLocalOut; Stage B (PSRayDriven's AVER_RD_SPLIT branch) reads that visibility back through
+// rdLocalVisFiltered and shades every lamp with rdLocalLightsShade.
 //
 // DERIVATIVES AS IN CSRdShadow (SM 6.6, 8x8 threads = 2x2 quads -- see its own header): the same
-// prologue and early-outs, then rtReprojectTexel's ddx/ddy of depth for every non-sky pixel BEFORE any
-// further data-dependent branch. The branch around that call reads only constant-buffer values, so it is
-// uniform and adds no divergence.
+// prologue and early-outs, then rdLocalLightsVisibility, whose rtReprojectTexel takes ddx/ddy of depth
+// for every non-sky pixel before any further data-dependent branch.
 //
-// NOT IN THE SINGLE-PASS COMPILE (AVER_RD_SINGLE_PASS), which is at the AMD driver's register limit
-// (rtGiShadowBits() in voxi_rt.hlsli) and has no staged history to accumulate into anyway.
+// NOT IN THE SINGLE-PASS COMPILE (AVER_RD_SINGLE_PASS), which has no staged surface record to light:
+// the single-pass PSRayDriven calls rdLocalLightsVisibility on its own hit instead.
 [numthreads(8, 8, 1)]
 void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
@@ -3714,74 +3994,9 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     float2 ndc;
     const float3 dir = rdPrimaryRayDir(pixel, ndc);
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
-    // The pixel centre, as CSRdShadow hands rtShadowTemporal -- velocityPx is measured from it.
-    const float2 pixelC = float2(pixel) + 0.5;
-
-    // THE REPROJECTION FIRST -- see this function's header. gRtHistParams.x: t6/u2 are bound this frame.
-    // gRtHistParams.y > 0.25, not the shadow's > 0.75: t6 holds a real previous frame, and its DEPTH
-    // stays valid on a frame only the sun moved (the sun-independent test sky occlusion uses) -- the lamps
-    // did not move. rdLocalHistValid(): t19 holds the same light set.
-    int2   texel      = int2(0, 0);
-    float2 velocityPx = float2(0.0, 0.0);
-    bool   haveHist   = false;
-    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
-        haveHist = rtReprojectTexel(s.wpos, pixelC, texel, velocityPx);
-    float prevVis = 1.0;
-    if (haveHist) prevVis = gRdLocalHist.Load(int3(texel, 0)).a;
-
-    // LOOP 1: the unshadowed sum, and each light's luminance as its weight for the pick below.
-    // Recomputed in loop 2 rather than kept in a 32-entry local array: loop-indexed arrays spill out of
-    // registers (rtShadowEx's own measured 25% regression), and a light's irradiance is a few ALU ops.
-    const uint n = min(rdLocalLightCount(), 32u);
-    float3 Esum    = float3(0.0, 0.0, 0.0);
-    float  wsum    = 0.0;
-    uint   lastLit = 0u;
-    [loop] for (uint i = 0u; i < n; ++i) {
-        const float3 E = rdLocalIrradiance(gRdLocalLights[i], s.wpos, s.N);
-        const float  w = averShadowLum(E);
-        Esum += E;
-        wsum += w;
-        if (w > 0.0) lastLit = i;
-    }
-    // No light reaches this pixel (or a non-finite sum, which `!(> 0)` also catches): nothing to trace,
-    // but the accumulated visibility is carried forward so a lamp coming back into range this texel does
-    // not restart from one ray.
-    if (!(wsum > 0.0)) {
-        if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, prevVis);
-        return;
-    }
-
-    // LOOP 2: walk the cumulative weights to the light u lands in. u is the pixel's own hash (salted so it
-    // is not rdLocalShadow's disc angle) rotated by the frame's radical inverse -- exact, and evenly
-    // spread over frames, so each light's turns come in proportion to its share rather than in runs.
-    // lastLit, not n - 1, is the fallback: u * wsum can round up to wsum itself, and the last light may
-    // be one that contributes nothing here.
-    const uint  frameIdx = (uint)gRtHistParams.z;
-    const float u        = frac(rtHash(pixelC + float2(0.37, 11.0)) + rtRadicalInverse2(frameIdx + 1u));
-    const float target   = u * wsum;
-    uint  pick = lastLit;
-    float acc  = 0.0;
-    [loop] for (uint j = 0u; j < n; ++j) {
-        acc += averShadowLum(rdLocalIrradiance(gRdLocalLights[j], s.wpos, s.N));
-        if (target < acc) { pick = j; break; }
-    }
-
-    // The sun's own frame jitter (rtShadowTemporalEx's untiled branch), so the disc sample turns every frame.
-    const float frameJitter = (float)frameIdx * 2.39996323;
-    const float v = rdLocalShadow(s.wpos, s.N, gRdLocalLights[pick], pixelC, frameJitter);
-
-    // Exponential accumulation, 0.9 history at rest (~10 frames, one ray behaving like ten, as the sun's
-    // does) falling to 0.5 by 8 px/frame of motion. UNMEASURED: 8 px is tighter than the sun's measured
-    // 32 px budget (rtShadowTemporalEx) and is the first number to revisit if lamp shadows smear or
-    // crawl under a moving camera.
-    float vis = v;
-    if (haveHist) {
-        const float alpha = lerp(0.1, 0.5, saturate(length(velocityPx) / 8.0));
-        vis = lerp(prevVis, v, alpha);
-    }
-    // CLAMPED BELOW RGBA16F's 65504: a receiver a centimetre from a bright lamp's centre gets 1e4 x
-    // lightIntensity, which past about 7 would store +inf and reach Stage B and auto exposure as NaN.
-    if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(min(Esum * vis, 60000.0), vis);
+    // The pixel centre, as CSRdShadow hands rtShadowTemporal. The visibility itself is Stage B's to read
+    // back from gRdLocalOut, so the return value is not needed here.
+    rdLocalLightsVisibility(s.wpos, s.N, float2(pixel) + 0.5, pixel, true);
 }
 #endif
 
@@ -4114,10 +4329,8 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     // dispatch rect.
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
-    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
-    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
-    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
-    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    float3 dirDx = averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0));
+    float3 dirDy = averViewRayDir(ndc + float2(0.0, ndcPixelStep.y));
     const float3 rdRayDx = (dirDx - dir) * s.hitT;
     const float3 rdRayDy = (dirDy - dir) * s.hitT;
 
@@ -4266,10 +4479,8 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     // already ran, in R1.
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
-    float4 farDx = mul(float4(ndc + float2(ndcPixelStep.x, 0.0), 1.0, 1.0), gInvViewProj);
-    float3 dirDx = normalize(farDx.xyz / farDx.w - gCamPos.xyz);
-    float4 farDy = mul(float4(ndc + float2(0.0, ndcPixelStep.y), 1.0, 1.0), gInvViewProj);
-    float3 dirDy = normalize(farDy.xyz / farDy.w - gCamPos.xyz);
+    float3 dirDx = averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0));
+    float3 dirDy = averViewRayDir(ndc + float2(0.0, ndcPixelStep.y));
     const float3 rdRayDx = (dirDx - dir) * s.hitT;
     const float3 rdRayDy = (dirDy - dir) * s.hitT;
     const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
@@ -4631,8 +4842,7 @@ void CSMip(uint3 id : SV_DispatchThreadID) {
 
 // Debug view: raymarches the volume straight to screen over the sky. Returns linear radiance.
 float4 PSVoxelDebug(SkyOut i) : SV_TARGET {
-    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
-    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
+    float3 ray = averViewRayDir(i.ndc);
     float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
     float4 acc = 0;
     float t = 0;

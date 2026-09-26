@@ -253,27 +253,28 @@ u64 PtSceneView::drawsKey() const {
 
 bool PtSceneView::deriveCamera(PtCamera& out) const {
     // viewProj itself is never read: the combined matrix cannot be decomposed back into view and
-    // projection alone (see the class comment), so everything below works from invViewProj and the
-    // eye position instead. IDevice::camera() allows a null output for exactly this reason.
-    f32 invVp[16], eye[3];
-    if (!dev_ || !dev_->camera(nullptr, invVp, eye)) return false;
-    Mat4 invVP;
-    std::memcpy(&invVP.m[0][0], invVp, sizeof(invVP.m));
+    // projection alone (see the class comment), so everything below works from the camera-relative
+    // inverse and the eye position instead. IDevice::camera() allows a null output for exactly this
+    // reason.
+    f32 invVpRel[16], eye[3];
+    if (!dev_ || !dev_->camera(nullptr, invVpRel, eye)) return false;
+    Mat4 invVPRel;
+    std::memcpy(&invVPRel.m[0][0], invVpRel, sizeof(invVPRel.m));
     const Vec3 eyeV{eye[0], eye[1], eye[2]};
 
-    // Three points on the far plane: NDC centre, top-centre and right-centre. Unprojecting THROUGH
-    // the far plane and subtracting the known eye gives a world-space ray direction without needing
-    // the view and projection matrices separately -- which IDevice::camera() does not hand back (see
-    // the class comment: the combined viewProj cannot be decomposed into the two alone).
-    const Vec3 farCenter = xformProjected(Vec3{0.0f, 0.0f, 1.0f}, invVP);
-    const Vec3 farTop    = xformProjected(Vec3{0.0f, 1.0f, 1.0f}, invVP);
-    const Vec3 farRight  = xformProjected(Vec3{1.0f, 0.0f, 1.0f}, invVP);
+    // Three points on the far plane: NDC centre, top-centre and right-centre. The inverse is
+    // camera-relative (rhi::PerFrameCB::invViewProjRel), so each point is already an offset from the
+    // eye -- a ray direction as it stands, with no eye-sized subtraction to lose precision far from
+    // the origin.
+    const Vec3 farCenter = xformProjected(Vec3{0.0f, 0.0f, 1.0f}, invVPRel);
+    const Vec3 farTop    = xformProjected(Vec3{0.0f, 1.0f, 1.0f}, invVPRel);
+    const Vec3 farRight  = xformProjected(Vec3{1.0f, 0.0f, 1.0f}, invVPRel);
 
-    const Vec3 forward = (farCenter - eyeV).getSafeNormal();
+    const Vec3 forward = farCenter.getSafeNormal();
     if (forward.sizeSquared() < 0.5f) return false;   // no usable camera yet
 
-    const Vec3 dirTop   = (farTop   - eyeV).getSafeNormal();
-    const Vec3 dirRight = (farRight - eyeV).getSafeNormal();
+    const Vec3 dirTop   = farTop.getSafeNormal();
+    const Vec3 dirRight = farRight.getSafeNormal();
 
     f32 tanV = 0.0f, tanH = 0.0f;
     Vec3 up, right;

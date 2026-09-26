@@ -346,9 +346,8 @@ void WaterRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, r
 void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
     if (!pso_ || !dev_) return;
 
-    f32 viewProj[16], invViewProj[16], camPos[3];
-    if (!dev_->camera(viewProj, invViewProj, camPos)) return;
-    (void)invViewProj;   // read only for the contract; this draw needs no inverse projection
+    f32 viewProj[16], camPos[3];
+    if (!dev_->camera(viewProj, nullptr, camPos)) return;   // no inverse projection needed here
 
     // AXIS NOTE: GerstnerWave.hpp's snapWorldToGridCm and gerstnerDisplaceCm are written generically
     // over "x"/"z" as the two horizontal axes, borrowing GPU Gems' own x/z-horizontal convention --

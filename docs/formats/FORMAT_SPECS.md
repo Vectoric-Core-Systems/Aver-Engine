@@ -340,7 +340,7 @@ PARAM uvTiling 200.0                # world CENTIMETRES per tile; read only unde
 
 # Optional: makes this material a small sphere LIGHT, shaded like the sun, in ray-driven mode only
 # (staged D3D12; Settings::rayDrivenStages 1/2). Off unless lightIntensity is present and > 0.
-# PARAM lightIntensity 8.0          # brightness at 1m in the SUN's units (~3); coloured by emissiveFactor
+# PARAM lightIntensity 1.0          # multiplier on the light emissiveFactor+size already cast; 1=physical
 
 TEX baseColor   {guid:0x…}  uv0 sRGB
 TEX metalRough  {guid:0x…}  uv0 linear     # B=metallic, G=roughness (glTF MR)
@@ -370,22 +370,30 @@ Rules: `TEX slot {guid:…|path:…} uvN colorspace` binds an `.octex` by GUID (
 `subsurfaceWeight` and `subsurfaceRadius` add a wrap-diffuse-plus-back-scatter approximation, deliberately **not a BSSRDF**: there is no light transport across the mesh, no per-texel thickness, and no separate scatter colour — the transmitted light is tinted by `baseColorFactor` instead, which is right for skin, wax, marble and leaves (the cases this is for) and wrong only where the interior colour differs from the surface colour (see the long comment on the fields themselves in `Material.hpp` for the full story). `subsurfaceWeight` `[0,1]` is how far light wraps past the terminator, `0` the feature-off default that every material authored before this existed keeps; `subsurfaceRadius` `[0,1]` is a thickness *proxy* that widens the back-scatter lobe — the effect that makes a lit ear or leaf glow when the sun is behind it. Both are clamped to `[0,1]` in the parser itself, the same defensive clamp `transmission` above uses and for the same reason: an authored `1.4` would otherwise reach the renderer as a magnitude this format never produces. Like `slopeBlend`, the pair is **omitted from the file entirely when off** — `writeOcmat` emits both lines together only `if (d.subsurfaceWeight > 0.0f)` — but for a sharper reason than `slopeBlend`'s byte-stability argument: `subsurfaceWeight > 0` is exactly the condition `MaterialGpu.cpp`'s `packMaterial` uses to set `MaterialFlag_Subsurface`, so `0` is not merely an unremarkable default but the feature's own off switch, and writing `PARAM subsurfaceWeight 0` into a material that never asked for the wrap term would parse back to the same state while turning every pre-existing `.ocmat` in this tree into a diff for a line that carries no information beyond "not in use." `subsurfaceRadius` rides along unconditionally on that one line because it is meaningless without the weight that gates it. Shaded end to end behind `AVER_MAT_SUBSURFACE` in `PbrShaders.cpp`/`VoxiShaders.hpp`.
 
 `lightIntensity` turns this material's draws into small sphere lights, shaded the same way the sun
-is: brightness at 1 metre in the sun's own units (`SkyAtmosphere::sunIntensity`, ~3 in the editor),
-0 the feature-off default that every material authored before this field existed keeps. It is
-**not** the same knob as `emissiveFactor` — emissive is what the surface looks like, `lightIntensity`
-is whether it casts light on anything else — and it is consumed by exactly one path: the staged
-ray-driven local-light pass (`CSRdLocalLights`, D3D12 only, read only under `Settings::rayDrivenStages`
-1 or 2). A draw whose material sets it becomes a light shaped like its own world bounding sphere,
-coloured by `emissiveFactor` (normalised to max component 1; white if that factor is all zero), summed
-with every other in-range light and shadowed by one traced ray per pixel. Raster, the single-pass
-megakernel and `PSMainVoxi`'s blended reuse never read it, so the same material shades by its emissive
-factor alone everywhere else — a lamp glows the same everywhere, and only lights the room it is in
-where ray-driven local lights are running. Floored at 0 in the parser like `attenuationDistance`
-above; unlike `subsurfaceWeight`/`transmission` it has **no upper clamp**, since a lamp may
-legitimately want to outshine the sun. Like `slopeBlend`/`subsurfaceWeight`, the line is **omitted
-entirely when off** — `writeOcmat` emits it only `if (d.lightIntensity > 0.0f)` — for the same
-byte-stability reason: 0 is the feature's own off switch, and packMaterial's `MaterialFlag_Light`
-tracks it exactly.
+is: a **multiplier**, in the sun's own units (`SkyAtmosphere::sunIntensity`, ~3 in the editor), on the
+light the sphere already, physically, casts at 1 metre given its own glow and size — `1` is exactly
+that output, `2` is twice it — computed from `emissiveFactor`'s peak channel as a Lambertian sphere's
+radiance and the draw's world bounding sphere as that sphere's radius (`VoxiRenderer::
+buildLocalLights`). 0 is the feature-off default that every material authored before this field
+existed keeps. It is **not** the same knob as `emissiveFactor` — emissive is what the surface looks
+like, `lightIntensity` is whether it casts light on anything else — and it is consumed by exactly one
+path: the staged ray-driven local-light pass (`CSRdLocalLights`, D3D12 only, read only under
+`Settings::rayDrivenStages` 1 or 2). A draw whose material sets it becomes a light shaped like its
+own world bounding sphere, coloured by `emissiveFactor` (normalised to max component 1; white if that
+factor is all zero — an emissiveFactor-less lamp still lights with radiance 1), summed with every
+other in-range light and shadowed by one traced ray per pixel. Raster, the single-pass megakernel and
+`PSMainVoxi`'s blended reuse never read it, so the same material shades by its emissive factor alone
+everywhere else — a lamp glows the same everywhere, and only lights the room it is in where
+ray-driven local lights are running. A lamp whose bounding sphere is larger than its visible emitter
+(a fixture carrying the material rather than just the bulb) over-lights at `1` and wants a lower
+value or a separate bulb mesh. Content authored while this field meant an absolute brightness (e.g.
+`8`, meaning "eight times the sun") reads far dimmer under the multiplier meaning; `1` is the
+physically matched value to re-author from, not an equivalent number. Floored at 0 in the parser like
+`attenuationDistance` above; unlike `subsurfaceWeight`/`transmission` it has **no upper clamp**, since
+a lamp may legitimately want to be far brighter than what its own glow and size alone would cast.
+Like `slopeBlend`/`subsurfaceWeight`, the line is **omitted entirely when off** — `writeOcmat` emits
+it only `if (d.lightIntensity > 0.0f)` — for the same byte-stability reason: 0 is the feature's own
+off switch, and packMaterial's `MaterialFlag_Light` tracks it exactly.
 
 `GRAPHREF <path>` names a `DOMAIN material` `.ocgraph` (§`OCGRAPH`) by its content-relative path — the rest of the line, so a path containing spaces is not cut short, and the same content-root convention `COMP mesh=` uses (never with the content directory on the front). It is a different mechanism from the inline `GRAPH{}` block above: `GRAPHREF` points at a graph asset a project authors and iterates on in the graph editor, while `GRAPH{}` is a small node list written inline in the material file itself. A file may carry either, both, or neither. Nothing in the `.ocmat` reader/writer resolves the path, loads the graph, or checks that it compiles — it is recorded verbatim for a loader to pass to `pbr::MaterialGraphRegistry::add`, which compiles it and returns the id that ends up in `MaterialConstants::graphId` (never round-tripped through the file itself, since the id is only stable for the current process).
 

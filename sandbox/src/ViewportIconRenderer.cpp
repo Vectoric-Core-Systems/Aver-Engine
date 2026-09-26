@@ -13,12 +13,14 @@ namespace {
 constexpr usize kInitialVertices = 64;   // 16 icons before the first grow; the editor draws a handful
 constexpr usize kInitialIndices  = 96;
 
-Vec3 unprojectPoint(const f32 ivp[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
+// Through the camera-relative inverse (rhi::PerFrameCB::invViewProjRel): the result is an offset
+// FROM THE EYE; an absolute point needs camPos added.
+Vec3 unprojectPoint(const f32 ivpRel[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
     const f32 v[4] = {ndcX, ndcY, ndcZ, 1.0f};
     f32 r[4] = {0, 0, 0, 0};
     for (int j = 0; j < 4; ++j)
         for (int i = 0; i < 4; ++i)
-            r[j] += v[i] * ivp[i * 4 + j];
+            r[j] += v[i] * ivpRel[i * 4 + j];
     const f32 invW = r[3] != 0.0f ? 1.0f / r[3] : 1.0f;
     return {r[0] * invW, r[1] * invW, r[2] * invW};
 }
@@ -29,11 +31,13 @@ Vec3 unprojectPoint(const f32 ivp[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
 // two functions -- to save ten lines. The proof that it is EXACT rather than a finite-difference
 // approximation lives with the original; the short version is that holding ndc.z fixed holds
 // view-space Z fixed for this engine's perspective matrix, and ndc.x is then linear in view-space X,
-// so a finite step in ndc.x maps purely along the camera's right axis at any step size.
-void cameraBasis(const f32 invViewProj[16], Vec3& outRight, Vec3& outUp) {
-    const Vec3 center = unprojectPoint(invViewProj, 0.0f, 0.0f, 0.5f);
-    const Vec3 rightP = unprojectPoint(invViewProj, 0.5f, 0.0f, 0.5f);
-    const Vec3 upP    = unprojectPoint(invViewProj, 0.0f, 0.5f, 0.5f);
+// so a finite step in ndc.x maps purely along the camera's right axis at any step size. The points
+// are camera-relative, centimetres from the eye rather than at its world magnitude, so their
+// differences stay exact far from the origin.
+void cameraBasis(const f32 invViewProjRel[16], Vec3& outRight, Vec3& outUp) {
+    const Vec3 center = unprojectPoint(invViewProjRel, 0.0f, 0.0f, 0.5f);
+    const Vec3 rightP = unprojectPoint(invViewProjRel, 0.5f, 0.0f, 0.5f);
+    const Vec3 upP    = unprojectPoint(invViewProjRel, 0.0f, 0.5f, 0.5f);
     outRight = (rightP - center).getSafeNormal();
     outUp    = (upP - center).getSafeNormal();
 }
@@ -259,11 +263,11 @@ void ViewportIconRenderer::transparentPass(rhi::IRenderContext& ctx) {
 
     if (pending_.empty() || !pso_ || !res_ || !dev_) return;
 
-    f32 viewProj[16], invViewProj[16], camPos[3];
-    if (!dev_->camera(viewProj, invViewProj, camPos)) return;
+    f32 viewProj[16], invViewProjRel[16], camPos[3];
+    if (!dev_->camera(viewProj, invViewProjRel, camPos)) return;
 
     Vec3 right, up;
-    cameraBasis(invViewProj, right, up);
+    cameraBasis(invViewProjRel, right, up);
     if (right.sizeSquared() < 0.5f || up.sizeSquared() < 0.5f) return;   // a degenerate camera
 
     // Grouped by icon so each texture is one draw. Stable, so two markers with the same icon keep

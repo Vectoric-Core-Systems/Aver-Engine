@@ -180,8 +180,10 @@ Content lives OUTSIDE the engine: example project at
 - **PBR**: Cook-Torrance GGX, per-object metallic/roughness (root constants, 24 DWORDs),
   sky-hemisphere ambient + sky env reflection, sRGB→linear in, ACES tonemap + gamma out.
   `gMaterial.z>0.5` = unlit path.
-- **Procedural sky + atmosphere**: fullscreen shader (`VSky/PSky`), ray from `gInvViewProj`,
-  zenith/horizon gradient + sun disk/glow; distance fog in the mesh PS.
+- **Procedural sky + atmosphere**: fullscreen shader (`VSky/PSky`), ray from `gInvViewProjRel`
+  (camera-relative inverse -- clip space to world offset from the camera, not an absolute
+  position) via `averViewRayDir`, zenith/horizon gradient + sun disk/glow; distance fog in the
+  mesh PS.
 - **Lines**: unlit `createLineMesh`/`drawLines` (grid, gizmo), line PSO.
 - **Wireframe**: second FillMode=WIREFRAME mesh PSO via `setWireframe`.
 - **Mesh shader geometry path** (`IDevice::setMeshShaders`, dev flag `--ms`): `MSMain` replaces the
@@ -197,7 +199,7 @@ Content lives OUTSIDE the engine: example project at
   driven per frame. Declared in `modules/rhi/include/aver/rhi/RHIResources.hpp`, with no vocabulary
   from any one feature in it.
 - RHI API: `createDevice/createSwapchain/beginFrame/endFrame`, `setClearColor/setCamera
-  (viewProj,invViewProj,camPos)/setLight/setSky`, `createMesh/drawMesh(mesh,world,color,
+  (viewProj,invViewProjRel,camPos)/setLight/setSky`, `createMesh/drawMesh(mesh,world,color,
   metallic,roughness)/createLineMesh/drawLines/setWireframe/setLineDepth/setMeshShaders`,
   `resources/addRenderFeature/removeRenderFeature`, `uiInit/uiNewFrame/uiShutdown/
   uiWantsMouse/uiActive`, `requestCapture/getCapture/getFrameImage` (PNG via stb).

@@ -174,6 +174,16 @@ inline bool g_gpuValidationEnabled = false;
 inline void setGpuValidationEnabled(bool enabled) { g_gpuValidationEnabled = enabled; }
 inline bool gpuValidationEnabled() { return g_gpuValidationEnabled; }
 
+// ENGINE RADIANCE UNITS -> cd/m^2. modules/assets/include/aver/assets/LevelSky.hpp maps
+// sky.sunIntensity = w.sunLux / (100000.0 / 3.0) so that SkyAtmosphere's default sunIntensity of 3.0
+// agrees with OcWorldEnv's default of 100000 lux; inverted, that says one engine irradiance unit is
+// 100000/3 lux, and because the renderer treats irradiance and the scene-linear pixel value before
+// exposure (RADIANCE) as the same unit throughout, one engine RADIANCE unit is 100000/3 cd/m^2 too.
+// Named once here rather than re-derived per call site: PostSettings' own eye-adaptation model below
+// needs a real luminance (cd/m^2), not an engine unit, wherever it reasons about absolute darkness or
+// brightness (the Krawczyk et al. formulas are fit to measured cd/m^2, not to this renderer's units).
+constexpr f32 kLuminanceToCdm2 = 100000.0f / 3.0f;
+
 // Camera post-processing: exposure, bloom and eye adaptation.
 struct PostSettings {
     // Linear multiplier on scene radiance, applied BEFORE the tonemap. With autoExposure on it
@@ -189,7 +199,9 @@ struct PostSettings {
 
     // Eye adaptation, from a luminance histogram of the frame.
     bool autoExposure   = true;
-    f32  exposureMin    = 0.05f;   // clamps on the computed multiplier, not on scene luminance
+    // Clamps on the computed multiplier, not on scene luminance. 0.01 so a bright view (open sky,
+    // sunlit stone) can still be brought down to the target. Not persisted (a tuned engine value).
+    f32  exposureMin    = 0.01f;
     // THE CEILING WAS 8, AND 8 IS THE EXPOSURE AT WHICH COLOUR DIES. It was almost certainly copied
     // from maxRadiance below, where 8 is genuinely derived -- "the input past which the tone curve
     // has nothing left to say, acesTonemap(8) = 1.003, pure white". That is the correct ceiling for
@@ -220,18 +232,82 @@ struct PostSettings {
     // gives 3.09, at the same brightness. With a curve that holds its colour there is no reason to
     // forbid the exposure that makes an enclosed scene readable.
     //
-    // 256 SINCE THE SKY BECAME PHYSICAL (2026-09-24, kSkyIrradianceCalibration 8 -> 1). 8 was tuned
-    // while the diffuse sky was 8x too bright and did most of an interior's lighting. At physical
-    // scale a sun-overhead NewSponza arcade, lit only by bounce and the sky through its arches, sits
-    // 20-50x below the sunlit courtyard and needed ~128x to read (measured, linear): at 8 the camera
-    // simply ran out of range. 256 is 8 stops above 1, well inside a real camera's metering range.
-    // SandboxSettings migrates a stored 8 (the old default) to this value once.
+    // THE RANGE IS WIDE ON PURPOSE: eye adaptation holds the view at exposureKey, and a ceiling the
+    // scene needs more than pins the exposure, so walking from light into shade changes nothing --
+    // adaptation looks broken. MEASURED on NewSponza from the level camera at exposureKey 0.18, the
+    // adaptation wanted x73 for the shaded courtyard at noon, x99 under the arcade, x120 at dusk and
+    // x151 at night (lamps only); a 16 ceiling tried on 2026-09-26 pinned all four. How BRIGHT the
+    // result looks is exposureKey's job, not this clamp's. 256 is 8 stops above 1, inside a real
+    // camera's metering range. Not persisted (a tuned engine value).
     f32  exposureMax    = 256.0f;
-    f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second
-    f32  exposureKey    = 0.18f;   // middle grey the average luminance is driven towards
+    // HOW FAST, AND NOT THE SAME BOTH WAYS -- as eyes: adapting to a BRIGHTER view (the exposure
+    // falling) is quick, adapting to a DARKER one (the exposure rising) is slower, so stepping out
+    // of a dark arcade into sun flares briefly and settles, and stepping back in stays dim for a
+    // moment before the shade opens up. Both in e-folds per second of log exposure.
+    f32  exposureSpeed     = 3.0f;   // toward a brighter view (exposure falling)
+    // 1.0 -> 0.5: the scotopic slowdown below (rods take up to 4x longer, adaptationRealism 1) comes
+    // ON TOP of this base speed, so it went down to keep the SAME real-world dark-adaptation time it
+    // had before that slowdown existed rather than compounding into an even slower one.
+    f32  exposureSpeedDark = 0.5f;   // toward a darker view (exposure rising), e-folds/s
+
+    // PERCEPTUAL EYE ADAPTATION (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in
+    // real-time tone mapping"); console post.adaptationRealism (not in the panel). [0,1]: 0 is full
+    // adaptation -- every view drives to the same exposureKey average, today's behaviour, exactly --
+    // 1 is the perceptual model. Two effects, both scaled by this one dial:
+    //
+    //   PARTIAL ADAPTATION (sec. 4): a bright scene still looks brighter than a dark one once the
+    //   eye has adapted to each, rather than both reading as the same average brightness. The
+    //   histogram's target key becomes keyEff = exposureKey * lerp(1, alpha(Y) / alpha(Yref),
+    //   adaptationRealism), where Y is the metered average luminance in cd/m^2, alpha(Y) =
+    //   1.03 - 2 / (2 + log10(Y + 1)), and Yref = 100 cd/m^2 (a dim interior) is the point at which
+    //   keyEff == exposureKey exactly, matching how exposureKey above was tuned. Worked values:
+    //   alpha(0.01) = 0.032, alpha(1) = 0.161, alpha(100) = 0.530, alpha(2000) = 0.653.
+    //
+    //   ROD-SLOWED DARK ADAPTATION (sec. 4, same section): darkening (exposureSpeedDark's direction)
+    //   gets up to 4x slower in true darkness, as rods genuinely adapt more slowly than cones --
+    //   see exposureSpeedDark's own comment on why its base speed moved when this was added.
+    //
+    // Implemented in post.hlsl's CSExposure (gPostEye.x); see that file for both formulas in full.
+    f32  adaptationRealism = 1.0f;   // [0,1]
+
+    // SCOTOPIC NIGHT VISION (Krawczyk et al. sec. 5, after Kim et al.), "Night Vision" in the panel.
+    // [0,1]: below about 1 cd/m^2 rods take over from cones, so colour drains out and blue-shifts
+    // (the Purkinje effect) as this rises toward 1 -- 0 leaves every pixel exactly as rendered. Runs
+    // per pixel on scene-linear radiance, before exposure, in post.hlsl's PSComposite; unlike
+    // adaptationRealism above it needs no CSExposure metering, so it applies whether or not
+    // auto-exposure itself is on.
+    f32  nightVision = 1.0f;   // [0,1]
+
+    // CENTRE-WEIGHTED METERING (console post.meteringCenterWeight). [0,1]: 0 meters every pixel of the
+    // region equally (today's behaviour, exactly); higher weights the region's centre up to 4x an
+    // edge pixel, the way a camera's centre-weighted meter favours what is framed in the middle,
+    // rather than letting a bright sky at the top or floor at the bottom of the metered region pull
+    // the reading away from what is actually being looked at. Implemented in post.hlsl's
+    // CSHistogram (gPostEye.w).
+    f32  meteringCenterWeight = 0.5f;   // [0,1]
+
+    // THE TARGET BRIGHTNESS -- the average (log-average of the histogram's middle band, see
+    // histogramLow/HighPercent) that adaptation drives every view towards, before the panel's
+    // Brightness (exposure, in stops) is applied on top. NOT persisted or in the panel -- a tuned
+    // engine value; console post.exposureKey for a session.
+    //
+    // 0.20, TUNED WITH THE REST OF THIS BLOCK AS DEFAULTS (2026-09-26): headless captures of seven
+    // NewSponza views scored in display space (viewport mean 0-255, % clipped >= 250, % crushed <= 5)
+    // against photographic targets set a little under middle grey, the owner's "everything should
+    // be dimmer". MEASURED means: noon courtyard 74, shaded arcade 73, upper gallery 68, dusk 68,
+    // lamp-lit night 55, a lamp close up 55, a moonless night 10 (the sky model has no moon, so that
+    // one is correctly near-black); nothing clipped in any. The earlier 0.03-0.04 only read as
+    // bright because the panel's exposure compensation had been left at 4.05 (+2 stops).
+    f32  exposureKey    = 0.20f;
     // Fraction of the histogram discarded at each end before averaging.
+    //
+    // THE HIGH CUT IS 0.95, NOT 0.85: discarding the brightest 15% meant a sunlit wall filling the
+    // middle of the view never pulled the exposure down -- the eye looked straight at it and did not
+    // adapt, and it clipped to white. The top 5% still goes, which is what the cut is for: the sun
+    // disc, a lamp bulb, a specular glint or a firefly should not darken the whole view. Tuned with
+    // exposureKey below (0% clipped in every tuned scene); not persisted.
     f32  histogramLowPercent  = 0.30f;
-    f32  histogramHighPercent = 0.85f;
+    f32  histogramHighPercent = 0.95f;
 
     // WHICH TONE CURVE. 0 is the original per-channel Narkowicz/Hill approximation; 1 is the same
     // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap); 2 is
@@ -292,18 +368,29 @@ struct PostSettings {
     // is > 0. Both ride PostCB.clampRadiance[1]/[2] (gPostClamp.y/z in post.hlsl) rather than new
     // cbuffer rows -- see that struct's own comment on why clampRadiance's spare components are
     // where a new post scalar lands first.
-    f32  localExposureShadows    = 0.5f;
-    f32  localExposureHighlights = 0.3f;
+    //
+    // Tuned with exposureKey above (see its comment for the scenes and numbers); neither is in the
+    // panel or persisted. Shadows 0.10: at 0.25-0.5 (up to +4 stops on a dark region) a lamp-lit
+    // night courtyard was lifted back toward daylight -- MEASURED night mean 64.5 (key 0.22, shadows
+    // 0.25) -> 55.2 (key 0.20, shadows 0.10) while the day scenes fell only ~12, both changed in one
+    // pass, so the split between them is not isolated. Highlights 0.5: a sunlit wall beside a shaded gallery
+    // clipped to white at 0.3 (owner's screenshot); 0.5 pulls a bright region halfway back toward the
+    // target, capped at AVER_LOCALEXP_MAX_DOWN stops (post.hlsl) -- 0% clipped in every tuned scene.
+    f32  localExposureShadows    = 0.10f;
+    f32  localExposureHighlights = 0.5f;
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
 // check is the reminder -- a new PostSettings field changes it, and must be added here too.
 inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
-    static_assert(sizeof(PostSettings) == 60, "a PostSettings field was added: compare it below too");
+    static_assert(sizeof(PostSettings) == 76, "a PostSettings field was added: compare it below too");
     return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
            a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
            a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
            a.exposureMax == b.exposureMax && a.exposureSpeed == b.exposureSpeed &&
+           a.exposureSpeedDark == b.exposureSpeedDark &&
+           a.adaptationRealism == b.adaptationRealism && a.nightVision == b.nightVision &&
+           a.meteringCenterWeight == b.meteringCenterWeight &&
            a.exposureKey == b.exposureKey && a.histogramLowPercent == b.histogramLowPercent &&
            a.histogramHighPercent == b.histogramHighPercent && a.tonemap == b.tonemap &&
            a.maxRadiance == b.maxRadiance &&
@@ -781,15 +868,20 @@ public:
     virtual bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const {
         (void)mesh; (void)outCentre; (void)outRadius; return false;
     }
-    // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProj reconstructs
-    // world-space rays for the procedural sky.
-    virtual void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) {
-        (void)viewProj; (void)invViewProj; (void)cameraPos;
+    // Per-frame camera (row-major, row-vector viewProj = view*proj). invViewProjRel is the inverse
+    // of the SAME view*proj with the view's translation removed, mapping clip space to a
+    // world-space OFFSET FROM cameraPos -- precise however far the camera is from the world origin,
+    // which the absolute inverse is not (PerFrameCB::invViewProjRel). Shaders take view rays from
+    // it through averViewRayDir (shaders/shared_prelude.hlsl).
+    virtual void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 cameraPos[3]) {
+        (void)viewProj; (void)invViewProjRel; (void)cameraPos;
     }
     // Reads the camera back, for a feature fitting its own frustum to the view. False when the
-    // backend has no camera to give. Any output may be null.
-    virtual bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const {
-        (void)viewProj; (void)invViewProj; (void)cameraPos; return false;
+    // backend has no camera to give. Any output may be null. invViewProjRel is the same
+    // camera-relative inverse setCamera takes; a caller that has no use for the inverse passes
+    // nullptr for it.
+    virtual bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const {
+        (void)viewProj; (void)invViewProjRel; (void)cameraPos; return false;
     }
     // The scene's own viewport rect in target pixels -- {x, y, w, h} -- for a feature reprojecting
     // a screen-space position between frames. NOT necessarily the whole render target: the editor
@@ -821,6 +913,13 @@ public:
     // Sets the camera post-processing chain.
     virtual void setPostProcess(const PostSettings& p) { (void)p; }
     virtual PostSettings postProcess() const { return {}; }
+    // The auto-exposure multiplier CSExposure (post.hlsl) last actually produced, read back from
+    // the GPU a few frames late -- a live UI number, not a value any draw call may depend on.
+    // False when auto exposure has not run yet (nothing has seeded it) or this backend cannot read
+    // it back. THE METERED VALUE, BEFORE PostSettings::exposure (the manual compensation
+    // multiplier applied on top of it) and before local exposure -- a caller wanting "what actually
+    // multiplies the scene" combines the two itself.
+    virtual bool postExposureReadout(f32& adaptedExposure) const { (void)adaptedExposure; return false; }
     // Records one draw of `mesh` with a world matrix (row-major), base colour, and PBR
     // metallic/roughness (0..1).
     virtual void drawMesh(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],

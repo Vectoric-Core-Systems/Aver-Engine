@@ -179,10 +179,12 @@ struct MaterialConstants {
 
     // ---- lamp light, and the growth to 176 ----
     //
-    // Mirrors MaterialDesc::lightIntensity -- see that field's own comment for what it means and why
-    // it is not the same knob as emissiveFactor. Read only by the ray-driven local-light pass
-    // (VoxiRenderer.cpp's CSRdLocalLights): every other shading path ignores this field and the flag
-    // it sets, so a material with lightIntensity > 0 still renders identically anywhere else.
+    // Mirrors MaterialDesc::lightIntensity -- see that field's own comment for what it means (a
+    // multiplier on the light the material's own glow and size physically cast, not a brightness by
+    // itself) and why it is not the same knob as emissiveFactor. Read only by the ray-driven
+    // local-light pass (VoxiRenderer.cpp's CSRdLocalLights, which does the glow/size -> irradiance
+    // math): every other shading path ignores this field and the flag it sets, so a material with
+    // lightIntensity > 0 still renders identically anywhere else.
     //
     // ONE MORE 16-BYTE ROW, the smallest legal growth, taking the block 160 -> 176. The coat comment
     // above said "there is now no padding left" when the block was 112 bytes; that has been true and

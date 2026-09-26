@@ -21,7 +21,9 @@ void SandboxApp::loadEditorPreferences() {
     // setAutoCompile at construction), the same precedence averSrFromCli_ gives AverSR further down.
     if (!autoCompileFromCli_) autoCompile_ = prefBool("scripting.autoCompile", autoCompile_);
     showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
-    showColliders_      = prefBool ("viewport.showColliders",        showColliders_);
+    // viewport.showColliders is deliberately NOT restored: the collider overlay is a debugging view,
+    // and remembering it made every level open covered in bounds (and, with bloom, glowing dots)
+    // long after the one session that needed it. It starts off each launch; View > Show Colliders.
     // Toggled from the Window menu rather than the Preferences panel, so these ride
     // onShutdown's sync rather than buildEditorPrefs' own save-on-close.
     showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
@@ -75,31 +77,27 @@ void SandboxApp::loadEditorPreferences() {
     // this the two ways of opening the same project would disagree about the same file; with it,
     // both read command line > manifest > my own stored preference.
     if (maxFrames_ == 0) {
+        // ONLY THE FOUR THE PANEL STILL SHOWS PERSIST. The rest of PostSettings (exposureKey,
+        // the speeds, the Min/Max clamps, the histogram cuts, local exposure, adaptationRealism,
+        // meteringCenterWeight, bloom threshold/knee) is tuned in RHI.hpp now, and a stored copy
+        // is exactly what let a dragged-once value (post.exposure's 4.05, +2 stops) outlive every
+        // relaunch and silently override that tuning. A console post.* var can still set any of
+        // them for the session -- see EditorConsole.hpp -- it just is not written back to disk.
         if (!postExposureFromCli_ && project_.postExposure < 0.0f)
             post_.exposure       = prefFloat("post.exposure",       post_.exposure);
         if (!postAutoExpFromCli_ && project_.postAutoExposure < 0)
             post_.autoExposure   = prefBool ("post.autoExposure",   post_.autoExposure);
         if (!postBloomFromCli_ && project_.postBloom < 0.0f)
             post_.bloomIntensity = prefFloat("post.bloomIntensity", post_.bloomIntensity);
-        post_.exposureKey    = prefFloat("post.exposureKey",    post_.exposureKey);
-        post_.exposureSpeed  = prefFloat("post.exposureSpeed",  post_.exposureSpeed);
-        post_.exposureMin    = prefFloat("post.exposureMin",    post_.exposureMin);
-        post_.exposureMax    = prefFloat("post.exposureMax",    post_.exposureMax);
-        // A STORED 8 IS THE OLD DEFAULT, NOT A CHOICE: every session before 2026-09-24 saved the
-        // compiled-in 8 back on exit, so every existing editor.ini holds it and would pin the camera
-        // at the ceiling the physical sky outgrew (RHI.hpp's own comment on exposureMax). Exactly 8
-        // is read as "never chosen" and takes the new default; any other stored value is kept.
-        if (post_.exposureMax == 8.0f) post_.exposureMax = rhi::PostSettings{}.exposureMax;
-        post_.bloomThreshold = prefFloat("post.bloomThreshold", post_.bloomThreshold);
-        post_.bloomKnee      = prefFloat("post.bloomKnee",      post_.bloomKnee);
-        // THE TWO FIELDS OF PostSettings THAT WERE STORED NOWHERE. Every other member of the
-        // struct rides in this block; these two were simply missed, so the auto-exposure
-        // histogram window reset to its compiled-in default on every launch while the nine
-        // knobs around it persisted.
-        post_.histogramLowPercent  = prefFloat("post.histogramLow",  post_.histogramLowPercent);
-        post_.histogramHighPercent = prefFloat("post.histogramHigh", post_.histogramHighPercent);
-        post_.localExposureShadows    = prefFloat("post.localExposureShadows",    post_.localExposureShadows);
-        post_.localExposureHighlights = prefFloat("post.localExposureHighlights", post_.localExposureHighlights);
+        post_.nightVision = prefFloat("post.nightVision", post_.nightVision);
+        // ONE-TIME RESET: post.exposure's MEANING changed from a raw linear multiplier to
+        // compensation on top of Eye Adaptation, so a stored 4.05 is not a choice anyone made
+        // against that behaviour -- it is the old bug, preserved. settingsVersion < 2 means this
+        // editor.ini predates the change; take the compiled-in exposure once and let saving below
+        // bump the version so it is never forced again. Same CLI/manifest guard as the load above,
+        // so a run that named its own exposure is never overridden by this.
+        if (!postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
+            post_.exposure = 1.0f;
     }
 
     // The derived-data cache's write-behind budget, in MEGABYTES on the wire because that is
@@ -2365,7 +2363,6 @@ void SandboxApp::saveEditorPreferences() {
     // from the Tools menu before this session started.
     if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
     setPrefBool ("viewport.showGrid",            showGrid_);
-    setPrefBool ("viewport.showColliders",       showColliders_);
     setPrefBool ("panels.worldOutliner",         showOutliner_);
     setPrefBool ("panels.details",               showDetails_);
     setPrefFloat("viewport.flySpeed",            flySpeed_);
@@ -2400,17 +2397,11 @@ void SandboxApp::saveEditorPreferences() {
     if (maxFrames_ == 0) {
         if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     post_.exposure);
         if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
-        setPrefFloat("post.exposureKey",    post_.exposureKey);
-        setPrefFloat("post.exposureSpeed",  post_.exposureSpeed);
-        setPrefFloat("post.exposureMin",    post_.exposureMin);
-        setPrefFloat("post.exposureMax",    post_.exposureMax);
         if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
-        setPrefFloat("post.bloomThreshold", post_.bloomThreshold);
-        setPrefFloat("post.bloomKnee",      post_.bloomKnee);
-        setPrefFloat("post.histogramLow",   post_.histogramLowPercent);
-        setPrefFloat("post.histogramHigh",  post_.histogramHighPercent);
-        setPrefFloat("post.localExposureShadows",    post_.localExposureShadows);
-        setPrefFloat("post.localExposureHighlights", post_.localExposureHighlights);
+        setPrefFloat("post.nightVision", post_.nightVision);
+        // Marks the one-time exposure reset above as done, so a session that never touches
+        // Brightness still leaves editor.ini past the version that would force it again.
+        setPrefInt("post.settingsVersion", 2);
     }
 
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();

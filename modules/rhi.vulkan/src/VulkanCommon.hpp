@@ -1443,8 +1443,8 @@ public:
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override;
     bool meshGeometry(MeshHandle mesh, BufferHandle* vb, BufferHandle* ib, u32* vertexCount, u32* indexCount) const override;
     bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const override;
-    void setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 cameraPos[3]) override;
-    bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const override;
+    void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 cameraPos[3]) override;
+    bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const override;
     bool sceneViewport(f32 rect[4]) const override;
     void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) override;
     void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) override {
@@ -1465,6 +1465,15 @@ public:
     SkyAtmosphere skyAtmosphere() const override { return sky_; }
     void setPostProcess(const PostSettings& p) override { post_ = p; }
     PostSettings postProcess() const override { return post_; }
+    // See IDevice::postExposureReadout (RHI.hpp) for the contract, and D3D12Device's identical
+    // override -- expReadoutValue_/expReadoutSeeded_ are filled a few frames late by
+    // collectExposureReadout, from a GPU copy runPostChain records only while auto exposure is
+    // actually running.
+    bool postExposureReadout(f32& adaptedExposure) const override {
+        if (!expReadoutSeeded_) return false;
+        adaptedExposure = expReadoutValue_;
+        return true;
+    }
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 baseColor[4], f32 metallic, f32 roughness) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
         storeDrawBinding(drawBinding_, set, constants, bytes);
@@ -1607,6 +1616,9 @@ private:
     bool createPostPipelines();
     bool createPostTargets();
     void releasePostTargets();
+    // Reads back the metered-exposure slot THIS frame's beginFrame just waited on -- see
+    // expReadback_'s own comment. Mirrors D3D12Device::collectExposureReadout field-for-field.
+    void collectExposureReadout();
     void runPostChain(VkImage backbufferImage, VkImageView backbufferView, VkFormat backbufferFormat);
     ConstantAllocation postConstants(const void* data, u32 bytes);
     static void toSceneReferred(const f32 display[4], f32 out[4]);
@@ -1778,6 +1790,25 @@ private:
     VkBuffer histBuf_ = VK_NULL_HANDLE; VkDeviceMemory histMemory_ = VK_NULL_HANDLE;   // 256-bin histogram, StructuredBuffer-shaped
     VkBuffer expBuf_ = VK_NULL_HANDLE;  VkDeviceMemory expMemory_ = VK_NULL_HANDLE;    // the one adapted-exposure scalar
     bool expSeeded_ = false;
+    // Per-frame-slot HOST_VISIBLE|HOST_COHERENT readback of expBuf_'s first 8 bytes, for
+    // IDevice::postExposureReadout -- a live UI number with no business stalling the frame on the
+    // GPU. runPostChain records the copy right after CSExposure runs (only while autoExp is true,
+    // so a slot never gets a copy of a value CSExposure did not just produce this frame);
+    // collectExposureReadout maps and reads it back once THIS slot's timeline value has retired.
+    // Mirrors D3D12Device's expReadback_ field-for-field, including WHERE it lives: created in
+    // createPostTargets and released in releasePostTargets rather than alongside expBuf_ itself in
+    // createPostPipelines -- fixed 8 bytes, so resize()'s waitForGpu() makes recreating it there
+    // exactly as safe, and it keeps the readback tied to the one function pair that already owns
+    // "the GPU is idle, drop anything mid-flight".
+    VkBuffer expReadback_[kFrameCount] = {}; VkDeviceMemory expReadbackMemory_[kFrameCount] = {};
+    // Set by runPostChain right after it records that slot's copy; cleared by collectExposureReadout
+    // once consumed, so a slot autoExp skipped (or one a resize just recreated) is never misread as
+    // holding a fresh value.
+    bool expReadbackPending_[kFrameCount] = {};
+    // What postExposureReadout() hands back -- the last value actually read from a completed GPU
+    // copy, a few frames behind expBuf_ itself.
+    f32  expReadoutValue_ = 0.0f;
+    bool expReadoutSeeded_ = false;
     // Local exposure's bilateral grid of log-luminance (u2 raw, u3 blurred) -- SCENE-sized, unlike
     // histBuf_/expBuf_ above, so createPostTargets() destroys and rebuilds them in place on every
     // resize (see that function); the final free for whatever generation is live at shutdown still

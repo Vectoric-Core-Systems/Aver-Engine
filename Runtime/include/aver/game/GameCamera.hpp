@@ -52,8 +52,21 @@ inline CameraMatrices pushCamera(rhi::IDevice& device, const Vec3& pos, const Ve
     const Mat4 view = Mat4::lookAtDirLH(pos, forward, Vec3{0, 0, 1});
     const Mat4 proj     = Mat4::perspectiveLH(radians(60.0f), aspect, kCameraNearCm, kCameraFarCm);
     const Mat4 viewProj = view * proj;           // row-vector: v * M, so view then proj
-    const Mat4 invVP    = viewProj.inverse();
-    device.setCamera(&viewProj.m[0][0], &invVP.m[0][0], &pos.x);
+
+    // THE DEVICE GETS THE CAMERA-RELATIVE INVERSE: the same view with its translation row zeroed
+    // (the rotation rows never depended on `pos`), composed with `proj` and inverted, so every
+    // entry is O(1) wherever the camera is. The absolute inverse carries about |pos|/near (1e5 at
+    // 2 km) in two rows, which every ray reconstruction then had to cancel back down to O(1) in
+    // float32 -- see PerFrameCB::invViewProjRel.
+    Mat4 viewRot = view;
+    viewRot.m[3][0] = viewRot.m[3][1] = viewRot.m[3][2] = 0.0f;
+    const Mat4 invViewProjRel = (viewRot * proj).inverse();
+    device.setCamera(&viewProj.m[0][0], &invViewProjRel.m[0][0], &pos.x);
+
+    // The absolute inverse the hosts keep for mouse picking, COMPOSED rather than inverted: offset
+    // from the eye, then translated by it, so the eye's magnitude enters only as an addition and
+    // never through Mat4::inverse()'s cofactor products.
+    const Mat4 invVP = invViewProjRel * Mat4::translation(pos);
     return { viewProj, invVP };
 }
 

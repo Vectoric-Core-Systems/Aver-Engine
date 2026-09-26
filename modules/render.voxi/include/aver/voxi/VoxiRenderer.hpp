@@ -1065,8 +1065,8 @@ private:
     // traces one shadow ray toward one lamp picked by luminance share, and accumulates that visibility
     // in rdLocalHist_ (t19/u19). Same layout/csDefs/SM 6.6 as rdShadowCsPso_, dispatched right after it
     // inside the lighting-stages group. OPTIONAL ON TOP OF THE STAGED PATH: rdStagedActive() never
-    // inspects it, so a failed compile only forces the light count to 0 (no lamp light), never the
-    // single-pass fallback.
+    // inspects it, so a failed compile only forces the staged path's light count to 0 (no lamp light
+    // there), never the single-pass fallback. Raster and single-pass shade lamps without it.
     rhi::PipelineHandle rdLocalLightsCsPso_ = 0;
     // Stage B: rayDrivenTexPso_/rayDrivenTexGbufPso_ recompiled with ";AVER_RD_SPLIT=1" appended to
     // their own defines -- same bindlessDefs/rdAblateDefs/render-target formats, so these are built
@@ -1124,14 +1124,16 @@ private:
     // `struct RdLocalLight { float4 posRadius; float4 radianceRange; }` -- same 32-byte stride, which
     // setSrvBuffer's stride argument hands the shader.
     //   posRadius     = world centre (cm), sphere radius (cm, >= 1)
-    //   radianceRange = rgb colour (max component 1) x lightIntensity; w = range (cm)
+    //   radianceRange = rgb colour (max component 1) x the lamp's 1-metre irradiance (its emissive
+    //                   peak and bounding-sphere radius, times lightIntensity -- see buildLocalLights);
+    //                   w = range (cm)
     struct RdLocalLight {
         f32 posRadius[4];
         f32 radianceRange[4];
     };
     static_assert(sizeof(RdLocalLight) == 32, "RdLocalLight is the HLSL RdLocalLight ABI");
-    // At most this many per frame, the most important by lightIntensity / max(camera distance in
-    // metres squared, 1). Bounds the per-pixel loop in CSRdLocalLights.
+    // At most this many per frame, the most important by that same 1-metre irradiance over max(camera
+    // distance in metres squared, 1). Bounds the per-pixel loop in CSRdLocalLights.
     static constexpr u32 kMaxLocalLights = 32;
     // AN UPLOAD-HEAP RING, the same shape and the same reason as rtInstances_: writeBuffer is an
     // unsynchronised memcpy into mapped memory, and this list is rewritten every frame while the GPU
@@ -1165,10 +1167,24 @@ private:
     bool rdLocalLightsFailLogged_ = false;   // ring allocation failure, said once
     // Builds this frame's list from drawsPrev_ -- including draws the TLAS or the camera cull hides,
     // so a lamp behind the camera still lights what is on screen -- and uploads it to t18. Empty
-    // (placeholder bound, count 0) unless voxi.localLights is on, CSRdLocalLights compiled, staged mode
-    // is requested on D3D12 and a TLAS exists this frame. Called from prePass() between
-    // buildAccelerationStructures() and the first bind of bindings_.
+    // (placeholder bound, count 0) unless voxi.localLights is on, the backend is D3D12 and a TLAS exists
+    // this frame: every ray-traced scene mode (raster, single-pass, staged) can light with it. Called from
+    // prePass() between buildAccelerationStructures() and the first bind of bindings_.
     void buildLocalLights();
+    // What every lamp-shading scene pass needs this frame: a non-empty list, voxi.localLights, and u19
+    // bound to the real history pair (rdLocalOutThisFrame_, which beginShadowHistory leaves 0 on a frame
+    // it bound nothing -- no ray-traced history, or the debug view). Each mode adds its own requirement on
+    // top: the staged path CSRdLocalLights' pipeline, the single pass kRdSinglePassLamps (VoxiRenderer.cpp).
+    bool localLightsReady() const {
+        return rdLocalLightCount_ > 0 && settings_.localLights && rdLocalOutThisFrame_ != 0;
+    }
+    // Writes cb_.cameraMedium[2]/[3] for the scene pass about to be recorded -- the light count and the
+    // history-valid / carries-all bits when `live`, both 0 otherwise -- and returns `live`, so the caller
+    // marks the history written (rdLocalHistFrame_/rdLocalHistHash_) once its pass is recorded. Called
+    // once per frame by whichever pass shades the opaque scene: prePass's tail for the raster draws,
+    // scenePass for the single pass, recordStagedRayDriven for the staged passes. The values then stay
+    // for the rest of the frame, the blended replay included. `pass` names it in the once-only log.
+    bool publishLocalLights(bool live, const char* pass);
 
     // ---- previous-frame per-instance transforms: tracked here; NOT YET reachable by any shader ----
     //
@@ -1571,10 +1587,12 @@ private:
         //
         // z, w: LOCAL LIGHTS (LAMPS), riding this row because it had two spare floats. z = the number
         // of lights in t18 as a float (HLSL rdLocalLightCount()), 0 whenever lamps are off or
-        // unavailable -- raised only for the staged ray-driven uploads (recordStagedRayDriven), 0 for
-        // every other pass and for the blended replay. w = two bits as a float: 1 when t19 holds a usable
-        // previous frame accumulated under the SAME light set (HLSL rdLocalHistValid()), 2 when every
-        // lamp-flagged draw is in the list so GI may drop emitters' own emission (rdLocalCarriesEmitters()).
+        // unavailable -- 0 for every pass prePass records, raised (publishLocalLights) for whichever
+        // scene pass shades the opaque scene -- the raster draws, the single-pass or the staged
+        // ray-driven primary -- and kept through the blended replay. w = two bits as a float: 1 when t19
+        // holds a usable previous frame accumulated under the SAME light set (HLSL rdLocalHistValid()), 2
+        // when every lamp-flagged draw is in the list so GI may drop emitters' own emission
+        // (rdLocalCarriesEmitters()).
         f32 cameraMedium[4] = {};
         // THE WATER VOLUME THAT CASTS CAUSTICS, in world centimetres: min.xyz and max.xyz of its
         // axis-aligned box, with min.w = 1 when there is one at all and max.w its strength.
@@ -2508,32 +2526,38 @@ private:
     // Two RGBA16F textures at the shadow history's own size, created/released in ensureShadowHistory
     // alongside rtShadowHist_ (gated on rdLocalHistWanted()), destroyed in shutdown(), and swapped
     // every active frame in beginShadowHistory on the SAME rtHistWriteIdx_ -- so reprojecting into t19
-    // lands on the texel the shadow history's own depth test just vouched for. rgb = this frame's lamp
-    // irradiance x accumulated visibility, a = the accumulated visibility (the only channel read back).
+    // lands on the texel the shadow history's own depth test just vouched for. a = the accumulated
+    // visibility (the only channel read or written; rgb stays 0).
+    // Written (u19) by whichever pass shades the opaque scene with lamps: PSMainVoxi's opaque RT variants
+    // (raster), the single-pass PSRayDriven, or CSRdLocalLights (staged).
     //
-    // RESTS IN NonPixelShaderResource, NOT ShaderResource like rtShadowHist_: its only SRV reader is a
-    // COMPUTE shader (CSRdLocalLights reads t19; Stage B reads the u19 side), and ShaderResource is
-    // D3D12's PIXEL_SHADER_RESOURCE -- a compute read in that state is the class of bug 21524cd3 fixed
-    // in exposure metering. Same transition schedule as rtShadowHist_, only the SRV state differs.
+    // RESTS IN ShaderResource, like rtShadowHist_ and on the same transition schedule: the raster and
+    // single-pass passes read t19 from PIXEL shaders, and ShaderResource is D3D12's PIXEL_SHADER_RESOURCE.
+    // Its one COMPUTE reader, CSRdLocalLights, visits NonPixelShaderResource around the staged lighting
+    // group exactly as t6 does (recordStagedRayDriven) -- a compute read in the pixel-only state is the
+    // class of bug 21524cd3 fixed in exposure metering. Stage B and the staged blended replay read the
+    // u19 side, which stays in UnorderedAccess.
     rhi::TextureHandle rdLocalHist_[2] = {0, 0};
     // A 1x1 RGBA16F SRV+UAV stand-in bound at both t19 and u19 whenever the pair does not exist, the
     // airVisPlaceholder_ shape. Created in createVoxelVolume, destroyed in shutdown.
     rhi::TextureHandle rdLocalHistPlaceholder_ = 0;
     // The write side bound at u19 THIS frame (beginShadowHistory), 0 when the pair was not bound --
-    // what CSRdLocalLights' dispatch and Stage B's barrier act on. Recorded rather than re-derived from
-    // rtHistWriteIdx_, which endShadowHistory has already flipped by the time scenePass runs.
+    // what localLightsReady() tests and the staged dispatch/barriers act on. Recorded rather than
+    // re-derived from rtHistWriteIdx_, which endShadowHistory has already flipped by the time scenePass
+    // runs.
     rhi::TextureHandle rdLocalOutThisFrame_ = 0;
     // RESOURCE STATE, not content trust: true once the read side was left in UnorderedAccess by an
     // earlier active frame since the pair was (re)created. Cleared only where the pair is destroyed.
     bool rdLocalHistPrimed_ = false;
     bool rdLocalHistFailLogged_ = false;   // allocation failure, said once; cleared on success
-    // CONTENT TRUST: the rtFrameIndex_ of the last frame CSRdLocalLights actually wrote u19 (0 = never)
-    // and the light-list hash it wrote under. gCameraMedium.w is 1 only when that frame was the
-    // previous one and the hash still matches -- a changed light set, a skipped frame or a frame that
-    // ran without lamps all restart accumulation.
+    // CONTENT TRUST: the rtFrameIndex_ of the last frame a scene pass wrote u19 (0 = never) and the
+    // light-list hash it wrote under -- marked where that pass is recorded: the CSRdLocalLights dispatch,
+    // the single-pass draw, or prePass's tail for the raster draws the backend records right after it.
+    // gCameraMedium.w is 1 only when that frame was the previous one and the hash still matches -- a
+    // changed light set, a skipped frame or a frame that ran without lamps all restart accumulation.
     u32 rdLocalHistFrame_ = 0;
     u64 rdLocalHistHash_ = 0;
-    // "Local lights running" said once, the first frame CSRdLocalLights is dispatched.
+    // "Local lights running" said once, the first frame any scene pass shades with lamps.
     bool rdLocalLightsRunLogged_ = false;
     // Settings::giRestirVisibility, cached at setSettings like giMode_ beside it. 2 (HalfResolution)
     // matches the struct default Voxi.hpp gives it (Quality::Medium's own ladder rung), so a renderer
@@ -2690,13 +2714,17 @@ private:
     // ensureShadowHistory the same way giRestirWanted() gates the surface-history pair's.
     bool giVisHistWanted() const { return giRestirWanted() && giRestirVisibility_ == 2u; }
 
-    // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating -- staged mode requested with ray
-    // tracing on (rdStagedResourcesWanted()) and voxi.localLights on. Two full-screen RGBA16F textures
-    // held for a single-pass or raster project would be VRAM for a pass that never runs, the same
-    // argument aoHistoryWanted()/giVisHistWanted() make for their own pairs. Not gated on
-    // rdLocalLightsCsPso_: a hot-reload can change that without any edge ensureShadowHistory sees, and
-    // the light count already goes to 0 without it.
-    bool rdLocalHistWanted() const { return rdStagedResourcesWanted() && settings_.localLights; }
+    // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating -- ray tracing on
+    // (rayTracingWanted()), voxi.localLights on, and the D3D12 backend, the only one buildLocalLights
+    // fills a list on. Every ray-traced scene mode lights with lamps (raster, single-pass, staged), so
+    // neither the render mode nor voxi.rayDrivenStages gates it; two full-screen RGBA16F textures held
+    // with ray tracing off or on Vulkan would be VRAM for a pass that never runs, the argument
+    // aoHistoryWanted()/giVisHistWanted() make for their own pairs. Not gated on rdLocalLightsCsPso_:
+    // only the staged path needs it, and a hot-reload can change it without any edge ensureShadowHistory
+    // sees. dev_ is null before init(), which reads as "not wanted" until onRenderTargetsChanged asks again.
+    bool rdLocalHistWanted() const {
+        return rayTracingWanted() && settings_.localLights && dev_ && dev_->backend() == rhi::Backend::D3D12;
+    }
 
     // OCCLUSION-AWARE FOG: whether airVisTex_ will ACTUALLY be created/kept -- the setting alone
     // (Settings::fogOcclusion) is not enough, the same "ask what will really run" shape

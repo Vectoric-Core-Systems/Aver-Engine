@@ -7,16 +7,29 @@ cbuffer AverPost : register(b0) {
                          // y bloom intensity, z bloom threshold, w bloom knee
     float4 gPostDst;     // xy destination size in texels, zw its reciprocal
     float4 gPostSrc;     // xy source size in texels,      zw its reciprocal
-    float4 gPostAdapt;   // x min log2 luminance, y 1/log2 range, z adaption alpha, w pixels sampled
+    float4 gPostAdapt;   // x min log2 luminance, y 1/log2 range, z adaption alpha toward a brighter view, w unused
     float4 gPostLimit;   // x exposure min, y exposure max, z histogram low cut, w high cut
     float4 gPostMisc;    // x middle grey, y auto-exposure on, z bloom filter radius, w tonemap mode
     float4 gPostClamp;   // x pre-tonemap radiance ceiling (0 = no clamp), y local exposure shadows
-                         // [0,1], z local exposure highlights [0,1] (see PostSettings), w spare
+                         // [0,1], z local exposure highlights [0,1] (see PostSettings), w adaption
+                         // alpha toward a darker view (PostSettings::exposureSpeedDark)
     // THE DOCKED-VIEWPORT SUB-RECT: xy is this pass's source uv origin, zw its uv size, both already
     // in the post chain's own normalised source space (see FrameConstants.hpp's PostCB::region for
     // the C++-side derivation). (0,0,1,1) identity when no sub-rect applies -- every read below is
     // then gPostRegion.xy + uv*gPostRegion.zw == uv, so this is a no-op on that path.
     float4 gPostRegion;
+    // EYE ADAPTATION REALISM (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in real-time
+    // tone mapping"): x PostSettings::adaptationRealism [0,1] -- 0 is full adaptation, today's
+    // behaviour, exactly; 1 is the perceptual model, used by CSExposure for both the
+    // luminance-dependent key and the rod-slowed dark-adaptation speed. y kLuminanceToCdm2, the
+    // scene-linear-radiance-unit -> cd/m^2 constant derived from LevelSky.hpp's sunIntensity
+    // calibration (see FrameConstants.hpp's PostCB::eye), used wherever this cbuffer needs a real
+    // luminance rather than an engine-unit one. z PostSettings::nightVision [0,1], the scotopic
+    // desaturation's own strength, read only by PSComposite. w PostSettings::meteringCenterWeight
+    // [0,1], read only by CSHistogram. Mirrors PostCB::eye, appended here for the same reason
+    // gPostRegion was -- a new post scalar gets its own row rather than hunting for spare
+    // components once none are left.
+    float4 gPostEye;
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
@@ -159,12 +172,38 @@ void CSHistogram(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float t = saturate((log2(lum) - gPostAdapt.x) * gPostAdapt.y);
             bin = (uint)(t * 254.0 + 1.0);
         }
-        InterlockedAdd(gHistLocal[bin], 1);
+        // CENTRE-WEIGHTED METERING (Krawczyk et al. sec. 4; the classical centre-weighted camera
+        // meter they cite it against): the region's centre counts for more than its edges. `d` is
+        // this sample's distance from the region's centre in units of the region's HALF-HEIGHT on
+        // BOTH axes -- aspect-corrected, so a widescreen region's horizontal falloff matches its
+        // vertical one instead of stretching into an ellipse; gPostDst is THIS dispatch's own grid
+        // (the metered region, downscaled -- see the comment above), so x/y here is exactly that
+        // region's aspect ratio. meteringCenterWeight 0 collapses w to 1 always, identical to the
+        // unweighted count this replaces. The percentile cuts below (CSExposure) already treat
+        // gPostHist as counts of arbitrary mass, not one-per-pixel, so a weighted count needs no
+        // change there.
+        float aspect = gPostDst.x / max(gPostDst.y, 1e-4);
+        float2 centred = float2((uvLocal.x - 0.5) * 2.0 * aspect, (uvLocal.y - 0.5) * 2.0);
+        float d2 = dot(centred, centred);
+        uint w = 1u + (uint)round(3.0 * gPostEye.w * exp(-d2 / (2.0 * 0.3 * 0.3)));
+        InterlockedAdd(gHistLocal[bin], w);
     }
     GroupMemoryBarrierWithGroupSync();
 
     uint local = gHistLocal[gi];
     if (local > 0) gPostHist.InterlockedAdd(gi * 4, local);
+}
+
+// LUMINANCE-DEPENDENT KEY (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in real-time
+// tone mapping", sec. 4): partial light adaptation. alpha(Y) in (0,1) is the fraction of full
+// adaptation the eye reaches at luminance Y cd/m^2 -- lower at low Y, which is what keeps a dim
+// scene looking dim after the eye adapts to it instead of every view settling to one identical
+// average brightness. No division by zero or negative log: Ycdm2 is clamped >= 0, so the
+// denominator is always >= 2. Worked values (PostSettings' own comment repeats them, since they
+// pin this exact formula): alpha(0.01) = 0.032, alpha(1) = 0.161, alpha(100) = 0.530,
+// alpha(2000) = 0.653.
+float averEyeAlpha(float Ycdm2) {
+    return 1.03 - 2.0 / (2.0 + log10(max(Ycdm2, 0.0) + 1.0));
 }
 
 // Reduces the histogram to one exposure value and damps towards it in log space.
@@ -174,6 +213,11 @@ void CSExposure() {
     // PSComposite) as compensation on this value, so storing it here too would square it. A frame
     // with nothing metered (all black) therefore still displays at exactly the authored value.
     float target = 1.0;
+    // The metered average luminance in cd/m^2, filled in below only inside the weighted-average
+    // branch; 0 otherwise (nothing was metered this frame, e.g. an all-black region), which reads
+    // as true darkness to both uses further down -- exactly the direction a rod-dominated view
+    // should slow into.
+    float avgLumCdm2 = 0.0;
 
     if (gPostMisc.y > 0.5) {
         // BIN 0 IS READ AND DELIBERATELY NOT COUNTED, and getting that wrong disabled half of this
@@ -214,7 +258,16 @@ void CSExposure() {
         if (weight > 0.0) {
             float avgBin = weighted / weight;
             float avgLum = exp2((avgBin - 1.0) / 254.0 / gPostAdapt.y + gPostAdapt.x);
-            target = gPostMisc.x / max(avgLum, 1e-4);
+            avgLumCdm2 = avgLum * gPostEye.y;   // kLuminanceToCdm2 -- LevelSky's lux/(100000/3) calibration
+            // keyEff blends the authored middle grey (exposureKey, gPostMisc.x) between "as
+            // authored" (adaptationRealism 0, today's full-adaptation behaviour -- keyEff ==
+            // exposureKey exactly, the lerp's base case) and the perceptual curve above, normalised
+            // so keyEff == exposureKey at the reference Yref = 100 cd/m^2 too (a dim interior;
+            // exposureKey was tuned against NewSponza's noon courtyard, which meters ~82 cd/m^2, so
+            // the two nearly coincide at full realism there). averEyeAlpha(100.0) is computed, not
+            // the 0.530 hardcoded, so it can never drift from the formula above.
+            float keyEff = gPostMisc.x * lerp(1.0, averEyeAlpha(avgLumCdm2) / max(averEyeAlpha(100.0), 1e-4), gPostEye.x);
+            target = keyEff / max(avgLum, 1e-4);
         }
         target = clamp(target, gPostLimit.x, gPostLimit.y);
 
@@ -223,9 +276,21 @@ void CSExposure() {
 
     float prev = asfloat(gPostExp.Load(0));
     uint  seeded = gPostExp.Load(4);
+    // TWO SPEEDS, like an eye: a view getting brighter (target below prev) is met at gPostAdapt.z,
+    // one getting darker (target above prev) at the slower gPostClamp.w -- PostSettings'
+    // exposureSpeed / exposureSpeedDark.
+    //
+    // ROD-SLOWED DARK ADAPTATION (Krawczyk et al. sec. 4): rods take over below about 1 cd/m^2 and
+    // adapt more slowly than cones, so darkening gets up to 4x slower in true darkness. sigmaAvg is
+    // the same rod/cone mix fraction PSComposite's scotopic desaturation computes per pixel, here on
+    // the metered average instead of one pixel. darkSlow collapses to 1 (no change from before this
+    // feature existed) at adaptationRealism 0, same lerp base as keyEff above.
+    float sigmaAvg = saturate(0.04 / (0.04 + max(avgLumCdm2, 0.0)));
+    float darkSlow = lerp(1.0, lerp(1.0, 0.25, sigmaAvg), gPostEye.x);
+    const float alpha = (target > prev) ? gPostClamp.w * darkSlow : gPostAdapt.z;
     float next = (seeded == 0 || prev <= 0.0)
                ? target
-               : exp2(lerp(log2(prev), log2(max(target, 1e-4)), saturate(gPostAdapt.z)));
+               : exp2(lerp(log2(prev), log2(max(target, 1e-4)), saturate(alpha)));
     gPostExp.Store(0, asuint(next));
     gPostExp.Store(4, 1);
 }
@@ -392,6 +457,35 @@ void averLocalGridSample(float2 tileXY, float bin, uint gridW, uint gridH, out f
 }
 
 // ---- composite -----------------------------------------------------------------------------
+
+// SCOTOPIC NIGHT VISION (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in real-time tone
+// mapping", sec. 5, after Kim et al.): below about 1 cd/m^2 rods take over from cones -- vision
+// loses the photopigments that see colour at all, and blue-shifts (the Purkinje effect) into what
+// rods respond to. Runs on SCENE-LINEAR radiance: rods react to the scene's own brightness, not to
+// a display value exposure has not produced yet.
+float3 averNightVision(float3 rgb) {
+    // CIE XYZ of the linear-sRGB pixel, Rec.709 primaries / D65 white -- the same primaries
+    // averLuminance's Y row already assumes.
+    float X = dot(rgb, float3(0.4124564, 0.3575761, 0.1804375));
+    float Y = max(dot(rgb, float3(0.2126729, 0.7151522, 0.0721750)), 0.0);
+    float Z = dot(rgb, float3(0.0193339, 0.1191920, 0.9503041));
+    // SCALE-FREE GUARD. (Y + Z) / X is a chromaticity ratio, the same for a pixel at any brightness,
+    // so the only X to guard is exactly zero -- and with non-negative radiance that is only black,
+    // whose V is 0 anyway. An absolute floor (1e-4) would be wrong here: one engine radiance unit is
+    // kLuminanceToCdm2 = 33,333 cd/m^2, so every pixel this ever affects (below ~1 cd/m^2) sits near
+    // 3e-5 and a floor that size bends the ratio until V goes negative and the pixel goes black.
+    //
+    // NORMALISED TO WHITE: the model's V is ~2.573 x Y for a D65-neutral surface ((Y+Z)/X = 2.198),
+    // and handing that back unscaled would make every dark region 2.6x BRIGHTER than it metered.
+    // Divided out, a grey surface keeps its brightness and only the COLOUR changes -- reds (which
+    // rods barely see) darken and blues lift, the Purkinje shift. The tint's own luminance is ~1.009.
+    const float kScotopicWhite = 2.573;
+    float V = (X > 0.0) ? max(Y * (1.33 * (1.0 + (Y + Z) / X) - 1.68), 0.0) / kScotopicWhite : 0.0;
+    float Ycd = Y * gPostEye.y;   // kLuminanceToCdm2 -- LevelSky's lux/(100000/3) calibration
+    float sigma = saturate(0.04 / (0.04 + Ycd) * gPostEye.z);
+    return lerp(rgb, V * float3(1.05, 0.97, 1.27), sigma);
+}
+
 // Exposure, bloom, tonemap and gamma in one pass; the frame becomes a display image here.
 float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     // i.uv is 0..1 over WHATEVER the raster viewport this pass drew into was set to -- the whole
@@ -402,6 +496,11 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     // so all three agree on which part of the (possibly larger) source textures this pixel belongs to.
     float2 srcUv = gPostRegion.xy + i.uv * gPostRegion.zw;
     float3 cRaw = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, srcUv, 0).rgb);
+    // NIGHT VISION HERE, NOT AFTER: cRaw is SCENE-LINEAR radiance, still BEFORE exposure and before
+    // local exposure (both below) -- exactly the scotopic model's input. It applies unconditionally,
+    // auto-exposure on or off (gPostEye.z alone gates it, via averNightVision's own sigma), unlike
+    // the key and dark-adaptation-speed changes above, which only take effect where CSExposure runs.
+    cRaw = averNightVision(cRaw);
 #ifdef AVER_POST_AUTOEXPOSURE
     // The adapted exposure, with the authored one as COMPENSATION applied after local exposure.
     // Kept apart because local exposure decides what is dark against the metered exposure alone:

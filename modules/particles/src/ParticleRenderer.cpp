@@ -15,20 +15,21 @@ namespace {
 constexpr u32 kInitialVertices = 4 * 256;   // 256 particles' worth, across every emitter this frame
 constexpr u32 kInitialIndices  = 6 * 256;
 
-// Applies a row-vector inverse-view-projection matrix to an NDC point and dehomogenises it -- the
-// same manual expansion ParticleSystem.cpp's transformPoint uses, just against invViewProj instead
-// of a world matrix.
-Vec3 unprojectPoint(const f32 ivp[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
+// Applies the row-vector camera-relative inverse view-projection (rhi::PerFrameCB::invViewProjRel)
+// to an NDC point and dehomogenises it -- the same manual expansion ParticleSystem.cpp's
+// transformPoint uses, just against that matrix instead of a world matrix. The result is an offset
+// FROM THE EYE; an absolute point needs camPos added.
+Vec3 unprojectPoint(const f32 ivpRel[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
     const f32 v[4] = {ndcX, ndcY, ndcZ, 1.0f};
     f32 r[4] = {0, 0, 0, 0};
     for (int j = 0; j < 4; ++j)
         for (int i = 0; i < 4; ++i)
-            r[j] += v[i] * ivp[i * 4 + j];
+            r[j] += v[i] * ivpRel[i * 4 + j];
     const f32 invW = r[3] != 0.0f ? 1.0f / r[3] : 1.0f;
     return {r[0] * invW, r[1] * invW, r[2] * invW};
 }
 
-// Recovers the camera's world-space RIGHT and UP axes from invViewProj ALONE -- no separate view
+// Recovers the camera's world-space RIGHT and UP axes from invViewProjRel ALONE -- no separate view
 // matrix exists on IDevice::camera() to read them from directly.
 //
 // WHY THIS IS EXACT, NOT APPROXIMATE. Fix an NDC depth d and vary only ndc.x: for this engine's
@@ -36,14 +37,17 @@ Vec3 unprojectPoint(const f32 ivp[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
 // Z, and ndc.z = f(view-space Z) alone -- so holding ndc.z fixed holds view-space Z fixed. With
 // view-space Z fixed, ndc.x = viewX * xScale / viewZ is LINEAR in viewX, so a finite step in ndc.x
 // maps to a finite step PURELY along the camera's view-space X axis, at ANY step size -- not just in
-// the limit. Unprojecting two such points back through invViewProj and subtracting therefore
+// the limit. Unprojecting two such points back through invViewProjRel and differencing therefore
 // recovers a vector that is exactly parallel to the camera's world-space right axis (view space's
 // X, carried through the view matrix's own rotation), not a first-order approximation of it. The
 // same argument holds for ndc.y and the up axis. Two calls, not four: `center` is shared by both.
-void cameraBasis(const f32 invViewProj[16], Vec3& outRight, Vec3& outUp) {
-    const Vec3 center = unprojectPoint(invViewProj, 0.0f, 0.0f, 0.5f);
-    const Vec3 rightP = unprojectPoint(invViewProj, 0.5f, 0.0f, 0.5f);
-    const Vec3 upP    = unprojectPoint(invViewProj, 0.0f, 0.5f, 0.5f);
+//
+// CAMERA-RELATIVE, so the three points sit a few centimetres from the eye rather than at its world
+// magnitude, and their differences lose nothing however far the camera is from the origin.
+void cameraBasis(const f32 invViewProjRel[16], Vec3& outRight, Vec3& outUp) {
+    const Vec3 center = unprojectPoint(invViewProjRel, 0.0f, 0.0f, 0.5f);
+    const Vec3 rightP = unprojectPoint(invViewProjRel, 0.5f, 0.0f, 0.5f);
+    const Vec3 upP    = unprojectPoint(invViewProjRel, 0.0f, 0.5f, 0.5f);
     outRight = (rightP - center).getSafeNormal();
     outUp    = (upP - center).getSafeNormal();
 }
@@ -328,12 +332,12 @@ void ParticleRenderer::transparentPass(rhi::IRenderContext& ctx) {
     if (!system_ || !res_ || !dev_) return;
     if (!premultPso_ && !additivePso_) return;
 
-    f32 viewProj[16], invViewProj[16], camPosArr[3];
-    if (!dev_->camera(viewProj, invViewProj, camPosArr)) return;
+    f32 viewProj[16], invViewProjRel[16], camPosArr[3];
+    if (!dev_->camera(viewProj, invViewProjRel, camPosArr)) return;
     const Vec3 camPos{camPosArr[0], camPosArr[1], camPosArr[2]};
 
     Vec3 right, up;
-    cameraBasis(invViewProj, right, up);
+    cameraBasis(invViewProjRel, right, up);
     if (right.sizeSquared() < 0.5f || up.sizeSquared() < 0.5f) return;   // a degenerate camera this frame
 
     verts_.clear();

@@ -277,11 +277,13 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
     changed |= track(ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
-    changed |= track(ImGui::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 50.0f));
+    changed |= track(ImGui::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 20.0f));
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Makes this material a light source in ray-driven mode -- brightness at "
-                          "1 metre in the sun's own units (the sun is about 3). 0 = not a light, "
-                          "coloured by Emissive (white if none).");
+        ImGui::SetTooltip("Makes this material a light source when ray tracing is on -- a MULTIPLIER on "
+                          "the light Emissive and this draw's size already, physically, cast: 1 is "
+                          "exactly that, 2 is twice it. 0 = not a light, coloured by Emissive "
+                          "(white if none). A bounding sphere bigger than the visible bulb "
+                          "over-lights; lower this or use a separate bulb mesh.");
 
     ImGui::Separator();
     int uvMode = static_cast<int>(d->uvMode);
@@ -1969,39 +1971,46 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         buildWaterPanel(e);
     } else if (sel_==-4){
         ImGui::TextUnformatted("Post Process"); ImGui::Separator();
-        ImGui::SliderFloat("Exposure", &post_.exposure, 0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        ImGui::Checkbox("Eye Adaptation", &post_.autoExposure);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The exposure adjusts automatically as the view gets brighter or\n"
+                              "darker, like eyes -- quickly toward light, more slowly toward dark.");
+        // STOPS, NOT THE RAW LINEAR MULTIPLIER post_.exposure IS: a linear drag has no sense of
+        // scale attached to it, which is how one landed at 4.05 (+2 stops) and stayed there through
+        // every relaunch, brightening every view enough to mask whatever the engine's own tuned
+        // defaults (RHI.hpp) were actually doing. EV reads the same whether it is compensation on
+        // Eye Adaptation's result or, with Eye Adaptation off, a fixed exposure relative to 1.
+        f32 ev = (post_.exposure > 0.0f) ? std::log2(post_.exposure) : 0.0f;
+        if (ImGui::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
+            post_.exposure = std::exp2(ev);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(post_.autoExposure
-                ? "Exposure compensation on top of Auto Exposure:\n1 = as metered, 2 = one stop brighter, 0.5 = one stop darker."
-                : "Linear multiplier on scene radiance, applied before the tone curve.");
-        ImGui::Checkbox("Auto Exposure", &post_.autoExposure);
+                ? "Compensation on top of Eye Adaptation's own exposure:\n"
+                  "0 = as tuned, +1 = twice as bright, -1 = half."
+                : "Fixed exposure relative to 1, with Eye Adaptation off:\n"
+                  "0 = as tuned, +1 = twice as bright, -1 = half.");
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) post_.exposure = 1.0f;
         if (post_.autoExposure) {
-            ImGui::SliderFloat("Middle Grey", &post_.exposureKey, 0.02f, 0.6f, "%.3f");
-            ImGui::SliderFloat("Adapt Speed", &post_.exposureSpeed, 0.1f, 20.0f, "%.1f/s");
-            ImGui::SliderFloat("Exposure Min", &post_.exposureMin, 0.01f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat("Exposure Max", &post_.exposureMax, 1.0f, 1024.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+            // LIVE READOUT so a value that never moves reads as stuck rather than as adaptation
+            // doing its job -- see IDevice::postExposureReadout for why it lags the eye by a frame
+            // or two. The clamps and histogram cuts it adapts within are tuned engine defaults now
+            // (RHI.hpp), not dials this panel hands out to be dragged somewhere that pins them.
+            f32 metered = 0.0f;
+            if (e.device() && e.device()->postExposureReadout(metered))
+                ImGui::TextDisabled("Adapted to %+.1f EV", std::log2(metered));
         }
-        // LOCAL EXPOSURE, beside auto-exposure because it finishes that job: one exposure per frame
-        // cannot show a sunlit courtyard and the shaded arcade beside it, so dark and bright REGIONS
-        // are pulled toward middle grey (edge-aware bilateral grid, no halos). Works with a fixed
-        // exposure too, so it is not inside the auto-exposure block above.
-        ImGui::SliderFloat("Local Exposure: Shadows", &post_.localExposureShadows, 0.0f, 1.0f, "%.2f");
+        // NIGHT VISION works on a fixed exposure too (Krawczyk/Myszkowski/Seidel 2005, rod-driven
+        // scotopic vision), so it sits beside Eye Adaptation rather than inside its block.
+        bool nightVision = post_.nightVision > 0.5f;
+        if (ImGui::Checkbox("Night Vision", &nightVision))
+            post_.nightVision = nightVision ? 1.0f : 0.0f;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Brightens regions darker than middle grey by this fraction of how far\n"
-                              "below it they sit (0 = off, 1 = fully flattened; up to +4 stops).\n"
-                              "Edge-aware, so a shaded wall beside sunlit stone lifts without a halo.");
-        ImGui::SliderFloat("Local Exposure: Highlights", &post_.localExposureHighlights, 0.0f, 1.0f, "%.2f");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Darkens regions brighter than middle grey by this fraction of how far\n"
-                              "above it they sit (0 = off; at most -2 stops). Keeps sunlit stone from\n"
-                              "clipping once the shadows are lifted.");
+            ImGui::SetTooltip("In very dim light colour fades and shifts blue-grey as the eye's\n"
+                              "rods take over.");
         ImGui::Separator();
         ImGui::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
-        if (post_.bloomIntensity > 0.0f) {
-            ImGui::SliderFloat("Threshold", &post_.bloomThreshold, 0.0f, 8.0f, "%.2f");
-            ImGui::SliderFloat("Knee", &post_.bloomKnee, 0.0f, 2.0f, "%.2f");
-        }
     } else ImGui::TextDisabled("Select an actor in the World Outliner");
     ImGui::End();
 

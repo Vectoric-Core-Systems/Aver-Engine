@@ -133,10 +133,11 @@ public sealed class MaterialBuilder
     public MaterialBuilder CoatF0(float v) { _coatF0 = v; return this; }
 
     /// <summary>
-    /// Makes this material a light source in ray-driven mode. Brightness at 1 metre in the sun's own
-    /// units (the sun itself is about 3) -- 0 is the default and means "not a light". Coloured by
-    /// <see cref="Emissive"/> (white if it is left at zero). Read only by the staged ray-driven
-    /// local-light pass; every other renderer shades this material by its Emissive factor alone.
+    /// Makes this material a light source when ray tracing is on. A MULTIPLIER on the light a glowing
+    /// sphere of this material's <see cref="Emissive"/> and this draw's bounding-sphere size physically
+    /// casts: 1 is exactly that, 2 is twice it -- not a brightness by itself. 0 is the default and
+    /// means "not a light". Coloured by <see cref="Emissive"/> (white if it is left at zero). Without
+    /// ray tracing the material is shaded by its Emissive factor alone.
     /// </summary>
     public MaterialBuilder LightIntensity(float v) { _lightIntensity = v; return this; }
 

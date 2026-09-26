@@ -82,6 +82,15 @@ constexpr u32 kRdGiCandElemBytes = 48;
 // pixel, so this buffer is orders of magnitude smaller than rdVisBuf_/rdGiCandBuf_.
 constexpr u32 kRdShadowTileElemBytes = 4;
 
+// ---- LOCAL LIGHTS (LAMPS) in the single-pass PSRayDriven (voxi.rayDrivenStages 0) ----
+// Whether that megakernel is compiled with the lamp term (AVER_RD_SINGLE_PASS_LAMPS, voxi.hlsl). A C++
+// switch because the megakernel sits at the AMD driver's register limit -- it lost the device before
+// ec35bb5a -- and lamps must be removable from it without touching the shader. false appends
+// ";AVER_RD_SINGLE_PASS_LAMPS=0" to its four compiles (createScenePipelines) AND keeps the light count at
+// 0 for the single pass (scenePass), so the blended replay and ReSTIR's emitter drop never act on lamp
+// light the opaque pixels did not receive.
+constexpr bool kRdSinglePassLamps = true;
+
 // Cascade split blend: 0 is uniform slabs, 1 is logarithmic (equal ratios).
 constexpr f32 kCascadeSplitLambda = 0.85f;
 
@@ -235,10 +244,11 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // staged group -- see rdGiCandBuf_/rdShadowTileBuf_'s own comment (VoxiRenderer.hpp) for why neither
 // is gated on the narrower setting that consumes it.
 //
-// +16, NOT +15, AS OF LOCAL LIGHTS (LAMPS): u19 is CSRdLocalLights' own output, the write side of the
-// local-light history pair (t19 above is its read side) -- rgb = this frame's lamp irradiance x
-// accumulated visibility, a = the accumulated visibility. Stage B reads it back through this same UAV
-// register, the way it reads u12.
+// +16, NOT +15, AS OF LOCAL LIGHTS (LAMPS): u19 is the write side of the local-light history pair (t19
+// above is its read side), written by whichever pass shades the opaque scene with lamps -- CSRdLocalLights
+// (staged), the single-pass PSRayDriven, or PSMainVoxi's opaque RT variants (raster) -- a = the
+// accumulated visibility (rgb unused). Stage B and the
+// staged blended replay read it back through this same UAV register, the way they read u12.
 constexpr u32 kVoxiUavCount = kGiUavCount + 16;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
@@ -353,7 +363,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // u6, and no SRV twin, exactly like u11-u15.
     uav[17] = rhi::SlotKind::StructuredBuffer;      // u17 GI-trace candidate buffer (gRdGiCand)
     uav[18] = rhi::SlotKind::StructuredBuffer;      // u18 shadow-probe tile verdicts (gRdShadowTiles)
-    uav[19] = rhi::SlotKind::Texture2D;             // u19 local-light history (write, CSRdLocalLights)
+    uav[19] = rhi::SlotKind::Texture2D;             // u19 local-light history (write)
     static_assert(kVoxiSrvCount == 20 && kVoxiUavCount == 20 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
@@ -831,8 +841,8 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // giRestirVisibility_ can move to or away from HalfResolution independently of giMode/the
     // rayTracing tier, and onRenderTargetsChanged only ever sees a resize.
     const bool wasVisWanted = giVisHistWanted();
-    // LOCAL LIGHTS (LAMPS): rdLocalHistWanted()'s own edge -- voxi.localLights and voxi.rayDrivenStages
-    // both move it without a resize, the same reason every edge captured here exists.
+    // LOCAL LIGHTS (LAMPS): rdLocalHistWanted()'s own edge -- voxi.localLights moves it without a resize
+    // (and without moving rayTracingWanted()), the same reason every edge captured here exists.
     const bool wasLocalHistWanted = rdLocalHistWanted();
     const u32 wasVis = giRestirVisibility_;
     // STAGED RAY-DRIVEN PASSES (milestone 1): rdVisBuf_/rdSunVisTex_'s OWN edge, for the identical
@@ -1547,9 +1557,11 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // those literals are back in voxi_restir.hlsli.)
     cb_.viewParams[2] = giRestirWanted() ? 1.0f : 0.0f;
     cb_.viewParams[3] = 0.0f;
-    // LOCAL LIGHTS (LAMPS): count and history-valid, 0 for every upload this frame unless
-    // recordStagedRayDriven -- the one place that knows the staged path really runs -- raises them for
-    // its own uploads. Raster, single-pass and the passes below never see a lamp.
+    // LOCAL LIGHTS (LAMPS): count and flags, 0 for every pass prePass itself records (shadow cascades,
+    // GI shadow, voxelise, air visibility) -- none of them lights with lamps, and PSVoxel keeps a lamp's
+    // emission in the volume. Raised afterwards for the scene pass only: at the end of prePass for the
+    // raster scene draws, in scenePass for the single-pass/staged primary (publishLocalLights), and kept
+    // from there through the blended replay.
     cb_.cameraMedium[2] = 0.0f;
     cb_.cameraMedium[3] = 0.0f;
     // y IS THE COHERENCE TILE EDGE, and it is sent whether or not the rays are on: the shader divides
@@ -1772,6 +1784,19 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                            rhi::ResourceState::ShaderResource);
     }
     endShadowHistory();
+
+    // LOCAL LIGHTS (LAMPS) FOR THE RASTER SCENE DRAWS: the backend records every opaque PSMainVoxi draw
+    // after prePass returns, reading cb_ through sceneConstants(), and Voxi gets no call once they are
+    // done -- so the constants are raised HERE, after every upload prePass itself made, and u19 is marked
+    // written here too, exactly as endShadowHistory just marked the sun's history those same draws write.
+    // Nothing later this frame reads u19 back (the blended replay's reuse is staged-only), so no UAV
+    // barrier follows them. A ray-driven frame decides in scenePass instead. A debug-view frame bound no
+    // u19 (rdLocalOutThisFrame_ is 0), so it stays at 0.
+    if (!rayDrivenActive() &&
+        publishLocalLights(localLightsReady(), "the raster scene draws (PSMainVoxi)")) {
+        rdLocalHistFrame_ = rtFrameIndex_;
+        rdLocalHistHash_ = rdLocalLightHash_;
+    }
 }
 
 // ---- W12: recreate or free the injection accumulator for this frame ----
@@ -3154,31 +3179,35 @@ void VoxiRenderer::takeGiSnapshot() {
 }
 
 u32 VoxiRenderer::fitCascades() {
-    f32 invViewProj[16] = {};
+    f32 invViewProjRel[16] = {};
     f32 camPos[3] = {};
     // The forward matrix is captured too, into curViewProj_ -- not used here, but this is where the
     // camera is already being read, and endShadowHistory needs THIS frame's viewProj to become next
     // frame's reprojection source.
-    if (!dev_ || !dev_->camera(curViewProj_, invViewProj, camPos)) return 0;
+    if (!dev_ || !dev_->camera(curViewProj_, invViewProjRel, camPos)) return 0;
 
-    Mat4 invVP;
-    std::memcpy(&invVP.m[0][0], invViewProj, sizeof(invViewProj));
+    Mat4 invVPRel;
+    std::memcpy(&invVPRel.m[0][0], invViewProjRel, sizeof(invViewProjRel));
     const Vec3 eye{camPos[0], camPos[1], camPos[2]};
 
-    // The frustum's eight world-space corners, from clip space. D3D depth is [0,1].
-    Vec3 nearC[4], farC[4];
+    // The frustum's eight corners AS OFFSETS FROM THE EYE (the camera-relative inverse, see
+    // rhi::PerFrameCB::invViewProjRel), and the whole fit stays relative until the centre. Absolute
+    // corners minus the eye would recover the ~2 cm near-plane offset from two |eye|-sized values --
+    // about 1% error at cloud altitude (f32 ulp 0.0156 cm at 2e5 cm), changing every frame the eye
+    // moves -- and every split distance below scales off camNear. D3D depth is [0,1].
+    Vec3 nearR[4], farR[4];
     const f32 nx[4] = {-1, 1, 1, -1};
     const f32 ny[4] = {-1, -1, 1, 1};
     for (int i = 0; i < 4; ++i) {
-        nearC[i] = xformProjected(Vec3{nx[i], ny[i], 0.0f}, invVP);
-        farC[i]  = xformProjected(Vec3{nx[i], ny[i], 1.0f}, invVP);
+        nearR[i] = xformProjected(Vec3{nx[i], ny[i], 0.0f}, invVPRel);
+        farR[i]  = xformProjected(Vec3{nx[i], ny[i], 1.0f}, invVPRel);
     }
 
     // View depth at each plane, measured along the view axis rather than radially.
-    Vec3 fwd = (farC[0] + farC[1] + farC[2] + farC[3]) * 0.25f - eye;
+    Vec3 fwd = (farR[0] + farR[1] + farR[2] + farR[3]) * 0.25f;
     fwd = fwd.getSafeNormal();
-    const f32 camNear = dot(nearC[0] - eye, fwd);
-    const f32 camFar  = dot(farC[0] - eye, fwd);
+    const f32 camNear = dot(nearR[0], fwd);
+    const f32 camFar  = dot(farR[0], fwd);
     if (!(camFar > camNear + 1e-3f)) return 0;
 
     const f32 zNear = camNear;
@@ -3200,24 +3229,28 @@ u32 VoxiRenderer::fitCascades() {
         const f32 uniSplit = zNear + (zFar - zNear) * p;
         f32 sliceFar = kCascadeSplitLambda * logSplit + (1.0f - kCascadeSplitLambda) * uniSplit;
 
-        // The corners of this slice, interpolated along the frustum's own edges.
+        // The corners of this slice, interpolated along the frustum's own edges -- still relative to
+        // the eye.
         const f32 tN = (sliceNear - camNear) / (camFar - camNear);
         const f32 tF = (sliceFar  - camNear) / (camFar - camNear);
         Vec3 corner[8];
         for (int i = 0; i < 4; ++i) {
-            corner[i]     = nearC[i] + (farC[i] - nearC[i]) * tN;
-            corner[i + 4] = nearC[i] + (farC[i] - nearC[i]) * tF;
+            corner[i]     = nearR[i] + (farR[i] - nearR[i]) * tN;
+            corner[i + 4] = nearR[i] + (farR[i] - nearR[i]) * tF;
         }
 
-        Vec3 centre{0, 0, 0};
-        for (const Vec3& v : corner) centre = centre + v;
-        centre = centre * 0.125f;
+        Vec3 centreRel{0, 0, 0};
+        for (const Vec3& v : corner) centreRel = centreRel + v;
+        centreRel = centreRel * 0.125f;
         f32 radius = 0.0f;
         for (const Vec3& v : corner) {
-            const f32 d = (v - centre).size();
+            const f32 d = (v - centreRel).size();
             if (d > radius) radius = d;
         }
         radius = std::ceil(radius * 16.0f) / 16.0f;
+
+        // Absolute once, for the light-space matrix, the texel snap and the per-draw cull below.
+        const Vec3 centre = eye + centreRel;
 
         // NO UNION WITH THE GI VOLUME HERE ANY MORE -- see kGiShadowSize's comment for the measured
         // cost of the old union. giShadowPass/fitGiShadow answer the volume separately now; every
@@ -3247,7 +3280,7 @@ u32 VoxiRenderer::fitCascades() {
         std::memcpy(cb_.cascadeViewProj[c], &lvp.m[0][0], sizeof(lvp.m));
 
         // Radial, because the cascades are fitted to bounding spheres.
-        cb_.cascadeSplit[c][0] = (centre - eye).size() + radius;
+        cb_.cascadeSplit[c][0] = centreRel.size() + radius;
         cb_.cascadeSplit[c][1] = texel * 1.5f;   // normal-offset bias, world units
         cb_.cascadeSplit[c][2] = 0.0f;
         cb_.cascadeSplit[c][3] = 0.0f;
@@ -3610,14 +3643,24 @@ bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::Materia
 // WHAT MAKES A LIGHT: an AUTHORED draw (the hashDrawMaterialInto test -- an unauthored draw's d.mat is
 // not a material this project wrote) whose captured MaterialConstants carry MaterialFlag_Light with
 // lightIntensity > 0, and whose mesh reported bounds (a negative radius has no sphere to light from).
-// lightIntensity is the brightness at 1 metre in the sun's units (SkyAtmosphere::sunIntensity), so a
-// lamp and the sun compose on the same scale; the colour is emissiveFactor normalised to a max
-// component of 1 (white when all zero), so emissive brightness and lamp brightness stay separate
-// knobs.
+// lightIntensity is a MULTIPLIER on the light the emitter's own glow and size physically cast, not a
+// brightness value by itself: the glow is emissiveFactor's peak channel treated as a Lambertian
+// sphere's radiance L, the size is the draw's bounding sphere radius r, and E1m = pi * L * r^2 (r in
+// metres) is the irradiance that sphere casts at 1 metre, in the sun's units (SkyAtmosphere::
+// sunIntensity) -- so 1 lights exactly what the material's own glow and size cast, 2 lights twice
+// that, and a lamp and the sun still compose on the same scale. A brighter glow therefore lights
+// more, as it would. The colour is emissiveFactor normalised to a max component of 1 (white when all
+// zero, so a lamp with no emissive factor still has an L and a colour to light with -- see the L
+// fallback below).
 //
-// RANGE: where irradiance I / d^2 (d in metres) falls to 0.002 of the sun's units -- d = sqrt(I / 0.002)
-// metres -- clamped to at least four radii (a lamp always lights its own surroundings) and at most
-// 50 m (the per-pixel loop must end somewhere). The shader fades to zero at it.
+// RANGE: where irradiance E1m * lightIntensity / d^2 (d in metres) falls to kLocalLightRangeCutoff of
+// the sun's units -- d = sqrt(E1m * lightIntensity / kLocalLightRangeCutoff) metres -- clamped to at
+// least four radii (a lamp always lights its own surroundings) and at most 50 m (the per-pixel loop
+// must end somewhere). The shader fades to zero at it. COST is about how many lamps a pixel has in
+// range: MEASURED on NewSponza's 22 lamps under the earlier absolute brightness (intensity 2, cutoff
+// 0.01, ~14 m ranges) the lamps cost 1.6 ms of a 16 ms frame, and a 32 m range put nearly every lamp
+// in every pixel's two loops. E1m for a bulb a few centimetres across is around 0.1, so 0.001 keeps
+// its range near that same ~14 m (chosen, not measured); 0.01 would cut it off at about 3 m.
 //
 // CANONICAL ORDER: drawsPrev_ is reordered every frame (occlusionOrder_), and the importance order
 // shifts whenever the camera moves, but the shader's light pick is weighted per pixel and does not
@@ -3632,12 +3675,18 @@ void VoxiRenderer::buildLocalLights() {
     rdLocalLightCand_.clear();
     if (!res_ || !bindings_) return;
 
-    f32 vp[16], ivp[16], eye[3] = {};
-    const bool wanted = settings_.localLights && rdLocalLightsCsPso_ != 0 && rdStagedWanted() &&
-                        rtActive_ && dev_ && dev_->backend() == rhi::Backend::D3D12 &&
-                        dev_->camera(vp, ivp, eye);
+    f32 vp[16], eye[3] = {};
+    // Every ray-traced scene mode lights with the list (raster, single-pass, staged), so neither the
+    // render mode nor CSRdLocalLights' pipeline gates it here -- publishLocalLights decides per pass.
+    // No inverse needed: every lamp candidate below works from eye and the draw's own bounds.
+    const bool wanted = settings_.localLights && rtActive_ && dev_ &&
+                        dev_->backend() == rhi::Backend::D3D12 && dev_->camera(vp, nullptr, eye);
     // Every draw whose material ASKS to be a light, kept or not -- see rdLocalLightsCarryAll_.
     u32 flagged = 0;
+    // At this cutoff, a white Lambertian surface receives kLocalLightRangeCutoff / pi ~ 3e-4 of the
+    // lamp's radiance -- below display precision even under strong auto-exposure brightening. See the
+    // function comment above for how this compares to the old, pre-physical-scaling cutoff.
+    constexpr f32 kLocalLightRangeCutoff = 0.001f;
     if (wanted) {
         for (const Draw& d : drawsPrev_) {
             if (d.matBytes < sizeof(pbr::MaterialConstants)) continue;
@@ -3660,15 +3709,29 @@ void VoxiRenderer::buildLocalLights() {
             f32 col[3] = {std::max(mc.emissiveFactor[0], 0.0f), std::max(mc.emissiveFactor[1], 0.0f),
                           std::max(mc.emissiveFactor[2], 0.0f)};
             const f32 peak = std::max(col[0], std::max(col[1], col[2]));
+            // L is the glow's own radiance -- the peak channel taken BEFORE colour is normalised out
+            // of it below, so a brighter emissiveFactor casts more light at the same lightIntensity
+            // than a dim one does. A lamp material can carry lightIntensity with no emissiveFactor at
+            // all (peak <= 0): it still has to be a light, so it falls back to L = 1 with a white
+            // colour rather than casting nothing.
+            f32 L;
             if (peak > 0.0f && std::isfinite(peak)) {
+                L = peak;
                 for (f32& c : col) c /= peak;
             } else {
+                L = 1.0f;
                 col[0] = col[1] = col[2] = 1.0f;
             }
-            const f32 maxColour = std::max(col[0], std::max(col[1], col[2]));
+            const f32 maxColour = std::max(col[0], std::max(col[1], col[2]));   // always 1, post-normalise
             const f32 radius = std::max(d.boundsRadius, 1.0f);
+            // E1m: the irradiance a Lambertian sphere of radiance L and this radius casts at 1 metre
+            // -- pi * L * r^2 with r in metres (the two factors of 0.01 for cm -> m become 1e-4).
+            // lightIntensity then MULTIPLIES this physically-consistent output rather than standing in
+            // for it: 1 is exactly the light the glow and size cast, 2 is twice that.
+            const f32 E1m = kPi * L * (radius * radius) * 1e-4f;
+            const f32 output = E1m * intensity;
             // min(max(...)), HLSL clamp's order: a sphere wider than 12.5 m still gets 50 m, not more.
-            const f32 range = std::min(std::max(100.0f * std::sqrt(intensity * maxColour / 0.002f),
+            const f32 range = std::min(std::max(100.0f * std::sqrt(output * maxColour / kLocalLightRangeCutoff),
                                                 radius * 4.0f),
                                        5000.0f);
 
@@ -3677,14 +3740,14 @@ void VoxiRenderer::buildLocalLights() {
             c.light.posRadius[1] = d.boundsCentre[1];
             c.light.posRadius[2] = d.boundsCentre[2];
             c.light.posRadius[3] = radius;
-            c.light.radianceRange[0] = col[0] * intensity;
-            c.light.radianceRange[1] = col[1] * intensity;
-            c.light.radianceRange[2] = col[2] * intensity;
+            c.light.radianceRange[0] = col[0] * output;
+            c.light.radianceRange[1] = col[1] * output;
+            c.light.radianceRange[2] = col[2] * output;
             c.light.radianceRange[3] = range;
             const f32 dx = (d.boundsCentre[0] - eye[0]) * 0.01f;   // cm -> m
             const f32 dy = (d.boundsCentre[1] - eye[1]) * 0.01f;
             const f32 dz = (d.boundsCentre[2] - eye[2]) * 0.01f;
-            c.importance = intensity / std::max(dx * dx + dy * dy + dz * dz, 1.0f);
+            c.importance = output / std::max(dx * dx + dy * dy + dz * dz, 1.0f);
             rdLocalLightCand_.push_back(c);
         }
     }
@@ -3749,6 +3812,32 @@ void VoxiRenderer::buildLocalLights() {
         res_->setSrvBuffer(bindings_, 18, rdLocalLightsPlaceholder_, sizeof(RdLocalLight), 1, 0);
         rdLocalLightsBound_ = rdLocalLightsPlaceholder_;
     }
+}
+
+// LOCAL LIGHTS (LAMPS): see the header's own comment. The history is trusted only when a scene pass
+// wrote it LAST frame (rdLocalHistFrame_) under the SAME light list (rdLocalHistHash_) and the shadow
+// history's own reprojection is usable this frame (rtHistParams.y > 0; its 0.5 "sun moved" state is
+// still usable here -- lamps do not depend on the sun). Which mode wrote it does not matter: all three
+// write the same quantity into the same pair, texel for texel.
+bool VoxiRenderer::publishLocalLights(bool live, const char* pass) {
+    if (!live) {
+        cb_.cameraMedium[2] = 0.0f;
+        cb_.cameraMedium[3] = 0.0f;
+        return false;
+    }
+    const bool histValid = cb_.rtHistParams[1] > 0.25f && rdLocalHistFrame_ != 0 &&
+                           rdLocalHistFrame_ + 1u == rtFrameIndex_ &&
+                           rdLocalHistHash_ == rdLocalLightHash_;
+    cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
+    // Two bits: 1 = history valid; 2 = every lamp-flagged draw is a live light this frame, so the GI
+    // estimators may drop an emitter's own emission (rdLocalLightsCarryAll_).
+    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f);
+    if (!rdLocalLightsRunLogged_) {
+        rdLocalLightsRunLogged_ = true;
+        AVER_INFO("[Voxi] local lights running: {} lamp(s) this frame, shaded by {}",
+                  rdLocalLightCount_, pass);
+    }
+    return true;
 }
 
 // Renders the replayed draw list into each cascade's quadrant of the shadow atlas, depth only.
@@ -4354,6 +4443,11 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         const rhi::PipelineHandle rdPso =
             gbufBound ? (rayDrivenTexGbufPso_ ? rayDrivenTexGbufPso_ : rayDrivenGbufPso_)
                       : (rayDrivenTexPso_     ? rayDrivenTexPso_     : rayDrivenPso_);
+        // LOCAL LIGHTS (LAMPS): raised before this draw's upload -- it shades lamps and writes u19 itself
+        // when compiled with the lamp term (kRdSinglePassLamps), and gets 0 otherwise. Left raised for the
+        // blended replay, which lights its panes from the same list.
+        const bool lamps = publishLocalLights(kRdSinglePassLamps && localLightsReady(),
+                                              "the single-pass PSRayDriven");
         ctx.setPipeline(rdPso);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -4362,6 +4456,13 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         ctx.drawFullscreen();
+        // No UAV barrier on u19 after it: nothing later this frame reads it (the blended replay reads
+        // u19 only under giShadowParams.w bit 16, which only the staged path sets), and next frame's
+        // beginShadowHistory transition orders this write before t19's reads.
+        if (lamps) {
+            rdLocalHistFrame_ = rtFrameIndex_;
+            rdLocalHistHash_ = rdLocalLightHash_;
+        }
         return;
     }
     if (!debugPso_) return;
@@ -4387,7 +4488,7 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
 // through) rather than assumed, because every one of the four points below is a documented way to
 // remove the device if it is wrong, not a wrong pixel:
 //   1. A compute pipeline bound via ctx.setPipeline gets the SAME device per-frame constants
-//      (gInvViewProj/gCamPos/gSceneViewport, kEngineFrameConstantRegister) a graphics one does:
+//      (gInvViewProjRel/gCamPos/gSceneViewport, kEngineFrameConstantRegister) a graphics one does:
 //      D3D12ResourceFactory::rootSignature reserves a root CBV parameter for every constant slot a
 //      PipelineLayout does not claim as root constants, unconditionally, for BOTH compute and
 //      graphics layouts (the loop building `params[]` has no `if (mesh)`/`if (compute)` gate at
@@ -4462,31 +4563,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // the count -- CSRdGi/CSRdGiTrace leave a lamp's own emission out of ReSTIR's candidate hits while
     // it is non-zero (the lamp is lit directly instead), CSRdLocalLights and Stage B act on it. Raised
     // for some of those uploads and not others, a lamp would count twice or not at all. prePass zeroed
-    // both fields for every upload before this one; they go back to 0 after Stage B.
-    //
-    // The history is trusted only when CSRdLocalLights wrote it LAST frame (rdLocalHistFrame_) under
-    // the SAME light list (rdLocalHistHash_) and the shadow history's own reprojection is usable this
-    // frame (rtHistParams.y > 0; its 0.5 "sun moved" state is still usable here -- lamps do not depend
-    // on the sun).
-    const bool localLights = rdLocalLightCount_ > 0 && settings_.localLights && rdLocalLightsCsPso_ != 0 &&
-                             rdLocalOutThisFrame_ != 0 && gx && gy;
-    if (localLights) {
-        const bool histValid = cb_.rtHistParams[1] > 0.25f && rdLocalHistFrame_ != 0 &&
-                               rdLocalHistFrame_ + 1u == rtFrameIndex_ &&
-                               rdLocalHistHash_ == rdLocalLightHash_;
-        cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
-        // Two bits: 1 = history valid; 2 = every lamp-flagged draw is a live light this frame, so the
-        // GI estimators may drop an emitter's own emission (rdLocalLightsCarryAll_).
-        cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f);
-        if (!rdLocalLightsRunLogged_) {
-            rdLocalLightsRunLogged_ = true;
-            AVER_INFO("[Voxi] local lights running: {} lamp(s) this frame (GPU span 'Voxi RD local "
-                      "lights' under voxi.rayDrivenStageTiming)", rdLocalLightCount_);
-        }
-    } else {
-        cb_.cameraMedium[2] = 0.0f;
-        cb_.cameraMedium[3] = 0.0f;
-    }
+    // both fields for every upload before this one; they stay as decided here through the blended
+    // replay. Staged adds one requirement to the others: CSRdLocalLights itself compiled.
+    const bool localLights = publishLocalLights(localLightsReady() && rdLocalLightsCsPso_ != 0 && gx && gy,
+                                                "CSRdLocalLights (GPU span 'Voxi RD local lights' under "
+                                                "voxi.rayDrivenStageTiming)");
 
     {
         rhi::ScopedGpuStat stat(ctx, "Voxi RD visibility");
@@ -4555,9 +4636,21 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // leaves it in ShaderResource (D3D12 PIXEL_SHADER_RESOURCE only), but CSRdShadow's reprojection and
     // CSRdLocalLights' (rtReprojectTexel) read it from COMPUTE -- the state bug 21524cd3 fixed for the
     // post chain. Back to ShaderResource after the group, where beginShadowHistory expects it next frame.
-    const rhi::TextureHandle shadowHistRead = rtShadowHist_[1 - rtHistWriteIdx_];
+    // rtHistWriteIdx_, NOT 1 - rtHistWriteIdx_: endShadowHistory() already flipped the index at the end of
+    // prePass, so the side bound at t6 THIS frame is the one the index now names; the other one is u2,
+    // sitting in UnorderedAccess (the same flip giNrmWrite's comment below describes).
+    const rhi::TextureHandle shadowHistRead = rtShadowHist_[rtHistWriteIdx_];
     if (shadowHistRead)
         ctx.textureBarrier(shadowHistRead, rhi::ResourceState::ShaderResource,
+                           rhi::ResourceState::NonPixelShaderResource);
+    // LOCAL LIGHTS (LAMPS): t19, the same visit for the same reason -- it rests in ShaderResource because
+    // the raster and single-pass scene passes read it from PIXEL shaders, while CSRdLocalLights reads it
+    // from compute. The read side is simply the half of the pair u19 (rdLocalOutThisFrame_) is not.
+    // Only when that dispatch runs; nothing else in this group reads t19.
+    const rhi::TextureHandle localHistRead =
+        localLights ? (rdLocalOutThisFrame_ == rdLocalHist_[0] ? rdLocalHist_[1] : rdLocalHist_[0]) : 0;
+    if (localHistRead)
+        ctx.textureBarrier(localHistRead, rhi::ResourceState::ShaderResource,
                            rhi::ResourceState::NonPixelShaderResource);
     {
         // Wraps every dispatch below -- see this function's own comment on why no barrier or
@@ -4789,6 +4882,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (shadowHistRead)
         ctx.textureBarrier(shadowHistRead, rhi::ResourceState::NonPixelShaderResource,
                            rhi::ResourceState::ShaderResource);
+    if (localHistRead)
+        ctx.textureBarrier(localHistRead, rhi::ResourceState::NonPixelShaderResource,
+                           rhi::ResourceState::ShaderResource);
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
     // dispatches above wrote them -- all four barriers sit here, unconditionally, rather than only
     // behind each dispatch's own `if`: a barrier against a texture nothing wrote this frame is a
@@ -4799,9 +4895,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     ctx.uavBarrierTexture(rdGiTex_);
     ctx.uavBarrierTexture(rdAoTex_);
     ctx.uavBarrierTexture(rdReflTex_);
-    // LOCAL LIGHTS (LAMPS): Stage B reads gRdLocalOut through u19 the way it reads u12 above, so it gets
-    // the same barrier -- conditional only because u19 may be a placeholder (or nothing real) on a
-    // frame without lamps, when Stage B does not read it at all (the count it tests is 0).
+    // LOCAL LIGHTS (LAMPS): Stage B (and after it the blended replay's reuse) reads gRdLocalOut through u19
+    // the way it reads u12 above, so it gets the same barrier -- conditional only because u19 may be a
+    // placeholder (or nothing real) on a frame without lamps, when neither reads it (the count is 0).
     if (localLights) ctx.uavBarrierTexture(rdLocalOutThisFrame_);
     // THE GI SURFACE-NORMAL HISTORY (u8) HAS TWO WRITERS NOW: CSRdGi (hit pixels, inside
     // giRestirIndirect) and Stage B's own miss branch (the sky sentinel). The texels are disjoint and
@@ -4862,10 +4958,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     cb_.viewParams[3] = giCbWrittenThisFrame_
                       ? static_cast<f32>((1u << 17) | ((nrdFrame_ & 1u) << 16))
                       : 0.0f;
-    // LOCAL LIGHTS (LAMPS): back to 0 for the blended replay, which gets no lamp light (PSMainVoxi has
-    // no local-light term), so its own ReSTIR GI must keep a lamp's emission rather than leave it out.
-    cb_.cameraMedium[2] = 0.0f;
-    cb_.cameraMedium[3] = 0.0f;
+    // LOCAL LIGHTS (LAMPS): cameraMedium z/w are deliberately NOT reset here. The blended replay lights
+    // its panes with the same lamps (PSMainVoxi's blended term, reading this frame's staged visibility
+    // through u19 where bit 16 below proves it sits on the lit surface), so its ReSTIR GI must drop a
+    // lamp's emission exactly as the opaque stages did.
 
     // BIT 16, SET LAST: tells the blended replay (D3D12Device::endFrame, which picks cb_ up through
     // sceneConstants() after scenePass returns) that gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex hold
@@ -4904,7 +5000,8 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
 
 // LOCAL LIGHTS (LAMPS): points t19/u19 back at the placeholder and THEN destroys the pair -- a
 // descriptor must never outlive the texture it names (aver-view-outlives-its-buffer) -- and drops
-// every flag that described the pair's state or contents. Idempotent.
+// every flag that described the pair's state or contents: unprimed, a recreated pair is taken to rest in
+// its creation state (ShaderResource, see ensureShadowHistory), and no history is trusted. Idempotent.
 void VoxiRenderer::releaseLocalHistory() {
     if (res_ && bindings_ && rdLocalHistPlaceholder_ && (rdLocalHist_[0] || rdLocalHist_[1])) {
         res_->setSrv(bindings_, 19, rdLocalHistPlaceholder_);
@@ -5044,10 +5141,10 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     if (!rtReflHist_[0] || !rtReflHist_[1]) return false;
 
     // LOCAL LIGHTS (LAMPS): the lamp visibility history, same size and ping-pong as rtShadowHist_ so
-    // the shadow history's reprojection/depth test addresses it texel for texel. Own desc, because it
-    // rests in NonPixelShaderResource (see rdLocalHist_'s own comment) where the pairs here rest in
-    // ShaderResource. A FAILED ALLOCATION IS NOT FATAL, the giVisHist_ posture: the placeholders stay
-    // bound, the light count stays 0, and everything else in this function still gets created.
+    // the shadow history's reprojection/depth test addresses it texel for texel, and resting in
+    // ShaderResource like it (see rdLocalHist_'s own comment). A FAILED ALLOCATION IS NOT FATAL, the
+    // giVisHist_ posture: the placeholders stay bound, the light count stays 0, and everything else in
+    // this function still gets created.
     if (rdLocalHistWanted()) {
         rhi::TextureDesc ld;
         ld.dim    = rhi::TextureDim::Tex2D;
@@ -5056,7 +5153,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         ld.mips   = 1;
         ld.format = rhi::Format::RGBA16F;
         ld.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
-        ld.initialState = rhi::ResourceState::NonPixelShaderResource;
+        ld.initialState = rhi::ResourceState::ShaderResource;
         ld.debugName = "Voxi RD local-light history A";
         rdLocalHist_[0] = res_->createTexture(ld);
         ld.debugName = "Voxi RD local-light history B";
@@ -5785,8 +5882,8 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Same reasoning again: giRestirParams.x says whether t12/u6/u7 are bound to real resources this
     // frame, and must not still read 1.0 from a previous frame once this one returns early below.
     cb_.giRestirParams[0] = 0.0f;
-    // LOCAL LIGHTS (LAMPS): and whether u19 is a real texture this frame -- recordStagedRayDriven
-    // dispatches CSRdLocalLights only against what this function actually bound.
+    // LOCAL LIGHTS (LAMPS): and whether u19 is a real texture this frame -- every lamp-shading scene pass
+    // (localLightsReady()) writes only to what this function actually bound.
     rdLocalOutThisFrame_ = 0;
     // ---- F5: THE POISON-VIEW FLAG, PUBLISHED HERE SO IT REACHES giMode 0 TOO ----
     // This USED TO be written only inside the giSurfPosHist_/giSurfNrmHist_ block further down,
@@ -5898,15 +5995,16 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     }
 
     // ---- LOCAL LIGHTS (LAMPS): u19/t19, swapped on the SAME writeIdx/readIdx as the shadow pair ----
-    // Same transitions as rtShadowHist_ above, except the SRV state is NonPixelShaderResource: t19's
-    // only reader is CSRdLocalLights, a compute shader (see rdLocalHist_'s own comment). Own primed flag,
-    // since the pair can appear on an rdLocalHistWanted() edge independently of the shadow pair's.
+    // The same transitions as rtShadowHist_ above, SRV side included: t19 rests in ShaderResource because
+    // the raster and single-pass scene passes read it from pixel shaders; CSRdLocalLights, its one compute
+    // reader, visits NonPixelShaderResource around its own dispatch (recordStagedRayDriven). Own primed
+    // flag, since the pair can appear on an rdLocalHistWanted() edge independently of the shadow pair's.
     if (rdLocalHist_[writeIdx] && rdLocalHist_[readIdx]) {
-        ctx.textureBarrier(rdLocalHist_[writeIdx], rhi::ResourceState::NonPixelShaderResource,
+        ctx.textureBarrier(rdLocalHist_[writeIdx], rhi::ResourceState::ShaderResource,
                            rhi::ResourceState::UnorderedAccess);
         if (rdLocalHistPrimed_)
             ctx.textureBarrier(rdLocalHist_[readIdx], rhi::ResourceState::UnorderedAccess,
-                               rhi::ResourceState::NonPixelShaderResource);
+                               rhi::ResourceState::ShaderResource);
         res_->setUav(bindings_, 19, rdLocalHist_[writeIdx], 0);
         res_->setSrv(bindings_, 19, rdLocalHist_[readIdx]);
         rdLocalOutThisFrame_ = rdLocalHist_[writeIdx];
@@ -6177,8 +6275,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             //
             // voxi.nrdLegacyCamera (default OFF) reinstates the exact OLD, WRONG encoding below for an
             // A/B comparison against this fix without a rebuild -- see its own console entry.
-            f32 camVp[16] = {}, camIvp[16] = {}, camEye[3] = {};
-            const bool haveCamera = dev_ && dev_->camera(camVp, camIvp, camEye);
+            f32 camVp[16] = {}, camEye[3] = {};
+            // No inverse needed: CameraFactor factors camVp itself, and nothing here unprojects.
+            const bool haveCamera = dev_ && dev_->camera(camVp, nullptr, camEye);
             bool cameraReady = false;
             if (nrdLegacyCamera_) {
                 // EXACTLY today's pre-fix encoding, both halves of it: identity worldToView, and
@@ -6449,8 +6548,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     cb_.cameraMedium[0] = cb_.cameraMedium[1] = 0.0f;
     cb_.causticMin[3] = 0.0f;
     {
-        f32 vp[16], ivp[16], eye[3] = {};
-        if (dev_ && dev_->camera(vp, ivp, eye)) {
+        f32 vp[16], eye[3] = {};
+        // No inverse needed: this block only tests eye against each volume's absolute AABB.
+        if (dev_ && dev_->camera(vp, nullptr, eye)) {
             // drawsPrev_, NOT draws_ -- a probe caught this read wrong once. beginScene() swaps this
             // frame's list into drawsPrev_ and clears draws_ before any pass runs, so draws_ is EMPTY
             // here; same list buildAccelerationStructures reads, for the same reason.
@@ -6606,8 +6706,9 @@ void VoxiRenderer::endShadowHistory() {
     rtHistValid_ = true;
     rtHistPrimed_ = true;   // the write side just bound above now sits in UnorderedAccess as the read side
     // LOCAL LIGHTS (LAMPS): resource state only, same reasoning as rtHistPrimed_ -- the side bound at
-    // u19 went to UnorderedAccess in beginShadowHistory whether or not CSRdLocalLights then wrote it.
-    // Content trust is rdLocalHistFrame_/rdLocalHistHash_, set where the dispatch is recorded.
+    // u19 went to UnorderedAccess in beginShadowHistory whether or not a scene pass then wrote it.
+    // Content trust is rdLocalHistFrame_/rdLocalHistHash_, set where that pass is recorded (the raster
+    // draws: at the end of prePass, just after this call).
     if (rdLocalOutThisFrame_) rdLocalHistPrimed_ = true;
     // giHistValid_ becomes true only once beginShadowHistory actually bound and wrote the
     // giSurfPosHist_/giSurfNrmHist_ pair THIS frame (cb_.giRestirParams.x, mirrored here rather
@@ -7508,7 +7609,9 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // The single-pass PSRayDriven variants only (rayDrivenStages 0): the voxi.rt* cost toggles become
     // compile-time constants there, because with all four live the megakernel lost the device on AMD.
     // See rtGiShadowBits() in voxi_rt.hlsli. The staged compute stages and PSMainVoxi do not take it.
-    static constexpr const char* kRdSinglePassDefs = ";AVER_RD_SINGLE_PASS=1";
+    // kRdSinglePassLamps (file scope) rides the same string, so all four single-pass compiles take it.
+    static constexpr const char* kRdSinglePassDefs =
+        kRdSinglePassLamps ? ";AVER_RD_SINGLE_PASS=1" : ";AVER_RD_SINGLE_PASS=1;AVER_RD_SINGLE_PASS_LAMPS=0";
     const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
@@ -7804,9 +7907,9 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         }
         // LOCAL LIGHTS (LAMPS): CSRdLocalLights, compiled exactly like csShadow -- same layout (so the
         // staged root signature is shared), csDefs and SM 6.6 -- since it reprojects into its history
-        // through the shadow history's own reprojection and depth test. Optional: a failure leaves lamps
-        // unlit (the light count stays 0) and never takes the staged path down with it --
-        // rdStagedActive() does not inspect this member.
+        // through the shadow history's own reprojection and depth test. Optional: a failure leaves the
+        // staged path's lamps unlit (its light count stays 0; raster and single-pass do not use it) and
+        // never takes the staged path down with it -- rdStagedActive() does not inspect this member.
         const rhi::ShaderHandle csLocalLights = compile("CSRdLocalLights", rhi::ShaderStage::Compute, 66,
                                                         rasterDefs(csDefs.c_str()).c_str());
         if (csLocalLights) {

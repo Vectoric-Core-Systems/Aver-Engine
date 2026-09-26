@@ -32,7 +32,7 @@
 //     voxi_restir.hlsli, it is plain, guard-free text spliced into an already-open conditional,
 //     exactly as if it had never left voxi.hlsl.
 //   - the shared and material preludes voxi.hlsl is textually the tail of: gCamPos, gViewProj,
-//     gInvViewProj and the rest of the camera block; gMaterialSampler; the AVER_MAT_* flag bits;
+//     gInvViewProjRel and the rest of the camera block; gMaterialSampler; the AVER_MAT_* flag bits;
 //     averVolumeTransmittance, averSunRadiance, averSkyIrradiance, averSkyRadianceCheap, gAmbient,
 //     PI. See voxi.hlsl's own file-level comment for what those preludes are and why a bad
 //     declaration anywhere in this chain fails every entry point at once, not just the ones that
@@ -147,7 +147,7 @@ struct RtMaterial {
 
     // Lamp brightness at 1 metre in the sun's units, mirroring MaterialConstants::lightIntensity at
     // offset 160 (took the struct from 160 to 176 bytes). > 0 is what sets AVER_MAT_LIGHT, which turns
-    // each draw using the material into a sphere light for CSRdLocalLights (voxi.hlsl). The RT table
+    // each draw using the material into a sphere light (gRdLocalLights, voxi.hlsl). The RT table
     // uploads MaterialConstants bytes verbatim, so the pad must stay declared for the stride.
     float  lightIntensity;
     float3 _lightPad;
@@ -268,8 +268,9 @@ float4 averRtSampleSlotGraph(uint slot, float2 uv) {
 // WHY THIS IS NOT ddx(uv)/ddy(uv). A pixel shader's implicit derivatives describe the SCREEN
 // coordinate; in a fullscreen ray pass the neighbouring lane may have hit a different triangle, a
 // different object, or nothing, so those derivatives are meaningless here. What IS available is
-// rdRayDx/rdRayDy -- the neighbouring pixels' own primary rays, reconstructed analytically from
-// gInvViewProj and scaled by this ray's hitT, already built in this shader for the shadow disc.
+// rdRayDx/rdRayDy -- the neighbouring pixels' own primary rays, reconstructed analytically via
+// averViewRayDir (through gInvViewProjRel) and scaled by this ray's hitT, already built in this
+// shader for the shadow disc.
 // That is a real world-space footprint; this turns it into a UV-space one.
 void averRtUvGrad(RtMaterial mat, RtInstance inst, float3 N,
                   float3 p0, float3 p1, float3 p2,
@@ -928,26 +929,42 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
     return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? float3(0, 0, 0) : float3(1, 1, 1);
 }
 
-// ---- LOCAL LIGHTS: lamps lit the way the sun is (staged ray-driven only) ----
+// ---- LOCAL LIGHTS: lamps lit the way the sun is ----
 //
 // A material with lightIntensity > 0 (AVER_MAT_LIGHT) turns every draw using it into a small SPHERE
 // light: the draw's world bounding sphere, coloured by its emissiveFactor. VoxiRenderer gathers at most
-// 32 of them per frame into gRdLocalLights (t18, voxi.hlsl) and CSRdLocalLights (voxi.hlsl) lights each
-// pixel with them: the summed diffuse irradiance of every light in range, times ONE stochastic shadow
-// ray's visibility accumulated over frames through the sun history's own reprojection.
+// 32 of them per frame into gRdLocalLights (t18, voxi.hlsl). Each lit pixel gets ONE stochastic shadow
+// ray toward one of them, accumulated over frames through the sun history's own reprojection
+// (rdLocalLightsVisibility, voxi.hlsl), and every light in range shaded through the sun's own BRDF
+// times that visibility (rdLocalLightsShade, voxi.hlsl) -- in the staged passes (CSRdLocalLights +
+// Stage B), the single-pass PSRayDriven and PSMainVoxi alike.
 //
 // Declared here rather than beside gRdLocalLights because voxi_restir.hlsli, #included straight after
-// this file and before voxi.hlsl's staged declarations, needs rdLocalLightCount() too (the emitter's
-// own emission leaves ReSTIR GI's candidate hits while these lights carry it).
+// this file and before voxi.hlsl's staged declarations, needs rdLocalCarriesEmitters() too (the
+// emitter's own emission leaves ReSTIR GI's candidate hits while these lights carry it).
 //
 // posRadius     = world centre (cm), sphere radius (cm, >= 1).
-// radianceRange = rgb: colour * lightIntensity, i.e. the irradiance at 1 metre in the sun's units
-//                 (averSunRadiance()); w: range in cm, past which the light contributes nothing.
+// radianceRange = rgb: colour * (the sphere's own 1-metre irradiance, from its emissive peak and
+//                 posRadius.w, times lightIntensity -- VoxiRenderer::buildLocalLights derives this,
+//                 not the shader), in the sun's units (averSunRadiance()); w: range in cm, past which
+//                 the light contributes nothing.
 // MIRRORS the C++ RdLocalLight (32 bytes) field for field -- a StructuredBuffer stride mismatch reads
 // the neighbour's bytes with no compile error.
 struct RdLocalLight { float4 posRadius; float4 radianceRange; };
 
-#if !AVER_RD_SINGLE_PASS
+// LAMPS IN THE SINGLE-PASS COMPILE: AVER_RD_SINGLE_PASS_LAMPS (default 1) keeps them in that megakernel
+// -- one shadow ray, one reprojection and a BRDF loop on top of what already sat at the AMD driver's
+// register limit (rtGiShadowBits() above). ";AVER_RD_SINGLE_PASS_LAMPS=0" on the single-pass defines
+// takes them back out entirely: every lamp function and call in these files sits under AVER_RD_LAMPS or
+// !AVER_RD_SINGLE_PASS (only the struct and resource declarations do not, and a shader that never reads
+// them drops them), so that compile then holds no lamp code at all. Every other compile (staged, raster,
+// compute) always carries them.
+#ifndef AVER_RD_SINGLE_PASS_LAMPS
+#define AVER_RD_SINGLE_PASS_LAMPS 1
+#endif
+#define AVER_RD_LAMPS (!AVER_RD_SINGLE_PASS || AVER_RD_SINGLE_PASS_LAMPS)
+
+#if AVER_RD_LAMPS
 // gCameraMedium.z/.w -- see that cbuffer field's own comment (voxi.hlsl). Count 0 means local lights are
 // off or unavailable this frame; every reader treats it as "no lamps", never as "read the buffer".
 uint rdLocalLightCount() { return (uint)(gCameraMedium.z + 0.5); }
@@ -961,10 +978,13 @@ bool rdLocalHistValid()  { return ((uint)(gCameraMedium.w + 0.5) & 1u) != 0u; }
 bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0u; }
 
 // One sphere light's DIFFUSE IRRADIANCE at wpos, before visibility: inverse square from the centre,
-// normalised so d = 100 cm gives radianceRange.rgb exactly (lightIntensity is "brightness at 1 metre"),
-// clamped at the sphere's own radius so a receiver touching the bulb does not blow up, and faded to
+// normalised so d = 100 cm gives radianceRange.rgb exactly (already the lamp's own 1-metre irradiance
+// times lightIntensity, computed on the C++ side -- see RdLocalLight's own comment above), clamped at
+// the sphere's own radius so a receiver touching the bulb does not blow up, and faded to
 // exactly zero at the range by the windowed falloff (1 - (d/range)^4)^2 -- a hard cut at the range
-// would draw a visible ring on every surface the light reaches.
+// would draw a visible ring on every surface the light reaches. The weights rdLocalLightsVisibility
+// (voxi.hlsl) picks its shadowed light by; rdLocalLightAt (voxi.hlsl) shades with the SAME falloff minus
+// the N.L, which the BRDF applies itself. Change one, change both.
 float3 rdLocalIrradiance(RdLocalLight l, float3 wpos, float3 N) {
     const float3 toC   = l.posRadius.xyz - wpos;
     const float  d2    = dot(toC, toC);
@@ -1369,10 +1389,10 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     return true;
 }
 
-// THE LOCAL-LIGHT TWIN of rtReprojectHistory, for CSRdLocalLights (voxi.hlsl): the same reprojection
-// and the same depth test against the SUN history's stored depth -- depth validity is a property of
-// the surface, not of the light, so the lamp history (gRdLocalHist) needs no depth channel of its own
-// -- returning the texel instead of the sun's visibility. A NEAR-COPY ON PURPOSE, like rtReprojectAo
+// THE LOCAL-LIGHT TWIN of rtReprojectHistory, for rdLocalLightsVisibility (voxi.hlsl): the same
+// reprojection and the same depth test against the SUN history's stored depth -- depth validity is a
+// property of the surface, not of the light, so the lamp history (gRdLocalHist) needs no depth channel
+// of its own -- returning the texel instead of the sun's visibility. A NEAR-COPY ON PURPOSE, like rtReprojectAo
 // below: routing rtReprojectHistory through a shared helper added phis to the register-bound
 // CSRdShadow (its outputs must be defined on every early return). The arithmetic is IDENTICAL; see
 // rtReprojectHistory for why each part is what it is. Change one, change both.

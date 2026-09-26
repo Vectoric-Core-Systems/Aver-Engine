@@ -585,8 +585,9 @@ static void testSubsurface() {
     check(near(lo.subsurfaceRadius, 0.0f), "...and subsurfaceRadius is clamped up to 0 too");
 }
 
-// PARAM lightIntensity: turns a material into a ray-driven local light, brightness at 1 metre in
-// the sun's own units. Kept out of kFull/testFullParse for the same reason testDielectric and
+// PARAM lightIntensity: turns a material into a ray-driven local light, a multiplier on the light
+// its own emissive glow and size already cast at 1 metre, in the sun's own units. Kept out of
+// kFull/testFullParse for the same reason testDielectric and
 // testSubsurface give for their own PARAMs -- kFull feeds testRoundTrip and the byte-exact fixture
 // in testGraphRef, and this is exactly the kind of addition that fixture exists to catch.
 //

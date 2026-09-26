@@ -2270,14 +2270,14 @@ void VulkanDevice::setViewportRect(u32 x, u32 y, u32 w, u32 h) {
     if (vpW_ == 0) vpW_ = 1;
     if (vpH_ == 0) vpH_ = 1;
 }
-void VulkanDevice::setCamera(const f32 viewProj[16], const f32 invViewProj[16], const f32 camPos[3]) {
+void VulkanDevice::setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) {
     std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
-    std::memcpy(frameCB_.invViewProj, invViewProj, sizeof(frameCB_.invViewProj));
+    std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
     frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
 }
-bool VulkanDevice::camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const {
+bool VulkanDevice::camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const {
     if (viewProj) std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
-    if (invViewProj) std::memcpy(invViewProj, frameCB_.invViewProj, sizeof(frameCB_.invViewProj));
+    if (invViewProjRel) std::memcpy(invViewProjRel, frameCB_.invViewProjRel, sizeof(frameCB_.invViewProjRel));
     if (cameraPos) std::memcpy(cameraPos, frameCB_.camPos, 3 * sizeof(f32));
     return true;
 }
@@ -2684,6 +2684,31 @@ void VulkanDevice::notifyRenderTargetsChanged() {
     for (IRenderFeature* f : features_) f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), sceneWidth_, sceneHeight_);
 }
 
+// Reads back the metered-exposure slot THIS frame's beginFrame just waited on, if runPostChain
+// filled it the LAST time this slot came round (kFrameCount frames ago) -- see expReadback_'s own
+// comment for the pipeline. A slot autoExp skipped last time (expReadbackPending_ false) is left
+// alone: expReadoutValue_/expReadoutSeeded_ simply keep whatever they last held, which is the
+// correct "hasn't updated" state for a live UI readout. Mirrors D3D12Device::collectExposureReadout
+// field-for-field.
+void VulkanDevice::collectExposureReadout() {
+    if (!expReadbackPending_[frameIndex_] || !expReadback_[frameIndex_]) return;
+    expReadbackPending_[frameIndex_] = false;
+    void* mapped = nullptr;
+    if (api_.MapMemory(device_, expReadbackMemory_[frameIndex_], 0, 2 * sizeof(u32), 0, &mapped) != VK_SUCCESS || !mapped) return;
+    f32 value = 0.0f; u32 seeded = 0;
+    std::memcpy(&value, mapped, sizeof value);
+    std::memcpy(&seeded, static_cast<const u8*>(mapped) + sizeof value, sizeof seeded);
+    api_.UnmapMemory(device_, expReadbackMemory_[frameIndex_]);
+    // Matches CSExposure's own contract (post.hlsl): byte 4 goes to 1 the first time it ever runs
+    // and stays there, so seeded == 0 here should never happen -- this frame's autoExp gate already
+    // guarantees CSExposure ran first in submission order. postExposureReadout's contract is
+    // "false", not "garbage", either way, so this checks rather than assumes.
+    if (seeded && std::isfinite(value) && value > 0.0f) {
+        expReadoutValue_ = value;
+        expReadoutSeeded_ = true;
+    }
+}
+
 // ================================================================================================
 // 13. beginFrame / endFrame / present / resize. The frame-pacing core: see the header's own note on
 //     timeline_/frameTimelineValues_/imageAvailable_/renderFinished_ for the full scheme.
@@ -2698,6 +2723,9 @@ void VulkanDevice::beginFrame() {
     ++frameSerial_;
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;
     waitTimeline(frameTimelineValues_[frameIndex_]);
+    // The wait above already proved this slot's last GPU work (including any exposure-readout
+    // copy runPostChain recorded into it) is done -- see collectExposureReadout's own comment.
+    collectExposureReadout();
     if (meshGeomPool_[frameIndex_]) api_.ResetDescriptorPool(device_, meshGeomPool_[frameIndex_], 0);
 
     api_.ResetCommandBuffer(commandBuffers_[frameIndex_], 0);
@@ -3321,6 +3349,15 @@ void VulkanDevice::releasePostTargets() {
     if (postDescriptorPool_) api_.ResetDescriptorPool(device_, postDescriptorPool_, 0);   // safe: waitForGpu() always precedes this (resize/setSampleCount)
     postSets_.clear();
     bloomMips_ = bloomW_ = bloomH_ = 0;
+    // Exposure readout: fixed 8 bytes per slot, independent of scene resolution like histBuf_/
+    // expBuf_ themselves, but dropped and rebuilt here anyway -- see expReadback_'s own comment for
+    // why this function pair is where its lifetime lives instead. A pending copy a resize
+    // interrupted names a slot that no longer holds what it promised, so the flag goes with the
+    // buffer; safe for the same reason the descriptor pool reset just above is.
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        if (expReadback_[i]) { destroyBufferCommitted(*this, expReadback_[i], expReadbackMemory_[i]); expReadback_[i] = VK_NULL_HANDLE; expReadbackMemory_[i] = VK_NULL_HANDLE; }
+        expReadbackPending_[i] = false;
+    }
     postReady_ = false;
 }
 
@@ -3511,6 +3548,19 @@ bool VulkanDevice::createPostTargets() {
         // No CmdFillBuffer clear, unlike histBuf_/expBuf_: CSLocalGrid overwrites (Store) all 16 bins
         // of every tile it dispatches over, every frame -- nothing here ever reads a bin it did not
         // just write this same frame, so a stale or uninitialized previous generation cannot leak in.
+    }
+
+    // ---- exposure readout: one small HOST_VISIBLE|HOST_COHERENT buffer per frame slot, holding a
+    // copy of expBuf_'s first 8 bytes for IDevice::postExposureReadout's live UI number -- see
+    // expReadback_'s own comment for the whole pipeline. Non-fatal on failure, same treatment
+    // AverSR's own targets get above: a UI readout nothing else in the post chain depends on, so a
+    // failed alloc just leaves postExposureReadout returning false.
+    for (u32 i = 0; i < kFrameCount; ++i) {
+        // createBufferCommitted already logs its own failure; nothing more to do here -- a null
+        // slot just makes runPostChain skip the copy and postExposureReadout keeps returning false.
+        createBufferCommitted(*this, 2 * sizeof(u32), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                expReadback_[i], expReadbackMemory_[i], nullptr, "post exposure readback");
     }
 
     // ---- descriptors: kFrameCount * kPostSlotCount of them, written ONCE for this resize
@@ -3731,7 +3781,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         // same values without a separate path. Byte-for-byte mirror of D3D12Device's identical fill.
         cb.clampRadiance[1] = post_.localExposureShadows;
         cb.clampRadiance[2] = post_.localExposureHighlights;
-        cb.clampRadiance[3] = 0.0f;
+        cb.clampRadiance[3] = 1.0f - std::exp(-post_.exposureSpeedDark * frameSeconds_);   // darker-view adaption alpha
 
         // gPostRegion: the docked editor's viewport sub-rect, in the post chain's own normalised
         // SOURCE space. The twin of D3D12Device's identical fill -- see there for why normalising by
@@ -3746,6 +3796,15 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         } else {
             cb.region[0] = 0.0f; cb.region[1] = 0.0f; cb.region[2] = 1.0f; cb.region[3] = 1.0f;
         }
+
+        // gPostEye: PostSettings' perceptual eye-adaptation dials. The twin of D3D12Device's
+        // identical fill -- y is the calibration constant, not a PostSettings field: see
+        // kLuminanceToCdm2's own comment (RHI.hpp, beside PostSettings) for its LevelSky.hpp
+        // derivation.
+        cb.eye[0] = post_.adaptationRealism;
+        cb.eye[1] = kLuminanceToCdm2;
+        cb.eye[2] = post_.nightVision;
+        cb.eye[3] = post_.meteringCenterWeight;
     };
     auto bindSetFor = [&](VkPipelineBindPoint bp, u32 slot) {
         const ConstantAllocation ca = postConstants(&cb, sizeof cb);
@@ -3819,9 +3878,28 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         api_.CmdDispatch(cmd, 1, 1, 1);
     }
     {
-        VkBufferMemoryBarrier2 expToSrv = bufBarrier(expBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                                     VK_ACCESS_2_SHADER_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
-        pipelineBarrier(api_, cmd, nullptr, 0, &expToSrv, 1);
+        // Metered-exposure readout (IDevice::postExposureReadout): only while CSExposure actually
+        // ran THIS frame -- mirrors D3D12Device::runPostChain's identical gate; autoExp false leaves
+        // expBuf_ holding whatever a PREVIOUS frame wrote, and copying that would show a live
+        // "metered" number for a control that isn't running. Detours expBuf_ through TRANSFER_READ
+        // and back to the SHADER_READ access/stage the composite below already expects either way,
+        // so this block ends in the same state on both paths.
+        const bool readExp = autoExp && expReadback_[frameIndex_] != VK_NULL_HANDLE;
+        if (readExp) {
+            VkBufferMemoryBarrier2 expToCopy = bufBarrier(expBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                          VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT);
+            pipelineBarrier(api_, cmd, nullptr, 0, &expToCopy, 1);
+            VkBufferCopy region{0, 0, 2 * sizeof(u32)};
+            api_.CmdCopyBuffer(cmd, expBuf_, expReadback_[frameIndex_], 1, &region);
+            VkBufferMemoryBarrier2 expToSrv = bufBarrier(expBuf_, VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                                                         VK_ACCESS_2_SHADER_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+            pipelineBarrier(api_, cmd, nullptr, 0, &expToSrv, 1);
+            expReadbackPending_[frameIndex_] = true;
+        } else {
+            VkBufferMemoryBarrier2 expToSrv = bufBarrier(expBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+            pipelineBarrier(api_, cmd, nullptr, 0, &expToSrv, 1);
+        }
     }
 
     // ---- local exposure: bilateral grid of log-luminance ----

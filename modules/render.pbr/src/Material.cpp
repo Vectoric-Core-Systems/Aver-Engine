@@ -46,9 +46,9 @@ void sanitise(MaterialDesc& d) {
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
     d.subsurfaceWeight  = std::clamp(d.subsurfaceWeight, 0.0f, 1.0f);
     d.subsurfaceRadius  = std::clamp(d.subsurfaceRadius, 0.0f, 1.0f);
-    // Brightness, not a ratio -- like emissiveFactor above, floored at 0 with no ceiling. There is
-    // no upper bound the way subsurfaceWeight's [0,1] has: a lamp can legitimately want to be far
-    // brighter than the sun.
+    // A multiplier on the light the material's own glow and size already cast, floored at 0 with no
+    // ceiling. There is no upper bound the way subsurfaceWeight's [0,1] has: a lamp can legitimately
+    // want to be far brighter than what its own glow and size alone would cast.
     d.lightIntensity    = std::max(d.lightIntensity, 0.0f);
     // Volume absorption. attenuationColor is a TRANSMITTANCE, so [0,1] per channel -- and the low end
     // is floored just above zero rather than at it, because the shader takes -log(colour) and a
@@ -444,8 +444,10 @@ float aver_pbr_get_subsurface_weight(aver_pbr_material m) {
 int32_t aver_pbr_set_subsurface_weight(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->subsurfaceWeight = v; return commit(m);
 }
-// Brightness at 1 metre in the sun's own units (SkyAtmosphere::sunIntensity, ~3 in the editor);
-// 0 = not a light. See MaterialDesc::lightIntensity for what sets it apart from emissiveFactor.
+// A multiplier on the light the material's own glow (emissiveFactor) and size (its bounding sphere)
+// already, physically, cast at 1 metre in the sun's own units (SkyAtmosphere::sunIntensity): 1 is
+// exactly that output, 2 is twice it. 0 = not a light. See MaterialDesc::lightIntensity for what sets
+// it apart from emissiveFactor.
 float aver_pbr_get_light_intensity(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? d->lightIntensity : 0.0f;
 }
