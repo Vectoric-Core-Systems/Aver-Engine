@@ -608,11 +608,13 @@ void SandboxApp::setViewMode(const std::string& mode) {
 #if AVER_MODULE_VOXI
         debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
-    } else if (m == "rayhit-instance" || m == "rayhit-material" || m == "rayhit-distance" || m == "triangles") {
+    } else if (m == "rayhit-instance" || m == "rayhit-material" || m == "rayhit-distance" || m == "triangles" ||
+               m == "ambient-occlusion") {
 #if AVER_MODULE_VOXI
         if (m == "rayhit-instance")      debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitInstance;
         else if (m == "rayhit-material") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitMaterial;
         else if (m == "rayhit-distance") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitDistance;
+        else if (m == "ambient-occlusion") debugView_ = voxi::VoxiRenderer::ViewDebug::AmbientOcclusion;
         else                             debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
         wireframe_ = false;
         gbufferDebugView_ = GBufferDebugFeature::Mode::Off;

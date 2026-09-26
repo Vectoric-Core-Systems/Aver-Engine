@@ -19,9 +19,8 @@
 //     gVoxelTex/gVoxelSamp (t0/s0), all declared far above in voxi.hlsl, before the #if AVER_RT
 //     guard even opens. NOT moved into this file, even though they look at a glance like "the
 //     volume resource declarations" that belong with the cone tracer: gVoxelTex/gVoxelSamp are
-//     ALSO sampled directly inside voxi_rt.hlsli (its AVER_AO_UNIFIED hit branch), which is
-//     #include'd long before this file's own #include point. Moving their declaration down here
-//     would undeclare them there. gVoxelUAV/gVoxelAccum (u0/u1), declared in the same original
+//     ALSO sampled by voxi_restir.hlsli's third-bounce ray, and other files #include'd before this
+//     one may sample them. gVoxelUAV/gVoxelAccum (u0/u1), declared in the same original
 //     block, belong to CSClear/CSResolve/CSMip -- the voxelisation WRITE side -- not to this
 //     file's read-only gather, and are left where they are for the same reason. AVER_VOX_FIXED/
 //     AVER_VOX_MAXRAD/AVER_VOX_INJECT_APERTURE/AVER_VOX_FEEDBACK are defined with that same block

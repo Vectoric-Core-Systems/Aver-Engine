@@ -1036,12 +1036,10 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // gAmbientParams.z bit 4 TRUE keeps that old unoccluded read, byte-identical to HEAD, for
     // comparison only. FALSE (the corrected default -- ON, per the user's own call, because this
     // extra ray sits behind the legacy bit rather than a second switch) traces one more cosine-
-    // weighted ray from this hit instead: a miss reads the same sky function rtAmbientTraced's own
-    // miss branch uses (averSkyRadianceCheap), now genuinely visibility-tested; a hit inside the GI
-    // volume reads that voxel's stored exitant radiance directly -- the THIRD bounce, missing
-    // altogether before this -- and a hit outside the volume contributes nothing, the same rule
-    // rtAmbientTraced's own AVER_AO_UNIFIED branch already applies to the identical case (voxi_rt.hlsli,
-    // a few hundred lines up).
+    // weighted ray from this hit instead: a miss reads the SH sky (averSkyRadianceCheap), now genuinely
+    // visibility-tested; a hit inside the GI volume reads that voxel's stored exitant radiance
+    // directly -- the THIRD bounce, missing altogether before this -- and a hit outside the volume
+    // contributes nothing (real geometry outside the voxelised region is occluded, not open sky).
     //
     // THE ARITHMETIC: L_o,ind(y) = (kd_y/PI) * Integral(L cos dw). Drawing the second direction from a
     // cosine-weighted hemisphere (rtHemiDiscSample, the same sampler F1 above uses -- streamSalt 0.71

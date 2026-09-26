@@ -1085,23 +1085,13 @@ bool   insideVolume(float3 uvw);
 // declaration is a compile error, not a silent drift) rather than being missed.
 float4 traceCone(float3 originWS, float3 dir, float aperture);
 
-// What one hemisphere gather learned. `sky` and `bounce` are written only under AVER_AO_UNIFIED and
-// are zero otherwise, so a caller that ignores them gets exactly the old behaviour and exactly the
-// old cost -- the branches that fill them are compiled out, not merely unread.
+// What one hemisphere gather learned. (A closest-hit variant that also returned the visible sky and
+// the bounce at the hit, AVER_AO_UNIFIED, was measured 2026-09-27 at +1.3 ms per frame and removed.)
 struct AverAmbientTraced {
-    float  open;    // fraction of samples that reached the sky. THE ONLY FIELD the legacy path uses.
-    float3 sky;     // mean radiance of the sky actually visible, per direction rather than averaged
-    float3 bounce;  // mean radiance of whatever stopped the rays that did not escape
+    float  open;    // fraction of samples that reached the sky
     // MEAN DISTANCE TRAVELLED, as a fraction of TMax, over ALL n samples -- a sample that escaped
-    // contributes a full 1.0, not zero and not nothing. That is what makes it a distance rather
-    // than a distance-among-the-hits: "nothing in the way for the whole length of the ray" is the
-    // largest distance this ray can report, and averaging only over the hits would say the opposite
-    // in exactly the open sky where the answer matters least and the error shows most.
-    //
-    // Computed on EVERY path, unlike `sky`/`bounce` above, and it costs one mad per sample: the
-    // consumer is an external denoiser that is either on or off for the whole frame, so making it
-    // a second compile-time variant of this function would double the permutations to save an
-    // instruction the ray's own BVH traversal dwarfs by four orders of magnitude.
+    // contributes a full 1.0. Averaging only over the hits would say the opposite of the truth in the
+    // open sky. Always computed: one mad per sample, for the external denoiser's hit-distance input.
     float  hitDist;
 };
 
@@ -1161,7 +1151,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     B = cross(N, T);
 
     AverAmbientTraced res;
-    res.open = 0.0; res.sky = float3(0, 0, 0); res.bounce = float3(0, 0, 0); res.hitDist = 0.0;
+    res.open = 0.0; res.hitDist = 0.0;
     // Hoisted out of the loop because the accumulation below divides by it, and because a TMax of
     // zero would otherwise be a divide by zero on a scene whose giMaxDistance was authored to
     // nothing -- max(...,1.0) is the same floor the RayDesc uses a few lines down.
@@ -1207,8 +1197,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
         r.TMax      = max(gVoxelParams.z, 1.0);
 
         // THE TEMPLATE ARGUMENT LOST ACCEPT_FIRST_HIT_AND_END_SEARCH, and the flag moved to the
-        // TraceRayInline call where the mode needs it. Two reasons, and the first applies even at
-        // AVER_AO_UNIFIED 0:
+        // TraceRayInline call:
         //
         //   averRtProceedSolid is written against exactly one RayQuery template argument, and says so
         //   ("A second flag set would need its own copy -- HLSL has no way to be generic over the
@@ -1227,26 +1216,18 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
         //   to darken. Running the shared loop resolves each candidate against its alpha and keeps
         //   traversing, which is what every other ray in this file already did.
         //
-        //   And under AVER_AO_UNIFIED the flag has to go anyway: "any hit will do" cannot tell you
-        //   WHICH surface you hit, and the hit is half the point.
-        //
-        // Runtime flags OR with template flags, so the non-unified path below is the same query it
-        // has always been, just spelled at the call rather than in the type.
+        // Runtime flags OR with template flags, so this is the same query as before, just spelled at
+        // the call rather than in the type.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-#if AVER_AO_UNIFIED
-        q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
-#else
         q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
-#endif
         averRtProceedSolid(q);
 
         // ONE `if`, BOTH ANSWERS. CommittedRayT() is meaningful only on a hit; on a miss the ray
         // ran its whole length, which IS the distance and is why the miss branch adds aoTMax rather
         // than skipping the term.
         //
-        // ON THE SHIPPING PATH THIS IS A FIRST HIT, NOT THE NEAREST ONE, and that is worth knowing
-        // rather than discovering. AVER_AO_UNIFIED is 0, so the query above carries
-        // ACCEPT_FIRST_HIT_AND_END_SEARCH: traversal stops at whatever triangle it reaches first
+        // THIS IS A FIRST HIT, NOT THE NEAREST ONE, and that is worth knowing rather than
+        // discovering. The query carries ACCEPT_FIRST_HIT_AND_END_SEARCH: traversal stops at whatever triangle it reaches first
         // within TMax, which need not be the closest. The distance is therefore an upper-bounded
         // estimate, never longer than the true one and usually equal to it in the enclosed
         // geometry this term exists for. Making it exact means dropping the flag and paying full
@@ -1256,55 +1237,14 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
         if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
             res.open    += 1.0;
             res.hitDist += aoTMax;
-#if AVER_AO_UNIFIED
-            // The sky this sample actually saw. averSkyRadianceCheap is the SH reconstruction, ~20
-            // ALU, against skyColor's 32-step march -- affordable once per hemisphere sample in a way
-            // the march never could be. It cannot represent the sun disc, which is correct here: the
-            // sun is a separate direct term and must not be gathered twice.
-            res.sky += averSkyRadianceCheap(dir);
-#endif
-        }
-#if AVER_AO_UNIFIED
-        else {
-            // FIRST-BOUNCE RADIANCE AT AN EXACT HIT, which is the same quantity traceCone estimates
-            // and a strictly better estimate of it. A cone widens with distance and climbs mips, and
-            // a coarse mip averages across a thin wall -- that is the leak that makes enclosed
-            // shadows read too bright. This ray stopped ON the geometry, so there is nothing to
-            // average across; mip 0 at the hit point is what the cone was approximating all along.
-            //
-            // Clamped exactly as every other consumer of this volume clamps it: the volume can hold
-            // a physically large value and gVoxelParams.y scales it further, so AVER_VOX_MAXRAD is
-            // the same firefly bound traceCone's callers already apply.
-            const float3 hp  = r.Origin + dir * q.CommittedRayT();
-            const float3 uvw = voxelUVW(hp);
-            // OUTSIDE THE VOLUME CONTRIBUTES NOTHING, deliberately, and this is the one place the
-            // unified path is DARKER than the cone gather rather than brighter: traceCone treats
-            // leaving the volume as "unoccluded" and hands back the sky, which is why shrinking the
-            // GI volume once made shadows brighter instead of darker. A ray that hit real geometry
-            // outside the voxelised region is genuinely occluded; crediting it with sky would
-            // reintroduce the leak this whole change exists to remove.
-            if (insideVolume(uvw))
-                res.bounce += min(gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0).rgb * gVoxelParams.y,
-                                  AVER_VOX_MAXRAD);
-        }
-#endif
-        // OUTSIDE THE #if, so the hit distance is accumulated on both paths. Under AVER_AO_UNIFIED
-        // the `else` above has already read CommittedRayT() for the bounce lookup; here it is read
-        // again rather than threaded through, because a hit's T is a register the query already
-        // holds and the alternative is a variable that exists only under one define.
-        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+        } else {
             res.hitDist += min(q.CommittedRayT(), aoTMax);
+        }
     }
 
-    // ALL THREE DIVIDE BY n, NOT BY THEIR OWN HIT COUNTS. These are Monte Carlo estimates of
-    // hemisphere integrals, so a sample that missed contributes zero to `bounce` and a sample that
-    // hit contributes zero to `sky` -- that is the estimate, not a gap in it. Dividing `sky` by the
-    // miss count instead would return the mean brightness of the visible sky and silently drop the
-    // occlusion, which is the very thing being measured.
+    // DIVIDED BY n, NOT BY A HIT COUNT: these are Monte Carlo estimates of hemisphere integrals.
     const float inv = 1.0 / (float)n;
     res.open    *= inv;
-    res.sky     *= inv;
-    res.bounce  *= inv;
     // Divided by TMax as well, which is what makes it the [0,1] fraction the declaration promises
     // rather than a world distance. saturate() because CommittedRayT can land a hair past TMax on a
     // ray that hit almost exactly at its own limit, and a consumer told to expect [0,1] should get
@@ -1313,10 +1253,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     return res;
 }
 
-// The scalar-only form every existing caller wants, kept so that turning AVER_AO_UNIFIED on does not
-// require every call site to change at once. Under the define the extra fields are computed and
-// discarded here, which is exactly the waste this whole idea is about -- so a call site that means to
-// use them must call rtAmbientTraced directly.
+// The open fraction alone, for callers that do not need the hit distance.
 float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
     return rtAmbientTraced(wpos, N, pixel, rays).open;
 }
@@ -1501,12 +1438,17 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
 // put a branch in a hot per-pixel path to save a page. The arithmetic is deliberately IDENTICAL --
 // the same plane-distance rejection expressed in last frame's depth, the same Gaussian with
 // sigma = radius/2, the same normal crease test, the same velocity taper. Change one, change both.
+// ONE DIFFERENCE: the radius is at least 2 (5x5). Sky visibility is low-frequency and one ray per pixel
+// at half rate leaves more variance than the sun's penumbra; at Epic's shadow radius 1 the AO view
+// read high-pass RMS 12.45, at 2 it reads 6.44, for +0.09 ms, with no measurable lit-image change
+// still or moving (textures mask it; untextured surfaces show it). 0 (Undenoised) still turns it off.
 //
 // It reads gAoHist -- LAST frame's openness -- exactly as the shadow filter reads last frame's
 // visibility, which is what makes the reprojected centre the right place to gather around.
 float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
-    const int radius = (int)gRtDenoiseParams.x;
-    if (radius <= 0 || gRtHistParams.y < 0.25 || gRtDenoiseParams.w < 0.5) return centre;
+    const int shadowRadius = (int)gRtDenoiseParams.x;
+    if (shadowRadius <= 0 || gRtHistParams.y < 0.25 || gRtDenoiseParams.w < 0.5) return centre;
+    const int radius = max(shadowRadius, 2);
 
     float texW, texH;
     gAoHist.GetDimensions(texW, texH);

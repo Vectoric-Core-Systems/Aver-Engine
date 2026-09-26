@@ -165,6 +165,7 @@ public:
         RayHitMaterial = 3,   // hash(hit instance's materialIndex) -> colour
         RayHitDistance = 4,   // hit distance (cm) on a log heat ramp
         Triangles      = 5,   // hash(instance index, primitive index) -> colour
+        AmbientOcclusion = 6, // the final AO factor (sky visibility x material AO map), greyscale
     };
 
     // Selects one of the debug views above (None turns them off). Reasserted every frame from
@@ -735,8 +736,10 @@ private:
     // Occlusion rays per pixel toward the sun's disc. FOUR by default: one gives the hard aliased
     // edge this replaced, and the cost is linear, so this is the knob to turn down first if ray
     // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
-    // deliberately does not default high. setShadowRays and --rt-rays move it.
+    // deliberately does not default high. setShadowRays and --rt-rays move it. It is a CEILING: the rays
+    // actually fired (rtShadowRaysUsed_) follow the sun disc's size -- see updateRtParamsPerFrame.
     u32 rtShadowRays_ = 4;
+    u32 rtShadowRaysUsed_ = 2;
     // Tile edge for the shadow's temporal amortisation. See setPixelsPerRayTile / Settings for the
     // contract; 1 traces every pixel every frame.
     u32 rtPixelsPerRayTile_ = 1;

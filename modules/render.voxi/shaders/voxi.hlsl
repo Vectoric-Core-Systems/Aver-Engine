@@ -279,49 +279,6 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 #define AVER_AO_COHERENCE_TILE 1.0
 #endif
 
-// AVER_AO_UNIFIED: let the ambient ray answer more than one question.
-//
-// THE OBSERVATION. rtSkyOcclusion fires a full hemisphere BVH traversal per sample and keeps ONE BIT
-// of what it learns -- `open += 1.0` on a miss. On a miss it has just seen the sky, in a direction it
-// knows, and throws that away while skyColor() marches the atmosphere 32 steps elsewhere in this same
-// shader for the same information. On a hit it carries ACCEPT_FIRST_HIT_AND_END_SEARCH, so it does
-// not even learn WHICH surface stopped it -- while thirteen cones march the voxel volume estimating
-// the bounced light off exactly those surfaces.
-//
-// So one ray is paying for three answers and returning a third of one. At 1 this file behaves exactly
-// as it always has; at 1 the ray keeps all three:
-//
-//   MISS   -> averSkyRadianceCheap(dir), the SH sky evaluated along the ray. This is strictly better
-//             than what it replaces, and not only cheaper: the current term is an unoccluded
-//             hemispherical mean scaled by a scalar, so a room with one window is lit by an average
-//             of the whole sky dimmed to taste. Per-direction sampling knows WHICH sky got in.
-//   HIT    -> the voxel volume sampled AT THE HIT POINT, mip 0. The cone gather's answer to the same
-//             question is a widening cone that starts leaking through thin walls as it climbs mips;
-//             a ray that actually traversed the geometry cannot leak, because it stopped.
-//
-// WHAT IT COSTS, AND WHY THIS IS A HYPOTHESIS RATHER THAN AN IMPROVEMENT. Dropping
-// ACCEPT_FIRST_HIT_AND_END_SEARCH turns an any-hit query into a closest-hit one, which is typically
-// 1.5-2x per ray -- the query can no longer stop at the first thing it touches. The bet is that this
-// buys the removal of the GI cone gather (4.05 ms), the specular cone (2.63 ms) and both atmosphere
-// marches (2.69 + 2.21 ms). If the closest-hit ray costs more than the ~11.6 ms of marching it
-// replaces, the idea is simply wrong and this define should be deleted rather than defaulted on.
-// MEASURE IT ON A MOVING CAMERA: every share quoted above is a still-camera share.
-//
-// AT 1 THE TWO PRIMARY-VISIBILITY PATHS DELIBERATELY DISAGREE, and that is the one thing about this
-// switch that must not surprise anyone. Only PSRayDriven is wired to the unified gather; PSMainVoxi
-// still takes the cone gather plus a scalar occlusion. Elsewhere this file insists the two must
-// match ("they currently agree to 2.23 MAD and that is worth keeping") and that is still the rule --
-// it is simply suspended inside a measurement mode that is off in every shipped configuration.
-// Wiring PSMainVoxi follows once the trade is measured, NOT before: doing both at once would mean
-// the first number came from a build with no unchanged path left to compare against.
-//
-// AND IT IS NOT ON A QUALITY TIER, for the same reason AVER_RD_ABLATE is not: this changes what the
-// image MEANS, not how much of it there is. A tier that silently swapped the estimator would make
-// two tiers of the same scene incomparable.
-#ifndef AVER_AO_UNIFIED
-#define AVER_AO_UNIFIED 0
-#endif
-
 
 // The roughness below which a reflective surface is treated as a MIRROR: no cone, no temporal
 // history, no spatial filter. See rtReflectionTemporal's own comment for why all three must be
@@ -3257,12 +3214,6 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     bool rdAoGathered = false;
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     // ablated: no cone gather
-#elif AVER_AO_UNIFIED
-    // NOT TRACED HERE AT ALL under the unified ambient ray -- the hemisphere gather below supplies
-    // this term from its own hits, and running both would double every interior's bounce light. The
-    // cones and the ray answer the SAME question (how much light arrives from the surfaces around
-    // this point); the difference is that the ray stopped on geometry while the cone averaged across
-    // it. See the ambient block further down, which assigns ind.diffuse.
 #else
     // GIMODE'S OWN SWITCH, exactly as PSMainVoxi's copy of this branch: gGiRestirParams.x (never the
     // raw Settings::giMode -- see giRestirIndirect's own header comment) says whether
@@ -3481,37 +3432,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // paths would disagree about how much sky reaches a surface -- they currently agree to 2.23 MAD
     // and that is worth keeping. Guarded for the same compile-time reason, and kept even though this
     // pass only exists under ray tracing: a reader should not have to prove that to know this builds.
-#if AVER_RT && AVER_AO_UNIFIED && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
-    // ONE GATHER, THREE ANSWERS. See AVER_AO_UNIFIED at the top of this file for the argument.
-    if (gAmbientParams.x > 0.5) {
-        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, i.pos.xy, (uint)gAmbientParams.x);
-        ind.occlusion = amb.open;
-        // The same write rtSkyOcclusionTemporal makes, because this branch REPLACES that call
-        // rather than wrapping it -- a build with AVER_AO_UNIFIED on would otherwise leave the hit
-        // distance target holding whatever the last frame with it off had written. Guarded
-        // explicitly since, unlike there, no early-out has already tested the flag here.
-        if (gRtDenoiseParams.w > 0.5) gAoHitDistOut[uint2(i.pos.xy)] = amb.hitDist;
-        // THE BOUNCE REPLACES THE CONE GATHER, and carries its own occlusion already: averIndirectTerms
-        // computes diffBounce as kD * ind.diffuse with NO occlusion factor, which is exactly right for
-        // a quantity gathered by rays that were themselves occluded.
-        ind.diffuse   = amb.bounce;
-        // DIVIDED BY `open` ON PURPOSE, and getting this wrong would darken every shadowed pixel by
-        // squaring the occlusion. amb.sky is ALREADY the occluded sky -- the mean over all n samples,
-        // where a blocked sample contributed zero -- but averIndirectTerms then multiplies ind.ambient
-        // by diffOcc = ind.occlusion * s.occlusion. Pre-dividing here means that multiply puts the
-        // occlusion back exactly once: (sky/open) * open == sky.
-        //
-        // WHY NOT SET ind.occlusion = 1 INSTEAD, which would look simpler: ind.occlusion is also read
-        // by averSpecularOcclusion for the specular lobe, and by the material's own s.occlusion map.
-        // Flattening it would silently unocclude both.
-        //
-        // The guard is for the fully-enclosed pixel: open == 0 means sky == 0 too, so the quotient is
-        // 0/0 and any finite stand-in gives the correct 0 after the multiply back.
-        ind.ambient   = amb.sky / max(amb.open, 1e-4);
-    } else {
-        ind.occlusion = rdAo;
-    }
-#elif AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
+#if AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     ind.occlusion    = gAmbientParams.x > 0.5
 #if AVER_RD_SPLIT
                      // STAGE B: in the two cases CSRdSkyOcc actually ran for (ReSTIR supplies diffuse,
@@ -3537,18 +3458,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #endif
                      : rdAo;
 #else
-    // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below
-    // Epic uses anyway -- so this mode measures the RAY, not the presence of ambient occlusion.
+    // ablated (or no ray tracing): the cone gather's own occlusion -- so this mode measures the RAY,
+    // not the presence of ambient occlusion.
     ind.occlusion    = rdAo;
 #endif
     // F4 (R1): PSMainVoxi's twin, applied here after ind.occlusion is final and before
     // averShadeIndirect reads ind -- see ind4's copy above (search "ONE OWNER FOR THE SKY") for the
-    // full identity and why it is a subtraction rather than zeroing ind.ambient. Never set inside the
-    // AO_UNIFIED branch above: that branch's ind.diffuse (amb.bounce) is the traced bounce ALONE, with
-    // its own occlusion already folded in and no sky term riding along with it, so
-    // rdRestirSuppliedDiffuse stays false there and this is a no-op for that tier.
+    // full identity and why it is a subtraction rather than zeroing ind.ambient.
     if (rdRestirSuppliedDiffuse && !giDiffusePoisoned && ((uint)gAmbientParams.z & 2u) == 0u)
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
+    const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
     radiance = averShadeIndirect(radiance, s, ind);
 
     // THE BOUNCE CARRIES THE DIFFUSE RESPONSE, not raw albedo: a metal reflects almost nothing
@@ -3676,7 +3595,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // shows exactly that debug encoding -- never silently mixed with either. Every other output
     // below (G-buffer MRTs, depth, history writes above) is untouched: NRD/history still see valid
     // geometry, only what lands on screen changes -- see viewDebugColor's own header comment.
-    if (vmode >= 2u)
+    if (vmode == 6u)
+        o.col.rgb = aoView.xxx;
+    else if (vmode >= 2u)
         o.col.rgb = viewDebugColor(vmode, rdInstanceIndex, inst.materialIndex, rdPrimIndex, hitT, N, dir);
 #if AVER_GBUFFER
     // clip.w IS the view-space linear depth viewZ wants, reused from o.depth's divide above rather
@@ -4203,12 +4124,6 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
 // the same derivative-capable compute shader model, 8x8 threads forming 2x2 quads.
 [numthreads(8, 8, 1)]
 void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
-#if AVER_AO_UNIFIED
-    // A NO-OP IN THIS BUILD. PSRayDriven's AVER_AO_UNIFIED branch computes occlusion itself through
-    // rtAmbientTraced (and writes u5 itself) and never reads gRdAoTex, so running rtSkyOcclusionTemporal
-    // here would only race that branch on u4/u5. The CPU still dispatches; this makes it empty.
-    return;
-#endif
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
@@ -4248,9 +4163,7 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
     // != AVER_RD_ABL_SKYOCC BRANCH DOES (further up this file, same condition, deliberately not also
     // excluding AVER_RD_ABL_ALL -- that asymmetry is PSRayDriven's existing behaviour, not introduced
     // here): this stage skips tracing in precisely the build where that branch's AVER_RD_SPLIT read of
-    // gRdAoTex is itself compiled out and falls back to `ind.occlusion = rdAo`. AVER_AO_UNIFIED's own
-    // sky-occlusion branch (the #if just above that #elif) is untouched by this stage -- AVER_AO_UNIFIED
-    // is 0 by default and this task leaves whatever it compiles to alone.
+    // gRdAoTex is itself compiled out and falls back to `ind.occlusion = rdAo`.
 #if AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     // EXACTLY THE ARGUMENTS PSRayDriven'S OWN (non-split) COPY PASSES for this case: coneAo=1.0,
     // coneAoIsGather=false (rdAo was never gathered on this branch), nrdAoUsable=false (same reason

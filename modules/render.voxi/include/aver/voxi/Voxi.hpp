@@ -137,66 +137,21 @@ struct Settings {
     // tree is deliberately not repeated here as settled: it predates this ladder and was never
     // re-measured against it.
     u32 giCones         = 6;
-    // Sky-visibility rays the AMBIENT term traces per pixel. 0 means "estimate it from the cone
-    // gather", which is what this renderer has always done and what Low and Medium still do.
+    // Sky-visibility rays the AMBIENT term traces per pixel (sweep: --gi-sky-occlusion-rays N). 0 means
+    // "estimate it from the cone gather" -- optimistic in enclosed geometry, because widening cones see
+    // through thin walls: Sponza shadowed pixels read [25,26,30] against a path-traced [7,7,7], blue-biased
+    // by leaked sky. Under ReSTIR GI the cone gather does not run at all and 0 means NO occlusion.
     //
-    // WHY THE RAYS EXIST. `diffAmbient` (material_prelude.hlsl) multiplies the FULL sky irradiance by
-    // the cone gather's occlusion, and that estimate is optimistic in enclosed geometry: six 60-degree
-    // cones marching a voxel volume see through thin walls once they widen into coarse mips. MEASURED
-    // on Sponza against a converged path-traced reference: shadowed pixels read [25,26,30] where the
-    // reference says [7,7,7], and blue-biased (B > R) because what leaks in is sky. In an OPEN scene
-    // the same estimate is approximately right, which is why this never showed up on the flat test map
-    // and why it cannot be found by looking at one.
+    // DERIVED FROM rayTracing on a tier change: 0 at Low (it rasterises), ONE at Medium, High and Epic.
+    // The default is 1 because the default tier is Medium, and the derivation only fires on a CHANGE.
     //
-    // DERIVED FROM rayTracing on a tier change, like rtShadowRays: 0 at Low and Medium, ONE at High
-    // and Epic. It was Epic-only, and four rays, until the term accumulated against a reprojected
-    // history (rtSkyOcclusionTemporal, rtAoHist_): one accumulated ray is both quieter than four
-    // correlated ones and cheaper, which is what let it come down a rung. THE DEFAULT IS 0 BECAUSE
-    // THE DEFAULT TIER IS Medium -- the derivation only fires when the tier
-    // CHANGES, so a struct whose default contradicts its own tier never reaches the rung it claims.
-    // rtShadowRays documents the same trap; it is written down twice because it has bitten once.
-    //
-    // ONE, NOT FOUR, and this sentence said four until the two were read side by side --
-    // giSkyOcclusionRaysForQuality has always returned 1. The number matters more than a typo
-    // normally would, because the obvious analogy is exactly the wrong one: rtShadowRays WAS 4 at
-    // Epic when this measurement was taken -- it is 8 now (see ladder::rtShadowRays,
-    // QualityLadder.hpp), but the four-ray figure below is what was actually measured and is left
-    // as measured rather than rescaled to match -- and copying that number here reads as harmless.
-    // It is not. Those four sun rays all point at the sun, walk the same BVH nodes and cost 0.05 ms
-    // between them; THIS ray is cosine-distributed over the hemisphere, so neighbouring lanes
-    // descend unrelated parts of the tree and the wave runs at the speed of its unluckiest lane. One
-    // of them measures 5.37 ms -- more than the sun's four together. Four here would be roughly
-    // 21 ms on a 50 ms frame. See rtSkyOcclusion in voxi.hlsl, which states the coherence argument
-    // at the ray itself.
-    //
-    // THE COUNT IS NOW SWEEPABLE: --gi-sky-occlusion-rays N. It was not when this field landed --
-    // there was no flag and no manifest key -- so the one dial the shader names as the lever for
-    // this ray had never been measured at any value but its default.
-    //
-    // AND THE FIRST SWEEP SETTLES BOTH QUESTIONS. Sponza (112 entities, RENDER.RAYTRACING 4, MSAA 2),
-    // --no-vsync, --gpu-timing, one camera, only this count differing:
-    //
-    //     rays   "Voxi ray-driven primary"   probe
-    //     0      10.92 ms                    20,20,22
-    //     1      12.25 ms                    11,11,13
-    //     4      15.58 ms                    11,11,13
-    //
-    // COUNT IS THE LEVER HERE, exactly as rtSkyOcclusion predicts and exactly UNLIKE the sun ray:
-    // the first ray costs 1.33 ms and each of rays 2-4 costs a further ~1.11 ms, against ~0.017 ms
-    // for an extra SUN ray. That is a ~65x per-ray gap between a coherent ray and an incoherent one,
-    // measured on one scene in one pass, and it is the reason this rung is 1 rather than 4.
-    //
-    // ONE RAY ALREADY BUYS THE CORRECTION. The probe is IDENTICAL at 1 and at 4, so three more rays
-    // bought 3.33 ms and no visible change; while going from 0 to 1 moved a shadowed pixel from
-    // 20,20,22 to 11,11,13, most of the way to the converged path-traced reference's 7,7,7. The
-    // estimate is noisy at one sample and it does not matter, because what it is correcting is a
-    // large systematic over-brightness, not a small random one.
-    //
-    // NOT A REPLACEMENT FOR THE CONE GATHER, which still supplies the bounced light (`ind.diffuse`).
-    // This only replaces the scalar the SKY is attenuated by, and closes rather less than half the
-    // measured gap: with ambient removed entirely the same pixel reads [15,14,15], so the remainder
-    // is the bounce term and is a separate question.
-    u32 giSkyOcclusionRays = 0;
+    // ONE RAY, accumulated against a reprojected history (rtSkyOcclusionTemporal), not four: unlike the
+    // coherent sun rays (~0.017 ms each) this ray is cosine-distributed, so lanes walk unrelated BVH nodes.
+    // Sweep (Sponza, one camera, "Voxi ray-driven primary"): 0 rays 10.92 ms, probe 20,20,22; 1 ray
+    // 12.25 ms, 11,11,13; 4 rays 15.58 ms, 11,11,13 -- the first ray buys the correction, more buy nothing.
+    // Medium at the default half rate: +0.5 ms, frame mean 33.4 -> 16.1 (Epic 16.2).
+    // It attenuates only the SKY term; the bounced light is the GI estimator's.
+    u32 giSkyOcclusionRays = 1;
     // Edge, in pixels, of the square that SHARES one sky-occlusion ray direction. 1 is a fresh
     // rotation per pixel and is what this renderer did before the dial was wired up.
     //

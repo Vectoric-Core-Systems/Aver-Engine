@@ -2504,6 +2504,7 @@ void SandboxApp::buildViewportOverlay() {
             case voxi::VoxiRenderer::ViewDebug::RayHitMaterial: viewModeLabel = "Ray Hit: Materials"; break;
             case voxi::VoxiRenderer::ViewDebug::RayHitDistance: viewModeLabel = "Ray Hit: Distance"; break;
             case voxi::VoxiRenderer::ViewDebug::Triangles:      viewModeLabel = "Triangles"; break;
+            case voxi::VoxiRenderer::ViewDebug::AmbientOcclusion: viewModeLabel = "Ambient Occlusion"; break;
             default: break;
         }
     } else
@@ -2624,6 +2625,7 @@ void SandboxApp::buildViewportOverlay() {
         debugItem("Ray Hit: Materials", VD::RayHitMaterial, "viewMode.rayHitMaterial");
         debugItem("Ray Hit: Distance", VD::RayHitDistance, "viewMode.rayHitDistance");
         debugItem("Triangles", VD::Triangles, "viewMode.triangles");
+        debugItem("Ambient Occlusion", VD::AmbientOcclusion, "viewMode.ambientOcclusion");
 #endif
         // UNDENOISED: independent of every mode above -- it stays on across a Lit/Unlit/Wireframe/
         // debug-view switch, and combines with any of them. See onUpdate's own UNDENOISED comment

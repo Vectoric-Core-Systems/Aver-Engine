@@ -118,7 +118,7 @@ int main() {
     checkLadder("rtPixelsPerRayTile",ladder::rtPixelsPerRayTile, 1,  1,   1,   1,   1);
     checkLadder("rtShadowDenoise",   ladder::rtShadowDenoise,    0,  2,   2,   1,   1);
     checkLadder("rtRenderMode",      ladder::rtRenderMode,       0,  0,   1,   1,   1);
-    checkLadder("giSkyOcclusionRays",ladder::giSkyOcclusionRays, 0,  0,   0,   1,   1);
+    checkLadder("giSkyOcclusionRays",ladder::giSkyOcclusionRays, 0,  0,   1,   1,   1);
     checkLadder("giSkyOcclusionTile",ladder::giSkyOcclusionTile, 1,  1,   1,   1,   1);
     checkLadder("ptBounces",         ladder::ptBounces,          1,  2,   2,   3,   4);
     // U1: {Off 3, Low 1, Medium 2, High 3, Epic 3} -- see ladder::giRestirVisibility's own comment for

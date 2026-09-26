@@ -406,7 +406,7 @@ constexpr u32 rtRenderMode(Quality q) {
 }
 
 // SKY-VISIBILITY RAYS the AMBIENT term traces per pixel. 0 means "estimate it from the cone gather",
-// which is what this renderer has always done and what Low and Medium still do. See
+// which only Low still does. See
 // Settings::giSkyOcclusionRays (Voxi.hpp) for why the rays exist and the Sponza measurements behind
 // the estimator's own error.
 //
@@ -431,9 +431,11 @@ constexpr u32 rtRenderMode(Quality q) {
 // brightens the darkest 81% of the frame by 2.6x (mean luminance 20.71 -> 31.92). That is why shadows
 // only ever looked properly dark once this term existed at all.
 //
-// LOW AND MEDIUM STAY ON THE CONE GATHER. The ray is cosine-distributed over the hemisphere, so
-// neighbouring lanes walk unrelated parts of the BVH and it is genuinely expensive -- accumulation
-// fixes its VARIANCE, not its traversal cost. A budget tier should not pay it. THE FIRST SWEEP that
+// MEDIUM TRACES IT TOO (2026-09-27). Medium runs ReSTIR GI, and under ReSTIR the cone gather never runs
+// -- its occlusion was a hardcoded 1.0, so Medium had NO ambient occlusion and rendered twice as bright
+// as Epic (Sponza arcade, AverSR Performance: mean 33.4 vs 16.2). One ray at the default half rate
+// brings it to 16.1 (MAD 0.31 against Epic) for +0.5 ms (11.78 -> 12.28 ms frame). LOW STAYS ON THE
+// CONE GATHER: RT Low rasterises, so there is nothing to trace against. THE FIRST SWEEP that
 // established the 0/1/1 shape (Sponza, 112 entities, RENDER.RAYTRACING 4, MSAA 2, --no-vsync,
 // --gpu-timing, one camera): 0 rays 10.92 ms (probe 20,20,22), 1 ray 12.25 ms (probe 11,11,13), 4 rays
 // 15.58 ms (same probe, 11,11,13) -- one ray already buys the correction; three more bought 3.33 ms
@@ -444,7 +446,7 @@ constexpr u32 giSkyOcclusionRays(Quality q) {
         // trace against, and the shader falls back to the cone gather's occlusion on this value.
         case Quality::Off:    return 0;
         case Quality::Low:    return 0;
-        case Quality::Medium: return 0;
+        case Quality::Medium: return 1;
         case Quality::High:   return 1;
         case Quality::Epic:   return 1;
         default:              return 0;   // an unknown tier must not silently cost more

@@ -195,8 +195,8 @@ constexpr u32 kNrdAoDenoiser[] = {0u};
 // wrong image out of it.
 constexpr u32 kNrdAoAndGiDenoisers[] = {0u, 1u};
 // THE DIFFUSE RADIANCE DENOISER ALONE. The two signals are INDEPENDENTLY available and were wrongly
-// treated as though the GI one implied the other: sky occlusion is Epic-tier only, ReSTIR GI is not,
-// so a project can want GI denoising with no occlusion signal in the frame at all.
+// treated as though the GI one implied the other: sky occlusion is not traced at Low (or when set to
+// 0), ReSTIR GI can still run, so a project can want GI denoising with no occlusion signal at all.
 constexpr u32 kNrdGiDenoiser[] = {1u};
 
 // THE SAME ARGUMENT ON THE UAV SIDE, and it needs its own constant for a reason the SRV side
@@ -1174,9 +1174,9 @@ void VoxiRenderer::reportFrameTime(const char* when) {
     f32 sum = 0.0f;
     for (f32 v : s) sum += v;
     AVER_INFO("[Voxi] frame period ({}): {} frames, median {:.3f} ms, mean {:.3f} ms, min {:.3f} ms, "
-              "p90 {:.3f} ms -- WHOLE frame, CPU, {} sun ray(s)/pixel, rt {}",
+              "p90 {:.3f} ms -- WHOLE frame, CPU, {} of max {} sun ray(s)/pixel, rt {}",
               when, static_cast<u32>(n), med, sum / static_cast<f32>(n), s.front(), p90,
-              rtShadowRays_, rtActive_ ? "active" : "off");
+              rtShadowRaysUsed_, rtShadowRays_, rtActive_ ? "active" : "off");
 }
 
 namespace {
@@ -2278,9 +2278,15 @@ void VoxiRenderer::updateRtParamsPerFrame() {
     // the disc subtends about half a degree, and rtShadow spreads its rays across exactly that.
     // Taken from the sky model rather than duplicated, so a scene that moves the sun or widens the
     // disc gets penumbrae that agree with its own sky.
-    const f32 halfAngle = dev_->skyAtmosphere().sunAngularDiameterDeg * 0.5f * 0.01745329252f;
+    const f32 discDeg = dev_->skyAtmosphere().sunAngularDiameterDeg;
+    const f32 halfAngle = discDeg * 0.5f * 0.01745329252f;
     cb_.rtParams[0] = std::tan(halfAngle);
-    cb_.rtParams[1] = static_cast<f32>(rtShadowRays_);
+    // THE DISC DECIDES HOW MANY RAYS A PENUMBRA NEEDS; the tier's count is only the ceiling. A ~0.5 deg
+    // sun softens edges over less than a pixel at editor distances, so every ray a pixel fires agrees:
+    // on Sponza 1, 2, 4 and 8 rays gave bit-identical frames, still and moving, and 8 cost 0.66 ms over 2.
+    // Rays = ceil(disc / 0.3 deg), at least 2: 0.55 deg -> 2, 1.2 deg -> 4, 2.4 deg -> 8.
+    rtShadowRaysUsed_ = std::min(rtShadowRays_, std::max(2u, static_cast<u32>(std::ceil(discDeg / 0.3f))));
+    cb_.rtParams[1] = static_cast<f32>(rtShadowRaysUsed_);
     // Base ray bias in centimetres, scaled by view distance in the shader. Small enough not to
     // detach a contact shadow, large enough that a surface does not intersect its own rays.
     cb_.rtParams[2] = 0.05f;
@@ -5220,7 +5226,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // consecutive runs of their project denoised nothing while the log said NRD was ready, and four
     // more with --gi-sky-occlusion-rays 1 denoised every frame -- same binary, same flags otherwise.
     //
-    // ReSTIR GI runs at ANY ray-tracing tier; sky occlusion is Epic-only
+    // ReSTIR GI runs at ANY ray-tracing tier; sky occlusion is Medium and up
     // (giSkyOcclusionRaysForQuality). Tying the first to the second was never a decision, it is just
     // where this code happened to be written back when occlusion was its only consumer.
     if (aoHistoryWanted() || giRestirWanted()) {
