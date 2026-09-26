@@ -2454,8 +2454,15 @@ void SandboxApp::buildUI(Engine& e) {
     }
 #endif
     if (!openAsset_.empty() && frameNo_ > 5) {
-        const std::string want = openAsset_;
+        std::string want = openAsset_;
         openAsset_.clear();
+        // A relative path is the project's ("Content/..." as the Content Browser shows it), not the
+        // working directory's, which is wherever the editor happened to be launched from.
+        if (project_.valid() && !std::filesystem::path(want).is_absolute()) {
+            const std::filesystem::path inProject = std::filesystem::path(project_.dir) / want;
+            std::error_code ec;
+            if (std::filesystem::exists(inProject, ec)) want = inProject.string();
+        }
         lastOpenAssetPath_ = want; // --graph-select (below) needs this after openAsset_ is cleared
         if (assetEditors_.open(want)) AVER_INFO("[Editor] --open-asset opened {}", want);
         else AVER_ERROR("[Editor] --open-asset: no registered editor accepts {}", want);

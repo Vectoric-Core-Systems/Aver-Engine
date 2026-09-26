@@ -2497,6 +2497,9 @@ u64 VoxiRenderer::prevTransformGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHan
 //
 // It matters most exactly where it is worst: a streamed level moving props kilometres away, or a
 // scatter layer well outside a level-fitted GI volume, re-keyed the volume on every tick.
+// The sphere comes from center_/extent_, not giShadowCentre_/giShadowRadius_ (computed identically by
+// fitGiShadow), so voxelisation does not depend on the GI shadow PSO having built: if it fails, those
+// fields keep stale values and the grid would under-voxelise on that device only.
 bool VoxiRenderer::giVoxelisedDraw(const Draw& d) const {
     if (d.translucent) return false;
     if (dev_ && dev_->meshVertexBuffer(d.mesh)) return false;
@@ -4222,13 +4225,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // draw in drawsPrev_ including ones streaming had brought in kilometres away; those never
     // survived (the pixel shader's UAV write lands outside the 128^3 grid and is dropped) but paid
     // the full vertex/raster cost first. On a streamed scene the volume covers a small fraction of
-    // what's resident, so this cull is most of the pass.
-    // The sphere is derived HERE from center_/extent_ rather than read from giShadowCentre_/
-    // giShadowRadius_ (which fitGiShadow() computes identically), because reading those would
-    // silently couple voxelisation to whether the GI shadow PSO built -- if it fails, those fields
-    // keep stale values and the grid under-voxelises on that device only.
-    const Vec3 volCentre{center_[0], center_[1], center_[2]};
-    const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
+    // what's resident, so this cull is most of the pass. The test is giVoxelisedDraw's.
     u32 voxelSubmitted = 0, voxelCulled = 0, voxelSkinned = 0;
 
     for (const Draw& d : drawsPrev_) {
