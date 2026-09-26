@@ -2943,6 +2943,11 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
                 if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
                 if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
                 const auto* mc = static_cast<const pbr::MaterialConstants*>(constants);
+                // Emissive before the texture branches below, since all three return paths carry it:
+                // the factor is already linear radiance and the path tracer takes no emissive map.
+                out.emissive[0] = mc->emissiveFactor[0];
+                out.emissive[1] = mc->emissiveFactor[1];
+                out.emissive[2] = mc->emissiveFactor[2];
                 // THE TRACER SAMPLES TEXTURES NOW, so the answer depends on whether this
                 // material has one, and the two branches mean DIFFERENT THINGS by outAlbedo.
                 //

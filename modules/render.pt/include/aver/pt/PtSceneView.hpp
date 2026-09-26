@@ -22,15 +22,21 @@
 //
 // WHAT IT DELIBERATELY DOES NOT DO, stated here because a first-time user hitting any of these should
 // read this comment before filing a bug:
-//   - LIGHT SOURCE. Two sources reach this view, and only two. ptEnvironment() (PtShaders.hpp) is
-//     skyColor() and nothing else -- INDIRECT/ambient light, collected when a bounce MISSES.
-//     ptDirectSun() (PtShaders.hpp) is a next-event shadow ray fired at the one authored directional
-//     light on every HIT -- DIRECT sun light, including on surfaces the sky itself cannot see (an
-//     overhang, a wall facing away from open sky). Together that is "outdoors, or an interior that
-//     sees sky and/or sun through a real opening". There is still no CLight (point/spot/area) and no
-//     emissive term: a room lit only by placed lights or glowing materials, with no sky above it and
-//     no line of sight to the sun, still correctly, honestly renders BLACK. That is not a bug in
-//     this feature -- it is exactly what those two sources not existing here means.
+//   - LIGHT SOURCE. Two sources of INCOMING light reach this view. ptEnvironment() (pt_pathtrace.hlsl)
+//     is skyColor() and nothing else -- INDIRECT/ambient light, collected when a bounce MISSES.
+//     ptDirectSun() (pt_pathtrace.hlsl) is a next-event shadow ray fired at the one authored
+//     directional light on every HIT -- DIRECT sun light, including on surfaces the sky itself
+//     cannot see (an overhang, a wall facing away from open sky). Together that is "outdoors, or an
+//     interior that sees sky and/or sun through a real opening".
+//
+//     Surfaces also EMIT: a material's emissiveFactor (linear radiance) travels ResolvedMaterial ->
+//     Draw -> PtSurface, and CSPathTrace adds `throughput * emissive` at every hit, camera ray
+//     included, so a lamp bulb glows and a bounce that lands on it carries its light to the walls.
+//     NOT NEXT-EVENT ESTIMATED like the sun: nothing aims a ray at an emitter, so a small one is found
+//     only when a bounce happens to hit it -- noisy, not biased.
+//
+//     THERE IS STILL NO CLight (point/spot/area). A room lit only by placed lights, with no sky
+//     above it, no sun and no emissive geometry, still renders BLACK -- that is not a bug.
 //   - GEOMETRY. Only draws whose mesh has no compute-written vertex buffer are included -- the same
 //     predicate VoxiRenderer::buildAccelerationStructures already applies (VoxiRenderer.cpp, gated on
 //     IDevice::meshVertexBuffer). Skinned characters, particles, and anything else that writes its
@@ -38,9 +44,9 @@
 //     every frame and the accumulator would never progress past sample 0.
 //   - MATERIALS. PtSurface carries one flat linear albedo, produced by the host's AlbedoResolver
 //     when it recognises the draw's binding, and by the legacy per-draw base colour otherwise (which
-//     is also what every draw gets when no resolver is installed at all). No textures are sampled,
-//     no metallic/roughness, no emissive. A textured OPAQUE material renders as its flat, decoded
-//     base colour and is traced as pure Lambertian, exactly as before.
+//     is also what every draw gets when no resolver is installed at all). A resolver can also hand
+//     over base-colour/metal-rough/normal textures, roughness and metallic (ResolvedMaterial), and
+//     the emissiveFactor -- as a flat factor only, no emissive texture.
 //
 //     A BLENDED DRAW (submitDraw's `blended` flag, see IRenderFeature's own contract) is now
 //     ACCEPTED rather than dropped, and marked a smooth, non-absorbing DIELECTRIC -- see
@@ -107,6 +113,10 @@ public:
         rhi::TextureHandle baseColorTex = 0;
         rhi::TextureHandle metalRoughTex = 0;
         rhi::TextureHandle normalTex = 0;
+        // pbr::MaterialConstants::emissiveFactor, linear radiance, no decode; {0,0,0} = no glow.
+        // NO EMISSIVE TEXTURE, unlike the three above: a fourth bindless fetch per hit for a term
+        // almost no surface carries. Add one here, as baseColorTex was, if a textured emitter needs it.
+        f32 emissive[3] = {0, 0, 0};
     };
     using AlbedoResolver = std::function<bool(rhi::BindingSetHandle set, const void* constants,
                                               u32 bytes, ResolvedMaterial& out)>;
@@ -171,6 +181,8 @@ private:
         // for a blended one. See PtSurface::ior for why one field carries both the kind and the
         // value, and this class's own MATERIALS comment for why the value is a fixed constant.
         f32 ior = 0.0f;
+        // ResolvedMaterial::emissive when a resolver answered; {0,0,0} on the legacy baseColor path.
+        f32 emissive[3] = {0, 0, 0};
     };
     std::vector<Draw> draws_, drawsPrev_;
 

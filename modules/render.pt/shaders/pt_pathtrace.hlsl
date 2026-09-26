@@ -10,8 +10,8 @@ RaytracingAccelerationStructure gPtScene : register(t0);
 
 // MIRRORS rhi::MeshVertex byte for byte; the stride is handed to setSrvBuffer and nothing checks it.
 struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
-// MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 + 4 + 4 + 4 + 4 + 4 + 4 = 112 bytes, packed tightly
-// with natural alignment (every field lands on a 4-byte boundary, so there is no padding to
+// MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 12 = 124 bytes, packed
+// tightly with natural alignment (every field lands on a 4-byte boundary, so there is no padding to
 // disagree about).
 // `ior` used to be the last field and used to be a spare `pad`; it is read as 0.0 for an ordinary
 // Lambertian surface and as a real index of refraction (>0) for a smooth dielectric -- see
@@ -22,7 +22,9 @@ struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
 // the instance BUFFER is the same bytes either way, so a struct that omitted the field in the
 // untextured build would read every following instance at the wrong offset. Only the SAMPLING is
 // conditional, never the layout.
-struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; float roughness; float metallic; uint metalRoughTex; uint normalTex; float normalScale; };
+// `emissive` (appended) is the material's emissiveFactor, a flat factor read in both variants like
+// `albedo` -- there is no emissive texture.
+struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; float roughness; float metallic; uint metalRoughTex; uint normalTex; float normalScale; float3 emissive; };
 
 StructuredBuffer<PtVertex>   gPtVerts     : register(t1);
 StructuredBuffer<uint>       gPtIndices   : register(t2);
@@ -398,7 +400,8 @@ float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float t
 // distinction. Recovered here, from the SAME comparison the flip already made, so a diffuse caller
 // that never reads it gets the identical nWS it always did.
 bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out float3 albedo,
-            out float ior, out bool entering, out float rough, out float metal) {
+            out float ior, out bool entering, out float rough, out float metal,
+            out float3 emissive) {
     hitPos   = org;
     nWS      = float3(0, 0, 1);
     albedo   = float3(0, 0, 0);
@@ -408,6 +411,7 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     // "no specular lobe" rather than a mirror. See PtSurface::roughness.
     rough    = -1.0;
     metal    = 0.0;
+    emissive = float3(0, 0, 0);
 
     RayDesc r;
     r.Origin    = org;
@@ -450,6 +454,7 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     ior    = inst.ior;
     rough  = inst.roughness;
     metal  = inst.metallic;
+    emissive = inst.emissive;   // a factor, not a texture -- read the same way in both shader variants
 #ifdef AVER_PT_BINDLESS
     // ONE UV FOR THE WHOLE MATERIAL, computed once whether one map is bound or three.
     const float2 uv = gPtVerts[i0].uv * w.x + gPtVerts[i1].uv * w.y + gPtVerts[i2].uv * w.z;
@@ -665,9 +670,9 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
         // it is only forbidden to scatter again. Off by one here would make a "1 bounce" path
         // tracer collect nothing at all and read 0 rather than L.
         [loop] for (uint b = 0; b <= bounce; ++b) {
-            float3 hitPos, nWS, albedo;
+            float3 hitPos, nWS, albedo, emissive;
             float ior; bool entering; float rough, metal;
-            if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering, rough, metal)) {
+            if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering, rough, metal, emissive)) {
                 // gPtTrace.z (R5/F6): >= 0.5 is the legacy bit, ON restoring skyColor() on every
                 // miss unconditionally (byte-identical to what this line was before this change).
                 // The default, < 0.5, matches the raster: b == 0 is a CAMERA ray with no previous
@@ -696,6 +701,13 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                 escaped += 1.0;
                 break;
             }
+
+            // EMISSION (Le), at every hit including the camera's, so a lamp bulb is seen directly and
+            // a bounce that lands on it carries its light. Weighted by the path so far only -- this
+            // hit's own albedo is folded into throughput below and must not scale its own glow -- and
+            // before the dielectric branch, so glowing glass counts too. Not next-event estimated
+            // (nothing aims a ray at an emitter): noisy for a small emitter, not biased.
+            radiance += throughput * emissive;
 
             // KIND IS ior > 0, NOT A SEPARATE FIELD -- see PtSurface::ior (PathTracer.hpp) for why
             // that sentinel needs no bit-packing and loses no precision versus a quantised kind+ior

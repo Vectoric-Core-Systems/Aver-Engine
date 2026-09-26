@@ -1617,12 +1617,16 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
             // giSnapshotUnchanged() -- that call has logging side effects (giGateWhyMask_, the
             // rejection-reason counters below it) that describe the REAL gate outcome, and forcing a
             // rebuild must not silence what the gate would otherwise have said about this tick.
-            if (giSnapshotUnchanged() && !converging && !giForceRebuild_) {
+            const bool gateUnchanged = giSnapshotUnchanged();
+            if (gateUnchanged && !converging && !giForceRebuild_) {
                 ++giSkipped_;
                 // W12: only while nothing is converging -- a bake still settling into its multi-bounce
                 // answer (giConvergeTicks_ > 0) is busy work the snapshot gate alone happened to skip,
                 // not an idle accumulator waiting to be freed.
                 if (giConvergeTicks_ == 0) ++giQuietTicks_;
+                // The volume has settled: inputs unchanged and the bounces converged. The one moment
+                // it is worth caching -- see giCacheSettlePending_.
+                if (giCacheSettlePending_ && giCacheScheduleDump(ctx)) giCacheSettlePending_ = false;
             } else {
                 giQuietTicks_ = 0;
                 // W12: the accumulator may have been freed since the last rebuild. A rebuild this gate
@@ -1646,21 +1650,27 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                     // the 3-in-4 frames injection is skipped would be pointless. (The other half of the
                     // saving is that the camera cascades no longer carry the volume at all -- fitCascades.)
                     giShadowPass(ctx);
-                    // THE CACHE SITS EXACTLY HERE, between "gate says rebuild" and the rebuild itself:
-                    // inputs are settled (takeGiSnapshot just ran) and work hasn't started. A hit fills
-                    // the volume from disk and the two passes below are skipped whole; a miss falls
-                    // through and bakes, then hands the result back for next time.
+                    // THE CACHE READ SITS EXACTLY HERE, between "gate says rebuild" and the rebuild
+                    // itself: inputs are settled (takeGiSnapshot just ran) and work hasn't started. A
+                    // hit fills the volume from disk and the two passes below are skipped whole; a miss
+                    // falls through and bakes. The WRITE is not here: a bake only marks the volume
+                    // for caching, and the skip branch above copies it out once it has settled (see
+                    // giCacheSettlePending_).
                     //
                     // M4: giForceRebuild_ SHORT-CIRCUITS THE CACHE ON BOTH SIDES, not just the read. A
                     // forced tick exists to MEASURE a bake -- a --gi-force-rebuild run must pay
-                    // voxelizePass+filterMips every single tick, never a cache hit -- and a still scene
-                    // at 256^3 sits comfortably under kMaxCachedGiEntryBytes, so every forced tick would
-                    // otherwise also schedule a readback and a disk write for a volume about to be
-                    // forced-rebuilt again next tick regardless.
+                    // voxelizePass+filterMips every single tick, never a cache hit -- and it never
+                    // reaches the skip branch that writes, so it never caches either.
                     if (giForceRebuild_ || !giCacheRestore(ctx)) {
                         voxelizePass(ctx);
                         filterMips(ctx);
-                        if (!giForceRebuild_) giCacheScheduleDump(ctx);
+                        // Whether everything since the last settled volume was the cloud clock alone
+                        // (giRebuildCloudOnly_ only describes THIS gate evaluation, and is false again
+                        // by the quiet tick that writes). A pure convergence tick changes nothing.
+                        if (!gateUnchanged)
+                            giCacheSettleCloudOnly_ =
+                                (giCacheSettlePending_ ? giCacheSettleCloudOnly_ : true) && giRebuildCloudOnly_;
+                        giCacheSettlePending_ = true;
                     }
                 }
             }
@@ -2227,6 +2237,57 @@ bool VoxiRenderer::rtAccelMustForceRebuild() const {
     return false;
 }
 
+// One draw's material identity into the running FNV chain `h`, for rtAccelDrawsKey() and
+// giDrawsKey()/giDrawsSubKeys() alike (see the declaration).
+//
+// ---- material identity: d.matSet alone is not enough ----
+// MaterialSystem::gpuMaterialRevision()'s own comment (MaterialSystem.hpp) says why plainly:
+// "touch()/MaterialLibrary::update() on a material's own factors or textures never moves its
+// row, only its CONTENTS at the row it already has, so an ordinary edit does not bump this".
+// pbr::materialGraphs().revision() does not help either -- it moves only when a GRAPH's
+// generated HLSL changes, not when a factor or a texture reference does. Neither catches an
+// in-place material edit, which the per-draw loop's OWN matKey (d.matSet alone, for an
+// authored draw) would silently miss too. So this hashes what that loop actually reads instead
+// of trusting a handle: d.mat -- the MaterialConstants submitDraw() re-captured THIS frame
+// from whatever the caller currently holds for the material, live edits included, regardless
+// of whether this gate exists -- plus the resolved texture set materials_.textures() reports
+// for it. d.mat ALONE is not enough for the texture half: packMaterial() always leaves
+// texIndex at the unbound placeholder (MaterialGpu.cpp) since only THIS renderer's own
+// residentTexture() ever fills it, downstream of where a gate would already have decided -- so
+// reassigning a material's texture changes none of d.mat's bytes.
+void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d) const {
+    const bool authored = materials_.ownsBindingSet(d.matSet) &&
+                           d.matSet != materials_.fallbackBindingSet();
+    h ^= static_cast<u64>(d.matSet); h *= 1099511628211ull;
+    h ^= authored ? 1ull : 0ull; h *= 1099511628211ull;
+    if (authored) {
+        for (usize i = 0; i < sizeof(d.mat); ++i) {
+            h ^= static_cast<u64>(d.mat[i]);
+            h *= 1099511628211ull;
+        }
+        if (const auto* tex = materials_.textures(d.matSet)) {
+            for (u32 t = 0; t < pbr::kTextureSlotCount; ++t) {
+                h ^= static_cast<u64>((*tex)[t]);
+                h *= 1099511628211ull;
+            }
+        }
+    } else {
+        // UNAUTHORED: the per-draw loop builds its constants from colour/metallic/roughness alone
+        // (synthMaterialKey), the same three fields both callers hash for the identical reason.
+        for (u32 i = 0; i < 4; ++i) {
+            u32 bits = 0;
+            std::memcpy(&bits, &d.color[i], sizeof(bits));
+            h ^= static_cast<u64>(bits);
+            h *= 1099511628211ull;
+        }
+        u32 mb = 0, rb = 0;
+        std::memcpy(&mb, &d.metallic, sizeof(mb));
+        std::memcpy(&rb, &d.roughness, sizeof(rb));
+        h ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
+        h *= 1099511628211ull;
+    }
+}
+
 // ORDER-INDEPENDENT, for the identical reason giDrawsKey() is (see its own comment further down this
 // file): occlusion culling reorders drawsPrev_ every frame, so this sums a per-draw hash rather than
 // folding one in list order, the only way a reshuffled-but-otherwise-identical draw list still matches.
@@ -2251,51 +2312,7 @@ u64 VoxiRenderer::rtAccelDrawsKey() const {
         h ^= (d.translucent ? 1ull : 0ull) | (d.hiddenFromOwner ? 2ull : 0ull);
         h *= 1099511628211ull;
 
-        // ---- material identity: d.matSet alone is not enough ----
-        // MaterialSystem::gpuMaterialRevision()'s own comment (MaterialSystem.hpp) says why plainly:
-        // "touch()/MaterialLibrary::update() on a material's own factors or textures never moves its
-        // row, only its CONTENTS at the row it already has, so an ordinary edit does not bump this".
-        // pbr::materialGraphs().revision() does not help either -- it moves only when a GRAPH's
-        // generated HLSL changes, not when a factor or a texture reference does. Neither catches an
-        // in-place material edit, which the per-draw loop's OWN matKey (d.matSet alone, for an
-        // authored draw) would silently miss too. So this hashes what that loop actually reads instead
-        // of trusting a handle: d.mat -- the MaterialConstants submitDraw() re-captured THIS frame
-        // from whatever the caller currently holds for the material, live edits included, regardless
-        // of whether this gate exists -- plus the resolved texture set materials_.textures() reports
-        // for it. d.mat ALONE is not enough for the texture half: packMaterial() always leaves
-        // texIndex at the unbound placeholder (MaterialGpu.cpp) since only THIS renderer's own
-        // residentTexture() ever fills it, downstream of where a gate would already have decided -- so
-        // reassigning a material's texture changes none of d.mat's bytes.
-        const bool authored = materials_.ownsBindingSet(d.matSet) &&
-                               d.matSet != materials_.fallbackBindingSet();
-        h ^= static_cast<u64>(d.matSet); h *= 1099511628211ull;
-        h ^= authored ? 1ull : 0ull; h *= 1099511628211ull;
-        if (authored) {
-            for (usize i = 0; i < sizeof(d.mat); ++i) {
-                h ^= static_cast<u64>(d.mat[i]);
-                h *= 1099511628211ull;
-            }
-            if (const auto* tex = materials_.textures(d.matSet)) {
-                for (u32 t = 0; t < pbr::kTextureSlotCount; ++t) {
-                    h ^= static_cast<u64>((*tex)[t]);
-                    h *= 1099511628211ull;
-                }
-            }
-        } else {
-            // UNAUTHORED: the per-draw loop builds its constants from colour/metallic/roughness alone
-            // (synthMaterialKey), the same three fields giDrawsKey() hashes, for the identical reason.
-            for (u32 i = 0; i < 4; ++i) {
-                u32 bits = 0;
-                std::memcpy(&bits, &d.color[i], sizeof(bits));
-                h ^= static_cast<u64>(bits);
-                h *= 1099511628211ull;
-            }
-            u32 mb = 0, rb = 0;
-            std::memcpy(&mb, &d.metallic, sizeof(mb));
-            std::memcpy(&rb, &d.roughness, sizeof(rb));
-            h ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
-            h *= 1099511628211ull;
-        }
+        hashDrawMaterialInto(h, d);
 
         // FINALISE BEFORE ADDING -- the same avalanche giDrawsKey() uses and for the identical reason:
         // FNV's last step leaves neighbouring inputs correlated in the low bits, and plain addition of
@@ -2444,19 +2461,12 @@ u64 VoxiRenderer::giDrawsKey() const {
             h ^= static_cast<u64>(bits);
             h *= 1099511628211ull;
         }
-        // Colour and metallic/roughness reach PSVoxel through the object constants and land in the
-        // baked radiance, so a material tweak with no movement must still rebuild.
-        for (u32 i = 0; i < 4; ++i) {
-            u32 bits = 0;
-            std::memcpy(&bits, &d.color[i], sizeof(bits));
-            h ^= static_cast<u64>(bits);
-            h *= 1099511628211ull;
-        }
-        u32 mb = 0, rb = 0;
-        std::memcpy(&mb, &d.metallic, sizeof(mb));
-        std::memcpy(&rb, &d.roughness, sizeof(rb));
-        h ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
-        h *= 1099511628211ull;
+        // The material lands in the baked radiance (voxelizePass binds d.matSet/d.mat for PSVoxel), so
+        // a material edit with no movement must still rebuild. This used to hash colour/metallic/
+        // roughness only, which is all an unauthored draw has, but an authored material's real
+        // constants (emissiveFactor, reflectance, ...) never moved it: a lamp edited in the Material
+        // Editor never reached the bounced light.
+        hashDrawMaterialInto(h, d);
         // FINALISE BEFORE ADDING. FNV's last step leaves neighbouring inputs correlated in the low
         // bits, and plain addition of correlated values collides far more readily than addition of
         // decorrelated ones. This is splitmix64's finaliser, used here only as an avalanche.
@@ -2501,15 +2511,9 @@ void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) c
         // would read as unchanged on this axis and the report would point at the wrong thing.
         w ^= static_cast<u64>(d.depthMesh); w *= 1099511628211ull;
         world += mix(w);
+        // The same material hash giDrawsKey() folds in, so the rejection log names the right axis.
         u64 m = 1469598103934665603ull;
-        for (u32 i = 0; i < 4; ++i) {
-            u32 bits = 0; std::memcpy(&bits, &d.color[i], sizeof(bits));
-            m ^= static_cast<u64>(bits); m *= 1099511628211ull;
-        }
-        u32 mb = 0, rb = 0;
-        std::memcpy(&mb, &d.metallic, sizeof(mb));
-        std::memcpy(&rb, &d.roughness, sizeof(rb));
-        m ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb); m *= 1099511628211ull;
+        hashDrawMaterialInto(m, d);
         m ^= static_cast<u64>(d.depthMesh); m *= 1099511628211ull;
         mat += mix(m);
     }
@@ -2691,6 +2695,7 @@ void VoxiRenderer::setGiCacheDir(const std::string& dir) {
     // A new directory means a new project: whatever was tried against the old one says nothing.
     giCacheTried_ = false;
     giCacheTriedKey_ = fmt::GiCacheKey{};
+    giCacheKnownKeys_.clear();
 }
 
 // The key describing the volume as it stands after takeGiSnapshot.
@@ -2835,6 +2840,9 @@ bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
 
     AVER_INFO("[Voxi] GI cache HIT: restored a {}^3 volume from {}", key.resolution,
               fmt::giCacheFileName(key));
+    // Already cached: the convergence bakes that follow a restore keep this key, and settling them
+    // must not copy and rewrite the file just read.
+    giCacheRememberKey(key);
     // W3: a restore writes the WHOLE volume (the copyBufferToTexture loop above runs every mip in
     // full), so this tick's box0 covers everything regardless of what any earlier rebuild's bounded
     // dispatch touched. Invalidating the previous box makes the NEXT rebuild start from a full-grid
@@ -2882,10 +2890,24 @@ void VoxiRenderer::giCacheWarnOversize(u64 bytes) {
               voxelResBuilt_, bytes / (1024 * 1024), kMaxCachedGiEntryBytes / (1024 * 1024));
 }
 
-// Schedules a readback of the freshly baked volume. Nothing is written yet -- see the countdown.
-void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
-    if (giCacheDir_.empty() || giCacheUnsupported_) return;
-    if (giCacheDumpCountdown_) return;   // one in flight is enough
+bool VoxiRenderer::giCacheKeyKnown(const fmt::GiCacheKey& k) const {
+    for (const fmt::GiCacheKey& known : giCacheKnownKeys_)
+        if (known == k) return true;
+    return false;
+}
+
+void VoxiRenderer::giCacheRememberKey(const fmt::GiCacheKey& k) {
+    if (giCacheKeyKnown(k)) return;
+    constexpr usize kKnownKeys = 64;   // giCacheFlush's kGiCacheKeepFiles: the directory keeps no more
+    if (giCacheKnownKeys_.size() >= kKnownKeys) giCacheKnownKeys_.erase(giCacheKnownKeys_.begin());
+    giCacheKnownKeys_.push_back(k);
+}
+
+// Schedules a readback of the SETTLED volume (called from the gate's skip branch, see
+// giCacheSettlePending_). Nothing is written yet -- see the countdown.
+bool VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
+    if (giCacheDir_.empty() || giCacheUnsupported_) return true;
+    if (giCacheDumpCountdown_) return false;   // one in flight is enough; ask again next quiet tick
 
     // A CLOUD-ONLY REBUILD IS NOT WORTH A FILE, and this is the sharpest instance of the cache
     // writing something it can never retrieve. giCacheKey deliberately zeroes cloudTime -- a key on a
@@ -2893,10 +2915,12 @@ void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
     // the cloud clock carries a key identical to the one already on disk while holding different
     // voxels. Writing it spends ~18 MB to make the cache non-deterministic: the same key would name
     // two different volumes depending on which run wrote last.
-    if (giRebuildCloudOnly_) return;
+    if (giCacheSettleCloudOnly_) return true;
 
     giCachePendingKey_ = giCacheKey();
-    if (giCachePendingKey_.resolution == 0) return;
+    if (giCachePendingKey_.resolution == 0) return true;
+    // Restored from, or already queued to, the cache this session: nothing new to write.
+    if (giCacheKeyKnown(giCachePendingKey_)) return true;
 
     // THE CEILING IS TESTED HERE, BEFORE ANYTHING IS COPIED, AND IT USED TO BE TESTED ONLY IN
     // giCacheTick -- after the copy had already run. That ordering made the "not cached" path the
@@ -2916,10 +2940,10 @@ void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
     // The only difference is that it now costs nothing to not cache it.
     if (fmt::giCacheTotalBytes(giCachePendingKey_) > kMaxCachedGiEntryBytes) {
         giCacheWarnOversize(fmt::giCacheTotalBytes(giCachePendingKey_));
-        return;
+        return true;
     }
 
-    if (!giCacheEnsureBuffers()) return;
+    if (!giCacheEnsureBuffers()) return true;
 
     // filterMips left the whole resource in ShaderResource; put it back there afterwards so the
     // cone trace later this frame reads it exactly as it would have.
@@ -2929,6 +2953,8 @@ void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
     ctx.textureBarrier(voxelTex_, rhi::ResourceState::CopySource, rhi::ResourceState::ShaderResource);
 
     giCacheDumpCountdown_ = kGiCacheReadbackDelay;
+    giCacheRememberKey(giCachePendingKey_);
+    return true;
 }
 
 // Ticks the countdown and writes the file when the GPU is provably past the copy.
@@ -3520,10 +3546,11 @@ bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::Materia
 
     if (!rtMaterialLogged_) {
         rtMaterialLogged_ = true;
-        // A realistic material count (tens) at 96 bytes each is a few KB, times three ring slots
-        // (the ring holds the largest table any slot has needed, same as rtInstances_). Re-uploads
-        // only on a rare build where the memcmp above finds a real difference -- a hot-reload, or a
-        // newly-appearing material -- not every frame, and not merely on reorder.
+        // A realistic material count (tens) at sizeof(pbr::MaterialConstants) bytes each is a few KB,
+        // times three ring slots (the ring holds the largest table any slot has needed, same as
+        // rtInstances_). Re-uploads only on a rare build where the memcmp above finds a real
+        // difference -- a hot-reload, or a newly-appearing material -- not every frame, and not
+        // merely on reorder.
         const usize bytesPerSlot = rtMaterialData_.size() * sizeof(pbr::MaterialConstants);
         AVER_INFO("[Voxi] ray-traced material table: {} distinct material(s) (index 0 the fallback "
                   "sentinel) = {} bytes, x{} ring slots = {} bytes resident. Re-uploaded only when "

@@ -64,6 +64,19 @@ literal into `Roughness`, and leaves metallic, the normal map, emissive, occlusi
 entirely — the material using it still has a normal map, it just also has a banded base colour a
 `PARAM` block could never produce.
 
+**`Emissive` is linear outgoing radiance, not a "strength" applied to something else.**
+`EmissiveFactor` is multiplied by the emissive map when one is bound
+(`a.emissive = gEmissiveFactor * map.emissive` in `material_prelude.hlsl`) and used alone, at full
+weight, when none is — the unbound map's identity is white (1, 1, 1), the same convention
+`BaseColor`/`Occlusion` already use, not black. Values above 1 are ordinary and expected for
+anything meant to read as a light source: a sunlit white wall sits around 1, a lamp bulb that should
+actually bloom and light the room it is in wants something on the order of 10–20, and the Material
+Editor's `Emissive` control goes to 32. There is no separate exposure or intensity knob — the factor,
+times the map when there is one, *is* the outgoing radiance. An emissive surface lights its
+surroundings only through GI — voxel GI and ReSTIR GI pick it up like any other radiance source —
+because there are no point lights yet: `CLight` (`docs/SCENE_FRAMEWORK.md` §3.7) is authored data no
+renderer currently reads.
+
 ---
 
 ## 3. `DOMAIN material`

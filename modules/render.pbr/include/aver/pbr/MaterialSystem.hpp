@@ -190,10 +190,9 @@ private:
 
     // 1x1, created before any material. The metal-rough one is (0,255,255,255): glTF packs
     // occlusion in R, roughness in G and metallic in B.
-    rhi::TextureHandle white_ = 0;       // base colour and occlusion
+    rhi::TextureHandle white_ = 0;       // base colour, occlusion and emissive
     rhi::TextureHandle flatNormal_ = 0;  // (128,128,255) — +Z in tangent space
     rhi::TextureHandle metalRough_ = 0;
-    rhi::TextureHandle black_ = 0;       // emissive
 
     rhi::BindingSetHandle fallbackSet_ = 0;
     MaterialConstants     fallbackConstants_{};

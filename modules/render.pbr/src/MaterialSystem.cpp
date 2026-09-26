@@ -83,20 +83,20 @@ bool MaterialSystem::init(rhi::IDevice& device, u32 tableBaseRegister) {
     return true;
 }
 
-// Creates the four 1x1 identity textures.
+// Creates the three 1x1 identity textures. There is no separate black fallback: every slot,
+// emissive included, multiplies a factor by its map, so the map's unbound value must be the
+// multiplicative identity (white) or an unmapped factor reads as zero. See writeSlots() below.
 bool MaterialSystem::createFallbackTextures() {
     // sRGB for base colour, linear for the rest. White is 1.0 under either encoding, but the FORMAT
     // must match or a real map would decode differently from the fallback it replaces.
     const u8 white[4]  = {255, 255, 255, 255};
     const u8 normal[4] = {128, 128, 255, 255};
     const u8 mr[4]     = {0, 255, 255, 255};
-    const u8 black[4]  = {0, 0, 0, 255};
 
     white_      = makePixel(*res_, white,  rhi::Format::RGBA8UnormSrgb, "pbr fallback white");
     flatNormal_ = makePixel(*res_, normal, rhi::Format::RGBA8Unorm,     "pbr fallback normal");
     metalRough_ = makePixel(*res_, mr,     rhi::Format::RGBA8Unorm,     "pbr fallback metalrough");
-    black_      = makePixel(*res_, black,  rhi::Format::RGBA8Unorm,     "pbr fallback black");
-    if (white_ && flatNormal_ && metalRough_ && black_) return true;
+    if (white_ && flatNormal_ && metalRough_) return true;
     AVER_ERROR("[PBR] the fallback textures could not be created");
     return false;
 }
@@ -111,7 +111,7 @@ void MaterialSystem::shutdown() {
     cache_.clear();
     if (fallbackSet_) res_->destroyBindingSet(fallbackSet_);
     fallbackSet_ = 0;
-    for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_, &black_}) {
+    for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_}) {
         if (*t) res_->destroyTexture(*t);
         *t = 0;
     }
@@ -198,7 +198,10 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         metalRough_,  // MetalRough
         flatNormal_,  // Normal
         white_,       // Occlusion
-        black_,       // Emissive
+        // Emissive multiplies emissiveFactor like BaseColor/Occlusion multiply theirs, so it falls
+        // back to the identity too. It used to be black, which zeroed every emissiveFactor-only
+        // material (a lamp bulb with no emissive texture).
+        white_,       // Emissive
         white_,       // Layer1BaseColor
         metalRough_,  // Layer1MetalRough
         flatNormal_,  // Layer1Normal

@@ -2651,7 +2651,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float4 mapMR    = averRtSampleSlot(mat, 1, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
     float3 mapNrm   = averRtSampleSlot(mat, 2, uvS, uvGx, uvGy, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
     float  mapOcc   = averRtSampleSlot(mat, 3, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).r;
-    float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, uvGx, uvGy, float4(0, 0, 0, 1)).rgb;
+    // WHITE, NOT BLACK, like every slot above: s.emissive = mat.emissiveFactor * mapEmis multiplies,
+    // so an unbound emissive map must be the identity. The black fallback this used to have made
+    // every emissiveFactor-only material (a lamp bulb with no emissive texture) render no glow.
+    float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).rgb;
     // glTF packs occlusion in R, roughness in G, metallic in B -- the same unpack averSampleMaps does.
     float2 metalRough = float2(mapMR.g, mapMR.b);
     float3 normalTS   = float3(mapNrm.xy * mat.normalScale, mapNrm.z);
@@ -2711,6 +2714,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.occlusion = lerp(1.0, mapOcc, mat.occlusionStrength);
 #else
     s.albedo   = inst.albedo * mat.baseColorFactor.rgb;
+    // The factor alone: no texture table on this compile. This branch never set it, so
+    // averShadeIndirect added whatever the register held -- see the HAND-SET rule below.
+    s.emissive = mat.emissiveFactor;
 #endif
 #ifdef AVER_RT_BINDLESS
     // metalRough is the SAMPLED pair, unpacked glTF-style: .x roughness (green), .y metallic (blue).
@@ -3223,6 +3229,14 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
         bp = bp + dirB * qb.CommittedRayT();
         bn = bnWS;
+        // The hit's own emission, weighted by the path so far and NOT by this hit's albedo (emitted
+        // light leaves the surface without bouncing off it), so a bounce that lands on a lamp bulb
+        // carries its glow and not only its sunlit reflection. The factor alone, no emissive map.
+        // NOT IN THE SINGLE-PASS COMPILE: that megakernel is at the AMD driver's register limit (see
+        // rtGiShadowBits() in voxi_rt.hlsli), and this loop only runs with GI off anyway.
+#if !AVER_RD_SINGLE_PASS
+        radiance += throughput * gRtMaterials[bi.materialIndex].emissiveFactor;
+#endif
         // Diffuse response again: a cosine-weighted bounce samples the DIFFUSE lobe, so a metal
         // correctly contributes almost nothing.
         throughput *= (1.0 - saturate(bi.metallic)) * bi.albedo;
@@ -3262,8 +3276,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // SV_DEPTH unwritten -- the exact "fills only some outputs" fault the struct's own comment warns
     // both return sites about. s.albedo is the SAMPLED base colour; shading a base-colour CONSTANT
     // is what made this mode pure white on every textured mesh.
-    o.col   = float4(vmode == 1u ? s.albedo : radiance, 1.0);   // vmode 1 == Unlit (see gViewParams's
-                                                                  // own cbuffer comment for the legend)
+    // Unlit is albedo PLUS emissive: it removes the lighting, not the surface's own light, so a lamp
+    // bulb still glows. Same rule as displayColor for the raster Unlit view (averBuildSurface).
+    o.col   = float4(vmode == 1u ? s.albedo + s.emissive : radiance, 1.0);   // vmode 1 == Unlit (see
+                                                                  // gViewParams's own cbuffer comment
+                                                                  // for the legend)
     // B1 (F5): applied LAST, after the unlit substitution just above and after fog/shading upstream,
     // so this is unconditionally the final colour whenever it fires -- see PSMainVoxi's identical
     // override for the precedence against giDiffusePoisoned (a giRestirIndirect colour on the diffuse
@@ -4347,6 +4364,12 @@ void PSVoxel(VoxOut i) {
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility / PI
                                 + averSkyIrradiance(N) * gAmbient.r * skyVis * skyInject
                                 + room.rgb * AVER_VOX_FEEDBACK);
+    // A LAMP'S OWN GLOW. Without it an emissive surface injected nothing and could never light a
+    // room through voxel GI. Added after the albedo multiply because emission is light the surface
+    // makes, not light it reflects, and s.emissive is already exitant radiance like the bracket
+    // above. The clamp below is Settings::giRadianceCeiling (default 16), so a lamp brighter than
+    // that injects at the ceiling.
+    radiance += s.emissive;
     radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
 
     // insideVolume() is inclusive of 1.0, and conservative raster does produce uvw == 1.0 exactly.

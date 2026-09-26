@@ -692,6 +692,7 @@ private:
     // build that actually ran, whether or not the gate itself is on -- see its own call sites.
     bool rtAccelSnapshotUnchanged() const;
     bool rtAccelMustForceRebuild() const;
+    // Its per-draw material hash is hashDrawMaterialInto(), shared with giDrawsKey().
     u64  rtAccelDrawsKey() const;
     void takeRtAccelSnapshot();
     // The one-time-per-reason "why" log (mirrors giSnapshotUnchanged's reject lambda) plus the
@@ -1279,6 +1280,13 @@ private:
         // a parallel list every pass has to remember to visit.
         bool hiddenFromOwner = false;
     };
+
+    // One draw's material identity folded into an FNV chain -- SHARED by rtAccelDrawsKey() and
+    // giDrawsKey()/giDrawsSubKeys() so the two gates cannot drift apart. giDrawsKey() used to hash
+    // only colour/metallic/roughness, so an authored material's edit (a lamp's emissiveFactor in the
+    // Material Editor) never rebuilt the voxel GI. Declared after struct Draw because it takes one.
+    void hashDrawMaterialInto(u64& h, const Draw& d) const;
+
     std::vector<Draw> draws_, drawsPrev_;
 
     // ---- the blended-draw census ----
@@ -1700,7 +1708,7 @@ private:
     u64 giDrawsCount_ = 0;     // how many draws were hashed
     u64 giDrawsMeshKey_ = 0;   // mesh handles only, order-independent
     u64 giDrawsWorldKey_ = 0;  // world transforms only
-    u64 giDrawsMatKey_ = 0;    // colour/metallic/roughness only
+    u64 giDrawsMatKey_ = 0;    // material identity (hashDrawMaterialInto)
     mutable u64 giDrawsRejects_ = 0;
     mutable u64 giDrawsCountMoved_ = 0, giDrawsMeshMoved_ = 0, giDrawsWorldMoved_ = 0, giDrawsMatMoved_ = 0;
     mutable u64 giDrawsNextReport_ = 32;
@@ -1845,6 +1853,23 @@ private:
     u64  giCacheBufBytes_ = 0;
     u32  giCacheDumpCountdown_ = 0;   // 0 = nothing pending
     fmt::GiCacheKey giCachePendingKey_{};
+    // ONLY A SETTLED VOLUME IS CACHED. A bake used to schedule its readback on every rebuild, so a
+    // sun or Emissive drag -- a new key every tick -- copied 18 MB per rebuild into the RAM buffer
+    // and flushed it to disk about once a second of dragging, all of it volumes nobody would ask for
+    // again, and each one caught mid multi-bounce convergence. Now a rebuild only raises
+    // giCacheSettlePending_, and the first QUIET gate tick after convergence (the drag let go, the
+    // bounces settled) schedules one readback.
+    bool giCacheSettlePending_ = false;
+    // True while every bake since the last settled volume was triggered by the cloud clock alone --
+    // giRebuildCloudOnly_ latched across the series, since that flag is false again by the quiet
+    // tick. giCacheScheduleDump declines such a volume, for the reason its own comment gives.
+    bool giCacheSettleCloudOnly_ = false;
+    // Keys this session already restored or queued, so a level load that restores its volume, or a
+    // revisited sun angle, does not copy and rewrite a file the cache already holds. Bounded like the
+    // directory itself (giCacheFlush's kGiCacheKeepFiles); oldest dropped first.
+    std::vector<fmt::GiCacheKey> giCacheKnownKeys_;
+    bool giCacheKeyKnown(const fmt::GiCacheKey& k) const;
+    void giCacheRememberKey(const fmt::GiCacheKey& k);
 
     // ---- the write-behind buffer -------------------------------------------------------------
     //
@@ -1852,7 +1877,8 @@ private:
     // write on the frame it finished, and an author nudging the sun produces a bake per nudge --
     // so a minute of lighting work was tens of writes and a directory that had to be swept after
     // each one. The volumes now accumulate here and reach the filesystem when the budget is
-    // exceeded or the editor shuts down.
+    // exceeded or the editor shuts down -- and only SETTLED ones are queued at all (see
+    // giCacheSettlePending_), so a drag adds one entry when it lets go, not one per tick.
     //
     // SAFE BECAUSE OF WHAT THIS CACHE IS, not because the window is small. GiCache.hpp states the
     // contract plainly: "nothing here is authored and nothing here is precious: the whole directory
@@ -1865,9 +1891,9 @@ private:
     // textures themselves. Editor Preferences > Derived Data Cache moves it.
     u64 giCacheRamBudget_ = 256ull * 1024ull * 1024ull;
     // True when the rebuild about to run was triggered by NOTHING but the cloud clock. The gate
-    // tests clouds last precisely so this can mean that, and giCacheScheduleDump uses it to
-    // decline writing a volume whose key cannot describe what changed. Cleared at the top of
-    // every gate evaluation.
+    // tests clouds last precisely so this can mean that, and giCacheSettleCloudOnly_ latches it so
+    // giCacheScheduleDump can decline writing a volume whose key cannot describe what changed.
+    // Cleared at the top of every gate evaluation.
     // mutable because giSnapshotUnchanged is const and should stay that way: it ANSWERS a question
     // about the world rather than changing it, and this records which answer it gave -- the same
     // reason giGateWhyMask_ beside it is written from that const method.
@@ -1904,8 +1930,11 @@ private:
     fmt::GiCacheKey giCacheKey() const;
     // Tries to fill voxelTex_ from disk. True when the volume now holds the cached answer.
     bool giCacheRestore(rhi::IRenderContext& ctx);
-    // Schedules a readback of voxelTex_ so it can be written out once the GPU is past it.
-    void giCacheScheduleDump(rhi::IRenderContext& ctx);
+    // Schedules a readback of the settled voxelTex_ so it can be buffered once the GPU is past it.
+    // False only when it should be asked again (a readback is already in flight); true once this
+    // volume needs nothing more -- copied, already known, or declined for a reason that holds until
+    // the next bake.
+    bool giCacheScheduleDump(rhi::IRenderContext& ctx);
     // Warns once that a volume is too big to cache. Shared by the two places that can decide it:
     // giCacheScheduleDump before the readback, giCacheTick as a guard after it.
     void giCacheWarnOversize(u64 bytes);

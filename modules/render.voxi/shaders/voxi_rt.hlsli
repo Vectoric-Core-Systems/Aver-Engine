@@ -124,7 +124,8 @@ struct RtMaterial {
     float  ior;
     float  transmission;
     // These two mirror MaterialConstants::subsurfaceWeight/subsurfaceRadius, which spent the
-    // _pad0/_pad1 this used to declare. Same order, same offsets: the struct still ends at 96 bytes.
+    // _pad0/_pad1 this used to declare. Same order, same offsets as MaterialConstants; the fields
+    // below take the struct to 160 bytes in all (MaterialGpu.hpp's static_assert).
     float  subsurfaceWeight;
     float  subsurfaceRadius;
     // Coat row, same order as MaterialConstants and the material_prelude.hlsl cbuffer -- three
@@ -2257,6 +2258,9 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     // reflection is fake" once directly-viewed surfaces carry real base-colour maps. Everything
     // needed is already here, so a reflected surface resolves its UV the same way a direct one does.
     float3 reflAlbedo = inst.albedo;
+    // THE REFLECTED SURFACE'S OWN EMISSION, added to the result and not scaled by its albedo or by
+    // the sun reaching it, so a lamp bulb glows in a mirror as it does seen directly.
+    float3 emission = 0.0;
 #ifdef AVER_RT_BINDLESS
     {
         const RtMaterial rmat = gRtMaterials[inst.materialIndex];
@@ -2280,7 +2284,20 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
                      rt * rad, rb * rad, rgx, rgy);
         reflAlbedo *= averRtSampleSlot(rmat, 0, ruv, rgx, rgy, float4(1, 1, 1, 1)).rgb
                     * rmat.baseColorFactor.rgb;
-    }
+
+#if !AVER_RD_SINGLE_PASS
+        // The emissive map on the base colour's footprint, white (the identity) when unbound.
+        emission = rmat.emissiveFactor
+                 * averRtSampleSlot(rmat, 4, ruv, rgx, rgy, float4(1, 1, 1, 1)).rgb;
+#else
+        // The factor alone: the single-pass compile is at the AMD driver's register limit
+        // (rtGiShadowBits() above), so no new texture sample on this secondary-hit path.
+        emission = rmat.emissiveFactor;
 #endif
-    return reflAlbedo * (direct + ambient);
+    }
+#else
+    // No texture table on this compile: the factor alone.
+    emission = gRtMaterials[inst.materialIndex].emissiveFactor;
+#endif
+    return reflAlbedo * (direct + ambient) + emission;
 }

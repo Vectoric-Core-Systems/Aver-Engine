@@ -97,6 +97,11 @@ struct PtSurface {
     // into one word and NO precision lost to quantising the IOR into a handful of bits. See
     // PathTracer::Instance for the mirrored field.
     f32 ior = 0.0f;
+
+    // Linear radiance this surface emits (a lamp bulb's emissiveFactor); {0,0,0} = no glow. Added
+    // at every hit in CSPathTrace, camera ray included. A factor only, no emissive texture -- see
+    // PtSceneView::ResolvedMaterial::emissive.
+    f32 emissive[3] = {0, 0, 0};
 };
 
 // The pinhole camera primary rays are generated from. Carried in the pass's own constants rather
@@ -308,8 +313,11 @@ private:
         u32 metalRoughTex = kUnboundTexture;
         u32 normalTex = kUnboundTexture;
         f32 normalScale = 1.0f;
+        // PtSurface::emissive, appended like normalScale; read by both shader variants. 112 -> 124,
+        // every field still on a 4-byte boundary.
+        f32 emissive[3] = {0, 0, 0};
     };
-    static_assert(sizeof(Instance) == 112, "PtInstance is the HLSL PtInstance ABI");
+    static_assert(sizeof(Instance) == 124, "PtInstance is the HLSL PtInstance ABI");
 
     struct Scene {
         rhi::TlasHandle  tlas = 0;

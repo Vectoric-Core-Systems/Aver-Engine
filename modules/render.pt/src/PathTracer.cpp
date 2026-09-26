@@ -490,6 +490,7 @@ bool PathTracer::prepare() {
         inst.metalRoughTex = surfaces_[i].metalRoughTex;
         inst.normalTex     = surfaces_[i].normalTex;
         inst.normalScale   = surfaces_[i].normalScale;
+        std::memcpy(inst.emissive, surfaces_[i].emissive, sizeof(inst.emissive));
         // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
         // surface is objectToWorld, albedo, ior and the base-colour index, right here.
         inst.firstVertex = row.firstVertex;

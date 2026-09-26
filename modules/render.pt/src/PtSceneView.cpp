@@ -176,6 +176,9 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
         d.roughness     = rm.roughness;
         d.metallic      = rm.metallic;
         d.normalScale   = rm.normalScale;
+        d.emissive[0] = rm.emissive[0];
+        d.emissive[1] = rm.emissive[1];
+        d.emissive[2] = rm.emissive[2];
     } else {
         d.albedo[0] = baseColor[0];
         d.albedo[1] = baseColor[1];
@@ -230,13 +233,14 @@ u64 PtSceneView::drawsKey() const {
         // 0 -> handle a few frames into a scene; a key blind to that would keep tracing the
         // untextured version until something unrelated forced a re-arm. It also covers the reverse
         // case a texture swap in the editor produces, and a gloss/metalness edit that changes no
-        // texture at all.
+        // texture at all -- and an emissiveFactor edit, for the same reason.
         {
             key ^= static_cast<u64>(d.baseColorTex);  key *= 1099511628211ull;
             key ^= static_cast<u64>(d.metalRoughTex); key *= 1099511628211ull;
             key ^= static_cast<u64>(d.normalTex);     key *= 1099511628211ull;
-            const f32 scalars[3] = {d.roughness, d.metallic, d.normalScale};
-            for (u32 i = 0; i < 3; ++i) {
+            const f32 scalars[6] = {d.roughness, d.metallic, d.normalScale,
+                                    d.emissive[0], d.emissive[1], d.emissive[2]};
+            for (u32 i = 0; i < 6; ++i) {
                 u32 bits = 0;
                 std::memcpy(&bits, &scalars[i], sizeof(bits));
                 key ^= static_cast<u64>(bits);
@@ -336,6 +340,7 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
         std::memcpy(s.world, d.world, sizeof(s.world));
         std::memcpy(s.albedo, d.albedo, sizeof(s.albedo));
         s.ior = d.ior;
+        std::memcpy(s.emissive, d.emissive, sizeof(s.emissive));
         // RESIDENCY IS RESOLVED HERE, not in submitDraw: this runs once per re-arm rather than once
         // per draw per frame, and residentTexture() is the call that may build the table and compile
         // the textured pipeline on first use. A handle the tracer cannot make resident comes back

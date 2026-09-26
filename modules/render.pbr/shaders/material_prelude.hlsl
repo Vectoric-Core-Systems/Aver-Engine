@@ -313,7 +313,9 @@ AverMaps averSampleMaps(float2 uv) {
     m.metalRough = float2(1, 1);
     m.normalTS   = float3(0, 0, 1);
     m.occlusion  = 1.0;
-    m.emissive   = float3(0, 0, 0);
+    // White, not black: a.emissive = gEmissiveFactor * map.emissive multiplies, so the identity is 1
+    // (black zeroed every emissiveFactor-only material, e.g. a lamp bulb with no emissive texture).
+    m.emissive   = float3(1, 1, 1);
 #endif
     return m;
 }
@@ -578,7 +580,11 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // the entire colour; and skipping srgbToLin hands an sRGB triple to a tonemap that assumes
     // linear, which is the same round-trip fault the selection outline hit in plainShadeSurface.
     // s.alpha rather than gBaseColor.a so an unlit surface fades with opacity like every other one.
-    s.displayColor = float4(s.albedo, s.alpha);
+    //
+    // PLUS s.emissive: displayColor is what the viewport's Unlit view shows for every scene mesh
+    // (the only setter of AVER_MODEL_UNLIT is setUnlit, and overlay/chrome draws clear it first --
+    // SandboxRender.cpp), and Unlit removes lighting, not a lamp's own glow.
+    s.displayColor = float4(s.albedo + s.emissive, s.alpha);
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);

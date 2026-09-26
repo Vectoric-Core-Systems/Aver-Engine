@@ -1009,6 +1009,44 @@ int main() {
         }
     }
     {
+        // KHR_materials_emissive_strength LIFTS emissiveFactor PAST glTF core's [0,1] cap. Bright
+        // emitters -- a lamp bulb, a neon tube -- cannot be authored with emissiveFactor alone, since
+        // the core spec caps it at 1; authoring tools bolt this multiplier on instead of a bigger
+        // factor, and GltfImport.cpp must fold it into emissiveFactor rather than drop it as "a
+        // material extension this importer does not carry".
+        const Tri tri = makeTriangleBuffer();
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Bright\",\"emissiveFactor\":[1.0,0.5,0.25],"
+              "\"extensions\":{\"KHR_materials_emissive_strength\":{\"emissiveStrength\":8}}}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a material with KHR_materials_emissive_strength imports: " + why);
+        if (res.materials.size() == 1) {
+            const fmt::GltfMaterial& m = res.materials[0];
+            checkNear(m.emissiveFactor[0], 8.0f, 1e-5f, "emissiveFactor r scaled by emissiveStrength (1.0 * 8)");
+            checkNear(m.emissiveFactor[1], 4.0f, 1e-5f, "emissiveFactor g scaled by emissiveStrength (0.5 * 8)");
+            checkNear(m.emissiveFactor[2], 2.0f, 1e-5f, "emissiveFactor b scaled by emissiveStrength (0.25 * 8)");
+        }
+        check(!noted(res, "KHR_materials_emissive_strength"),
+              "the extension that was READ AND APPLIED is not also reported as one this importer dropped");
+    }
+    {
+        // WITHOUT the extension, a stated emissiveFactor carries verbatim -- there is no strength to
+        // fold in, and the no-extension path must not scale by anything other than the implicit 1.0.
+        const Tri tri = makeTriangleBuffer();
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"NoStrength\",\"emissiveFactor\":[1.0,0.5,0.25]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a material without the extension imports: " + why);
+        if (res.materials.size() == 1) {
+            const fmt::GltfMaterial& m = res.materials[0];
+            checkNear(m.emissiveFactor[0], 1.00f, 1e-6f, "emissiveFactor r unscaled without the extension");
+            checkNear(m.emissiveFactor[1], 0.50f, 1e-6f, "emissiveFactor g unscaled without the extension");
+            checkNear(m.emissiveFactor[2], 0.25f, 1e-6f, "emissiveFactor b unscaled without the extension");
+        }
+    }
+    {
         // AN IMAGE THROUGH A data: URI, and its bytes must arrive unchanged. Nothing decodes or
         // re-encodes an image: a round trip through a compressor would change bytes the source is
         // entitled to get back, and would cost quality on a JPEG for nothing.

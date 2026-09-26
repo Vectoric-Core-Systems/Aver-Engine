@@ -898,6 +898,8 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     }
     float4 hitMapBase = float4(1, 1, 1, 1);
     float4 hitMapMR   = float4(1, 1, 1, 1);
+    // White: an unbound emissive map is the identity, so mat.emissiveFactor alone carries a lamp's glow.
+    float4 hitMapEmis = float4(1, 1, 1, 1);
 #ifdef AVER_RT_BINDLESS
     {
         const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
@@ -914,6 +916,12 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
                      ht * rad, hb * rad, hgx, hgy);
         hitMapBase = averRtSampleSlot(mat, 0, huv, hgx, hgy, float4(1, 1, 1, 1));
         hitMapMR   = averRtSampleSlot(mat, 1, huv, hgx, hgy, float4(1, 1, 1, 1));
+#if !AVER_RD_SINGLE_PASS
+        // The emissive map, on the footprint just computed. Not in the single-pass compile, which is
+        // at the AMD driver's register limit (rtGiShadowBits() in voxi_rt.hlsli): the factor alone
+        // there.
+        hitMapEmis = averRtSampleSlot(mat, 4, huv, hgx, hgy, float4(1, 1, 1, 1));
+#endif
     }
 #endif
     // glTF's metal-rough channels, as PSRayDriven reads them: G roughness, B metalness.
@@ -944,7 +952,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     s.kdAlbedo  = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
     s.model     = AVER_MODEL_STANDARD;
     s.alpha     = 1.0;
-    s.emissive  = mat.emissiveFactor;
+    s.emissive  = mat.emissiveFactor * hitMapEmis.rgb;
     s.occlusion = 1.0;
 
     AverLight sun;
@@ -974,10 +982,10 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     }
     sun.visibility *= 1.0 + averCausticFocus(hitPos);
 
-    // 0.0, NOT s.emissive: averShadeIndirect below adds s.emissive itself (its own header comment,
-    // "adds ambient, bounce, environment specular and self-emission, in that order"), matching the
-    // averShadeDirect(radiance=0)/averShadeIndirect(radiance) pairing PSRayDriven uses for the same
-    // AverSurface (voxi.hlsl:1094-1096, :1775). Passing s.emissive here too would count it twice.
+    // THE HIT'S EMISSION IS THE SEED: averShadeDirect returns its first argument plus the direct sun
+    // term (material_prelude.hlsl), and nothing later in this function adds s.emissive again -- the
+    // ambient/bounce term below is kdAlbedo-weighted light only. So it is counted exactly once, here.
+    // (averShadeIndirect, which adds s.emissive itself, is PSRayDriven's pairing and is not used here.)
     float3 radiance = averShadeDirect(s.emissive, s, sun);
 
     // ---- DIFFUSE AMBIENT ONLY. AN ENVIRONMENT-SPECULAR TERM HERE FLATTENS THE WHOLE IMAGE ----

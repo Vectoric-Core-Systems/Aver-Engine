@@ -1152,16 +1152,39 @@ void Gltf::importMaterials() {
             const JsonValue& v = jm["emissiveFactor"];
             for (usize k = 0; k < 3 && k < v.size(); ++k) m.emissiveFactor[k] = v[k].asFloat(0.0f);
         }
+
+        // glTF core caps emissiveFactor at [0,1], so a bright emitter -- a lamp bulb, a neon tube --
+        // cannot be authored with the core fields alone. KHR_materials_emissive_strength carries the
+        // multiplier that lifts it past 1, and it is read here, before the "extensions we don't
+        // carry" loop below, so that loop can name-check and skip it rather than reporting the very
+        // extension this importer just applied as one it dropped.
+        if (jm["extensions"].has("KHR_materials_emissive_strength")) {
+            // Absent emissiveStrength is the spec's own default of 1.0 (no change) -- mirrored by
+            // asFloat's own fallback here, the same idiom occlusionStrength above uses. A non-finite
+            // or negative value can't scale a radiance sanely -- multiplying it in would leave inf/
+            // NaN/negative glow sitting in emissiveFactor -- so it is noted and left unscaled instead.
+            const f32 strength = jm["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"].asFloat(1.0f);
+            if (std::isfinite(strength) && strength >= 0.0f) {
+                for (usize k = 0; k < 3; ++k) m.emissiveFactor[k] *= strength;
+            } else {
+                note("a KHR_materials_emissive_strength.emissiveStrength that is not a finite, "
+                     "non-negative number on " + m.name + " (left unscaled)");
+            }
+        }
+
         m.alphaMode    = jm.has("alphaMode") ? std::string(jm["alphaMode"].asString("OPAQUE")) : std::string("OPAQUE");
         m.alphaCutoff  = jm["alphaCutoff"].asFloat(0.5f);
         m.doubleSided  = jm["doubleSided"].asBool(false);
 
         // Extensions, NAMED. A material carrying KHR_materials_transmission is not a material this
         // importer understood and quietly simplified -- it is one whose glass is missing, and the
-        // author is entitled to be told which one.
+        // author is entitled to be told which one. KHR_materials_emissive_strength is excluded here:
+        // it was read and applied above, so listing it again would call an applied extension one
+        // this importer dropped.
         if (jm.has("extensions"))
             for (const JsonMember& e : jm["extensions"].members())
-                note("a material extension this importer does not carry: " + e.key);
+                if (e.key != "KHR_materials_emissive_strength")
+                    note("a material extension this importer does not carry: " + e.key);
     }
 }
 

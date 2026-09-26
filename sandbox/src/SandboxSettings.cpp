@@ -457,8 +457,9 @@ void SandboxApp::buildEditorPrefs() {
             voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(ddcRamBudgetMb_) * 1024ull * 1024ull);
         uiReg_.track("prefs.ddc.ramBudget");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Bakes are held in memory and written in batches, rather than one\n"
-                              "~18 MB file per bake. They go to disk when this is exceeded, and\n"
+            ImGui::SetTooltip("Only settled bakes are kept: dragging the sun or a material slider\n"
+                              "adds one volume when you let go, not one per frame. They are held\n"
+                              "in memory and go to disk in batches -- when this is exceeded, and\n"
                               "when the editor closes. Lowering it below what is already held\n"
                               "writes immediately.");
 
