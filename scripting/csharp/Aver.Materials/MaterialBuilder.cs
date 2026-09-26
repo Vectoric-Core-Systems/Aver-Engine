@@ -40,6 +40,7 @@ public sealed class MaterialBuilder
     private float _coatWeight;
     private float _coatRoughness;
     private float _coatF0 = 0.04f;   // the field default, so an unset coat emits nothing
+    private float _lightIntensity;   // 0 = not a light, MaterialDesc's own default
 
     private readonly Dictionary<Slot, string> _textures = new();
 
@@ -130,6 +131,14 @@ public sealed class MaterialBuilder
 
     /// <summary>Normal-incidence reflectance of the coat film; 0.04 (IOR 1.5) is ordinary lacquer.</summary>
     public MaterialBuilder CoatF0(float v) { _coatF0 = v; return this; }
+
+    /// <summary>
+    /// Makes this material a light source in ray-driven mode. Brightness at 1 metre in the sun's own
+    /// units (the sun itself is about 3) -- 0 is the default and means "not a light". Coloured by
+    /// <see cref="Emissive"/> (white if it is left at zero). Read only by the staged ray-driven
+    /// local-light pass; every other renderer shades this material by its Emissive factor alone.
+    /// </summary>
+    public MaterialBuilder LightIntensity(float v) { _lightIntensity = v; return this; }
 
     /// <summary>World centimetres per texture tile. Only meaningful with <see cref="WorldUv"/> on.</summary>
     public MaterialBuilder Tiling(float centimetres) { _uvTiling = centimetres; return this; }
@@ -245,6 +254,12 @@ public sealed class MaterialBuilder
             s.Append("PARAM coatRoughness ").Append(Num(_coatRoughness)).Append('\n');
             s.Append("PARAM coatF0 ").Append(Num(_coatF0)).Append('\n');
         }
+
+        // OMITTED WHEN OFF, same reasoning as the subsurface/coat blocks above: 0 is not merely a
+        // default but the feature's own off switch, so a material that never asked to be a light
+        // gets no line at all. Matches modules/formats/src/OcMat.cpp's writer -- see this class's own
+        // remarks on why the two must agree.
+        if (_lightIntensity > 0f) s.Append("PARAM lightIntensity ").Append(Num(_lightIntensity)).Append('\n');
 
         if (_textures.Count > 0)
         {

@@ -1096,6 +1096,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "while voxi.rayDrivenStages is 1 or 2.",
         []{ return vBool(Renderer::get().settings().rayDrivenReflSplit); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rayDrivenReflSplit = on; }); }});
+    t.push_back({"voxi.localLights", VarType::Bool, false,
+        "Lamps: a material with lightIntensity > 0 makes each draw using it a sphere light (its "
+        "bounds, tinted by its emissive colour), shadowed by one stochastic ray per pixel and "
+        "accumulated over time like the sun's shadow. At most 32 per frame, nearest-and-brightest "
+        "first. No cost without lamps. Off forces the light count to 0 and frees the history. Only "
+        "while voxi.rayDrivenStages is 1 or 2 (D3D12); translucent draws get no lamp light.",
+        []{ return vBool(Renderer::get().settings().localLights); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->localLights = on; }); }});
     t.push_back({"voxi.rtSkipUnchangedTlas", VarType::Bool, false,
         "Skips the TLAS rebuild and instance/material table rewrite when nothing "
         "buildAccelerationStructures() reads from the draw list has changed since the last build -- "

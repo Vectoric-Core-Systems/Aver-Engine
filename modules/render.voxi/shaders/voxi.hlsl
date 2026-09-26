@@ -39,6 +39,12 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // x = 1 when the eye is inside a blended single-sided volume, y = that medium's ior.
     // Computed once per frame on the CPU -- a pixel cannot know whether its own volume encloses the
     // camera. See VoxiRenderer's own comment for why a loose bounding-sphere test is safe here.
+    // z/w are LOCAL LIGHTS (lamps, voxi_rt.hlsli's RdLocalLight), unrelated to x/y and sharing the row
+    // only because it had two spare floats: z = how many lights gRdLocalLights (t18) holds this frame,
+    // as a float (0 = local lights off or unavailable -- every reader then behaves as before they
+    // existed); w = two bits as a float: 1 when gRdLocalHist (t19) holds a usable previous frame for the
+    // SAME light set, 2 when every lamp-flagged draw is in the list so GI may drop emitters' own emission.
+    // Decode through rdLocalLightCount()/rdLocalHistValid()/rdLocalCarriesEmitters() (voxi_rt.hlsli).
     float4   gCameraMedium;
     // The caustic caster's world box: min.xyz / max.xyz, min.w = 1 when one exists, max.w strength.
     // max.z is the surface light refracts through. See VoxiRenderer for why a box and not a sphere.
@@ -578,6 +584,64 @@ RWTexture2D<float4>       gRdAoTex     : register(u14);
 // see CSRdRefl's and CSRdReflFilter's own comments, further down this file, for the full two-pass
 // contract.
 RWTexture2D<float4>       gRdReflTex   : register(u15);
+
+// ---- LOCAL LIGHTS (lamps): the light list and CSRdLocalLights' own visibility history ----
+//
+// gRdLocalLights: this frame's sphere lights, at most 32, rdLocalLightCount() of them live (gCameraMedium.z
+// -- see that field's own comment); the struct and what each field means are voxi_rt.hlsli's RdLocalLight.
+// gRdLocalHist/gRdLocalOut: one RGBA16F texel per pixel, the size of the sun's shadow history and
+// PING-PONGED WITH IT on the same index (VoxiRenderer's rtHistWriteIdx_), so last frame's lamp texel sits
+// at the same reprojected texel the sun's does. rgb = this frame's summed local diffuse IRRADIANCE times
+// the accumulated visibility, a = that accumulated visibility -- the only channel read back next frame.
+// Written once by CSRdLocalLights (below), read once by Stage B (rdLocalLightFiltered, below; a RW read,
+// exactly as gRdSunVisTex's) after it. Unlike gRdSunVisTex this pair IS a history, and it carries no
+// depth: CSRdLocalLights validates against the sun history's depth at the same texel (rtReprojectTexel).
+//
+// kVoxiSrvCount 18 -> 20 (t18, t19) and kVoxiUavCount 19 -> 20 (u19) (VoxiRenderer.cpp, not this file) --
+// the next free slots after gAirVis's t17 and gRdShadowTiles' u18. Every slot holds a placeholder on any
+// frame the real resource is absent, so a read with a count of 0 is never a null-descriptor read.
+StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
+Texture2D<float4>              gRdLocalHist   : register(t19);
+RWTexture2D<float4>            gRdLocalOut    : register(u19);
+
+#if !AVER_RD_SINGLE_PASS
+// One arm of rdLocalLightFiltered's cross. The weight falls linearly to zero at the reprojection depth
+// test's own tolerance (3% of the depth plus 1 cm, rtReprojectTexel) so a tap across a silhouette -- a
+// different surface, lit by a different share of the lamps -- contributes nothing. A sky tap (alpha
+// <= 0, gRdSunVisTex's own sentinel) is skipped outright. Clamped into THIS frame's viewport: texels
+// outside it are never written by the staged passes and may hold any earlier frame's values.
+void rdLocalLightTap(int2 p, int2 lo, int2 hi, float zc, inout float3 sum, inout float wsum) {
+    const uint2 q  = uint2(clamp(p, lo, hi));
+    const float zt = gRdSunVisTex[q].a;
+    const float w  = (zt > 0.0) ? saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
+    // Skipped, not multiplied by a zero weight: a rejected neighbour can hold any value, and one that
+    // is not finite would turn `* 0` into NaN.
+    if (w > 0.0) {
+        sum  += gRdLocalOut[q].rgb * w;
+        wsum += w;
+    }
+}
+
+// Stage B's read of CSRdLocalLights' answer: this pixel plus its four +-1 px neighbours, weighted by
+// view-depth similarity (gRdSunVisTex.a is this frame's linear view depth, 0 for sky). One stochastic
+// shadow ray per pixel per frame leaves grain the temporal accumulation has not yet averaged, above all
+// on a moving camera where its history weight falls; five taps along the same surface take the edge off
+// it for ten texel reads. Returns IRRADIANCE times visibility -- the caller applies kdAlbedo/PI.
+float3 rdLocalLightFiltered(uint2 pixel) {
+    const float zc = gRdSunVisTex[pixel].a;
+    if (zc <= 0.0) return float3(0.0, 0.0, 0.0);
+    const int2 lo = int2(gSceneViewportCur.xy);
+    const int2 hi = lo + max(int2(gSceneViewportCur.zw), int2(1, 1)) - 1;
+    const int2 c  = int2(pixel);
+    float3 sum  = gRdLocalOut[pixel].rgb;
+    float  wsum = 1.0;
+    rdLocalLightTap(c + int2(-1,  0), lo, hi, zc, sum, wsum);
+    rdLocalLightTap(c + int2( 1,  0), lo, hi, zc, sum, wsum);
+    rdLocalLightTap(c + int2( 0, -1), lo, hi, zc, sum, wsum);
+    rdLocalLightTap(c + int2( 0,  1), lo, hi, zc, sum, wsum);
+    return sum / wsum;
+}
+#endif
 
 // gViewParams.w carries the staged buffers' row pitch as an exact integer (see gRdVisBuf's own header
 // comment above) PLUS, from milestone 4 on, per-dispatch flag bits above it -- bit 16 is CSRdGi's
@@ -2779,6 +2843,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
     float3 radiance = averShadeDirect(0.0, s, sun);
 
+#if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
+    // LOCAL LIGHTS (lamps): CSRdLocalLights' irradiance x visibility, lit through the SAME diffuse lobe
+    // the sun's own term just used (averDirectTerms: kdAlbedo/PI) -- diffuse only, no specular highlight
+    // of the lamp. Inside `radiance` and nowhere else, so it stays out of the NRD/AO/ind terms below and
+    // Unlit (vmode 1), which replaces `radiance` wholesale, drops it with the rest of the lighting. The
+    // count is a constant-buffer value, so this branch is uniform and costs nothing with no lamps.
+    if (rdLocalLightCount() > 0u)
+        radiance += s.kdAlbedo / PI * rdLocalLightFiltered(uint2(i.pos.xy));
+#endif
+
     // THE ENVIRONMENT THROUGH THE ENGINE'S OWN INDIRECT TERM, not a diffuse-only line. What stood
     // here (`radiance += s.kdAlbedo * averSkyIrradiance(N) * gAmbient.r`) had two faults, found by
     // the white furnace:
@@ -3233,9 +3307,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // light leaves the surface without bouncing off it), so a bounce that lands on a lamp bulb
         // carries its glow and not only its sunlit reflection. The factor alone, no emissive map.
         // NOT IN THE SINGLE-PASS COMPILE: that megakernel is at the AMD driver's register limit (see
-        // rtGiShadowBits() in voxi_rt.hlsli), and this loop only runs with GI off anyway.
+        // rtGiShadowBits() in voxi_rt.hlsli), and this loop only runs with GI off anyway. A lamp that
+        // CSRdLocalLights already lights directly adds nothing here (rdLocalCarriesEmitters), or the
+        // first bounce would count its light twice -- the same rule as giTraceInitialCandidate's.
 #if !AVER_RD_SINGLE_PASS
-        radiance += throughput * gRtMaterials[bi.materialIndex].emissiveFactor;
+        const RtMaterial bmat = gRtMaterials[bi.materialIndex];
+        if (!((bmat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()))
+            radiance += throughput * bmat.emissiveFactor;
 #endif
         // Diffuse response again: a cosine-weighted bounce samples the DIFFUSE lobe, so a metal
         // correctly contributes almost nothing.
@@ -3582,6 +3660,130 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);
 }
+
+#if !AVER_RD_SINGLE_PASS
+// ---- STAGE L: CSRdLocalLights -- lamps lit the way the sun is -----------------------------------------
+//
+// Dispatched right after CSRdShadow, and only on a frame VoxiRenderer has lights for (a zero count skips
+// the dispatch, so a scene with no lamps pays nothing). Per pixel: the summed diffuse irradiance of every
+// light in range (rdLocalIrradiance, voxi_rt.hlsli), ONE light picked in proportion to its luminance
+// share of that sum, ONE shadow ray toward a jittered point on it (rdLocalShadow), and that 0/1 answer
+// accumulated over frames. Writes irradiance x accumulated visibility to gRdLocalOut; Stage B
+// (PSRayDriven's AVER_RD_SPLIT branch, via rdLocalLightFiltered) applies kdAlbedo/PI.
+//
+// ONE VISIBILITY STANDS FOR EVERY LIGHT, and that is sound in expectation: picking light i with
+// probability w_i/wsum makes the expected visibility sum_i (w_i/wsum) v_i, so Esum times it is
+// sum_i E_i v_i in luminance -- one ray whatever the lamp count. Where it approximates is colour: a spot
+// one lamp shadows and a differently coloured one still lights comes out as the mix of both, dimmed,
+// rather than as the second lamp's colour.
+//
+// THE SUN'S HISTORY MACHINERY: rtReprojectTexel is the sun's reprojection and depth test (its arithmetic
+// twin -- see its header for why a twin), against the sun history's stored depth at the same texel (depth
+// is a property of the surface, not of the light), and gRdLocalHist ping-pongs with gRtShadowHist on the
+// same index, so that texel is where last frame's lamp answer for this surface sits.
+//
+// DERIVATIVES AS IN CSRdShadow (SM 6.6, 8x8 threads = 2x2 quads -- see its own header): the same
+// prologue and early-outs, then rtReprojectTexel's ddx/ddy of depth for every non-sky pixel BEFORE any
+// further data-dependent branch. The branch around that call reads only constant-buffer values, so it is
+// uniform and adds no divergence.
+//
+// NOT IN THE SINGLE-PASS COMPILE (AVER_RD_SINGLE_PASS), which is at the AMD driver's register limit
+// (rtGiShadowBits() in voxi_rt.hlsli) and has no staged history to accumulate into anyway.
+[numthreads(8, 8, 1)]
+void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+
+    const uint pitch = rdRowPitch();
+    if (pitch == 0u) return;
+    const uint idx = pixel.y * pitch + pixel.x;
+
+    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's own copy of this line gives: no blended draw
+    // reaches a staged pass, so this pass's history write is always live.
+    gAverHistoryWrite = true;
+
+    const uint4 rec = gRdVisBuf[idx];
+    if (rec.x == 0xFFFFFFFFu) {
+        // Sky: nothing to light, but every texel of a HISTORY must be written each frame or the
+        // ping-pong hands a two-frames-old value back later. Visibility 1, so a surface that
+        // reprojects onto this texel by a depth-test near-miss starts lit rather than in full shadow.
+        if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    float2 ndc;
+    const float3 dir = rdPrimaryRayDir(pixel, ndc);
+    const RdSurface s = rdSurfaceFromRecord(rec, dir);
+    // The pixel centre, as CSRdShadow hands rtShadowTemporal -- velocityPx is measured from it.
+    const float2 pixelC = float2(pixel) + 0.5;
+
+    // THE REPROJECTION FIRST -- see this function's header. gRtHistParams.x: t6/u2 are bound this frame.
+    // gRtHistParams.y > 0.25, not the shadow's > 0.75: t6 holds a real previous frame, and its DEPTH
+    // stays valid on a frame only the sun moved (the sun-independent test sky occlusion uses) -- the lamps
+    // did not move. rdLocalHistValid(): t19 holds the same light set.
+    int2   texel      = int2(0, 0);
+    float2 velocityPx = float2(0.0, 0.0);
+    bool   haveHist   = false;
+    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
+        haveHist = rtReprojectTexel(s.wpos, pixelC, texel, velocityPx);
+    float prevVis = 1.0;
+    if (haveHist) prevVis = gRdLocalHist.Load(int3(texel, 0)).a;
+
+    // LOOP 1: the unshadowed sum, and each light's luminance as its weight for the pick below.
+    // Recomputed in loop 2 rather than kept in a 32-entry local array: loop-indexed arrays spill out of
+    // registers (rtShadowEx's own measured 25% regression), and a light's irradiance is a few ALU ops.
+    const uint n = min(rdLocalLightCount(), 32u);
+    float3 Esum    = float3(0.0, 0.0, 0.0);
+    float  wsum    = 0.0;
+    uint   lastLit = 0u;
+    [loop] for (uint i = 0u; i < n; ++i) {
+        const float3 E = rdLocalIrradiance(gRdLocalLights[i], s.wpos, s.N);
+        const float  w = averShadowLum(E);
+        Esum += E;
+        wsum += w;
+        if (w > 0.0) lastLit = i;
+    }
+    // No light reaches this pixel (or a non-finite sum, which `!(> 0)` also catches): nothing to trace,
+    // but the accumulated visibility is carried forward so a lamp coming back into range this texel does
+    // not restart from one ray.
+    if (!(wsum > 0.0)) {
+        if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, prevVis);
+        return;
+    }
+
+    // LOOP 2: walk the cumulative weights to the light u lands in. u is the pixel's own hash (salted so it
+    // is not rdLocalShadow's disc angle) rotated by the frame's radical inverse -- exact, and evenly
+    // spread over frames, so each light's turns come in proportion to its share rather than in runs.
+    // lastLit, not n - 1, is the fallback: u * wsum can round up to wsum itself, and the last light may
+    // be one that contributes nothing here.
+    const uint  frameIdx = (uint)gRtHistParams.z;
+    const float u        = frac(rtHash(pixelC + float2(0.37, 11.0)) + rtRadicalInverse2(frameIdx + 1u));
+    const float target   = u * wsum;
+    uint  pick = lastLit;
+    float acc  = 0.0;
+    [loop] for (uint j = 0u; j < n; ++j) {
+        acc += averShadowLum(rdLocalIrradiance(gRdLocalLights[j], s.wpos, s.N));
+        if (target < acc) { pick = j; break; }
+    }
+
+    // The sun's own frame jitter (rtShadowTemporalEx's untiled branch), so the disc sample turns every frame.
+    const float frameJitter = (float)frameIdx * 2.39996323;
+    const float v = rdLocalShadow(s.wpos, s.N, gRdLocalLights[pick], pixelC, frameJitter);
+
+    // Exponential accumulation, 0.9 history at rest (~10 frames, one ray behaving like ten, as the sun's
+    // does) falling to 0.5 by 8 px/frame of motion. UNMEASURED: 8 px is tighter than the sun's measured
+    // 32 px budget (rtShadowTemporalEx) and is the first number to revisit if lamp shadows smear or
+    // crawl under a moving camera.
+    float vis = v;
+    if (haveHist) {
+        const float alpha = lerp(0.1, 0.5, saturate(length(velocityPx) / 8.0));
+        vis = lerp(prevVis, v, alpha);
+    }
+    // CLAMPED BELOW RGBA16F's 65504: a receiver a centimetre from a bright lamp's centre gets 1e4 x
+    // lightIntensity, which past about 7 would store +inf and reach Stage B and auto exposure as NaN.
+    if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(min(Esum * vis, 60000.0), vis);
+}
+#endif
 
 // ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's own resample to read back
 //

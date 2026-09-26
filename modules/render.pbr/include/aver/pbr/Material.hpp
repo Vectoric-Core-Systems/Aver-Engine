@@ -177,6 +177,18 @@ struct MaterialDesc {
     f32 coatRoughness = 0.0f;   // [0,1] the coat's own roughness, independent of the base's
     f32 coatF0        = 0.04f;  // normal-incidence reflectance of the coat film itself
 
+    // ---- lamp light: a material that CASTS light, not merely looks bright ----
+    // Emissive already makes a surface look bright; this makes it light its surroundings, the way
+    // the sun does, without waiting for GI to carry it. 0 is off -- every material authored before
+    // this field existed -- and a positive value is brightness at 1 metre in the SUN's OWN UNITS
+    // (SkyAtmosphere::sunIntensity, ~3 in the editor), so a lamp and the sun sit on one dial instead
+    // of a separate "intensity" scale nobody could calibrate against anything. Consumed only by the
+    // staged ray-driven local-light pass (CSRdLocalLights, D3D12): a draw whose material has this set
+    // becomes a small sphere light -- its world bounding sphere, coloured by emissiveFactor -- that
+    // pass sums and shadows. Raster, the single-pass megakernel and PSMainVoxi's blended reuse never
+    // read it, so a lamp still shades exactly as its emissive factor says everywhere those paths run.
+    f32 lightIntensity = 0.0f;   // sun's own units; 0 = not a light
+
     AlphaMode alphaMode   = AlphaMode::Opaque;
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;

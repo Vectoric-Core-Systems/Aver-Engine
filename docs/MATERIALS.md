@@ -71,11 +71,28 @@ weight, when none is — the unbound map's identity is white (1, 1, 1), the same
 `BaseColor`/`Occlusion` already use, not black. Values above 1 are ordinary and expected for
 anything meant to read as a light source: a sunlit white wall sits around 1, a lamp bulb that should
 actually bloom and light the room it is in wants something on the order of 10–20, and the Material
-Editor's `Emissive` control goes to 32. There is no separate exposure or intensity knob — the factor,
-times the map when there is one, *is* the outgoing radiance. An emissive surface lights its
-surroundings only through GI — voxel GI and ReSTIR GI pick it up like any other radiance source —
-because there are no point lights yet: `CLight` (`docs/SCENE_FRAMEWORK.md` §3.7) is authored data no
-renderer currently reads.
+Editor's `Emissive` control goes to 32. `Emissive` alone is the factor, times the map when there is
+one, *is* the outgoing radiance — nothing more.
+
+**`lightIntensity` is the separate knob this section used to say did not exist.** `Emissive` is what
+a surface looks like; `lightIntensity` (`pbr::MaterialDesc::lightIntensity`, `PARAM lightIntensity`
+in `.ocmat`) is whether it *casts* light the way the sun does. 0, the default, leaves a material
+exactly as the paragraph above describes — bright to look at, dark to everything around it. A
+positive value, in the SUN's own units (`SkyAtmosphere::sunIntensity`, ~3 in the editor), turns every
+draw using that material into a small sphere light — its world bounding sphere
+(`Draw::boundsCentre`/`boundsRadius`), coloured by `EmissiveFactor` (normalised to max component 1;
+white if it is left at zero) — that the staged ray-driven local-light pass (`CSRdLocalLights`, D3D12
+only, `Settings::rayDrivenStages` 1 or 2) sums, shadows with one traced ray, and adds as direct
+diffuse light. **It is read nowhere else.** Raster, the single-pass megakernel
+(`AVER_RD_SINGLE_PASS`) and `PSMainVoxi`'s blended reuse all shade the material by its `Emissive`
+factor alone, so a lamp shows the same glow everywhere and only lights the room it sits in where
+ray-driven local lights are actually running. A lamp's own glass shade (a `BLEND translucent` bulb
+around the filament) does not block its own light — not because the pass tests for the material, but
+because translucent draws are not in the ray-traced scene at all (§10's blended-draw limitation
+applies here too), so the light simply has nothing of the bulb's own geometry to be shadowed by. An
+emissive surface with `lightIntensity` left at 0 still lights its surroundings only through GI —
+voxel GI and ReSTIR GI pick it up like any other radiance source — because there are still no point
+lights: `CLight` (`docs/SCENE_FRAMEWORK.md` §3.7) is authored data no renderer currently reads.
 
 ---
 

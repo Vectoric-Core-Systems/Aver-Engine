@@ -70,6 +70,8 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // so by name. It cannot see THIS file, which is how the two drifted apart while the guard
     // stayed green -- so when you append there, append here too.
     float4   gSceneViewportCur;
+    // x/y = camera medium, z/w = the local-light count and flags (voxi.hlsl's own comment on this
+    // field). Declared for size only, like its neighbours: nothing in this prelude lights with lamps.
     float4   gCameraMedium;
     float4   gCausticMin;
     float4   gCausticMax;

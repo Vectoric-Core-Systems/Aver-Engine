@@ -101,6 +101,13 @@ cbuffer AverMaterial : register(b2) {
     // through averVolumeTransmittance below.
     float3 gAttenuationColor;
     float  gAttenuationDistance;
+
+    // Lamp light, mirroring MaterialConstants::lightIntensity/_lightPad -- the row that took the
+    // block from 160 to 176. Brightness at 1 metre in the sun's own units; read only by the
+    // ray-driven local-light pass (CSRdLocalLights in VoxiRenderer.cpp), which this prelude does not
+    // itself touch -- it only transports the value, the same split gIor's own comment describes.
+    float  gLightIntensity;
+    float3 gLightPad;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -122,6 +129,11 @@ cbuffer AverMaterial : register(b2) {
 #define AVER_MAT_CAST_SHADOW    (1u << 13)
 #define AVER_MAT_SUBSURFACE     (1u << 14)
 #define AVER_MAT_COAT           (1u << 15)
+// MaterialDesc::lightIntensity > 0. Read by the ray-driven local-light pass to decide whether a
+// draw becomes a sphere light (CSRdLocalLights) and by voxi_restir.hlsli to skip a promoted
+// emitter's own emission in GI candidate hits while local lights are active -- see those files for
+// the two consumers; nothing in THIS prelude branches on the bit.
+#define AVER_MAT_LIGHT          (1u << 16)
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
 #define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX

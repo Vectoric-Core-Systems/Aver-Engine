@@ -19,6 +19,8 @@
 //     giTraceInitialCandidate traces gScene directly and shades what it hits through that adapter.
 //   - rtHash and rtDiscSample, the low-discrepancy sampling primitives giTraceInitialCandidate
 //     draws its candidate direction from.
+//   - rdLocalLightCount (voxi_rt.hlsli, outside the single-pass compile), which giTraceInitialCandidate
+//     reads to leave a promoted lamp's emission out while CSRdLocalLights lights with it.
 //   - the VoxiFrame cbuffer fields this file reads (gGiRestirParams, gRtHistParams, gVoxelParams,
 //     gViewProj, gPrevViewProj) and gNrdGi (t15).
 //   - the #if AVER_RT guard that opens earlier in voxi.hlsl must still be open at the #include
@@ -953,6 +955,17 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     s.model     = AVER_MODEL_STANDARD;
     s.alpha     = 1.0;
     s.emissive  = mat.emissiveFactor * hitMapEmis.rgb;
+#if !AVER_RD_SINGLE_PASS
+    // A PROMOTED LAMP'S GLOW IS ALREADY LIGHT FROM CSRdLocalLights (voxi.hlsl) while local lights are
+    // active: its lightIntensity lights every surface in range directly, shadowed. Carrying the same
+    // emitter's emission into this candidate as well would light those surfaces twice, so it leaves
+    // here -- but only when EVERY lamp-flagged draw made this frame's light list (rdLocalCarriesEmitters),
+    // or a lamp cut by the 32-light cap would lose both. Voxel GI injection and reflections keep it: a
+    // bulb seen in a mirror must still glow, and the voxel volume also serves passes that have no lamp
+    // term of their own.
+    if ((mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters())
+        s.emissive = float3(0.0, 0.0, 0.0);
+#endif
     s.occlusion = 1.0;
 
     AverLight sun;

@@ -88,6 +88,8 @@ static const MirrorField kMirror[] = {
     {"texIndex[4..7]",      "gTexIndex1",          nullptr},
     {"attenuationColor",    "gAttenuationColor",   "attenuationColor"},
     {"attenuationDistance", "gAttenuationDistance", "attenuationDistance"},
+    {"lightIntensity",      "gLightIntensity",     "lightIntensity"},
+    {"_lightPad",           "gLightPad",           "_lightPad"},
 };
 
 // Reads a repo-relative file whole. Empty on failure, which the caller MUST treat as a failure:
@@ -583,6 +585,65 @@ static void testSubsurface() {
     check(near(lo.subsurfaceRadius, 0.0f), "...and subsurfaceRadius is clamped up to 0 too");
 }
 
+// PARAM lightIntensity: turns a material into a ray-driven local light, brightness at 1 metre in
+// the sun's own units. Kept out of kFull/testFullParse for the same reason testDielectric and
+// testSubsurface give for their own PARAMs -- kFull feeds testRoundTrip and the byte-exact fixture
+// in testGraphRef, and this is exactly the kind of addition that fixture exists to catch.
+//
+// THE DISCRIMINATING PART, same shape as testDielectric/testSubsurface: before this PARAM branch
+// existed, "lightIntensity" was an unrecognised key and is silently dropped, so d.lightIntensity
+// would stay at the MaterialDesc default of 0.0f no matter what the file said. Asserting a specific
+// nonzero value is what makes this test fail against a pre-fix parser, which would read back 0
+// regardless.
+static void testLightIntensity() {
+    AVER_INFO("=== .ocmat: PARAM lightIntensity ===");
+    std::string err;
+
+    pbr::MaterialDesc d;
+    check(fmt::parseOcmat("OCMAT 1\nNAME M_Lamp\nPARAM lightIntensity 8\n", d, nullptr, &err),
+          "a material with lightIntensity parses: " + err);
+    check(near(d.lightIntensity, 8.0f), "lightIntensity is read, not left at the 0.0 default");
+
+    // Round trip. OMITTED WHEN OFF, the same convention subsurfaceWeight/coatWeight use (see
+    // writeOcmat's comment on the lightIntensity line): 0 is the feature's own off switch, not
+    // merely a number, so a material that stated it must get the line back and one that never
+    // mentioned it must not gain one.
+    const std::string text = fmt::writeOcmat(d, nullptr);
+    check(text.find("PARAM lightIntensity 8") != std::string::npos,
+          "the writer emits PARAM lightIntensity when the material asked for it");
+    pbr::MaterialDesc back;
+    check(fmt::parseOcmat(text, back, nullptr, &err), "the writer's own output re-parses: " + err);
+    check(near(back.lightIntensity, d.lightIntensity), "lightIntensity survives the round trip");
+
+    // A header-only file loads the feature in its OFF state, exactly like every material authored
+    // before this field existed.
+    pbr::MaterialDesc def;
+    check(fmt::parseOcmat("OCMAT 1\n", def, nullptr, &err), "a header-only file loads");
+    check(near(def.lightIntensity, 0.0f), "...lightIntensity defaults to 0, the feature's own off switch");
+
+    // THE WRITTEN-ABSENCE CASE: a material that never asked to be a light must not gain a
+    // "PARAM lightIntensity 0" line it never authored.
+    const std::string offText = fmt::writeOcmat(def, nullptr);
+    check(offText.find("lightIntensity") == std::string::npos,
+          "a material with lightIntensity 0 writes NO light line at all");
+
+    // FLOORED, NOT CEILINGED: unlike subsurfaceWeight/transmission, there is no upper bound -- a
+    // lamp can legitimately want to be far brighter than the sun -- so only the negative case is
+    // clamped, and it is clamped up to 0 rather than kept negative or reverted to some other default.
+    pbr::MaterialDesc neg;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM ior 1.9\nPARAM lightIntensity -3.0\n", neg, nullptr, &err),
+          "a negative lightIntensity parses, rather than failing the file");
+    check(near(neg.ior, 1.9f), "...ior alongside it still reads correctly, so the file was not simply dropped");
+    check(near(neg.lightIntensity, 0.0f), "...but lightIntensity is clamped up to 0, not kept negative");
+
+    // A large value is kept AS AUTHORED -- the discriminating case for "no ceiling", since a clamped
+    // implementation would quietly cap this the way subsurfaceWeight's [0,1] does.
+    pbr::MaterialDesc bright;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM lightIntensity 500\n", bright, nullptr, &err),
+          "a very bright lightIntensity parses");
+    check(near(bright.lightIntensity, 500.0f), "...and is kept exactly, not capped to some ceiling");
+}
+
 // Checks packMaterial: the 96-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
@@ -597,7 +658,7 @@ static void testPack() {
     // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
     // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
     // instead -- keep it that way, since the point is to be told, not to be stopped.
-    check(sizeof(pbr::MaterialConstants) == 160, "MaterialConstants is 160 bytes");
+    check(sizeof(pbr::MaterialConstants) == 176, "MaterialConstants is 176 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     // ---- THE FIELD LAYOUT, NOT JUST THE TOTAL ----
@@ -664,6 +725,10 @@ static void testPack() {
     // moved in one of them shades a material with its neighbour's bytes rather than failing to build.
     check(offsetof(pbr::MaterialConstants, attenuationColor)    == 144, "attenuationColor at 144");
     check(offsetof(pbr::MaterialConstants, attenuationDistance) == 156, "attenuationDistance at 156");
+    // The lamp-light row, appended after attenuationDistance when the block grew 160 -> 176. Same
+    // reasoning as every offset above: three hand-maintained mirrors, and a field moved in one of
+    // them shades a material with its neighbour's bytes rather than failing to build.
+    check(offsetof(pbr::MaterialConstants, lightIntensity)      == 160, "lightIntensity at 160");
 
     // ---- AND NOW THE OTHER TWO MIRRORS, WHICH THIS BLOCK NEVER USED TO OPEN ----
     //
@@ -740,7 +805,7 @@ static void testPack() {
         // The table must not itself fall behind the struct. sizeof is the only handle the test has
         // on "a field was added": if someone appends a row to MaterialConstants and does not extend
         // kMirror, the loops above would still pass while checking a prefix.
-        check(sizeof(pbr::MaterialConstants) == 160,
+        check(sizeof(pbr::MaterialConstants) == 176,
               "...and kMirror covers the whole struct (extend it if this size ever changes)");
     }
     {
@@ -831,6 +896,21 @@ static void testPack() {
     c = pbr::packMaterial(g);
     check((c.flags & pbr::MaterialFlag_Subsurface) == 0,
           "subsurfaceWeight=0 clears the bit even with subsurfaceRadius still set to 0.35");
+
+    // lightIntensity surviving the pack, and MaterialFlag_Light tracking it alone -- same shape as
+    // the subsurface/transmission blocks above, and the same reason: packMaterial assigns this field
+    // by hand, so a deleted assignment line would silently zero the GPU-side value while this suite
+    // stayed green.
+    check((c.flags & pbr::MaterialFlag_Light) == 0,
+          "lightIntensity defaults to 0.0 and packs with MaterialFlag_Light clear");
+    g.lightIntensity = 8.0f;
+    c = pbr::packMaterial(g);
+    check(near(c.lightIntensity, 8.0f), "lightIntensity survives packMaterial");
+    check((c.flags & pbr::MaterialFlag_Light) != 0,
+          "lightIntensity > 0 sets MaterialFlag_Light (bit 16)");
+    g.lightIntensity = 0.0f;
+    c = pbr::packMaterial(g);
+    check((c.flags & pbr::MaterialFlag_Light) == 0, "lightIntensity=0 clears the bit again");
 }
 
 // The one translucency predicate, and the shadow transmittance derived from it.
@@ -1319,6 +1399,7 @@ int main() {
     testGraphRef();
     testDielectric();
     testSubsurface();
+    testLightIntensity();
     testPack();
     testTranslucency();
     testRoundTrip();

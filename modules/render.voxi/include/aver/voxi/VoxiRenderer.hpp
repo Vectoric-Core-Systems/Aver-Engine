@@ -1061,6 +1061,13 @@ private:
     // csDefs/SM 6.6 as rdReflCsPso_/rdReflSplitCsPso_ -- CSRdReflFilter's own header comment (voxi.hlsl)
     // states it needs no compile-time guard of its own.
     rhi::PipelineHandle rdReflFilterCsPso_ = 0;
+    // LOCAL LIGHTS (LAMPS): CSRdLocalLights -- sums every in-range lamp's diffuse irradiance per pixel,
+    // traces one shadow ray toward one lamp picked by luminance share, and accumulates that visibility
+    // in rdLocalHist_ (t19/u19). Same layout/csDefs/SM 6.6 as rdShadowCsPso_, dispatched right after it
+    // inside the lighting-stages group. OPTIONAL ON TOP OF THE STAGED PATH: rdStagedActive() never
+    // inspects it, so a failed compile only forces the light count to 0 (no lamp light), never the
+    // single-pass fallback.
+    rhi::PipelineHandle rdLocalLightsCsPso_ = 0;
     // Stage B: rayDrivenTexPso_/rayDrivenTexGbufPso_ recompiled with ";AVER_RD_SPLIT=1" appended to
     // their own defines -- same bindlessDefs/rdAblateDefs/render-target formats, so these are built
     // right beside their untextured twins rather than in a function of their own. 0 on a device that
@@ -1109,6 +1116,59 @@ private:
     // outside one build needs it, and a build that exits early should not leave a stale generation
     // sitting on the object for the next build to find half-populated.
     bool buildMaterialTable(const std::unordered_map<u64, pbr::MaterialConstants>& matConstantsByKey);
+
+    // ---- LOCAL LIGHTS (LAMPS): the per-frame light list at t18 (gRdLocalLights) ----
+    //
+    // One entry per authored draw whose material has MaterialFlag_Light (lightIntensity > 0): the
+    // draw's world bounding sphere becomes a sphere light coloured by its emissiveFactor. HLSL mirror
+    // `struct RdLocalLight { float4 posRadius; float4 radianceRange; }` -- same 32-byte stride, which
+    // setSrvBuffer's stride argument hands the shader.
+    //   posRadius     = world centre (cm), sphere radius (cm, >= 1)
+    //   radianceRange = rgb colour (max component 1) x lightIntensity; w = range (cm)
+    struct RdLocalLight {
+        f32 posRadius[4];
+        f32 radianceRange[4];
+    };
+    static_assert(sizeof(RdLocalLight) == 32, "RdLocalLight is the HLSL RdLocalLight ABI");
+    // At most this many per frame, the most important by lightIntensity / max(camera distance in
+    // metres squared, 1). Bounds the per-pixel loop in CSRdLocalLights.
+    static constexpr u32 kMaxLocalLights = 32;
+    // AN UPLOAD-HEAP RING, the same shape and the same reason as rtInstances_: writeBuffer is an
+    // unsynchronised memcpy into mapped memory, and this list is rewritten every frame while the GPU
+    // may still be reading the previous frame's copy -- a lamp would light the pixel from where the
+    // NEXT frame puts it. Rotating before the write keeps this frame off the slot the last one bound.
+    rhi::BufferHandle rdLocalLights_[kRtInstanceRing] = {};
+    u32 rdLocalLightSlot_ = 0;
+    u32 rdLocalLightCapacity_ = 0;     // elements each ring slot was sized for
+    // A one-element stand-in bound at t18 whenever the list is empty -- every declared slot must hold
+    // a valid descriptor of its declared kind (Tier 1). Created in createVoxelVolume, kept until
+    // shutdown.
+    rhi::BufferHandle rdLocalLightsPlaceholder_ = 0;
+    // What t18 names right now, so an empty list rebinds the placeholder once, not every frame.
+    rhi::BufferHandle rdLocalLightsBound_ = 0;
+    // THIS frame's list as uploaded (canonical order -- see buildLocalLights), its length, and an
+    // FNV-1a hash of exactly those bytes plus the count, which rdLocalHistHash_ is compared against.
+    std::vector<RdLocalLight> rdLocalLightData_;
+    u32 rdLocalLightCount_ = 0;
+    u64 rdLocalLightHash_ = 0;
+    // True when EVERY draw whose material asks to be a light made this frame's list -- none cut by the
+    // 32-light cap, none without bounds. Only then may the GI estimators leave a lamp-flagged hit's own
+    // emission out (gCameraMedium.w bit 2): a flagged lamp that missed the list would otherwise get
+    // neither its direct light nor its glow in GI, and go dark.
+    bool rdLocalLightsCarryAll_ = false;
+    // Per-draw candidates, kept as a member so a steady scene reuses the allocation.
+    struct RdLocalLightCand {
+        f32 importance;
+        RdLocalLight light;
+    };
+    std::vector<RdLocalLightCand> rdLocalLightCand_;
+    bool rdLocalLightsFailLogged_ = false;   // ring allocation failure, said once
+    // Builds this frame's list from drawsPrev_ -- including draws the TLAS or the camera cull hides,
+    // so a lamp behind the camera still lights what is on screen -- and uploads it to t18. Empty
+    // (placeholder bound, count 0) unless voxi.localLights is on, CSRdLocalLights compiled, staged mode
+    // is requested on D3D12 and a TLAS exists this frame. Called from prePass() between
+    // buildAccelerationStructures() and the first bind of bindings_.
+    void buildLocalLights();
 
     // ---- previous-frame per-instance transforms: tracked here; NOT YET reachable by any shader ----
     //
@@ -1502,12 +1562,19 @@ private:
         // and reusing the previous one silently mismatches for a frame after any viewport change.
         f32 sceneViewportCur[4] = {};
         // THE MEDIUM THE CAMERA IS CURRENTLY INSIDE. x = 1 when the eye is within a blended,
-        // single-sided volume; y = that material's ior; z, w spare.
+        // single-sided volume; y = that material's ior.
         //
         // Needed because a closed volume seen FROM WITHIN has no front faces at all -- every face
         // points away from the eye -- so the back-face discard that keeps a water box from
         // compositing four coats of alpha also deletes the surface entirely once you swim under it.
         // The shader inverts that discard rather than switching it off; see PSMainVoxi.
+        //
+        // z, w: LOCAL LIGHTS (LAMPS), riding this row because it had two spare floats. z = the number
+        // of lights in t18 as a float (HLSL rdLocalLightCount()), 0 whenever lamps are off or
+        // unavailable -- raised only for the staged ray-driven uploads (recordStagedRayDriven), 0 for
+        // every other pass and for the blended replay. w = two bits as a float: 1 when t19 holds a usable
+        // previous frame accumulated under the SAME light set (HLSL rdLocalHistValid()), 2 when every
+        // lamp-flagged draw is in the list so GI may drop emitters' own emission (rdLocalCarriesEmitters()).
         f32 cameraMedium[4] = {};
         // THE WATER VOLUME THAT CASTS CAUSTICS, in world centimetres: min.xyz and max.xyz of its
         // axis-aligned box, with min.w = 1 when there is one at all and max.w its strength.
@@ -2436,6 +2503,38 @@ private:
     // same idiom as giAccumRecreateFailedLogged_/nrdWarnedMsaa_ elsewhere in this class. Cleared on
     // the next successful create, same reason giAccumRecreateFailedLogged_'s own comment gives.
     bool giVisHistFailLogged_ = false;
+
+    // ---- LOCAL LIGHTS (LAMPS): the visibility history pair, t19 (read) / u19 (write) ----
+    // Two RGBA16F textures at the shadow history's own size, created/released in ensureShadowHistory
+    // alongside rtShadowHist_ (gated on rdLocalHistWanted()), destroyed in shutdown(), and swapped
+    // every active frame in beginShadowHistory on the SAME rtHistWriteIdx_ -- so reprojecting into t19
+    // lands on the texel the shadow history's own depth test just vouched for. rgb = this frame's lamp
+    // irradiance x accumulated visibility, a = the accumulated visibility (the only channel read back).
+    //
+    // RESTS IN NonPixelShaderResource, NOT ShaderResource like rtShadowHist_: its only SRV reader is a
+    // COMPUTE shader (CSRdLocalLights reads t19; Stage B reads the u19 side), and ShaderResource is
+    // D3D12's PIXEL_SHADER_RESOURCE -- a compute read in that state is the class of bug 21524cd3 fixed
+    // in exposure metering. Same transition schedule as rtShadowHist_, only the SRV state differs.
+    rhi::TextureHandle rdLocalHist_[2] = {0, 0};
+    // A 1x1 RGBA16F SRV+UAV stand-in bound at both t19 and u19 whenever the pair does not exist, the
+    // airVisPlaceholder_ shape. Created in createVoxelVolume, destroyed in shutdown.
+    rhi::TextureHandle rdLocalHistPlaceholder_ = 0;
+    // The write side bound at u19 THIS frame (beginShadowHistory), 0 when the pair was not bound --
+    // what CSRdLocalLights' dispatch and Stage B's barrier act on. Recorded rather than re-derived from
+    // rtHistWriteIdx_, which endShadowHistory has already flipped by the time scenePass runs.
+    rhi::TextureHandle rdLocalOutThisFrame_ = 0;
+    // RESOURCE STATE, not content trust: true once the read side was left in UnorderedAccess by an
+    // earlier active frame since the pair was (re)created. Cleared only where the pair is destroyed.
+    bool rdLocalHistPrimed_ = false;
+    bool rdLocalHistFailLogged_ = false;   // allocation failure, said once; cleared on success
+    // CONTENT TRUST: the rtFrameIndex_ of the last frame CSRdLocalLights actually wrote u19 (0 = never)
+    // and the light-list hash it wrote under. gCameraMedium.w is 1 only when that frame was the
+    // previous one and the hash still matches -- a changed light set, a skipped frame or a frame that
+    // ran without lamps all restart accumulation.
+    u32 rdLocalHistFrame_ = 0;
+    u64 rdLocalHistHash_ = 0;
+    // "Local lights running" said once, the first frame CSRdLocalLights is dispatched.
+    bool rdLocalLightsRunLogged_ = false;
     // Settings::giRestirVisibility, cached at setSettings like giMode_ beside it. 2 (HalfResolution)
     // matches the struct default Voxi.hpp gives it (Quality::Medium's own ladder rung), so a renderer
     // that somehow renders a frame before its first setSettings call behaves as Medium would rather
@@ -2524,6 +2623,8 @@ private:
     // match, and resets rtHistValid_ when it does -- the old contents belong to a resolution that
     // no longer exists. DESTROYS all four instead when rayTracingWanted() is false; see there.
     bool ensureShadowHistory(u32 width, u32 height);
+    // Rebinds t19/u19 to rdLocalHistPlaceholder_, then destroys rdLocalHist_ and clears its flags.
+    void releaseLocalHistory();
     // Builds a render::nrd::Denoiser::ReblurTuning from settings_'s three live REBLUR dials
     // (reblurDiffusePrepassBlurRadius/reblurMaxAccumulatedFrameNum/reblurMaxStabilizedFrameNum) plus
     // the engine's own fixed hitDistA/B/C/enableAntiFirefly, and hands it to nrd_.setReblurTuning.
@@ -2588,6 +2689,14 @@ private:
     // giRestirWanted() already apply to their own pairs. Gates giVisHist_'s own allocation in
     // ensureShadowHistory the same way giRestirWanted() gates the surface-history pair's.
     bool giVisHistWanted() const { return giRestirWanted() && giRestirVisibility_ == 2u; }
+
+    // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating -- staged mode requested with ray
+    // tracing on (rdStagedResourcesWanted()) and voxi.localLights on. Two full-screen RGBA16F textures
+    // held for a single-pass or raster project would be VRAM for a pass that never runs, the same
+    // argument aoHistoryWanted()/giVisHistWanted() make for their own pairs. Not gated on
+    // rdLocalLightsCsPso_: a hot-reload can change that without any edge ensureShadowHistory sees, and
+    // the light count already goes to 0 without it.
+    bool rdLocalHistWanted() const { return rdStagedResourcesWanted() && settings_.localLights; }
 
     // OCCLUSION-AWARE FOG: whether airVisTex_ will ACTUALLY be created/kept -- the setting alone
     // (Settings::fogOcclusion) is not enough, the same "ask what will really run" shape

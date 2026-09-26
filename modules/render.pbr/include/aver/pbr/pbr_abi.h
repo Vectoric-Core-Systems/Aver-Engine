@@ -129,6 +129,11 @@ AVER_PBR_ABI int32_t aver_pbr_set_transmission(aver_pbr_material m, float v);
  * thickness, no separate scatter colour (the transmitted light is tinted by baseColorFactor). */
 AVER_PBR_ABI float   aver_pbr_get_subsurface_weight(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_subsurface_weight(aver_pbr_material m, float v);
+/* Lamp light: brightness at 1 metre in the sun's own units (SkyAtmosphere::sunIntensity, ~3 in the
+ * editor); 0 = not a light. Read only by the ray-driven local-light pass (CSRdLocalLights) --
+ * every other renderer ignores it, so a lamp still shades by its Emissive factor everywhere else. */
+AVER_PBR_ABI float   aver_pbr_get_light_intensity(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_light_intensity(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_coat_weight(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_coat_weight(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_coat_roughness(aver_pbr_material m);

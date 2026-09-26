@@ -86,6 +86,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // every one of its members is assigned here rather than some being left at the zero the
     // `MaterialConstants c{};` above gives them -- if a field is ever added back without a line in
     // this function, it ships as a silent zero.
+    // Lamp light, forwarded verbatim for the same reason: not clamped here, only floored at 0 by
+    // pbr::sanitize (Material.cpp), the way every other authored float in this block already is.
+    c.lightIntensity = d.lightIntensity;
+    c._lightPad[0] = c._lightPad[1] = c._lightPad[2] = 0.0f;   // assigned, not left to the {} above
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)
@@ -110,6 +114,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // Same reasoning as subsurface above: the WEIGHT alone decides. A coat roughness or F0 with no
     // weight coats nothing, and letting either set the flag would pay for the lobe to compute zero.
     if (d.coatWeight > 0.0f) flags |= MaterialFlag_Coat;
+    // Same weight-alone convention again: a positive lightIntensity is what turns this material's
+    // draws into ray-driven local lights (CSRdLocalLights), so the bit tracks the one field that
+    // means anything on its own.
+    if (d.lightIntensity > 0.0f) flags |= MaterialFlag_Light;
 
     // EVERY SLOT UNBOUND UNTIL SOMETHING RESIDENT-IFIES IT. packMaterial works from a MaterialDesc
     // alone and has no idea where (or whether) a texture landed in the ray path's bindless table --

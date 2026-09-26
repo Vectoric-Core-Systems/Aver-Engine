@@ -168,6 +168,11 @@ std::string materialConfigureChain(const pbr::MaterialDesc& d, const OcMatExtras
         line(".SubsurfaceRadius(" + num(d.subsurfaceRadius) + ")");
     }
 
+    // OMITTED WHEN OFF, same convention as subsurfaceWeight just above: 0 is the feature's own off
+    // switch (packMaterial sets MaterialFlag_Light exactly when this is > 0), not a default worth
+    // stating on a material that never asked to be a light.
+    if (d.lightIntensity > 0.0f) line(".LightIntensity(" + num(d.lightIntensity) + ")");
+
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
         const pbr::TextureRef& r = d.textures[i];
         if (r.path.empty()) continue;

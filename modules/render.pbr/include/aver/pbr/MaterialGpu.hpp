@@ -40,6 +40,11 @@ enum MaterialFlag : u32 {
     // Set when coatWeight > 0, for the reason stated one field up: a flag, not a branch on the
     // float, so the coat lobe compiles out for every material that never asked for one.
     MaterialFlag_Coat                = 1u << 15,
+
+    // Set when lightIntensity > 0 -- same weight-alone convention as Subsurface/Coat above. Read by
+    // the ray-driven local-light pass (CSRdLocalLights) to decide whether a draw's bounding sphere
+    // becomes a light source; every other consumer of this material ignores the bit entirely.
+    MaterialFlag_Light               = 1u << 16,
 };
 
 // The packed per-material GPU constant block. MIRRORS the HLSL `cbuffer AverMaterial` in
@@ -162,25 +167,48 @@ struct MaterialConstants {
     // hardest to see. The layout test in tests/formats/src/MaterialTest.cpp asserts both.
     //
     // STILL CHEAP TO CARRY, checked rather than assumed: kMaxDrawConstantBytes is 256
-    // (RHIResources.hpp) and enforced in both backends, so 160 leaves 96 bytes of headroom at a
-    // register every material-shaded draw already binds. No new binding and nothing to plumb.
+    // (RHIResources.hpp) and enforced in both backends, so 160 left 96 bytes of headroom at a
+    // register every material-shaded draw already binds -- 80 now, after lightIntensity's own row
+    // just below spent 16 more of it. No new binding and nothing to plumb either time.
     //
     // Zero is off -- attenuationDistance <= 0 means no volume, which is what a material authored
     // before this existed already has in these bytes, so every such material shades bit-identically
     // and the gate baselines do not move.
     f32 attenuationColor[3];
     f32 attenuationDistance;
+
+    // ---- lamp light, and the growth to 176 ----
+    //
+    // Mirrors MaterialDesc::lightIntensity -- see that field's own comment for what it means and why
+    // it is not the same knob as emissiveFactor. Read only by the ray-driven local-light pass
+    // (VoxiRenderer.cpp's CSRdLocalLights): every other shading path ignores this field and the flag
+    // it sets, so a material with lightIntensity > 0 still renders identically anywhere else.
+    //
+    // ONE MORE 16-BYTE ROW, the smallest legal growth, taking the block 160 -> 176. The coat comment
+    // above said "there is now no padding left" when the block was 112 bytes; that has been true and
+    // then re-spent twice since (texIndex to 144, volume absorption to 160), and it is true again
+    // here: the next field added past this one grows the block to 192 and every GPU mirror --
+    // material_prelude.hlsl's cbuffer, voxi_rt.hlsli's RtMaterial, the two static_asserts below and
+    // the runtime one in tests/formats/src/MaterialTest.cpp -- has to be revisited again.
+    //
+    // STILL CHEAP TO CARRY: kMaxDrawConstantBytes is 256 (RHIResources.hpp), enforced in both
+    // backends, so 176 leaves 80 bytes of headroom at a register every material-shaded draw already
+    // binds. Zero is off -- lightIntensity <= 0 means "not a light", which is what a material
+    // authored before this field existed already has in these bytes, so every such material shades
+    // bit-identically and the gate baselines do not move.
+    f32 lightIntensity;
+    f32 _lightPad[3];    // keeps the row 16 bytes; not read anywhere
 };
 
 // No texture in that slot. Deliberately not 0; see MaterialConstants::texIndex.
 inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
 
 // SIZED FROM THE ENUM, so adding a TextureSlot is a compile error here rather than a silent
-// mismatch against the HLSL mirror. 8 is asserted separately because the 160-byte figure below
+// mismatch against the HLSL mirror. 8 is asserted separately because the 176-byte figure below
 // depends on it: a ninth slot is a deliberate decision about the constant-buffer size, not a
 // change to wave through.
-static_assert(kTextureSlotCount == 8, "texIndex sizing and the 160-byte block below assume 8 slots");
-static_assert(sizeof(MaterialConstants) == 160, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(kTextureSlotCount == 8, "texIndex sizing and the 176-byte block below assume 8 slots");
+static_assert(sizeof(MaterialConstants) == 176, "the HLSL cbuffer mirrors this byte for byte");
 static_assert(sizeof(MaterialConstants) % 16 == 0, "must be a legal constant-buffer size");
 
 // Packs the authored description into the block the GPU reads. A slot counts as bound when either

@@ -253,6 +253,14 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.coatF0);
                 out.coatF0 = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             }
+            // ---- lamp light: a material that casts light like the sun, not merely glows ----
+            // Brightness at 1 metre in the sun's own units -- no upper bound the way the ratios
+            // above have one, since a lamp can legitimately want to outshine the sun. Only the
+            // floor is enforced, same idiom as attenuationDistance's floor a few branches up.
+            else if (equalsCI(p, "lightIntensity")) {
+                const f32 v = tokF(t, 2, out.lightIntensity);
+                out.lightIntensity = v < 0.0f ? 0.0f : v;
+            }
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
             // World centimetres per tile; a non-positive value is dropped.
             // slopeBlend <lo> <hi> [layer1UvScale] -- turns the second layer on and says across
@@ -431,6 +439,13 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
         s += "PARAM coatWeight " + num(d.coatWeight)    + "\n"
              "PARAM coatRoughness " + num(d.coatRoughness) + "\n"
              "PARAM coatF0 " + num(d.coatF0)        + "\n";
+
+    // OMITTED WHEN OFF, same reasoning as subsurfaceWeight/coatWeight above: 0 is not merely an
+    // unremarkable default but the feature's own off switch (packMaterial sets MaterialFlag_Light
+    // exactly when this is > 0), so a material that never asked to be a light has nothing meaningful
+    // to round-trip and gets no line at all.
+    if (d.lightIntensity > 0.0f)
+        s += "PARAM lightIntensity " + num(d.lightIntensity) + "\n";
 
     bool anyTex = false;
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {

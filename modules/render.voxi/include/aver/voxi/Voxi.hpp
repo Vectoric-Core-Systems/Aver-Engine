@@ -836,6 +836,17 @@ struct Settings {
     // rayDrivenStages is 1 or 2. Console: voxi.rayDrivenReflSplit.
     bool rayDrivenReflSplit = true;
 
+    // LOCAL LIGHTS (LAMPS): a material with lightIntensity > 0 (brightness at 1 metre, in the sun's
+    // units) turns every draw using it into a small sphere light -- the draw's bounding sphere, tinted
+    // by its emissive colour -- lit the way the sun is: one stochastic shadow ray per pixel toward one
+    // lamp, visibility accumulated through the sun shadow's own reprojection. At most 32 lamps a
+    // frame, the brightest-and-nearest by intensity over squared distance. STAGED MODES ONLY
+    // (rayDrivenStages 1 or 2, D3D12): not in the single-pass megakernel, not in raster mode, and
+    // translucent draws get no lamp light. Zero cost with no lamps in the scene (the pass is skipped);
+    // off frees the two full-screen history textures and forces the light count to 0. Console:
+    // voxi.localLights.
+    bool localLights = true;
+
     // ---- staged ray-driven bit-field toggles (cb_.giShadowParams.w / gGiShadowParams.w) ---------
     // Four independent RUNTIME toggles packed into one integer bit-field riding the fourth
     // component of the GI-only shadow map's params row -- see FrameConstants::giShadowParams's own

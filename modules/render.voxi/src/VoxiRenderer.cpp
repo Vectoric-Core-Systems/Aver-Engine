@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
+#include <cstddef>   // offsetof: buildLocalLights reads two MaterialConstants fields per draw
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -167,7 +168,13 @@ void giSamplers(rhi::PipelineLayout& l) {
 // or the real texture has not been created yet -- the shader treats "GetDimensions() <= 1" as "no
 // volume" and reads visibility 1, the identical dimension test t14/t15 above already use for their
 // own optional absence.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 9;
+//
+// +11, NOT +9, AS OF LOCAL LIGHTS (LAMPS): t18 is this frame's local-light list (gRdLocalLights, a
+// StructuredBuffer of RdLocalLight, see buildLocalLights) and t19 the local-light visibility history's
+// read side (rdLocalHist_ in VoxiRenderer.hpp, u19's ping-pong twin). Both always hold a valid
+// descriptor -- a placeholder whenever the real one is absent -- and the shaders touch neither unless
+// gCameraMedium.z (the light count) is non-zero this frame.
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 11;
 
 // The denoiser index Voxi asks NRD to run. create() is handed exactly one kind
 // (ReblurDiffuseOcclusion), so this is 0 -- named rather than written as a bare literal at the
@@ -227,7 +234,12 @@ constexpr u32 kNrdGiDenoiser[] = {1u};
 // Same "always declared, allocated unconditionally alongside u11-u16" contract as the rest of the
 // staged group -- see rdGiCandBuf_/rdShadowTileBuf_'s own comment (VoxiRenderer.hpp) for why neither
 // is gated on the narrower setting that consumes it.
-constexpr u32 kVoxiUavCount = kGiUavCount + 15;
+//
+// +16, NOT +15, AS OF LOCAL LIGHTS (LAMPS): u19 is CSRdLocalLights' own output, the write side of the
+// local-light history pair (t19 above is its read side) -- rgb = this frame's lamp irradiance x
+// accumulated visibility, a = the accumulated visibility. Stage B reads it back through this same UAV
+// register, the way it reads u12.
+constexpr u32 kVoxiUavCount = kGiUavCount + 16;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -288,6 +300,10 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // A Texture3D SRV, like t0, not a Texture2D -- it is sampled trilinear over the SAME voxel volume
     // space t0 occupies, just at its own fixed 32^3 resolution.
     srv[17] = rhi::SlotKind::Texture3D;             // t17 air sky-visibility volume (read)
+    // t18/t19/u19: LOCAL LIGHTS (LAMPS) -- see kVoxiSrvCount/kVoxiUavCount's own comments above. t18
+    // is a StructuredBuffer like t3-t5/t9; t19 is a Texture2D history read side like t6/t11.
+    srv[18] = rhi::SlotKind::StructuredBuffer;      // t18 local-light list (gRdLocalLights)
+    srv[19] = rhi::SlotKind::Texture2D;             // t19 local-light history (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -337,7 +353,8 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // u6, and no SRV twin, exactly like u11-u15.
     uav[17] = rhi::SlotKind::StructuredBuffer;      // u17 GI-trace candidate buffer (gRdGiCand)
     uav[18] = rhi::SlotKind::StructuredBuffer;      // u18 shadow-probe tile verdicts (gRdShadowTiles)
-    static_assert(kVoxiSrvCount == 18 && kVoxiUavCount == 19 && kGiSrvCount == 9 && kGiUavCount == 4,
+    uav[19] = rhi::SlotKind::Texture2D;             // u19 local-light history (write, CSRdLocalLights)
+    static_assert(kVoxiSrvCount == 20 && kVoxiUavCount == 20 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -369,7 +386,8 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
                                    // ray-driven reflection output (all this frame's), u16 the air
                                    // sky-visibility volume CSAirVis writes (t17's UAV twin), u17/u18
                                    // the sub-stage splits' own GI-trace candidate and shadow-probe
-                                   // tile buffers
+                                   // tile buffers, u19 the local-light history's write side (t19's
+                                   // ping-pong twin)
     // Table 1: the material's textures, based at t(kVoxiSrvCount) -- the root-signature builder
     // accumulates srvBase across tables, so a register number derived from a comment instead of this
     // value goes wrong the moment kVoxiSrvCount grows past kGiSrvCount.
@@ -638,6 +656,9 @@ void VoxiRenderer::shutdown() {
                                         // the SUB-STAGE SPLITS entry immediately above, for its own two
                                         // extra compute pipelines.
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
+                                        // LOCAL LIGHTS (LAMPS): CSRdLocalLights, built beside the other
+                                        // staged compute pipelines in createScenePipelines().
+                                        rdLocalLightsCsPso_,
                                         // OCCLUSION-AWARE FOG: airVisPso_, created alongside mipPso_
                                         // in createPipelines() and never touched by
                                         // createScenePipelines()'s own hot-reload -- same lifetime as
@@ -661,6 +682,7 @@ void VoxiRenderer::shutdown() {
     rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
+    rdLocalLightsCsPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     // W12: the placeholder that stands in for voxelAccumTex_ while it is freed -- see
@@ -709,6 +731,17 @@ void VoxiRenderer::shutdown() {
     // the "zeroing a handle looks like releasing it" mistake the comment above the fourth/fifth pairs
     // describes closing three times in this file already.
     for (rhi::TextureHandle& t : giVisHist_)     { if (t) res_->destroyTexture(t); t = 0; }
+    // LOCAL LIGHTS (LAMPS): the history pair, its placeholder, the light-list ring and ITS placeholder.
+    // bindings_ is already gone (top of this function), so nothing names any of them any more.
+    for (rhi::TextureHandle& t : rdLocalHist_)   { if (t) res_->destroyTexture(t); t = 0; }
+    if (rdLocalHistPlaceholder_) { res_->destroyTexture(rdLocalHistPlaceholder_); rdLocalHistPlaceholder_ = 0; }
+    for (rhi::BufferHandle& b : rdLocalLights_)  { if (b) res_->destroyBuffer(b); b = 0; }
+    if (rdLocalLightsPlaceholder_) { res_->destroyBuffer(rdLocalLightsPlaceholder_); rdLocalLightsPlaceholder_ = 0; }
+    rdLocalLightCapacity_ = rdLocalLightSlot_ = rdLocalLightCount_ = 0;
+    rdLocalLightsBound_ = 0;
+    rdLocalOutThisFrame_ = 0;
+    rdLocalHistPrimed_ = false;
+    rdLocalHistFrame_ = 0;
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
@@ -798,6 +831,9 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // giRestirVisibility_ can move to or away from HalfResolution independently of giMode/the
     // rayTracing tier, and onRenderTargetsChanged only ever sees a resize.
     const bool wasVisWanted = giVisHistWanted();
+    // LOCAL LIGHTS (LAMPS): rdLocalHistWanted()'s own edge -- voxi.localLights and voxi.rayDrivenStages
+    // both move it without a resize, the same reason every edge captured here exists.
+    const bool wasLocalHistWanted = rdLocalHistWanted();
     const u32 wasVis = giRestirVisibility_;
     // STAGED RAY-DRIVEN PASSES (milestone 1): rdVisBuf_/rdSunVisTex_'s OWN edge, for the identical
     // reason wasAoWanted/wasGiRestirWanted exist above -- voxi.rayDrivenStages can flip independently
@@ -867,7 +903,8 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
     // and that call will apply the current setting itself when it arrives.
     if ((rayTracingWanted() != wasWanted || aoHistoryWanted() != wasAoWanted ||
-         giRestirWanted() != wasGiRestirWanted || giVisHistWanted() != wasVisWanted) &&
+         giRestirWanted() != wasGiRestirWanted || giVisHistWanted() != wasVisWanted ||
+         rdLocalHistWanted() != wasLocalHistWanted) &&
         rtHistWantW_ && rtHistWantH_)
         if (!ensureShadowHistory(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] ray-traced history could not follow a ray-tracing setting change at {}x{}",
@@ -1510,6 +1547,11 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // those literals are back in voxi_restir.hlsli.)
     cb_.viewParams[2] = giRestirWanted() ? 1.0f : 0.0f;
     cb_.viewParams[3] = 0.0f;
+    // LOCAL LIGHTS (LAMPS): count and history-valid, 0 for every upload this frame unless
+    // recordStagedRayDriven -- the one place that knows the staged path really runs -- raises them for
+    // its own uploads. Raster, single-pass and the passes below never see a lamp.
+    cb_.cameraMedium[2] = 0.0f;
+    cb_.cameraMedium[3] = 0.0f;
     // y IS THE COHERENCE TILE EDGE, and it is sent whether or not the rays are on: the shader divides
     // the pixel coordinate by it unconditionally, so a 0 arriving here would be a division by zero in
     // every pixel rather than a disabled feature. max(1) is the identity, not a guard against a
@@ -1569,6 +1611,9 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // this call.
     manageInjectionAccumulator(ctx);
     buildAccelerationStructures(ctx);   // sets rtActive_, which beginShadowHistory reads
+    // After the TLAS decision (a lamp's shadow ray needs one) and before shadowPass() first binds
+    // bindings_ -- t18 is written here, and Vulkan forbids writing a set it has already bound this frame.
+    buildLocalLights();
     // GATED ON rtActive_, NOT ON THE SETTING ALONE. The shader traces these against the same
     // acceleration structure the shadow ray uses, and there is not one on a frame that built no
     // TLAS -- publishing a non-zero count then would have every pixel trace into nothing and read
@@ -3560,6 +3605,152 @@ bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::Materia
     return true;
 }
 
+// LOCAL LIGHTS (LAMPS): see the header's own comment on buildLocalLights for when the list is empty.
+//
+// WHAT MAKES A LIGHT: an AUTHORED draw (the hashDrawMaterialInto test -- an unauthored draw's d.mat is
+// not a material this project wrote) whose captured MaterialConstants carry MaterialFlag_Light with
+// lightIntensity > 0, and whose mesh reported bounds (a negative radius has no sphere to light from).
+// lightIntensity is the brightness at 1 metre in the sun's units (SkyAtmosphere::sunIntensity), so a
+// lamp and the sun compose on the same scale; the colour is emissiveFactor normalised to a max
+// component of 1 (white when all zero), so emissive brightness and lamp brightness stay separate
+// knobs.
+//
+// RANGE: where irradiance I / d^2 (d in metres) falls to 0.002 of the sun's units -- d = sqrt(I / 0.002)
+// metres -- clamped to at least four radii (a lamp always lights its own surroundings) and at most
+// 50 m (the per-pixel loop must end somewhere). The shader fades to zero at it.
+//
+// CANONICAL ORDER: drawsPrev_ is reordered every frame (occlusionOrder_), and the importance order
+// shifts whenever the camera moves, but the shader's light pick is weighted per pixel and does not
+// care about order. So the kept set is re-sorted by its own bytes before upload: the uploaded list,
+// and so rdLocalLightHash_, is a function of the SET alone, and the accumulated history survives a
+// camera move that does not change which lamps are in it.
+void VoxiRenderer::buildLocalLights() {
+    rdLocalLightCount_ = 0;
+    rdLocalLightHash_ = 0;
+    rdLocalLightsCarryAll_ = false;
+    rdLocalLightData_.clear();
+    rdLocalLightCand_.clear();
+    if (!res_ || !bindings_) return;
+
+    f32 vp[16], ivp[16], eye[3] = {};
+    const bool wanted = settings_.localLights && rdLocalLightsCsPso_ != 0 && rdStagedWanted() &&
+                        rtActive_ && dev_ && dev_->backend() == rhi::Backend::D3D12 &&
+                        dev_->camera(vp, ivp, eye);
+    // Every draw whose material ASKS to be a light, kept or not -- see rdLocalLightsCarryAll_.
+    u32 flagged = 0;
+    if (wanted) {
+        for (const Draw& d : drawsPrev_) {
+            if (d.matBytes < sizeof(pbr::MaterialConstants)) continue;
+            // TWO FIELDS FIRST, the whole block only for a lamp: this loop visits every draw in the
+            // scene (up to kMaxDraws), and nearly none of them are lamps.
+            u32 flags = 0;
+            std::memcpy(&flags, d.mat + offsetof(pbr::MaterialConstants, flags), sizeof(flags));
+            if (!(flags & pbr::MaterialFlag_Light)) continue;
+            f32 intensity = 0.0f;
+            std::memcpy(&intensity, d.mat + offsetof(pbr::MaterialConstants, lightIntensity),
+                        sizeof(intensity));
+            if (!(intensity > 0.0f) || !std::isfinite(intensity)) continue;   // also rejects NaN
+            ++flagged;
+            if (d.boundsRadius < 0.0f) continue;
+            if (!materials_.ownsBindingSet(d.matSet) || d.matSet == materials_.fallbackBindingSet())
+                continue;
+            pbr::MaterialConstants mc;
+            std::memcpy(&mc, d.mat, sizeof(mc));
+
+            f32 col[3] = {std::max(mc.emissiveFactor[0], 0.0f), std::max(mc.emissiveFactor[1], 0.0f),
+                          std::max(mc.emissiveFactor[2], 0.0f)};
+            const f32 peak = std::max(col[0], std::max(col[1], col[2]));
+            if (peak > 0.0f && std::isfinite(peak)) {
+                for (f32& c : col) c /= peak;
+            } else {
+                col[0] = col[1] = col[2] = 1.0f;
+            }
+            const f32 maxColour = std::max(col[0], std::max(col[1], col[2]));
+            const f32 radius = std::max(d.boundsRadius, 1.0f);
+            // min(max(...)), HLSL clamp's order: a sphere wider than 12.5 m still gets 50 m, not more.
+            const f32 range = std::min(std::max(100.0f * std::sqrt(intensity * maxColour / 0.002f),
+                                                radius * 4.0f),
+                                       5000.0f);
+
+            RdLocalLightCand c{};
+            c.light.posRadius[0] = d.boundsCentre[0];
+            c.light.posRadius[1] = d.boundsCentre[1];
+            c.light.posRadius[2] = d.boundsCentre[2];
+            c.light.posRadius[3] = radius;
+            c.light.radianceRange[0] = col[0] * intensity;
+            c.light.radianceRange[1] = col[1] * intensity;
+            c.light.radianceRange[2] = col[2] * intensity;
+            c.light.radianceRange[3] = range;
+            const f32 dx = (d.boundsCentre[0] - eye[0]) * 0.01f;   // cm -> m
+            const f32 dy = (d.boundsCentre[1] - eye[1]) * 0.01f;
+            const f32 dz = (d.boundsCentre[2] - eye[2]) * 0.01f;
+            c.importance = intensity / std::max(dx * dx + dy * dy + dz * dz, 1.0f);
+            rdLocalLightCand_.push_back(c);
+        }
+    }
+
+    // Byte order of the light itself: a total order independent of where a draw sat in the list.
+    auto canonicalLess = [](const RdLocalLight& a, const RdLocalLight& b) {
+        return std::memcmp(&a, &b, sizeof(RdLocalLight)) < 0;
+    };
+    if (rdLocalLightCand_.size() > kMaxLocalLights) {
+        // Ties broken canonically too, so which lamp is dropped at the cut does not depend on draw order.
+        std::partial_sort(rdLocalLightCand_.begin(), rdLocalLightCand_.begin() + kMaxLocalLights,
+                          rdLocalLightCand_.end(),
+                          [&](const RdLocalLightCand& a, const RdLocalLightCand& b) {
+                              if (a.importance != b.importance) return a.importance > b.importance;
+                              return canonicalLess(a.light, b.light);
+                          });
+        rdLocalLightCand_.resize(kMaxLocalLights);
+    }
+    rdLocalLightData_.reserve(rdLocalLightCand_.size());
+    for (const RdLocalLightCand& c : rdLocalLightCand_) rdLocalLightData_.push_back(c.light);
+    std::sort(rdLocalLightData_.begin(), rdLocalLightData_.end(), canonicalLess);
+
+    if (!rdLocalLightData_.empty()) {
+        // Grown straight to the cap on first need: 32 x 32 bytes per slot, so there is never a reason
+        // to reallocate again as lamps come and go.
+        if (rdLocalLightCapacity_ < rdLocalLightData_.size()) {
+            // Every slot or none: a half-built ring would bind a null buffer on its missing turns.
+            bool ok = true;
+            for (u32 i = 0; i < kRtInstanceRing; ++i) {
+                if (rdLocalLights_[i]) res_->destroyBuffer(rdLocalLights_[i]);
+                rhi::BufferDesc bd;
+                bd.bytes = sizeof(RdLocalLight) * kMaxLocalLights;
+                bd.kind  = rhi::BufferKind::Upload;
+                bd.debugName = "Voxi local lights";
+                rdLocalLights_[i] = res_->createBuffer(bd);
+                ok = ok && rdLocalLights_[i] != 0;
+            }
+            rdLocalLightCapacity_ = ok ? kMaxLocalLights : 0;
+        }
+        if (rdLocalLightCapacity_ >= rdLocalLightData_.size()) {
+            // Rotate BEFORE writing, so this frame never touches the buffer the previous one bound.
+            rdLocalLightSlot_ = (rdLocalLightSlot_ + 1) % kRtInstanceRing;
+            const rhi::BufferHandle buf = rdLocalLights_[rdLocalLightSlot_];
+            const u32 count = static_cast<u32>(rdLocalLightData_.size());
+            res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * count, 0);
+            res_->setSrvBuffer(bindings_, 18, buf, sizeof(RdLocalLight), count, 0);
+            rdLocalLightsBound_ = buf;
+            rdLocalLightCount_ = count;
+            u64 h = 1469598103934665603ull;
+            const u8* bytes = reinterpret_cast<const u8*>(rdLocalLightData_.data());
+            for (usize i = 0; i < sizeof(RdLocalLight) * count; ++i) { h ^= bytes[i]; h *= 1099511628211ull; }
+            h ^= count; h *= 1099511628211ull;
+            rdLocalLightHash_ = h;
+        } else if (!rdLocalLightsFailLogged_) {
+            rdLocalLightsFailLogged_ = true;
+            AVER_ERROR("[Voxi] local-light list buffer could not be created; lamps stay unlit (said once)");
+        }
+    }
+    rdLocalLightsCarryAll_ = rdLocalLightCount_ > 0 && rdLocalLightCount_ == flagged;
+    // Empty (or the ring failed): the placeholder, rebound only when t18 names something else.
+    if (rdLocalLightCount_ == 0 && rdLocalLightsPlaceholder_ && rdLocalLightsBound_ != rdLocalLightsPlaceholder_) {
+        res_->setSrvBuffer(bindings_, 18, rdLocalLightsPlaceholder_, sizeof(RdLocalLight), 1, 0);
+        rdLocalLightsBound_ = rdLocalLightsPlaceholder_;
+    }
+}
+
 // Renders the replayed draw list into each cascade's quadrant of the shadow atlas, depth only.
 // INSTANCED BY DEFAULT when shadowInstancedPso_ built: every surviving draw in a cascade is grouped
 // by mesh into shadowInstanceGroups_, one IRenderContext::drawMeshInstanced call per group instead of
@@ -4231,6 +4422,11 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
 // ScopedGpuStat ("Voxi RD lighting stages") rather than each opening its own span the way
 // CSRdVisibility above and the Stage B draw below still do.
 //
+// CSRdLocalLights (LOCAL LIGHTS, dispatched right after CSRdShadow) JOINS THE SAME BARRIER-FREE GROUP ON
+// THE SAME CONTRACT: it writes u19 alone, and reads only the fenced visibility record, the light list
+// (t18), LAST frame's histories (t19, t6) and the TLAS -- never CSRdShadow's own this-frame outputs
+// (u2/u12). A shader change that reads either of those needs a barrier here first.
+//
 // SUB-STAGE SPLITS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit) ARE THE ONE EXCEPTION TO "NO
 // BARRIER" ABOVE: S1 (CSRdShadowProbe) and G1 (CSRdGiTrace) run FIRST, inside the same span, and
 // their own outputs (gRdShadowTiles/gRdGiCand) get an explicit uavBarrierBuffer before CSRdShadow's
@@ -4261,6 +4457,36 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // curSceneViewport_, so the two could disagree on a frame the view appeared or went away. No
     // other shader reads gViewParams.w (it was spare), so the single pass never sees a nonzero value.
     cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
+
+    // LOCAL LIGHTS (LAMPS): decided HERE, before the first upload, because more than one stage reads
+    // the count -- CSRdGi/CSRdGiTrace leave a lamp's own emission out of ReSTIR's candidate hits while
+    // it is non-zero (the lamp is lit directly instead), CSRdLocalLights and Stage B act on it. Raised
+    // for some of those uploads and not others, a lamp would count twice or not at all. prePass zeroed
+    // both fields for every upload before this one; they go back to 0 after Stage B.
+    //
+    // The history is trusted only when CSRdLocalLights wrote it LAST frame (rdLocalHistFrame_) under
+    // the SAME light list (rdLocalHistHash_) and the shadow history's own reprojection is usable this
+    // frame (rtHistParams.y > 0; its 0.5 "sun moved" state is still usable here -- lamps do not depend
+    // on the sun).
+    const bool localLights = rdLocalLightCount_ > 0 && settings_.localLights && rdLocalLightsCsPso_ != 0 &&
+                             rdLocalOutThisFrame_ != 0 && gx && gy;
+    if (localLights) {
+        const bool histValid = cb_.rtHistParams[1] > 0.25f && rdLocalHistFrame_ != 0 &&
+                               rdLocalHistFrame_ + 1u == rtFrameIndex_ &&
+                               rdLocalHistHash_ == rdLocalLightHash_;
+        cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
+        // Two bits: 1 = history valid; 2 = every lamp-flagged draw is a live light this frame, so the
+        // GI estimators may drop an emitter's own emission (rdLocalLightsCarryAll_).
+        cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f);
+        if (!rdLocalLightsRunLogged_) {
+            rdLocalLightsRunLogged_ = true;
+            AVER_INFO("[Voxi] local lights running: {} lamp(s) this frame (GPU span 'Voxi RD local "
+                      "lights' under voxi.rayDrivenStageTiming)", rdLocalLightCount_);
+        }
+    } else {
+        cb_.cameraMedium[2] = 0.0f;
+        cb_.cameraMedium[3] = 0.0f;
+    }
 
     {
         rhi::ScopedGpuStat stat(ctx, "Voxi RD visibility");
@@ -4324,6 +4550,14 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const bool giHitShadowMap = settings_.rtGiHitShadowMap && giShadowTex_ != 0;
     if (giHitShadowMap)
         ctx.textureBarrier(giShadowTex_, rhi::ResourceState::ShaderResource,
+                           rhi::ResourceState::NonPixelShaderResource);
+    // THE SUN SHADOW HISTORY'S READ SIDE (t6), the same visit for the same reason: beginShadowHistory
+    // leaves it in ShaderResource (D3D12 PIXEL_SHADER_RESOURCE only), but CSRdShadow's reprojection and
+    // CSRdLocalLights' (rtReprojectTexel) read it from COMPUTE -- the state bug 21524cd3 fixed for the
+    // post chain. Back to ShaderResource after the group, where beginShadowHistory expects it next frame.
+    const rhi::TextureHandle shadowHistRead = rtShadowHist_[1 - rtHistWriteIdx_];
+    if (shadowHistRead)
+        ctx.textureBarrier(shadowHistRead, rhi::ResourceState::ShaderResource,
                            rhi::ResourceState::NonPixelShaderResource);
     {
         // Wraps every dispatch below -- see this function's own comment on why no barrier or
@@ -4465,6 +4699,22 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (gx && gy) ctx.dispatch(gx, gy, 1);
         stageEnd(rdSunVisTex_);
 
+        // LOCAL LIGHTS (LAMPS): CSRdLocalLights, writing u19 -- see this function's own comment for why it
+        // needs no barrier against the rest of the group. Skipped outright with no lamps, so a scene
+        // without any pays nothing. The history is marked written only here, where it actually is.
+        if (localLights) {
+            stageBegin("Voxi RD local lights");
+            ctx.setPipeline(rdLocalLightsCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            ctx.dispatch(gx, gy, 1);
+            stageEnd(rdLocalOutThisFrame_);
+            rdLocalHistFrame_ = rtFrameIndex_;
+            rdLocalHistHash_ = rdLocalLightHash_;
+        }
+
         if (giDispatch) {
             stageBegin("Voxi RD GI stage");
             ctx.setPipeline(giSplit ? (giCb ? rdGiSplitCbCsPso_ : rdGiSplitCsPso_)
@@ -4536,6 +4786,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (giHitShadowMap)
         ctx.textureBarrier(giShadowTex_, rhi::ResourceState::NonPixelShaderResource,
                            rhi::ResourceState::ShaderResource);
+    if (shadowHistRead)
+        ctx.textureBarrier(shadowHistRead, rhi::ResourceState::NonPixelShaderResource,
+                           rhi::ResourceState::ShaderResource);
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
     // dispatches above wrote them -- all four barriers sit here, unconditionally, rather than only
     // behind each dispatch's own `if`: a barrier against a texture nothing wrote this frame is a
@@ -4546,6 +4799,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     ctx.uavBarrierTexture(rdGiTex_);
     ctx.uavBarrierTexture(rdAoTex_);
     ctx.uavBarrierTexture(rdReflTex_);
+    // LOCAL LIGHTS (LAMPS): Stage B reads gRdLocalOut through u19 the way it reads u12 above, so it gets
+    // the same barrier -- conditional only because u19 may be a placeholder (or nothing real) on a
+    // frame without lamps, when Stage B does not read it at all (the count it tests is 0).
+    if (localLights) ctx.uavBarrierTexture(rdLocalOutThisFrame_);
     // THE GI SURFACE-NORMAL HISTORY (u8) HAS TWO WRITERS NOW: CSRdGi (hit pixels, inside
     // giRestirIndirect) and Stage B's own miss branch (the sky sentinel). The texels are disjoint and
     // the barriers above already drain the GPU in practice, but the order between a dispatch and a
@@ -4605,6 +4862,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     cb_.viewParams[3] = giCbWrittenThisFrame_
                       ? static_cast<f32>((1u << 17) | ((nrdFrame_ & 1u) << 16))
                       : 0.0f;
+    // LOCAL LIGHTS (LAMPS): back to 0 for the blended replay, which gets no lamp light (PSMainVoxi has
+    // no local-light term), so its own ReSTIR GI must keep a lamp's emission rather than leave it out.
+    cb_.cameraMedium[2] = 0.0f;
+    cb_.cameraMedium[3] = 0.0f;
 
     // BIT 16, SET LAST: tells the blended replay (D3D12Device::endFrame, which picks cb_ up through
     // sceneConstants() after scenePass returns) that gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex hold
@@ -4641,6 +4902,20 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
         AVER_ERROR("[Voxi] staged ray-driven resources could not be (re)created at {}x{}", width, height);
 }
 
+// LOCAL LIGHTS (LAMPS): points t19/u19 back at the placeholder and THEN destroys the pair -- a
+// descriptor must never outlive the texture it names (aver-view-outlives-its-buffer) -- and drops
+// every flag that described the pair's state or contents. Idempotent.
+void VoxiRenderer::releaseLocalHistory() {
+    if (res_ && bindings_ && rdLocalHistPlaceholder_ && (rdLocalHist_[0] || rdLocalHist_[1])) {
+        res_->setSrv(bindings_, 19, rdLocalHistPlaceholder_);
+        res_->setUav(bindings_, 19, rdLocalHistPlaceholder_, 0);
+    }
+    for (rhi::TextureHandle& t : rdLocalHist_) { if (t && res_) res_->destroyTexture(t); t = 0; }
+    rdLocalOutThisFrame_ = 0;
+    rdLocalHistPrimed_ = false;
+    rdLocalHistFrame_ = 0;
+}
+
 // (Re)creates the ray-traced shadow AND reflection histories at the given resolution. All four
 // textures are destroyed and rebuilt together: one at the wrong size with another right would
 // corrupt reprojection, and the two pairs share rtHistWriteIdx_/rtHistValid_ so they must always
@@ -4655,7 +4930,9 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // switching ray tracing OFF at runtime gives the memory back instead of stranding it.
     if (!rayTracingWanted()) {
         const bool had = rtShadowHist_[0] || rtReflHist_[0] || rtAoHist_[0] || giSurfPosHist_[0] ||
-                          giVisHist_[0];
+                          giVisHist_[0] || rdLocalHist_[0];
+        // LOCAL LIGHTS (LAMPS): rdLocalHistWanted() requires rayTracingWanted(), so the pair goes too.
+        releaseLocalHistory();
         for (rhi::TextureHandle& t : rtShadowHist_)  { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtReflHist_)    { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtAoHist_)      { if (t) res_->destroyTexture(t); t = 0; }
@@ -4702,6 +4979,8 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         // question than giRestirWanted() (2.9's own comment on giVisHistWanted()), so it needs its
         // own independent check here rather than riding either of the two above.
         (giVisHist_[0] && giVisHist_[1]) == giVisHistWanted() &&
+        // LOCAL LIGHTS (LAMPS): the same test for rdLocalHist_, on its own wanted-condition.
+        (rdLocalHist_[0] && rdLocalHist_[1]) == rdLocalHistWanted() &&
         rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;
 
@@ -4714,6 +4993,8 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // condition changed" edge as the fourth/fifth pair immediately above -- see the early-out test's
     // own comment for why it needed a THIRD, independent test rather than riding either of theirs.
     for (rhi::TextureHandle& t : giVisHist_)     { if (t) res_->destroyTexture(t); t = 0; }
+    // LOCAL LIGHTS (LAMPS): torn down with the rest and recreated below at the new size if wanted.
+    releaseLocalHistory();
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     giHistValid_ = false;   // same reason rtHistValid_ two lines below is cleared: a stale resolution
     giHistPrimed_ = false;   // the pair below is about to be destroyed and recreated in ShaderResource
@@ -4761,6 +5042,36 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     d.debugName = "Voxi RT reflection history B";
     rtReflHist_[1] = res_->createTexture(d);
     if (!rtReflHist_[0] || !rtReflHist_[1]) return false;
+
+    // LOCAL LIGHTS (LAMPS): the lamp visibility history, same size and ping-pong as rtShadowHist_ so
+    // the shadow history's reprojection/depth test addresses it texel for texel. Own desc, because it
+    // rests in NonPixelShaderResource (see rdLocalHist_'s own comment) where the pairs here rest in
+    // ShaderResource. A FAILED ALLOCATION IS NOT FATAL, the giVisHist_ posture: the placeholders stay
+    // bound, the light count stays 0, and everything else in this function still gets created.
+    if (rdLocalHistWanted()) {
+        rhi::TextureDesc ld;
+        ld.dim    = rhi::TextureDim::Tex2D;
+        ld.width  = width;
+        ld.height = height;
+        ld.mips   = 1;
+        ld.format = rhi::Format::RGBA16F;
+        ld.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+        ld.initialState = rhi::ResourceState::NonPixelShaderResource;
+        ld.debugName = "Voxi RD local-light history A";
+        rdLocalHist_[0] = res_->createTexture(ld);
+        ld.debugName = "Voxi RD local-light history B";
+        rdLocalHist_[1] = res_->createTexture(ld);
+        if (!rdLocalHist_[0] || !rdLocalHist_[1]) {
+            releaseLocalHistory();
+            if (!rdLocalHistFailLogged_) {
+                rdLocalHistFailLogged_ = true;
+                AVER_WARN("[Voxi] local-light history could not be created at {}x{}; lamps stay unlit "
+                          "(said once)", width, height);
+            }
+        } else {
+            rdLocalHistFailLogged_ = false;
+        }
+    }
 
     // BACK TO RG32Float FOR THE AMBIENT PAIR -- the reflection block above left d.format on
     // RGBA16F, and inheriting it here would give the depth channel 8cm precision at the exact
@@ -5031,6 +5342,12 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     if (giVisHist_[0]) {
         res_->setUav(bindings_, 10, giVisHist_[0], 0);
         res_->setSrv(bindings_, 16, giVisHist_[1]);
+    }
+    // LOCAL LIGHTS (LAMPS): the same starting bind for u19/t19; beginShadowHistory swaps them with the
+    // rest. Absent, the placeholders releaseLocalHistory() bound above stay.
+    if (rdLocalHist_[0] && rdLocalHist_[1]) {
+        res_->setUav(bindings_, 19, rdLocalHist_[0], 0);
+        res_->setSrv(bindings_, 19, rdLocalHist_[1]);
     }
     // The reservoir StructuredBuffer is bound ONCE, like rtAoHitDist_ above -- it never ping-pongs as
     // a DESCRIPTOR, only the ARRAY INDEX RTXDI_ReservoirPositionToPointer computes from
@@ -5468,6 +5785,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Same reasoning again: giRestirParams.x says whether t12/u6/u7 are bound to real resources this
     // frame, and must not still read 1.0 from a previous frame once this one returns early below.
     cb_.giRestirParams[0] = 0.0f;
+    // LOCAL LIGHTS (LAMPS): and whether u19 is a real texture this frame -- recordStagedRayDriven
+    // dispatches CSRdLocalLights only against what this function actually bound.
+    rdLocalOutThisFrame_ = 0;
     // ---- F5: THE POISON-VIEW FLAG, PUBLISHED HERE SO IT REACHES giMode 0 TOO ----
     // This USED TO be written only inside the giSurfPosHist_/giSurfNrmHist_ block further down,
     // which runs only when giRestirWanted() -- i.e. only in giMode 1 (RTXDI ReSTIR GI). PSMainVoxi
@@ -5575,6 +5895,21 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         res_->setUav(bindings_, 4, rtAoHist_[writeIdx], 0);
         res_->setSrv(bindings_, 11, rtAoHist_[readIdx]);
         cb_.rtDenoiseParams[3] = 1.0f;
+    }
+
+    // ---- LOCAL LIGHTS (LAMPS): u19/t19, swapped on the SAME writeIdx/readIdx as the shadow pair ----
+    // Same transitions as rtShadowHist_ above, except the SRV state is NonPixelShaderResource: t19's
+    // only reader is CSRdLocalLights, a compute shader (see rdLocalHist_'s own comment). Own primed flag,
+    // since the pair can appear on an rdLocalHistWanted() edge independently of the shadow pair's.
+    if (rdLocalHist_[writeIdx] && rdLocalHist_[readIdx]) {
+        ctx.textureBarrier(rdLocalHist_[writeIdx], rhi::ResourceState::NonPixelShaderResource,
+                           rhi::ResourceState::UnorderedAccess);
+        if (rdLocalHistPrimed_)
+            ctx.textureBarrier(rdLocalHist_[readIdx], rhi::ResourceState::UnorderedAccess,
+                               rhi::ResourceState::NonPixelShaderResource);
+        res_->setUav(bindings_, 19, rdLocalHist_[writeIdx], 0);
+        res_->setSrv(bindings_, 19, rdLocalHist_[readIdx]);
+        rdLocalOutThisFrame_ = rdLocalHist_[writeIdx];
     }
 
     // ---- RTXDI ReSTIR GI: the fourth/fifth pair, swapped in the SAME lockstep, own condition ----
@@ -6270,6 +6605,10 @@ void VoxiRenderer::endShadowHistory() {
     rtHistWriteIdx_ = 1 - rtHistWriteIdx_;
     rtHistValid_ = true;
     rtHistPrimed_ = true;   // the write side just bound above now sits in UnorderedAccess as the read side
+    // LOCAL LIGHTS (LAMPS): resource state only, same reasoning as rtHistPrimed_ -- the side bound at
+    // u19 went to UnorderedAccess in beginShadowHistory whether or not CSRdLocalLights then wrote it.
+    // Content trust is rdLocalHistFrame_/rdLocalHistHash_, set where the dispatch is recorded.
+    if (rdLocalOutThisFrame_) rdLocalHistPrimed_ = true;
     // giHistValid_ becomes true only once beginShadowHistory actually bound and wrote the
     // giSurfPosHist_/giSurfNrmHist_ pair THIS frame (cb_.giRestirParams.x, mirrored here rather
     // than re-derived from giRestirWanted()
@@ -6603,6 +6942,32 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     }
     res_->setSrv(bindings_, 17, airVisPlaceholder_, rhi::kAllMips);
     res_->setUav(bindings_, 16, airVisPlaceholder_, 0);
+    // LOCAL LIGHTS (LAMPS): t18, t19 and u19 get placeholders here for the same reason t17/u16 do --
+    // buildLocalLights() and ensureShadowHistory() upgrade them to the real list/history pair, and
+    // rebind these whenever those go away. Guarded so a second call here cannot orphan the first pair.
+    if (!rdLocalLightsPlaceholder_) {
+        rhi::BufferDesc pd;
+        pd.bytes = sizeof(RdLocalLight);   // one element: the smallest view of this stride
+        pd.kind  = rhi::BufferKind::Default;
+        pd.debugName = "Voxi local-light list placeholder";
+        rdLocalLightsPlaceholder_ = res_->createBuffer(pd);
+        if (!rdLocalLightsPlaceholder_) { AVER_ERROR("[Voxi] local-light list placeholder could not be created"); return false; }
+    }
+    if (!rdLocalHistPlaceholder_) {
+        rhi::TextureDesc pd;
+        pd.dim    = rhi::TextureDim::Tex2D;
+        pd.width  = 1; pd.height = 1; pd.mips = 1;
+        pd.format = rhi::Format::RGBA16F;
+        pd.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+        pd.initialState = rhi::ResourceState::ShaderResource;
+        pd.debugName    = "Voxi local-light history placeholder";
+        rdLocalHistPlaceholder_ = res_->createTexture(pd);
+        if (!rdLocalHistPlaceholder_) { AVER_ERROR("[Voxi] local-light history placeholder could not be created"); return false; }
+    }
+    res_->setSrvBuffer(bindings_, 18, rdLocalLightsPlaceholder_, sizeof(RdLocalLight), 1, 0);
+    rdLocalLightsBound_ = rdLocalLightsPlaceholder_;
+    res_->setSrv(bindings_, 19, rdLocalHistPlaceholder_);
+    res_->setUav(bindings_, 19, rdLocalHistPlaceholder_, 0);
     // t6/u2 (rtShadowHist_), t7/u3 (rtReflHist_) and t11/u4 (rtAoHist_) are populated once
     // onRenderTargetsChanged creates them -- the resolution is not known this early, and the
     // slots are declared above so Tier 1 null-fills them correctly until then. THREE pairs, not
@@ -7028,7 +7393,9 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          // SUB-STAGE C (Settings::rayDrivenReflSplit): the identical
                                          // "this function overwrites every member a few lines down"
                                          // reasoning, for its own two extra compute pipelines.
-                                         rdReflSplitCsPso_, rdReflFilterCsPso_};
+                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
+                                         // LOCAL LIGHTS (LAMPS): the same, for CSRdLocalLights.
+                                         rdLocalLightsCsPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
@@ -7044,6 +7411,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
+    rdLocalLightsCsPso_ = 0;
 
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
@@ -7434,6 +7802,19 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.layout = giTex;
             rdReflFilterCsPso_ = res_->createComputePipeline(p);
         }
+        // LOCAL LIGHTS (LAMPS): CSRdLocalLights, compiled exactly like csShadow -- same layout (so the
+        // staged root signature is shared), csDefs and SM 6.6 -- since it reprojects into its history
+        // through the shadow history's own reprojection and depth test. Optional: a failure leaves lamps
+        // unlit (the light count stays 0) and never takes the staged path down with it --
+        // rdStagedActive() does not inspect this member.
+        const rhi::ShaderHandle csLocalLights = compile("CSRdLocalLights", rhi::ShaderStage::Compute, 66,
+                                                        rasterDefs(csDefs.c_str()).c_str());
+        if (csLocalLights) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csLocalLights;
+            p.layout = giTex;
+            rdLocalLightsCsPso_ = res_->createComputePipeline(p);
+        }
         // Stage B: the SAME textured pixel shader psTex/psTexGbuf were compiled from, with
         // ";AVER_RD_SPLIT=1" appended -- it reads gRdVisBuf/gRdSunVisTex instead of tracing and
         // calling rtShadowTemporal itself; everything after that point is unchanged (voxi.hlsl's own
@@ -7485,14 +7866,15 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
                       "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {}, "
                       "half-rate GI checkerboard stage {}, shadow-tile sub-stage {}, GI-trace "
-                      "sub-stage {}, reflection register/filter sub-stage {})",
+                      "sub-stage {}, reflection register/filter sub-stage {}, local lights stage {})",
                       kRtTextureCapacity,
                       rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
                       rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable",
                       rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable",
                       (rdShadowProbeCsPso_ && rdShadowTiledCsPso_) ? "ready" : "unavailable",
                       (rdGiTraceCsPso_ && rdGiSplitCsPso_) ? "ready" : "unavailable",
-                      (rdReflSplitCsPso_ && rdReflFilterCsPso_) ? "ready" : "unavailable");
+                      (rdReflSplitCsPso_ && rdReflFilterCsPso_) ? "ready" : "unavailable",
+                      rdLocalLightsCsPso_ ? "ready" : "unavailable");
         else
             AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
                       "split pixel shader {}); voxi.rayDrivenStages 1 or 2 falls back to the single pass",

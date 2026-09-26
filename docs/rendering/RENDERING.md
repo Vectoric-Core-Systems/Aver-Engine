@@ -260,6 +260,25 @@ For a mostly-outdoor racing sim, a strong **physically-based sky/atmosphere** (H
 
 Froxel-based **volumetric fog** (Bart Wronski's approach, published): scatter/extinction into a 3D froxel volume, temporally integrated, ray-marched and applied. Reuses the cluster structure. Handles track-side atmosphere, exhaust haze, tyre smoke light interaction, and god-rays from sun/headlights. God-rays also available as cheaper screen-space radial blur on Compat.
 
+### 4.6 Local lights (lamps) — as built in Voxi
+
+**What makes a light.** A material with `lightIntensity > 0` (its brightness at 1 metre, in the same units as the sun's `SkyAtmosphere::sunIntensity`) sets `MaterialFlag_Light`. Every authored draw using it becomes a small **sphere light**: the draw's world bounding sphere, coloured by the material's `emissiveFactor` normalised to a maximum component of 1 (white if the emissive colour is black). Each lamp's range is where its irradiance falls to 0.002 of the sun's units, clamped to at least four radii and at most 50 m.
+
+**How it is lit — the same way as the sun.** A compute pass, `CSRdLocalLights`, runs right after the sun-shadow stage (`CSRdShadow`). Per pixel it sums every in-range lamp's diffuse irradiance, picks **one** lamp stochastically by its share of that irradiance, traces **one** opaque shadow ray toward a jittered point on it, and accumulates the visibility over time through the sun shadow history's own reprojection and depth test. The shade pass adds `kdAlbedo / π ×` a 5-tap depth-aware filter of the result. A lamp's own emission is left out of ReSTIR GI's candidate hits (and the GI-off bounce loop) while every lamp-flagged draw made the list, so it is not counted twice; voxel GI injection and reflections still see it.
+
+**Lamp list.** Rebuilt every frame from the whole draw list — including draws the camera or the TLAS culls, so a lamp behind the camera still lights what is on screen. At most **32** lamps a frame, chosen by `lightIntensity / max(distance², 1 m²)`. The accumulated history restarts whenever that set changes.
+
+**Cost.** Zero with no lamps (the dispatch is skipped). Budgeted at ~0.3–0.5 ms with lamps on screen — not yet measured. Two full-screen RGBA16F history textures while staged mode and `voxi.localLights` are both on.
+
+**Limitations.**
+- **Staged ray-driven mode only** (`voxi.rayDrivenStages` 1 or 2, D3D12). The single-pass megakernel is at the AMD register limit and does not get it; raster mode does not get it.
+- **Translucent draws get no lamp light** — including the blended replay's reuse of the staged lighting.
+- 32 lamps per frame; beyond that, the least important by the measure above are dropped, and then every lamp keeps its emission in ReSTIR GI (a dropped lamp would otherwise go dark).
+- **Diffuse only**: no specular highlight of the lamp from the direct term. A glossy surface still shows the glowing bulb through ray-traced reflections.
+- **Voxel cone GI (`giMode 0`) counts a lamp's glow twice** where the cone gather reaches it: the bulb's emission is injected into the voxel volume and its direct light comes from this pass. Small while the emissive surface is small; ReSTIR GI (`giMode 1`) does not have it.
+- One visibility stands for all lamps at a pixel: where one lamp is blocked and a differently coloured one is not, the light is right in brightness on average but mixes their colours.
+- `voxi.localLights 0` turns the feature off.
+
 ---
 
 ## 4b. Path tracer scene view (reference renderer)

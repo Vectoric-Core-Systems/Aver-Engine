@@ -16,9 +16,10 @@
 //     (t11/u4), gAoHitDistOut (u5), gNrdAo (t14), gGiRadianceOut/gNrdGi (u9/t15),
 //     gRtReflHist/gRtReflHistOut (t7/u3), gGBufNormalHist (t10, under AVER_GBUFFER_HISTORY).
 //   - the low-discrepancy sampling primitives: rtHash, rtRadicalInverse2, rtDiscSample.
-//   - the estimators: rtShadow; AverAmbientTraced/rtAmbientTraced/rtSkyOcclusion;
-//     rtReprojectHistory/rtReprojectAo; rtAoSpatial/rtShadowSpatial; rtSkyOcclusionTemporal;
-//     averShadowLum/averShadowTint/rtShadowTemporal; rtReflection.
+//   - the estimators: rtShadow; the local-light (lamp) struct RdLocalLight and its rdLocalIrradiance/
+//     rdLocalShadow; AverAmbientTraced/rtAmbientTraced/rtSkyOcclusion;
+//     rtReprojectTexel/rtReprojectHistory/rtReprojectAo; rtAoSpatial/rtShadowSpatial;
+//     rtSkyOcclusionTemporal; averShadowLum/averShadowTint/rtShadowTemporal; rtReflection.
 //
 // WHAT MUST PRECEDE THIS FILE'S #include LINE IN voxi.hlsl:
 //   - cbuffer VoxiFrame and the volume/shadow/backdrop resources and defines that sit above the
@@ -125,7 +126,7 @@ struct RtMaterial {
     float  transmission;
     // These two mirror MaterialConstants::subsurfaceWeight/subsurfaceRadius, which spent the
     // _pad0/_pad1 this used to declare. Same order, same offsets as MaterialConstants; the fields
-    // below take the struct to 160 bytes in all (MaterialGpu.hpp's static_assert).
+    // below take the struct to 176 bytes in all (MaterialGpu.hpp's static_assert).
     float  subsurfaceWeight;
     float  subsurfaceRadius;
     // Coat row, same order as MaterialConstants and the material_prelude.hlsl cbuffer -- three
@@ -143,6 +144,13 @@ struct RtMaterial {
     // struct from 144 to 160 bytes); offsets asserted by tests/formats/src/MaterialTest.cpp.
     float3 attenuationColor;
     float  attenuationDistance;
+
+    // Lamp brightness at 1 metre in the sun's units, mirroring MaterialConstants::lightIntensity at
+    // offset 160 (took the struct from 160 to 176 bytes). > 0 is what sets AVER_MAT_LIGHT, which turns
+    // each draw using the material into a sphere light for CSRdLocalLights (voxi.hlsl). The RT table
+    // uploads MaterialConstants bytes verbatim, so the pad must stay declared for the stride.
+    float  lightIntensity;
+    float3 _lightPad;
 };
 
 #ifdef AVER_RT_BINDLESS
@@ -851,6 +859,16 @@ uint rtGiShadowBits() { return 1u; }
 uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
 #endif
 
+// Where a shadow ray along `dir` leaves the surface at wpos: rtShadowEx's distance-scaled bias, and the
+// offset along the normal AND along the ray (see rtShadowEx for why both). The bias/origin half of
+// rtShadowRay0 below, shared with rdLocalShadow (further below) so a lamp's shadow ray leaves the
+// surface exactly as the sun's does -- the same two statements, in the same order, rtShadowRay0 had
+// inline. rtShadowEx keeps its own inline copy, for the hot-loop reason rtShadowRay0's comment gives.
+void rtShadowRayStart(float3 wpos, float3 N, float3 dir, out float3 origin, out float bias) {
+    bias   = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    origin = wpos + N * bias + dir * bias;
+}
+
 // The ray a single rtShadowEx sample would build at rays=1, kFirst=0, zero footprint (dpx=dpy=0 --
 // what every caller of rtShadowOpaque below passes). Factored out so rtShadowOpaque cannot drift from
 // rtShadowEx's own formula: same T/B frame around L, same ang0 = rtHash(pixel)*2pi+frameJitter, same
@@ -867,8 +885,7 @@ void rtShadowRay0(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitt
     const float ang0  = rtHash(pixel) * 6.2831853 + frameJitter;
     const float2 disc = rtDiscSample(0, ang0);
     dir    = normalize(L + (T * disc.x + B * disc.y) * tanR);
-    bias   = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
-    origin = wpos + N * bias + dir * bias;
+    rtShadowRayStart(wpos, N, dir, origin, bias);
 }
 
 // T1 (Settings::rtSecondaryShadowOpaque, console voxi.rtSecondaryShadowOpaque): the cheap sun-shadow
@@ -910,6 +927,100 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
 
     return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? float3(0, 0, 0) : float3(1, 1, 1);
 }
+
+// ---- LOCAL LIGHTS: lamps lit the way the sun is (staged ray-driven only) ----
+//
+// A material with lightIntensity > 0 (AVER_MAT_LIGHT) turns every draw using it into a small SPHERE
+// light: the draw's world bounding sphere, coloured by its emissiveFactor. VoxiRenderer gathers at most
+// 32 of them per frame into gRdLocalLights (t18, voxi.hlsl) and CSRdLocalLights (voxi.hlsl) lights each
+// pixel with them: the summed diffuse irradiance of every light in range, times ONE stochastic shadow
+// ray's visibility accumulated over frames through the sun history's own reprojection.
+//
+// Declared here rather than beside gRdLocalLights because voxi_restir.hlsli, #included straight after
+// this file and before voxi.hlsl's staged declarations, needs rdLocalLightCount() too (the emitter's
+// own emission leaves ReSTIR GI's candidate hits while these lights carry it).
+//
+// posRadius     = world centre (cm), sphere radius (cm, >= 1).
+// radianceRange = rgb: colour * lightIntensity, i.e. the irradiance at 1 metre in the sun's units
+//                 (averSunRadiance()); w: range in cm, past which the light contributes nothing.
+// MIRRORS the C++ RdLocalLight (32 bytes) field for field -- a StructuredBuffer stride mismatch reads
+// the neighbour's bytes with no compile error.
+struct RdLocalLight { float4 posRadius; float4 radianceRange; };
+
+#if !AVER_RD_SINGLE_PASS
+// gCameraMedium.z/.w -- see that cbuffer field's own comment (voxi.hlsl). Count 0 means local lights are
+// off or unavailable this frame; every reader treats it as "no lamps", never as "read the buffer".
+uint rdLocalLightCount() { return (uint)(gCameraMedium.z + 0.5); }
+// gRdLocalHist (t19) holds a usable previous frame for the SAME light set (gCameraMedium.w bit 1). False
+// restarts accumulation: a visibility accumulated against a different set of lights is an answer to
+// another question.
+bool rdLocalHistValid()  { return ((uint)(gCameraMedium.w + 0.5) & 1u) != 0u; }
+// Every lamp-flagged draw is a live light this frame (gCameraMedium.w bit 2), so a GI estimator that
+// hits one may leave its emission out -- the direct term already carries it. False when any flagged lamp
+// missed the list (the 32 cap, no bounds): that lamp keeps its glow in GI rather than going dark.
+bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0u; }
+
+// One sphere light's DIFFUSE IRRADIANCE at wpos, before visibility: inverse square from the centre,
+// normalised so d = 100 cm gives radianceRange.rgb exactly (lightIntensity is "brightness at 1 metre"),
+// clamped at the sphere's own radius so a receiver touching the bulb does not blow up, and faded to
+// exactly zero at the range by the windowed falloff (1 - (d/range)^4)^2 -- a hard cut at the range
+// would draw a visible ring on every surface the light reaches.
+float3 rdLocalIrradiance(RdLocalLight l, float3 wpos, float3 N) {
+    const float3 toC   = l.posRadius.xyz - wpos;
+    const float  d2    = dot(toC, toC);
+    const float  range = l.radianceRange.w;
+    // Also the zero-range guard: a range of 0 always takes this return, so the divide below never sees it.
+    if (d2 >= range * range) return float3(0.0, 0.0, 0.0);
+    const float r   = l.posRadius.w;
+    const float x2  = d2 / (range * range);             // (d/range)^2
+    const float win = saturate(1.0 - x2 * x2);          // 1 - (d/range)^4
+    const float ndl = saturate(dot(N, toC) * rsqrt(max(d2, 1e-8)));
+    return l.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win) * ndl;
+}
+
+// ONE opaque shadow ray from wpos toward a point on the light's sphere: 1 unoccluded, 0 blocked. The
+// sun's own recipe with the sphere standing in for the sun's disc -- the same T/B frame around the
+// light direction, the same per-pixel rotated disc sample (rtHash + frameJitter, rtDiscSample(0, .)),
+// scaled by the sphere's radius instead of the sun's angular tangent, and the same surface start
+// (rtShadowRayStart). The same single first-hit ray, opaque-including-cutouts lane, as rtShadowOpaque:
+// a pane of glass casts no lamp shadow, the rtShadowOpaque trade.
+//
+// TMax STOPS SHORT OF THE SPHERE (distance to centre - 1.25 radius), so the bulb's own surface -- which
+// sits inside its bounding sphere -- never shadows the light it is. A receiver that close to or inside
+// the sphere has no room for an occluder and returns 1 without tracing, which also keeps the frame
+// below well-defined (dist > 1.25 r >= 1.25 cm, never the zero vector).
+float rdLocalShadow(float3 wpos, float3 N, RdLocalLight l, float2 pixel, float frameJitter) {
+    const float3 toC  = l.posRadius.xyz - wpos;
+    const float  dist = length(toC);
+    const float  tMax = dist - l.posRadius.w * 1.25;
+    if (tMax <= 0.0) return 1.0;
+
+    const float3 Lc = toC / dist;
+    float3 up = abs(Lc.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 T  = normalize(cross(up, Lc));
+    float3 B  = cross(Lc, T);
+    const float  ang0   = rtHash(pixel) * 6.2831853 + frameJitter;
+    const float2 disc   = rtDiscSample(0, ang0);
+    const float3 target = l.posRadius.xyz + (T * disc.x + B * disc.y) * l.posRadius.w;
+    const float3 dir    = normalize(target - wpos);
+
+    float3 origin;
+    float  bias;
+    rtShadowRayStart(wpos, N, dir, origin, bias);
+
+    RayDesc r;
+    r.Origin    = origin;
+    r.Direction = dir;
+    r.TMin      = bias;
+    r.TMax      = max(tMax, bias);
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
+    averRtProceedSolid(q);
+
+    return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0 : 1.0;
+}
+#endif
 
 // The fraction of the hemisphere above `N` from which the SKY is actually reachable: 1 fully open,
 // 0 fully enclosed. This is the scalar `diffAmbient` multiplies the sky irradiance by, traced
@@ -1258,8 +1369,38 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     return true;
 }
 
-// The AMBIENT twin of rtReprojectHistory, against gAoHist. A near-copy on purpose: HLSL below
-// SM 6.6 cannot take a Texture2D parameter, and the alternative -- folding both into one function
+// THE LOCAL-LIGHT TWIN of rtReprojectHistory, for CSRdLocalLights (voxi.hlsl): the same reprojection
+// and the same depth test against the SUN history's stored depth -- depth validity is a property of
+// the surface, not of the light, so the lamp history (gRdLocalHist) needs no depth channel of its own
+// -- returning the texel instead of the sun's visibility. A NEAR-COPY ON PURPOSE, like rtReprojectAo
+// below: routing rtReprojectHistory through a shared helper added phis to the register-bound
+// CSRdShadow (its outputs must be defined on every early return). The arithmetic is IDENTICAL; see
+// rtReprojectHistory for why each part is what it is. Change one, change both.
+bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velocityPx) {
+    texel = int2(0, 0);
+    velocityPx = 0.0;
+    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float dzdx = ddx(clip.w);   // before every early-out, as in rtReprojectHistory
+    const float dzdy = ddy(clip.w);
+    if (clip.w <= 1e-4) return false;
+    float3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return false;
+    float texW, texH;
+    gRtShadowHist.GetDimensions(texW, texH);
+    float2 px = gSceneViewport.xy +
+                float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
+    const int2 t = int2(floor(px));
+    if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) return false;
+    const float storedDepth = gRtShadowHist.Load(int3(t, 0)).y;
+    const float tol = max(clip.w, storedDepth) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;
+    if (abs(clip.w - storedDepth) > tol) return false;
+    texel = t;
+    velocityPx = px - pixel;
+    return true;
+}
+
+// The AMBIENT twin of rtReprojectHistory, against gAoHist. A near-copy on purpose: HLSL below SM 6.6
+// cannot take a Texture2D parameter, and the alternative -- folding both into one function
 // behind a flag -- would put a branch in the hot path of every pixel to save nine lines. The
 // arithmetic is deliberately IDENTICAL, including floor() over round() and the 3% depth tolerance;
 // see the original for why each of those is what it is. Change one, change both.

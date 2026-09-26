@@ -338,6 +338,10 @@ PARAM uvTiling 200.0                # world CENTIMETRES per tile; read only unde
 # PARAM subsurfaceWeight 0.6        # [0,1] how far light wraps past the terminator; 0 = off
 # PARAM subsurfaceRadius 0.4        # [0,1] thickness proxy; widens the back-scatter lobe
 
+# Optional: makes this material a small sphere LIGHT, shaded like the sun, in ray-driven mode only
+# (staged D3D12; Settings::rayDrivenStages 1/2). Off unless lightIntensity is present and > 0.
+# PARAM lightIntensity 8.0          # brightness at 1m in the SUN's units (~3); coloured by emissiveFactor
+
 TEX baseColor   {guid:0x…}  uv0 sRGB
 TEX metalRough  {guid:0x…}  uv0 linear     # B=metallic, G=roughness (glTF MR)
 TEX normal      {guid:0x…}  uv0 normal
@@ -364,6 +368,24 @@ Rules: `TEX slot {guid:…|path:…} uvN colorspace` binds an `.octex` by GUID (
 `PARAM slopeBlend <lo> <hi> [layer1UvScale]` turns on the material's second layer and says across which slope band it fades in: `lo`/`hi` are world-normal Z (`1` flat ground, `0` a vertical face), and `lo` is the **steeper** end. A backwards pair (`lo > hi`) is repaired by swapping rather than rejected — the same clamp-don't-reject idiom `ior` above already uses — because feeding an inverted range to the shader's smoothstep would produce silent garbage rather than a value that at least means something. `layer1UvScale`, third and optional, only takes effect when positive; omit it, or give a non-positive value, to tile layer 1 at the same scale as layer 0. Unlike `reflectance`/`f90`/`ior`/`transmission` above, this line is **omitted entirely when off** — `writeOcmat` only emits it `if (d.slopeBlend)` — because writing `PARAM slopeBlend 0.55 0.8` into a material with no second layer would claim a feature it does not have, and re-reading it would turn the mode on for a material that never asked for it. The three `layer1*` `TEX` slots (`layer1BaseColor` sRGB, `layer1MetalRough` linear, `layer1Normal` normal — the same colour-space-per-slot rule as their layer-0 counterparts) are meaningful only once `slopeBlend` is on; the reader does not refuse them on a material that has it off, they are simply never sampled. `FLAGS worlduv` and `PARAM uvTiling` are a separate, unrelated axis: `worlduv=1` switches sampling to a planar world-space projection instead of the mesh's own UVs (`worlduv=0`, the default, is `UvMode::Mesh`), tiled every `uvTiling` world **centimetres**. `uvTiling` is read only when `worlduv=1`, and a non-positive value is dropped rather than accepted — the same positivity guard `layer1UvScale` uses.
 
 `subsurfaceWeight` and `subsurfaceRadius` add a wrap-diffuse-plus-back-scatter approximation, deliberately **not a BSSRDF**: there is no light transport across the mesh, no per-texel thickness, and no separate scatter colour — the transmitted light is tinted by `baseColorFactor` instead, which is right for skin, wax, marble and leaves (the cases this is for) and wrong only where the interior colour differs from the surface colour (see the long comment on the fields themselves in `Material.hpp` for the full story). `subsurfaceWeight` `[0,1]` is how far light wraps past the terminator, `0` the feature-off default that every material authored before this existed keeps; `subsurfaceRadius` `[0,1]` is a thickness *proxy* that widens the back-scatter lobe — the effect that makes a lit ear or leaf glow when the sun is behind it. Both are clamped to `[0,1]` in the parser itself, the same defensive clamp `transmission` above uses and for the same reason: an authored `1.4` would otherwise reach the renderer as a magnitude this format never produces. Like `slopeBlend`, the pair is **omitted from the file entirely when off** — `writeOcmat` emits both lines together only `if (d.subsurfaceWeight > 0.0f)` — but for a sharper reason than `slopeBlend`'s byte-stability argument: `subsurfaceWeight > 0` is exactly the condition `MaterialGpu.cpp`'s `packMaterial` uses to set `MaterialFlag_Subsurface`, so `0` is not merely an unremarkable default but the feature's own off switch, and writing `PARAM subsurfaceWeight 0` into a material that never asked for the wrap term would parse back to the same state while turning every pre-existing `.ocmat` in this tree into a diff for a line that carries no information beyond "not in use." `subsurfaceRadius` rides along unconditionally on that one line because it is meaningless without the weight that gates it. Shaded end to end behind `AVER_MAT_SUBSURFACE` in `PbrShaders.cpp`/`VoxiShaders.hpp`.
+
+`lightIntensity` turns this material's draws into small sphere lights, shaded the same way the sun
+is: brightness at 1 metre in the sun's own units (`SkyAtmosphere::sunIntensity`, ~3 in the editor),
+0 the feature-off default that every material authored before this field existed keeps. It is
+**not** the same knob as `emissiveFactor` — emissive is what the surface looks like, `lightIntensity`
+is whether it casts light on anything else — and it is consumed by exactly one path: the staged
+ray-driven local-light pass (`CSRdLocalLights`, D3D12 only, read only under `Settings::rayDrivenStages`
+1 or 2). A draw whose material sets it becomes a light shaped like its own world bounding sphere,
+coloured by `emissiveFactor` (normalised to max component 1; white if that factor is all zero), summed
+with every other in-range light and shadowed by one traced ray per pixel. Raster, the single-pass
+megakernel and `PSMainVoxi`'s blended reuse never read it, so the same material shades by its emissive
+factor alone everywhere else — a lamp glows the same everywhere, and only lights the room it is in
+where ray-driven local lights are running. Floored at 0 in the parser like `attenuationDistance`
+above; unlike `subsurfaceWeight`/`transmission` it has **no upper clamp**, since a lamp may
+legitimately want to outshine the sun. Like `slopeBlend`/`subsurfaceWeight`, the line is **omitted
+entirely when off** — `writeOcmat` emits it only `if (d.lightIntensity > 0.0f)` — for the same
+byte-stability reason: 0 is the feature's own off switch, and packMaterial's `MaterialFlag_Light`
+tracks it exactly.
 
 `GRAPHREF <path>` names a `DOMAIN material` `.ocgraph` (§`OCGRAPH`) by its content-relative path — the rest of the line, so a path containing spaces is not cut short, and the same content-root convention `COMP mesh=` uses (never with the content directory on the front). It is a different mechanism from the inline `GRAPH{}` block above: `GRAPHREF` points at a graph asset a project authors and iterates on in the graph editor, while `GRAPH{}` is a small node list written inline in the material file itself. A file may carry either, both, or neither. Nothing in the `.ocmat` reader/writer resolves the path, loads the graph, or checks that it compiles — it is recorded verbatim for a loader to pass to `pbr::MaterialGraphRegistry::add`, which compiles it and returns the id that ends up in `MaterialConstants::graphId` (never round-tripped through the file itself, since the id is only stable for the current process).
 

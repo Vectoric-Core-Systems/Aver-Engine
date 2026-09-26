@@ -277,6 +277,11 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
     changed |= track(ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
+    changed |= track(ImGui::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 50.0f));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Makes this material a light source in ray-driven mode -- brightness at "
+                          "1 metre in the sun's own units (the sun is about 3). 0 = not a light, "
+                          "coloured by Emissive (white if none).");
 
     ImGui::Separator();
     int uvMode = static_cast<int>(d->uvMode);
