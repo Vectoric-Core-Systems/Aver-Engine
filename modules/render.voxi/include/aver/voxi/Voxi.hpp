@@ -842,6 +842,9 @@ struct Settings {
     // stopped at frame 100, compared with the settled pose): error 4.58 -> 4.70 MAD, pixels > 16
     // codes 2.67% -> 2.73%, isolated specks 0.100% -> 0.109%, and no 8-px tile structure (edge
     // energy on the tile grid 0.99/1.04, same as off).
+    // STAGED MODES ONLY: the single-pass mode (rayDrivenStages 0) compiles T1 on and T2-T4 off as
+    // constants and ignores these four -- with all four live its one pixel shader lost the device on
+    // AMD (rtGiShadowBits() in voxi_rt.hlsli has the measurement).
 
     // T1 (bit 1): the sun-shadow ray fired FROM A SECONDARY HIT -- rtReflection's hit and ReSTIR GI's
     // candidate hit -- normally walks rtShadow's full transmittance loop (up to 8 steps, RAY_FLAG_NONE,

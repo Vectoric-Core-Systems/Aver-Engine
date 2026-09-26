@@ -7086,6 +7086,10 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     const auto rdAblateDefs = [&]() -> std::string {
         return rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
     };
+    // The single-pass PSRayDriven variants only (rayDrivenStages 0): the voxi.rt* cost toggles become
+    // compile-time constants there, because with all four live the megakernel lost the device on AMD.
+    // See rtGiShadowBits() in voxi_rt.hlsli. The staged compute stages and PSMainVoxi do not take it.
+    static constexpr const char* kRdSinglePassDefs = ";AVER_RD_SINGLE_PASS=1";
     const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
@@ -7115,7 +7119,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Less would reject every pixel against a cleared far-plane buffer.
     const rhi::ShaderHandle psRayDriven =
         rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs((std::string("AVER_RT=1") + rdAblateDefs()).c_str()).c_str()) : 0;
+                       rasterDefs((std::string("AVER_RT=1") + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str()) : 0;
     if (vsky && psRayDriven) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsky; p.ps = psRayDriven;
@@ -7152,7 +7156,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         const rhi::ShaderHandle vskyTex = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
                                                   rasterDefs(bindlessDefs.c_str()).c_str());
         const rhi::ShaderHandle psTex = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                                                rasterDefs((bindlessDefs + rdAblateDefs()).c_str()).c_str());
+                                                rasterDefs((bindlessDefs + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str());
         if (vskyTex && psTex) {
             rhi::GraphicsPipelineDesc p;
             p.vs = vskyTex; p.ps = psTex;
@@ -7181,7 +7185,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         // member for why that made every A/B across the flag meaningless.
         const rhi::ShaderHandle psTexGbuf =
             compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                    rasterDefs((bindlessDefs + ";AVER_GBUFFER=1" + rdAblateDefs()).c_str()).c_str());
+                    rasterDefs((bindlessDefs + ";AVER_GBUFFER=1" + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str());
         if (vskyTex && psTexGbuf) {
             rhi::GraphicsPipelineDesc p;
             p.vs = vskyTex; p.ps = psTexGbuf;
@@ -7477,7 +7481,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // share -- see rayDrivenPso_'s own block for why Always/write-on replaces Less/write-on here).
     const rhi::ShaderHandle psRayDrivenGbuf =
         rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs((std::string("AVER_RT=1;AVER_GBUFFER=1") + rdAblateDefs()).c_str()).c_str())
+                       rasterDefs((std::string("AVER_RT=1;AVER_GBUFFER=1") + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str())
              : 0;
     if (vsky && psRayDrivenGbuf) {
         rhi::GraphicsPipelineDesc p;

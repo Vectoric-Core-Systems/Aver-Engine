@@ -1103,7 +1103,8 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH ray against the opaque-including-cutouts mask "
         "instead of rtShadow's full glass-tinting transmittance walk. Trade: glass/water stops "
         "casting a shadow for these two secondary rays. Primary shadows are untouched. ON by "
-        "default: measured GI trace 3.88 -> 3.38 ms, reflection 3.14 -> 2.73 ms, image MAD 0.09.",
+        "default: measured GI trace 3.88 -> 3.38 ms, reflection 3.14 -> 2.73 ms, image MAD 0.09. "
+        "Staged ray-driven modes only; single-pass (voxi.rayDrivenStages 0) always has it on.",
         []{ return vBool(Renderer::get().settings().rtSecondaryShadowOpaque); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSecondaryShadowOpaque = on; }); }});
     t.push_back({"voxi.rtSkyOcclusionHalfRate", VarType::Bool, false,
@@ -1111,21 +1112,24 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "parity wherever that tile's reprojected history is valid, reusing the reprojection as the "
         "fresh estimate instead. Whole tiles skip together, not a per-pixel checkerboard. A pixel "
         "with no valid history always traces. ON by default: measured 0.72 -> 0.47 ms, still image "
-        "MAD 0.40, no tile pattern in motion.",
+        "MAD 0.40, no tile pattern in motion. Staged ray-driven modes only; single-pass "
+        "(voxi.rayDrivenStages 0) always has it off.",
         []{ return vBool(Renderer::get().settings().rtSkyOcclusionHalfRate); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSkyOcclusionHalfRate = on; }); }});
     t.push_back({"voxi.rtReflectionHalfRate", VarType::Bool, false,
         "Skips rtReflectionTemporalEx's traced reflection for a rough pixel (mirrors always retrace) "
         "on a skip-parity tile whose reflection history reprojects validly, reusing that reprojection "
         "as this frame's colour. ON by default: measured reflection trace 3.14 -> 2.17 ms, still "
-        "image MAD 0.04, no tile pattern in motion.",
+        "image MAD 0.04, no tile pattern in motion. Staged ray-driven modes only; single-pass "
+        "(voxi.rayDrivenStages 0) always has it off.",
         []{ return vBool(Renderer::get().settings().rtReflectionHalfRate); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtReflectionHalfRate = on; }); }});
     t.push_back({"voxi.rtGiHitShadowMap", VarType::Bool, false,
         "The sun visibility at a ReSTIR GI bounce hit comes from the GI-only shadow map instead of a "
         "shadow ray (the ray still fires where the map cannot answer). OFF by default: measured GI "
         "trace 3.38 -> 2.68 ms, still image MAD 1.61, about 1% brighter where the map's coarse texels "
-        "let bounce light under column capitals and bases.",
+        "let bounce light under column capitals and bases. Staged ray-driven modes only; "
+        "single-pass (voxi.rayDrivenStages 0) always has it off.",
         []{ return vBool(Renderer::get().settings().rtGiHitShadowMap); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtGiHitShadowMap = on; }); }});
     t.push_back({"voxi.blendedReuseStagedLighting", VarType::Bool, false,

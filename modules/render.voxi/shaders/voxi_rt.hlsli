@@ -831,7 +831,24 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
 // (rtSkyOcclusionTemporal, further down this file) and T3 (rtReflectionTemporalEx, voxi.hlsl) all
 // decode the same field the same way rather than three independent (uint) casts that could drift if
 // the field is ever renumbered.
+//
+// THE SINGLE-PASS PSRayDriven COMPILE (AVER_RD_SINGLE_PASS, set only on its four variants in
+// VoxiRenderer::createScenePipelines) SEES CONSTANTS INSTEAD: T1 on, T2/T3/T4 off. Every runtime bit
+// compiles BOTH of its paths into the shader, and that megakernel -- shadow, GI, reflection and sky
+// occlusion in one pixel shader -- grew past what the AMD driver handles: MEASURED 2026-09-26 (RX 7800
+// XT), the device was lost on its first frame (DRED: that draw, a page fault at a fixed VA with no
+// allocation), at any resolution; removing ANY one stage, sky occlusion included, stopped it, and so did
+// folding these bits to constants with every stage kept. The staged passes, which split the same work
+// across smaller shaders, keep all four toggles live. Anything added to the single-pass path can push it
+// back over: run it (--rd-stages 0 --dred) after changing it.
+#ifndef AVER_RD_SINGLE_PASS
+#define AVER_RD_SINGLE_PASS 0
+#endif
+#if AVER_RD_SINGLE_PASS
+uint rtGiShadowBits() { return 1u; }
+#else
 uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
+#endif
 
 // The ray a single rtShadowEx sample would build at rays=1, kFirst=0, zero footprint (dpx=dpy=0 --
 // what every caller of rtShadowOpaque below passes). Factored out so rtShadowOpaque cannot drift from
