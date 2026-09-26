@@ -2045,9 +2045,8 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     if (gAverHistoryWrite && gw > 0u && gh > 0u) {
         // _NRD_YCoCgToLinear, the matching half of the write above. REBLUR hands back what it
         // filtered, in the basis it filtered it in; NRD's own back-end unpack is this same transform
-        // and also ends in a max against zero, because the chroma round trip can put a channel
-        // slightly negative and negative radiance reads BRIGHT once it reaches the tonemap.
-        // LINEAR, so blending the four taps in YCoCg and decoding once equals decoding each.
+        // followed by a per-channel max against zero -- which this does NOT copy, see the gamut step
+        // below. LINEAR, so blending the four taps in YCoCg and decoding once equals decoding each.
         const float3 y = nrdWsum > 1e-3 ? nrdYcocg / nrdWsum
                                         : gNrdGi.Load(int3(pixelPos, 0)).rgb;   // disocclusion / legacy
         const float  t = y.x - y.z;
@@ -2079,15 +2078,31 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // same "zero is the honest answer for a broken sample" the raw path already chose, rather
         // than a screen-filling flash with nothing in the log to explain it.
         giPoisonNrdHit = any(isnan(decoded)) || any(isinf(decoded));
+        // ---- OUT OF GAMUT GOES TOWARD GREY AT THE SAME LUMINANCE, NOT CHANNEL BY CHANNEL ----
+        //
+        // REBLUR filters Y and the two chroma channels separately, so a pixel it clamped hard (a
+        // firefly, a thin lamp frame with no similar neighbours) can come back with luma pulled down
+        // and chroma kept: a YCoCg triple no RGB colour has. With Cg dominant that decodes to R and B
+        // below zero and G above -- and flooring each channel at zero, as this used to, turned it into
+        // PURE GREEN, which the ceiling below then capped at (0, 16, 0): the bright green dots with a
+        // bloom halo the owner saw scattered around the lamps and arches. Pulling the colour toward
+        // grey by the smallest amount that brings every channel to >= 0 keeps the filtered luminance
+        // (y.x) and invents no hue. Y <= 0 has no light to keep and reads black.
+        const float  lumaY  = max(y.x, 0.0);
+        const float  lowest = min(decoded.r, min(decoded.g, decoded.b));
+        const float3 inGamut = lowest < 0.0
+                             ? lumaY + (decoded - lumaY) * (lumaY / max(lumaY - lowest, 1e-6))
+                             : decoded;
         // THE NRD-SIDE TWIN OF giPoisonEstCeilHit above, same reasoning: a finite REBLUR readback
         // that is nonetheless above the ceiling paints solid white once tonemapped, invisible to the
-        // isnan/isinf guard directly above. Same shape -- checked against the clamp's own
-        // already-floored input, skipped when giPoisonNrdHit already fired.
-        const float3 decodedNonNeg = max(decoded, 0.0);
-        giPoisonNrdCeilHit = !giPoisonNrdHit && any(decodedNonNeg > AVER_VOX_MAXRAD);
+        // isnan/isinf guard directly above. Skipped when giPoisonNrdHit already fired. Scaled down as a
+        // whole rather than clamped per channel, for the same reason as the gamut step: a per-channel
+        // min shifts the hue toward whichever channels were under the ceiling.
+        const float peak = max(inGamut.r, max(inGamut.g, inGamut.b));
+        giPoisonNrdCeilHit = !giPoisonNrdHit && peak > AVER_VOX_MAXRAD;
         outDiffuse = giPoisonNrdHit
                    ? float3(0.0, 0.0, 0.0)
-                   : min(decodedNonNeg, AVER_VOX_MAXRAD);
+                   : inGamut * min(1.0, AVER_VOX_MAXRAD / max(peak, 1e-6));
     }
 
     // ---- POISON DEBUG VIEW (voxi.giPoisonView / gGiRestirParams.w) -- OVERRIDE 2/3's by-hand tool ----
