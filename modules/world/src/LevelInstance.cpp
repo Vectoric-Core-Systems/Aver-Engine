@@ -2,6 +2,7 @@
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 #if AVER_MODULE_PHYSICS
@@ -69,6 +70,24 @@ StaticBoxFit fitStaticBox(const Transform& worldXf, const Vec3& localMin, const 
     return fit;
 }
 
+void scaleMeshForBody(const f32* localPositions, u32 vertexCount, const u32* localIndices,
+                      u32 indexCount, const Vec3& scale,
+                      std::vector<f32>& outPositions, std::vector<u32>& outIndices) {
+    outPositions.resize(usize(vertexCount) * 3);
+    for (u32 v = 0; v < vertexCount; ++v) {
+        outPositions[usize(v) * 3 + 0] = localPositions[usize(v) * 3 + 0] * scale.x;
+        outPositions[usize(v) * 3 + 1] = localPositions[usize(v) * 3 + 1] * scale.y;
+        outPositions[usize(v) * 3 + 2] = localPositions[usize(v) * 3 + 2] * scale.z;
+    }
+
+    outIndices.assign(localIndices, localIndices + indexCount);
+    // See this function's own header comment for why the sign of scale.x*scale.y*scale.z is exactly
+    // the mirror test.
+    if (scale.x * scale.y * scale.z < 0.0f)
+        for (usize k = 0; k + 2 < outIndices.size(); k += 3)
+            std::swap(outIndices[k + 1], outIndices[k + 2]);
+}
+
 #if AVER_MODULE_PHYSICS
 i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax) {
     const StaticBoxFit fit = fitStaticBox(worldXf, localMin, localMax);
@@ -80,6 +99,30 @@ i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3&
     // call aver_phys_add_static_box already is -- a second ABI call per placement that never needed
     // one is a cost this guard exists to avoid, not a correctness fix.
     const Quat& q = fit.rotation;
+    if (!(q.x == 0.0f && q.y == 0.0f && q.z == 0.0f && q.w == 1.0f))
+        aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
+    return body;
+}
+
+i32 addStaticMeshBody(const Transform& worldXf, const f32* localPositions, u32 vertexCount,
+                      const u32* indices, u32 indexCount) {
+    if (!localPositions || !indices || vertexCount < 3 || indexCount < 3) return 0;
+
+    std::vector<f32> positions;
+    std::vector<u32> wound;
+    scaleMeshForBody(localPositions, vertexCount, indices, indexCount, worldXf.scale, positions, wound);
+
+    // aver_phys_add_mesh takes int32_t indices; a u32 index buffer reinterprets bit-for-bit, the same
+    // cast modules/render.softbody/src/SoftBodyScene.cpp already makes for the identical ABI shape --
+    // a real conversion would only matter if an index could exceed INT32_MAX, which nothing in this
+    // engine's mesh formats can produce.
+    const i32 body = aver_phys_add_mesh(positions.data(), static_cast<i32>(vertexCount),
+                                        reinterpret_cast<const i32*>(wound.data()),
+                                        static_cast<i32>(wound.size()),
+                                        worldXf.position.x, worldXf.position.y, worldXf.position.z);
+    if (!body) return body;
+    // EXACTLY IDENTITY -- same guard, same reason, as addStaticBoxBody above.
+    const Quat& q = worldXf.rotation;
     if (!(q.x == 0.0f && q.y == 0.0f && q.z == 0.0f && q.w == 1.0f))
         aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
     return body;
@@ -225,23 +268,51 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             // was; for a child the authored numbers are parent-relative and using them would put the
             // collision somewhere the mesh is not.
             const Transform& wx = worldXf[i];
-            // THE UNIT-CUBE PLACEHOLDER UNLESS THE HOST KNOWS BETTER. A placement's authored scale
-            // used to go straight into aver_phys_add_static_box as a half-extent -- exactly right for
-            // the built-in cube (local bounds exactly [-1,1] cm) and silently wrong for anything else:
-            // an imported mesh placed at scale 1 got a 2x2x2 cm box at its pivot, i.e. no collision an
-            // object of any real size could ever reach.
-            Vec3 lmin{-kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm};
-            Vec3 lmax{ kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm};
-            // Only trusted on a TRUE return, same as groundHeightAt above: a host that answers false
-            // has made no promise about what it left in the out-params.
-            if (opt.localBoundsFor) {
-                Vec3 hostMin, hostMax;
-                if (opt.localBoundsFor(p.objectId, hostMin, hostMax)) { lmin = hostMin; lmax = hostMax; }
+            const auto bodyStart = std::chrono::steady_clock::now();
+
+            // TRIANGLES FIRST. A mesh's per-material-merged geometry can be concave -- an archway, a
+            // courtyard wall -- and one box per mesh fills that concavity solid; asking for triangles
+            // before ever building a box means concave architecture only ever gets the box when
+            // nothing has (or can) give it triangles. Only trusted on a TRUE return with at least one
+            // triangle's worth of indices, same as localBoundsFor/groundHeightAt: a host that answers
+            // false, or leaves the counts at 0, has made no promise about the pointers either.
+            bool usedMesh = false;
+            u32 meshTriCount = 0;
+            if (opt.localTrianglesFor) {
+                const f32* triPositions = nullptr; u32 triVertexCount = 0;
+                const u32* triIndices = nullptr;   u32 triIndexCount = 0;
+                if (opt.localTrianglesFor(p.objectId, triPositions, triVertexCount,
+                                          triIndices, triIndexCount) &&
+                    triVertexCount > 0 && triIndexCount >= 3) {
+                    body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount);
+                    usedMesh = true;
+                    meshTriCount = triIndexCount / 3;
+                }
             }
-            body = addStaticBoxBody(wx, lmin, lmax);
-            // The one line that makes this placement's body IDENTIFIABLE later -- a raycast that
-            // hits it can now report `e`, not just an opaque physics handle nothing else understands.
-            if (body) aver_phys_set_entity(body, static_cast<i32>(e));
+            if (!usedMesh) {
+                // THE UNIT-CUBE PLACEHOLDER UNLESS THE HOST KNOWS BETTER. A placement's authored scale
+                // used to go straight into aver_phys_add_static_box as a half-extent -- exactly right
+                // for the built-in cube (local bounds exactly [-1,1] cm) and silently wrong for
+                // anything else: an imported mesh placed at scale 1 got a 2x2x2 cm box at its pivot,
+                // i.e. no collision an object of any real size could ever reach.
+                Vec3 lmin{-kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm};
+                Vec3 lmax{ kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm};
+                if (opt.localBoundsFor) {
+                    Vec3 hostMin, hostMax;
+                    if (opt.localBoundsFor(p.objectId, hostMin, hostMax)) { lmin = hostMin; lmax = hostMax; }
+                }
+                body = addStaticBoxBody(wx, lmin, lmax);
+            }
+
+            out.bodyCreationSeconds +=
+                std::chrono::duration<f64>(std::chrono::steady_clock::now() - bodyStart).count();
+            if (body) {
+                // The one line that makes this placement's body IDENTIFIABLE later -- a raycast that
+                // hits it can now report `e`, not just an opaque physics handle nothing else understands.
+                aver_phys_set_entity(body, static_cast<i32>(e));
+                if (usedMesh) { ++out.meshBodyCount; out.meshTriangleCount += meshTriCount; }
+                else ++out.boxBodyCount;
+            }
             out.bodies.push_back(body);
         }
 #  else

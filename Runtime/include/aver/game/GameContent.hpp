@@ -12,6 +12,7 @@
 #  include "aver/pbr/MaterialSystem.hpp"
 #endif
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -211,6 +212,27 @@ public:
     // Bounds as loaded from the .ocmesh, or nullptr. Used by the draw walk to cull.
     const std::pair<Vec3, Vec3>* boundsFor(u64 id) const;
 
+    // A collision-only triangle mesh for `id`, lazily read from its .ocmesh and cached on first ask
+    // (see GameContent.cpp for exactly how the LOD is picked and the mesh compacted). `positions` is
+    // LOCAL space, 3 f32 per vertex; `indices` is 3 per triangle into `positions`, remapped down to
+    // only the vertices this LOD actually references -- NOT LOD 0's full vertex array, which a
+    // coarser level shares but mostly does not touch. `lod` is which stored level this came from (0
+    // is the mesh's finest, i.e. `OcMeshData::indices`); `errorCm` is that level's own geometric
+    // error, in centimetres (0 for LOD 0, by the format's own convention).
+    //
+    // nullptr for a mesh with no .ocmesh at all -- a built-in (registerBuiltins never indexes one)
+    // or an unknown id -- or one whose file failed to load. EITHER answer is cached, so a bad id is
+    // stat'd/read at most once no matter how many placements name it. A caller getting nullptr keeps
+    // colliding that mesh as the fitted box (world::addStaticBoxBody) -- this function never falls
+    // back to a box itself, because it has no box to fall back to; the caller does.
+    struct CollisionMesh {
+        std::vector<f32> positions;
+        std::vector<u32> indices;
+        u32 lod = 0;
+        f32 errorCm = 0.0f;
+    };
+    const CollisionMesh* collisionMeshFor(u64 id);
+
     // Depth proxy map for LOD-based shadow/voxel optimization.
     const std::unordered_map<rhi::MeshHandle, rhi::MeshHandle>& depthProxyMap() const { return depthProxyMap_; }
 
@@ -264,6 +286,12 @@ private:
     // frame. Keyed by handle: RHI handles are never recycled (IDevice::destroyMesh's contract).
     struct PosedParts { u64 meshId = 0; std::vector<MeshPart> parts; };
     std::unordered_map<rhi::MeshHandle, PosedParts> posedParts_;
+    // collisionMeshFor's cache: mesh id -> its collision mesh, or a present key holding a null
+    // pointer for "asked for and there is none" (missing file, load failure, or a built-in) -- see
+    // that function's own comment for why a negative result is cached too. Cleared alongside
+    // meshBounds_/meshSlot0Material_ in releaseProjectMeshes: it is keyed by the same mesh ids and a
+    // reload can put a different .ocmesh behind one of them.
+    std::unordered_map<u64, std::unique_ptr<CollisionMesh>> collisionMeshCache_;
     MeshLoadedFn meshLoaded_ = nullptr;
     void* meshLoadedUser_ = nullptr;
     bool buildDepthProxies_ = true;

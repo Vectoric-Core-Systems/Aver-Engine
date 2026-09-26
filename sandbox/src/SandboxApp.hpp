@@ -2317,9 +2317,12 @@ private:
     // undo/redo/copy/paste -- see EditCmd::hadBody's own comment. THE ONE PLACE A BODY IS MADE:
     // drops whatever `e` already owns in entityBodies_ (unconditionally -- a caller replaying a
     // command against a since-destroyed handle, or running before aver_phys_init, still has to
-    // drop the stale one), then, if physics is up and `e` is still live, fits a fresh one from
-    // content_.boundsFor(its CMeshRenderer::mesh) (the placeholder unit cube when the mesh's
-    // bounds are unknown) and its CURRENT world transform via aver::world::addStaticBoxBody.
+    // drop the stale one), then, if physics is up and `e` is still live, fits a fresh one from its
+    // CMeshRenderer::mesh and its CURRENT world transform. TRIANGLES FIRST: content_.collisionMeshFor
+    // gets tried via aver::world::addStaticMeshBody before the box; only a mesh with no cached
+    // collision mesh (a built-in, or one whose .ocmesh failed to load) falls back to
+    // content_.boundsFor (the placeholder unit cube when even that is unknown) via
+    // aver::world::addStaticBoxBody.
     void rebuildEntityBody(scene::Entity e);
 
     // rebuildEntityBody for `e` and every descendant that currently owns a body. A descendant's

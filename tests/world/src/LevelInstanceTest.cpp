@@ -228,6 +228,45 @@ int main() {
         }
     }
 
+    // ---- scaleMeshForBody: the scale-and-mirror step addStaticMeshBody hands to the physics ABI -----
+    // Pure math, no physics needed -- see LevelInstance.hpp's own comment on why scaleMeshForBody has
+    // no such dependency. One triangle (0,0,0)-(1,0,0)-(0,1,0), indices 0,1,2 in that order, is enough
+    // to see both the per-axis scale and the winding swap.
+    {
+        const f32 tri[9] = {0, 0, 0,  1, 0, 0,  0, 1, 0};
+        const u32 idx[3] = {0, 1, 2};
+
+        // A POSITIVE SCALE ON EVERY AXIS: vertices scale component-wise, index order is untouched.
+        {
+            std::vector<f32> pos; std::vector<u32> ind;
+            world::scaleMeshForBody(tri, 3, idx, 3, Vec3{2, 3, 4}, pos, ind);
+            check(pos.size() == 9, "positive scale: same vertex count comes back");
+            checkNear(pos[3], 2.0f, 0.0f, "positive scale: vertex 1 x scales by scale.x");
+            checkNear(pos[7], 3.0f, 0.0f, "positive scale: vertex 2 y scales by scale.y");
+            check(ind.size() == 3 && ind[0] == 0 && ind[1] == 1 && ind[2] == 2,
+                  "positive scale: index order is unchanged");
+        }
+
+        // ONE NEGATIVE AXIS -- a genuine mirror (odd number of negative axes) -- FLIPS the winding:
+        // the second and third index of the triangle swap.
+        {
+            std::vector<f32> pos; std::vector<u32> ind;
+            world::scaleMeshForBody(tri, 3, idx, 3, Vec3{-2, 3, 4}, pos, ind);
+            checkNear(pos[3], -2.0f, 0.0f, "one negative axis: the mirrored axis still scales by its magnitude, signed");
+            check(ind.size() == 3 && ind[0] == 0 && ind[1] == 2 && ind[2] == 1,
+                  "one negative axis: winding flips (index 1 and 2 swap)");
+        }
+
+        // TWO NEGATIVE AXES -- a 180-degree rotation about the third, not a mirror -- do NOT flip the
+        // winding: the product of the three scale factors is positive again.
+        {
+            std::vector<f32> pos; std::vector<u32> ind;
+            world::scaleMeshForBody(tri, 3, idx, 3, Vec3{-2, -3, 4}, pos, ind);
+            check(ind.size() == 3 && ind[0] == 0 && ind[1] == 1 && ind[2] == 2,
+                  "two negative axes: winding is unchanged");
+        }
+    }
+
     // ---- instantiation ---------------------------------------------------------------------------
     std::vector<std::pair<i32, std::string>> bound;
     world::InstantiateOptions opt;

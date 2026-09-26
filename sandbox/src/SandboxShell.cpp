@@ -2060,9 +2060,9 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("view.showColliders");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Every physics body's WORLD-SPACE BOUNDING BOX.\n"
-                                  "Green = static, amber = it moves.\n"
-                                  "A box collider is drawn exactly; a sphere, capsule or mesh\n"
-                                  "is drawn as its bound, not its outline.");
+                                  "Green = static box, blue = static triangle mesh, amber = it moves.\n"
+                                  "A box collider is drawn exactly; a triangle mesh, sphere or capsule\n"
+                                  "is drawn as its bound -- it collides with its actual shape inside.");
 #endif
             if (ImGui::MenuItem("Region Colours", nullptr, &navRegionColours_))
                 rebuildNavOverlay(e);

@@ -654,6 +654,7 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
         }
         meshBounds_.erase(id);
         meshSlot0Material_.erase(id);
+        collisionMeshCache_.erase(id);
     }
     projectMeshIds_.clear();
 }
@@ -661,6 +662,89 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
 const std::pair<Vec3, Vec3>* GameContent::boundsFor(u64 id) const {
     const auto it = meshBounds_.find(id);
     return it == meshBounds_.end() ? nullptr : &it->second;
+}
+
+// Concave architecture needs its triangles: NewSponza's per-material merged meshes (walls, arches,
+// ...) each span the whole building, so world::addStaticBoxBody's one box per mesh fills the
+// courtyard and buries anyone standing in it. This is the lazily-built source those triangles come
+// from -- see GameContent.hpp's own comment on the shape of the answer and what null means.
+const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
+    if (const auto it = collisionMeshCache_.find(id); it != collisionMeshCache_.end())
+        return it->second.get();
+
+    // INSERTED NOW, EVEN ON FAILURE: every `return nullptr` below leaves this null entry behind, so
+    // the next ask for the same id is a hash lookup, not a re-read of a file that was never going to
+    // parse (or a re-stat of a path that was never going to exist, e.g. every built-in id).
+    std::unique_ptr<CollisionMesh>& slot = collisionMeshCache_[id];
+
+    const std::string path = pathFor(id);
+    if (path.empty()) return nullptr;   // a built-in (never indexed) or an id nothing recognises
+
+    fmt::OcMeshData md;
+    std::string why;
+    if (!fmt::loadOcMesh(path, md, &why)) {
+        AVER_WARN("[Collision] {}", why);
+        return nullptr;
+    }
+
+    // THE COARSEST LOD WITHIN kCollisionMaxErrorCm, same search shape as loadProjectMeshes' depth-
+    // proxy pick just above (monotonic non-decreasing error, level 0 always qualifies at 0.0f) --
+    // but a different threshold and a different reason: a depth pass only needs a correct
+    // silhouette, while collision needs a shape a player cannot obviously clip through, so the
+    // budget here is centimetres a human can feel, not a shadow-map texel.
+    //
+    // GATED ON TRIFACTOR, like the depth-proxy pick: coarserLods is data the FILE carries regardless
+    // of which module baked it, but reading its error back out in world units goes through
+    // aver::trifactor::levelWorldErrorCm (OcMeshLod::screenErrorThreshold is worldErrorCm *
+    // kReferenceProjScale -- that function is the one divide back to centimetres). Without Trifactor
+    // linked, `pick` stays 0 -- LOD 0, always exact, just heavier -- which is the same fallback a
+    // mesh with no coarser level at all already gets.
+    u32 pick = 0;
+    f32 pickErrorCm = 0.0f;
+#if AVER_MODULE_TRIFACTOR
+    constexpr f32 kCollisionMaxErrorCm = 2.0f;
+    for (u32 lvl = 1; lvl < md.lodCount(); ++lvl) {
+        const f32 err = trifactor::levelWorldErrorCm(md, lvl);
+        if (err <= kCollisionMaxErrorCm) { pick = lvl; pickErrorCm = err; }
+    }
+#endif
+
+    const std::vector<u32>& srcIndices = pick == 0 ? md.indices : md.coarserLods[pick - 1].indices;
+    const u32 vertexCount = md.vertexCount();
+    if (srcIndices.size() < 3 || vertexCount == 0) return nullptr;
+
+    // COMPACTED to only the vertices this LOD's triangles reference: a coarser level shares LOD 0's
+    // whole `positions` array (OcMeshData::coarserLods' own comment) rather than owning a smaller
+    // one, and NewSponza's coarsest levels touch a small fraction of it -- physics has no use for
+    // carrying the rest of a 3.75M-vertex building along for a 182k-triangle collision proxy.
+    auto mesh = std::make_unique<CollisionMesh>();
+    mesh->lod = pick;
+    mesh->errorCm = pickErrorCm;
+    std::unordered_map<u32, u32> remap;
+    remap.reserve(srcIndices.size());
+    mesh->indices.reserve(srcIndices.size());
+    for (usize k = 0; k + 2 < srcIndices.size(); k += 3) {
+        const u32 ia = srcIndices[k], ib = srcIndices[k + 1], ic = srcIndices[k + 2];
+        if (ia >= vertexCount || ib >= vertexCount || ic >= vertexCount) continue;   // out of range
+        if (ia == ib || ib == ic || ia == ic) continue;   // degenerate: no area, nothing to collide with
+        for (const u32 orig : {ia, ib, ic}) {
+            const auto [it2, inserted] =
+                remap.try_emplace(orig, static_cast<u32>(mesh->positions.size() / 3));
+            if (inserted) {
+                mesh->positions.push_back(md.positions[usize(orig) * 3 + 0]);
+                mesh->positions.push_back(md.positions[usize(orig) * 3 + 1]);
+                mesh->positions.push_back(md.positions[usize(orig) * 3 + 2]);
+            }
+            mesh->indices.push_back(it2->second);
+        }
+    }
+    if (mesh->indices.size() < 3) return nullptr;   // every triangle was degenerate or out of range
+
+    const usize tris0 = md.indices.size() / 3;
+    AVER_INFO("[Collision] {}: LOD {}, {} tris (from {} at LOD 0), {:.1f} cm error", path, pick,
+              mesh->indices.size() / 3, tris0, pickErrorCm);
+    slot = std::move(mesh);
+    return slot.get();
 }
 
 rhi::MeshHandle GameContent::resolveSceneMesh(u64 id, void* user) {

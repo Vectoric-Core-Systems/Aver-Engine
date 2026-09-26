@@ -112,6 +112,20 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         outLocalMax = b->second;
         return true;
     };
+    // TRIANGLES, TRIED FIRST -- see InstantiateOptions::localTrianglesFor's own comment. GameContent
+    // caches the collision mesh it builds (collisionMeshFor), and that cache is not cleared during
+    // instantiate(), so the pointers handed back here stay valid for exactly as long as instantiate()
+    // needs them.
+    opt.localTrianglesFor = [&content](u64 meshId, const f32*& outPositions, u32& outVertexCount,
+                                       const u32*& outIndices, u32& outIndexCount) {
+        const GameContent::CollisionMesh* cm = content.collisionMeshFor(meshId);
+        if (!cm || cm->indices.size() < 3) return false;
+        outPositions = cm->positions.data();
+        outVertexCount = static_cast<u32>(cm->positions.size() / 3);
+        outIndices = cm->indices.data();
+        outIndexCount = static_cast<u32>(cm->indices.size());
+        return true;
+    };
 #if AVER_MODULE_PBR
     // Bind the authored material, if the project has one for this surface token. Done at load rather
     // than per draw because materialForSurface stats up to three paths on a miss and caches the
@@ -289,8 +303,15 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // it must equal the count of PLACE lines without `nocollide`. Reported even when zero, because
     // zero bodies with colliding placements means physics was not ready at load time -- the exact
     // ordering bug initPhysics-before-openProject exists to prevent.
-    AVER_INFO("[Level] {} static physics body(ies) from {} placement(s)",
-              levelBodies_.size(), w.placements.size());
+    //
+    // TRIANGLE MESH VS BOX, AND HOW LONG THEY TOOK: the breakdown that actually tells an owner
+    // whether NewSponza's courtyard is a solid box or its walls -- inst.meshBodyCount/boxBodyCount/
+    // meshTriangleCount/bodyCreationSeconds all come straight off world::instantiate's own loop (see
+    // LevelInstance.hpp's own comment on why they are collected there and not re-derived here).
+    AVER_INFO("[Level] {} static physics body(ies) from {} placement(s): {} triangle mesh(es) "
+              "({} triangles total), {} box(es), {:.2f} ms to create",
+              levelBodies_.size(), w.placements.size(), inst.meshBodyCount, inst.meshTriangleCount,
+              inst.boxBodyCount, inst.bodyCreationSeconds * 1000.0);
 #endif
     if (hooks_.afterInstantiate)
         hooks_.afterInstantiate(LoadedLevel{path, w, inst, legacy ? &legacyMap : nullptr});

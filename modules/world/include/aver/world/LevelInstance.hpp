@@ -23,6 +23,8 @@
 #include "aver/core/Math.hpp"
 #include "aver/world/LevelTransform.hpp"
 
+#include <vector>
+
 namespace aver::world {
 
 // A static collision box fitted to a mesh's LOCAL bounds under a world TRS: world-space centre,
@@ -48,6 +50,25 @@ inline constexpr f32 kPlaceholderHalfExtentCm = 1.0f;
 // overlay, for one.
 StaticBoxFit fitStaticBox(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax);
 
+// Scales `localPositions` (3 f32 per vertex, `vertexCount` of them) component-wise by `scale` into
+// `outPositions`, and copies `localIndices` (3 per triangle, `indexCount` of them) into `outIndices`
+// -- reversing the second and third index of every triangle when `scale`'s determinant is negative,
+// so the mesh's faces keep facing outward under a mirror. A component-wise scale is diagonal, so its
+// determinant is simply scale.x * scale.y * scale.z: negative for an ODD number of negative axes (one,
+// or all three); an EVEN number (two, or none) is a rotation by 180 degrees about the remaining axis,
+// which preserves handedness and needs no correction.
+//
+// Always copies -- never edits `localPositions`/`localIndices` in place -- because the caller's
+// source geometry (GameContent::collisionMeshFor's cached CollisionMesh, in every real caller) is
+// shared across every placement that names that mesh, and one placement's scale must not corrupt it
+// for the next placement that reads it unscaled.
+//
+// PURE, deliberately: no physics dependency, so LevelInstanceTest can check the scale-and-winding
+// math with no physics world. addStaticMeshBody (below) is its one caller.
+void scaleMeshForBody(const f32* localPositions, u32 vertexCount, const u32* localIndices,
+                      u32 indexCount, const Vec3& scale,
+                      std::vector<f32>& outPositions, std::vector<u32>& outIndices);
+
 #if AVER_MODULE_PHYSICS
 // Creates fitStaticBox(worldXf, localMin, localMax) as a static body: aver_phys_add_static_box, then
 // aver_phys_body_set_rotation unless the fit's rotation is EXACTLY identity (x==0 && y==0 && z==0 &&
@@ -58,6 +79,18 @@ StaticBoxFit fitStaticBox(const Transform& worldXf, const Vec3& localMin, const 
 // this does not call it, and does not call aver_phys_set_entity either: stamping the entity is the
 // caller's job, once, after it has decided the body exists.
 i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax);
+
+// Creates a static TRIANGLE MESH body for concave geometry a box cannot represent: scaleMeshForBody
+// into `worldXf.scale`, then aver_phys_add_mesh with that scaled geometry and worldXf.position as the
+// body's centre (the shape is LOCAL geometry around that centre, matching addStaticBoxBody's own
+// convention -- see physics_abi.h's own comment on aver_phys_add_mesh), then aver_phys_body_set_rotation
+// unless worldXf.rotation is EXACTLY identity, same rule and same reason as addStaticBoxBody.
+//
+// Returns the ABI's handle, or 0 if it refused (fewer than 3 vertices/indices, or Jolt itself refused
+// the shape -- e.g. every triangle degenerate). Same contract as addStaticBoxBody otherwise: the
+// caller has already checked aver_phys_ready() and owns aver_phys_set_entity.
+i32 addStaticMeshBody(const Transform& worldXf, const f32* localPositions, u32 vertexCount,
+                      const u32* indices, u32 indexCount);
 #endif
 
 } // namespace aver::world
@@ -112,6 +145,29 @@ struct InstantiateOptions {
     // them -- it does not depend on GameContent, which Runtime links on top of it, and it does not
     // depend on a GPU device, which is what actually loaded the mesh that has them.
     std::function<bool(u64 meshId, Vec3& outLocalMin, Vec3& outLocalMax)> localBoundsFor;
+
+    // A mesh's LOCAL triangles, by the placement's objectId -- the SAME id localBoundsFor above is
+    // keyed by. True with at least one triangle (`outVertexCount` and `outIndexCount` both non-zero)
+    // means the placement collides with THIS geometry, via addStaticMeshBody; false, no callback at
+    // all, or fewer than one triangle's worth of indices, falls back to the fitted box exactly as a
+    // level authored before this existed already collides.
+    //
+    // TRIED FIRST: instantiate() asks this before it asks localBoundsFor, so a mesh that answers here
+    // never touches the box path at all -- see instantiate()'s own comment for why concave
+    // architecture (an archway, a courtyard wall) needs this rather than the box either fitStaticBox
+    // or a mesh's own local bounds could ever describe.
+    //
+    // A HOST CALLBACK, for the same reason localBoundsFor is one: the triangles live on
+    // GameContent's lazily-built collision-mesh cache (the game) or the editor's own copy of the same
+    // idea, and Aver.World must not learn to build or load one -- it does not depend on GameContent
+    // and does not read .ocmesh files itself.
+    //
+    // POINTERS INTO GEOMETRY THE HOST ALREADY OWNS AND KEEPS ALIVE, not vectors this struct would
+    // have to copy: GameContent::collisionMeshFor's cache is not cleared during instantiate(), so a
+    // callback answering from it hands back a view, not a multi-million-triangle copy, per placement
+    // that names the mesh.
+    std::function<bool(u64 meshId, const f32*& outPositions, u32& outVertexCount,
+                       const u32*& outIndices, u32& outIndexCount)> localTrianglesFor;
 };
 
 // The result, in placement order. `entities` holds only the placements that produced an entity, so
@@ -125,6 +181,16 @@ struct LevelInstance {
     // The bodies that were actually created, in creation order, for a host that only needs to
     // remove them again. Equal to `entityBody` with the -1s dropped.
     std::vector<i32> bodies;
+
+    // Physics body creation, broken down by which fitter actually produced each body -- for a host's
+    // own summary log line (Runtime/src/GameLevel.cpp), which is the only reason this is collected
+    // here rather than left for a caller to re-derive: only this loop knows which path
+    // (addStaticMeshBody or addStaticBoxBody) a given placement took and how many triangles a mesh
+    // body got, and re-deriving either from `entityBody`/`bodies` alone is not possible.
+    u32 meshBodyCount = 0;
+    u32 boxBodyCount = 0;
+    u64 meshTriangleCount = 0;       // summed across every triangle-mesh body, indexCount/3 each
+    f64 bodyCreationSeconds = 0.0;   // wall time inside the collide-and-fit branch, steady_clock
 };
 
 // Creates one entity per placement in the process-global World.

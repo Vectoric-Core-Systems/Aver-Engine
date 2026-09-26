@@ -20,6 +20,23 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
     const int32_t n = aver_phys_body_count();
     if (n <= 0) return;
 
+    // WHICH STATIC BODIES ARE TRIANGLE MESHES. The ABI does not report a body's shape, but the
+    // editor made every level body itself, by one rule (rebuildEntityBody, and world::instantiate at
+    // load): triangles whenever content_.collisionMeshFor has a mesh for the entity's CMeshRenderer,
+    // a fitted box otherwise. Asking the same cache again (a lookup -- the load already filled it)
+    // answers the question without a second bookkeeping table that could drift from the first.
+    std::unordered_set<int32_t> meshBodies;
+#if AVER_MODULE_SCENE
+    {
+        scene::World& w = scene::World::instance();
+        for (const auto& [ent, body] : entityBodies_) {
+            const auto* mr = w.component<scene::CMeshRenderer>(static_cast<scene::Entity>(ent),
+                                                               scene::kComponentMeshRenderer);
+            if (mr && content_.collisionMeshFor(mr->mesh)) meshBodies.insert(body);
+        }
+    }
+#endif
+
     std::vector<rhi::LineVertex> lines;
     lines.reserve(static_cast<usize>(n) * 24);
     for (int32_t i = 0; i < n; ++i) {
@@ -28,13 +45,16 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
         f32 lo[3], hi[3];
         if (!aver_phys_body_aabb(body, lo, hi)) continue;
 
-        // GREEN FOR STATIC, AMBER FOR ANYTHING THAT MOVES. The distinction is the one a person
-        // is usually looking for -- "why is this not falling" and "why is this not stopping
-        // anything" are different questions and this separates them at a glance.
+        // GREEN FOR A STATIC BOX, BLUE FOR A STATIC TRIANGLE MESH, AMBER FOR ANYTHING THAT MOVES.
+        // "Why is this not falling" and "why is this not stopping anything" are different
+        // questions, and this separates them at a glance. Blue matters because a mesh body's bound
+        // is NOT its shape: a merged wall's bound can span a whole courtyard the mesh itself only
+        // rings, and drawn green that reads as a solid block where there is open floor.
         const int32_t motion = aver_phys_body_motion_type(body);
-        const f32 r = (motion == 0) ? 0.35f : 1.0f;
-        const f32 g = (motion == 0) ? 0.95f : 0.72f;
-        const f32 b = (motion == 0) ? 0.45f : 0.25f;
+        const bool triMesh = motion == 0 && meshBodies.count(body) != 0;
+        const f32 r = (motion != 0) ? 1.0f  : (triMesh ? 0.30f : 0.35f);
+        const f32 g = (motion != 0) ? 0.72f : (triMesh ? 0.62f : 0.95f);
+        const f32 b = (motion != 0) ? 0.25f : (triMesh ? 1.00f : 0.45f);
 
         const f32 xs[2] = {lo[0], hi[0]};
         const f32 ys[2] = {lo[1], hi[1]};

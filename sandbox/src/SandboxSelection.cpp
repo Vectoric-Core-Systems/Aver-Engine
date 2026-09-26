@@ -839,21 +839,36 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
     scene::World& w = scene::World::instance();
     if (!w.valid(e) || !aver_phys_ready()) return;
 
-    // UNKNOWN MESH GETS THE PLACEHOLDER'S OWN BOUNDS. fitStaticBox's own fallback to the unit cube
-    // is for a non-finite or inverted box; content_.boundsFor returning null is the different case
-    // of nothing having measured this mesh at all, and the built-in unit cube is the one shape
-    // every editor build is guaranteed to have registered.
-    Vec3 lmin{-world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm};
-    Vec3 lmax{ world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm};
-    if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
-        if (const auto* b = content_.boundsFor(mr->mesh)) { lmin = b->first; lmax = b->second; }
-    }
-
     // COMPOSED UP THE PARENT CHAIN, not read from CWorld: worldTransformOf is correct the instant a
     // create or a setLocalTransform lands, with no dependency on a later system pass recomposing
     // it -- see worldTransformOf's own comment for why decomposing CWorld's matrix instead would
     // not even be well-defined for the scales this editor allows.
-    const i32 body = world::addStaticBoxBody(worldTransformOf(w, e), lmin, lmax);
+    const Transform worldXf = worldTransformOf(w, e);
+    u64 meshId = 0;
+    if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
+        meshId = mr->mesh;
+
+    // TRIANGLES FIRST, the same precedence world::instantiate gives a loaded placement (see
+    // InstantiateOptions::localTrianglesFor's own comment): a mesh with a cached collision mesh --
+    // every imported mesh with a .ocmesh, never a built-in -- collides with it here too, so dragging
+    // or duplicating a NewSponza wall in the editor does not regress it back to one solid box.
+    i32 body = 0;
+    if (const game::GameContent::CollisionMesh* cm = content_.collisionMeshFor(meshId);
+        cm && cm->indices.size() >= 3) {
+        body = world::addStaticMeshBody(worldXf, cm->positions.data(),
+                                        static_cast<u32>(cm->positions.size() / 3),
+                                        cm->indices.data(), static_cast<u32>(cm->indices.size()));
+    }
+    if (!body) {
+        // UNKNOWN MESH GETS THE PLACEHOLDER'S OWN BOUNDS. fitStaticBox's own fallback to the unit
+        // cube is for a non-finite or inverted box; content_.boundsFor returning null is the
+        // different case of nothing having measured this mesh at all, and the built-in unit cube is
+        // the one shape every editor build is guaranteed to have registered.
+        Vec3 lmin{-world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm};
+        Vec3 lmax{ world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm};
+        if (const auto* b = content_.boundsFor(meshId)) { lmin = b->first; lmax = b->second; }
+        body = world::addStaticBoxBody(worldXf, lmin, lmax);
+    }
     if (!body) return;
     aver_phys_set_entity(body, static_cast<i32>(e));
     entityBodies_[static_cast<u32>(e)] = body;
