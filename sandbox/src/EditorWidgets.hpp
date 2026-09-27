@@ -196,12 +196,17 @@ inline bool splitterHandle(const char* id, f32 thickness, f32* widthPx, f32 avai
 // instant the drag ends, persists it through the SAME EditorPrefs round trip EditorWidgetsTest
 // exercises directly against loadSplitFraction/storeSplitFraction. `thickness` and the two minimums
 // should already be DPI-scaled by the caller, matching splitPaneWidth's own convention.
+// ONLY A DRAG WRITES THE FRACTION. This used to store the CLAMPED width back every frame, so any
+// frame the tab was briefly narrow (opening, docking, a window resize) clamped the fraction down to
+// honour the other pane's minimum -- and it never grew back once the tab widened, so the first pane
+// ratcheted smaller over a session and the next drag persisted it ("the mesh viewer's viewport keeps
+// getting tinier"). The clamp belongs to this frame's drawn width (splitPaneWidth), not the setting.
 inline void drawSplitHandle(SplitPane& pane, const char* id, std::string_view prefKey, f32 avail,
                              f32 minSelfPx, f32 minOtherPx, f32 thickness) {
-    f32 widthPx = splitWidthOf(pane.fraction, avail);
+    f32 widthPx = clampSplitWidth(splitWidthOf(pane.fraction, avail), avail, minSelfPx, minOtherPx);
     bool released = false;
-    splitterHandle(id, thickness, &widthPx, avail, minSelfPx, minOtherPx, &released);
-    pane.fraction = splitFractionOf(widthPx, avail);
+    if (splitterHandle(id, thickness, &widthPx, avail, minSelfPx, minOtherPx, &released))
+        pane.fraction = splitFractionOf(widthPx, avail);
     if (released) storeSplitFraction(prefKey, pane.fraction);
 }
 

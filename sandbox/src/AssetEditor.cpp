@@ -241,9 +241,24 @@ namespace {
 
 #if AVER_WITH_IMGUI
 // The viewport/details split fraction -- see EditorWidgets.hpp's own SplitPane for why this is a
-// persisted FRACTION rather than a raw pixel width. 0.70f matches the brief's "~70% width" viewport.
-constexpr f32 kDefaultViewFraction = 0.70f;
-constexpr const char* kPrefViewSplit = "meshEditor.viewSplit";
+// persisted FRACTION rather than a raw pixel width. 0.75: the viewport dominates, as in Unreal's
+// Static Mesh Editor. ".v2" drops fractions stored before drawSplitHandle stopped ratcheting the
+// viewport smaller every time the tab was briefly narrow (EditorWidgets.hpp).
+constexpr f32 kDefaultViewFraction = 0.75f;
+constexpr const char* kPrefViewSplit = "meshEditor.viewSplit.v2";
+
+// One UE-style property grid: a dim label column and a value column, alternating row shade.
+bool beginPropertyGrid(const char* id) {
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) return false;
+    ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 0.42f);
+    ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+    return true;
+}
+void propertyRow(const char* name, const char* value) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn(); ImGui::TextDisabled("%s", name);
+    ImGui::TableNextColumn(); ImGui::TextUnformatted(value);
+}
 #endif
 
 // Viewer AND (as of ITEM 1.2) editor for one .ocmesh file: counts, bounds, an editable material-slot
@@ -318,30 +333,50 @@ public:
         const f32 viewW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, avail,
                                           minView, minDetails);
 
-        if (ImGui::BeginChild("##meshView", ImVec2(viewW, 0.0f), true)) drawPreview(e);
+        // Viewport edge to edge, as in Unreal: no padding, border or scrollbar in its pane -- padding
+        // is dead space round the render, and a scrollbar appearing would steal width from the image.
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        const bool viewOpen = ImGui::BeginChild("##meshView", ImVec2(viewW, 0.0f), ImGuiChildFlags_None,
+                                                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar();
+        if (viewOpen) drawPreview(e);
         ImGui::EndChild();
         drawSplitHandle(split_, "##meshsplit", kPrefViewSplit, avail, minView, minDetails, 6.0f * dpi);
 
-        if (ImGui::BeginChild("##meshDetails", ImVec2(0.0f, 0.0f), true)) {
-            ImGui::TextDisabled("%s", path_.c_str());
+        if (ImGui::BeginChild("##meshDetails", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders)) {
+            ImGui::TextUnformatted("Details");
+            ImGui::SameLine();
+            ImGui::TextDisabled("  %s", std::filesystem::path(path_).filename().string().c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path_.c_str());
             ImGui::Separator();
 
-            if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::Text("Vertices   %u", mesh_.vertexCount());
-                ImGui::Text("Triangles  %zu", mesh_.indices.size() / 3);
-                ImGui::Text("Indices    %zu (%s)", mesh_.indices.size(),
-                            (mesh_.flags & fmt::kOcMeshIndex32) ? "32-bit" : "16-bit");
+            char buf[96];
+            if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen) &&
+                beginPropertyGrid("##geometry")) {
+                std::snprintf(buf, sizeof buf, "%u", mesh_.vertexCount());
+                propertyRow("Vertices", buf);
+                std::snprintf(buf, sizeof buf, "%zu", mesh_.indices.size() / 3);
+                propertyRow("Triangles", buf);
+                std::snprintf(buf, sizeof buf, "%zu (%s)", mesh_.indices.size(),
+                              (mesh_.flags & fmt::kOcMeshIndex32) ? "32-bit" : "16-bit");
+                propertyRow("Indices", buf);
+                ImGui::EndTable();
             }
 
             if (ImGui::CollapsingHeader("LODs", ImGuiTreeNodeFlags_DefaultOpen)) {
                 drawLods();
             }
 
-            if (ImGui::CollapsingHeader("Bounds", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::CollapsingHeader("Bounds", ImGuiTreeNodeFlags_DefaultOpen) &&
+                beginPropertyGrid("##bounds")) {
                 const Vec3 lo = mesh_.boundsMin, hi = mesh_.boundsMax;
-                ImGui::Text("Min   %8.1f  %8.1f  %8.1f", lo.x, lo.y, lo.z);
-                ImGui::Text("Max   %8.1f  %8.1f  %8.1f", hi.x, hi.y, hi.z);
-                ImGui::Text("Size  %8.1f  %8.1f  %8.1f  cm", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+                std::snprintf(buf, sizeof buf, "%.1f  %.1f  %.1f", lo.x, lo.y, lo.z);
+                propertyRow("Min", buf);
+                std::snprintf(buf, sizeof buf, "%.1f  %.1f  %.1f", hi.x, hi.y, hi.z);
+                propertyRow("Max", buf);
+                std::snprintf(buf, sizeof buf, "%.1f x %.1f x %.1f cm", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+                propertyRow("Size", buf);
+                ImGui::EndTable();
             }
 
             if (ImGui::CollapsingHeader("Material Slots", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -375,6 +410,8 @@ public:
             }
         }
         ImGui::EndChild();
+#else
+        (void)e;   // the headless (no-ImGui) test build draws nothing
 #endif
     }
 
@@ -452,6 +489,11 @@ private:
             } else if (resizeDue_ > 0.0 && ImGui::GetTime() >= resizeDue_) {
                 resizeDue_ = 0.0;
                 preview->resize(pendingW_, pendingH_);
+            } else if (resizeDue_ <= 0.0 && (preview->width() != iw || preview->height() != ih)) {
+                // SHARED target: another tab (Actor/Anim editor) resized it to its own viewport since.
+                // Comparing only against this tab's own last request kept drawing that size here,
+                // letterboxed small; take it back now this tab is the focused one.
+                resizeDue_ = ImGui::GetTime() + 0.1;
             }
         }
 
@@ -462,6 +504,10 @@ private:
         const f32 texH = static_cast<f32>(preview->height());
         const f32 fit  = std::min(availW / std::max(texW, 1.0f), availH / std::max(texH, 1.0f));
         const ImVec2 imgSize(std::max(texW * fit, 16.0f), std::max(texH * fit, 16.0f));
+        // Centred while letterboxed (only until the debounced resize lands), not pinned top-left.
+        const ImVec2 origin = ImGui::GetCursorPos();
+        ImGui::SetCursorPos(ImVec2(origin.x + std::max(0.0f, (availW - imgSize.x) * 0.5f),
+                                   origin.y + std::max(0.0f, (availH - imgSize.y) * 0.5f)));
         const ImVec2 imageMin = ImGui::GetCursorScreenPos();
         ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), imgSize);
         const ImVec2 imageMax(imageMin.x + imgSize.x, imageMin.y + imgSize.y);
@@ -510,7 +556,12 @@ private:
             drawPreviewAxes(imageMin, imageMax, dpi, preview->camera());
             if (showUvOverlay_) drawUvOverlay(imageMin, imageMax, dpi);
         } else {
-            ImGui::TextDisabled("Click this tab to take the preview.");
+            // Over the image, not below it: a line under the image would overflow the pane.
+            const char* msg = "Click this tab to take the preview";
+            const ImVec2 ts = ImGui::CalcTextSize(msg);
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(imageMin.x + (imgSize.x - ts.x) * 0.5f, imageMin.y + (imgSize.y - ts.y) * 0.5f),
+                ImGui::GetColorU32(ImGuiCol_TextDisabled), msg);
         }
     }
 

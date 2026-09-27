@@ -28,6 +28,7 @@
 #  include <imgui.h>
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -1354,6 +1355,10 @@ void ActorEditor::draw(Engine& e) {
 
     const f32 split = 6.0f * dpi;
     const f32 minView = 200.0f * dpi;
+    // This frame's DRAWN details width yields to the viewport's minimum; the stored g_rightColW only
+    // changes on a drag, so a briefly narrow tab no longer shrinks the viewport for good.
+    const f32 maxRight = avail - leftW - (threeColumns ? split * 2.0f : split) - minView;
+    if (rightW > maxRight) rightW = std::max(maxRight, 160.0f * dpi);
     const f32 viewW = avail - leftW - rightW - (threeColumns ? split * 2.0f : split);
 
     // ---- the Components column ----
@@ -1361,9 +1366,13 @@ void ActorEditor::draw(Engine& e) {
         ImGui::BeginChild("##componentcol", ImVec2(leftW, 0.0f), ImGuiChildFlags_None);
         drawComponentTree(/*ownColumn=*/true);
         ImGui::EndChild();
+        // On a copy, applied only when dragged: clamping the stored width itself every frame ratcheted
+        // it whenever the tab was briefly narrow (see EditorWidgets.hpp's drawSplitHandle).
         bool doneL = false;
-        columnSplitter("##splitL", split, &g_leftColW, avail - rightW - split * 2.0f,
-                       120.0f * dpi, minView, &doneL);
+        f32 dragL = leftW;
+        if (columnSplitter("##splitL", split, &dragL, avail - rightW - split * 2.0f,
+                           120.0f * dpi, minView, &doneL))
+            g_leftColW = dragL;
         if (doneL) { setPrefFloat(kPrefLeft, g_leftColW / dpi); flushEditorPrefs(); }
     }
 
@@ -1501,12 +1510,12 @@ void ActorEditor::draw(Engine& e) {
     ImGui::EndChild();   // ##viewcol
     // The right splitter is mirrored: dragging right narrows the details column.
     {
-        f32 mirrored = avail - g_rightColW;
-        const f32 before = mirrored;
+        // Same drag-only rule as the left splitter: the clamp shapes this frame, never the setting.
+        f32 mirrored = avail - rightW;   // where the column is actually drawn this frame
         bool doneR = false;
-        columnSplitter("##splitR", split, &mirrored, avail,
-                       leftW + split * 2.0f + minView, 160.0f * dpi, &doneR);
-        if (mirrored != before) g_rightColW = avail - mirrored;
+        if (columnSplitter("##splitR", split, &mirrored, avail,
+                           leftW + split * 2.0f + minView, 160.0f * dpi, &doneR))
+            g_rightColW = avail - mirrored;
         if (g_rightColW < 160.0f * dpi) g_rightColW = 160.0f * dpi;
         if (doneR) { setPrefFloat(kPrefRight, g_rightColW / dpi); flushEditorPrefs(); }
     }

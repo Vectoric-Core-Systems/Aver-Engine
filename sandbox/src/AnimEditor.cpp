@@ -2558,6 +2558,12 @@ void AnimEditor::draw(Engine& e) {
             } else if (resizeDue_ > 0.0 && ImGui::GetTime() >= resizeDue_) {
                 resizeDue_ = 0.0;
                 preview->resize(pendingW_, pendingH_);
+            } else if (resizeDue_ <= 0.0 && (preview->width() != w || preview->height() != hh) &&
+                       ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+                // SHARED target: another tab resized it to its own viewport since this one's last
+                // request, which only compared against itself and so kept drawing that size. Taken
+                // back only while focused, so two visible tabs don't fight over it.
+                resizeDue_ = ImGui::GetTime() + 0.1;
             }
             const f32 iw = avail.x, ih = avail.y;
             ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(iw, ih));
