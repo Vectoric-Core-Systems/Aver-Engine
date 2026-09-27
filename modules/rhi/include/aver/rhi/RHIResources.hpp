@@ -552,6 +552,16 @@ public:
     // Allocates a top-level acceleration structure sized for `maxInstances`.
     virtual TlasHandle       createTlas(u32 maxInstances) = 0;
 
+    // UPDATABLE twins of createBlas/createTlas: built with ALLOW_UPDATE (D3D12) /
+    // ALLOW_UPDATE_BIT_KHR (Vulkan) and a scratch buffer sized for BOTH a build and an update, so
+    // IRenderContext::refitBlas/refitTlas can update them in place instead of rebuilding from
+    // scratch. A little more memory, and a refitted structure traces a little slower the further its
+    // contents drift from its last full build -- callers that refit also rebuild periodically.
+    // NOT PURE, defaulting to the plain create: a backend (or test mock) without refit support simply
+    // hands back a structure every refit call fully rebuilds, which is always correct.
+    virtual BlasHandle createBlasUpdatable(MeshHandle mesh) { return createBlas(mesh); }
+    virtual TlasHandle createTlasUpdatable(u32 maxInstances) { return createTlas(maxInstances); }
+
     // Destruction is DEFERRED BY CONTRACT: the resource retires once the GPU is past every frame
     // that could reference it.
     virtual void destroyTexture(TextureHandle h) = 0;
@@ -760,6 +770,28 @@ public:
     virtual void buildBlas(BlasHandle blas) = 0;
     // Builds a top-level acceleration structure over `instances`.
     virtual void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) = 0;
+
+    // ---- in-place updates (refit) ----
+    // Both return TRUE when they updated in place and FALSE when they did a full build instead; the
+    // structure is valid either way, so a caller only needs the result for its own bookkeeping (when to
+    // force the next periodic full rebuild). Defaults do the full build: correct for any backend.
+    //
+    // refitBlas: updates a BLAS from its mesh's CURRENT vertices -- what a compute-skinned mesh needs
+    // every frame, at a fraction of a full build. Refits only when the BLAS was created updatable, has
+    // been built, and its mesh still has the vertex and index counts it was built with; otherwise builds.
+    virtual bool refitBlas(BlasHandle blas) { buildBlas(blas); return false; }
+    // refitTlas: updates a TLAS in place when `instances` (after the same filtering buildTlas applies)
+    // has the SAME COUNT as this TLAS's last build or refit and every slot names the SAME BLAS with the
+    // same flags and mask; transforms and instance ids may differ. Anything else -- created
+    // non-updatable, never built, a count/BLAS/flags/mask change -- falls back to a full build.
+    // REQUIRED after any buildBlas/refitBlas of a BLAS this TLAS references: DXR and Vulkan both require
+    // a TLAS to be rebuilt or updated before rays traverse it once a referenced BLAS was modified (the
+    // TLAS caches each instance's bounds), so "the BLAS was rebuilt in place at the same address" is
+    // NOT a reason to leave the TLAS alone.
+    virtual bool refitTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) {
+        buildTlas(tlas, instances, count);
+        return false;
+    }
 
     // Transitions a texture, or one of its mips, between states.
     virtual void textureBarrier(TextureHandle t, ResourceState from, ResourceState to,

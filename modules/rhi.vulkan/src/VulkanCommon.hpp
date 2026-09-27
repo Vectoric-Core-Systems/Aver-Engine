@@ -1016,7 +1016,33 @@ struct RhiBlas {
     VkDeviceAddress asAddress = 0;
     MeshHandle mesh = 0;
     bool built = false;
+    // Set at creation by createBlasUpdatable: built with ALLOW_UPDATE_BIT_KHR and scratchBuffer
+    // above already sized for an update as well as a build, so VulkanRenderContext::refitBlas may
+    // update this BLAS in place instead of rebuilding it from scratch. Mirrors D3D12ResourceFactory's
+    // RhiBlas::allowUpdate.
+    bool allowUpdate = false;
+    // This mesh's vertex/index counts as of the last FULL build -- refitBlas's eligibility test. An
+    // in-place update must keep the SAME geometry description Vulkan built with (maxVertex,
+    // primitiveCount included), only moved vertex positions; a mesh that has grown or shrunk since
+    // needs a full rebuild instead.
+    u32 builtVertexCount = 0;
+    u32 builtIndexCount = 0;
+    // What asBuffer/scratchBuffer were allocated at, once, by createBlasImpl -- so refitBlas can
+    // refuse a rebuild the mesh has outgrown instead of writing past them (same guard as D3D12's).
+    VkDeviceSize asSize = 0;
+    VkDeviceSize scratchSize = 0;
 };
+
+// One instance as it was packed into a TLAS's last build or refit -- BLAS identity plus the Vulkan
+// instance flags and mask, but deliberately NOT the transform or instance id, which refitTlas lets
+// change freely. Mirrors D3D12ResourceFactory's RhiTlasSlot (blasVa there, blasAddress here -- same
+// idea, this backend's GPU-address type).
+struct RhiTlasSlot {
+    VkDeviceAddress blasAddress = 0;
+    u32 flags = 0;
+    u32 mask = 0;
+};
+
 // A top-level acceleration structure, its scratch, and one instance buffer per frame in flight.
 struct RhiTlas {
     VkAccelerationStructureKHR as = VK_NULL_HANDLE;
@@ -1027,6 +1053,20 @@ struct RhiTlas {
     VkDeviceMemory instanceMemory[kFrameCount] = {};
     u8* instancePtr[kFrameCount] = {};
     u32 maxInstances = 0;
+    // Set at creation by createTlasUpdatable: see RhiBlas::allowUpdate above -- same idea, this
+    // structure's scratchBuffer is sized for an update too.
+    bool allowUpdate = false;
+    // Has a full BUILD ever landed. An UPDATE needs a valid source structure, so refitTlas falls
+    // back to a full build until this is true, same as RhiBlas::built gates refitBlas.
+    bool built = false;
+    // The last build's or refit's per-slot signature, AFTER buildTlas/refitTlas's own filtering (an
+    // invalid-BLAS or oversized-id instance never appears here), in submission order. refitTlas
+    // updates in place only when the new filtered list is the SAME SIZE and every entry's
+    // {BLAS, flags, mask} still matches -- transforms and instance ids may differ freely.
+    std::vector<RhiTlasSlot> builtSlots;
+    // Where each build/refit packs its NEW signature before swapping it with builtSlots -- kept, not a
+    // local, so a per-frame refit reuses one allocation instead of making one per call.
+    std::vector<RhiTlasSlot> pendingSlots;
 };
 
 // A destroyed object the GPU may still be reading, released once `fence` retires. Vulkan analog
@@ -1768,6 +1808,11 @@ public:
     BindingSetHandle createBindingSet(const BindingSetDesc& d) override;
     BlasHandle       createBlas(MeshHandle mesh) override;
     TlasHandle       createTlas(u32 maxInstances) override;
+    // UPDATABLE twins: same allocation, built with ALLOW_UPDATE_BIT_KHR and a scratch sized for an
+    // update too, so IRenderContext::refitBlas/refitTlas can update the result in place. See
+    // IResourceFactory's contract comment above createBlasUpdatable/createTlasUpdatable.
+    BlasHandle       createBlasUpdatable(MeshHandle mesh) override;
+    TlasHandle       createTlasUpdatable(u32 maxInstances) override;
 
     void destroyTexture(TextureHandle h) override;
     void destroyBuffer(BufferHandle h) override;
@@ -1863,6 +1908,12 @@ private:
     // TRANSFER_DST_OPTIMAL; on success it has been transitioned to `d.initialState` and the GPU has
     // finished (a fence wait, not just a barrier -- the staging buffer is freed right after).
     bool uploadInitialData(VkImage image, const VkImageCreateInfo& ci, const TextureDesc& d, u32 mips);
+    // Shared by createBlas/createBlasUpdatable and createTlas/createTlasUpdatable: identical except
+    // for `allowUpdate`, which decides the build flags the prebuild size query is run against and
+    // whether scratch is sized for an update as well as a build. Mirrors D3D12ResourceFactory's
+    // createBlasImpl/createTlasImpl.
+    BlasHandle createBlasImpl(MeshHandle mesh, bool allowUpdate);
+    TlasHandle createTlasImpl(u32 maxInstances, bool allowUpdate);
     // Writes a valid, dimension-matched descriptor into every slot a BindingSetDesc declared but
     // the caller never wrote.
     //
@@ -1976,6 +2027,10 @@ public:
     void drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) override;
     void buildBlas(BlasHandle blas) override;
     void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
+    // ---- in-place updates (refit) -- see IRenderContext's contract comment above refitBlas/
+    // refitTlas for the eligibility rules both follow. ----
+    bool refitBlas(BlasHandle blas) override;
+    bool refitTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     void textureBarrier(TextureHandle t, ResourceState from, ResourceState to, u32 subresource) override;
     void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) override;
     void uavBarrierTexture(TextureHandle t) override;
@@ -2007,6 +2062,26 @@ private:
     // dev_->currentCommandBuffer() -- the one place every method above reaches the live command
     // buffer through, so a future frame-pacing change touches this one line, not every override.
     VkCommandBuffer cmd() const;
+
+    // ---- shared tails for buildBlas/refitBlas and buildTlas/refitTlas ----
+    // Records the actual BLAS build or in-place update for `b`'s mesh and marks it built.
+    // MODE_BUILD_KHR (source left null) for a full build, MODE_UPDATE_KHR with src == dst == b.as
+    // for an in-place refit -- both need the SAME flags the structure was created/last built with
+    // (ALLOW_UPDATE_BIT_KHR whenever `b.allowUpdate`), matching the update contract in
+    // RHIResources.hpp's comment above IRenderContext::refitBlas.
+    void recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildAccelerationStructureModeKHR mode);
+    // Fills THIS frame's instance buffer for `t` from `instances` (`count` of them), applying the
+    // same filtering buildTlas has always done (an instance naming a dead BLAS, or an id that does
+    // not fit in 24 bits, is dropped -- logged under `caller`). Returns how many were actually
+    // written, and fills `outSlots` with each written instance's {BLAS, flags, mask} in submission
+    // order -- refitTlas's eligibility check against RhiTlas::builtSlots. Shared by buildTlas and
+    // refitTlas so one packing loop serves both.
+    u32 packTlasInstances(RhiTlas& t, const TlasInstance* instances, u32 count, const char* caller,
+                          std::vector<RhiTlasSlot>& outSlots);
+    // Records the actual TLAS build or in-place update over instances already packed by
+    // packTlasInstances, and marks `t` built. Same MODE_BUILD_KHR/MODE_UPDATE_KHR split as
+    // recordBlasBuild above.
+    void recordTlasBuild(RhiTlas& t, u32 written, VkBuildAccelerationStructureModeKHR mode);
 
     VulkanDevice* dev_;
     VulkanResourceFactory* res_;

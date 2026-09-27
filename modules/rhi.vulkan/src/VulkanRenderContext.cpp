@@ -37,6 +37,7 @@
 // single-instance semantics to a class member would -- it is documented at each use, not smuggled in.
 #include "VulkanCommon.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 namespace aver::rhi::vkb {
@@ -921,18 +922,12 @@ void VulkanRenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVe
 }
 
 // ====================================================================================================
-// buildBlas -- records a bottom-level acceleration structure build for its mesh.
+// buildBlas / refitBlas -- records a bottom-level acceleration structure build, or an in-place
+// update, for its mesh. recordBlasBuild is the shared tail: geometry description, scratch and the
+// post-build barrier are identical either way, only mode/src differ (see its declaration).
 // ====================================================================================================
-void VulkanRenderContext::buildBlas(BlasHandle h) {
-    RhiBlas* b = res_->blas(h);
-    if (!b) { AVER_ERROR("[RHI.Vulkan] buildBlas with an invalid handle"); return; }
+void VulkanRenderContext::recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildAccelerationStructureModeKHR mode) {
     VkCommandBuffer cb = cmd();
-    if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
-        AVER_ERROR("[RHI.Vulkan] buildBlas without ray-tracing support");
-        return;
-    }
-    if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
-    const GpuMesh& m = dev_->meshes_[b->mesh - 1];
 
     VkAccelerationStructureGeometryTrianglesDataKHR tri{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
     tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;   // MeshVertex::px,py,pz -- see RHI.hpp's layout
@@ -948,16 +943,24 @@ void VulkanRenderContext::buildBlas(BlasHandle h) {
     geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
 
     VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-    scratchInfo.buffer = b->scratchBuffer;
+    scratchInfo.buffer = b.scratchBuffer;
 
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    // Same flags every time this structure is built or updated (required by both the D3D12 and
+    // Vulkan update contracts -- RHIResources.hpp's comment above IRenderContext::refitBlas):
+    // ALLOW_UPDATE_BIT_KHR whenever it was created updatable, whether this call is itself a build
+    // or an update.
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+              (b.allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
+    bi.mode = mode;
+    // In-place update: source and destination are the SAME structure -- legal per the Vulkan spec
+    // and the whole point of a refit, no second structure to age out of sync with this one.
+    bi.srcAccelerationStructure = (mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR) ? b.as : VK_NULL_HANDLE;
+    bi.dstAccelerationStructure = b.as;
     bi.geometryCount = 1;
     bi.pGeometries = &geom;
     bi.scratchData.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo);
-    bi.dstAccelerationStructure = b->as;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = m.indexCount / 3;
@@ -976,32 +979,100 @@ void VulkanRenderContext::buildBlas(BlasHandle h) {
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &mb;
     dev_->api().CmdPipelineBarrier2(cb, &dep);
-    b->built = true;
+
+    b.built = true;
+    b.builtVertexCount = m.vertexCount;
+    b.builtIndexCount = m.indexCount;
+}
+
+void VulkanRenderContext::buildBlas(BlasHandle h) {
+    RhiBlas* b = res_->blas(h);
+    if (!b) { AVER_ERROR("[RHI.Vulkan] buildBlas with an invalid handle"); return; }
+    VkCommandBuffer cb = cmd();
+    if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
+        AVER_ERROR("[RHI.Vulkan] buildBlas without ray-tracing support");
+        return;
+    }
+    if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
+    recordBlasBuild(*b, dev_->meshes_[b->mesh - 1], VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+}
+
+// refitBlas -- updates `h`'s BLAS from its mesh's CURRENT vertices instead of rebuilding from
+// scratch, when eligible (created updatable, already built, mesh's vertex/index counts unchanged
+// since that build -- see RHIResources.hpp's contract comment above IRenderContext::refitBlas).
+// Otherwise falls back to a full build, exactly like the default this overrides.
+bool VulkanRenderContext::refitBlas(BlasHandle h) {
+    RhiBlas* b = res_->blas(h);
+    if (!b) { AVER_ERROR("[RHI.Vulkan] refitBlas with an invalid handle"); return false; }
+    if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) { buildBlas(h); return false; }
+    const GpuMesh& m = dev_->meshes_[b->mesh - 1];
+    const bool countsChanged = m.vertexCount != b->builtVertexCount || m.indexCount != b->builtIndexCount;
+    // Same guard as D3D12RenderContext::refitBlas: a BUILT structure whose mesh changed counts falls back
+    // to a full build into buffers sized once at creation -- refuse it when the mesh has outgrown them,
+    // rather than write past them. Skinned meshes (what refit is for) never change counts.
+    if (b->built && countsChanged && dev_->api().GetAccelerationStructureBuildSizesKHR) {
+        VkAccelerationStructureGeometryTrianglesDataKHR tri{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
+        tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        tri.vertexData.deviceAddress = m.vbAddress;
+        tri.vertexStride = sizeof(MeshVertex);
+        tri.maxVertex = m.vertexCount ? m.vertexCount - 1 : 0;
+        tri.indexType = VK_INDEX_TYPE_UINT32;
+        tri.indexData.deviceAddress = m.ibAddress;
+        VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geom.geometry.triangles = tri;
+        geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                   (b->allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
+        bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        bi.geometryCount = 1;
+        bi.pGeometries = &geom;
+        const u32 primCount = m.indexCount / 3;
+        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        dev_->api().GetAccelerationStructureBuildSizesKHR(dev_->vkDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                          &bi, &primCount, &sizes);
+        const VkDeviceSize scratchNeed = b->allowUpdate ? std::max(sizes.buildScratchSize, sizes.updateScratchSize)
+                                                        : sizes.buildScratchSize;
+        if (sizes.accelerationStructureSize > b->asSize || scratchNeed > b->scratchSize) {
+            AVER_ERROR("[RHI.Vulkan] refitBlas: mesh {} moved from {}v/{}i to {}v/{}i, past what its BLAS was "
+                       "allocated for at creation -- rebuilding it in place would write past that allocation, "
+                       "so this refit is refused; the caller must destroy and recreate the BLAS",
+                       b->mesh, b->builtVertexCount, b->builtIndexCount, m.vertexCount, m.indexCount);
+            return false;
+        }
+    }
+    const bool eligible = b->allowUpdate && b->built && !countsChanged;
+    if (!eligible) { buildBlas(h); return false; }
+
+    VkCommandBuffer cb = cmd();
+    if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
+        AVER_ERROR("[RHI.Vulkan] refitBlas without ray-tracing support");
+        return false;
+    }
+    recordBlasBuild(*b, m, VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR);
+    return true;
 }
 
 // ====================================================================================================
-// buildTlas -- packs the instance buffer and records a top-level acceleration structure build.
+// buildTlas / refitTlas -- packs the instance buffer and records a top-level acceleration structure
+// build, or an in-place update. packTlasInstances is the shared packing loop (buildTlas always used
+// to do this inline; refitTlas needs the exact same filtering to decide whether an update is even
+// legal), recordTlasBuild the shared build/update tail (mirrors recordBlasBuild above).
 // ====================================================================================================
-void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
-    RhiTlas* t = res_->tlas(h);
-    if (!t) { AVER_ERROR("[RHI.Vulkan] buildTlas with an invalid handle"); return; }
-    VkCommandBuffer cb = cmd();
-    if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
-        AVER_ERROR("[RHI.Vulkan] buildTlas without ray-tracing support");
-        return;
-    }
-    if (count > t->maxInstances) {
-        AVER_WARN("[RHI.Vulkan] buildTlas: {} instances clamped to the {} this TLAS was sized for", count, t->maxInstances);
-        count = t->maxInstances;
-    }
+u32 VulkanRenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* instances, u32 count,
+                                           const char* caller, std::vector<RhiTlasSlot>& outSlots) {
+    outSlots.clear();
     const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
-    if (!t->instancePtr[f]) return;
+    if (!t.instancePtr[f]) return 0;
+    outSlots.reserve(count);
 
-    auto* dst = reinterpret_cast<VkAccelerationStructureInstanceKHR*>(t->instancePtr[f]);
+    auto* dst = reinterpret_cast<VkAccelerationStructureInstanceKHR*>(t.instancePtr[f]);
     u32 written = 0;
     for (u32 i = 0; i < count && instances; ++i) {
         const RhiBlas* b = res_->blas(instances[i].blas);
-        if (!b || !b->as) { AVER_WARN("[RHI.Vulkan] buildTlas: instance {} names an invalid BLAS", i); continue; }
+        if (!b || !b->as) { AVER_WARN("[RHI.Vulkan] {}: instance {} names an invalid BLAS", caller, i); continue; }
         VkAccelerationStructureInstanceKHR id{};
         // Engine matrices are row-major/row-vector (v*M); VkTransformMatrixKHR is the same row-major
         // 3x4 [R|T] layout D3D12_RAYTRACING_INSTANCE_DESC::Transform already uses, so this is the
@@ -1015,8 +1086,8 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
         // value would silently alias onto another instance's id and a hit would resolve to the
         // wrong geometry -- identical reasoning to D3D12's own InstanceID rejection.
         if (instances[i].instanceId > kMaxTlasInstanceId) {
-            AVER_ERROR("[RHI.Vulkan] buildTlas: instance {} has id {} which does not fit in 24 bits; "
-                       "it is dropped rather than aliased onto another instance", i, instances[i].instanceId);
+            AVER_ERROR("[RHI.Vulkan] {}: instance {} has id {} which does not fit in 24 bits; "
+                       "it is dropped rather than aliased onto another instance", caller, i, instances[i].instanceId);
             continue;
         }
         // instanceCustomIndex (CommittedInstanceID() in HLSL), NOT
@@ -1043,11 +1114,18 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
         addrInfo.accelerationStructure = b->as;
         id.accelerationStructureReference = dev_->api().GetAccelerationStructureDeviceAddressKHR(dev_->vkDevice(), &addrInfo);
         dst[written++] = id;
+        outSlots.push_back({id.accelerationStructureReference, static_cast<u32>(vkFlags), id.mask});
     }
+    return written;
+}
+
+void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 written, VkBuildAccelerationStructureModeKHR mode) {
+    VkCommandBuffer cb = cmd();
+    const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
 
     VkAccelerationStructureGeometryInstancesDataKHR instData{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
     VkBufferDeviceAddressInfo instBufInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-    instBufInfo.buffer = t->instanceBuffers[f];
+    instBufInfo.buffer = t.instanceBuffers[f];
     instData.data.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &instBufInfo);
 
     VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -1055,16 +1133,21 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
     geom.geometry.instances = instData;
 
     VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-    scratchInfo.buffer = t->scratchBuffer;
+    scratchInfo.buffer = t.scratchBuffer;
 
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    // Same flags every time -- see recordBlasBuild's identical comment.
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+              (t.allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
+    bi.mode = mode;
+    // In-place update: source and destination are the SAME structure, as legal here as it is for
+    // a BLAS (recordBlasBuild) -- refitTlas's whole reason to exist.
+    bi.srcAccelerationStructure = (mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR) ? t.as : VK_NULL_HANDLE;
+    bi.dstAccelerationStructure = t.as;
     bi.geometryCount = 1;
     bi.pGeometries = &geom;
     bi.scratchData.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo);
-    bi.dstAccelerationStructure = t->as;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = written;
@@ -1080,6 +1163,67 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &mb;
     dev_->api().CmdPipelineBarrier2(cb, &dep);
+
+    t.built = true;
+}
+
+void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
+    RhiTlas* t = res_->tlas(h);
+    if (!t) { AVER_ERROR("[RHI.Vulkan] buildTlas with an invalid handle"); return; }
+    VkCommandBuffer cb = cmd();
+    if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
+        AVER_ERROR("[RHI.Vulkan] buildTlas without ray-tracing support");
+        return;
+    }
+    if (count > t->maxInstances) {
+        AVER_WARN("[RHI.Vulkan] buildTlas: {} instances clamped to the {} this TLAS was sized for", count, t->maxInstances);
+        count = t->maxInstances;
+    }
+    const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
+    if (!t->instancePtr[f]) return;
+
+    const u32 written = packTlasInstances(*t, instances, count, "buildTlas", t->pendingSlots);
+    recordTlasBuild(*t, written, VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+    t->builtSlots.swap(t->pendingSlots);
+}
+
+// refitTlas -- updates `h`'s TLAS in place when the filtered instance list (after the SAME
+// filtering packTlasInstances/buildTlas has always applied) has the same count as the last
+// build/refit AND every slot still names the same BLAS with the same flags and mask; transforms and
+// instance ids may differ freely. Otherwise falls back to a full build, exactly like the default
+// this overrides. See RHIResources.hpp's contract comment above IRenderContext::refitTlas.
+bool VulkanRenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
+    RhiTlas* t = res_->tlas(h);
+    if (!t) { AVER_ERROR("[RHI.Vulkan] refitTlas with an invalid handle"); return false; }
+    if (!t->allowUpdate || !t->built) { buildTlas(h, instances, count); return false; }
+    VkCommandBuffer cb = cmd();
+    if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
+        AVER_ERROR("[RHI.Vulkan] refitTlas without ray-tracing support");
+        return false;
+    }
+    if (count > t->maxInstances) {
+        AVER_WARN("[RHI.Vulkan] refitTlas: {} instances clamped to the {} this TLAS was sized for", count, t->maxInstances);
+        count = t->maxInstances;
+    }
+    const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
+    if (!t->instancePtr[f]) { buildTlas(h, instances, count); return false; }
+
+    // Packed regardless of eligibility below -- an update needs the freshly packed buffer exactly
+    // as much as a full build would, and this is the ONLY way to know the new filtered shape to
+    // compare against builtSlots.
+    std::vector<RhiTlasSlot>& slots = t->pendingSlots;
+    const u32 written = packTlasInstances(*t, instances, count, "refitTlas", slots);
+
+    const bool sameShape = written == t->builtSlots.size() &&
+        std::equal(slots.begin(), slots.end(), t->builtSlots.begin(),
+                   [](const RhiTlasSlot& a, const RhiTlasSlot& b) {
+                       return a.blasAddress == b.blasAddress && a.flags == b.flags && a.mask == b.mask;
+                   });
+
+    recordTlasBuild(*t, written, sameShape ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                                            : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+    t->builtSlots.swap(t->pendingSlots);
+    return sameShape;
 }
 
 // ====================================================================================================

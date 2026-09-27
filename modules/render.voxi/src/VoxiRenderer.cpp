@@ -467,7 +467,13 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     // Created up front, and sized for the draw-list cap, so its t2 descriptor is never rewritten
     // while a frame that may be reading it is in flight.
     if (rtSupported_) {
-        tlas_ = res_->createTlas(kMaxDraws);
+        // Updatable only while Settings::rtRefitAccel reads true AT THIS CALL -- like layeredBsdf_,
+        // this is latched for the renderer's life, not reread every frame: refitOrRebuildTlas() checks
+        // the live setting before every refit attempt, but whether tlas_ itself carries the extra
+        // ALLOW_UPDATE scratch is decided once, here. Off keeps the plain createTlas allocation exactly
+        // as before this setting existed; a backend without refit support just hands back the same
+        // structure a plain createTlas would either way, per createTlasUpdatable's own contract.
+        tlas_ = settings_.rtRefitAccel ? res_->createTlasUpdatable(kMaxDraws) : res_->createTlas(kMaxDraws);
         if (tlas_) res_->setSrvTlas(bindings_, 2, tlas_);   // t2, per the shader's register(t2)
         else {
             AVER_WARN("[Voxi] TLAS could not be created; ray-traced sun shadows stay off");
@@ -1592,7 +1598,8 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
 // Builds a bottom-level structure for every referenced mesh, then one top-level structure over the
 // replayed draw list. Publishes shadowParams.z so the lit pass knows whether it may trace. Settings::
 // rtSkipUnchangedTlas gates all of that on rtAccelSnapshotUnchanged() -- see the "THE UNCHANGED GATE"
-// block just below for what it skips.
+// block just below for what it skips, and Settings::rtRefitAccel for the lighter refit-only pass it
+// runs there instead of a plain skip when a dynamic mesh needs to keep moving.
 void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtActive_ = false;
     cb_.shadowParams[2] = 0.0f;
@@ -1601,13 +1608,26 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // ---- The unchanged gate (Settings::rtSkipUnchangedTlas) ----
     // See rtAccelSnapshotUnchanged() for what "unchanged" checks. A match means tlas_,
     // rtInstanceData_ and every SRV bound to them (slots 2/3/4/5/9, set the last time the per-draw
-    // loop actually ran) are still correct, so the whole
-    // body below is skipped -- except what's NOT a function of drawsPrev_ and is read every frame
-    // regardless: rtActive_, cb_.shadowParams[2], cb_.rtParams (updateRtParamsPerFrame(), factored
-    // out for this reuse), and cb_.rtParams[3] from rtGeometryReady_ rather than a fresh
-    // buildGeometryTable() call (one of the things being skipped).
+    // loop actually ran) are still correct, so the whole body below (the per-draw loop, the material
+    // and geometry tables) is skipped -- except what's NOT a function of drawsPrev_ and is read every
+    // frame regardless: rtActive_, cb_.shadowParams[2], cb_.rtParams (updateRtParamsPerFrame(),
+    // factored out for this reuse), cb_.rtParams[3] from rtGeometryReady_ rather than a fresh
+    // buildGeometryTable() call, and -- when Settings::rtRefitAccel is on and rtDynamicMeshes_ is
+    // non-empty -- the dynamic BLASes/tlas_/their rtVerts_ slices, refreshed in place by
+    // refitDynamicAccelStructures() rather than left alone.
     if (settings_.rtSkipUnchangedTlas && rtAccelSnapshotUnchanged()) {
-        ++rtAccelSkipped_;
+        // A dynamic mesh's pose keeps moving even on a tick this gate would otherwise skip outright,
+        // and its BLAS changing means tlas_ must be refit or rebuilt too (RHIResources.hpp's refitTlas
+        // contract) -- so trade the plain skip for a lighter refit-only pass: no per-draw loop, just
+        // the handful of dynamic BLASes refit/rebuilt, tlas_ refit from them, and their rtVerts_
+        // slices refreshed (STALE-POSE FIX; see refreshDynamicVertexSlices). Nothing dynamic in the
+        // last full build (rtDynamicMeshes_ empty) has nothing to refit, so it stays a plain skip.
+        if (settings_.rtRefitAccel && !rtDynamicMeshes_.empty()) {
+            refitDynamicAccelStructures(ctx);
+            ++rtAccelRefitOnly_;
+        } else {
+            ++rtAccelSkipped_;
+        }
         rtActive_ = true;
         cb_.shadowParams[2] = 1.0f;
         updateRtParamsPerFrame();
@@ -1634,6 +1654,9 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtInstanceMatKey_.clear();
     rebuiltThisFrame_.clear();
     rtInstancePrevWorld_.clear();
+    // Repopulated below as each dynamic mesh's BLAS survives the loop -- see rtDynamicMeshes_'s
+    // declaration for why this, not rebuiltThisFrame_, is what refitDynamicAccelStructures() reads.
+    rtDynamicMeshes_.clear();
     u32 firstBuilds = 0;
 
     // CPU-only cost of walking drawsPrev_ and filling rtInstanceData_/rtInstanceMesh_/
@@ -1678,34 +1701,54 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         if (it != blas_.end() && it->second && res_->blasMesh(it->second) != d.mesh) {
             blas_.erase(it);
             it = blas_.end();
+            // A reused mesh handle must not inherit a stray refit streak from whatever this handle
+            // named before -- the fresh BLAS about to be created has no build history of its own yet.
+            dynamicBlasRefits_.erase(d.mesh);
         }
         if (it == blas_.end()) {
-            // createBlas returns 0 for a destroyed mesh; recorded so it isn't retried each frame.
-            const rhi::BlasHandle nb = res_->createBlas(d.mesh);
-            if (nb) { ctx.buildBlas(nb); ++firstBuilds; }
+            // createBlas/createBlasUpdatable return 0 for a destroyed mesh; recorded so it isn't
+            // retried each frame. Updatable only for a compute-written mesh, and only while
+            // Settings::rtRefitAccel is on -- static geometry never refits, so there is nothing for the
+            // extra ALLOW_UPDATE scratch to buy it, and with the setting off this mesh's own BLAS stays
+            // the plain allocation createBlas always gave it (this is the per-mesh twin of init()'s
+            // tlas_ gate above; the compute-written test itself must stay unconditional -- everywhere
+            // else in this function it still means "this mesh is compute-written", not "...and refits").
+            const bool dynamic = settings_.rtRefitAccel && dev_->meshVertexBuffer(d.mesh) != 0;
+            const rhi::BlasHandle nb = dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
+            if (nb) { ctx.buildBlas(nb); ++firstBuilds; }   // first build is always full; nothing to refit yet
             it = blas_.emplace(d.mesh, nb).first;
         } else if (it->second && dev_->meshVertexBuffer(d.mesh)) {
             // A mesh whose vertices are written by compute invalidates its own structure every
             // frame -- memoising it (right for static geometry) would give a skinned character a
             // ray-traced shadow frozen at its first pose, invisible in the raster image. The
             // skinning dispatch already left the buffer in GeometryRead, since that feature
-            // registers before this one.
-            // Rebuilt once per mesh per frame, not once per draw -- previously a mesh drawn twice
-            // was rebuilt twice, the second a wasted full PREFER_FAST_TRACE build over identical
-            // vertices. The linear scan is over the distinct dynamic meshes in one frame, a handful.
+            // registers before this one. refitOrRebuildDynamicBlas refits in place (Settings::
+            // rtRefitAccel) rather than a full rebuild every time, with its own periodic full rebuild.
+            // Refreshed once per mesh per frame, not once per draw -- previously a mesh drawn twice
+            // was refreshed twice, the second wasted work over identical vertices. The linear scan is
+            // over the distinct dynamic meshes in one frame, a handful.
             if (std::find(rebuiltThisFrame_.begin(), rebuiltThisFrame_.end(), d.mesh) ==
                 rebuiltThisFrame_.end()) {
-                ctx.buildBlas(it->second);
+                refitOrRebuildDynamicBlas(ctx, it->second, d.mesh);
                 rebuiltThisFrame_.push_back(d.mesh);
             }
             if (!dynamicBlasLogged_) {
-                AVER_INFO("[Voxi] mesh {} has compute-written vertices; its bottom-level structure "
-                          "is rebuilt every frame rather than cached", d.mesh);
+                AVER_INFO("[Voxi] mesh {} has compute-written vertices; its bottom-level structure is "
+                          "refit (or rebuilt, if voxi.rtRefitAccel is off) every frame rather than "
+                          "cached outright", d.mesh);
                 dynamicBlasLogged_ = true;
             }
         }
         const rhi::BlasHandle b = it->second;
         if (!b) continue;
+        // Distinct compute-written meshes that survived this build with a usable BLAS -- what
+        // refitDynamicAccelStructures() (the gate's refit-only pass) refreshes on a tick with no
+        // per-draw loop of its own. Catches a mesh seen for the first time this build too (the branch
+        // just above only touches an ALREADY-cached dynamic mesh).
+        if (dev_->meshVertexBuffer(d.mesh) &&
+            std::find(rtDynamicMeshes_.begin(), rtDynamicMeshes_.end(), d.mesh) == rtDynamicMeshes_.end()) {
+            rtDynamicMeshes_.push_back(d.mesh);
+        }
         rhi::TlasInstance i;
         // Engine convention, handed over untouched: the backend owns the transpose DXR wants.
         std::memcpy(i.world, d.world, sizeof(i.world));
@@ -1879,10 +1922,12 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // bug this replaces). rtAccelKey_/rtAccelSnapValid_ are deliberately left untouched on this
     // exit: the gate above already said "rebuild" (a key mismatch, a forced condition, or no
     // snapshot yet), so whatever they hold still correctly describes the LAST build that actually
-    // ran ctx.buildTlas, which this exit (empty tlasInstScratch_) doesn't reach.
+    // ran ctx.buildTlas/refitTlas, which this exit (empty tlasInstScratch_) doesn't reach.
     if (tlasInstScratch_.empty()) return;
 
-    ctx.buildTlas(tlas_, tlasInstScratch_.data(), static_cast<u32>(tlasInstScratch_.size()));
+    // Refits tlas_ in place when Settings::rtRefitAccel and the streak allow it, else a full build --
+    // see refitOrRebuildTlas. Same structure either way, so nothing downstream needs to know which.
+    refitOrRebuildTlas(ctx);
     if (tlasTranslucentThisBuild_ && tlasTranslucentLogged_ != tlasTranslucentThisBuild_) {
         tlasTranslucentLogged_ = tlasTranslucentThisBuild_;
         AVER_INFO("[Voxi] acceleration structure: {} instance(s), {} in the translucent lane "
@@ -1916,24 +1961,35 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // w > 0.5 tells the lit pass it may trace a reflection ray, only true when the flat geometry
     // table actually exists -- a reflection hitting geometry it can't look up would read a
     // neighbour's triangle rather than fail visibly.
-    cb_.rtParams[3] = buildGeometryTable(ctx) ? 1.0f : 0.0f;
+    const bool geomTableReady = buildGeometryTable(ctx);
+    cb_.rtParams[3] = geomTableReady ? 1.0f : 0.0f;
+    // STALE-POSE FIX: buildGeometryTable's own copy loop only re-copies a slice when the mesh SET
+    // changes, so a compute-skinned mesh's slice would otherwise hold whatever pose it had the frame
+    // its slice was first laid out. Runs whenever the table is usable, not only on a set change --
+    // that's exactly the case this exists for. See refreshDynamicVertexSlices / rtDynamicVertexSlices_.
+    if (geomTableReady) refreshDynamicVertexSlices(ctx);
     if (!rtLogged_) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(tlasInstScratch_.size()), static_cast<u32>(blas_.size()));
         rtLogged_ = true;
     }
-    // Every build here is a full PREFER_FAST_TRACE build (the RHI has no refit verb), so this count
-    // IS the bill -- also the only way to see the rebuild predicate (meshVertexBuffer non-zero) go
-    // wrong: if it stops being true, a static scene silently rebuilds everything every frame and
-    // looks identical. Keyed on BOTH halves, not their sum: two first-time builds becoming two
-    // rebuilds is the same total but a different statement about the cache.
+    // A first-time build is always full (nothing to refit yet); a returning dynamic mesh's own share
+    // of rebuiltThisFrame_ is refit or rebuilt per refitOrRebuildDynamicBlas, so this count is no
+    // longer automatically the whole GPU bill the way it was before refit existed -- the lifetime
+    // rtDynamicBlasRefits_/rtDynamicBlasRebuilds_ (and their TLAS twins) appended below say how that
+    // split has actually gone. Still the only way to see the rebuild predicate (meshVertexBuffer
+    // non-zero) go wrong: if it stops being true, a static scene silently rebuilds everything every
+    // frame and looks identical. Keyed on BOTH halves, not their sum: two first-time builds becoming
+    // two rebuilds is the same total but a different statement about the cache.
     const u32 rebuilds = (static_cast<u32>(rebuiltThisFrame_.size()) << 16) | (firstBuilds & 0xFFFFu);
     if (rebuilds != lastBlasRebuilds_) {
-        AVER_INFO("[Voxi] bottom-level builds this frame: {} ({} first-time, {} rebuilt) over {} "
-                  "draws of {} distinct meshes",
+        AVER_INFO("[Voxi] bottom-level builds this frame: {} ({} first-time, {} refit/rebuilt) over "
+                  "{} draws of {} distinct meshes; lifetime dynamic BLAS {} refit / {} rebuilt, TLAS "
+                  "{} refit / {} rebuilt",
                   firstBuilds + static_cast<u32>(rebuiltThisFrame_.size()), firstBuilds,
                   static_cast<u32>(rebuiltThisFrame_.size()), static_cast<u32>(drawsPrev_.size()),
-                  static_cast<u32>(blas_.size()));
+                  static_cast<u32>(blas_.size()), rtDynamicBlasRefits_, rtDynamicBlasRebuilds_,
+                  rtTlasRefits_, rtTlasRebuilds_);
         lastBlasRebuilds_ = rebuilds;
     }
 
@@ -1974,10 +2030,14 @@ void VoxiRenderer::updateRtParamsPerFrame() {
 // virtual call per draw, none of the real loop's BLAS creation/instance population/material resolution.
 bool VoxiRenderer::rtAccelMustForceRebuild() const {
     for (const Draw& d : drawsPrev_) {
-        // A compute-skinned mesh's BLAS is rebuilt inside the per-draw loop every call -- freezing it
-        // here would silently show a shadow/reflection at a stale pose. Presence in the draw list is
-        // reason enough; nothing about its key changing is required.
-        if (dev_ && dev_->meshVertexBuffer(d.mesh)) return true;
+        // A compute-skinned mesh's BLAS needs refreshing every call -- freezing it here would
+        // silently show a shadow/reflection at a stale pose. Presence in the draw list is reason
+        // enough; nothing about its key changing is required. ONLY forces the real per-draw loop when
+        // Settings::rtRefitAccel is off, though: when it's on, the gate's refit-only pass
+        // (refitDynamicAccelStructures, run from the skip branch) keeps the dynamic BLAS/tlas_/vertex
+        // slice current without it, so a compute-skinned mesh alone no longer has to buy the whole
+        // loop back every tick.
+        if (!settings_.rtRefitAccel && dev_ && dev_->meshVertexBuffer(d.mesh)) return true;
         // Same "destroyed-and-reused mesh handle" check the real loop makes: a BLAS cached under a
         // mesh handle the factory no longer attributes to it is dead, and a key-only gate would leave
         // the TLAS pointing straight at it.
@@ -2093,7 +2153,8 @@ bool VoxiRenderer::rtAccelSnapshotUnchanged() const {
     };
     if (!rtAccelSnapValid_) return reject(0, "no snapshot yet (expected once)");
     if (rtAccelMustForceRebuild())
-        return reject(1, "compute-skinned mesh present or a cached BLAS handle went stale");
+        return reject(1, "compute-skinned mesh present without a refit path (voxi.rtRefitAccel off), "
+                         "or a cached BLAS handle went stale");
     if (rtAccelDrawsKey() != rtAccelKey_) return reject(2, "draw list changed");
     return true;
 }
@@ -2105,21 +2166,83 @@ void VoxiRenderer::takeRtAccelSnapshot() {
     rtAccelSnapValid_ = true;
 }
 
-// Widening-interval "N rebuilt / M skipped" report, same shape and reason as the GI rebuild gate's
-// (prePass(), right after giSnapshotUnchanged()): a fixed-window report lands mid-load-in and
-// describes a phase nobody asked about, so this reports both the lifetime and since-last-report ratio.
+// Widening-interval "N rebuilt / M refit-only / M skipped" report, same shape and reason as the GI
+// rebuild gate's (prePass(), right after giSnapshotUnchanged()): a fixed-window report lands
+// mid-load-in and describes a phase nobody asked about, so this reports both the lifetime and
+// since-last-report ratio. rtAccelRefitOnly_ (Settings::rtRefitAccel's lighter pass, run in place of
+// a plain skip when there's a dynamic mesh to keep current) counts as "avoided a full rebuild"
+// alongside rtAccelSkipped_ for the percentage, but is broken out on its own too.
 void VoxiRenderer::reportRtAccelGate() {
-    const u64 ticks = rtAccelSkipped_ + rtAccelRebuilt_;
+    const u64 ticks = rtAccelSkipped_ + rtAccelRefitOnly_ + rtAccelRebuilt_;
     if (ticks < rtAccelGateNextReport_) return;
-    const u64 winTicks = ticks - rtAccelGateLastTicks_;
-    const u64 winSkipped = rtAccelSkipped_ - rtAccelGateLastSkipped_;
-    AVER_INFO("[Voxi] RT accel-structure gate: {} rebuilt / {} skipped of {} tick(s) "
-              "-- {}% avoided overall, {}% since the last report",
-              rtAccelRebuilt_, rtAccelSkipped_, ticks, (rtAccelSkipped_ * 100) / ticks,
-              winTicks ? (winSkipped * 100) / winTicks : 0);
+    const u64 winTicks   = ticks - rtAccelGateLastTicks_;
+    const u64 winAvoided = (rtAccelSkipped_ + rtAccelRefitOnly_) -
+                           (rtAccelGateLastSkipped_ + rtAccelGateLastRefitOnly_);
+    AVER_INFO("[Voxi] RT accel-structure gate: {} full rebuild / {} refit-only / {} skipped of {} "
+              "tick(s) -- {}% avoided a full rebuild overall, {}% since the last report",
+              rtAccelRebuilt_, rtAccelRefitOnly_, rtAccelSkipped_, ticks,
+              ((rtAccelSkipped_ + rtAccelRefitOnly_) * 100) / ticks,
+              winTicks ? (winAvoided * 100) / winTicks : 0);
     rtAccelGateLastTicks_ = ticks;
     rtAccelGateLastSkipped_ = rtAccelSkipped_;
+    rtAccelGateLastRefitOnly_ = rtAccelRefitOnly_;
     rtAccelGateNextReport_ = ticks * 2;   // 64, 128, 256, ... -- a handful of lines, not a flood
+}
+
+// Refits `blas` (mesh's CURRENT vertices) in place when Settings::rtRefitAccel allows it and this
+// mesh hasn't hit its periodic full-rebuild budget; otherwise a full ctx.buildBlas, which resets that
+// budget. See RHIResources.hpp's refitBlas contract: it does the full-build fallback ITSELF whenever
+// `blas` isn't eligible (not created updatable, never built, or the mesh's vertex/index counts moved
+// since that build), so this never has to call buildBlas a second time to be sure -- ctx.refitBlas's
+// own return value says which one happened.
+void VoxiRenderer::refitOrRebuildDynamicBlas(rhi::IRenderContext& ctx, rhi::BlasHandle blas,
+                                             rhi::MeshHandle mesh) {
+    u32& refits = dynamicBlasRefits_[mesh];
+    const bool tryRefit = settings_.rtRefitAccel && refits < kDynamicBlasRefitsPerRebuild;
+    const bool refitted = tryRefit && ctx.refitBlas(blas);
+    if (refitted) { ++refits; ++rtDynamicBlasRefits_; }
+    else {
+        // tryRefit false means rtRefitAccel is off or the periodic budget ran out, and only then do
+        // we need to build it ourselves -- tryRefit true but refitted false means ctx.refitBlas above
+        // already did its own full-build fallback, so calling buildBlas here would double it.
+        if (!tryRefit) ctx.buildBlas(blas);
+        refits = 0;
+        ++rtDynamicBlasRebuilds_;
+    }
+}
+
+// Same shape as refitOrRebuildDynamicBlas, for tlas_ against tlasRefitStreak_/kTlasRefitsPerRebuild --
+// see RHIResources.hpp's refitTlas contract for why a false return never needs a second buildTlas
+// call here either. Shared by buildAccelerationStructures' full-build tail and
+// refitDynamicAccelStructures() (the gate's refit-only pass), so a scene alternating between the two
+// still rebuilds tlas_ on ONE schedule rather than each path running its own independent countdown.
+bool VoxiRenderer::refitOrRebuildTlas(rhi::IRenderContext& ctx) {
+    const u32 count = static_cast<u32>(tlasInstScratch_.size());
+    const bool tryRefit = settings_.rtRefitAccel && tlasRefitStreak_ < kTlasRefitsPerRebuild;
+    const bool refitted = tryRefit && ctx.refitTlas(tlas_, tlasInstScratch_.data(), count);
+    if (refitted) { ++tlasRefitStreak_; ++rtTlasRefits_; }
+    else {
+        if (!tryRefit) ctx.buildTlas(tlas_, tlasInstScratch_.data(), count);
+        tlasRefitStreak_ = 0;
+        ++rtTlasRebuilds_;
+    }
+    return refitted;
+}
+
+// The gate's refit-only pass (Settings::rtRefitAccel): called from buildAccelerationStructures' skip
+// branch instead of a plain skip, when rtDynamicMeshes_ is non-empty. Keeps every dynamic BLAS,
+// tlas_ (RHIResources.hpp's refitTlas contract requires it once a referenced BLAS changes) and their
+// rtVerts_ slices current with NO per-draw loop -- rtDynamicMeshes_/tlasInstScratch_ are still the
+// last full build's own, untouched since (both are only cleared when a full build starts).
+void VoxiRenderer::refitDynamicAccelStructures(rhi::IRenderContext& ctx) {
+    rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
+    for (rhi::MeshHandle mesh : rtDynamicMeshes_) {
+        const auto it = blas_.find(mesh);
+        if (it == blas_.end() || !it->second) continue;   // gone stale; the next full build drops it
+        refitOrRebuildDynamicBlas(ctx, it->second, mesh);
+    }
+    refitOrRebuildTlas(ctx);
+    refreshDynamicVertexSlices(ctx);
 }
 
 // Groups a previous-transform key by (mesh, drawBinding) -- see VoxiRenderer.hpp's declaration
@@ -2998,6 +3121,10 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     rtGeomFirstIndex_.clear();
     rtGeomCopiesVerts_.clear();
     rtGeomVertSlice_.clear();
+    // Rebuilt every call, alongside rtGeomFirstVertex_/rtGeomCopiesVerts_ below, into the PENDING list
+    // and swapped in only when this returns true -- see its declaration (VoxiRenderer.hpp) for why.
+    rtDynamicVertexSlices_.clear();
+    rtDynamicVertexSlicesPending_.clear();
     rtGeomFirstVertex_.reserve(rtGeomMeshes_.size());
     rtGeomFirstIndex_.reserve(rtGeomMeshes_.size());
     rtGeomCopiesVerts_.reserve(rtGeomMeshes_.size());
@@ -3015,6 +3142,9 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         rtGeomFirstVertex_.push_back(sit->second);
         rtGeomFirstIndex_.push_back(totalIndices);
         rtGeomCopiesVerts_.push_back(fresh ? 1u : 0u);
+        // This slice's mesh is compute-written: record it so refreshDynamicVertexSlices can re-copy
+        // it every frame instead of the one-time copy loop below, which only runs on a set change.
+        if (fresh && dev_->meshVertexBuffer(h)) rtDynamicVertexSlicesPending_.push_back({vb, vc, sit->second});
         if (fresh) totalVerts += vc;
         totalIndices += ic;
     }
@@ -3055,7 +3185,11 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     res_->setSrvBuffer(bindings_, 5, inst, sizeof(RtInstance),
                        static_cast<u32>(rtInstanceData_.size()), 0);
 
-    if (key == rtGeometryKey_ && rtGeometryReady_) return true;
+    if (key == rtGeometryKey_ && rtGeometryReady_) {
+        // Same set, same sorted layout as the table already on the GPU -- the pending slices are valid.
+        rtDynamicVertexSlices_.swap(rtDynamicVertexSlicesPending_);
+        return true;
+    }
 
     // The geometry itself. Default-heap, because it is written once by copy and then read by every
     // reflection ray for as long as the mesh set holds.
@@ -3094,9 +3228,15 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         u32 vc = 0, ic = 0;
         if (!dev_->meshGeometry(rtGeomMeshes_[m], &vb, &ib, &vc, &ic)) return false;
         if (rtGeomCopiesVerts_[m]) {
-            ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                           static_cast<u64>(rtGeomFirstVertex_[m]) * sizeof(rhi::MeshVertex), 0);
             ++distinctSlices;
+            // A compute-written mesh's slice is filled every frame by refreshDynamicVertexSlices
+            // instead (STALE-POSE FIX, rtDynamicVertexSlices_ above) -- copying it here too would
+            // just be an extra copy of whatever pose happens to be current the one frame the mesh SET
+            // changes, immediately superseded.
+            if (!dev_->meshVertexBuffer(rtGeomMeshes_[m])) {
+                ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                               static_cast<u64>(rtGeomFirstVertex_[m]) * sizeof(rhi::MeshVertex), 0);
+            }
         }
         ctx.copyBuffer(rtIndices_, ib, static_cast<u64>(ic) * sizeof(u32),
                        static_cast<u64>(rtGeomFirstIndex_[m]) * sizeof(u32), 0);
@@ -3106,12 +3246,40 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
 
     rtGeometryKey_ = key;
     rtGeometryReady_ = true;
+    rtDynamicVertexSlices_.swap(rtDynamicVertexSlicesPending_);   // this layout is now the live one
     res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), totalVerts, 0);
     res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), totalIndices, 0);
     AVER_INFO("[Voxi] ray-traced reflection table: {} instances over {} distinct mesh(es) "
               "({} vertex slice(s)), {} vertices, {} indices",
               rtInstanceData_.size(), rtGeomMeshes_.size(), distinctSlices, totalVerts, totalIndices);
     return true;
+}
+
+// STALE-POSE FIX: re-copies every compute-written mesh's CURRENT vertex buffer into its rtVerts_
+// slice (rtDynamicVertexSlices_, recorded by buildGeometryTable above). That function's own copy
+// loop only runs when the mesh SET changes, so without this a moving character's ray hits would
+// reconstruct wpos/N/UV (rdSurfaceFromRecord, voxi.hlsl) from whatever pose was current the one frame
+// the slice was first laid out, while its BLAS -- refit or rebuilt every frame regardless of this
+// table -- traces the CURRENT pose. Independent of Settings::rtRefitAccel: a correctness fix either
+// way, not a refit trade. Called after a successful buildGeometryTable() on the full path, and
+// directly (no fresh buildGeometryTable() call) on the gate's refit-only path.
+void VoxiRenderer::refreshDynamicVertexSlices(rhi::IRenderContext& ctx) {
+    if (rtDynamicVertexSlices_.empty() || !rtVerts_) return;
+    // Same Common<->CopyDest round trip buildGeometryTable's own copy loop uses on rtVerts_ -- the
+    // RHI's buffer-state tracker doesn't model D3D12's implicit Common->CopyDest promotion, so an
+    // implicit promotion here would claim a state it never saw the buffer enter.
+    ctx.bufferBarrier(rtVerts_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+    for (const DynamicVertexSlice& s : rtDynamicVertexSlices_) {
+        // The posed buffer sits in GeometryRead after this frame's skinning dispatch (RENDERING.md
+        // 7.3), which does not include copy source -- its own round trip, back to GeometryRead once
+        // the copy is issued so whatever touches it next (another compute dispatch, or this same copy
+        // next frame) finds it where that contract says it should be.
+        ctx.bufferBarrier(s.vb, rhi::ResourceState::GeometryRead, rhi::ResourceState::CopySource);
+        ctx.copyBuffer(rtVerts_, s.vb, static_cast<u64>(s.vertexCount) * sizeof(rhi::MeshVertex),
+                       static_cast<u64>(s.firstVertex) * sizeof(rhi::MeshVertex), 0);
+        ctx.bufferBarrier(s.vb, rhi::ResourceState::CopySource, rhi::ResourceState::GeometryRead);
+    }
+    ctx.bufferBarrier(rtVerts_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
 }
 
 // Builds this build's dense material table from rtInstanceMatKey_/matConstantsByKey (filled by

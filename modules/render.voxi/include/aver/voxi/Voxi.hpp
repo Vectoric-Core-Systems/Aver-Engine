@@ -622,17 +622,32 @@ struct Settings {
 
     // ---- the acceleration-structure "unchanged" gate ------------------------------------------
     // MEASURED on the owner's static NewSponza scene: the "Voxi acceleration structures" GPU span
-    // costs 0.42 ms every frame -- a from-scratch ctx.buildTlas (PREFER_FAST_TRACE, no update flags;
-    // the RHI has no refit verb) plus an unconditional instance-buffer rewrite/upload, recomputing the
-    // identical answer on an unmoved scene. Same trick as the GI rebuild gate (which has no Settings
-    // field of its own; giUpdateInterval only amortises it): hash what buildAccelerationStructures()
-    // reads from the draw list, and if nothing moved, leave tlas_/rtInstanceData_/their bound SRVs
-    // exactly as they are. See VoxiRenderer::rtAccelSnapshotUnchanged() for what "unchanged" checks and
-    // the two things forcing a real rebuild regardless (a compute-skinned mesh present, refreshed
-    // every frame; a cached BLAS handle the resource factory no longer attributes to its mesh).
+    // costs 0.42 ms every frame -- a from-scratch ctx.buildTlas (PREFER_FAST_TRACE) plus an
+    // unconditional instance-buffer rewrite/upload, recomputing the identical answer on an unmoved
+    // scene; skipping the whole thing outright is still cheaper than even a refit (Settings::
+    // rtRefitAccel), which is why this gate exists as a separate setting rather than being subsumed
+    // by that one. Same trick as the GI rebuild gate (which has no Settings field of its own;
+    // giUpdateInterval only amortises it): hash what buildAccelerationStructures() reads from the
+    // draw list, and if nothing moved, leave tlas_/rtInstanceData_/their bound SRVs exactly as they
+    // are. See VoxiRenderer::rtAccelSnapshotUnchanged() for what "unchanged" checks and the one thing
+    // that still forces a real rebuild regardless (a cached BLAS handle the resource factory no
+    // longer attributes to its mesh) -- a compute-skinned mesh present forces it too, but only while
+    // Settings::rtRefitAccel below is off; on, this gate instead runs a lighter refit-only pass for
+    // it (VoxiRenderer::refitDynamicAccelStructures) rather than a plain skip.
     // ON BY DEFAULT: it only ever skips work whose output is bit-identical -- not a quality trade --
     // so turning it off costs frame time and buys nothing measurable. Console: voxi.rtSkipUnchangedTlas.
     bool rtSkipUnchangedTlas = true;
+
+    // ---- in-place update (refit) for the ray-tracing acceleration structures ------------------
+    // ON: tlas_ and each compute-skinned mesh's BLAS are created updatable and refit in place instead of
+    // fully rebuilt; a skinned mesh alone no longer forces the whole per-draw loop every frame (the gate
+    // above runs a refit-only pass instead of a plain skip). Periodic full rebuilds every
+    // kDynamicBlasRefitsPerRebuild / kTlasRefitsPerRebuild refits (VoxiRenderer.hpp), since a refit traces
+    // worse as the pose drifts. OFF: the old behaviour exactly (full builds, no ALLOW_UPDATE).
+    // UNMEASURED (engine runs were off when this landed, 2026-09-27). The ALLOW_UPDATE allocation is
+    // LATCHED when a structure is created (like layeredBsdf); toggling live only changes whether a refit is
+    // attempted. Console: voxi.rtRefitAccel.
+    bool rtRefitAccel = true;
 
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS: RAY TRACING is discrete rays answering one

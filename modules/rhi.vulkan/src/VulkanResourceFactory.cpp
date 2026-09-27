@@ -2659,7 +2659,7 @@ bool accelStructureSupported(VulkanDevice& dev) {
 }
 } // namespace
 
-BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) {
+BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdate) {
     collect();
     if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createBlas without ray-tracing support"); return 0; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.Vulkan] createBlas with an invalid mesh handle"); return 0; }
@@ -2683,9 +2683,14 @@ BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) {
     geom.geometry.triangles = tri;
     geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
 
+    // ALLOW_UPDATE_BIT_KHR must be in the size query AND every later build/update for this
+    // structure to stay updatable -- Vulkan sizes (and validates an update against) the flags the
+    // structure was queried/built with, same as D3D12's ALLOW_UPDATE requirement.
+    const VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+        (allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bi.flags = flags;
     bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bi.geometryCount = 1;
     bi.pGeometries = &geom;
@@ -2693,13 +2698,21 @@ BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) {
     const u32 primCount = m.indexCount / 3;
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &primCount, &sizeInfo);
+    // Scratch sized for whichever of a build or an update is larger -- this ONE scratch buffer
+    // serves both buildBlas (full BUILD) and refitBlas (in-place UPDATE) for the structure's whole
+    // life; updateScratchSize is 0 (and irrelevant) when allowUpdate is false.
+    const VkDeviceSize scratchSize = allowUpdate ? std::max(sizeInfo.buildScratchSize, sizeInfo.updateScratchSize)
+                                                  : sizeInfo.buildScratchSize;
 
     RhiBlas b{};
     b.mesh = mesh;
+    b.allowUpdate = allowUpdate;
+    b.asSize = sizeInfo.accelerationStructureSize;
+    b.scratchSize = scratchSize;
     if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.asBuffer, b.asMemory, nullptr, "rhi BLAS buffer") ||
-        !createBufferCommitted(*dev_, sizeInfo.buildScratchSize,
+        !createBufferCommitted(*dev_, scratchSize,
                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.scratchBuffer, b.scratchMemory, nullptr, "rhi BLAS scratch")) {
         AVER_ERROR("[RHI.Vulkan] createBlas allocation failed");
@@ -2729,7 +2742,15 @@ BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) {
     return static_cast<BlasHandle>(blases_.size());
 }
 
-TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) {
+BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) { return createBlasImpl(mesh, false); }
+
+// UPDATABLE twin of createBlas -- see IResourceFactory's contract comment above
+// createBlasUpdatable. Same allocation, plus ALLOW_UPDATE_BIT_KHR and a build-AND-update-sized
+// scratch, so VulkanRenderContext::refitBlas can update this BLAS in place instead of rebuilding it
+// from scratch every frame (the compute-skinned-mesh case RHIResources.hpp motivates this with).
+BlasHandle VulkanResourceFactory::createBlasUpdatable(MeshHandle mesh) { return createBlasImpl(mesh, true); }
+
+TlasHandle VulkanResourceFactory::createTlasImpl(u32 maxInstances, bool allowUpdate) {
     collect();
     if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createTlas without ray-tracing support"); return 0; }
     if (maxInstances == 0) { AVER_ERROR("[RHI.Vulkan] createTlas for zero instances"); return 0; }
@@ -2741,22 +2762,30 @@ TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) {
     geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
 
+    // See createBlasImpl's identical comment: the size query's flags must be the flags this
+    // structure will actually be built/updated with.
+    const VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+        (allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bi.flags = flags;
     bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bi.geometryCount = 1;
     bi.pGeometries = &geom;
 
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &maxInstances, &sizeInfo);
+    // Scratch sized for whichever of a build or an update is larger -- see createBlasImpl.
+    const VkDeviceSize scratchSize = allowUpdate ? std::max(sizeInfo.buildScratchSize, sizeInfo.updateScratchSize)
+                                                  : sizeInfo.buildScratchSize;
 
     RhiTlas t{};
     t.maxInstances = maxInstances;
+    t.allowUpdate = allowUpdate;
     if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.asBuffer, t.asMemory, nullptr, "rhi TLAS buffer") ||
-        !createBufferCommitted(*dev_, sizeInfo.buildScratchSize,
+        !createBufferCommitted(*dev_, scratchSize,
                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.scratchBuffer, t.scratchMemory, nullptr, "rhi TLAS scratch")) {
         AVER_ERROR("[RHI.Vulkan] createTlas allocation failed");
@@ -2792,6 +2821,14 @@ TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) {
     tlases_.push_back(t);
     return static_cast<TlasHandle>(tlases_.size());
 }
+
+TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) { return createTlasImpl(maxInstances, false); }
+
+// UPDATABLE twin of createTlas -- see IResourceFactory's contract comment above
+// createTlasUpdatable. Same allocation, plus ALLOW_UPDATE_BIT_KHR and a build-AND-update-sized
+// scratch, so VulkanRenderContext::refitTlas can update this TLAS in place instead of rebuilding it
+// from scratch every frame.
+TlasHandle VulkanResourceFactory::createTlasUpdatable(u32 maxInstances) { return createTlasImpl(maxInstances, true); }
 
 void VulkanResourceFactory::destroyTexture(TextureHandle h) {
     // BEFORE anything is torn down: a UI toolkit may hold a descriptor pointing at this texture's
@@ -2852,6 +2889,9 @@ void VulkanResourceFactory::destroyBlas(BlasHandle h) {
     b.scratchBuffer = VK_NULL_HANDLE;
     b.mesh = 0;
     b.built = false;
+    b.allowUpdate = false;
+    b.builtVertexCount = 0;
+    b.builtIndexCount = 0;
     collect();
 }
 

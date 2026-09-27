@@ -1876,6 +1876,22 @@ struct RhiBlas {
     ComPtr<ID3D12Resource> as, scratch;
     MeshHandle mesh = 0;
     bool built = false;
+    // Set at creation by createBlasUpdatable: built with ALLOW_UPDATE and a scratch sized for an
+    // update too, so refitBlas may update this BLAS in place instead of rebuilding it from scratch.
+    bool allowUpdate = false;
+    // This mesh's vertex/index counts as of the last full build -- refitBlas's eligibility test.
+    // An in-place update must keep the SAME geometry description (D3D12 requires it), only moved
+    // vertex positions; a mesh that has grown or shrunk since needs a full rebuild instead.
+    u32 builtVertexCount = 0;
+    u32 builtIndexCount = 0;
+};
+
+// One instance as it was packed into a TLAS's last build or refit -- BLAS identity, D3D12 instance
+// flags and mask, but not the transform or instance id, which refitTlas allows to change freely.
+struct RhiTlasSlot {
+    D3D12_GPU_VIRTUAL_ADDRESS blasVa = 0;
+    u32 flags = 0;
+    u32 mask = 0;
 };
 
 // A top-level acceleration structure, its scratch, and one instance buffer per frame in flight.
@@ -1884,6 +1900,16 @@ struct RhiTlas {
     ComPtr<ID3D12Resource> instances[kFrameCount];
     u8* instancePtr[kFrameCount] = {};
     u32 maxInstances = 0;
+    // Set at creation by createTlasUpdatable: see RhiBlas::allowUpdate above.
+    bool allowUpdate = false;
+    bool built = false;
+    // The last build's or refit's per-slot signature, for refitTlas's eligibility test: an update
+    // is only legal when the new instance list has the same count and every slot still names the
+    // same BLAS with the same flags and mask.
+    std::vector<RhiTlasSlot> builtSlots;
+    // Where each build/refit packs its NEW signature before swapping it with builtSlots -- kept, not a
+    // local, so a per-frame refit reuses one allocation instead of making one per call.
+    std::vector<RhiTlasSlot> pendingSlots;
 };
 
 // A root signature plus the parameter indices it was built with; shared by identical layouts.
@@ -1990,6 +2016,11 @@ public:
     BindingSetHandle createBindingSet(const BindingSetDesc& d) override;
     BlasHandle       createBlas(MeshHandle mesh) override;
     TlasHandle       createTlas(u32 maxInstances) override;
+    // UPDATABLE twins: same allocation, built with ALLOW_UPDATE and a scratch sized for an update
+    // too, so IRenderContext::refitBlas/refitTlas can update the result in place. See
+    // RHIResources.hpp's contract.
+    BlasHandle       createBlasUpdatable(MeshHandle mesh) override;
+    TlasHandle       createTlasUpdatable(u32 maxInstances) override;
 
     void destroyTexture(TextureHandle h) override;
     void destroyBuffer(BufferHandle h) override;
@@ -2042,6 +2073,12 @@ public:
 private:
     // The acceleration-structure substitution warning, said once per device.
     bool asSlotLogged_ = false;
+
+    // Shared by createBlas/createBlasUpdatable and createTlas/createTlasUpdatable: identical except
+    // for `allowUpdate`, which decides the build flags the prebuild query is run against and whether
+    // scratch is sized for an update as well as a build.
+    BlasHandle createBlasImpl(MeshHandle mesh, bool allowUpdate);
+    TlasHandle createTlasImpl(u32 maxInstances, bool allowUpdate);
 
     // Fills a freshly created texture from TextureDesc::initialData. The resource must already be
     // in COPY_DEST; on success it has been transitioned to `d.initialState` and the GPU has finished.
@@ -2175,6 +2212,8 @@ public:
     void drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) override;
     void buildBlas(BlasHandle blas) override;
     void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
+    bool refitBlas(BlasHandle blas) override;
+    bool refitTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     void textureBarrier(TextureHandle t, ResourceState from, ResourceState to, u32 subresource) override;
     void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) override;
     void uavBarrierTexture(TextureHandle t) override;
@@ -2190,6 +2229,13 @@ private:
     // Bind the sticky per-draw state, if the current pipeline declared anywhere to put it.
     void applyDrawBinding();
     D3D12_GPU_VIRTUAL_ADDRESS zeroCbv();
+    // Packs `instances` (filtered exactly as buildTlas has always done: an invalid BLAS or an id
+    // that doesn't fit 24 bits is skipped, logging under `caller`) into `t`'s THIS-frame instance
+    // buffer and returns the per-slot signature refitTlas compares against the last build/refit.
+    // Shared by buildTlas and refitTlas so one packing loop serves both -- a future change to the
+    // filtering or transform packing can't update only one of them.
+    u32 packTlasInstances(RhiTlas& t, const TlasInstance* instances, u32 count, const char* caller,
+                          std::vector<RhiTlasSlot>& outSlots);
 
     D3D12Device* dev_;
     D3D12ResourceFactory* res_;
@@ -7408,8 +7454,11 @@ BindingSetHandle D3D12ResourceFactory::createBindingSet(const BindingSetDesc& d)
 }
 
 namespace {
-// Geometry description shared by the prebuild query and the build. The result points at `geo`.
-D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m, D3D12_RAYTRACING_GEOMETRY_DESC& geo) {
+// Geometry description shared by the prebuild query, the build and (when `allowUpdate`) the update
+// -- all three must agree on Flags/NumDescs/geometry or D3D12 either rejects the update or sizes the
+// scratch wrong. The result points at `geo`.
+D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m, D3D12_RAYTRACING_GEOMETRY_DESC& geo,
+                                                                 bool allowUpdate) {
     geo = {};
     geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
     geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
@@ -7425,14 +7474,32 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m
     in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
     in.NumDescs = 1;
     in.pGeometryDescs = &geo;
+    return in;
+}
+
+// Same role as blasInputs above, for the TLAS: shared by the prebuild query, the build and the
+// update, `NumDescs` aside (an update keeps the descs it was built with; buildTlas/refitTlas pass
+// however many instances survived filtering).
+D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlasInputs(u32 numDescs, bool allowUpdate) {
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    in.NumDescs = numDescs;
     return in;
 }
 } // namespace
 
 // Allocates a bottom-level acceleration structure for a mesh, sized by the prebuild query.
-BlasHandle D3D12ResourceFactory::createBlas(MeshHandle mesh) {
+BlasHandle D3D12ResourceFactory::createBlas(MeshHandle mesh) { return createBlasImpl(mesh, false); }
+// Same, but built with ALLOW_UPDATE and a scratch sized for an update too -- see RhiBlas::allowUpdate.
+BlasHandle D3D12ResourceFactory::createBlasUpdatable(MeshHandle mesh) { return createBlasImpl(mesh, true); }
+
+BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdate) {
     collect();
     if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] createBlas without ray-tracing support"); return 0; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] createBlas with an invalid mesh handle"); return 0; }
@@ -7444,37 +7511,45 @@ BlasHandle D3D12ResourceFactory::createBlas(MeshHandle mesh) {
     if (m.indexCount == 0) { AVER_ERROR("[RHI.D3D12] createBlas for a mesh with no indices"); return 0; }
 
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
-    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo);
+    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo, allowUpdate);
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
 
     RhiBlas b;
     b.mesh = mesh;
+    b.allowUpdate = allowUpdate;
     b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    b.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
+    // An updatable structure's scratch must cover whichever of a build or an update asks for more --
+    // it is reused for both, and D3D12 sizes the two independently.
+    const u64 scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
+                                          : info.ScratchDataSizeInBytes;
+    b.scratch = makeAsBuffer(dev_->device_.Get(), scratchBytes, D3D12_RESOURCE_STATE_COMMON);
     if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
 }
 
 // Allocates a top-level acceleration structure for up to `maxInstances` instances.
-TlasHandle D3D12ResourceFactory::createTlas(u32 maxInstances) {
+TlasHandle D3D12ResourceFactory::createTlas(u32 maxInstances) { return createTlasImpl(maxInstances, false); }
+// Same, but built with ALLOW_UPDATE and a scratch sized for an update too -- see RhiTlas::allowUpdate.
+TlasHandle D3D12ResourceFactory::createTlasUpdatable(u32 maxInstances) { return createTlasImpl(maxInstances, true); }
+
+TlasHandle D3D12ResourceFactory::createTlasImpl(u32 maxInstances, bool allowUpdate) {
     collect();
     if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] createTlas without ray-tracing support"); return 0; }
     if (maxInstances == 0) { AVER_ERROR("[RHI.D3D12] createTlas for zero instances"); return 0; }
 
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    in.NumDescs = maxInstances;
+    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(maxInstances, allowUpdate);
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
 
     RhiTlas t;
     t.maxInstances = maxInstances;
+    t.allowUpdate = allowUpdate;
     t.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    t.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
+    const u64 scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
+                                          : info.ScratchDataSizeInBytes;
+    t.scratch = makeAsBuffer(dev_->device_.Get(), scratchBytes, D3D12_RESOURCE_STATE_COMMON);
     if (!t.as || !t.scratch) { AVER_ERROR("[RHI.D3D12] createTlas allocation failed"); return 0; }
 
     const u64 bytes = static_cast<u64>(maxInstances) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
@@ -8615,7 +8690,7 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
 
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-    bd.Inputs = blasInputs(m, geo);
+    bd.Inputs = blasInputs(m, geo, b->allowUpdate);
     bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
     dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
@@ -8624,25 +8699,87 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     bar.UAV.pResource = b->as.Get();
     dev_->cmdList_->ResourceBarrier(1, &bar);
     b->built = true;
+    b->builtVertexCount = m.vertexCount;
+    b->builtIndexCount = m.indexCount;
 }
 
-// Packs the instance buffer and records a top-level acceleration structure build.
-void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
-    RhiTlas* t = res_->tlas(h);
-    if (!t) { AVER_ERROR("[RHI.D3D12] buildTlas with an invalid handle"); return; }
-    if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] buildTlas without ray-tracing support"); return; }
-    if (count > t->maxInstances) {
-        AVER_WARN("[RHI.D3D12] buildTlas: {} instances clamped to the {} this TLAS was sized for", count, t->maxInstances);
-        count = t->maxInstances;
+// Updates `h` in place from its mesh's current vertices when eligible, otherwise falls back to a
+// full buildBlas -- see RHIResources.hpp's refitBlas contract.
+bool D3D12RenderContext::refitBlas(BlasHandle h) {
+    RhiBlas* b = res_->blas(h);
+    if (!b) { AVER_ERROR("[RHI.D3D12] refitBlas with an invalid handle"); return false; }
+    if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] refitBlas without ray-tracing support"); return false; }
+    if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return false;
+    const GpuMesh& m = dev_->meshes_[b->mesh - 1];
+
+    // Not eligible: not created updatable, never built, or the mesh's vertex/index counts have moved
+    // since that build -- an update must keep the SAME geometry description as the build it updates.
+    const bool countsChanged = m.vertexCount != b->builtVertexCount || m.indexCount != b->builtIndexCount;
+    if (!b->allowUpdate || !b->built || countsChanged) {
+        // A genuine count change -- unlike "never built yet", where b->as/b->scratch are already
+        // sized for the mesh as it is right now -- is the one case where falling through to buildBlas
+        // below is not necessarily safe: those buffers were sized ONCE, by createBlasImpl's prebuild
+        // query at creation, and are never reallocated afterwards. A full rebuild of a mesh that has
+        // genuinely grown since would write past them -- GPU corruption or a device-lost crash, not a
+        // clean fallback. Compute-skinned meshes, what refit exists for, keep the SAME vertex/index
+        // counts every tick and only move positions, so this should never actually fire; check rather
+        // than trust that, and refuse the corrupting build instead of attempting it. A caller whose
+        // mesh's counts really did change must destroy and recreate the BLAS instead.
+        if (b->built && countsChanged) {
+            D3D12_RAYTRACING_GEOMETRY_DESC geo{};
+            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo, b->allowUpdate);
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+            dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+            const u64 scratchBytes = b->allowUpdate
+                ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
+                : info.ScratchDataSizeInBytes;
+            if (info.ResultDataMaxSizeInBytes > b->as->GetDesc().Width || scratchBytes > b->scratch->GetDesc().Width) {
+                AVER_ERROR("[RHI.D3D12] refitBlas: mesh {} moved from {}v/{}i to {}v/{}i, past what its BLAS "
+                           "was allocated for at creation -- rebuilding it in place would write past that "
+                           "allocation, so this refit is refused; the caller must destroy and recreate the BLAS",
+                           b->mesh, b->builtVertexCount, b->builtIndexCount, m.vertexCount, m.indexCount);
+                return false;
+            }
+        }
+        buildBlas(h);
+        return false;
+    }
+
+    D3D12_RAYTRACING_GEOMETRY_DESC geo{};
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+    bd.Inputs = blasInputs(m, geo, /*allowUpdate=*/true);
+    bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+    bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
+    bd.SourceAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    bar.UAV.pResource = b->as.Get();
+    dev_->cmdList_->ResourceBarrier(1, &bar);
+    return true;
+}
+
+// Packs `instances` into `t`'s THIS-frame instance buffer -- never another frame's, in flight or
+// not -- exactly as buildTlas has always filtered them, and records the per-slot signature
+// refitTlas needs to decide whether its next call can update in place.
+u32 D3D12RenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* instances, u32 count, const char* caller,
+                                          std::vector<RhiTlasSlot>& outSlots) {
+    if (count > t.maxInstances) {
+        AVER_WARN("[RHI.D3D12] {}: {} instances clamped to the {} this TLAS was sized for", caller, count, t.maxInstances);
+        count = t.maxInstances;
     }
     const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
-    if (!t->instancePtr[f]) return;
+    outSlots.clear();
+    if (!t.instancePtr[f]) return 0;
+    outSlots.reserve(count);
 
-    auto* dst = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(t->instancePtr[f]);
+    auto* dst = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(t.instancePtr[f]);
     u32 written = 0;
     for (u32 i = 0; i < count && instances; ++i) {
         const RhiBlas* b = res_->blas(instances[i].blas);
-        if (!b || !b->as) { AVER_WARN("[RHI.D3D12] buildTlas: instance {} names an invalid BLAS", i); continue; }
+        if (!b || !b->as) { AVER_WARN("[RHI.D3D12] {}: instance {} names an invalid BLAS", caller, i); continue; }
         D3D12_RAYTRACING_INSTANCE_DESC id{};
         // Engine matrices are row-major / row-vector (v*M); DXR wants a 3x4 column-vector [R|T].
         for (int r = 0; r < 3; ++r) {
@@ -8653,9 +8790,9 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
         // Rejected rather than truncated: InstanceID is a 24-bit bitfield, so a larger value would
         // silently alias onto another instance's id and a hit would resolve to the wrong geometry.
         if (instances[i].instanceId > kMaxTlasInstanceId) {
-            AVER_ERROR("[RHI.D3D12] buildTlas: instance {} has id {} which does not fit in 24 bits; "
+            AVER_ERROR("[RHI.D3D12] {}: instance {} has id {} which does not fit in 24 bits; "
                        "it is dropped rather than aliased onto another instance",
-                       i, instances[i].instanceId);
+                       caller, i, instances[i].instanceId);
             continue;
         }
         id.InstanceID = instances[i].instanceId;
@@ -8675,13 +8812,23 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
         id.Flags = d3dFlags;
         id.AccelerationStructure = b->as->GetGPUVirtualAddress();
         dst[written++] = id;
+        // The mask as the GPU keeps it (InstanceMask is 8 bits), so bits it never sees can't defeat a refit.
+        outSlots.push_back({id.AccelerationStructure, d3dFlags, instances[i].mask & 0xFFu});
     }
+    return written;
+}
 
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    in.NumDescs = written;
+// Packs the instance buffer and records a top-level acceleration structure build.
+void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
+    RhiTlas* t = res_->tlas(h);
+    if (!t) { AVER_ERROR("[RHI.D3D12] buildTlas with an invalid handle"); return; }
+    if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] buildTlas without ray-tracing support"); return; }
+    const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+    if (!t->instancePtr[f]) return;
+
+    const u32 written = packTlasInstances(*t, instances, count, "buildTlas", t->pendingSlots);
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(written, t->allowUpdate);
     in.InstanceDescs = t->instances[f]->GetGPUVirtualAddress();
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
@@ -8693,6 +8840,51 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = t->as.Get();
     dev_->cmdList_->ResourceBarrier(1, &bar);
+    t->built = true;
+    t->builtSlots.swap(t->pendingSlots);
+}
+
+// Updates `h` in place when the filtered instance list matches the last build/refit's signature
+// exactly (same count, every slot naming the same BLAS with the same flags and mask -- transforms
+// and instance ids may differ), otherwise records a full build instead. See RHIResources.hpp's
+// refitTlas contract. REQUIRED after any buildBlas/refitBlas of a BLAS this TLAS references.
+bool D3D12RenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
+    RhiTlas* t = res_->tlas(h);
+    if (!t) { AVER_ERROR("[RHI.D3D12] refitTlas with an invalid handle"); return false; }
+    if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] refitTlas without ray-tracing support"); return false; }
+    const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+    if (!t->instancePtr[f]) return false;
+
+    std::vector<RhiTlasSlot>& slots = t->pendingSlots;
+    const u32 written = packTlasInstances(*t, instances, count, "refitTlas", slots);
+
+    bool eligible = t->allowUpdate && t->built && slots.size() == t->builtSlots.size();
+    for (size_t i = 0; eligible && i < slots.size(); ++i) {
+        const RhiTlasSlot& a = slots[i];
+        const RhiTlasSlot& prev = t->builtSlots[i];
+        if (a.blasVa != prev.blasVa || a.flags != prev.flags || a.mask != prev.mask) eligible = false;
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(written, t->allowUpdate);
+    in.InstanceDescs = t->instances[f]->GetGPUVirtualAddress();
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+    bd.Inputs = in;
+    bd.ScratchAccelerationStructureData = t->scratch->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = t->as->GetGPUVirtualAddress();
+    if (eligible) {
+        bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+        // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
+        bd.SourceAccelerationStructureData = t->as->GetGPUVirtualAddress();
+    }
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    bar.UAV.pResource = t->as.Get();
+    dev_->cmdList_->ResourceBarrier(1, &bar);
+    t->built = true;
+    t->builtSlots.swap(t->pendingSlots);
+    return eligible;
 }
 
 namespace {

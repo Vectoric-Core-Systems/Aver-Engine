@@ -983,10 +983,23 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Skips the TLAS rebuild and instance/material table rewrite when nothing "
         "buildAccelerationStructures() reads from the draw list has changed since the last build -- "
         "MEASURED at 0.42 ms/frame on a static scene otherwise spent recomputing the identical answer. "
-        "Same image always; a compute-skinned mesh present, or a cached BLAS handle gone stale, still "
-        "forces a real rebuild regardless of this setting's own key match.",
+        "Same image always; a cached BLAS handle gone stale still forces a real rebuild regardless of "
+        "this setting's own key match. A compute-skinned mesh present forces it too when "
+        "voxi.rtRefitAccel is off; when that's on, this instead runs a lighter refit-only pass for it.",
         []{ return vBool(Renderer::get().settings().rtSkipUnchangedTlas); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSkipUnchangedTlas = on; }); }});
+    t.push_back({"voxi.rtRefitAccel", VarType::Bool, false,
+        "Updates the TLAS and a compute-skinned mesh's BLAS in place (refit) instead of a full "
+        "PREFER_FAST_TRACE build every time they move, including on a tick voxi.rtSkipUnchangedTlas "
+        "would otherwise skip outright (a lighter refit-only pass instead). Falls back to a full "
+        "rebuild periodically since refit quality drifts with the pose, and whenever the RHI can't "
+        "refit in place. Off is today's behaviour exactly: full builds only, no ALLOW_UPDATE "
+        "allocation, and a compute-skinned mesh forces the whole per-draw loop and a full TLAS build "
+        "every frame. Whether a structure actually carries ALLOW_UPDATE is latched when it is created "
+        "(project load), not reread every frame; toggling this live only changes whether a refit is "
+        "attempted on structures already allocated updatable.",
+        []{ return vBool(Renderer::get().settings().rtRefitAccel); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtRefitAccel = on; }); }});
     t.push_back({"voxi.rtSecondaryShadowOpaque", VarType::Bool, false,
         "Fires the sun-shadow ray from a secondary hit (reflection, ReSTIR GI candidate) as one "
         "RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH ray against the opaque-including-cutouts mask "
