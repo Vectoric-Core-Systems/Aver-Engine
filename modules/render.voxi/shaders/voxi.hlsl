@@ -477,42 +477,73 @@ float rdLocalVisFiltered(uint2 pixel) {
     return sum / wsum;
 }
 
-// The lamp-HISTORY twin of rdLocalVisTap for rdLocalHistFiltered's 3x3: same weight shape/tolerance, but
-// against LAST frame's stored depth (gRtShadowHist.y, at gRdLocalHist's ping-ponged texel) instead of
-// this frame's gRdSunVisTex.a -- depth belongs to the surface, not the light (rtReprojectTexel), which is
-// why gRdLocalHist carries none of its own.
-void rdLocalHistTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout float wsum) {
-    const int2  q  = clamp(p, lo, hi);
+// ---- lamp HISTORY reads, at the continuous reprojected position ----
+// Against LAST frame's stored depth (gRtShadowHist.y at gRdLocalHist's ping-ponged texel), not this frame's
+// gRdSunVisTex.a -- depth belongs to the surface, not the light (rtReprojectTexel), which is why
+// gRdLocalHist carries none of its own. Bounds: gRtShadowHist's dimensions intersected with the PREVIOUS
+// viewport (gSceneViewport); a tap outside either is skipped.
+//
+// SUB-PIXEL, NOT SNAPPED (2026-09-28): both reads used to centre on rtReprojectTexel's floor()ed texel. Flying
+// FORWARD magnifies the image, so several pixels snapped to one history texel and read identical values --
+// a noisy texel became a blob that grew as the camera kept moving ("noise in the night view when in
+// motion": vault MAD 11.0 moving vs settled, lamps off 1.6). Weights now follow the exact reprojected
+// point `pxPrev`; at rest it sits on a texel centre, so both reduce to the old weights exactly.
+void rdLocalHistBounds(out int2 lo, out int2 hi) {
+    float texW, texH;
+    gRtShadowHist.GetDimensions(texW, texH);
+    lo = max(int2(gSceneViewport.xy), int2(0, 0));
+    hi = min(int2(gSceneViewport.xy) + max(int2(gSceneViewport.zw), int2(1, 1)) - 1,
+             int2((int)texW, (int)texH) - 1);
+}
+
+// One history tap, weighted by `area` (its share of the caller's footprint) times depth agreement with zc
+// (same shape/tolerance as rdLocalVisTap). Skipped, not multiplied by zero: see rdLocalVisTap.
+void rdLocalHistTap(int2 q, int2 lo, int2 hi, float zc, float area, inout float sum, inout float wsum) {
+    if (area <= 0.0 || any(q < lo) || any(q > hi)) return;
     const float zt = gRtShadowHist.Load(int3(q, 0)).y;
-    const float w  = (zt > 0.0) ? saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
-    // Skipped, not multiplied by a zero weight: see rdLocalVisTap above for why.
+    const float w  = (zt > 0.0) ? area * saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
     if (w > 0.0) {
         sum  += gRdLocalHist.Load(int3(q, 0)).a * w;
         wsum += w;
     }
 }
 
-// THE HISTORY READ rdLocalLightsVisibility blends its fresh sample into (all modes) -- unrelated to
-// Stage B's THIS FRAME filter above. A depth-weighted 3x3 around the REPROJECTED history texel
-// (rtReprojectTexel's `texel` out-param), against the SUN history's stored depth (gRdLocalHist has none
-// of its own). Bounds: gRtShadowHist's dimensions intersected with the PREVIOUS frame's viewport
-// (gSceneViewport) -- a tap outside either lands on a stale, differently sized frame's texel. Why an
-// average, not the bare texel: see rdLocalLightsVisibility's accumulation comment below.
-float rdLocalHistFiltered(int2 texel) {
-    float texW, texH;
-    gRtShadowHist.GetDimensions(texW, texH);
-    const int2 lo = max(int2(gSceneViewport.xy), int2(0, 0));
-    const int2 hi = min(int2(gSceneViewport.xy) + max(int2(gSceneViewport.zw), int2(1, 1)) - 1,
-                         int2((int)texW, (int)texH) - 1);
-    const float zc = gRtShadowHist.Load(int3(texel, 0)).y;
-    float sum  = gRdLocalHist.Load(int3(texel, 0)).a;
-    float wsum = 1.0;
-    [unroll] for (int oy = -1; oy <= 1; ++oy) {
-        [unroll] for (int ox = -1; ox <= 1; ++ox) {
-            if (ox != 0 || oy != 0) rdLocalHistTap(texel + int2(ox, oy), lo, hi, zc, sum, wsum);
+// The value CARRIED forward (prevVisC): bilinear at pxPrev over depth-agreeing taps. `texel` is
+// rtReprojectTexel's validated one, the fallback if no tap agrees.
+float rdLocalHistBilinear(float2 pxPrev, int2 texel) {
+    int2 lo, hi;
+    rdLocalHistBounds(lo, hi);
+    const float  zc = gRtShadowHist.Load(int3(texel, 0)).y;
+    const float2 f  = pxPrev - 0.5;
+    const int2   q0 = int2(floor(f));
+    const float2 t  = f - float2(q0);
+    float sum = 0.0, wsum = 0.0;
+    rdLocalHistTap(q0,              lo, hi, zc, (1.0 - t.x) * (1.0 - t.y), sum, wsum);
+    rdLocalHistTap(q0 + int2(1, 0), lo, hi, zc, t.x * (1.0 - t.y),         sum, wsum);
+    rdLocalHistTap(q0 + int2(0, 1), lo, hi, zc, (1.0 - t.x) * t.y,         sum, wsum);
+    rdLocalHistTap(q0 + int2(1, 1), lo, hi, zc, t.x * t.y,                 sum, wsum);
+    return wsum > 0.0 ? sum / wsum : gRdLocalHist.Load(int3(texel, 0)).a;
+}
+
+// THE HISTORY READ rdLocalLightsVisibility blends its fresh sample into (all modes) -- unrelated to Stage
+// B's THIS-frame filter above: a depth-weighted 3x3-texel BOX centred on pxPrev, each texel weighted by its
+// area overlap (up to 4x4 taps while moving, exactly the old 3x3 at rest). Why an average, not the bare
+// texel: see rdLocalLightsVisibility's accumulation comment below.
+float rdLocalHistFiltered(float2 pxPrev, int2 texel) {
+    int2 lo, hi;
+    rdLocalHistBounds(lo, hi);
+    const float  zc = gRtShadowHist.Load(int3(texel, 0)).y;
+    const float2 a  = pxPrev - 1.5, b = pxPrev + 1.5;
+    const int2   q0 = int2(floor(a));
+    float sum = 0.0, wsum = 0.0;
+    [unroll] for (int oy = 0; oy < 4; ++oy) {
+        [unroll] for (int ox = 0; ox < 4; ++ox) {
+            const int2   q  = q0 + int2(ox, oy);
+            const float2 ov = saturate(min(float2(q) + 1.0, b) - max(float2(q), a));
+            rdLocalHistTap(q, lo, hi, zc, ov.x * ov.y, sum, wsum);
         }
     }
-    return sum / wsum;
+    return wsum > 0.0 ? sum / wsum : gRdLocalHist.Load(int3(texel, 0)).a;
 }
 
 // ---- THE VISIBILITY HALF: one shadow ray for every lamp, accumulated the way the sun's is ----
@@ -555,8 +586,10 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
     float prevVisC = 1.0;
     float prevVisF = 1.0;
     if (haveHist) {
-        prevVisC = gRdLocalHist.Load(int3(texel, 0)).a;
-        prevVisF = rdLocalHistFiltered(texel);
+        // Where this surface point sat last frame, unsnapped (rtReprojectTexel: velocityPx = px - pixelC).
+        const float2 pxPrev = pixelC + velocityPx;
+        prevVisC = rdLocalHistBilinear(pxPrev, texel);
+        prevVisF = rdLocalHistFiltered(pxPrev, texel);
     }
 
     // HALF RATE: a pixel with usable history traces on alternate frames (checkerboard swapping every
@@ -613,10 +646,12 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
             const float frameJitter = (float)turn * 2.39996323;
             const float v = rdLocalShadow(wpos, N, gRdLocalLights[pick], pixelC, frameJitter);
 
-            // Exponential accumulation: 0.95 history at rest (~20 turns), falling to 0.5 by 8 px/frame of
-            // motion. UNMEASURED (tighter than the sun's measured 32 px budget, rtShadowTemporalEx) --
-            // first number to revisit if lamp shadows smear/crawl under motion; the slow at-rest weight
-            // costs ~1/3 s for a shadow to settle after motion.
+            // Exponential accumulation: 0.95 history at rest (~20 turns), rising only to 0.2 fresh by 32
+            // px/frame (the sun's own measured budget, rtShadowTemporalEx). Was 0.5 by 8 px/frame: an
+            // ordinary pan then averaged ~2 frames of a 0/1 ray and the filters smeared that into boiling
+            // blotches. MEASURED on NewSponza_Night (moving vs settled MAD, fixed exposure): pan 6.43 ->
+            // 3.48, fast pan 7.02 -> 5.00. A static lamp's shadow does not change when the CAMERA moves --
+            // reprojection carries it, and the depth test already drops history on a changed surface.
             //
             // Blended into prevVisF, not bare prevVisC: an EMA fed a Bernoulli 0/1 trace never settles
             // (steady-state stddev sqrt(alpha/(2-alpha)*p(1-p)), ~11% at a half-lit penumbra with alpha
@@ -626,7 +661,7 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
             // 2.0 with all three -- matching the scene's own 2.0 with lamps off.
             vis = v;
             if (haveHist) {
-                const float alpha = lerp(0.05, 0.5, saturate(length(velocityPx) / 8.0));
+                const float alpha = lerp(0.05, 0.2, saturate(length(velocityPx) / 32.0));
                 vis = lerp(prevVisF, v, alpha);
             }
             histVis = vis;   // carried forward as next frame's prevVisC, to fold into rdLocalHistFiltered's 3x3 again
