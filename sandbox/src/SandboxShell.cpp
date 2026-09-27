@@ -1,6 +1,5 @@
-// Editor: the menu bar and toolbar (buildUI), modal prompts, the output log and console, the drawer and notifications, reference/profiler/nav panels.
-// Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
-// verbatim; the class itself is declared in SandboxApp.hpp.
+// Editor: menu bar/toolbar (buildUI), modal prompts, output log/console, drawer/notifications, reference/profiler/nav panels.
+// Split out of SandboxApp.cpp (29,952 lines) on 2026-09-16, method bodies moved verbatim; class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
 
@@ -13,29 +12,15 @@ namespace aver {
 // because a declaration compiled out while its definition is not is a C2039 on a member of a class
 // that no longer has one -- which is exactly how `no-ui` and `d3d12-off` broke.
 #if AVER_WITH_IMGUI
-// ---- The GPU profiler, as a panel rather than as scrolling text -----------------------------
-//
-// D3D12Device has kept a full hierarchical timestamp profiler for a long time and its ONLY
-// consumer was the interactive `frametime` console command -- so a per-pass tree existed and
-// could only be read as a wall of text that scrolled away. GpuTimingReport is already
-// structural (label, inclusive ms, parent index), so this is genuinely a view over data that
-// was there: no new instrumentation, no new cost.
-//
-// EXCLUSIVE TIME IS DERIVED HERE, not reported: the nodes carry INCLUSIVE ms and a parent
-// index, and "how much of this pass is not its children" is the number that actually points at
-// what to optimise. Deriving it in the view keeps the ABI carrying one number per node.
-// The References panel: which files name the asset you asked about.
-//
-// WHY IT IS A PANEL AND NOT ONLY A MODAL LINE. The scan has existed for a while, and could be
-// reached from exactly two places: the delete confirm and the rename confirm. So the one moment
-// an author could ask "what uses this?" was the moment they had already decided to remove or
-// rename it -- which is the wrong end of the question. This asks it on demand.
-//
-// A SCAN, NOT AN INDEX, and it says so. The result is a snapshot taken when you pressed the menu
-// item, over the text formats only, and it can be wrong in one direction: a reference built at
-// runtime in C#, or held only as a hashed ObjectId with the path nowhere on disk, cannot be seen
-// from here. Reporting "found N" rather than "there are exactly N" is the honest framing and the
-// panel repeats it, because a reader who takes this for a complete answer will delete something.
+// ---- GPU profiler panel (view over GpuTimingReport, previously only readable via `frametime`) ----
+// A view over data already there -- no new instrumentation, no new cost. Nodes carry INCLUSIVE ms
+// + parent index; exclusive time (own cost minus children's) is derived here rather than stored,
+// so the ABI keeps one number per node.
+// ---- References panel: which files name the asset you asked about ----
+// On-demand scan (previously only reachable from delete/rename confirms -- too late to ask "what
+// uses this?"). A snapshot over text formats only, not an index: misses references built at
+// runtime in C# or held as a hashed id with no path on disk. Reports "found N", not "there are
+// exactly N" (repeated in the panel's own text below).
 void SandboxApp::buildReferencesPanel() {
     if (!showReferences_) return;
     ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 320.0f * dpi_), ImGuiCond_FirstUseEver);
@@ -60,8 +45,7 @@ void SandboxApp::buildReferencesPanel() {
         ImGui::Text("%zu file(s) name it:", refPanelResults_.size());
         ImGui::Separator();
         for (const std::string& rel : refPanelResults_) {
-            // DOUBLE-CLICK OPENS IT, which is what makes this a navigation surface rather than a
-            // list of strings you then have to go and find by hand.
+            // Double-click opens it -- makes this a navigation surface, not just a list of strings.
             if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 const std::string abs = project_.contentDir() + "\\" + rel;
@@ -72,8 +56,7 @@ void SandboxApp::buildReferencesPanel() {
     }
 
     ImGui::Separator();
-    // THE LIMIT, said every time rather than once in a comment nobody reads. See
-    // cbFindReferencesTo for what it can and cannot see.
+    // See cbFindReferencesTo for what this scan can/cannot see (restated in the UI text below).
     ImGui::TextDisabled("Scanned .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject for this path.");
     ImGui::TextDisabled("Cannot see: a path built in C# at runtime, or a reference stored only as");
     ImGui::TextDisabled("a hashed id. This is \"found N\", not \"there are exactly N\".");
@@ -87,8 +70,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 
     const rhi::GpuTimingReport r = e.device()->gpuTiming();
     if (!r.supported) {
-        // THE TWO "NO DATA" AXES ARE DIFFERENT QUESTIONS and the panel says which one it is
-        // rather than showing an empty tree. Vulkan has no timestamp machinery at all today.
+        // Two different "no data" cases, reported separately rather than as one empty tree.
         ImGui::TextWrapped("This backend does not report GPU timings. D3D12 does; the Vulkan "
                            "backend has no timestamp machinery yet.");
         ImGui::End();
@@ -128,9 +110,9 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
-        // ONE PASS, PARENT-BEFORE-CHILD, using the depth the parent chain implies rather than a
-        // recursive walk: the report is emitted in that order already, and indenting by computed
-        // depth keeps this immune to a node whose parent index points forward.
+        // Single pass, parent-before-child order (already the report's order); depth is computed
+        // from the parent chain rather than a recursive walk, so a forward-pointing parent index
+        // can't break it.
         for (usize i = 0; i < r.nodes.size(); ++i) {
             const rhi::GpuTimingNode& n = r.nodes[i];
             int depth = 0;
@@ -146,9 +128,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
             ImGui::Unindent(depth * 14.0f * dpi_);
             ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms);
             ImGui::TableSetColumnIndex(2);
-            // THE COLUMN WORTH READING, so it is the one that gets colour: a pass whose own
-            // time dominates is where the work is, and a parent that is nearly all children is
-            // just a label.
+            // Exclusive-time column is colour-coded -- it's the one that shows where the work is.
             const f64 frac = total > 0.0 ? (excl / total) : 0.0;
             if (frac > 0.20)      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%.2f", excl);
             else if (frac > 0.08) ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.40f, 1.0f), "%.2f", excl);
@@ -162,29 +142,17 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 #endif  // AVER_WITH_IMGUI -- the two panels above
 
 #if AVER_MODULE_SYNAPSE
-// Bakes, writes the result beside the level, and rebuilds the overlay. Returns false with a
-// reason rather than throwing one away, because every way this fails is something the author
-// has to act on: an empty level, an entity dropped far from the rest, physics not running.
+// Bakes, writes the .ocnav beside the level, rebuilds the overlay. Returns false with a reason
+// (not thrown away): every failure needs author action -- empty level, stray entity, no physics.
 //
-// THE FOUR TOASTS ARE GUARDED, THE BAKE IS NOT, and the split is deliberate rather than the
-// smallest edit that compiles. This function is guarded on AVER_MODULE_SYNAPSE because that is
-// what it genuinely needs for the grid arithmetic -- editor::bakeNavigation, synapse::BakeStats --
-// and it produces a .ocnav on disk plus a `why` string handed back to its caller, neither of which
-// wants a UI. notifyOutcome is declared and defined behind AVER_WITH_IMGUI because it pushes onto
-// editor::notifications(), which only the notification overlay ever drains; so the CALLER is
-// guarded, exactly as the screenshot writer in SandboxRender.cpp and --import's deferred handshake
-// already are (see notifyOutcome's own comment). Every branch below already logs its outcome
-// first, so a -DAVER_ENABLE_UI=OFF build still answers the question -- only the toast about it has
-// nowhere to appear.
-//
-// AND ALSO ON AVER_MODULE_SCENE, which AVER_MODULE_SYNAPSE alone does not prove. Aver.Synapse is
-// the grid math and nothing else, and a tree can compile it in with no entity world behind it at
-// all. The one line below that actually needs a world -- scene::World::instance(), handed to
-// editor::bakeNavigation as what to sample -- is what makes the WHOLE function meaningless without
-// SCENE, not just that one line, so the guard covers the function rather than the call: a bake
-// that can only ever report "failed" is not a degraded feature, it is a button that lies. The
-// Build menu's "Bake Navigation" item carries the same pairing so a scene-less build does not
-// offer a bake it cannot perform.
+// Guarded on AVER_MODULE_SYNAPSE (grid math only, via editor::bakeNavigation/synapse::BakeStats)
+// AND AVER_MODULE_SCENE (needs scene::World::instance() to sample) -- with no world to sample the
+// whole function could only ever report "failed", so the guard covers the function, not just that
+// call. The four toasts (notifyOutcome, behind AVER_WITH_IMGUI, pushing onto editor::notifications()
+// which only the overlay drains) are a separate guard on the CALLER only, same pattern as the
+// screenshot writer in SandboxRender.cpp and --import's deferred handshake (see notifyOutcome's own
+// comment): every branch logs first, so a no-UI build still answers, it just has nowhere to show
+// the toast. Build menu's "Bake Navigation" item carries the same SYNAPSE+SCENE pairing.
 #if AVER_MODULE_SCENE
 bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     editor::NavBakeSettings s;
@@ -204,9 +172,7 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     rebuildNavOverlay(e);
     showNav_ = true;   // baking something invisible is how a bake gets run twice
 
-    // NOT WRITTEN FOR AN UNSAVED LEVEL. A .ocnav is named after its level, so a level with no
-    // path has nowhere for one to go; baking it into the session and saying so beats
-    // inventing a filename the author never asked for.
+    // Unsaved level has no path, so no .ocnav filename to write -- stays session-only, said so.
     if (levelPath_.empty()) {
         AVER_WARN("[Editor] navigation baked but NOT saved -- this level has no path yet; "
                   "save the level and bake again to write its .ocnav");
@@ -237,38 +203,25 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
 
 #endif
 
-// ---- Revision control: the editor-facing half ------------------------------------------------
+// ---- Revision control: the editor-facing half ----
+// RevisionControl.hpp (carries a headless unit test for what git's bytes mean) and .cpp (every
+// process spawn) own that; this file owns ImGui, logging, and WHEN to ask -- nothing below parses
+// git output or spawns a process on the frame thread.
 //
-// THE DIVISION, WHICH IS THE POINT AND NOT A STYLE CHOICE. RevisionControl.hpp decides what git's
-// bytes MEAN and carries a headless unit test for it; RevisionControl.cpp owns every process spawn.
-// This file owns every ImGui call, every log line, and the one thing neither of those can have an
-// opinion about: WHEN to ask. Nothing below parses a byte of git's output, and nothing below starts
-// a process on the frame thread.
-//
-// NOTHING HERE CAN LOSE WORK, AND THAT IS ENFORCED A LAYER DOWN rather than promised here: the only
-// git this editor can run is isReadOnlyGitSubcommand()'s list (RevisionControl.hpp), which has no
-// commit, checkout, restore, reset, clean, stash, revert, push or pull on it. So there is no
-// Discard button, no Revert, no Sync -- not because they were left for later tidiness, but because
-// a button whose verb loses work needs the user to have said yes to THAT SPECIFIC THING first.
-// WHEN THOSE ARRIVE THEY HANG OFF A CONFIRMATION MODAL, and this file already has the shape to copy:
-// drawLaunchRuntimePrompt below. Note what it does -- it names what is at stake ("this level has
-// unsaved changes"), it offers the non-destructive way out first, it STAYS OPEN when the safe path
-// fails rather than proceeding anyway, and the action is reached only through a button the user
-// pressed inside it. A revert or a discard belongs behind exactly that, with its own entry point in
-// RevisionControl.cpp, and NOT by widening the read-only list (see the list's own comment).
+// Enforced a layer down: only read-only git subcommands run (isReadOnlyGitSubcommand()'s list,
+// RevisionControl.hpp) -- no commit/checkout/restore/reset/clean/stash/revert/push/pull. So no
+// Discard/Revert/Sync button here: a work-losing action needs its own confirmation modal (pattern
+// to copy: drawLaunchRuntimePrompt below -- names the stakes, offers the safe path first, stays
+// open on failure) and its own entry point in RevisionControl.cpp, not a widened read-only list
+// (see the list's own comment).
 #if AVER_WITH_IMGUI
 namespace {
 
-// Which paths the diff viewer has something to show for.
-//
-// IT LIVES HERE, NOT IN RevisionControl.hpp, on purpose. That header's entire vocabulary is what
-// git said; ".ocworld" is a fact about THIS editor's asset formats, and teaching it to the parser
-// would make RevisionControlTest -- whose claim is that it links Aver.Core and nothing else -- the
-// owner of the editor's format table.
-//
-// EVERYTHING ELSE A PROJECT HOLDS IS A BINARY CONTAINER OR AN IMAGE. .ocmesh, .ocbeam, .ocbt,
-// .ocaudio and the rest are AVR1 files; a unified diff of those is a wall of escaped bytes that
-// tells a reader nothing, which is why the panel says so in words instead of showing an empty pane.
+// Which paths the diff viewer can show a text diff for.
+// Lives here, not RevisionControl.hpp: that header only knows git's output, not the editor's asset
+// format table (keeping it that way is why RevisionControlTest can claim to link only Aver.Core).
+// Everything else (.ocmesh/.ocbeam/.ocbt/.ocaudio/... = AVR1 binary) diffs as a wall of escaped
+// bytes, so the panel says so in words instead of showing an empty pane.
 bool isDiffableAsset(std::string_view path) {
     const usize dot = path.rfind('.');
     if (dot == std::string_view::npos) return false;
@@ -277,9 +230,8 @@ bool isDiffableAsset(std::string_view path) {
     return ext == ".ocworld" || ext == ".ocmat" || ext == ".ocgraph" || ext == ".cs";
 }
 
-// A path with its separators and case flattened, for comparing an editor path against git's.
-// Windows hands this editor "C:\Users\...\Content" and git prints "C:/Users/.../Content" for the
-// same directory, and either may differ in case from the other without naming a different file.
+// Flattens separators+case so an editor path ("C:\Users\...\Content") compares equal to git's
+// ("C:/Users/.../Content"); either may differ in case from the other without naming a different file.
 std::string flattenedPath(std::string_view s) {
     std::string out(s);
     for (char& c : out) {
@@ -290,9 +242,8 @@ std::string flattenedPath(std::string_view s) {
     return out;
 }
 
-// How far back the per-file history goes. A panel, not a history browser: fifty touches is more
-// than anybody scrolls in a docked pane, and `git log` over a whole repository's history is the
-// one read here whose cost grows with the project's age rather than with its size.
+// Per-file history depth. 50: more than a docked panel needs to scroll; `git log` cost grows with
+// the repo's age, not its size.
 constexpr int kRcLogCount = 50;
 
 // How loudly a status should speak for a FOLDER that contains it. Only the ordering matters.
@@ -305,23 +256,15 @@ int folderRank(editor::FileStatus s) {
     }
 }
 
-// The status-bar face for the revision-control widget: an icon, the branch (or whatever state is
-// standing in for one), and -- only once an answer is current -- the change count beside it, the
-// shape Unreal's own status bar uses for the same fact.
+// Status-bar face: icon + branch (or stand-in) + change count once an answer is current. Mirrors
+// Unreal's status bar shape.
 //
-// SPLIT OUT OF drawRevisionControlStatusWidget SO THE LAYOUT CAN MEASURE IT FIRST. The status bar
-// lays its right-hand cluster out by summing each button's rendered width before any of them are
-// drawn, because ImGui::SameLine needs the run's total width to place its start; that means the
-// exact text drawRevisionControlStatusWidget will render has to exist before that widget's own
-// call, not just inside it. Calling this twice a frame (once to measure, once to draw) costs a
-// few string operations over data that is already latched -- nowhere near the git process this
-// whole file exists to keep off the frame thread.
+// Split out of drawRevisionControlStatusWidget so the status bar can measure this text's width
+// before drawing (ImGui::SameLine needs the run's total width up front); called twice/frame
+// (measure + draw), cheap string ops over already-latched data, not the git process itself.
 //
-// BUSY OVERRIDES THE LABEL RATHER THAN RACING IT. `summary` still describes the last answer that
-// was latched, which is a perfectly good answer right up until the moment a new one is already on
-// its way -- and once rcStatusJob_ is set, that is exactly what is happening. Showing the old
-// label and count as though they were current would be indistinguishable from a live answer, and
-// the count in particular can no longer be trusted to be the number git is about to report.
+// `busy` overrides the label rather than racing it: once rcStatusJob_ is set, `summary` is only
+// the last latched answer, no longer trustworthy as current, so shows "Refreshing..." instead.
 std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
     std::string face = ICON_TREE " ";
     face += busy ? "Refreshing..." : summary.label;
@@ -333,10 +276,8 @@ std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
 
 // Reaps whatever a worker finished, and decides whether to ask again. Once a frame, from buildUI.
 void SandboxApp::revisionControlTick() {
-    // THE PROJECT CHANGED UNDER THE LATCH. Everything held here describes a repository that is no
-    // longer open, and badges drawn from it would mark the new project's files with the old
-    // project's changes -- wrong in the one direction that matters, since a mark says "this differs
-    // from what is committed".
+    // Project changed under the latch: stale state here would badge the new project's files with
+    // the old project's changes -- wrong direction, since a mark means "differs from committed".
     if (rcProjectDir_ != project_.dir) {
         rcProjectDir_ = project_.dir;
         rcRoot_.clear();

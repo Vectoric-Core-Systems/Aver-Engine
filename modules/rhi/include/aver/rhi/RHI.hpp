@@ -64,14 +64,11 @@ struct LineVertex {
 
 // How to create a device: backend preference order and development switches.
 //
-// THE PREFERENCE ORDER IS THE SELECTION MECHANISM, and until now nothing ever wrote it. Every
-// caller took the default, so which backend ran was decided entirely by which ones were COMPILED
-// IN -- a `#if` in RHI.cpp, not a choice. Principle P7 in ARCHITECTURE.md claims backends are
-// "selected at runtime from the compiled-in set", and that was not true of any build.
-//
-// It matters more than it looks: a second backend that cannot be ASKED FOR cannot be exercised
-// either, so it cannot be developed against. Everything written for it would be unreachable code
-// that compiles.
+// The preference order is the actual selection mechanism: a backend never asked for cannot be
+// exercised or developed against. Until now nothing wrote it -- backend choice was decided by
+// which ones were compiled in (a `#if` in RHI.cpp). ARCHITECTURE.md's P7 ("selected at runtime
+// from the compiled-in set") depends on callers populating this rather than taking the default,
+// which was true of no build before now.
 struct DeviceDesc {
     Backend preferred[4] = {Backend::D3D12, Backend::D3D11, Backend::Vulkan, Backend::Null};
     u32 preferredCount = 4;
@@ -92,33 +89,23 @@ struct DeviceCaps {
     bool dxcAvailable = false;       // DXIL compiler present (needed for SM 6.x)
     u32 resourceBindingTier = 0;     // 0 = unknown, 1/2/3 = D3D12_RESOURCE_BINDING_TIER_N
 
-    // Whether a shader may index a large texture ARRAY by a value it computed -- what texturing a
-    // ray hit needs, because one fullscreen pass shades every material and cannot bind a descriptor
-    // table per draw the way the raster path does.
+    // Whether a shader may index a large texture array by a computed value -- needed by the
+    // ray-traced path (one fullscreen pass shades every material, unlike raster's per-draw tables).
     //
-    // A SEPARATE BIT FROM resourceBindingTier, NOT DERIVED FROM IT, and that is deliberate on both
-    // backends. RHIResources.hpp opens by promising "explicit descriptor tables, NOT bindless",
-    // because the engine floor is FL 11_0 (binding tier 1). That promise still holds for every
-    // raster pipeline; this bit says only that the RAY-TRACED path, which already demands DXR 1.1
-    // and SM 6.5 and therefore hardware that is always binding tier 3, may use one. Deriving it
-    // from resourceBindingTier would also be wrong on Vulkan, where that field is hardcoded to 0
-    // by design and could never carry this.
+    // Separate from resourceBindingTier, not derived: raster stays "explicit descriptor tables, not
+    // bindless" (RHIResources.hpp, floor FL 11_0/tier 1); this covers only ray tracing (DXR 1.1 +
+    // SM 6.5, always tier 3). Deriving from resourceBindingTier would also be wrong on Vulkan (that
+    // field is hardcoded 0 there).
     bool rtBindlessTextures = false;
 
-    // Whether a shader may perform 64-BIT ATOMICS on a buffer. Needed by any lock-free hash map
-    // built on a 64-bit compare-exchange, which is what a world-space radiance cache is.
+    // Whether a shader may perform 64-bit atomics on a buffer -- needed by a lock-free hash map
+    // (64-bit compare-exchange), which is what a world-space radiance cache is.
     //
-    // QUERIED FROM THE DEVICE, NOT DERIVED FROM shaderModel, and the difference is the whole reason
-    // this is its own bit. RTXGI's SHaRC auto-detects the same capability from the DXC SHADER
-    // TARGET alone -- SM 6.6 or better means "assume native 64-bit atomics" -- which answers a
-    // question about the COMPILER when the question is about the HARDWARE AND DRIVER. A device can
-    // report SM 6.6 support and still lack this; the two are independent D3D12 feature queries
-    // (D3D12_FEATURE_D3D12_OPTIONS1::Int64ShaderOps, and OPTIONS9 for the typed-resource form).
-    //
-    // WHAT IT COSTS TO GET WRONG: a consumer that assumes native atomics where there are none has
-    // to fall back to a software spin-lock, which needs a whole extra buffer -- 16 MiB at SHaRC's
-    // suggested cache size. Guessing high silently corrupts the map; guessing low wastes the
-    // memory. So it is asked rather than inferred.
+    // Queried from the device, not derived from shaderModel: SM 6.6+ does not imply this (unlike
+    // RTXGI SHaRC's auto-detect from DXC target alone) -- two independent D3D12 queries
+    // (OPTIONS1::Int64ShaderOps, OPTIONS9 for typed-resource). Getting it wrong either corrupts the
+    // map (assumed true, actually false) or wastes a 16 MiB spin-lock fallback buffer (assumed
+    // false); hence asked, not inferred.
     bool shaderInt64Atomics = false;
 };
 
@@ -145,26 +132,20 @@ const CapsOverride& capsOverride();
 // Applied by each backend at the end of its own capability query. Monotonically reducing.
 void clampCaps(DeviceCaps& caps);
 
-// SIMULATED DEVICE LOSS, after this many presented frames. 0 -- the default -- never fires.
+// Simulated device loss, after this many presented frames. 0 (default) never fires.
 //
-// DELIBERATELY NOT A CapsOverride TOKEN, even though --force-caps is the obvious neighbour: that
-// struct says of itself that every field "only ever reduces a capability", and losing a device is
-// not a capability, it is an event. Folding it in there would have made that sentence untrue.
-//
-// WHY SIMULATE IT AT ALL. Device loss is real -- a driver timeout, a driver update, a hardware
-// fault -- and the code that handles it is the code least likely to have ever been run: reaching it
-// honestly means making a GPU disappear underneath a live process. So it is the exact shape of path
-// that rots silently and is then wrong on the one day it matters. This makes it a command line.
+// Not a CapsOverride token, though --force-caps is the obvious neighbour: that struct's fields
+// only ever reduce a capability, but losing a device is an event, not a capability. Exists
+// because real device loss (driver timeout/update, hardware fault) is rarely exercised honestly,
+// so the recovery path would otherwise rot silently until the one day it happens for real.
 void setSimulatedDeviceLoss(u32 afterPresentedFrames);
 u32  simulatedDeviceLoss();
 
-// D3D12 DRED (Device Removed Extended Data), forced on via --dred. SAME SHAPE OF PROBLEM as
-// setSimulatedDeviceLoss just above: the D3D12 backend has to ask for DRED off the debug interface
-// BEFORE D3D12CreateDevice runs, which is earlier than SandboxApp's DeviceDesc reaches it (that
-// struct is filled from the app's own config, itself built after argv parsing but read only once
-// device creation starts) -- so this is a plain pre-device flag, not a DeviceDesc field.
-// Header-only: RHI.cpp is not where this pairing lives, so there is no matching definition there;
-// the D3D12 backend is the only reader.
+// D3D12 DRED (Device Removed Extended Data), forced on via --dred. Same shape of problem as
+// setSimulatedDeviceLoss above: a pre-device flag rather than a DeviceDesc field, since D3D12
+// must enable DRED on the debug interface BEFORE D3D12CreateDevice runs, earlier than DeviceDesc
+// is populated/read. Header-only -- no matching definition in RHI.cpp; the D3D12 backend is the
+// only reader.
 inline bool g_dredEnabled = false;
 inline void setDredEnabled(bool enabled) { g_dredEnabled = enabled; }
 inline bool dredEnabled() { return g_dredEnabled; }
@@ -174,14 +155,12 @@ inline bool g_gpuValidationEnabled = false;
 inline void setGpuValidationEnabled(bool enabled) { g_gpuValidationEnabled = enabled; }
 inline bool gpuValidationEnabled() { return g_gpuValidationEnabled; }
 
-// ENGINE RADIANCE UNITS -> cd/m^2. modules/assets/include/aver/assets/LevelSky.hpp maps
-// sky.sunIntensity = w.sunLux / (100000.0 / 3.0) so that SkyAtmosphere's default sunIntensity of 3.0
-// agrees with OcWorldEnv's default of 100000 lux; inverted, that says one engine irradiance unit is
-// 100000/3 lux, and because the renderer treats irradiance and the scene-linear pixel value before
-// exposure (RADIANCE) as the same unit throughout, one engine RADIANCE unit is 100000/3 cd/m^2 too.
-// Named once here rather than re-derived per call site: PostSettings' own eye-adaptation model below
-// needs a real luminance (cd/m^2), not an engine unit, wherever it reasons about absolute darkness or
-// brightness (the Krawczyk et al. formulas are fit to measured cd/m^2, not to this renderer's units).
+// Engine radiance units -> cd/m^2. LevelSky.hpp sets sky.sunIntensity = w.sunLux / (100000/3) so
+// the default sunIntensity 3.0 agrees with OcWorldEnv's default 100000 lux; inverted, one engine
+// irradiance unit is 100000/3 cd/m^2, and since the renderer treats irradiance and the pre-exposure
+// scene-linear pixel value (radiance) as the same unit throughout, one engine radiance unit is too.
+// Named once here because PostSettings' eye adaptation needs real cd/m^2 (Krawczyk et al.'s
+// formulas are fit to measured luminance).
 constexpr f32 kLuminanceToCdm2 = 100000.0f / 3.0f;
 
 // Camera post-processing: exposure, bloom and eye adaptation.
@@ -202,180 +181,127 @@ struct PostSettings {
     // Clamps on the computed multiplier, not on scene luminance. 0.01 so a bright view (open sky,
     // sunlit stone) can still be brought down to the target. Not persisted (a tuned engine value).
     f32  exposureMin    = 0.01f;
-    // THE CEILING WAS 8, AND 8 IS THE EXPOSURE AT WHICH COLOUR DIES. It was almost certainly copied
-    // from maxRadiance below, where 8 is genuinely derived -- "the input past which the tone curve
-    // has nothing left to say, acesTonemap(8) = 1.003, pure white". That is the correct ceiling for
-    // a RADIANCE clamp and exactly the wrong one for an exposure MULTIPLIER: it licenses the
-    // adaptation to scale the scene until the AVERAGE pixel sits where the curve maps everything to
-    // white, and no tone operator preserves chroma past its own shoulder.
+    // A ceiling of 8 (copied from maxRadiance's radiance clamp below) is wrong for an exposure
+    // MULTIPLIER: it lets adaptation scale the AVERAGE pixel onto the tonemap's white shoulder,
+    // killing chroma. MEASURED on PTTest Sponza (--frames 244, viewport mean/chroma R-B): exposure
+    // 1->19.38/3.32, 2->29.79/4.47 (peak), 3.2->38.66/4.34, 5->48.76/3.28, 8->61.61/1.40 (what
+    // auto-exposure picked) -- chroma collapses by 8, blue overtakes green above 5. `--exposure 8`
+    // reproduced the auto-exposed image within 0.02/channel, confirming the clamp was the culprit.
     //
-    // MEASURED on PTTest Sponza (an enclosed arcade -- dark enough that the adaptation pegs at this
-    // clamp), 3D viewport means, --frames 244, one run per row:
-    //
-    //   exposure    mean    R-B (chroma)
-    //   1 (off)     19.38   3.32
-    //   2           29.79   4.47   <- peak
-    //   3.2         38.66   4.34
-    //   5           48.76   3.28
-    //   8           61.61   1.40   <- what auto-exposure was picking
-    //
-    // Chroma peaks around 2 and has collapsed by 8, and above 5 BLUE overtakes GREEN -- a warm stone
-    // interior rendering cold, which is what "the colours look washed out" was. `--exposure 8`
-    // reproduces the auto-exposed image to within 0.02 per channel, which is how the clamp was
-    // identified as the thing being hit rather than the metering being wrong.
-    //
-    // THE CEILING WENT BACK TO 8, because capping it was treating the symptom. It was briefly 3,
-    // which did remove the washout and was immediately reported as "too dark" -- correctly: the
-    // scene needs the gain, it just could not survive it. The cause was the CURVE, not the ceiling,
-    // and tonemap mode 2 (acesLumaTonemap) fixes it at the source by tonemapping luminance and
-    // keeping chromaticity. Measured at exposure 8, same frame: mode 1 gives chroma 1.41, mode 2
-    // gives 3.09, at the same brightness. With a curve that holds its colour there is no reason to
-    // forbid the exposure that makes an enclosed scene readable.
-    //
-    // THE RANGE IS WIDE ON PURPOSE: eye adaptation holds the view at exposureKey, and a ceiling the
-    // scene needs more than pins the exposure, so walking from light into shade changes nothing --
-    // adaptation looks broken. MEASURED on NewSponza from the level camera at exposureKey 0.18, the
-    // adaptation wanted x73 for the shaded courtyard at noon, x99 under the arcade, x120 at dusk and
-    // x151 at night (lamps only); a 16 ceiling tried on 2026-09-26 pinned all four. How BRIGHT the
-    // result looks is exposureKey's job, not this clamp's. 256 is 8 stops above 1, inside a real
-    // camera's metering range. Not persisted (a tuned engine value).
+    // Capping lower (tried 3) removed the washout but read "too dark": the scene needs the gain,
+    // just can't survive the CURVE -- fixed at the source via tonemap mode 2 (acesLumaTonemap:
+    // chroma 3.09 at exposure 8 vs mode 1's 1.41, same brightness). Ceiling went back to 8; range
+    // stays wide on purpose since a tighter ceiling pins the exposure across light/shade. MEASURED
+    // on NewSponza (exposureKey 0.18): adaptation wanted x73 (courtyard noon), x99 (arcade), x120
+    // (dusk), x151 (night, lamps only) -- a 16 ceiling (2026-09-26) pinned all four. 256 = 8 stops
+    // above 1, inside a real camera's range. Not persisted.
     f32  exposureMax    = 256.0f;
-    // HOW FAST, AND NOT THE SAME BOTH WAYS -- as eyes: adapting to a BRIGHTER view (the exposure
-    // falling) is quick, adapting to a DARKER one (the exposure rising) is slower, so stepping out
-    // of a dark arcade into sun flares briefly and settles, and stepping back in stays dim for a
-    // moment before the shade opens up. Both in e-folds per second of log exposure.
+    // Adaptation speed, e-folds/s of log exposure, asymmetric like real eyes: brighter (exposure
+    // falling) is fast; darker (exposure rising) is slower, so leaving shade for sun flares then
+    // settles, but leaving sun for shade stays dim briefly.
     f32  exposureSpeed     = 3.0f;   // toward a brighter view (exposure falling)
-    // 1.0 -> 0.5: the scotopic slowdown below (rods take up to 4x longer, adaptationRealism 1) comes
-    // ON TOP of this base speed, so it went down to keep the SAME real-world dark-adaptation time it
-    // had before that slowdown existed rather than compounding into an even slower one.
+    // 1.0 -> 0.5: the scotopic slowdown below (rods up to 4x, adaptationRealism 1) stacks on this
+    // base speed, so it was lowered to keep the same real dark-adaptation time rather than compound.
     f32  exposureSpeedDark = 0.5f;   // toward a darker view (exposure rising), e-folds/s
 
-    // PERCEPTUAL EYE ADAPTATION (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in
-    // real-time tone mapping"); console post.adaptationRealism (not in the panel). [0,1]: 0 is full
-    // adaptation -- every view drives to the same exposureKey average, today's behaviour, exactly --
-    // 1 is the perceptual model. Two effects, both scaled by this one dial:
+    // Perceptual eye adaptation (Krawczyk, Myszkowski & Seidel 2005). console post.adaptationRealism
+    // (not in panel). [0,1]: 0 = full adaptation (every view drives to exposureKey, today's default
+    // behaviour exactly); 1 = perceptual model. Scales two effects:
     //
-    //   PARTIAL ADAPTATION (sec. 4): a bright scene still looks brighter than a dark one once the
-    //   eye has adapted to each, rather than both reading as the same average brightness. The
-    //   histogram's target key becomes keyEff = exposureKey * lerp(1, alpha(Y) / alpha(Yref),
-    //   adaptationRealism), where Y is the metered average luminance in cd/m^2, alpha(Y) =
-    //   1.03 - 2 / (2 + log10(Y + 1)), and Yref = 100 cd/m^2 (a dim interior) is the point at which
-    //   keyEff == exposureKey exactly, matching how exposureKey above was tuned. Worked values:
-    //   alpha(0.01) = 0.032, alpha(1) = 0.161, alpha(100) = 0.530, alpha(2000) = 0.653.
+    //   Partial adaptation (sec. 4): keyEff = exposureKey * lerp(1, alpha(Y)/alpha(Yref),
+    //   adaptationRealism), alpha(Y) = 1.03 - 2/(2 + log10(Y+1)), Yref = 100 cd/m^2 (keyEff ==
+    //   exposureKey there, matching how exposureKey was tuned). alpha(0.01)=0.032, alpha(1)=0.161,
+    //   alpha(100)=0.530, alpha(2000)=0.653.
     //
-    //   ROD-SLOWED DARK ADAPTATION (sec. 4, same section): darkening (exposureSpeedDark's direction)
-    //   gets up to 4x slower in true darkness, as rods genuinely adapt more slowly than cones --
-    //   see exposureSpeedDark's own comment on why its base speed moved when this was added.
+    //   Rod-slowed dark adaptation (sec. 4): darkening gets up to 4x slower in true darkness (see
+    //   exposureSpeedDark's own comment).
     //
     // Implemented in post.hlsl's CSExposure (gPostEye.x); see that file for both formulas in full.
     f32  adaptationRealism = 1.0f;   // [0,1]
 
-    // SCOTOPIC NIGHT VISION (Krawczyk et al. sec. 5, after Kim et al.), "Night Vision" in the panel.
-    // [0,1]: below about 1 cd/m^2 rods take over from cones, so colour drains out and blue-shifts
-    // (the Purkinje effect) as this rises toward 1 -- 0 leaves every pixel exactly as rendered. Runs
-    // per pixel on scene-linear radiance, before exposure, in post.hlsl's PSComposite; unlike
-    // adaptationRealism above it needs no CSExposure metering, so it applies whether or not
-    // auto-exposure itself is on.
+    // Scotopic night vision (Krawczyk et al. sec. 5, after Kim et al.), "Night Vision" in panel.
+    // [0,1]: below ~1 cd/m^2 rods take over from cones, draining colour and blue-shifting (Purkinje
+    // effect) as this rises toward 1; 0 leaves pixels as rendered. Runs per pixel on scene-linear
+    // radiance before exposure (post.hlsl PSComposite), so it applies regardless of auto-exposure.
     f32  nightVision = 1.0f;   // [0,1]
 
-    // CENTRE-WEIGHTED METERING (console post.meteringCenterWeight). [0,1]: 0 meters every pixel of the
-    // region equally (today's behaviour, exactly); higher weights the region's centre up to 4x an
-    // edge pixel, the way a camera's centre-weighted meter favours what is framed in the middle,
-    // rather than letting a bright sky at the top or floor at the bottom of the metered region pull
-    // the reading away from what is actually being looked at. Implemented in post.hlsl's
-    // CSHistogram (gPostEye.w).
+    // Centre-weighted metering (console post.meteringCenterWeight). [0,1]: 0 meters the region
+    // equally (today's default); higher weights the centre up to 4x an edge pixel, like a camera's
+    // centre-weighted meter, so a bright sky or floor at the region's edge can't dominate the
+    // reading. Implemented in post.hlsl's CSHistogram (gPostEye.w).
     f32  meteringCenterWeight = 0.5f;   // [0,1]
 
-    // THE TARGET BRIGHTNESS -- the average (log-average of the histogram's middle band, see
-    // histogramLow/HighPercent) that adaptation drives every view towards, before the panel's
-    // Brightness (exposure, in stops) is applied on top. NOT persisted or in the panel -- a tuned
-    // engine value; console post.exposureKey for a session.
+    // Target brightness -- the log-average of the histogram's middle band (see
+    // histogramLow/HighPercent) that adaptation drives every view toward, before panel Brightness
+    // (stops) on top. Not persisted or in panel; console post.exposureKey for a session.
     //
-    // 0.20, TUNED WITH THE REST OF THIS BLOCK AS DEFAULTS (2026-09-26): headless captures of seven
-    // NewSponza views scored in display space (viewport mean 0-255, % clipped >= 250, % crushed <= 5)
-    // against photographic targets set a little under middle grey, the owner's "everything should
-    // be dimmer". MEASURED means: noon courtyard 74, shaded arcade 73, upper gallery 68, dusk 68,
-    // lamp-lit night 55, a lamp close up 55, a moonless night 10 (the sky model has no moon, so that
-    // one is correctly near-black); nothing clipped in any. The earlier 0.03-0.04 only read as
-    // bright because the panel's exposure compensation had been left at 4.05 (+2 stops).
+    // 0.20, tuned with the rest of this block (2026-09-26): headless captures of seven NewSponza
+    // views, scored in display space (viewport mean 0-255, % clipped >= 250, % crushed <= 5)
+    // against targets a little under middle grey (owner: "everything should be dimmer"). MEASURED
+    // means: noon courtyard 74, shaded arcade 73, upper gallery 68, dusk 68, lamp-lit night 55,
+    // lamp close-up 55, moonless night 10 (no moon in the sky model, correctly near-black);
+    // nothing clipped. Earlier 0.03-0.04 only read bright because exposure compensation had been
+    // left at 4.05 (+2 stops).
     f32  exposureKey    = 0.20f;
     // Fraction of the histogram discarded at each end before averaging.
     //
-    // THE HIGH CUT IS 0.95, NOT 0.85: discarding the brightest 15% meant a sunlit wall filling the
-    // middle of the view never pulled the exposure down -- the eye looked straight at it and did not
-    // adapt, and it clipped to white. The top 5% still goes, which is what the cut is for: the sun
-    // disc, a lamp bulb, a specular glint or a firefly should not darken the whole view. Tuned with
-    // exposureKey below (0% clipped in every tuned scene); not persisted.
+    // High cut is 0.95, not 0.85: discarding the brightest 15% let a sunlit wall dominating the view
+    // clip to white without pulling exposure down. The remaining top 5% still goes, so a sun disc,
+    // lamp bulb, glint or firefly can't darken the whole view. Tuned with exposureKey (0% clipped in
+    // every tuned scene); not persisted.
     f32  histogramLowPercent  = 0.30f;
     f32  histogramHighPercent = 0.95f;
 
-    // WHICH TONE CURVE. 0 is the original per-channel Narkowicz/Hill approximation; 1 is the same
-    // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap); 2 is
-    // acesLumaTonemap, which tonemaps LUMINANCE and puts the original chromaticity back.
+    // Which tone curve. 0 = original per-channel Narkowicz/Hill approximation; 1 = the same curve
+    // between the ACES input/output matrices (colour.hlsli's acesFittedTonemap); 2 = acesLumaTonemap
+    // (tonemaps luminance, restores original chromaticity).
     //
-    // 0 IS THE DEFAULT AGAIN (owner's call, 2026-09-24): its toe is the gentlest of the three, so dim
-    // indirect light stays visible. Mode 2's Hill RRT/ODT fit (with its x2 gain) has a hard black
-    // point at ~0.0016 scene luminance and a steep toe that scales anything below ~0.02 by ~0.2 --
-    // physically correct bounce light at a few percent of a sunlit floor (NewSponza's stone is
-    // albedo ~0.1-0.2) was being crushed to near-black and read as "no GI". The trade, recorded
-    // below: at the large exposures an enclosed scene's auto-exposure reaches for, 0 lets channels
-    // run onto the shoulder and desaturate, which is what made 2 the default before.
+    // 0 is the default again (owner's call, 2026-09-24): gentlest toe, dim indirect light stays
+    // visible. Mode 2's Hill RRT/ODT fit (x2 gain) has a hard black point at ~0.0016 and crushes
+    // anything below ~0.02 by ~0.2, reading physically-correct bounce light (NewSponza stone
+    // albedo ~0.1-0.2) as "no GI"; at the large exposures an enclosed scene needs, mode 0's trade
+    // is channels running onto the shoulder and desaturating -- the reason mode 2 was the default
+    // before.
     //
-    // WHY 2 WAS THE DEFAULT. 1 desaturates less than 0 but it still runs a shoulder per channel after the
-    // matrices, so a big exposure -- which an enclosed scene needs, and which the eye adaptation
-    // will reach for -- lands every channel on the flat part and the frame arrives grey. That was
-    // the whole of a "colours are washed out" report. MEASURED on PTTest Sponza, chroma (mean R-B)
-    // against exposure, mode 1: 1x -> 3.32, 2x -> 4.47, 5x -> 3.28, 8x -> 1.40. Mode 2 at that same
-    // 8x holds 3.09 at identical brightness, and above 5x mode 1 also lets BLUE overtake GREEN --
-    // a warm stone interior rendering cold.
+    // Mode 1 desaturates less than 0 (ACES matrices rotate into a space where the curve behaves,
+    // then rotate back) but still greys out at big exposure: MEASURED chroma (mean R-B) vs exposure,
+    // mode 1: 1x->3.32, 2x->4.47, 5x->3.28, 8x->1.40 ("colours are washed out"); mode 2 at 8x holds
+    // 3.09 at the same brightness, and above 5x mode 1 also lets blue overtake green.
     //
-    // 1 IS KEPT and is still the right answer for anything that must match a recorded baseline: it
-    // desaturates less than 0 because the matrixed form rotates into a space where the curve behaves
-    // and rotates back, which is the entire reason ACES has those matrices. It is only mode 2 that
-    // declines to let the curve decide colour at all.
-    //
-    // 0 is also the curve every recorded gate baseline in scripts/ was measured through, so the
-    // default now reproduces them again.
+    // 1 remains correct for matching a recorded baseline; 0 is also the curve every recorded gate
+    // baseline in scripts/ was measured through, so the default reproduces them.
     u32  tonemap = 0;
 
-    // Ceiling applied to scene radiance immediately before the tonemap; 0 disables it.
+    // Ceiling on scene radiance immediately before the tonemap; 0 disables it.
     //
-    // WHY IT EXISTS: nothing else in this renderer bounds radiance. The sun disc alone is drawn at
-    // sunColour * sunIntensity * 14 (scene.hlsl PSky) and reaches ~42x at the default intensity of
-    // 3, with no clamp anywhere between there and here. The tonemap flattens it to white regardless,
-    // so the disc looks the same either way -- but the auto-exposure histogram reads the unclamped
-    // value and lets a few enormous pixels pull the whole frame darker.
+    // Nothing else here bounds radiance: the sun disc (sunColour * sunIntensity * 14, scene.hlsl
+    // PSky) reaches ~42x at default intensity 3 with no clamp. The tonemap flattens it to white
+    // regardless, but the unclamped value pulls the auto-exposure histogram (and thus the whole
+    // frame) darker.
     //
-    // 8 IS DERIVED, NOT TASTE: it is the input past which the tone curve has nothing left to say.
-    // acesTonemap(8) = 1.003, which saturates to pure white, so every value above 8 produces the
-    // IDENTICAL pixel -- clamping there cannot change how anything looks. What it does change is the
-    // bloom, which thresholds the same unclamped radiance and so bleeds a halo in proportion to a sun
-    // disc sitting at ~42. The disc stays blazing white; its halo stops being unbounded.
+    // 8 is derived: acesTonemap(8) = 1.003 (saturates to pure white), so clamping there changes no
+    // pixel's tonemapped colour -- only bloom, which thresholds the unclamped value and so bleeds an
+    // unbounded halo off a ~42x disc. Clamping bounds the halo while the disc stays blazing white.
     //
-    // Raise it if a project genuinely wants larger bloom from very bright sources; 0 turns the clamp
-    // off entirely and restores the previous behaviour exactly.
+    // Raise it for more bloom from very bright sources; 0 restores the unclamped behaviour exactly.
     f32  maxRadiance = 8.0f;
 
-    // LOCAL EXPOSURE (as in Unreal's Local Exposure). Auto-exposure above can only pick ONE
-    // multiplier for the whole frame -- in a sunlit arcade the sunlit stone sets it and the shaded
-    // interior sits 4-5 stops down, reading near-black, even though the eye would read both. These
-    // brighten dark REGIONS and gently tame bright ones toward exposureKey (middle grey), using an
-    // edge-aware bilateral grid of log-luminance so it does so without haloing at region edges.
+    // Local exposure (as in Unreal). Auto-exposure above picks one multiplier for the whole frame,
+    // so a sunlit arcade's stone sets it and the shaded interior sits 4-5 stops down, near-black.
+    // This brightens dark regions and tames bright ones toward exposureKey (middle grey), via an
+    // edge-aware bilateral grid of log-luminance to avoid haloing at region edges.
     //
-    // [0,1]: the fraction of a region's deviation from middle grey that is removed -- 0 is off, 1
-    // fully flattens it (no local contrast left). shadows applies where the local region reads
-    // darker than middle grey, highlights where it reads brighter. Local exposure is on when either
-    // is > 0. Both ride PostCB.clampRadiance[1]/[2] (gPostClamp.y/z in post.hlsl) rather than new
-    // cbuffer rows -- see that struct's own comment on why clampRadiance's spare components are
-    // where a new post scalar lands first.
+    // [0,1]: fraction of a region's deviation from middle grey removed -- 0 off, 1 fully flattens
+    // local contrast. shadows applies below middle grey, highlights above; on when either is > 0.
+    // Both ride PostCB.clampRadiance[1]/[2] (gPostClamp.y/z, post.hlsl) instead of new cbuffer rows
+    // (see that struct's comment on where a new post scalar lands first).
     //
-    // Tuned with exposureKey above (see its comment for the scenes and numbers); neither is in the
-    // panel or persisted. Shadows 0.10: at 0.25-0.5 (up to +4 stops on a dark region) a lamp-lit
-    // night courtyard was lifted back toward daylight -- MEASURED night mean 64.5 (key 0.22, shadows
-    // 0.25) -> 55.2 (key 0.20, shadows 0.10) while the day scenes fell only ~12, both changed in one
-    // pass, so the split between them is not isolated. Highlights 0.5: a sunlit wall beside a shaded gallery
-    // clipped to white at 0.3 (owner's screenshot); 0.5 pulls a bright region halfway back toward the
-    // target, capped at AVER_LOCALEXP_MAX_DOWN stops (post.hlsl) -- 0% clipped in every tuned scene.
+    // Tuned with exposureKey above; neither is in the panel or persisted. Shadows 0.10 (tried
+    // 0.25-0.5, up to +4 stops on a dark region): MEASURED night mean 64.5 (key 0.22, shadows 0.25)
+    // -> 55.2 (key 0.20, shadows 0.10), day scenes fell only ~12 (both changed together, not
+    // isolated). Highlights 0.5: a sunlit wall beside a shaded
+    // gallery clipped to white at 0.3; 0.5 pulls it halfway back, capped at AVER_LOCALEXP_MAX_DOWN
+    // stops (post.hlsl) -- 0% clipped in every tuned scene.
     f32  localExposureShadows    = 0.10f;
     f32  localExposureHighlights = 0.5f;
 };
@@ -427,34 +353,30 @@ struct SkyAtmosphere {
     // The authoritative field, pointing TOWARD the light. Need not be normalised. Degrees are the
     // editing form only; setSunAngles / sunAngles convert.
     f32 sunDirection[3] = {-0.5481f, 0.3838f, 0.7431f};
-    // The light ARRIVING AT THE TOP OF THE ATMOSPHERE, before any air. White is the physical
-    // default -- the physical sky (atmoFitDome / dome.sunTransmittance in packAtmosphere) already
-    // tints it toward orange by Rayleigh/Mie/ozone transmittance as elevation drops, so authoring
-    // a warm bias here double-counts the atmosphere's own colouring.
+    // Light arriving at the top of the atmosphere, before any air. White is the physical default:
+    // the physical sky (atmoFitDome / dome.sunTransmittance, packAtmosphere) already tints toward
+    // orange via Rayleigh/Mie/ozone as elevation drops, so a warm bias here would double-count it.
     f32 sunColor[3]     = {1.0f, 1.0f, 1.0f};
     f32 sunIntensity    = 3.0f;   // scales direct light, GI injection and the sun disk alike
     f32 sunTemperatureK = 0.0f;   // Kelvin; 0 means use sunColor as authored
     f32 sunAngularDiameterDeg = 0.545f;   // disk size, and how fast a shadow edge softens
 
-    // WHITE FURNACE radiance. Zero is off, and off is the only value any content should ever use.
-    // Non-zero replaces the whole sky, the ground and the sun with a uniform environment of this
-    // radiance, which is the standard way to measure whether a shading model conserves energy: a
-    // surface of albedo 1 inside it must read exactly this, whatever its orientation and whatever
-    // is around it. It lives on the sky rather than in a debug flag because it IS a statement about
-    // the environment, and because every path that asks the sky for radiance then gets it for free.
+    // White furnace radiance. 0 = off (the only value content should use). Non-zero replaces sky,
+    // ground and sun with a uniform environment of this radiance -- the standard energy-conservation
+    // test: an albedo-1 surface inside it must read exactly this value, any orientation. Lives on the
+    // sky (not a debug flag) since it IS a statement about the environment, and every radiance query
+    // gets it for free.
     f32 furnaceRadiance = 0.0f;
 
-    // Keeps the SUN ON inside the furnace, with the uniform environment at zero.
+    // Keeps the sun on inside the furnace, with the uniform environment at zero.
     //
-    // A SEPARATE MODE because the two halves of the shading model fail differently and the plain
-    // furnace can only see one of them. With the sun off, only the ambient term is exercised -- and
-    // that term was already correct when a missing /PI made every SUNLIT reflection 3.14x too
-    // bright. The oracle was blind to the exact bug it was built to find.
+    // A separate mode because plain furnace (sun off) only exercises the ambient term, and was
+    // blind to a missing /PI that made every sunlit reflection 3.14x too bright.
     //
-    // Here an albedo-1 Lambertian surface at angle theta to the sun must have exitant radiance
-    // E*cos(theta)/PI, where E is the sun's irradiance. That is an ABSOLUTE claim, and it has to
-    // be: a missing 1/PI is a GLOBAL SCALE, so no ratio between two surfaces and no equality
-    // between two configurations can see it. Only a comparison against a known number can.
+    // Contract: an albedo-1 Lambertian surface at angle theta to the sun must read exactly
+    // E*cos(theta)/PI (E = sun irradiance) -- an absolute claim, needed because a missing 1/PI is a
+    // global scale no ratio or equality between configurations can reveal; only comparison against a
+    // known number can.
     bool furnaceSun = false;
 
     // ---- the air ----
@@ -474,12 +396,10 @@ struct SkyAtmosphere {
     f32  cloudScale    = 0.00002f;    // 1 / the width of one noise feature, in world units
     f32  cloudWind[2]  = {900.0f, 260.0f};   // world units per second
     f32  cloudTime     = 0.0f;               // accumulated seconds; the app owns the clock
-    // Which sky this is. Two levels with different seeds get different cloud fields from the same
-    // settings, which is what makes a PCGVOLUME's seed reach the sky.
-    //
-    // ZERO IS THE UNSEEDED FIELD AND REPRODUCES THE PREVIOUS OUTPUT EXACTLY. That is deliberate
-    // rather than incidental: it is what lets this land without moving a single recorded gate probe,
-    // and what lets anyone bisect a sky change without wondering whether the seed did it.
+    // Which sky this is: two levels with different seeds get different cloud fields from the same
+    // settings (lets a PCGVOLUME's seed reach the sky). 0 is the unseeded field and reproduces
+    // previous output exactly -- deliberate, so this lands without moving any recorded gate probe,
+    // and so anyone can bisect a sky change without wondering whether the seed did it.
     i32  cloudSeed     = 0;
 
     // Writes sunDirection from an elevation above the horizon and an azimuth bearing about +Z
@@ -489,19 +409,16 @@ struct SkyAtmosphere {
     void sunAngles(f32& elevationDeg, f32& azimuthDeg) const;
 };
 
-// One node of a per-pass GPU timing report -- the public mirror of D3D12Device's private
-// GpuAccum tree (see that struct's own comment for why it is a tree keyed by (label, parent)
-// rather than a flat list). FLAT AND PARENT-INDEXED, not an owning nested structure: the source
-// data is already exactly this shape, so returning it flat is a straight copy, and a caller that
-// wants indentation (the console, formatting this the way collectGpuTiming's own log line does)
-// walks it with the same O(n) children-list pass collectGpuTiming already builds each report.
+// One node of a per-pass GPU timing report -- the public mirror of D3D12Device's private GpuAccum
+// tree (see its own comment for why it's keyed by (label, parent), not a flat list). Flat and
+// parent-indexed here since the source data is already this shape; a caller wanting indentation
+// walks it with the same O(n) children-list pass collectGpuTiming builds.
 //
-// `ms` is INCLUSIVE -- itself plus everything nested under it, matching what a begin/end
-// timestamp pair actually measures. A caller wanting the pass's OWN time subtracts its direct
-// children's `ms`, exactly as collectGpuTiming's Appender does when it prints "(excl ...)".
+// `ms` is INCLUSIVE (itself + everything nested); a caller wanting the pass's own time subtracts
+// its direct children's `ms`, as collectGpuTiming's Appender does for "(excl ...)".
 struct GpuTimingNode {
-    // A span index used as "this node is top-level" -- the same sentinel value D3D12Device's
-    // private kNoAccumParent uses, so copying GpuAccum into this type needs no remapping pass.
+    // Sentinel for "top-level", matching D3D12Device's private kNoAccumParent so copying GpuAccum
+    // needs no remapping.
     static constexpr u32 kNoParent = 0xFFFFFFFFu;
     std::string label;
     f64 ms = 0;              // inclusive, averaged across framesAccumulated frames
@@ -510,36 +427,29 @@ struct GpuTimingNode {
 
 // A snapshot of one device's per-pass GPU timing, as of the last frame it collected one.
 //
-// TWO INDEPENDENT "NO DATA" AXES, deliberately not collapsed into one empty result:
-//   - `supported` is the CAPABILITY axis. False means this backend cannot report timings at all
-//     -- Vulkan has no equivalent machinery yet (see its own comment), and a D3D12 device with
-//     GPU timing disabled (tsEnabled_ false, e.g. timestamp queries unavailable on this adapter)
-//     reports the same way. `nodes` is always empty when this is false.
-//   - `nodes` empty (or `framesAccumulated` 0) with `supported` true is the CONTENT axis: an
-//     enabled backend that simply has not accumulated a span yet -- frame 0, or every span this
-//     frame was dropped (see tsDropped_'s own comment). The console needs to tell "ask again
-//     later" apart from "this device will never answer", which is exactly what these two together
-//     say and a single bool could not.
+// Two independent "no data" axes, not collapsed into one:
+//   - `supported` is the CAPABILITY axis: false means this backend cannot report timings at all
+//     (Vulkan: no machinery yet; D3D12 with timing disabled). `nodes` is then always empty.
+//   - `nodes` empty (or `framesAccumulated` 0) with `supported` true is the CONTENT axis: enabled
+//     but nothing accumulated yet (frame 0, or every span this frame dropped -- see tsDropped_).
+//     Lets a caller tell "ask again later" from "will never answer", which one bool couldn't.
 struct GpuTimingReport {
     bool supported = false;
-    // Averaged over this many frames since boot (see D3D12Device::tsAccumFrames_'s own comment on
-    // why an average, not one sampled frame). 0 when nothing has been collected yet.
+    // Averaged over this many frames since boot (see D3D12Device::tsAccumFrames_ for why an
+    // average, not one sample). 0 when nothing collected yet.
     u32 framesAccumulated = 0;
     std::vector<GpuTimingNode> nodes;
 };
 
-// A snapshot of the adapter's video memory budget and current usage, split the way both backends'
-// own APIs split it: LOCAL is memory on the GPU's own bus (VRAM on a discrete card, the whole pool
-// on a UMA/integrated one); NON_LOCAL is everything else the driver can spill into (system memory
-// reached over PCIe on a discrete card, effectively unused on UMA). "Budget" is the OS's current
-// ceiling for this process, not the adapter's physical total -- it moves as other applications and
-// the desktop compositor claim or release their own share, which is exactly why this is polled
-// rather than read once at startup.
+// A snapshot of the adapter's video memory budget and usage, split as both backends' own APIs
+// split it: LOCAL is memory on the GPU's own bus (VRAM discrete, whole pool on UMA); NON_LOCAL is
+// everything else spillable (system memory over PCIe on discrete, unused on UMA). "Budget" is the
+// OS's current per-process ceiling, not the physical total -- it moves as other processes/the
+// compositor claim their share, hence polled rather than read once.
 //
-// `supported` is the same two-state shape as GpuTimingReport::supported just above: false means the
-// backend could not answer THIS call (no IDXGIAdapter3 on this device, the Vulkan extension absent,
-// or the query itself failed), and every numeric field is then 0 rather than a stale or guessed
-// value -- a caller must check this before trusting zero to mean "no memory used".
+// `supported`: same two-state shape as GpuTimingReport::supported -- false means the backend could
+// not answer this call (no IDXGIAdapter3, Vulkan extension absent, or the query failed), and every
+// numeric field is then 0 rather than stale/guessed; check before trusting zero as "no memory used".
 struct VideoMemoryInfo {
     bool supported = false;
     u64  localBudgetBytes = 0;      // D3D12 DXGI_MEMORY_SEGMENT_GROUP_LOCAL Budget / Vulkan: sum of heapBudget over DEVICE_LOCAL memory heaps
@@ -560,35 +470,30 @@ public:
     // support, which is how a feature declines to initialise.
     virtual IResourceFactory* resources() { return nullptr; }
 
-    // The SAME command-recording context the backend's own drawMesh() uses internally to let a
-    // registered IRenderFeature override individual scene draws (see D3D12Device::drawMesh's
-    // overridesScenePipeline branch). Exposed here too so a CALLER -- not just a registered feature
-    // -- can interleave its own setPipeline/dispatchMeshClusters-shaped calls with ordinary
-    // e.device()->drawMesh() calls in the same frame, for the SUBSET of instances that want a
-    // different draw path (per-cluster GPU LOD is the first consumer: most instances still go
-    // through drawMesh(), only the ones with cluster data take this). setPipeline() already
-    // invalidates the backend's own cached root-signature/PSO state as a side effect (see its own
-    // comment), which is what makes drawMesh() calls safe again immediately afterwards -- the same
-    // contract IRenderFeature's override path already relies on every frame. nullptr on a backend
-    // with no GPU support, exactly like resources().
+    // The SAME context drawMesh() uses internally so a registered IRenderFeature can override
+    // scene draws (D3D12Device::drawMesh's overridesScenePipeline). Exposed here so a CALLER too
+    // can interleave setPipeline/dispatchMeshClusters calls with ordinary drawMesh() calls, for
+    // the SUBSET of instances wanting a different draw path (per-cluster GPU LOD is the first
+    // consumer; most instances still go through drawMesh()).
+    // setPipeline() invalidates cached root-signature/PSO state as a side effect, keeping drawMesh()
+    // safe right after -- same contract IRenderFeature's override relies on. nullptr with no GPU
+    // support, like resources().
     virtual IRenderContext* renderContext() { return nullptr; }
 
     // Render-feature registration. NON-owning: the caller keeps the feature alive.
     virtual void addRenderFeature(IRenderFeature* f) { (void)f; }
     virtual void removeRenderFeature(IRenderFeature* f) { (void)f; }
 
-    // The upscaler that turns the scene-resolution colour into the present-resolution image, or
-    // null for none -- which is the default and must stay bit-identical to a build with no upscaler
-    // module at all (docs/AVERSR.md's own invariant for quality Off).
+    // The upscaler turning scene-resolution colour into the present-resolution image, or null for
+    // none (default; must stay bit-identical to a build with no upscaler module -- docs/AVERSR.md's
+    // invariant for quality Off).
     //
-    // NON-OWNING, exactly like addRenderFeature above: the caller keeps it alive, and the composition
-    // root is the only place that knows a concrete type. That is what lets Aver.Render.Sr be linked
-    // by the HOST and by no engine module -- the rule docs/AVERSR.md states and modules/render.voxi
-    // already follows.
+    // Non-owning like addRenderFeature: caller keeps it alive, composition root is the only place
+    // that knows the concrete type -- lets Aver.Render.Sr be linked by the HOST alone (docs/AVERSR.md).
     //
-    // A DEFAULTED NO-OP, so every other IDevice implementation compiles unchanged. The Vulkan
-    // backend implements this same interface and is mid-bring-up; a pure virtual here would break
-    // its build for a feature it does not yet have.
+    // Defaulted no-op so every IDevice implementation compiles unchanged: Vulkan implements this
+    // same interface and is mid-bring-up, and a pure virtual here would break its build for a
+    // feature it does not yet have.
     virtual void setUpscaler(IUpscaler* u) { (void)u; }
     virtual IUpscaler* upscaler() const { return nullptr; }
 
@@ -620,30 +525,25 @@ public:
     // top-left origin. (0,0,0,0) = full backbuffer.
     virtual void setViewportRect(u32 x, u32 y, u32 w, u32 h) { (void)x; (void)y; (void)w; (void)h; }
 
-    // The aspect ratio scene rendering is actually being confined to: the sub-rect above when one
-    // is set, the whole scene target otherwise. A RATIO rather than the rect, for two reasons: it
-    // is what a consumer deriving a camera needs, and a ratio is invariant under the present-space
-    // to scene-space conversion setViewportRect applies, so no caller has to know about
-    // renderScale. 0 means "not known yet", which callers read as "make no correction".
+    // The aspect ratio scene rendering is confined to: the sub-rect above if set, else the whole
+    // scene target. A RATIO not the rect: it's what a camera-deriving consumer needs, and it's
+    // invariant under setViewportRect's present-to-scene conversion (no caller needs renderScale).
+    // 0 = "not known yet", read as "make no correction".
     //
-    // THIS EXISTS BECAUSE A CAMERA DERIVED FROM THE WRONG ASPECT IS INVISIBLE UNTIL MEASURED:
-    // PtSceneView built its rays for its own fixed 16:9 accumulator while the editor docks the
-    // scene at whatever ratio it likes, and the blit maps NDC straight across, so the traced image
-    // arrived stretched by exactly dstAspect/srcAspect against the rasterised one it is used as a
-    // reference for -- 1.06x on the dockspace it was found on.
+    // Exists because a wrong-aspect camera is invisible until measured: PtSceneView built rays for
+    // a fixed 16:9 accumulator while the editor docks at any ratio, and the straight NDC blit
+    // stretched the traced image by dstAspect/srcAspect -- 1.06x on the dockspace it was found on.
     virtual f32 viewportAspect() const { return 0.0f; }
 
-    // Decouples the 3D scene's own render targets from the swapchain's: the scene renders at
-    // round(present * scale) and the post chain's composite upscales it back to the present size,
-    // which the editor UI and the backbuffer/viewport texture stay pinned to (they never see this
-    // value). Clamped to [0.25, 1.0]. 1.0 (the default) reproduces the pre-existing behaviour of
-    // sizing the scene 1:1 with the swapchain, byte-for-byte -- a backend that never implements this
-    // is exactly that default, permanently. Deferred to the next beginFrame() when a swapchain
-    // already exists (optimisation-wave-2, C2-13): D3D12Device and VulkanDevice both PARK the value
-    // and apply it through their own applyPendingRenderScale(), called as the first statement of
-    // beginFrame(), rather than rebuilding immediately here -- see either implementation's own
-    // setRenderScale comment for why an immediate rebuild mid-frame is what actually loses the
-    // device (aver-render-scale-device-loss).
+    // Decouples the scene's render targets from the swapchain's: scene renders at
+    // round(present * scale), post-chain composite upscales back to present size (editor UI and
+    // backbuffer/viewport texture never see this value). Clamped [0.25, 1.0]; 1.0 default reproduces
+    // 1:1 sizing exactly, permanently for a backend that never implements this.
+    //
+    // Deferred to the next beginFrame() when a swapchain exists (optimisation-wave-2, C2-13):
+    // D3D12Device/VulkanDevice PARK the value and apply via their own applyPendingRenderScale()
+    // (first statement of beginFrame) -- an immediate mid-frame rebuild loses the device (see
+    // either implementation's own comment; aver-render-scale-device-loss).
     virtual void setRenderScale(f32 scale) { (void)scale; }
     virtual f32  renderScale() const { return 1.0f; }
 
@@ -656,56 +556,46 @@ public:
 
     // True once this device has been REMOVED and can no longer execute anything.
     //
-    // WHY THIS HAS TO BE ASKABLE. A GPU can be taken away underneath a running process -- a driver
-    // timeout, a driver update, a hardware fault -- and the API does NOT report it at the call that
-    // caused it. Every later call simply fails, quietly, and the process carries on issuing work
-    // into a device that will never run any of it until something finally faults hard. That is the
-    // shape of "the engine crashed with no message", and the only way out of it is for the layer
-    // that DETECTS the removal to be able to tell the layer that drives the frame.
+    // Needed because a GPU can vanish underneath a running process (driver timeout/update, hardware
+    // fault) without the API reporting it at the call that caused it -- every later call just fails
+    // quietly, and the process carries on issuing work into a device that will never run any of it
+    // until something finally faults hard, which is the shape of "the engine crashed with no
+    // message" unless the layer that detects removal can tell the layer driving the frame.
     //
-    // ONE-WAY AND STICKY: nothing here recovers a lost device. Recreating one means recreating every
-    // resource every module owns, which is a feature and not an error path; this is the honest
-    // minimum, which is to stop, say so, and leave the last good frame on screen.
+    // One-way and sticky: nothing here recovers a lost device (that means recreating every resource
+    // every module owns); this is the honest minimum -- stop, say so, keep the last good frame.
     //
-    // Defaults to false so a backend that cannot lose its device -- and every mock in the tests --
-    // is unaffected without writing a line.
+    // Defaults to false so a backend that can't lose its device, and every test mock, is unaffected.
     virtual bool deviceLost() const { return false; }
 
-    // TRUE WHEN SOME REGISTERED FEATURE HAS TAKEN THE SCENE OVER -- the path-traced reference view
-    // being the one that does today. Exists so a CALLER can decide not to issue a draw at all,
-    // which is a different question from the one drawMesh already answers internally.
+    // True when some registered feature has taken the scene over -- the path-traced reference view
+    // is the one that does today. Lets a CALLER skip a draw entirely, a different question from
+    // what drawMesh already answers internally.
     //
-    // WHY A CALLER NEEDS TO ASK. drawMesh submits to every feature BEFORE it honours suppression,
-    // and that order is deliberate: a suppressing feature is usually suppressing precisely because
-    // it is building its own scene out of those submissions, so skipping submitDraw would starve it.
-    // The consequence is that an EDITOR-ONLY draw -- a selection outline, a gizmo, anything that is
-    // chrome rather than scene -- is still handed to a feature that has no way to tell chrome from
-    // geometry, and gets baked into its output. Filtering inside drawMesh cannot fix that: by then
-    // the information that this draw is chrome is gone.
+    // drawMesh submits to every feature BEFORE honouring suppression (a suppressing feature is
+    // usually building its own scene from those submissions, so skipping submitDraw would starve
+    // it) -- so an EDITOR-ONLY draw (outline, gizmo, chrome not scene) still gets baked into that
+    // feature's output; drawMesh can't filter it out after the fact.
     //
-    // Defaults to false, like deviceLost() above, so a backend that registers no features and every
-    // mock in the tests is unaffected without writing a line.
+    // Defaults to false, like deviceLost() above, so a backend with no features, and every test
+    // mock, is unaffected.
     virtual bool sceneSuppressed() const { return false; }
 
-    // Per-pass GPU timing, for a caller that wants to know where the frame's time went (the
-    // command console's frame-time breakdown is the first one) without going through the periodic
-    // AVER_INFO log a backend may print on its own.
+    // Per-pass GPU timing (the command console's frame-time breakdown is the first consumer)
+    // without going through the periodic AVER_INFO log a backend may print on its own.
     //
-    // TWO FRAMES OLD, ON PURPOSE. The GPU timestamps this reports were resolved from a readback
-    // slice that only becomes readable once the GPU has caught up to it, which beginFrame fences
-    // on before collecting -- see D3D12Device's own per-pass-timing comment. Reading "this frame's"
-    // own timings would mean blocking on the GPU to ask how fast the GPU was, which would create
-    // the very stall it reports. A caller that polls this once a frame is reading a rolling average
-    // a couple of frames behind the frame it's currently driving, not a live number.
+    // Two frames old, on purpose: timestamps are resolved from a readback slice only readable once
+    // the GPU has caught up, which beginFrame fences on before collecting (see D3D12Device's own
+    // per-pass-timing comment) -- reading "this frame's" own timings would stall on the GPU to ask
+    // how fast the GPU was, creating the stall it reports. A caller polling once a frame reads a
+    // rolling average a couple of frames behind, not a live number.
     //
-    // RETURNED BY VALUE, not a reference into backend state: the source data mutates every single
-    // beginFrame (new spans folded in, occasionally reallocated), so a reference handed out here
-    // would be dangling or stale by the next frame. This is a snapshot -- a dozen or so short-label
-    // nodes, cheap to copy -- safe for the caller to hold onto for as long as it likes.
+    // Returned by value, not a reference: source data mutates every beginFrame (spans folded in,
+    // occasionally reallocated), so a handed-out reference would go stale. This snapshot (a dozen or
+    // so short-label nodes) is cheap to copy and safe to hold.
     //
-    // Defaults to an unsupported/empty report (GpuTimingReport::supported == false, `nodes` empty)
-    // so a backend that has not implemented this -- Vulkan (no equivalent machinery yet), D3D11,
-    // Null, and every test mock -- is unaffected without writing a line, same as deviceLost() above.
+    // Defaults to an unsupported/empty report (supported == false, `nodes` empty) so Vulkan (no
+    // machinery yet), D3D11, Null, and every test mock are unaffected, same as deviceLost() above.
     virtual GpuTimingReport gpuTiming() const { return {}; }
 
     // GPU self-test: clears a tiny offscreen target to `in` and reads the pixel back into
@@ -724,144 +614,116 @@ public:
     // implementing this.
     virtual VideoMemoryInfo videoMemory() const { return {}; }
 
-    // Chooses which GPU heap createMesh() uploads a static mesh's vertex/index buffers to, for every
-    // call made AFTER this one -- meshes already created keep whatever heap they were built on.
-    // Default false = BufferKind::Upload, which is today's behaviour on every backend: the buffer
-    // lives in CPU-visible, GPU-cacheable memory the whole engine already reads correctly, at the
-    // cost of every draw, shadow, voxelisation, and BLAS build fetching it back across the bus on a
-    // discrete card rather than out of local VRAM. True moves new static meshes to the Default heap,
-    // trading a one-shot upload-time copy (see the D3D12 implementation's own comment on why that
-    // copy is synchronous) for that per-frame bus traffic. See VoxiRenderer.cpp's own ray-tracing
-    // geometry, which already puts BLAS-backing buffers on the Default heap for the identical reason
-    // -- this generalises that precedent to ordinary raster meshes rather than introducing a new one.
-    // A backend that never implements this (D3D11, Null, every mock) is that default, permanently.
+    // Chooses which GPU heap createMesh() uploads to, for calls AFTER this one (existing meshes
+    // keep their heap). Default false = BufferKind::Upload (CPU-visible; correct everywhere, but
+    // every draw/shadow/voxelisation/BLAS-build re-fetches it across the bus on discrete cards).
+    // True moves new meshes to the Default heap, trading a one-shot sync upload copy (D3D12 impl's
+    // comment) for that traffic -- generalising VoxiRenderer.cpp's BLAS-buffer precedent. Permanent
+    // default on D3D11/Null/mocks.
     virtual void setStaticMeshHeapDefault(bool onDefaultHeap) { (void)onDefaultHeap; }
     virtual bool staticMeshHeapDefault() const { return false; }
 
-    // Creates a new mesh that SHARES `source`'s vertex buffer and has its own, independent index
-    // buffer -- the inverse split from createSkinTargetMesh's shared-index/own-vertices shape just
-    // below, and the one an LOD ladder actually wants: coarser LOD levels of the same asset reuse
-    // the same vertex positions/normals/uvs and only thin out which triangles reference them, so
-    // duplicating the vertex stream per level is pure waste -- W11 in the engine optimisation plan.
-    // The vertex buffer is REFCOUNTED across every mesh sharing it (source plus every
-    // createMeshSharingVertices call against it); destroyMesh on any of them while shares remain
-    // outstanding is refused rather than freeing memory a sibling mesh still draws.
+    // Creates a mesh SHARING `source`'s vertex buffer with its own index buffer -- inverse of
+    // createSkinTargetMesh's split below, for an LOD ladder: coarser levels reuse the same vertex
+    // stream and only thin the triangle list (W11 in the optimisation plan). REFCOUNTED across
+    // every sharer; destroyMesh on any is refused while shares remain outstanding.
     //
-    // `source` must be alive and its own vertices must not already be compute-written (a skin target
-    // -- sharing a buffer a compute pass writes into would make every sharer's geometry jitter with
-    // whatever the source was last posed to, not a bug a caller would think to suspect). Bounds
-    // (centre/radius/AABB) are copied from `source`, since a coarser index list over the same vertex
-    // positions cannot exceed the source's own extents.
+    // `source` must be alive and not compute-written (a skin target would make every sharer jitter
+    // with its last pose). Bounds (centre/radius/AABB) are copied from `source` since a coarser
+    // index list can't exceed its extents.
     //
-    // Returns 0 on any refusal -- unsupported backend, dead or invalid source, or a compute-written
-    // source (see createPosedPartMesh for the posed case) -- and the caller MUST THEN FALL BACK TO
-    // createMesh with its own full, independent
-    // vertex array, exactly as if this entry point did not exist. A backend that never implements
-    // this (D3D11, Null, every mock, and Vulkan until it does) is that fallback path, permanently.
+    // 0 on any refusal (unsupported backend, dead/invalid/compute-written source -- see
+    // createPosedPartMesh for the posed case); caller MUST fall back to createMesh with its own
+    // full vertex array. Permanent fallback on D3D11, Null, every mock, and Vulkan until implemented.
     virtual MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
         (void)source; (void)indices; (void)indexCount; return 0;
     }
 
     // Releases a mesh's GPU memory. False if the handle is invalid, already dead, or still shared.
     //
-    // WHY THIS DID NOT EXIST, AND WHY IT HAD TO. Until this, every mesh ever created lived until the
-    // device did. Two subsystems hit that and worked around it rather than fixing it:
-    // LandscapeRenderer capped its cache and drew a coarser ancestor once full (its own warning said
-    // "there is no destroyMesh, so residency cannot be reclaimed"), and SkinnedScene recycles dead
-    // entries because it cannot free them. A streaming world makes it fatal rather than untidy:
-    // loading chunks in without ever letting them out is a leak with a camera attached.
+    // Needed because meshes used to live until the device did (LandscapeRenderer capped its cache
+    // and drew a coarser ancestor once full -- its own warning said "there is no destroyMesh, so
+    // residency cannot be reclaimed" -- and SkinnedScene recycled dead entries, both working around
+    // the missing free) -- fatal for a streaming world: chunks in without chunks out is a leak with
+    // a camera attached.
     //
-    // THE HANDLE IS NOT RECYCLED. The slot is cleared and kept, so a stale handle addresses a DEAD
-    // mesh and draws nothing. Reusing slots would make it address a DIFFERENT live mesh and silently
-    // draw the wrong geometry, which is far harder to notice than a hole. The cost is a few dozen
-    // bytes of dead slot per destroyed mesh -- against the megabytes of vertex and index data this
-    // actually reclaims. If churn ever makes that matter, the fix is a generation in the handle, not
-    // bare reuse.
-    //
-    // ACCELERATION STRUCTURES GO WITH IT. A BLAS holds the mesh's GPU addresses, so leaving one
-    // behind would point ray tracing at freed memory. The backend destroys any it built from this
-    // mesh as part of this call.
+    // Handle NOT recycled: the slot is cleared and kept, so a stale handle addresses a dead mesh,
+    // not a different live one that would silently draw wrong geometry -- a few dozen dead-slot
+    // bytes against the megabytes reclaimed (a generation in the handle is the fix if churn ever
+    // matters). Acceleration structures go with it: a BLAS holds the mesh's GPU addresses, so the
+    // backend destroys any built from this mesh too.
     virtual bool destroyMesh(MeshHandle mesh) { (void)mesh; return false; }
 
     // Creates a mesh whose VERTEX BUFFER IS A COMPUTE TARGET, sharing `source`'s index buffer.
     //
-    // This is how skinning reaches the rasteriser, and it is deliberately a creation entry point
-    // rather than a modifier on a draw. The alternative -- carrying a substitute stream alongside
-    // the MeshHandle -- would have to be threaded through IRenderFeature::submitDraw, the feature's
-    // own draw record, each of its replay passes and both backend draw verbs, and ONE MISSED SITE
-    // IS A REST-POSE SHADOW BESIDE A POSED CHARACTER. Substituting the handle instead leaves every
-    // one of those untouched, and gives each instance its own acceleration structure for free,
-    // which a shared MeshHandle could never do.
+    // How skinning reaches the rasteriser -- deliberately a creation entry point rather than a draw
+    // modifier: threading a substitute stream through submitDraw, draw records, replay passes and
+    // both backend draw verbs risks ONE MISSED SITE giving a rest-pose shadow beside a posed
+    // character. Substituting the handle instead leaves all of that untouched, and gives each
+    // instance its own acceleration structure for free -- which a shared MeshHandle could never do.
     //
-    // The returned buffer is where a compute pass writes rhi::MeshVertex elements. It is SEEDED
-    // WITH `source`'S VERTICES, so a mesh drawn before anything has posed it shows the bind pose
-    // rather than uninitialised GPU memory -- which would be plausible-looking garbage, not a crash.
+    // Returned buffer is where compute writes rhi::MeshVertex elements, SEEDED with `source`'s
+    // vertices so an unposed draw shows the bind pose, not uninitialised (plausible-looking) memory.
     //
-    // Zero on failure, and `outVertices` is then untouched.
+    // Zero on failure; `outVertices` then untouched.
     virtual MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) {
         (void)source; (void)outVertices; return 0;
     }
 
-    // A POSED PART: a mesh SHARING a compute-written mesh's vertex buffer (a createSkinTargetMesh
+    // A POSED PART: a mesh SHARING a compute-written mesh's vertex buffer (createSkinTargetMesh
     // result) with its OWN index buffer -- the per-material split of a skinned mesh, cut over its
-    // live pose. `indices` are in the SOURCE's vertex numbering, i.e. a slice of the base mesh's own
-    // index list, which a skin target shares verbatim.
+    // live pose. `indices` are in the SOURCE's vertex numbering (a slice of the base mesh's index
+    // list).
     //
-    // WHY IT EXISTS: a mesh naming several materials is split at load into one mesh per slot, but a
-    // skinned entity draws its POSED copy -- a different handle the split was never cut from -- so it
-    // fell back to ONE draw under the entity's own material. A character whose hair cards are their
-    // own material slot never drew them with the hair material at all, so no alpha cut-out ever
-    // applied to them. This builds that split over the pose instead.
+    // Exists because a multi-material mesh is split at load into one mesh per slot, but a skinned
+    // entity draws a different (posed) handle the split was never cut from, falling back to ONE
+    // draw under the entity's material (e.g. hair-card slots never got the hair material's alpha
+    // cut-out). This builds the split over the pose instead.
     //
-    // Unlike createMeshSharingVertices: REQUIRES a compute-written source, range-checks every index
-    // against its vertex count, and marks the result compute-written itself, so meshVertexBuffer()
-    // is non-zero for it and every consumer (the frame-wide prepass exclusion, the per-frame BLAS
-    // rebuild, GI-voxelisation and PT-scene exclusion, drawMeshDepthOnly's acceptance) treats it
-    // exactly as the whole posed mesh. Refcounted through the same vertex-share mechanism, so
-    // destroyMesh on the source is refused while a posed part lives, and destroying the part never
-    // frees the shared buffer (that is gated on ownership, not on compute-written). 0 on any refusal;
-    // the caller then keeps the single whole-mesh draw. D3D11/Null/mocks: that fallback, permanently.
+    // Unlike createMeshSharingVertices: REQUIRES a compute-written source, range-checks every
+    // index, and marks the result compute-written too, so meshVertexBuffer() is non-zero for it and
+    // every consumer (prepass exclusion, BLAS rebuild, GI-voxelisation/PT-scene exclusion,
+    // drawMeshDepthOnly) treats it as the whole posed mesh. Refcounted the same way: destroyMesh on
+    // the source is refused while a part lives, and destroying the part itself never frees the
+    // shared buffer (gated on ownership, not compute-written). 0 on refusal; caller keeps the
+    // whole-mesh draw (permanent fallback on D3D11/Null/mocks).
     virtual MeshHandle createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) {
         (void)posedSource; (void)indices; (void)indexCount; return 0;
     }
 
-    // Non-zero when a mesh's vertices are WRITTEN BY COMPUTE rather than uploaded once, and the
-    // buffer they live in. Zero for every ordinary mesh.
+    // Non-zero (the buffer they live in) when a mesh's vertices are WRITTEN BY COMPUTE rather than
+    // uploaded once; zero for every ordinary mesh.
     //
-    // This exists so that a consumer which CACHES something derived from the vertices can tell that
-    // its cache expires every frame. An acceleration structure is the case that forced it: the
-    // renderer memoises one per mesh and never rebuilds it, which is right for static geometry and
-    // means a skinned character's ray-traced shadow keeps the silhouette it had when the structure
-    // was first built. The character moves; its shadow does not.
+    // Lets a consumer caching something derived from the vertices know its cache expires every
+    // frame. Forced by acceleration structures: memoised once per mesh, right for static geometry,
+    // but a skinned character's ray-traced shadow would keep the silhouette from when it was built
+    // -- the character moves, its shadow doesn't -- without this.
     virtual BufferHandle meshVertexBuffer(MeshHandle mesh) const { (void)mesh; return 0; }
 
-    // A mesh's geometry as BUFFERS a shader can be given descriptors over, plus its element counts.
-    // False when the backend cannot express it, which is the signal to fall back rather than to
-    // read nothing.
+    // A mesh's geometry as BUFFERS a shader can get descriptors over, plus element counts. False
+    // when the backend can't express it -- the signal to fall back, not to read nothing.
     //
-    // This is what a RAY needs and a raster draw never did. A hit gives back a primitive index and
-    // barycentrics, and nothing else -- reconstructing the position, normal and uv of the triangle
-    // that was hit means indexing the mesh's own index and vertex streams from the shader. Until
-    // these existed, ray tracing here could answer "is something there" and nothing more, which is
-    // exactly as much as a shadow needs and not enough for a reflection.
+    // What a RAY needs that a raster draw never did: a hit gives back only a primitive index and
+    // barycentrics, so reconstructing position/normal/uv means indexing these streams from the
+    // shader. Without them, ray tracing could answer "is something there" -- enough for a shadow,
+    // not for a reflection.
     virtual bool meshGeometry(MeshHandle mesh, BufferHandle* vb, BufferHandle* ib,
                               u32* vertexCount, u32* indexCount) const {
         (void)mesh; (void)vb; (void)ib; (void)vertexCount; (void)indexCount; return false;
     }
-    // A mesh's LOCAL-SPACE bounding sphere -- centre and radius, in the mesh's own coordinate space
-    // before any world transform. Computed once at createMesh time from the AABB of its vertices
-    // (centre = AABB midpoint, radius = distance to a corner), which is a real, conservative
-    // bounding sphere -- it contains the AABB, which contains every vertex -- not a tight one; a
-    // caller culling with it can produce a false "might be visible", never a false "definitely is
-    // not". False when the backend has no bounds to give, which is the signal to skip culling for
-    // that mesh rather than treat an all-zero sphere as a real, radius-zero point.
-    // The mesh's LOCAL-space axis-aligned extents, or false where the backend never measured them.
+    // Mesh's LOCAL-SPACE bounding sphere (meshBounds, below) -- centre and radius before any world
+    // transform, computed once at createMesh from the vertex AABB (centre = midpoint, radius =
+    // distance to a corner): contains the AABB (which contains every vertex), so it's conservative,
+    // not tight -- false "might be visible", never false "definitely not" under culling. False when
+    // the backend has no bounds, signalling skip culling rather than treating an all-zero sphere as
+    // a real point.
+    // Mesh's LOCAL-space axis-aligned extents (meshBoundsAabb, immediately below), or false if never
+    // measured.
     //
-    // The sphere below is the right shape for a frustum cull -- one centre, one radius, one dot
-    // product -- and the wrong one for containment. A sphere around a wide shallow pool bulges above
-    // its own surface, so "is the camera in the water" answered yes from the poolside. Callers that
-    // need to know whether a POINT is inside a volume, or where that volume's top actually is, want
-    // this instead.
+    // The sphere is right for a frustum cull (one centre/radius/dot product) but wrong for
+    // containment: a sphere around a wide shallow pool bulges above its surface, so "is the camera
+    // in the water" wrongly reads yes from the poolside. Use the AABB for point-in-volume or
+    // "where's the top" questions instead.
     virtual bool meshBoundsAabb(MeshHandle mesh, f32 outMin[3], f32 outMax[3]) const {
         (void)mesh; (void)outMin; (void)outMax; return false;
     }
@@ -891,19 +753,17 @@ public:
     // Sets the directional light and the ambient term.
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
     // Sets the sky, the sun and the air. Supersedes setLight for the sun.
-    // The engine's clock, forwarded into PerFrameCB::time so that ANY shader can animate.
+    // Engine clock, forwarded into PerFrameCB::time so any shader can animate.
     //
-    // Separate from SkyAtmosphere::cloudTime, which is the cloud layer's own drift and is authored
-    // weather rather than a wall clock -- a level that pauses its sky must not thereby freeze every
-    // animated material in it. `seconds` is raw and monotonic; the backend does the wrapping the
-    // shader needs (see PerFrameCB::time for why it wraps at all).
-    // The water wave set both the surface shader and the caustics read -- see PerFrameCB::wave for
-    // why one array rather than a copy each. `waves` is up to 3 entries of
-    // {dirX, dirY, k (rad/cm), speed (rad/s)}; `count` 0 disables the surface entirely.
+    // Separate from SkyAtmosphere::cloudTime (the cloud layer's own authored-weather drift, not a
+    // wall clock) -- a paused sky must not freeze animated materials. `seconds` is raw and
+    // monotonic; the backend wraps it as the shader needs (see PerFrameCB::time).
+    // Sets both the surface shader's and the caustics' wave read (see PerFrameCB::wave for why one
+    // array, not a copy each). `waves`: up to 3 entries of {dirX, dirY, k (rad/cm), speed (rad/s)};
+    // `count` 0 disables the surface.
     //
-    // A CALLER MAY GENERATE THESE HOWEVER IT LIKES -- authored WAVE records, a PCG pass, a gameplay
-    // system reacting to weather. The renderer neither knows nor cares where they came from, which
-    // is the point of putting the seam here.
+    // Caller may generate these however it likes (authored records, PCG, gameplay reacting to
+    // weather) -- the renderer doesn't know or care where they came from.
     virtual void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) {
         (void)waves; (void)count; (void)amplitude;
     }
@@ -913,12 +773,11 @@ public:
     // Sets the camera post-processing chain.
     virtual void setPostProcess(const PostSettings& p) { (void)p; }
     virtual PostSettings postProcess() const { return {}; }
-    // The auto-exposure multiplier CSExposure (post.hlsl) last actually produced, read back from
-    // the GPU a few frames late -- a live UI number, not a value any draw call may depend on.
-    // False when auto exposure has not run yet (nothing has seeded it) or this backend cannot read
-    // it back. THE METERED VALUE, BEFORE PostSettings::exposure (the manual compensation
-    // multiplier applied on top of it) and before local exposure -- a caller wanting "what actually
-    // multiplies the scene" combines the two itself.
+    // The auto-exposure multiplier CSExposure (post.hlsl) last produced, read back from the GPU a
+    // few frames late -- a live UI number, not something a draw call may depend on. False when
+    // auto-exposure hasn't run yet or the backend can't read it back. THE METERED VALUE, before
+    // PostSettings::exposure (the manual compensation multiplier) and before local exposure --
+    // combine both for "what multiplies the scene".
     virtual bool postExposureReadout(f32& adaptedExposure) const { (void)adaptedExposure; return false; }
     // Records one draw of `mesh` with a world matrix (row-major), base colour, and PBR
     // metallic/roughness (0..1).
@@ -939,112 +798,88 @@ public:
 
     // ---- same-frame depth prepass (see docs/RENDERING.md and D3D12Device::drawMesh) ----
     //
-    // OFF (the default) is the entire pre-existing render path, unchanged: drawMesh always shades
-    // straight away, drawMeshDepthPrepass is a no-op and setNextDrawPrepassed's flag is never read.
-    // A DEFAULTED NO-OP for the same reason setUpscaler is (see its own comment just above): the
-    // Vulkan backend is mid-bring-up and must keep compiling without implementing this yet.
+    // Off (default) is the unchanged pre-existing path: drawMesh shades immediately,
+    // drawMeshDepthPrepass is a no-op, setNextDrawPrepassed's flag is never read. Defaulted no-op
+    // like setUpscaler above, so Vulkan's mid-bring-up keeps compiling without this yet.
     virtual void setDepthPrepassEnabled(bool on) { (void)on; }
     virtual bool depthPrepassEnabled() const { return false; }
 
-    // Draws `mesh`'s depth ONLY, through whichever registered feature both overridesScenePipeline()
-    // and returns non-zero from depthPrepassPipeline() -- a no-op otherwise, and a no-op whenever
-    // depthPrepassEnabled() is false. `world` is the SAME row-major transform an equivalent drawMesh
-    // call would use; base colour/metallic/roughness are not needed here because nothing this draws
-    // is shaded, only tested and written.
+    // Draws `mesh`'s depth ONLY, via whichever registered feature both overridesScenePipeline() and
+    // returns non-zero from depthPrepassPipeline() -- no-op otherwise, or when
+    // depthPrepassEnabled() is false. `world` matches an equivalent drawMesh call; colour/metallic/
+    // roughness aren't needed since nothing here is shaded, only tested and written.
     //
-    // A CALLER MUST NOT OFFER A COMPUTE-WRITTEN (SKINNED) MESH HERE -- see meshVertexBuffer's own
-    // comment for what that flag means. This entry point checks it defensively and silently declines
-    // rather than trust every future call site to remember, but the caller choosing NOT to call this
-    // for such a mesh in the first place is still the primary contract: a skinned entity is one of
-    // the paths this feature is meant to exclude, not one it is meant to guard against after the fact.
+    // A CALLER MUST NOT PASS A COMPUTE-WRITTEN (SKINNED) MESH HERE (see meshVertexBuffer). This
+    // checks and silently declines defensively, but the primary contract is the caller not calling
+    // this for such a mesh at all.
     //
-    // `color` IS THE SAME ARRAY THE PAIRED drawMesh() RECEIVES, and it is not decoration: the depth
-    // shader's alpha test is `gBaseColor.a * gBaseColorFactor.a * texture.a` (voxi.hlsl's
-    // PSDepthPrepass), and gBaseColor is the per-object constant that array fills. This used to take
-    // no colour and leave that slot zero, so every alpha-masked material computed alpha 0, clipped
-    // every pixel, and wrote NO depth at all -- and its colour draw, being "prepassed", then wrote
-    // none either. Found by adversarial review; it had been latent only because the prepass itself
-    // never took effect while it was broken.
+    // `color` matches the paired drawMesh()'s array and is not decoration: gBaseColor is the
+    // per-object constant that array fills, and the depth shader's alpha test is
+    // `gBaseColor.a * gBaseColorFactor.a * texture.a` (voxi.hlsl PSDepthPrepass). This used
+    // to leave that slot zero, so every alpha-masked material clipped every pixel and wrote NO
+    // depth -- and its "prepassed" colour draw then wrote none either. Found by adversarial review;
+    // latent only because the prepass itself was broken.
     virtual void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
         (void)mesh; (void)world; (void)color;
     }
 
-    // drawMeshDepthPrepass's body WITHOUT the frame-wide depthPrepassEnabled() gate, and without
-    // counting toward its per-frame census -- for a SINGLE draw that needs its depth written by the
-    // alpha-testing depth-only shader immediately before its own colour draw, whether or not the
-    // whole-frame prepass is on. Follow it with setNextDrawPrepassed(true), exactly as a
-    // whole-frame prepass is followed.
+    // drawMeshDepthPrepass's body WITHOUT the frame-wide depthPrepassEnabled() gate or per-frame
+    // census -- for a SINGLE draw needing depth written by the alpha-testing depth-only shader
+    // immediately before its colour draw, prepass on or off. Follow with
+    // setNextDrawPrepassed(true), as for a whole-frame prepass.
     //
-    // WHY IT EXISTS: an ALPHA-MASKED material under a colour shader that forces early depth. The
-    // scene colour shader (PSMainVoxi) is [earlydepthstencil] -- load-bearing, see its own comment --
-    // and under forced early depth the depth write happens BEFORE the shader runs, so the alpha
-    // clip() in averEvalMaterial cannot take it back. Every cut-out texel of a leaf or a fence
-    // therefore wrote opaque depth, and whatever was drawn behind it afterwards failed the depth test
-    // and never appeared through the hole. Writing that draw's depth first through PSDepthPrepass
-    // (which has no forced early depth and clips BEFORE its write), then drawing its colour with the
-    // LessEqual/NO-WRITE twin, leaves early depth nothing to write, so the clip is honoured again.
+    // Exists for an ALPHA-MASKED material under forced early depth: PSMainVoxi is
+    // [earlydepthstencil] (see its own comment), so depth writes BEFORE the shader runs and the
+    // alpha clip() in averEvalMaterial can't take it back, hiding whatever's behind a cut-out.
+    // Writing depth first through PSDepthPrepass (clips before its write), then colour with the
+    // LessEqual/no-write twin, restores the clip.
     //
     // A COMPUTE-WRITTEN (skinned/soft-body) MESH IS ACCEPTED HERE, unlike drawMeshDepthPrepass: its
-    // posed buffer IS its vertex buffer (a createPosedPartMesh part shares it), and skinning has
-    // already run for this frame by the time any
-    // walk draws, so the colour draw of the same handle that must follow immediately reads identical
-    // vertices. drawMesh honours the prepassed flag for such a mesh only when it is that exact handle
-    // -- otherwise the colour draw would reject its own equal depth and the mesh would vanish.
+    // posed buffer IS its vertex buffer (createPosedPartMesh shares it) and skinning already ran
+    // this frame, so the following colour draw reads identical vertices. drawMesh only honours the
+    // flag for that exact handle, else the colour draw rejects its own equal depth and vanishes.
     //
-    // RETURNS WHETHER DEPTH WAS ACTUALLY WRITTEN, and the caller marks the colour draw prepassed only
-    // on true. False in wireframe, when a feature suppresses the rasterised scene
-    // (ray-driven primary visibility, a debug view -- there is no raster colour pass to consume the
-    // depth, and writing raster depth over the ray-driven pass's own depth would be wrong), or when
-    // no feature offers a depth-only pipeline. `color` as for drawMeshDepthPrepass, for the same
-    // alpha-test reason.
+    // Returns whether depth was written; caller marks the colour draw prepassed only on true. False
+    // in wireframe, when a feature suppresses the rasterised scene (ray-driven primary visibility, a
+    // debug view -- there's no raster colour pass to consume the depth, and writing over the
+    // ray-driven pass's own depth would be wrong), or when no feature offers a depth-only pipeline.
+    // `color` as for drawMeshDepthPrepass, same alpha-test reason.
     virtual bool drawMeshDepthOnly(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
         (void)mesh; (void)world; (void)color; return false;
     }
 
     // Marks the VERY NEXT drawMesh() call as one whose depth a prior drawMeshDepthPrepass() call
-    // already wrote for the identical mesh/world THIS SAME FRAME, so the backend can ask the scene
-    // feature for its depth-tested-only pipeline variant (scenePipeline(..., depthPrepassed=true))
-    // instead of the ordinary depth-write one.
+    // already wrote for the identical mesh/world THIS SAME FRAME, so the backend uses the scene
+    // feature's depth-tested-only pipeline variant (depthPrepassed=true) instead of the ordinary one.
     //
-    // AUTO-CONSUMED, NOT STICKY -- deliberately unlike setDrawBinding just above. setDrawBinding's
-    // material stays correct for every draw until a caller changes it, which is why it is sticky;
-    // this flag means something only about the ONE upcoming draw, and dozens of call sites across
-    // this codebase (the landscape, skinned characters, editor gizmos, the selection outline) call
-    // drawMesh with no idea this flag exists. If it stayed set after being read, the first caller
-    // that forgot to clear it would silently hand every draw AFTER it the wrong depth state. Reset to
-    // false by drawMesh whether or not it was true, so the default -- never having called this at
-    // all -- is exactly today's behaviour everywhere this is not explicitly threaded through.
+    // Auto-consumed, not sticky, unlike setDrawBinding above (whose material stays correct until
+    // changed): this flag concerns only the one upcoming draw, and dozens of call sites (landscape,
+    // skinned characters, gizmos, selection outline) have no idea it exists. Staying set after being
+    // read would silently corrupt every later draw's depth state if one caller forgot to clear it.
+    // drawMesh always resets it to false, so never calling this reproduces today's behaviour exactly.
     virtual void setNextDrawPrepassed(bool prepassed) { (void)prepassed; }
 
     // ---- translucency: the blended-mesh path ----
     //
-    // Marks every subsequent drawMesh() as TRANSLUCENT until a caller says otherwise. STICKY, like
-    // setDrawBinding and unlike setNextDrawPrepassed just above, and for the same reason
-    // setDrawBinding is: this is a property of the MATERIAL a caller is currently drawing with, not
-    // of one upcoming draw. beginFrame resets it to false, so a caller that never touches it gets
-    // exactly today's behaviour on every draw.
+    // Marks every subsequent drawMesh() as TRANSLUCENT until changed. Sticky like setDrawBinding
+    // (unlike setNextDrawPrepassed above): a property of the current MATERIAL, not one draw.
+    // beginFrame resets it to false.
     //
-    // WHAT A TRUE FLAG ACTUALLY CHANGES, because it is more than a blend state. A blended draw
-    // leaves the opaque path completely, at the very top of drawMesh, BEFORE the IRenderFeature
-    // submitDraw loop -- so a translucent mesh is not voxelised, not put in the ray-tracing
-    // acceleration structure, not drawn into the shadow cascade, and not depth-prepassed. The device
-    // captures it instead, and replays every captured draw sorted BACK-TO-FRONT after the deferred
-    // sky and before IRenderFeature::transparentPass, through
-    // scenePipeline(..., blended = true).
+    // A true flag is more than a blend state: a blended draw leaves the opaque path entirely, at
+    // the top of drawMesh, BEFORE IRenderFeature's submitDraw loop -- not voxelised, not in the
+    // acceleration structure, not shadow-cast, not depth-prepassed. The device captures it and
+    // replays every draw BACK-TO-FRONT after the deferred sky and before
+    // IRenderFeature::transparentPass, via scenePipeline(..., blended = true).
     //
-    // THE ORDERING IS THE WHOLE POINT AND IT IS NOT NEGOTIABLE. Drawing a blended mesh where the
-    // opaque ones are drawn puts it BEFORE the deferred sky, whose own depth-EQUAL opaque fill then
-    // overwrites it -- the identical failure the particle pass was moved to fix; see
-    // D3D12Device::endFrame's comment at the sky draw. A caller cannot fix this by sorting its own
-    // draw list, because the sky is not in that list. Hence the capture.
+    // Ordering is not negotiable: drawn with the opaque pass it would land BEFORE the deferred sky,
+    // whose depth-EQUAL fill would overwrite it (the failure the particle pass was moved to fix; see
+    // D3D12Device::endFrame's sky-draw comment) -- sorting the caller's own draw list can't fix
+    // this since the sky isn't in it, hence the capture.
     //
-    // WHAT IT COSTS, stated rather than discovered later: excluded from the acceleration structure
-    // means glass casts no ray-traced shadow and does not appear in a reflection; excluded from
-    // voxelisation means it contributes no GI bounce. Those are the correct FIRST answers -- a pane
-    // of glass that casts a solid black shadow is a worse artefact than one that casts none -- but
-    // they are approximations, not physics, and a later pass that wants coloured transmission
-    // shadows will have to put translucent draws back into the structure with a material flag the
-    // any-hit shader can read.
+    // Cost: excluded from the acceleration structure, glass casts no ray-traced shadow and shows in
+    // no reflection; excluded from voxelisation, no GI bounce. Correct FIRST answers (a solid black
+    // shadow is worse than none) but approximations -- coloured transmission shadows need
+    // translucent draws back in with an any-hit-readable flag.
     virtual void setDrawBlended(bool blended) { (void)blended; }
     // What setDrawBlended last set, for a caller that saves and restores it around a nested draw.
     virtual bool drawBlended() const { return false; }
@@ -1054,17 +889,15 @@ public:
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
     // Releases a line mesh's GPU memory. False for a stale or already-released handle.
     //
-    // WHY THIS HAD TO EXIST. Every line mesh is a committed UPLOAD-heap buffer and there was no way
-    // to free one -- createLineMesh appended to a vector that only ever grew. Fine for the handful
-    // the editor builds once at startup (the grid, the gizmo, the sculpt ring); a leak per rebuild
-    // for anything that CHANGES, which is every debug overlay worth drawing: a navmesh, an agent's
-    // current path, a perception cone. docs/CHUNKS.md raised exactly this for meshes (B6) and
-    // destroyMesh was added; line meshes were missed.
+    // Every line mesh was a committed UPLOAD-heap buffer with no way to free it -- createLineMesh
+    // appended to a vector that only ever grew. Fine for the handful the editor builds once at
+    // startup (the grid, the gizmo, the sculpt ring), a leak per rebuild for anything that CHANGES
+    // (a navmesh, an agent's path, a perception cone). docs/CHUNKS.md raised this for meshes (B6)
+    // and destroyMesh was added; line meshes were missed until now.
     //
-    // THE SLOT IS KEPT, NOT RECYCLED, exactly as destroyMesh does and for the reason stated there:
-    // a stale handle must address a DEAD mesh rather than a live one. Handing handle 3 to a new
-    // caller means whoever still held the old 3 starts drawing somebody else's geometry -- a bug
-    // that looks like corruption and cannot be traced back to here.
+    // Slot kept, not recycled, same reason as destroyMesh: a stale handle must address a DEAD mesh,
+    // not silently hand a new caller's handle 3 to whoever still held the old one -- a bug that
+    // looks like corruption and can't be traced back to here.
     virtual bool destroyLineMesh(LineHandle mesh) { (void)mesh; return false; }
 
     // Mesh shader geometry path (mesh-shader Tier 1 + SM 6.5), replacing the input-assembler vertex
@@ -1076,46 +909,39 @@ public:
     virtual void setWireframe(bool on) { (void)on; }
     // Draws the next mesh with NO LIGHTING -- flat gBaseColor, no sun, no ambient, no fog.
     //
-    // IT TURNS ON A PATH THAT ALREADY EXISTED AND COULD NOT BE REACHED. plainShadeSurface has carried
-    // `if (gMaterial.z > 0.5) return float4(gBaseColor.rgb, gBaseColor.a);` since it was written
-    // (shared_prelude.hlsl, and its constant block documents the slot as "z=unlit(0/1)"), and every
-    // single call site that fills that constant hardcoded it to 0 -- so the branch was dead in the
-    // shader with nothing on either backend able to select it.
+    // Turns on a path that already existed but was unreachable: plainShadeSurface's
+    // `if (gMaterial.z > 0.5) return float4(gBaseColor.rgb, gBaseColor.a)` (shared_prelude.hlsl,
+    // slot documented as "z=unlit(0/1)") was dead because every call site hardcoded that constant
+    // to 0.
     //
-    // A SETTER, NOT A WIDER drawMesh, matching setWireframe/setDrawBlended/setLineDepth beside it.
-    // Widening the call would drag IRenderFeature::submitDraw's signature and every feature with it,
-    // for a flag no feature ever sees: the editor's one caller draws in WIREFRAME, and wireframe is
-    // exactly the case where VoxiRenderer declines the pipeline, so the draw has already fallen
-    // through to the backend's own before this matters.
+    // A setter, not a wider drawMesh, matching setWireframe/setDrawBlended/setLineDepth: widening
+    // would drag IRenderFeature::submitDraw's signature along for a flag no feature ever sees (the
+    // editor's one caller draws in WIREFRAME, where VoxiRenderer already declines the pipeline, so
+    // the draw has already fallen through to the backend's own path before this matters).
     //
-    // STICKY, like setWireframe: nothing resets it per frame, so a caller brackets its own draw.
+    // Sticky like setWireframe: nothing resets it per frame; the caller brackets its own draw.
     virtual void setUnlit(bool on) { (void)on; }
 
     // Line depth testing. Default true; false draws subsequent lines as an always-on-top overlay.
     virtual void setLineDepth(bool testDepth) { (void)testDepth; }
 
-    // How much scene radiance a line writes, as a multiple of the colour it was authored with.
-    // 1.0 is exactly the old behaviour: the line lands at the display colour the vertex named.
-    // Above 1.0 the line is BRIGHTER THAN WHITE in the pre-tonemap target, which is what makes the
-    // camera's own bloom pick it up -- lines already draw into the HDR scene target and bloom runs
-    // before the tonemap, so this needs no glow shader of its own, only headroom.
+    // How much scene radiance a line writes, as a multiple of its authored colour. 1.0 = old
+    // behaviour (display colour as named); above 1.0 the line is BRIGHTER THAN WHITE in the
+    // pre-tonemap target, which the camera's own bloom picks up -- no glow shader needed, only
+    // headroom, since lines already draw HDR before the tonemap.
     //
-    // WHY A MULTIPLIER AND NOT A BRIGHTER AUTHORED COLOUR. PSLine writes
-    // averInverseTonemap(srgbToLin(col)), and that curve is near-vertical at the top: it clamps at
-    // 1.0329, because its `2.43y - 2.51` denominator reaches zero there. Two of the six baked gizmo
-    // hues already sit at exactly 1.0 on a channel, where averInverseTonemap(srgbToLin(1.0)) is
-    // about 7.24 -- and at 1.4 it clamps and evaluates to about 1931. A 270x jump, with the other
-    // channels washing toward white on the way. Scaling AFTER the inverse tonemap has no ceiling
-    // and no hue shift: every channel moves by the same factor, so red stays red.
+    // A multiplier, not a brighter authored colour, because PSLine's
+    // averInverseTonemap(srgbToLin(col)) clamps at 1.0329 (its `2.43y - 2.51` denominator hits
+    // zero): col=1.0 (two of six baked gizmo hues sit there on a channel) -> ~7.24, col=1.4 -> ~1931
+    // (270x jump, other channels washing toward white).
+    // Scaling AFTER the inverse tonemap has no ceiling and no hue shift.
     //
-    // STICKY, like setLineDepth above it, and drawLines writes the constant on EVERY call rather
-    // than only when it is non-default -- the value shares dword 16 of the per-object block with
-    // gBaseColor.x, so a line drawn after any mesh would otherwise inherit that mesh's red channel
-    // as its glow. Callers still bracket, so the sticky value is 1.0 outside a bracket.
+    // Sticky like setLineDepth; drawLines writes the constant every call since it shares dword 16
+    // of the per-object block with gBaseColor.x (else a line after any mesh would inherit that
+    // mesh's red channel). Callers still bracket, so it reads 1.0 outside a bracket.
     //
-    // NOT EXPOSURE-STABLE, stated rather than fixed: PSLine never divides by gPostTone.x, so under
-    // auto-exposure the apparent strength drifts with scene brightness. That is pre-existing --
-    // the authored line colour has always had it -- and acceptable for a cosmetic effect.
+    // NOT exposure-stable: PSLine never divides by gPostTone.x, so strength drifts with brightness
+    // under auto-exposure -- pre-existing, acceptable for a cosmetic effect.
     virtual void setLineGlow(f32 gain) { (void)gain; }
 
     // Captures the backbuffer pixel at (x,y) during the next presented frame; poll getCapture().
@@ -1124,11 +950,10 @@ public:
     // Full captured frame (tight RGBA8, top-to-bottom) after a requestCapture completes.
     virtual bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) { (void)outRGBA; (void)w; (void)h; return false; }
 
-    // Initialises in-window UI on this device for a native window. False if the backend has no UI
-    // support, or has UI support but nothing was installed for it to host -- see, for the D3D12
-    // backend, aver::rhi::d3d12::IUiBackend and installUiBackend (UiBackend.hpp): this interface is
-    // deliberately silent about WHICH UI toolkit a backend hosts, Dear ImGui or otherwise. Widgets are
-    // built between uiNewFrame() and endFrame().
+    // Initialises in-window UI on this device. False if the backend has no UI support, or has
+    // support but nothing installed to host (D3D12: aver::rhi::d3d12::IUiBackend/installUiBackend,
+    // UiBackend.hpp) -- deliberately silent about which toolkit. Widgets build between uiNewFrame()
+    // and endFrame().
     virtual bool uiInit(void* windowHandle) { (void)windowHandle; return false; }
     virtual void uiNewFrame() {}
     virtual void uiShutdown() {}
@@ -1140,176 +965,131 @@ public:
     // integer. Cached on the texture. 0 where the backend hosts no UI.
     virtual u64 uiTextureId(TextureHandle t) { (void)t; return 0; }
 
-    // The backend's OWN scene depth target, registered as an ordinary TextureHandle through the SAME
-    // resource-factory table createTexture() populates -- so a caller reaches it with the generic
-    // setSrv/textureBarrier vocabulary exactly as it would any other texture, rather than this
-    // interface growing a bespoke, backend-specific "hand me the raw depth resource" accessor (see
-    // modules/occlusion/include/aver/occlusion/Occlusion.hpp's top comment, point (c), for why that
-    // distinction was a deliberate design-review correction and not a style preference). Declares
-    // ITS OWN sample count as sampleCount() above (a multisampled result needs an SRV slot declared
-    // rhi::SlotKind::Texture2DMS, not Texture2D — see that enum's own comment).
+    // The backend's OWN scene depth target, registered as an ordinary TextureHandle through the
+    // SAME resource-factory table createTexture() populates, so a caller reaches it with the
+    // generic setSrv/textureBarrier vocabulary rather than a bespoke accessor (deliberate
+    // design-review correction -- see modules/occlusion/include/aver/occlusion/Occlusion.hpp's top
+    // comment, point (c)). Declares its own
+    // sample count via sampleCount() above (multisampled needs SlotKind::Texture2DMS, not
+    // Texture2D).
     //
-    // A DEFAULTED NO-OP, same shape as setUpscaler/setDepthPrepassEnabled above: the Vulkan backend
-    // is mid-bring-up and must keep compiling without implementing this yet, and the Null backend has
-    // no depth buffer to give at all. 0 before the first swapchain resize has run, exactly like every
-    // other size-dependent target this interface exposes.
+    // Defaulted no-op, same shape as setUpscaler/setDepthPrepassEnabled: Vulkan is mid-bring-up,
+    // Null has no depth buffer at all. 0 before the first swapchain resize, like every other
+    // size-dependent target here.
     virtual TextureHandle sceneDepthTexture() { return 0; }
 
-    // THE OPAQUE SCENE, COPIED, SO A TRANSLUCENT SURFACE CAN READ WHAT IS BEHIND IT.
+    // The opaque scene, copied, so a translucent surface can read what's behind it.
     //
-    // WHY THIS HAS TO EXIST. Hardware alpha blending attenuates the destination by ONE scalar
-    // (1 - src.a), which cannot differ per channel. Volume absorption is Beer-Lambert and is
-    // per-channel by definition -- glass is green because iron passes green and eats red, and the
-    // effect grows with path length. So a blended surface can be made to go DARKER with depth by
-    // raising its alpha, but it can never TINT what is behind it. That is the whole reason glass in
-    // this engine could not show the green edge that real glass shows.
+    // Hardware alpha blending attenuates the destination by one scalar (1-src.a), but volume
+    // absorption (Beer-Lambert) is per-channel and grows with path length -- glass is green because
+    // iron passes green, eats red. So a blended surface can go DARKER with depth via alpha, but
+    // never TINT what's behind it -- the whole reason glass here couldn't show real glass's green
+    // edge. Handing the shader the background as a texture lets it composite itself instead. Returns a
+    // copy of the scene colour taken just BEFORE blended draws replay -- the same trick AverSR uses
+    // for the upscaler's raw render target.
     //
-    // The way out is to hand the shader the background as a texture, so it does the composite itself
-    // instead of leaving it to one blend factor. This returns a copy of the scene colour taken just
-    // BEFORE the blended draws replay -- the same trick the AverSR path already uses to give the
-    // upscaler a TextureHandle for a raw render target.
+    // One copy, taken once: a second translucent layer samples a background missing the first
+    // (glass over water reads water's backdrop, not the water) -- the standard trade (UE's
+    // distortion pass makes it too), cheaper than per-channel destination blending, which D3D12
+    // can't offer here (four render targets bound with G-buffer on, dual-source blending needs
+    // exactly one).
     //
-    // ONE COPY, TAKEN ONCE. A second translucent layer therefore samples a background that does not
-    // include the first: glass over water reads the water's own backdrop, not the water. That is the
-    // standard trade (UE's distortion pass makes it too) and it is the price of this approach over
-    // per-channel destination blending, which D3D12 cannot offer here because the blended pass binds
-    // four render targets when the G-buffer is on and dual-source blending requires exactly one.
-    //
-    // 0 when unavailable, and the shader must fall back to the scalar composite when it is: before
-    // the first resize, on a backend that has not implemented it, and under MSAA, where the scene
-    // target is multisampled and a plain CopyResource into a single-sample texture is invalid.
+    // 0 when unavailable (before first resize, unimplemented backend, or under MSAA where
+    // CopyResource into single-sample is invalid) -- shader falls back to scalar composite.
     virtual TextureHandle sceneColorBackdropTexture() { return 0; }
 
     // ---------------------------------------------------------------------------------------
     // G-buffer: velocity, view-space depth, and world normal+roughness, written ALONGSIDE the
-    // ordinary forward scene pass at scene resolution -- three extra render targets and nothing
-    // else, added here rather than replacing anything the scene pass already produces.
+    // forward scene pass at scene resolution -- three extra render targets, nothing else changed.
     //
-    // WHY THIS EXISTS. Aver is a FORWARD renderer: PSMainVoxi returns a single SV_TARGET, so a
-    // shaded pixel's normal, roughness and depth exist only in that one shader invocation's own
-    // registers and are gone the instant it returns -- never in a texture any LATER pass, compute
-    // or otherwise, can read. That single gap blocks, simultaneously: the vendored FidelityFX
-    // Denoiser (third_party/fidelityfx-denoiser -- its README lists FFX_DNSR_Shadows_ReadDepth /
-    // ReadNormals / ReadVelocity / ReadPreviousDepth as callbacks the HOST must supply, and today
-    // the honest answer to each is "no"), FSR2/3, TAA, and screen-space reflections -- every one of
-    // them is a compute pass that needs to read what a previous pass saw, and until now nothing
-    // could hand it that. It is also why today's temporal reprojection is WRONG for a moving
-    // object: it reprojects THIS frame's world position through LAST frame's camera (gPrevViewProj
-    // in VoxiShaders.hpp), which is only correct for geometry that did not move between frames --
-    // fixing that fully needs a per-instance previous transform this G-buffer does not carry (see
-    // RtInstance's own comment in VoxiRenderer.hpp), but the per-pixel velocity below is the piece
-    // every consumer in the list above needs regardless, and it is what this declares.
+    // Aver is a FORWARD renderer (PSMainVoxi returns one SV_TARGET): a shaded pixel's
+    // normal/roughness/depth live only in that invocation's registers, unreadable by any later
+    // pass. Blocks the vendored FidelityFX Denoiser (third_party/fidelityfx-denoiser's README lists
+    // ReadDepth/ReadNormals/ReadVelocity/ReadPreviousDepth as callbacks the host must supply; today
+    // the honest answer is "no" to each), FSR2/3, TAA, and SSR alike -- each needs to read what a
+    // previous pass saw, which until now nothing could hand it. Also why
+    // temporal reprojection is wrong for moving objects today (reprojects THIS frame's position
+    // through LAST frame's camera, gPrevViewProj in VoxiShaders.hpp -- correct only for static
+    // geometry; the full fix needs a per-instance previous transform this G-buffer doesn't carry,
+    // see RtInstance in VoxiRenderer.hpp). The per-pixel velocity below is what every consumer
+    // above needs regardless. Fuller writeup: docs/rendering/DENOISING.md.
     //
-    // See docs/rendering/DENOISING.md for the fuller design writeup this slice is drawn from.
+    // Additive and defaulted throughout: setGBufferEnabled defaults OFF, and every accessor below
+    // defaults to a safe "nothing here" value (0 for a texture, false/true for the bools, whichever
+    // is the safe reading), so never enabling it allocates none of the three targets, records no
+    // extra writes, and renders BIT-IDENTICAL to a build without this declaration.
     //
-    // ADDITIVE AND DEFAULTED, THE WHOLE WAY DOWN. setGBufferEnabled defaults to OFF, and every
-    // accessor below defaults to its own "nothing here" value (0 for a texture, false/true for the
-    // bools, chosen as whichever is the SAFE reading for a caller that forgot to check
-    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) allocates none of
-    // these three targets, records no extra writes, and renders a frame BIT-IDENTICAL to one from
-    // before this declaration existed.
+    // OPEN: a prior "nothing yet enables this" claim here went false within a day of being written
+    // (2026-08-29) -- SandboxApp.cpp passes `gbufferOverride_ || gbufferDebugView_ != Mode::Off`,
+    // driven by --gbuffer/--gbuffer-debug, and viewport debug reads it back; only the packaged
+    // runtime abstains. Left in as a reminder this file has a history of
+    // stale absolutes outliving what they described; a render-gate oracle (18x9 configs) and 89
+    // headless suites both assume the accessors hold their defaults while gBufferEnabled() is false
+    // -- a backend that allocates or writes any of this while reporting false would fail both
+    // without pointing at why.
     //
-    // "WHICH IS EVERY BUILD TODAY, SINCE NOTHING YET DOES" STOOD HERE AND WAS FALSE, from the day
-    // after it was written (2026-08-29) until it was corrected. The editor calls this every frame:
-    // sandbox/src/SandboxApp.cpp passes `gbufferOverride_ || gbufferDebugView_ != Mode::Off`, driven
-    // by --gbuffer and --gbuffer-debug, and the viewport's G-buffer debug view reads all three
-    // accessors back. The packaged runtime still never turns it on, which is the true half of what
-    // the sentence was reaching for -- but a reader checking whether this surface has ever been
-    // exercised would have concluded "no" and been wrong, which is the entire cost of the mistake.
-    // Left in rather than deleted because this file has a recorded history of stale absolutes
-    // outliving the thing they described.
-    // That is not a nicety: a render-gate oracle (18 gates x 9 configurations) and 89 headless
-    // suites both assume it, and a backend that allocates or writes any of this while reporting
-    // gBufferEnabled() == false would fail both without the failure pointing at why.
-    //
-    // WHO IMPLEMENTS WHAT. This class only declares the surface. Deciding how the three targets are
-    // populated -- which pass writes them, whether that is a same-frame prepass or folded into the
-    // existing forward pass's pixel shader, how a Vulkan backend mid-bring-up stages the work -- is
-    // the backend's call, not this header's; every method here is a virtual with an inert default
-    // specifically so a backend that has not done that work yet keeps compiling and keeps behaving
-    // exactly as it does today.
+    // This class only declares the surface; populating the three targets is the backend's call --
+    // every method here defaults inert so an unimplemented backend compiles and behaves unchanged.
     virtual void setGBufferEnabled(bool on) { (void)on; }
     virtual bool gBufferEnabled() const { return false; }
 
     // Scene-resolution screen-space motion, Format::RG16F. UNITS: TEXELS PER FRAME, DESTINATION
-    // TEXEL MINUS SOURCE TEXEL -- for a surface point shaded at THIS frame's pixel (x, y), the
-    // stored (vx, vy) satisfies (x, y) - (vx, vy) == the pixel that SAME surface point occupied
-    // LAST frame. This is deliberately the identical convention UpscalerNeeds::MotionVectors
-    // already documents (RHIResources.hpp): FSR2/3, DLSS, and FFX_DNSR_Shadows_ReadVelocity all
-    // read texel-space motion in this direction, and a G-buffer that disagreed with the upscaler
-    // seam's own documented meaning would make "motion vectors" mean two different things
-    // depending on which consumer asked -- exactly the kind of unit mismatch that never shows up
-    // as a compile error or a crash, only as history that reprojects to the wrong pixel.
+    // TEXEL MINUS SOURCE TEXEL -- for a point shaded at THIS frame's pixel (x,y), stored (vx,vy)
+    // satisfies (x,y) - (vx,vy) == where that surface point was LAST frame. Matches
+    // UpscalerNeeds::MotionVectors' convention (RHIResources.hpp) exactly, since FSR2/3, DLSS, and
+    // FFX_DNSR_Shadows_ReadVelocity all read texel-space motion this direction -- a mismatch here
+    // would silently reproject to the wrong pixel with no compile error or crash.
     //
-    // 0 when gBufferEnabled() is false or this backend has not implemented the G-buffer -- the same
-    // "absent, not garbage" contract sceneDepthTexture() above already uses. A caller must check
-    // gBufferEnabled() (or simply treat a 0 handle as "nothing to read") rather than assume a
-    // non-zero handle whenever the G-buffer is on; see this method family's own top comment for why
-    // every accessor here defaults to an unambiguous "nothing here" value.
+    // 0 when gBufferEnabled() is false or unimplemented -- same "absent, not garbage" contract as
+    // sceneDepthTexture() above; a caller must check gBufferEnabled() rather than assume non-zero.
     virtual TextureHandle gBufferVelocityTexture() { return 0; }
 
-    // Scene-resolution depth, Format::R32Float. UNITS: VIEW-SPACE LINEAR DEPTH -- the shaded
-    // point's Z in camera/view space, equivalently clip-space W before the perspective divide --
-    // and DELIBERATELY NOT the post-projection [0,1] value sceneDepthTexture()'s own depth-stencil
-    // buffer holds. Those two quantities are related by a projection-dependent, NON-LINEAR
-    // remapping (the classic "depth precision" curve), so a consumer that samples this texture and
-    // treats it as ordinary [0,1] depth gets a number wrong by a different factor at every pixel --
-    // not a crash, not an obviously bad image, just quietly incorrect reprojection and reconstructed
-    // world positions. FFX_DNSR_Shadows_ReadDepth / ReadPreviousDepth and any future SSR pass both
-    // want THIS linear form because it is what makes reconstructing a view-space position from a
-    // screen UV a single division rather than an un-projection through the full projection matrix.
+    // Scene-resolution depth, Format::R32Float. UNITS: VIEW-SPACE LINEAR DEPTH (shaded point's Z in
+    // view space, i.e. clip-space W pre-divide) -- deliberately NOT sceneDepthTexture()'s
+    // post-projection [0,1] value; the two relate by a non-linear "depth precision" remapping, so
+    // treating this as [0,1] depth is quietly wrong at every pixel, not a crash. FFX_DNSR_Shadows_
+    // ReadDepth/ReadPreviousDepth and any SSR pass want this linear form because it makes
+    // reconstructing a view-space position from a screen UV a single division, not a full unproject.
     //
     // 0 when gBufferEnabled() is false or unimplemented, matching gBufferVelocityTexture() above.
     virtual TextureHandle gBufferViewZTexture() { return 0; }
 
     // Scene-resolution normal and roughness, Format::RGB10A2Unorm -- packed to NRD's OWN
-    // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM layout (third_party/nrd/Shaders/NRDConfig.hlsli), NOT
-    // the plain n*0.5+0.5-with-roughness-in-w scheme an earlier version of this contract documented
-    // (that was NRD's #else layout, for encodings 0/3 -- wrong for the format this texture actually
-    // is, and the reason REBLUR used to decode a garbage normal and a view-angle-dependent
-    // roughness instead of the real ones). xyz JOINTLY encode the normal AND the roughness: an
-    // improved-octahedral fold puts N into x/y, and z carries roughness's MAGNITUDE with the SIGN
-    // OF N.z riding on z's own sign (roughness can never be exactly 0, or that sign bit has nothing
-    // to carry it). See averPackNormalRoughness (modules/render.voxi/shaders/voxi.hlsl, transcribed
-    // byte-exact from NRD's _NRD_EncodeNormalRoughness101010) for the encode, and
-    // sandbox/shaders/gbuffer_debug.hlsl for the matching decode. w: materialID/3 in NRD's
-    // convention -- this engine has no material-ID concept yet, so it is always 0 here, NOT
-    // roughness. A raw sample of this texture is NOT directly interpretable with a cheap n*2-1 on
-    // xyz; a reader needs the full decode (NRD_FrontEnd_UnpackNormalAndRoughness's own job, or the
-    // transcribed pair named above) to recover either channel, and a reader that assumes the OLD
-    // contract gets a vector that LOOKS plausible while being wrong at every pixel -- exactly the
-    // shape of bug that survives a casual visual check, and exactly how this one did.
+    // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM layout (third_party/nrd/Shaders/NRDConfig.hlsli), NOT a
+    // plain n*0.5+0.5-with-roughness-in-w scheme (that's NRD's #else layout for encodings 0/3, and
+    // wrong here -- an earlier version of this contract documented it, and REBLUR decoded garbage
+    // normals and view-angle-dependent roughness as a result). xyz JOINTLY encode both: an
+    // improved-octahedral fold puts N into x/y, z carries roughness's MAGNITUDE with the SIGN OF
+    // N.z riding on z's own sign (roughness is never exactly 0, so that sign bit always has
+    // something to carry). Encode: averPackNormalRoughness (modules/render.voxi/shaders/voxi.hlsl,
+    // transcribed byte-exact from NRD's _NRD_EncodeNormalRoughness101010); decode:
+    // sandbox/shaders/gbuffer_debug.hlsl. w: materialID/3 in NRD's
+    // convention, always 0 here (no material-ID concept yet), NOT roughness. A raw n*2-1 sample of
+    // xyz is wrong -- needs the full decode (NRD_FrontEnd_UnpackNormalAndRoughness or the pair
+    // above); assuming the OLD contract gives a plausible-looking but per-pixel-wrong vector --
+    // exactly the shape of bug a casual visual check misses, and exactly how this one shipped.
     //
     // 0 when gBufferEnabled() is false or unimplemented, matching the two accessors above.
     virtual TextureHandle gBufferNormalRoughnessTexture() { return 0; }
 
-    // Previous frame's view-projection -- ROW-MAJOR, ROW-VECTOR, the SAME convention setCamera's
-    // own `viewProj` argument uses above -- valid whenever gBufferEnabled() is true. EVERY temporal
-    // consumer of the three textures above needs this: each is a snapshot of ONE frame, and
-    // reprojecting that snapshot against accumulated history (FFX_DNSR_Shadows_
-    // GetReprojectionMatrix's own job, and this method's direct answer to it) is meaningless
-    // without knowing what camera the frame being reprojected FROM was rendered with. False when
-    // the G-buffer is off or this backend has not implemented it, leaving `outPrevViewProj`
-    // untouched -- the same "ask before you trust it" contract camera() above already uses, and for
-    // the same reason: a caller that skips the check and reads untouched memory as a matrix will
-    // not get a crash, it will get a plausible-looking wrong reprojection.
+    // Previous frame's view-projection -- ROW-MAJOR, ROW-VECTOR, same convention as setCamera's
+    // `viewProj` -- valid whenever gBufferEnabled() is true. Every temporal consumer of the three
+    // textures above needs this to reproject a one-frame snapshot against accumulated history
+    // (FFX_DNSR_Shadows_GetReprojectionMatrix's job). False when the G-buffer is off or
+    // unimplemented, leaving `outPrevViewProj` untouched -- same "ask before you trust it" contract
+    // as camera() above; skipping the check gives a plausible-looking wrong reprojection, not a crash.
     virtual bool gBufferPrevViewProj(f32 outPrevViewProj[16]) const { (void)outPrevViewProj; return false; }
 
-    // True when the three textures above -- and gBufferPrevViewProj, which is meaningless without
-    // them -- do NOT describe a continuous previous frame: the first frame the G-buffer was
-    // enabled, a camera cut, a level load, a change of render resolution, or anything else that
-    // makes "reproject against last frame" produce nonsense rather than merely one frame of stale
-    // data. EVERY temporal consumer must ask this rather than infer it, because getting it wrong is
-    // not a crash and not even reliably visible in isolation -- it is ONE BAD FRAME immediately
-    // after every cut, exactly the shape of defect a single still-frame screenshot review never
-    // catches and a person actually moving the camera always will (this engine's own broken
-    // per-object reprojection, above, is a standing example of a temporal bug nobody noticed until
-    // something moved).
+    // True when the three textures above -- and gBufferPrevViewProj, meaningless without them --
+    // do NOT describe a continuous previous frame: first frame enabled, a camera cut, a level load,
+    // a resolution change, or anything else making "reproject against last frame" nonsense rather
+    // than merely stale. Every temporal consumer must ask this, not infer it: getting it wrong is
+    // ONE BAD FRAME right after every cut -- invisible to a still-frame review, always visible once
+    // the camera actually moves (see this engine's own per-object reprojection bug above).
     //
-    // Defaults to TRUE -- the conservative answer, "assume history is invalid" -- so a caller that
-    // correctly checks this before trusting history, but talks to a backend that has not
-    // implemented the G-buffer at all, drops one frame of temporal reuse rather than silently
-    // accumulating against a previous frame that was never actually rendered into these targets.
+    // Defaults to TRUE (conservative: "assume invalid"), so a caller talking to a backend without
+    // the G-buffer drops one frame of temporal reuse rather than accumulating against a frame that
+    // was never rendered into these targets.
     virtual bool gBufferHistoryInvalid() const { return true; }
 };
 

@@ -1,16 +1,13 @@
-// Verification harnesses: the maybe*Test / run*Test / *Check drivers and the command-line knobs they are set through.
-// Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
-// verbatim; the class itself is declared in SandboxApp.hpp.
+// Verification harnesses: the maybe*Test / run*Test / *Check drivers and the CLI knobs that set them.
+// Split out of SandboxApp.cpp (29,952 lines) 2026-09-16, bodies moved verbatim; class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
 
 namespace aver {
-// --lod-select [px] / --no-lod-select: virtualized-geometry LOD selection
-// (aver::trifactor::ClusterAdapt). `thresholdPx` is the pixel budget passed to
-// chooseLevelCached/screenSpaceErrorPx.
-// NOW ON BY DEFAULT: it was off, reproducing pre-existing behaviour of drawing every instance at
-// LOD 0 always. Measured on Electric Dreams at --no-vsync: 102.7ms median / 153.0ms p90 off,
-// 76.7ms median / 127.3ms p90 on.
+// --lod-select [px] / --no-lod-select: virtualized-geometry LOD selection (aver::trifactor::ClusterAdapt).
+// thresholdPx is the pixel budget for chooseLevelCached/screenSpaceErrorPx.
+// ON by default (was off = always LOD 0). Measured, Electric Dreams --no-vsync: 102.7/153.0ms (off)
+// vs 76.7/127.3ms (on) median/p90.
 void SandboxApp::setLodSelect(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     lodSelectEnabled_ = on;
@@ -30,9 +27,8 @@ void SandboxApp::setLodClusterStats(bool on) {
 #endif
 }
 
-// --lod-per-cluster [px]: turns on PER-CLUSTER virtualized-geometry selection, replacing
-// --lod-select's per-LEVEL choice for an instance entirely when both are given (this one wins).
-// OFF (default) leaves --lod-select or no selection completely unaffected.
+// --lod-per-cluster [px]: PER-CLUSTER virtualized-geometry selection; wins over --lod-select's
+// per-LEVEL choice when both are given. OFF (default) leaves --lod-select unaffected.
 void SandboxApp::setLodPerCluster(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     lodPerClusterEnabled_ = on;
@@ -42,12 +38,11 @@ void SandboxApp::setLodPerCluster(bool on, f32 thresholdPx) {
 #endif
 }
 
-// --lod-mesh-shader [px]: the GPU per-cluster path -- an amplification shader runs the SAME local
-// cut test as --lod-per-cluster's CPU reference, one thread per cluster, and DispatchMesh's the
-// survivors. Wins when the mesh has GPU cluster data AND this device built the pipeline; falls
-// back to whichever other flag is set, per-instance, otherwise (house rule 6's "degrade, not
-// crash"). --lod-mesh-shader / --no-lod-mesh-shader records an EXPLICIT choice, suppressing the
-// caps-driven default in onInit.
+// --lod-mesh-shader [px]: GPU per-cluster path -- an amplification shader runs the same cut test as
+// --lod-per-cluster's CPU reference, one thread/cluster, DispatchMesh's the survivors. Wins when the
+// mesh has GPU cluster data and the pipeline built; else falls back per-instance (house rule 6's
+// "degrade, not crash").
+// --lod-mesh-shader / --no-lod-mesh-shader is an explicit choice, suppressing onInit's caps-driven default.
 void SandboxApp::setLodMeshShader(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     lodMeshShaderRequest_ = on ? 1 : 0;
@@ -63,28 +58,25 @@ void SandboxApp::setUiDemo(bool on) { showUiDemo_ = on; }
 void SandboxApp::setOpenAsset(std::string p) { openAsset_ = std::move(p); }
 
 // --select <substring>: select the first entity whose name or outliner label contains it.
-// EXISTS TO MAKE THE DETAILS PANEL CAPTURABLE: a bounded --frames run starts with nothing
-// selected, so most panels were unreachable from a screenshot. --graph-select is the same idea
-// for a node inside the graph editor; this is its counterpart for the world.
+// Makes the Details panel capturable: a bounded --frames run starts with nothing selected, so
+// most panels were unreachable from a screenshot. --graph-select is the counterpart for a node.
 void SandboxApp::setSelectEntity(std::string p) { selectEntity_ = std::move(p); }
 
 // --water <heightCm>. Stored whether or not the module is compiled in, so a build without it can
 // say so rather than ignoring the flag in silence.
 void SandboxApp::setWater(bool on, f32 heightCm) { waterEnabled_ = on; waterHeightCm_ = heightCm; }
 
-// --open-legacy: open an older-series project WITHOUT upgrading it. Never migrates, so it
-// cannot damage the project it is pointed at -- which is what makes it safe to hand a
-// benchmark that must measure content exactly as it exists on disk.
+// --open-legacy: open an older-series project WITHOUT upgrading it. Never migrates, so it cannot
+// damage the project -- safe for a benchmark that must measure content exactly as it is on disk.
 void SandboxApp::setOpenLegacy(bool on) { openLegacy_ = on; }
 
-// --graph-select <nodeId>: fired one frame after --open-asset opens, so a --frames/--screenshot
-// capture can prove a details/inspector panel renders a real, populated node -- no human clicking.
-// Same shape as every other CLI test-proof flag: a plain setter here, the work happens in onGui().
+// --graph-select <nodeId>: fires one frame after --open-asset opens, so a --frames/--screenshot
+// capture can prove the details/inspector panel renders a real, populated node with no clicking.
+// Plain setter; the work happens in onGui().
 void SandboxApp::setGraphSelectNode(std::string id) { graphSelectNode_ = std::move(id); }
 
-// --graph-tab viewport: brings the graph tab's inner Viewport tab to the front, on the same
-// frame budget --graph-select uses. Only "viewport" does anything; Event Graph is already the
-// one in front, so there is nothing for the other value to do.
+// --graph-tab viewport: brings the graph tab's inner Viewport tab to front, same frame budget as
+// --graph-select. Only "viewport" does anything; Event Graph is already in front.
 void SandboxApp::setGraphTab(std::string tab) { graphTab_ = std::move(tab); }
 
 void SandboxApp::setInputProbe(bool on) { inputProbe_ = on; }
@@ -93,9 +85,8 @@ void SandboxApp::setAutoCompile(bool on) { autoCompile_ = on; autoCompileFromCli
 
 void SandboxApp::setFocusLevelAt(int frame) { focusLevelAt_ = frame; }
 
-// --chunk-stream [N]: frames left before setChunkStreamingEnabled(true) fires on its own. Member
-// and setter are unguarded (like focusLevelAt_) even though the effect is AVER_MODULE_SCENE-only;
-// see the countdown in onUpdate.
+// --chunk-stream [N]: frames left before setChunkStreamingEnabled(true) fires. Member/setter
+// unguarded (like focusLevelAt_) though the effect is AVER_MODULE_SCENE-only; see onUpdate's countdown.
 void SandboxApp::setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
 
 #if AVER_MODULE_SCENE
@@ -109,10 +100,10 @@ void SandboxApp::setDroneGraph(std::string) {}
 
 #endif
 
-// --landscape <path>: an explicit .ocland override. Wins over the level's LANDSCAPE record and the
-// levelname.ocland convention the next time a level loads (handed to GameLandscape::setPathOverride) -- so a
-// --frames capture can prove the LOD-selection path draws real terrain without a level file or a
-// human clicking anything. Unguarded like setChunkStreamAuto/setDroneAuto above.
+// --landscape <path>: explicit .ocland override, wins over the level's LANDSCAPE record and the
+// levelname.ocland convention on next load (-> GameLandscape::setPathOverride) -- lets a --frames
+// capture prove the LOD-selection path draws real terrain with no level file or clicking.
+// Unguarded like setChunkStreamAuto/setDroneAuto above.
 void SandboxApp::setLandscapePath(std::string path) { landscapeCliOverride_ = std::move(path); }
 
 #if AVER_MODULE_SCENE
@@ -129,13 +120,13 @@ void SandboxApp::setFogMatchToStreamRadius(bool, f32) {}
 
 #endif
 
-// --drone [N]: frames left before setDroneEnabled(true) fires on its own, same shape as
-// --chunk-stream. Member and setter are unguarded for the same reason chunkStreamAutoFrames_ is
-// (the countdown in onUpdate is what's actually AVER_MODULE_SCENE-gated).
+// --drone [N]: frames left before setDroneEnabled(true) fires, same shape as --chunk-stream.
+// Member/setter unguarded for the same reason chunkStreamAutoFrames_ is (onUpdate's countdown is
+// the actually AVER_MODULE_SCENE-gated part).
 void SandboxApp::setDroneAuto(int framesIn) { droneAutoFrames_ = framesIn; }
 
 // --undo-test [N]: frames left before runUndoTest() fires and the process exits, same shape as
-// --drone/--chunk-stream. See runUndoTest()'s own comment for what it actually proves.
+// --drone/--chunk-stream. See runUndoTest() for what it proves.
 void SandboxApp::setUndoTestAuto(int framesIn) { undoTestAutoFrames_ = framesIn; }
 
 // --keybind-test write|read [N]: frames left before runKeybindPersistTest(mode) fires and the
@@ -170,16 +161,14 @@ void SandboxApp::setClouds(f32 coverage) {
 
 // Selects the physical sky and optionally moves the sun's elevation. --sky-physical [elevation].
 //
-// RECORDED AS AN OVERRIDE RATHER THAN WRITTEN ONCE, and that is the whole fix. Writing sky_ here
-// happens at startup, and applyLevelSky then overwrites sky_ wholesale the moment a level opens
-// -- so on any run that loads a level, which is every interesting one, this did nothing at all.
-// MEASURED: `--sky-physical 20` and `--sky-physical 60` on Sponza produced BYTE-IDENTICAL
-// frames, and identical to passing no flag, while the log said nothing. It was found while
-// trying to use the sun's elevation to tell bounced light apart from an ambient term, which is
-// exactly the kind of measurement a silently-inert flag turns into a confident wrong answer.
+// Recorded as an OVERRIDE, not written once: writing sky_ at startup did nothing once a level
+// loaded, since applyLevelSky overwrites sky_ wholesale. MEASURED: --sky-physical 20 vs 60 on
+// Sponza produced byte-identical frames (and identical to no flag), log silent. Found while using
+// sun elevation to separate bounced light from an ambient term -- a silently-inert flag turns that
+// into a confident wrong answer.
 //
-// The sixth instance of the flag-versus-authored-state precedence bug this file records; see the
-// --gi-update-interval block for the previous four and --sky-light for the fifth.
+// 6th instance of the flag-vs-authored-state precedence bug this file records; see
+// --gi-update-interval for the previous four and --sky-light for the fifth.
 void SandboxApp::setSkyPhysical(f32 elevationDeg) {
     skyModelOverride_ = 1;
     if (elevationDeg > -90.0f) sunElevationOverride_ = elevationDeg;
@@ -189,12 +178,10 @@ void SandboxApp::setSkyAuthored() { skyModelOverride_ = 0; }
 
 // Sets exposure, bloom intensity and auto-exposure. --exposure / --bloom / --auto-exposure.
 //
-// ASSIGNS UNCONDITIONALLY, AND HAS TO. argv's defaults are exposure 1.0 and bloom 0.0, and the
-// second of those is NOT PostSettings' own default of 0.06 -- so the sandbox has always run with
-// bloom off unless asked, and every recorded gate image was taken that way. Making the
-// assignment conditional on the flag being present would quietly restore 0.06 and move all 20.
-// The two `set` bools exist only to decide who wins over a stored preference; see
-// loadEditorPreferences.
+// Assigns UNCONDITIONALLY: argv defaults are exposure 1.0, bloom 0.0 -- NOT PostSettings' own
+// 0.06 default -- so the sandbox has always run bloom-off unless asked, and every gate image was
+// taken that way; making the assignment conditional would quietly restore 0.06 and move all 20 gate images.
+// The two `set` bools only decide who wins over a stored preference; see loadEditorPreferences.
 void SandboxApp::setPost(f32 exposure, bool exposureSet, f32 bloomIntensity, bool bloomSet, bool autoExposure) {
     post_.exposure = exposure;
     post_.bloomIntensity = bloomIntensity;
@@ -204,8 +191,8 @@ void SandboxApp::setPost(f32 exposure, bool exposureSet, f32 bloomIntensity, boo
     postAutoExpFromCli_  = autoExposure;
 }
 
-// --tonemap N / --max-radiance F. Both are POST settings rather than renderer ones, so they land
-// straight in post_ and need no tier derivation; -1 / negative leaves the shipped default alone.
+// --tonemap N / --max-radiance F: POST settings, not renderer ones, so they land straight in
+// post_ with no tier derivation; -1 / negative leaves the shipped default alone.
 void SandboxApp::setTonemap(int mode)      { if (mode >= 0) post_.tonemap = static_cast<u32>(mode); }
 
 void SandboxApp::setMaxRadiance(f32 ceil)  { if (ceil >= 0.0f) post_.maxRadiance = ceil; }
@@ -217,9 +204,9 @@ void SandboxApp::applyCaptureExposureRule(bool explicitlyRequested) {
 
 void SandboxApp::setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; }
 
-// --project-settings-page N: verification-only, jumps straight to sub-page N (see
-// settingsPage_'s own comment for the index) instead of leaving a screenshot script to navigate
-// a docked window it cannot click. Implies --project-settings.
+// --project-settings-page N: verification-only, jumps straight to sub-page N (see settingsPage_
+// for the index) instead of making a screenshot script navigate a docked window it can't click.
+// Implies --project-settings.
 void SandboxApp::setProjectSettingsPage(int page) { focusVoxi_ = 4; settingsPage_ = page; }
 
 // Opens a drawer fully open on startup, optionally in a Content subfolder. --drawer.
@@ -228,9 +215,9 @@ void SandboxApp::setDrawerOpen(int which, std::string sub) {
     drawer_ = drawerShown_ = which == 2 ? Drawer::Log : which == 3 ? Drawer::Console : Drawer::Content;
     drawerAnim_ = 1.0f;
     drawerStartSub_ = std::move(sub);
-    // NOT routed through consoleFocusPending_ (toggleDrawer's own arm): this path is --drawer's
-    // startup hook, whose only real caller is a screenshot/capture script that wants the panel
-    // shown, not the input line stealing keyboard focus out from under it.
+    // Not routed through consoleFocusPending_ (toggleDrawer's own arm): this is --drawer's startup
+    // hook for a capture script (its only real caller) that wants the panel shown, not focus
+    // stolen by the input line.
 }
 
 void SandboxApp::setFocusScript(bool b) { tools_.armNewScript(b); }
@@ -239,20 +226,17 @@ void SandboxApp::setFocusTools(bool b) { tools_.armToolsMenu(b); }
 
 void SandboxApp::setOpenLevelPicker(bool b) { armOpenLevelPicker_ = b; }
 
-// --no-editor-chrome sets a plain bool that suppresses viewport CHROME -- the grid, the gizmo, the
-// selection outline (SandboxRender.cpp) -- and every one of those is drawn whether or not
-// AVER_MODULE_SCENE is compiled in; none of them touch a scene::Entity. noEditorChrome_ only
-// landed inside SandboxApp.hpp's AVER_MODULE_SCENE block because that is where the cursor was when
-// multi-selection was being written next to it, not because the flag needs a world. Left unguarded
-// here on purpose; see this task's headerChanges for moving the member out of that block instead of
-// compiling this setter out.
+// --no-editor-chrome suppresses viewport CHROME -- grid, gizmo, selection outline
+// (SandboxRender.cpp) -- all drawn regardless of AVER_MODULE_SCENE; none touch a scene::Entity.
+// noEditorChrome_ only landed in SandboxApp.hpp's AVER_MODULE_SCENE block by accident of where it
+// was written, not because it needs a world. Left unguarded here on purpose; see headerChanges for
+// moving the member out of that block instead of compiling this setter out.
 void SandboxApp::setNoEditorChrome(bool b) { noEditorChrome_ = b; }
 
 // --scene-census, unlike --no-editor-chrome above, has nothing to report without a scene to walk:
-// its one reader (SandboxApp.cpp's onUpdate) calls world::takeSceneCensus(scene::World::instance(),
-// playerStart_), and sceneCensus_ is declared `#if AVER_MODULE_SCENE` in SandboxApp.hpp for exactly
-// that reason. This setter must be guarded the same way -- same shape as
-// setDroneGraph/setFogMatchToStreamRadius above.
+// its one reader (SandboxApp.cpp onUpdate) calls world::takeSceneCensus(scene::World::instance(),
+// playerStart_), so sceneCensus_ is `#if AVER_MODULE_SCENE` in SandboxApp.hpp and this setter must
+// match -- same shape as setDroneGraph/setFogMatchToStreamRadius above.
 #if AVER_MODULE_SCENE
 void SandboxApp::setSceneCensus(bool b) { sceneCensus_ = b; }
 #else
@@ -274,9 +258,9 @@ void SandboxApp::setSkinDrawTest() { skinDrawTest_ = true; }
 
 void SandboxApp::setParticleTest() { particleTest_ = true; }
 
-// --no-particle-gi: the A/B toggle particles DECIDED 4's own proof needs -- same scene, same Voxi
-// volume, only whether particleRenderer_.setGiSeam is ever called differs. Distinct from --no-gi
-// (stops the volume being BUILT) and --no-gi-cone (stops the opaque scene's own cone-trace read).
+// --no-particle-gi: A/B toggle for DECIDED 4's proof -- same scene/Voxi volume, only whether
+// particleRenderer_.setGiSeam is called differs. Distinct from --no-gi (stops the volume being
+// built) and --no-gi-cone (stops the opaque scene's cone-trace read).
 void SandboxApp::setNoParticleGi() { noParticleGi_ = true; }
 
 // --particle-stress <N> <M>: verification-only, see particleStressEmitters_'s own comment.
@@ -293,21 +277,22 @@ void SandboxApp::setFurnaceTest() { furnaceTest_ = true; }
 
 void SandboxApp::setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }
 
-// --furnace-grid: implies --furnace-test for the same reason --pt-furnace does -- the furnace
-// is a property of the SKY, and a grid of plates lit by nothing measures nothing. Combines
-// with --furnace-sun, which is how the DIRECT specular path gets the same treatment.
+// --furnace-grid: implies --furnace-test like --pt-furnace does -- the furnace is a property of
+// the SKY, and a grid of plates lit by nothing measures nothing. Combines with --furnace-sun for
+// the direct specular path.
 void SandboxApp::setFurnaceGrid() { furnaceTest_ = true; furnaceGrid_ = true; }
 
 // --furnace-tilt DEG: implies the grid, since it is the grid it rotates.
 void SandboxApp::setFurnaceTilt(f32 d) { furnaceTest_ = true; furnaceGrid_ = true; furnaceTilt_ = d; }
 
-// --sun-angle DEG: the sun's ANGULAR DIAMETER, not a look control: it sets how wide a ray-traced
-// penumbra is, and at the real 0.545 degrees that penumbra is narrower than a pixel at contact
-// distances. A gate sampling a partially-occluded pixel has to widen the source until the transition spans several pixels.
+// --sun-angle DEG: the sun's ANGULAR DIAMETER, not a look control -- sets how wide a ray-traced
+// penumbra is. At the real 0.545 deg the penumbra is narrower than a pixel at contact distances,
+// so a gate sampling a partially-occluded pixel must widen the source to span several pixels.
 void SandboxApp::setSunAngle(f32 deg) { sunAngle_ = deg; }
 
-// --pt-furnace: the furnace measured through the PATH TRACER rather than the raster shading
-// model. Implies --furnace-test since the furnace is a property of the SKY, and the tracer reads the same averFurnaceL() every other shading path does.
+// --pt-furnace: the furnace measured through the PATH TRACER rather than the raster shading model.
+// Implies --furnace-test since the furnace is a sky property, and the tracer reads the same
+// averFurnaceL() every other shading path does.
 void SandboxApp::setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }
 
 // --pt-scene seeds the WANT flag syncPtSceneView() reconciles every frame; see that function's
@@ -357,14 +342,12 @@ void SandboxApp::setLumaSweep(bool on, int stride) { lumaSweep_ = on; lumaSweepS
 void SandboxApp::setFireflyMetric(bool on, f32 mult) { fireflyMetric_ = on; fireflyMult_ = mult > 0.0f ? mult : 8.0f; }
 
 // pieCamFrames_/inputStuckFrames_/inputSrcFrames_/wheelTestFrames_ (and recapFrames_/vmFrames_
-// further below) are all declared `#if AVER_MODULE_FRAMEWORK` in SandboxApp.hpp: maybePieCameraTest
-// and its three siblings here live entirely inside that same block, because there is no
-// Play-in-Editor camera or input to drive a proof against without Framework's play-mode plumbing.
-// These setters were left unguarded, so a FRAMEWORK=OFF tree (module-matrix.ps1's scene-off row,
-// which forces FRAMEWORK off with it) failed on an undeclared identifier at every one of them.
-// Guarded the same way setDroneGraph/setFogMatchToStreamRadius are guarded above, with a
-// same-signature no-op stub so the unconditional --pie-camera-test/--input-stuck-test/... argv
-// parsing in SandboxMain.cpp keeps compiling either way.
+// below) are `#if AVER_MODULE_FRAMEWORK` in SandboxApp.hpp: no Play-in-Editor camera/input to test
+// without Framework's play-mode plumbing. These setters were left unguarded and failed on an
+// undeclared identifier at every one of them, on a FRAMEWORK=OFF tree (module-matrix.ps1's
+// scene-off row, which forces FRAMEWORK off with it). Guarded like setDroneGraph/
+// setFogMatchToStreamRadius above, with a same-signature no-op stub so SandboxMain.cpp's
+// unconditional argv parsing keeps compiling either way.
 #if AVER_MODULE_FRAMEWORK
 void SandboxApp::setPieCameraTest(int n) { pieCamFrames_ = n; }
 #else
@@ -389,13 +372,10 @@ void SandboxApp::setWheelSpeedTest(int n) { wheelTestFrames_ = n; }
 void SandboxApp::setWheelSpeedTest(int) {}
 #endif
 
-// multiSelTestFrames_ is declared `#if AVER_WITH_IMGUI` in SandboxApp.hpp -- its one reader,
-// runMultiSelectTest further down this file, is already guarded the same way, and so is its
-// onUpdate call site in SandboxApp.cpp. Only this setter was left unguarded, so a no-ui or
-// d3d12-off tree (the two module-matrix.ps1 rows that turn AVER_WITH_IMGUI off) failed on it.
-// Every setter below down to setClearShaderCache shares this exact shape -- a member guarded
-// `#if AVER_WITH_IMGUI` whose only reader is a run*Test also guarded that way further down this
-// file -- so each gets the same fix without repeating the explanation.
+// multiSelTestFrames_ is `#if AVER_WITH_IMGUI` in SandboxApp.hpp; its one reader runMultiSelectTest and
+// its onUpdate call site are already guarded, but this setter was not, so a no-ui/d3d12-off tree
+// (the two module-matrix.ps1 rows with AVER_WITH_IMGUI off) failed on it. Every setter below down
+// to setClearShaderCache shares this exact shape and gets the same fix, not repeated per-site.
 #if AVER_WITH_IMGUI
 void SandboxApp::setMultiSelectTest(int n) { multiSelTestFrames_ = n; }
 #else
@@ -420,24 +400,21 @@ void SandboxApp::setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }
 void SandboxApp::setPrefsWriteTest(int) {}
 #endif
 
-// --notify-test N. The lift is the point: drawNotifications refuses to draw during a bounded
-// run so a capture never has a toast in shot, and this is the one run where the toast IS the
-// thing being captured. notifyTestFrames_/notifyTestLift_ are both `#if AVER_WITH_IMGUI` (the
-// toast itself is drawNotifications' own, in the ImGui half of this app).
+// --notify-test N. The lift is the point: drawNotifications refuses to draw during a bounded run
+// so a capture never has a toast in shot -- this is the one run where the toast IS what's captured.
+// notifyTestFrames_/notifyTestLift_ are both `#if AVER_WITH_IMGUI` (drawNotifications' own half).
 #if AVER_WITH_IMGUI
 void SandboxApp::setNotifyTest(int n) { notifyTestFrames_ = n; notifyTestLift_ = true; }
 #else
 void SandboxApp::setNotifyTest(int) {}
 #endif
 
-// --autosave-test <sec>: shorten the interval, mark the level dirty so the timer has a reason to
-// run, and lift the capture suppression. The countdown is otherwise unreachable from a bounded
-// run -- it needs thirty seconds of unsaved edits, which no capture has. NEEDS BOTH MACROS, not
-// just one: autosaveIntervalSec_ is `#if AVER_MODULE_SCENE` (maybeAutosave in SandboxAutosave.cpp
-// is a whole-function AVER_MODULE_SCENE block, since autosave saves the level), while
-// notifyTestLift_/autosaveTestArm_/autosaveTestLift_ are `#if AVER_WITH_IMGUI` (the toast and the
-// capture-suppression lift they drive both live there). Missing either one leaves one of the four
-// assignments below reaching a member that does not exist in that configuration.
+// --autosave-test <sec>: shortens the interval, marks the level dirty so the timer has a reason to
+// run, and lifts capture suppression -- otherwise unreachable from a bounded run (needs 30s of
+// unsaved edits). NEEDS BOTH MACROS: autosaveIntervalSec_ is `#if AVER_MODULE_SCENE` (maybeAutosave
+// in SandboxAutosave.cpp is a whole-function AVER_MODULE_SCENE block, since it saves the level),
+// while notifyTestLift_/autosaveTestArm_/autosaveTestLift_ are
+// `#if AVER_WITH_IMGUI`; missing either leaves one of the four assignments below undeclared.
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
 void SandboxApp::setAutosaveTest(f32 sec) {
     autosaveIntervalSec_ = sec;
@@ -450,8 +427,8 @@ void SandboxApp::setAutosaveTest(f32) {}
 #endif
 
 // --find-refs <content-relative-path>: print what references an asset and exit. The delete
-// confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
-// shared asset can be tested rather than eyeballed once.
+// confirm's scan -- the thing that stops someone destroying a shared asset -- reachable without a
+// modal, so it can be tested rather than eyeballed.
 #if AVER_WITH_IMGUI
 void SandboxApp::setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
 #else
@@ -502,9 +479,8 @@ void SandboxApp::setClearShaderCache(const std::string& dir) {
 void SandboxApp::setClearShaderCache(const std::string&) {}
 #endif
 
-// Same reason as pieCamFrames_ et al. at the top of this run: recapFrames_/vmFrames_ are
-// `#if AVER_MODULE_FRAMEWORK` in SandboxApp.hpp (maybeRecaptureTest/maybeViewmodelTest are
-// Play-in-Editor-only).
+// Same reason as pieCamFrames_ et al. above: recapFrames_/vmFrames_ are `#if AVER_MODULE_FRAMEWORK`
+// (maybeRecaptureTest/maybeViewmodelTest are Play-in-Editor-only).
 #if AVER_MODULE_FRAMEWORK
 void SandboxApp::setRecaptureTest(int n)   { recapFrames_ = n; }
 #else
@@ -527,15 +503,14 @@ void SandboxApp::setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBake
 
 #endif
 
-// --cam X Y Z PITCH YAW: places the viewport camera outright, cm/degrees -- a capture tool since
-// every other way into this camera either frames the level (always pitch -31 deg, horizon just off
-// the top edge) or needs a real mouse, so nothing headless could aim at the sky, and the sky is the
-// one thing no gate covers. Applied last, after level framing.
-// --cam-wobble DEG PERIOD: swing the yaw sinusoidally about wherever the camera is aimed.
-// A SINE THAT RETURNS TO ZERO, not a one-way pan: comparing a moving run against a still one AT
-// THE SAME PIXEL needs the probe to land on the same geometry, and sin() is zero at every whole
-// multiple of the period, so a run whose frame count lands on one ends aimed where it started.
-// Driven off the engine's frame COUNTER, never the clock, so the path is identical every run.
+// --cam X Y Z PITCH YAW: places the viewport camera outright, cm/degrees -- a capture tool, since
+// every other way into this camera either frames the level (fixed pitch -31 deg) or needs a real
+// mouse, so nothing headless could aim at the sky -- the one thing no gate covers. Applied last,
+// after level framing.
+// --cam-wobble DEG PERIOD: swings yaw sinusoidally about wherever the camera is aimed. A sine that
+// RETURNS TO ZERO (not a one-way pan): a run whose frame count lands on a whole period ends aimed
+// where it started, so a moving run can be probed at the same pixel as a still one. Driven off the
+// frame COUNTER, never the clock, so the path is identical every run.
 void SandboxApp::setCamWobble(f32 degrees, i32 periodFrames) {
     camWobbleDeg_ = degrees;
     camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
@@ -544,10 +519,9 @@ void SandboxApp::setCamWobble(f32 degrees, i32 periodFrames) {
 // --cam-wobble-stop N: the frame the wobble above stops at. See its own use site in onUpdate.
 void SandboxApp::setCamWobbleStop(i32 frame) { camWobbleStopFrame_ = frame > 0 ? frame : 0; }
 
-// --set NAME VALUE, repeatable: console variables applied once, on the first frame that has a
-// device. Console syntax is exactly what the drawer's own input takes, so a capture can A/B any
-// dial the console exposes without a new flag per dial -- which is the whole point, since a
-// bisection invents dials faster than argv can grow spellings for them.
+// --set NAME VALUE, repeatable: console variables applied once, on the first frame with a device.
+// Same syntax as the drawer's own input, so a capture can A/B any console dial without a new flag
+// per dial -- a bisection invents dials faster than argv can grow spellings for them.
 void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>> sets) {
     consoleSets_ = std::move(sets);
 }
@@ -561,14 +535,11 @@ void SandboxApp::setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
 // is today's behaviour -- every LOD level gets its own independent vertex buffer.
 void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
 
-// --cam-translate SPEED: fly the camera forward along camForward() by SPEED world-cm every
-// frame, starting at frame 1. UNLIKE --cam-wobble (pure rotation about a fixed point, which
-// barely changes what-occludes-what -- the same walls occlude the same objects, just at
-// different screen positions), this is TRANSLATION through the scene: occlusion relationships
-// change continuously, the way WASD forward-flight does. Driven off the frame counter (see
-// onUpdate), never the clock, so the path is identical every run at a given --frames count.
-// Composes with --cam-wobble if both are given: wobble only ever touches yaw_, this only ever
-// touches camPos_.
+// --cam-translate SPEED: flies the camera forward along camForward() by SPEED world-cm/frame,
+// from frame 1. Unlike --cam-wobble (pure rotation, occlusion barely changes), this is
+// TRANSLATION -- occlusion changes continuously like WASD forward-flight. Frame-counter driven
+// (onUpdate), never the clock, so the path is identical every run at a given --frames count.
+// Composes with --cam-wobble: wobble touches yaw_, this touches camPos_.
 void SandboxApp::setCamTranslate(f32 speedCmPerFrame) { camTranslateSpeed_ = speedCmPerFrame; }
 
 void SandboxApp::setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
@@ -586,14 +557,13 @@ void SandboxApp::setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls
 // --unlit latches viewModeFromCli_.
 void SandboxApp::setUnlitMode(bool on) { unlit_ = on; if (on) viewModeFromCli_ = true; }
 
-// --view-mode: see its own declaration comment (SandboxApp.hpp) for the full contract. Lowercased
-// here, case-insensitively, the same courtesy every other string flag in this file gets (--aversr,
-// --gbuffer-debug, --restir-visibility, ...). "undenoised" is independent of everything else this
-// sets and returns early; every other name mirrors what the matching viewport dropdown Selectable
-// does (SandboxViewport.cpp's "viewMode" popup) -- Lit/Unlit/Wireframe clear debugView_, since a
-// debug view did not exist as a concept before this flag and there is no old behaviour of leaving
-// it set to preserve; a ray-hit/triangles name clears wireframe_ and gbufferDebugView_, mirroring
-// that Selectable's own "needs the ray-driven path" clear.
+// --view-mode: see its declaration (SandboxApp.hpp) for the full contract. Lowercased
+// case-insensitively like every other string flag here (--aversr, --gbuffer-debug, ...).
+// "undenoised" is independent and returns early; every other name mirrors the matching viewport
+// dropdown Selectable (SandboxViewport.cpp's "viewMode" popup): Lit/Unlit/Wireframe clear
+// debugView_ (no old behaviour of leaving it set predates this flag); a ray-hit/triangles name
+// clears wireframe_ and gbufferDebugView_, mirroring that Selectable's own "needs the ray-driven
+// path" clear.
 void SandboxApp::setViewMode(const std::string& mode) {
     std::string m = mode;
     for (char& c : m) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -636,9 +606,8 @@ void SandboxApp::setPlayTest() { playTest_ = true; }
 
 void SandboxApp::setProjectPath(std::string p) { projectPath_ = std::move(p); }
 
-// --mode <name>. Stored, not applied: setEditorMode refuses a mode whose preconditions aren't met,
-// and at parse time no project is open and no terrain is loaded, so applying it here would refuse
-// every mode but Select. Consumed once, on the first frame that has a level (applyStartMode).
+// --mode <name>. Stored, not applied: at parse time no project/terrain exists, so setEditorMode
+// would refuse every mode but Select. Consumed once, on the first frame with a level (applyStartMode).
 void SandboxApp::setStartMode(std::string m) { startMode_ = std::move(m); }
 
 // <path>.ocmap given on the command line: opened INSTEAD of the project's start map.
@@ -646,9 +615,9 @@ void SandboxApp::setOpenMap(std::string p) { openMapPath_ = std::move(p); }
 
 void SandboxApp::armBrowser(bool on) { browserActive_ = on; }
 
-// Whether THIS launch's command line looked like the shell's own shape (see createApplication's
-// computation of this, right beside the sender-side gate it is the superset of). Read once, at
-// window_ = e.window() in onInit, to decide whether to register as a single-instance primary.
+// Whether THIS launch's command line looked like the shell's own shape; see createApplication's
+// computation, beside the sender-side gate it is the superset of. Read once in onInit (at
+// window_ = e.window()) to decide whether to register as a single-instance primary.
 void SandboxApp::setSingleInstanceEligible(bool b) { singleInstanceEligible_ = b; }
 
 #if AVER_MODULE_FRAMEWORK
@@ -684,46 +653,38 @@ namespace {
 
 // ---- SYNTHETIC INPUT FOR THE PLAY SELF-TESTS, INTO THE ACCUMULATOR THE PUBLISHER READS --------
 //
-// WHY THESE EXIST AS OF THIS COMMIT. Until SandboxApp::pushInput was folded into
-// game::publishInput, an io.AddKeyEvent / io.AddMouseButtonEvent was enough to reach gameplay,
-// because the editor's publish read ImGui and ImGui's own queue was therefore on the path. It is
-// not any more: the publish reads input_, which is fed from Win32Window::dispatch. This file
-// already recorded the underlying fact next to --input-source-test -- io.AddKeyEvent "injects
-// directly into ImGui's queue, never reaching Win32Window::dispatch()" -- it simply did not matter
-// for the framework half until now. These put the event where the publisher will look for it.
+// Since pushInput was folded into game::publishInput, that publish reads input_ (fed from
+// Win32Window::dispatch), not ImGui's queue -- so io.AddKeyEvent/AddMouseButtonEvent no longer
+// reach gameplay. These inject where the publisher actually looks.
 //
-// TIMING, because it is what makes an injection from HERE land at all. These drivers run from
-// onUpdate AFTER pushInput has already published this frame (sandbox/src/SandboxApp.cpp:2363 for
-// the publish, :2383 onwards for the drivers), and input_.newFrame() at the tail of onRender rolls
-// the press/release edges and zeroes the deltas but LEAVES HELD STATE ALONE (InputState::newFrame,
-// whose own header calls that "the point"). So a synthetic HELD button or key injected here is
-// still held when the NEXT frame's pushInput reads it: one frame of latency, then it stays down
-// until something says otherwise. An EDGE injected here, by contrast, is rolled away before any
-// publish sees it, which is why every caller below asserts a hold rather than a tap.
+// TIMING: these drivers run from onUpdate AFTER pushInput has published this frame
+// (sandbox/src/SandboxApp.cpp:2363 publish, :2383+ drivers). input_.newFrame() (tail of onRender)
+// rolls press/release edges but LEAVES HELD STATE ALONE (InputState::newFrame, whose own header
+// calls that "the point"). So a synthetic
+// HELD button/key is still held next frame (one frame latency, then stays down); an EDGE is
+// rolled away before any publish sees it -- which is why every caller below asserts a hold, not a tap.
 #if AVER_WITH_IMGUI
-// Guarded because BOTH its callers are: --recapture-test and --input-stuck-test need own_ resolved,
-// which only happens in a run with a UI context. At /W4 an internal-linkage function nobody calls
-// is C4505, so the guard is what keeps the no-ui row of module-matrix.ps1 quiet.
+// Guarded because both callers are: --recapture-test/--input-stuck-test need own_ resolved, which
+// only happens with a UI context. At /W4 an unused internal-linkage function is C4505, so this
+// keeps module-matrix.ps1's no-ui row quiet.
 void injectMouseButton(InputState& in, i32 button, bool pressed) {
     Event e;
     e.type    = EventType::MouseButton;
     e.button  = button;
     e.pressed = pressed;
-    // THE POSITION IS WHATEVER THE ACCUMULATOR ALREADY HOLDS, and stating it is not redundant:
-    // InputState::onEvent takes mouseX/mouseY off a BUTTON event as well as off a move
-    // (modules/platform/src/InputState.cpp), so a button left at the default 0,0 would move its
-    // idea of the cursor to the corner and manufacture a large bogus delta out of the next real
-    // WM_MOUSEMOVE. Restating the current position makes this a button event and nothing else.
+    // Position is restated from the accumulator: InputState::onEvent takes mouseX/mouseY off a
+    // BUTTON event too (modules/platform/src/InputState.cpp), so leaving it at 0,0 would move the
+    // cursor to the corner and manufacture a bogus delta on the next real WM_MOUSEMOVE.
     e.mouseX  = in.mouseX();
     e.mouseY  = in.mouseY();
     in.onEvent(e);
 }
 #endif
 
-// The keyboard twin, by RAW WIN32 VIRTUAL KEY -- which is what InputState is keyed by, and what
-// frameworkKeyFromVk (aver/framework/InputKeys.hpp) turns back into a named AVER_FW_KEY_* slot
-// inside the publisher. Not an ImGuiKey: the two enums are unrelated, which is the same reason the
-// raw-VK twin has always been published from input_ rather than from ImGui.
+// The keyboard twin, by raw Win32 virtual key -- what InputState is keyed by, and what
+// frameworkKeyFromVk (aver/framework/InputKeys.hpp) turns into a named AVER_FW_KEY_* slot in the
+// publisher. Not an ImGuiKey: the two enums are unrelated -- the reason this has always been
+// published from input_, not ImGui.
 void injectKey(InputState& in, i32 vk, bool pressed) {
     Event e;
     e.type    = EventType::Key;
@@ -735,18 +696,17 @@ void injectKey(InputState& in, i32 vk, bool pressed) {
 } // namespace
 
 // --pie-camera-test [N]: press Play, touch NOTHING, prove the camera holds perfectly still -- a
-// PIE camera with no input has exactly one correct behaviour, and any drift is a bug, needing no
-// eyes or judgement call.
-// It exists because the loop it catches is invisible elsewhere: drivePlayCamera derives
-// yaw_/pitch_ back OUT of the pawn's forward vector every frame while fly control writes rotation
-// IN from yaw_/pitch_ -- if the quaternion doesn't exactly invert camForward(), the angles walk
-// further every frame and the view slowly tumbles. Nothing else asserts the round trip.
+// PIE camera with no input has exactly one correct behaviour, so any drift is a bug.
+// Catches a loop invisible elsewhere: drivePlayCamera derives yaw_/pitch_ back OUT of the pawn's
+// forward vector every frame while fly control writes rotation IN from yaw_/pitch_ -- if the
+// quaternion doesn't exactly invert camForward(), the angles walk and the view slowly tumbles.
+// Nothing else asserts the round trip.
 void SandboxApp::maybePieCameraTest() {
     if (pieCamFrames_ <= 0) return;
-// AND ON AVER_WITH_IMGUI, the same pairing maybeInputSourceTest below carries and for a related
-// reason: this test drives the camera by writing keys and mouse deltas into ImGuiIO, so
-// AVER_MODULE_FRAMEWORK -- which proves only that there is a pawn to possess -- is not enough. With
-// AVER_ENABLE_UI=OFF there is no io to write into and nothing for the assertions to observe.
+// Also needs AVER_WITH_IMGUI (same pairing as maybeInputSourceTest below): this test drives the
+// camera via keys/mouse deltas in ImGuiIO, and AVER_MODULE_FRAMEWORK alone only proves there's a
+// pawn to possess. With AVER_ENABLE_UI=OFF there is no io to write into and nothing for the
+// assertions to observe.
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
     ++pieCamFrame_;
     if (pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
@@ -780,27 +740,22 @@ void SandboxApp::maybePieCameraTest() {
     }
 
     // ---- phase 3: hold W, and check the camera actually travels. ----
-    // THROUGH THE REAL KEY PATHS, not by shortcutting to the movement maths: a private flag would
-    // pass while the path a hand actually uses stayed broken. Both are re-asserted every frame the
-    // key should be held, not pressed once.
+    // Through the REAL KEY PATHS, not a shortcut to the movement maths, so a private flag can't
+    // pass while the real path stays broken. Re-asserted every frame (held, not tapped once).
     //
-    // BOTH READERS, BECAUSE ONE PHYSICAL W FEEDS BOTH. Which path carries this test's W depends
-    // entirely on the project: with no GameMode the editor's own fly block moves the possessed
-    // default pawn and asks ImGui::IsKeyDown(ImGuiKey_W) (sandbox/src/SandboxApp.cpp:2206-2211),
-    // while with a real GameMode the pawn is moved by gameplay reading the published AVER_FW_KEY_W
-    // slot -- which, since pushInput started calling game::publishInput, comes from input_ and no
-    // longer from ImGui. A real keypress reaches both readers off the one Win32 stream
-    // (--input-source-test below asserts exactly that, "one stream, two readers"), so the
-    // synthetic one has to as well or this test covers whichever project it was last run against.
+    // BOTH READERS, because one physical W feeds both: with no GameMode the editor's fly block
+    // reads ImGui::IsKeyDown(ImGuiKey_W) (SandboxApp.cpp:2206-2211); with a GameMode, gameplay
+    // reads the published AVER_FW_KEY_W slot, which comes from input_ since pushInput started
+    // calling game::publishInput. A real keypress reaches both off one Win32 stream
+    // (--input-source-test asserts this), so the synthetic one must too -- else this test only
+    // covers whichever project it last ran against.
     //
-    // THIS IS NOT A FIX FOR THE MOVE PHASE'S CURRENT FAILURE, and must not be read as one. The W
-    // was already reaching the named slot through ImGui before this commit, so "the named slot was
-    // fed from the wrong place" cannot be why the phase reports 0.0 cm travelled; all this does is
-    // keep it reaching that slot now that the slot is fed from input_ instead. The open lead is
-    // the HARNESS, not the publisher: measured 2026-09-19, --input-stuck-test passes on PTTest
-    // unbounded and fails on the same project under --frames 900, and this test prints "THE VIEW
-    // IGNORES W" in exactly those bounded runs. Whatever --frames costs these drivers has not been
-    // pinned to a line, so run this one WITHOUT --frames before believing either result.
+    // NOT A FIX for the move phase's current failure: W already reached the named slot through
+    // ImGui before this commit, so "the named slot was fed from the wrong place" cannot be why the
+    // phase reports 0.0 cm; this just keeps it reaching the slot now that the slot is fed from
+    // input_. The open lead is the HARNESS, not the publisher: MEASURED 2026-09-19, --input-stuck-test
+    // passes on PTTest unbounded and fails on the same project under --frames 900, printing "THE
+    // VIEW IGNORES W" only in bounded runs. Run this one WITHOUT --frames before trusting either result.
     if (pieCamFrame_ >= 50 && pieCamFrame_ < 90) {
         io.AddKeyEvent(ImGuiKey_W, true);
         injectKey(input_, 'W', true);          // VK_W is the ASCII code; see InputKeys.hpp
@@ -811,17 +766,17 @@ void SandboxApp::maybePieCameraTest() {
         io.AddKeyEvent(ImGuiKey_W, false);
         injectKey(input_, 'W', false);
         pieCamMoved_    = (camPos_ - pieCamMoveFrom_).size();
-        // ALONG THE VIEW, not merely somewhere. A pawn shoved by gravity or by a stray physics
-        // impulse would also register distance; only a forward component proves it was W.
+        // Along the VIEW, not merely somewhere: gravity or a stray physics impulse would also
+        // register distance; only a forward component proves it was W.
         const Vec3 d = (camPos_ - pieCamMoveFrom_).getSafeNormal();
         pieCamMoveDot_  = dot(d, camForward());
         return;
     }
     // ---- phase 4: released. It must COAST TO A STOP, not keep going. ----
-    // BASELINED TWO FRAMES AFTER THE RELEASE IS ASKED FOR, not slack: events queue and apply at
-    // the next NewFrame, so a release requested on frame 90 is still down for 90 and only clears
-    // on 91. Baselining at 90 counted one more legitimate frame as "still moving" -- 6.89cm coast
-    // against 6.7cm/frame of real motion, the same number wearing a disguise. The ruler started early.
+    // Baselined at frame+2 after release, not slack: events apply at the next NewFrame, so a
+    // release on frame 90 is still down for 90 and clears on 91. Baselining at 90 counted one more
+    // legitimate frame as "still moving" (6.89cm coast vs 6.7cm/frame real motion -- same number
+    // wearing a disguise).
     if (pieCamFrame_ == 92) { pieCamAfterMove_ = camPos_; return; }
     if (pieCamFrame_ > 92)
         pieCamCoast_ = std::fmax(pieCamCoast_, (camPos_ - pieCamAfterMove_).size());
@@ -851,12 +806,11 @@ void SandboxApp::maybePieCameraTest() {
 
 // --input-source-test N: does the editor's own InputState see the real OS event stream, and does
 // ImGui still see it too?
-// WHAT IT ACTUALLY GUARDS: the editor's Window::setEventCallback and ImGui's Window::messageHook
-// coexist only because imgui_impl_win32's handler returns 0 (not consumed) for every relevant
-// message, letting it fall through to Window::dispatch() too. That's vendored third-party
-// behaviour an ImGui upgrade could silently change with no compile error -- a comment cannot catch
-// that, this can.
-// WHY IT POSTS REAL WINDOW MESSAGES: io.AddKeyEvent injects directly into ImGui's queue, never
+// GUARDS: Window::setEventCallback and ImGui's Window::messageHook coexist only because
+// imgui_impl_win32's handler returns 0 (not consumed) for every relevant message, letting it fall
+// through to Window::dispatch() too -- vendored behaviour an ImGui upgrade could silently break;
+// this test can catch that, a comment cannot.
+// POSTS REAL WINDOW MESSAGES because io.AddKeyEvent injects straight into ImGui's queue, never
 // reaching Win32Window::dispatch(), so it can't tell whether InputState received anything. The MCP
 // bridge's PostMessageW is the only synthesis here that enters the real pump.
 void SandboxApp::maybeInputSourceTest() {
@@ -873,9 +827,8 @@ void SandboxApp::maybeInputSourceTest() {
     if (inputSrcFrame_ == 6 + half) { ::PostMessageW(hwnd, WM_KEYUP,   (WPARAM)kVk, 0); return; }
     if (inputSrcFrame_ < 7) return;
 
-    // Two frames of slack after each post: PostMessageW queues, pumpEvents delivers on the next
-    // turn of the loop, and ImGui applies queued key events at its own NewFrame. Sampling the
-    // frame after a post would be reading the answer before it was written.
+    // Two frames of slack after each post: PostMessageW queues, pumpEvents delivers next loop
+    // turn, ImGui applies at its own NewFrame. Sampling sooner reads the answer before it's written.
     const bool inState = input_.keyHeld(kVk);
     const bool inImGui = ImGui::IsKeyDown(ImGuiKey_W);
     const bool wantDown = inputSrcFrame_ < 6 + half;
@@ -908,17 +861,15 @@ void SandboxApp::maybeInputSourceTest() {
 
 // --wheel-speed-test: does turning the wheel while flying actually change the fly speed?
 //
-// THIS EXISTS BECAUSE THE CONTROL WAS DEAD AND NOTHING NOTICED. The wheel read sat in onUpdate,
-// which Engine::frameStep runs BEFORE ImGui's NewFrame, and ImGui::EndFrame zeroes io.MouseWheel
-// at the tail of the previous frame -- so the read was 0.0f on every frame by construction, from
-// the day it was written. It survived a rewrite of its own direction and a commit message
-// describing how it behaved. A control with no headless witness is a control that can be dead
-// for months while everyone reads the source and agrees it looks right.
+// EXISTS BECAUSE THE CONTROL WAS DEAD AND NOTHING NOTICED: the wheel read sat in onUpdate, which
+// Engine::frameStep runs BEFORE ImGui's NewFrame, and ImGui::EndFrame zeroes io.MouseWheel at the
+// tail of the previous frame -- so the read was always 0.0f. It survived a rewrite of its own
+// direction and a commit message describing behaviour that never actually ran. A control with no
+// headless witness can stay dead for months while the source looks right.
 //
-// REAL WINDOW MESSAGES, for the same reason maybeInputSourceTest posts them: the whole defect
-// lives in WHICH input path is read and WHEN, so a harness that injects straight into ImGui's
-// queue (or straight into InputState) would pass while the editor stayed broken. Only a message
-// through the real pump exercises the ordering that was wrong.
+// Posts REAL WINDOW MESSAGES for the same reason maybeInputSourceTest does: the defect is in WHICH
+// input path is read and WHEN, so injecting straight into ImGui or InputState would pass while the
+// editor stayed broken.
 void SandboxApp::maybeWheelSpeedTest() {
     if (wheelTestFrames_ <= 0) return;
 #if defined(_WIN32) && AVER_WITH_IMGUI
@@ -928,12 +879,12 @@ void SandboxApp::maybeWheelSpeedTest() {
         if (wheelTestFrame_ > 4) { AVER_INFO("[wheel-test] RESULT: SKIPPED (no window)"); wheelTestFrames_ = 0; }
         return;
     }
-    // Both sources sampled EVERY frame, because the contrast is the evidence: the fix is not
-    // "the speed moved", it is "the value this function reads is the live one".
+    // Both sources sampled EVERY frame: the fix is "the value this function reads is the live
+    // one", not just "the speed moved".
     wheelTestSawImGui_ = wheelTestSawImGui_ || ImGui::GetIO().MouseWheel != 0.0f;
     wheelTestSawInput_ = wheelTestSawInput_ || input_.wheel() != 0.0f;
-    // The gates between the wheel arriving and the speed changing, sampled too -- without these
-    // a FAIL cannot be told apart from "the harness never reached the code".
+    // Gates between the wheel arriving and the speed changing, sampled too, so a FAIL can be told
+    // apart from "the harness never reached the code".
     if (input_.wheel() != 0.0f) {
         wheelTestOwnAtWheel_ = own_.keyboardToTool || own_.mouseToTool;
         wheelTestFlyAtWheel_ = flying_;
@@ -942,22 +893,19 @@ void SandboxApp::maybeWheelSpeedTest() {
     if (wheelTestFrame_ == 5) {
         wheelTestSpeedBefore_ = flySpeed_;
         // Straight into fly mode rather than synthesising a right-drag: entering it needs the
-        // pointer inside the viewport rect and levelHovered_ set by the docked window, neither of
-        // which a posted WM_MOUSEMOVE reliably reproduces headlessly. What is under test is the
-        // wheel READ, not the gesture that opens it, so forcing the state keeps the harness
-        // measuring the thing that was broken instead of the thing that was not.
+        // pointer inside the viewport rect and levelHovered_, neither reliably reproduced by a
+        // posted WM_MOUSEMOVE. Under test is the wheel READ, not the gesture that opens it.
         wheelTestForceFly_ = true;
         return;
     }
-    // One notch UP, which is the direction that speeds up. Positive WHEEL_DELTA is up; the
-    // test posts the real message so it exercises the same path a hand does, sign included --
-    // which is exactly what would catch this flipping back by accident.
+    // One notch UP (the speed-up direction). Posts the real message, sign included, so it would
+    // catch this flipping back by accident.
     if (wheelTestFrame_ == 6) {
         ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
         return;
     }
-    // Slack for the same reason maybeInputSourceTest leaves it: PostMessageW queues, pumpEvents
-    // delivers on the next turn of the loop. Sampling sooner reads the answer before it is written.
+    // Slack for the same reason as maybeInputSourceTest: PostMessageW queues, pumpEvents delivers
+    // next loop turn.
     if (wheelTestFrame_ < 9) return;
 
     wheelTestForceFly_ = false;
@@ -983,15 +931,12 @@ void SandboxApp::maybeWheelSpeedTest() {
 }
 
 // --viewmodel-test N: does the gun sit STILL in the frame, or does it swim against the camera?
-// THE INVARIANT: the viewmodel is rigidly parented to the eye, so its position in VIEW SPACE is
-// constant by construction; any deviation means the gun and camera transforms were derived from
-// different data -- what "the gun jitters" looks like.
-// WHY VIEW SPACE AND NOT WORLD: the gun moves constantly and correctly in world space, so only
-// relative-to-eye motion is the question.
-// TWO PHASES, because the suspected cause only shows in one: drivePlayCamera derives
-// camPos_/yaw_/pitch_ and rebuilds a basis from those, while the gun draws from the view entity's
-// matrix directly -- a still camera and a turning one are measured separately, and the DIFFERENCE
-// is the finding.
+// INVARIANT: the viewmodel is rigidly parented to the eye, so its VIEW SPACE position is constant
+// by construction; any deviation means the gun and camera transforms came from different data.
+// VIEW SPACE not world: the gun moves correctly in world space, only relative-to-eye motion matters.
+// TWO PHASES (still, then turning): drivePlayCamera derives camPos_/yaw_/pitch_ and rebuilds a
+// basis from those, while the gun draws from the view entity's matrix directly -- the DIFFERENCE
+// between the two phases is the finding.
 void SandboxApp::maybeViewmodelTest() {
     if (vmFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_WITH_IMGUI
@@ -1019,9 +964,8 @@ void SandboxApp::maybeViewmodelTest() {
     const Mat4& gm = w.worldMatrix(gun);
     const Vec3 gunPos{gm.m[3][0], gm.m[3][1], gm.m[3][2]};
 
-    // The exact basis the renderer uses: camForward() from yaw_/pitch_, not the view entity's
-    // own axes. Using the entity's axes here would compare the gun against itself and always
-    // report zero -- the whole point is to test the DECOMPOSED path the camera actually takes.
+    // The exact basis the renderer uses: camForward() from yaw_/pitch_, not the view entity's own
+    // axes -- using the entity's axes would compare the gun against itself and always read zero.
     const Vec3 fwd = camForward();
     const Vec3 wup{0, 0, 1};
     const Vec3 rgt = Vec3{fwd.y * wup.z - fwd.z * wup.y, fwd.z * wup.x - fwd.x * wup.z,
@@ -1034,9 +978,9 @@ void SandboxApp::maybeViewmodelTest() {
                   rel.x * fwd.x + rel.y * fwd.y + rel.z * fwd.z};
 
     // ---- phase 1: dead still ----
-    // NOTHING IS MEASURED BEFORE THE REFERENCE EXISTS. The first version accumulated from frame
-    // 20 while vmRef_ was still zero-initialised, comparing the gun against the ORIGIN and
-    // reporting 39.56cm as drift -- a probe that fails loudly on a rigid viewmodel, sending the search somewhere real code is fine.
+    // Nothing measured before the reference exists: an earlier version accumulated from frame 20
+    // while vmRef_ was still zero-initialised, comparing the gun against the ORIGIN and reporting
+    // 39.56cm drift on a rigid viewmodel.
     if (vmFrame_ <= 25) { vmRef_ = vs; return; }
     if (vmFrame_ < 25 + vmFrames_) {
         vmStill_ = std::fmax(vmStill_, (vs - vmRef_).size());
@@ -1065,11 +1009,10 @@ void SandboxApp::maybeViewmodelTest() {
 }
 
 // --recapture-test N: does the click that takes the mouse BACK also fire the weapon?
-// THE GESTURE: the release-mouse chord then a click back into the viewport means "give the game
-// the mouse again" and must not ALSO reach gameplay -- in PTTest it did, since the fire gate is a
-// LEVEL read of InputKey(MOUSE_LEFT) behind a cooldown.
-// WHY --input-stuck-test DOES NOT COVER IT: that holds then releases; this releases then clicks --
-// a live key arriving through a gesture never meant to be gameplay input.
+// GESTURE: release-mouse chord then click back into the viewport means "give the game the mouse
+// again" and must not ALSO reach gameplay -- in PTTest it did, since fire gates on a LEVEL read of
+// InputKey(MOUSE_LEFT) behind a cooldown.
+// --input-stuck-test doesn't cover this: that holds then releases; this releases then clicks.
 void SandboxApp::maybeRecaptureTest() {
     if (recapFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
@@ -1078,32 +1021,29 @@ void SandboxApp::maybeRecaptureTest() {
     if (recapFrame_ < 15) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    // Park the pointer in the middle of the 3D view for the whole test: the recapture path is
-    // gated on inViewport(), so a click anywhere else would prove nothing either way.
+    // Park the pointer in the middle of the 3D view: the recapture path gates on inViewport(), so
+    // a click anywhere else would prove nothing.
     io.AddMousePosEvent(vpX_ + vpW_ * 0.5f, vpY_ + vpH_ * 0.5f);
 
     // Hand the mouse to the editor, exactly as the chord does.
     if (recapFrame_ == 15) { releasedByUser_ = true; return; }
     if (recapFrame_ < 20) return;
 
-    // ...then click back into the viewport and HOLD. A real click lasts many frames; the bug
-    // needs only the frames after the first, once own_ has refreshed with releasedByUser_ false
-    // and mouse_.captured() true.
+    // ...then click back into the viewport and HOLD: a real click lasts many frames, and the bug
+    // needs only the frames after the first, once own_ refreshes with releasedByUser_ false and
+    // mouse_.captured() true.
     //
-    // INTO BOTH READERS, AND NEITHER HALF IS OPTIONAL HERE. The gesture under test is decided on
-    // ImGui's side -- the recapture branch asks ImGui::IsMouseClicked(0) before it clears
-    // releasedByUser_ and arms eatRecaptureClick_ (sandbox/src/SandboxApp.cpp:2324-2331) -- while
-    // the LEAK this test counts is read back off the published AVER_FW_KEY_MOUSE_LEFT slot, which
-    // pushInput now fills from input_ rather than from ImGui. Drop the ImGui half and no recapture
-    // ever happens, so there is nothing to leak from; drop the input_ half and no button is ever
-    // published, so a leak could not show up even if the eat were removed. A real click reaches
-    // both off one Win32 stream, which is what makes injecting into both faithful rather than a
-    // way of making the test agree with itself.
+    // INTO BOTH READERS, neither optional: the gesture is decided on ImGui's side (recapture asks
+    // ImGui::IsMouseClicked(0) before clearing releasedByUser_ and arming eatRecaptureClick_,
+    // SandboxApp.cpp:2324-2331), while the LEAK counted here is read off the published
+    // AVER_FW_KEY_MOUSE_LEFT slot, which pushInput fills from input_. Drop the ImGui half and no
+    // recapture happens, nothing to leak from; drop the input_ half and no button is published,
+    // nothing to leak. A real click reaches both off one Win32 stream.
     io.AddMouseButtonEvent(0, true);
     injectMouseButton(input_, 0, true);
-    // The recapture itself takes a frame or two to land -- the button event queues and applies
-    // at ImGui's next NewFrame, and the capture block reads it the frame after. The leak is
-    // counted only ONCE THE MOUSE IS ACTUALLY BACK, the window the bug lives in.
+    // Recapture takes a frame or two to land (button event applies at ImGui's next NewFrame, read
+    // by the capture block a frame after). The leak is counted only ONCE THE MOUSE IS ACTUALLY
+    // BACK, the window the bug lives in.
     if (!releasedByUser_) recapNotRecaptured_ = 1;          // 1 == "it did take the mouse back"
     if (recapNotRecaptured_ && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) ++recapLeaked_;
 
@@ -1112,9 +1052,8 @@ void SandboxApp::maybeRecaptureTest() {
         const bool clean    = recapLeaked_ == 0;
         // NOT-RECAPTURED IS A FINDING, NOT A FAILURE: the recapture branch requires
         // !WantCaptureMouse, and ImGui ALWAYS wants the mouse over the 3D dock window (measured
-        // here), so it can't be taken -- clicking back into the viewport does nothing today, its
-        // own bug and the REASON the weapon-fire defect cannot currently happen. The leak assertion
-        // stays meaningful for whoever fixes the recapture gesture.
+        // here), so it can't be taken today -- its own bug, and the reason the weapon-fire defect
+        // can't currently happen. The leak assertion stays meaningful for whoever fixes recapture.
         AVER_INFO("[recapture] the click took the mouse back : {} -- {}",
                   tookBack ? "yes" : "no",
                   tookBack ? "the gesture works"
@@ -1134,26 +1073,23 @@ void SandboxApp::maybeRecaptureTest() {
 }
 
 // --input-stuck-test N: does releasing the mouse mid-session leave a key held forever?
-// THE BUG: pushInput() used to `return` after aver_fw_input_new_frame(), which does NOT clear
-// cur[] -- so every key froze at its last value while aver_fw_tick kept running, and a weapon
-// gated on a LEVEL read of MOUSE_LEFT fired forever with the mouse untouched.
-// IT ASSERTS EVERY KEY, NOT THE ONE IT PRESSED: the fix spans ~29 set_key call sites, and a test
+// BUG: pushInput() used to `return` after aver_fw_input_new_frame(), which does NOT clear cur[]
+// -- every key froze at its last value while aver_fw_tick kept running, so a weapon gated on a
+// LEVEL read of MOUSE_LEFT fired forever with the mouse untouched.
+// ASSERTS EVERY KEY, not just the one pressed: the fix spans ~29 set_key call sites, and a test
 // watching one slot would pass with 28 fixed and the 29th still latching.
-// WHY IT DRIVES THE DEVICE STREAM RATHER THAN THE ABI: --play-test's aver_fw_input_set_key writes
-// the very state the bug corrupts, so it cannot catch this; the injection has to enter upstream of
-// pushInput, the function under test, and be carried by it.
-// AND WHY THAT STREAM IS input_ AND NO LONGER ImGui. It was io.AddMouseButtonEvent while pushInput
-// read ImGui; pushInput now hands game::publishInput the editor's policy and that publisher reads
-// InputState, so an ImGui-only click stopped being on the path at all. Re-pointed rather than
-// duplicated here, unlike --recapture-test just above, and the difference is worth stating: this
-// test needs no ImGui-side gesture, and an ImGui-held button is actively in its way -- a held
-// button makes ImGui report WantCaptureMouse, resolveInputOwnership then denies the mouse to the
-// game unless mouse_.captured() overrides it, and setMouseCaptured is skipped in a bounded run
-// (sandbox/src/SandboxApp.cpp:2311 and :2357), which is phase 1 failing on the test's own injection.
-// STILL GUARDED ON AVER_WITH_IMGUI even though nothing in the body touches ImGui any more: own_ is
-// only resolved in a run that has a UI context, and without one the publisher is correctly told
-// that nobody owns the mouse -- phase 1 would report "no input arrived" and prove nothing, which is
-// a worse outcome than not running.
+// DRIVES THE DEVICE STREAM, not the ABI: --play-test's aver_fw_input_set_key writes the very state
+// the bug corrupts, so injection must enter upstream of pushInput, the function under test.
+// THAT STREAM IS input_, not ImGui: it was io.AddMouseButtonEvent while pushInput read ImGui;
+// pushInput now hands game::publishInput the editor's policy and that publisher reads InputState,
+// so an ImGui-only click is off the path. Unlike --recapture-test above, this needs no ImGui-side
+// gesture, and a held ImGui button actively gets in the way (it makes WantCaptureMouse true, and
+// resolveInputOwnership denies the mouse to the game unless mouse_.captured() overrides it, with
+// setMouseCaptured skipped in a bounded run -- SandboxApp.cpp:2311, :2357) -- phase 1 failing on
+// the test's own injection, not the bug under test.
+// STILL GUARDED ON AVER_WITH_IMGUI though nothing in the body touches ImGui: own_ only resolves
+// with a UI context; without one phase 1 would report "no input arrived" and prove nothing, worse
+// than not running at all.
 void SandboxApp::maybeInputStuckTest() {
     if (inputStuckFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
@@ -1162,10 +1098,9 @@ void SandboxApp::maybeInputStuckTest() {
     if (inputStuckFrame_ < 11) return;
 
     // ---- phase 1: hold the button and prove it actually reaches gameplay ----
-    // Re-asserted every frame rather than pressed once: the point is that the BUTTON never goes
-    // up, so a test that stopped saying so would be testing the wrong thing. (Re-asserting a hold
-    // is also free -- InputState::onEvent only counts the 0->1 transition as a press, exactly so
-    // Windows' own key auto-repeat cannot read as a fresh tap.)
+    // Re-asserted every frame, not pressed once: the point is the BUTTON never goes up. (Free to
+    // do: InputState::onEvent only counts the 0->1 transition as a press, so auto-repeat can't
+    // read as a fresh tap.)
     if (inputStuckFrame_ < 30) {
         injectMouseButton(input_, 0, true);
         if (inputStuckFrame_ > 12 && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) inputStuckSawDown_ = true;
@@ -1173,8 +1108,8 @@ void SandboxApp::maybeInputStuckTest() {
     }
 
     // ---- phase 2: release the mouse to the editor, WITHOUT letting the button up ----
-    // Exactly what a person does mid-session to go and click something in the Outliner, and the
-    // precise moment the old code stopped publishing.
+    // Exactly what a person does to click something in the Outliner mid-session -- the precise
+    // moment the old code stopped publishing.
     if (inputStuckFrame_ == 30) { injectMouseButton(input_, 0, true); releasedByUser_ = true; return; }
 
     // ---- phase 3: from here on gameplay must see NOTHING held ----
@@ -1194,9 +1129,9 @@ void SandboxApp::maybeInputStuckTest() {
                   inputStuckLatched_, inputStuckFrames_, inputStuckFirstKey_,
                   clearOk ? "nothing latched" : "A KEY IS STUCK (pushInput returned without publishing)");
         AVER_INFO("[input-stuck] RESULT: {}", (downOk && clearOk) ? "PASS" : "FAIL");
-        // LET GO BEFORE HANDING THE EDITOR BACK. Held state is the one thing InputState::newFrame
+        // Let go before handing the editor back: held state is the one thing InputState::newFrame
         // deliberately does not roll, so a synthetic button left down here stays down for the rest
-        // of the process and the next thing to read input_ inherits it.
+        // of the process, inherited by the next thing that reads input_.
         injectMouseButton(input_, 0, false);
         releasedByUser_ = false;
         stopPlay();
@@ -1209,9 +1144,9 @@ void SandboxApp::maybeInputStuckTest() {
 void SandboxApp::maybePlayTest() {
     if (!playTest_) return;
     if (!playTestBegun_) {
-        // NO GameMode IS A CASE WORTH TESTING, NOT A REASON TO GIVE UP: it used to abandon the
-        // run, leaving the single most broken Play path -- the one that used to possess a
-        // stationary drone and strand the camera -- with no automated coverage. This drives it too.
+        // No GameMode is a case worth testing, not a reason to give up: this used to abandon the
+        // run, leaving the most broken Play path (possessing a stationary drone, stranding the
+        // camera) with no automated coverage. This drives it too.
         if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
             if (++playTestWait_ <= 10) return;   // still give classes a moment to register
             playTestBegun_ = true;
@@ -1225,9 +1160,9 @@ void SandboxApp::maybePlayTest() {
         startPlay();
         return;
     }
-    // SYNTHETIC INPUT ONLY WHERE THERE IS SOMETHING TO RECEIVE IT, but the COUNTDOWN runs either
-    // way: it used to live entirely inside this branch, so the spectator fallback (which never
-    // calls begin_play, so never reports PLAYING) started and ran forever without reaching Stop.
+    // Synthetic input only where there's something to receive it, but the COUNTDOWN runs either
+    // way: it used to live entirely inside this branch, so the spectator fallback (never calls
+    // begin_play, so never reports PLAYING) started and ran forever without reaching Stop.
     const bool fwPlaying = aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
     if (fwPlaying) {
         aver_fw_input_set_key(AVER_FW_KEY_W, 1);
@@ -1244,10 +1179,10 @@ void SandboxApp::maybePlayTest() {
                           wm.m[3][0], wm.m[3][1], wm.m[3][2]);
             }
             AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
-            // stopPlay(), NOT aver_fw_end_play() DIRECTLY: calling the framework straight
-            // through skipped everything the Stop BUTTON does (taking down a play-started drone,
-            // restoring the level's transforms), so the one automated run exercised a path no user
-            // can take. A harness that bypasses the button does not test the button.
+            // stopPlay(), not aver_fw_end_play() directly: calling the framework straight through
+            // skips what the Stop BUTTON does (taking down a play-started drone, restoring the
+            // level's transforms), so the run would exercise a path no user can take -- a harness
+            // that bypasses the button does not test the button.
             stopPlay();
         }
     }
@@ -1256,30 +1191,25 @@ void SandboxApp::maybePlayTest() {
 #endif
 
 #if AVER_WITH_IMGUI
-// --undo-test [N]: a headless, in-process proof that Copy/Paste/Duplicate/Delete/Undo/Redo
-// actually work at runtime against a REAL scene::World and objects_ vector, printing one PASS/FAIL
-// line per assertion and exiting 0/1 -- never returns, so it never leaves a window open past the
-// check.
+// --undo-test [N]: headless, in-process proof that Copy/Paste/Duplicate/Delete/Undo/Redo work
+// against a REAL scene::World and objects_ vector; one PASS/FAIL line per assertion, exits 0/1 --
+// never returns, so it never leaves a window open past the check.
 // Two phases: A forces the scene-entity branch (hideEditorScene_=true); B forces the placeholder-
-// object branch (no level) against the SAME six commands -- the path that, before this change,
-// silently pushed no undo entry for Create/Destroy at all. B runs even with SCENE off.
+// object branch (no level) against the same six commands -- the path that used to silently push
+// no undo entry for Create/Destroy at all. B runs even with SCENE off.
 // --multiselect-test: drives the multi-selection MODEL directly and asserts its semantics.
 //
-// THE MODEL, NOT THE CLICKS. Shift and Ctrl reach it through the outliner's ImGui tree, which a
-// headless run has no way to click; what CAN be checked headlessly is the part that actually
-// decides behaviour -- what the set contains after each gesture, and above all the staleness
-// rule, which is the subtle one. multiStale() exists so that ~40 places that assign selEntity_
-// directly collapse the selection instead of leaving a set the user cannot see; if that ever
-// silently stops working, Delete starts removing things nobody highlighted. That is worth a
-// witness, and this file has learned twice today what an unwitnessed control costs.
+// THE MODEL, NOT THE CLICKS: Shift/Ctrl reach it through the outliner's ImGui tree, unclickable
+// headlessly; what can be checked is what the set contains after each gesture, and above all
+// staleness. multiStale() exists so the ~40 places that assign selEntity_ directly collapse the
+// selection rather than leave an invisible set; if that silently breaks, Delete removes things
+// nobody highlighted.
 // --cbmove-test <dir>: exercises the Content Browser's copy/move against a scratch directory.
 //
-// THE FILE OPERATIONS, NOT THE DRAG. Dropping onto a folder is an ImGui gesture no headless run
-// can perform; what can be checked is the part that actually touches the disk, which is also the
-// part that can lose somebody's work. Untested destructive file operations are not a thing to
-// ship into a project full of assets.
+// THE FILE OPERATIONS, NOT THE DRAG: dropping onto a folder is an unheadless ImGui gesture; what
+// can be checked is the part that touches the disk, and can lose someone's work if untested.
 //
-// WRITES ONLY UNDER THE DIRECTORY IT IS GIVEN, and creates its own fixture there.
+// Writes only under the directory it is given, and creates its own fixture there.
 void SandboxApp::runCbMoveTest(const std::string& root) {
     int failures = 0;
     auto check = [&](bool cond, const char* what) {
@@ -1346,27 +1276,24 @@ void SandboxApp::runCbMoveTest(const std::string& root) {
 
 // --savedirty-test: does "unsaved changes" actually track the file?
 //
-// THE BUG THIS PINS: levelHasUnsavedEdits() was `return canUndo()`, so the exit prompt fired on
-// every close no matter how recently the level had been written -- it could only go quiet by
-// undoing the entire session. A prompt that cries wolf every time trains the reflex that
-// dismisses it, and one day it is telling the truth.
+// BUG THIS PINS: levelHasUnsavedEdits() was `return canUndo()`, so the exit prompt fired on every
+// close regardless of how recently the level was written -- only quiet by undoing the whole
+// session. A prompt that cries wolf trains the reflex that dismisses it.
 //
-// THE CASES THAT MATTER ARE THE UNDO ONES. Anyone can make "save clears the flag" work; the
-// interesting question is what happens when you save, undo past that point, and redo back to it.
-// A stack-DEPTH watermark gets that wrong the moment pushEdit trims from the front at
-// kUndoDepth; a per-edit serial does not, and that is the whole reason for the serial.
+// THE CASES THAT MATTER ARE THE UNDO ONES: save, undo past that point, redo back to it. A
+// stack-DEPTH watermark gets that wrong once pushEdit trims from the front at kUndoDepth; a
+// per-edit serial does not -- the whole reason for the serial.
 // --prefs-write-test: does a preference actually reach disk?
 //
-// editor.ini has not been written since 15:53 on the day this was added, across many sessions --
-// so "preferences do not save" is a WRITE failing, not merely nothing having been dirtied. Every
-// layer of that write reads correctly (setPrefString dirties on a real change, flushEditorPrefs
-// writes through writeFileTextAtomic and only clears the dirty bit on success, the atomic write
-// is write-temp-then-MoveFileEx). Reading further was not going to settle it, so this reports
-// each step against the real file instead.
-// Raises one notification of each severity, plus a progress one, so the stack's appearance can
-// be screenshotted. This is the half of the feature a headless test genuinely cannot judge:
-// EditorNotificationsTest owns every rule about WHEN a notification lives and dies, and nothing
-// but a picture can say whether the result is legible.
+// editor.ini went unwritten since 15:53 on the day this was added, across many sessions --
+// "preferences do not save" was a WRITE failing, not just nothing dirtied. Every layer read
+// correctly on inspection
+// (setPrefString dirties on a real change, flushEditorPrefs writes via writeFileTextAtomic and
+// only clears dirty on success, the atomic write is write-temp-then-MoveFileEx), so this checks
+// each step against the real file instead of reading further.
+// Raises one notification of each severity plus a progress one, so the stack's appearance can be
+// screenshotted -- the half of the feature a headless test can't judge (EditorNotificationsTest
+// owns the WHEN rules; only a picture can say whether the result is legible).
 void SandboxApp::runNotifyTest() {
     editor::NotificationQueue& q = editor::notifications();
     editor::Notification n;
@@ -1383,14 +1310,12 @@ void SandboxApp::runNotifyTest() {
     n.title = "Already imported"; n.body = "Content/Props/Rock_01.ocmesh exists.";
     n.ttlSec = 1.0e6; q.push(n);
 
-    // THROUGH THE LOG, not pushed directly, and that is the point of this one: it is the only
-    // sample that exercises the production path -- logSink -> pushFromLog -> the queue -- so the
-    // capture proves the wiring rather than just the drawing. Safe to log here because
-    // runNotifyTest is called from the frame tick, not from inside the sink.
+    // Through the LOG, not pushed directly: the only sample exercising the production path
+    // (logSink -> pushFromLog -> queue), proving the wiring, not just the drawing. Safe to log
+    // here since runNotifyTest runs from the frame tick, not inside the sink.
     //
-    // Error and not Critical: AVER_CRITICAL wakes the crash reporter, and a diagnostic flag has
-    // no business launching a second process. The Critical sample below is pushed directly for
-    // exactly that reason.
+    // Error, not Critical: AVER_CRITICAL wakes the crash reporter, and a diagnostic flag has no
+    // business launching a second process. The Critical sample below is pushed directly instead.
     AVER_ERROR("[Import] could not read Textures/missing.png");
 
     n = {}; n.severity = editor::NotifySeverity::Critical;
@@ -1427,7 +1352,7 @@ void SandboxApp::runPrefsWriteTest() {
     editor::flushEditorPrefs();
 
     // Read the FILE back, not the in-memory store -- the store would report success even if the
-    // write never happened, which is precisely the failure being hunted.
+    // write never happened.
     std::string text;
     const bool read = readFileText(path, text);
     check(read, "the file can be read back after the flush");
@@ -1438,8 +1363,8 @@ void SandboxApp::runPrefsWriteTest() {
                          ? std::filesystem::file_size(path, ec) : 0u;
     AVER_INFO("[prefs-write-test] after:  size={}", static_cast<unsigned long long>(sizeAfter));
 
-    // Also prove the directory is writable at all, independently of the prefs store, so a
-    // failure can be told apart from a permissions problem.
+    // Also proves the directory is writable independently of the prefs store, to tell a failure
+    // apart from a permissions problem.
     const std::string probe = std::filesystem::path(path).parent_path().string() + "/writeprobe.tmp";
     const bool direct = writeFileTextAtomic(probe, "x");
     check(direct, "writeFileTextAtomic can write to that directory directly");
@@ -1493,14 +1418,13 @@ void SandboxApp::runProjectSwitchTest() {
 }
 
 void SandboxApp::runGraphPrintTest() {
-    // NOTHING IS LOGGED WHILE logMutex_ IS HELD, and the first draft of this test got that
-    // wrong. Log.hpp's contract says a sink "must not itself log": logSink takes logMutex_, so a
-    // check() that logs from inside a lock_guard on it deadlocks against itself -- std::mutex is
-    // not recursive. It presented as the test stopping dead after its first PASS with no error,
-    // which is exactly what a self-deadlock looks like from outside.
+    // NOTHING IS LOGGED WHILE logMutex_ IS HELD (the first draft of this test got that wrong):
+    // Log.hpp's contract says a sink "must not itself log", and logSink takes logMutex_, so a
+    // check() logging from inside a lock_guard on it deadlocks (std::mutex is not recursive) --
+    // presents as the test stopping dead after its first PASS with no error.
     //
-    // So every phase below reads what it needs under the lock into plain locals, releases, and
-    // only then reports. The lambda is deliberately not called anywhere a lock is held.
+    // So every phase reads what it needs under the lock into plain locals, releases, then reports.
+    // The lambda is never called while a lock is held.
     int failures = 0;
     auto check = [&](bool cond, const char* what) {
         if (cond) AVER_INFO("[graph-print-test] PASS: {}", what);
@@ -1508,15 +1432,11 @@ void SandboxApp::runGraphPrintTest() {
     };
     auto clear = [this] { std::lock_guard<std::mutex> lk(logMutex_); graphPrints_.clear(); };
 
-    // The case that decides whether this feature is usable at all: a PrintString on an OnTick
-    // chain fires EVERY FRAME once Play starts (tickGraphClassInstances is gated on
-    // aver_fw_play_state() == AVER_FW_PLAY_PLAYING), and every frame in a packaged game -- which
-    // is exactly when someone is watching this feed.
-    //
-    // (This said "the editor ticks graph instances ungated on play state". That was wrong, and it
-    // is the SECOND copy of the same wrong sentence: the first, beside logSink, was corrected in
-    // 1f9507e and this one was missed because the correction fixed the site it was reading rather
-    // than grepping for the claim.)
+    // Decides whether this feature is usable at all: a PrintString on an OnTick chain fires EVERY
+    // FRAME once Play starts (tickGraphClassInstances gates on
+    // aver_fw_play_state()==AVER_FW_PLAY_PLAYING), and every frame in a packaged game -- exactly
+    // when someone is watching this feed. (Previously said this ticks ungated on play state --
+    // wrong, corrected in 1f9507e; this was a second, missed copy of that same wrong claim.)
     clear();
     for (int i = 0; i < 200; ++i) AVER_INFO("[Graph] hello: reached_the_tick");
     usize rows = 0; u32 count = 0; std::string text;
@@ -1529,9 +1449,9 @@ void SandboxApp::runGraphPrintTest() {
     check(count == 200, "and the row counts every one of them");
     check(text == "hello: reached_the_tick", "with the [Graph] prefix stripped and the rest kept verbatim");
 
-    // ALTERNATING PRINTS MUST NOT COLLAPSE. A Branch taking each arm in turn is exactly the
-    // pattern an author is watching for; merging those would hide the alternation that IS the
-    // signal. Six lines, two distinct, alternating -> six rows.
+    // ALTERNATING PRINTS MUST NOT COLLAPSE: a Branch taking each arm in turn is exactly the
+    // pattern being watched for, and merging would hide the alternation that IS the signal. Six
+    // lines, two distinct, alternating -> six rows.
     clear();
     for (int i = 0; i < 3; ++i) {
         AVER_INFO("[Graph] branch: took_true");

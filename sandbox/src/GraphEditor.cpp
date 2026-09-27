@@ -1,20 +1,14 @@
 // The .ocgraph node editor tab: ImGui canvas on top of GraphEditorGeometry's headless core.
 //
-// LOAD/SAVE CONTRACT (the two hard requirements from the task brief):
-//   1. A load -> save with no edits is byte-identical. Guaranteed structurally, not by luck: graph_
-//      is the exact OcGraphData parseOcgraph() produced, and it is mutated ONLY inside the explicit
-//      edit paths below (each preceded by pushUndo()). Auto-layout and canvas display never touch it
-//      -- see displayPos_'s doc comment on GraphEditor.hpp. save() always calls
-//      fmt::writeOcgraph(graph_, originalText_), matching testRoundTrip's own assertion
-//      (tests/formats/src/OcGraphTest.cpp:149) that a write of an untouched parse reproduces its
-//      input byte for byte.
-//   2. Unknown records survive a save. This editor NEVER calls fmt::saveOcgraph() -- that function
-//      (modules/formats/src/OcGraph.cpp:376-386) always writes fresh with no `existing` text and
-//      would silently drop anything this editor doesn't model, exactly the docs/VISUAL_SCRIPTING.md
-//      trap already documented for .ocworld. Every write here goes through save() below, which reads
-//      writeOcgraph(graph_, originalText_) and writes THAT string, so any unrecognised line the
-//      parser skipped (a comment, a future record type) rides through untouched, the same guarantee
-//      testUnknownRecords exercises (tests/formats/src/OcGraphTest.cpp:183).
+// LOAD/SAVE CONTRACT:
+//   1. Load -> save with no edits is byte-identical: graph_ is the exact parseOcgraph() output,
+//      mutated ONLY in the edit paths below (each preceded by pushUndo()); auto-layout/display never
+//      touch it (see displayPos_ in GraphEditor.hpp). save() always writes
+//      fmt::writeOcgraph(graph_, originalText_) -- matches testRoundTrip (tests/formats/src/OcGraphTest.cpp:149).
+//   2. Unknown records survive a save: NEVER call fmt::saveOcgraph() (OcGraph.cpp:376-386), which
+//      writes fresh with no `existing` text and drops anything unmodeled (the .ocworld trap in
+//      docs/VISUAL_SCRIPTING.md). Always go through save() below, which threads originalText_ through
+//      writeOcgraph so unrecognised lines survive untouched (testUnknownRecords, OcGraphTest.cpp:183).
 #include "EditorTransform.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorPrefs.hpp"
@@ -24,8 +18,7 @@
 #  include "aver/fluids/FluidVolume.hpp"   // the seed shell a Fluid component previews
 #endif
 #if AVER_WITH_IMGUI
-// The Viewport tab only. Behind the guard because tests/editor compiles THIS FILE with no ImGui,
-// no preview module and a three-library link -- see tests/editor/CMakeLists.txt, which says so.
+// Viewport tab only; guarded because tests/editor compiles this file with no ImGui/preview module and a three-library link (tests/editor/CMakeLists.txt).
 #  include "ActorEditor.hpp"   // sharedPreview / sharedPreviewMeshes / actorEditorContentRoot
 #endif
 
@@ -39,9 +32,8 @@
 #  include "aver/render/preview/PreviewMeshCache.hpp"
 #  include "PreviewChrome.hpp"   // drawPreviewToolbar/drawPreviewStats/drawPreviewAxes/formatCount
 #  if AVER_MODULE_PBR
-// The material-graph registry, for the Viewport tab of a DOMAIN material graph: the preview shape
-// is shaded by the same compiled graph the renderer uses, so the two cannot drift. Nested inside the
-// ImGui guard because tests/editor compiles this file with neither.
+// Material-graph registry: a material graph's Viewport preview shades via the same compiled graph the renderer uses, so they can't drift.
+// Nested inside the ImGui guard too, since tests/editor compiles this file with neither.
 #    include "aver/pbr/MaterialGraphRegistry.hpp"
 #  endif
 #endif
@@ -70,31 +62,28 @@ float g_graphEditorDpi = 1.0f;
 f32 vecLen(Vec2 v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
 // The three VAR types the C# PinType enum accepts (Enum.TryParse<PinType>), case-insensitive. Exec is
-// excluded on purpose: it's data the graph COMPUTES WITH, not data it REMEMBERS between ticks
-// (OcGraphParser.cs rejects "VAR ... declared exec"). Graph.Validate() is the real compile-time gate
-// for this; this check only keeps addVariable/retypeVariable's fallback and the Variables panel's
-// type Combo honest about what the editor itself will produce.
+// excluded: it's computed-with data, not remembered-between-ticks data (OcGraphParser.cs rejects
+// "VAR ... declared exec"). Graph.Validate() is the real compile-time gate; this only keeps
+// addVariable/retypeVariable's fallback and the Variables panel's Combo honest about what it produces.
 bool isValidVarType(const std::string& type) {
     std::string t = type;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return t == "float" || t == "int" || t == "bool";
 }
 
-// Same no-quoting guard setAttribute uses (OcGraph.cpp's splitWhitespace / OcGraphParser.cs's
-// SplitWhitespace both tokenise on bare whitespace) -- shared so VAR fields get identical protection
-// to NODE attributes, rather than a second copy that can drift.
+// Shared with setAttribute's no-quoting guard (OcGraph.cpp splitWhitespace / OcGraphParser.cs
+// SplitWhitespace both tokenise on bare whitespace), so VAR fields get the same protection as NODE attrs.
 bool containsWhitespace(const std::string& s) {
     return s.find_first_of(" \t\r\n\v\f") != std::string::npos;
 }
 
-// The .ocproject that owns `graphPath`, found by walking up from it -- the same algorithm
-// aver::ownerProjectOf (sandbox/src/SandboxMain.cpp) uses for a level, duplicated in miniature here
-// rather than called directly: that function lives in the Sandbox executable's entry-point
-// translation unit, which is NOT one of this file's link targets -- GraphEditorLoadSaveTest compiles
-// GraphEditor.cpp + GraphEditorGeometry.cpp only (tests/editor/CMakeLists.txt), so a direct call
-// would link in the real Sandbox app and fail to link in that test. Bounded to eight levels for the
-// identical reason ownerProjectOf's own comment gives: far past any real Content/Maps/... nesting, so
-// a graph with no project can't walk all the way to the drive root looking for one.
+// The .ocproject owning `graphPath`, found by walking up -- duplicates aver::ownerProjectOf
+// (sandbox/src/SandboxMain.cpp) in miniature rather than calling it directly: that lives in the
+// Sandbox exe's entry-point TU, not a link target of GraphEditorLoadSaveTest (tests/editor/CMakeLists.txt
+// compiles GraphEditor.cpp + GraphEditorGeometry.cpp only), so a direct call would link in the real
+// Sandbox app and fail to link in that test. Bounded to 8 levels, the same bound ownerProjectOf's own
+// comment gives -- well past any real Content/Maps/... nesting, so a graph with no project can't walk
+// to the drive root looking for one.
 std::string findOwnerProjectForGraph(const std::string& graphPath) {
     std::error_code ec;
     std::filesystem::path dir = std::filesystem::path(graphPath).parent_path();
@@ -112,12 +101,11 @@ std::string findOwnerProjectForGraph(const std::string& graphPath) {
     return {};
 }
 
-// The node header label. For all types but GetVar/SetVar this is just the catalog displayName --
-// those two used to draw "Get Var" regardless of which variable, unreadable in a wall of them; this
-// shows the variable's own name instead (as Unreal does).
+// The node header label: catalog displayName, except GetVar/SetVar show the bound variable's own name
+// (as Unreal does) rather than "Get Var" regardless of which one -- unreadable in a wall of them.
 //
-// Headless and above the ImGui guard on purpose: the layout pass sizes a node from this title with no
-// ImGui in the translation unit, so a box sized for "Get Var" would clip "PlayerSpeed".
+// Headless and above the ImGui guard: the layout pass sizes a node from this title with no ImGui in
+// the TU, so a box sized for "Get Var" would clip "PlayerSpeed".
 std::string nodeTitle(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
                       const std::vector<fmt::OcGraphVariable>& vars) {
     const std::string fallback = desc ? desc->displayName : n.type;
@@ -137,23 +125,21 @@ std::string nodeTitle(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
     return shown + "  [?]";
 }
 
-// Everything below is ImGui-typed (ImVec2/ImU32) and used only from draw(), which is itself entirely
-// behind `#if AVER_WITH_IMGUI`. Guarding these too is what lets GraphEditorLoadSaveTest compile this
-// translation unit with no ImGui headers and no ImGui context -- see that test's own file comment.
+// Everything below is ImGui-typed (ImVec2/ImU32), used only from draw() (itself behind
+// `#if AVER_WITH_IMGUI`) -- guarding these too is what lets GraphEditorLoadSaveTest compile this TU
+// with no ImGui headers or context (see that test's own file comment).
 #if AVER_WITH_IMGUI
 inline ImVec2 toIm(Vec2 v) { return ImVec2(v.x, v.y); }
 inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 
-// Pin colour is by declared type (Unreal's palette, kept -- already learned: green=float, white=exec);
-// header colour is by node CATEGORY, in Aver's own orange/steel (matching editor chrome), because the
-// node body is not a borrowed surface. Both fall back to a neutral default for anything unrecognised.
+// Pin colour is by declared type (kept from Unreal's palette: green=float, white=exec); header colour
+// is by node CATEGORY in Aver's own orange/steel (matching editor chrome), since the node body isn't a
+// borrowed surface. Both fall back to neutral for anything unrecognised.
 //
-// THE RULE IS WARM VERSUS COOL, not one hue per category: warm (orange) means the node reaches
-// outside the graph (an event, or the world changing); cool (steel) is pure computation; grey is flow
-// control (order only, touches nothing). A function call gets Aver orange rather than Blueprint's
-// blue -- from the caller's side a user function and an engine call are the same thing. Events used
-// to share that orange; split to red because an entry point and a call are the two things a reader
-// most needs to tell apart at a glance (and it matches Blueprint's convention).
+// RULE: warm (orange) = reaches outside the graph (event/world change); cool (steel) = pure
+// computation; grey = flow control only. Function calls get orange, not Blueprint's blue -- a user
+// function and an engine call look the same from the caller's side. Events are red, not orange, so an
+// entry point and a call stay visually distinct (also matches Blueprint's convention).
 ImU32 headerColorForCategory(const std::string& category) {
     if (category == "Function") return IM_COL32(242, 101, 34, 255);
     std::string c = category;
@@ -174,34 +160,24 @@ ImU32 headerColorForCategory(const std::string& category) {
     return IM_COL32( 91, 141, 239, 255);                        // Aver steel -- math, vector, convert, logic, const
 }
 
-// The one highlight colour for selected node/link/comment borders and a link's end-pin ring --
-// previously duplicated at each site. Amber, not Unreal's white, so it can't be confused with an exec
-// wire; dimmer than the (255,220,90) it replaces, for the same glare reason the pin palette came down.
+// One highlight colour for selected node/link/comment borders and a link's end-pin ring (was
+// duplicated per site). Amber, not Unreal's white, so it isn't confused with an exec wire; dimmer than
+// the (255,220,90) it replaces, for the same glare reason the pin palette below was toned down.
 constexpr ImU32 kSelectionCol = IM_COL32(226, 188, 96, 255);
 
 ImU32 colorForType(const std::string& type) {
     std::string t = type;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    // Unreal's pin colours, kept deliberately (see headerColorForCategory above). Toned down from
-    // Unreal's near-fullbright originals (float was (91,255,15), string (255,0,168)) -- fine on
-    // Blueprint's own background but glare at real graph size.
-    //
-    // TONED DOWN A SECOND TIME (2026-09-22), because the first pass was not enough: the owner
-    // reported the connectors still reading too bright. Every value below is the previous one with
-    // its HUE HELD EXACTLY and saturation scaled 0.72, value 0.86 -- computed in HSV rather than
-    // nudged per channel, which is what keeps the relationship between the five constant instead of
-    // drifting them apart one eyedropper at a time.
-    //
-    // HUE IS THE PART THAT MUST NOT MOVE. The whole reason for carrying Unreal's palette is that a
-    // Blueprint user already knows green-is-float and red-is-bool; dulling is free, re-hueing throws
-    // that away and would be a worse graph than either palette.
-    //
-    // HOW FAR IS TOO FAR, MEASURED RATHER THAN EYEBALLED: the minimum pairwise separation across
-    // these five, in a luma-weighted opponent space, goes 0.220 -> 0.162. Still comfortably
-    // distinguishable at pin size, which is the constraint that actually binds -- a pin is a few
-    // pixels across, so two types that merge there make the graph unreadable in a way no amount of
-    // "calmer" compensates for. Another pass of this size would land near 0.12 and is not advised
-    // without checking that number again.
+    // Unreal's pin colours, kept deliberately (see headerColorForCategory above): a Blueprint user
+    // already knows green=float, red=bool, so re-hueing would be a worse graph than either palette.
+    // Toned down from Unreal's near-fullbright originals (float was (91,255,15), string (255,0,168)) for
+    // glare at real graph size, then toned down AGAIN 2026-09-22, because the owner reported the
+    // connectors still reading too bright: each value
+    // below is the previous one with hue held exactly, saturation x0.72, value x0.86 in HSV, so the
+    // five stay in the same relationship rather than drifting apart one eyedropper at a time.
+    // Measured minimum pairwise separation (luma-weighted opponent space) went 0.220 -> 0.162 -- still
+    // distinguishable at pin size, which is the binding constraint. Another pass this size lands near
+    // 0.12; re-measure before doing it.
     if (t == "float")  return IM_COL32(126, 171,  95, 255);  // yellow-green
     if (t == "int")    return IM_COL32( 88, 156, 138, 255);  // turquoise
     if (t == "bool")   return IM_COL32(151,  87,  87, 255);  // red
@@ -210,12 +186,10 @@ ImU32 colorForType(const std::string& type) {
     return IM_COL32(131, 134, 138, 255);
 }
 
-// A node's header takes its category's colour, except GetVar/SetVar take their VARIABLE'S TYPE
-// colour instead -- the pins' own language. See nodeTitle() above for why these two are split out.
-//
-// The type comes from the VARIABLE, not the node's own pin: retypeVariable() does not rewrite pins
-// already placed, so a value pin can outlive a retype and still say "float" when the variable is now
-// an int. Reading the declaration keeps the header honest regardless.
+// A node's header takes its category colour, except GetVar/SetVar take their VARIABLE's type colour
+// (see nodeTitle() above). Read from the declaration, not the node's own pin: retypeVariable() doesn't
+// rewrite already-placed pins, so a value pin can outlive a retype and still say "float" when the
+// variable is now an int.
 ImU32 nodeHeaderColor(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
                       const std::vector<fmt::OcGraphVariable>& vars) {
     const ImU32 categoryCol = headerColorForCategory(desc ? desc->category : std::string());
@@ -272,9 +246,9 @@ void GraphEditor::loadFromDisk() {
     // Before layout: node box height comes from pin count, so filling pins in afterwards would
     // space nodes smaller than what's actually drawn.
     synthesizeMissingPins();
-    // A function node (FuncEntry/FuncReturn/CallFunc) has no catalog pins for the loop above --
-    // its shape comes from a FUNC declaration, not a node type. Without this, a call node loaded
-    // from disk draws no pins and every wire into it silently disappears.
+    // A function node (FuncEntry/FuncReturn/CallFunc) has no catalog pins -- its shape comes from a
+    // FUNC declaration, not a node type. Without this, a call node loaded from disk draws no pins and
+    // every wire into it silently disappears.
     for (const auto& f : graph_.functions) resyncFunctionNodePins(f.name);
 
     displayPos_.clear();
@@ -313,11 +287,11 @@ void GraphEditor::synthesizeMissingPins() {
     }
 }
 
-// Auto-layout for a graph with no meaningful stored positions: triggers only when EVERY node sits
-// at exactly (0,0) -- the shape a hand-written file has when nobody set NODE's x/y, since the parser
+// Auto-layout for a graph with no meaningful stored positions: triggers only when EVERY node sits at
+// exactly (0,0) -- the shape a hand-written file has when nobody set NODE's x/y, since the parser
 // requires x on every NODE line (OcGraph.cpp:78-81) but a human just types "0 0" or omits y. A file
-// with one deliberate node at the origin and others placed elsewhere is left alone. Writes ONLY to
-// the display overlay (see GraphEditor.hpp's displayPos_ comment).
+// with one deliberate node at the origin and others placed elsewhere is left alone. Writes ONLY the
+// display overlay (see GraphEditor.hpp's displayPos_ comment).
 void GraphEditor::runAutoLayoutIfUnpositioned() {
     if (graph_.nodes.empty()) return;
     bool allOrigin = true;
@@ -325,9 +299,9 @@ void GraphEditor::runAutoLayoutIfUnpositioned() {
         if (n.x != 0.0 || n.y != 0.0) { allOrigin = false; break; }
     }
     if (!allOrigin) return;
-    // THE SAME SCALE recomputeLayouts() draws at, not 1.0. Node boxes are sized at DPI; spacing them
-    // as if DPI were 1 packs columns three times too tightly on a 300% display, so nodes land on top
-    // of each other and titles clip. Layout and drawing must agree on how big a node is.
+    // Same scale recomputeLayouts() draws at, not 1.0: node boxes are sized at DPI, so spacing them as
+    // if DPI were 1 packs columns three times too tight on a 300% display and titles clip. Layout and
+    // drawing must agree on how big a node is.
     autoLayoutDpi_ = g_graphEditorDpi;
     autoLaidOut_ = true;
     const auto pos = autoLayoutPositions(graph_, style_, autoLayoutDpi_);
@@ -343,8 +317,8 @@ bool GraphEditor::save(std::string* why) {
         if (why) *why = "cannot save: file failed to load (" + loadError_ + ")";
         return false;
     }
-    // Strip the pins synthesizeMissingPins() invented, so a save writes what the author wrote plus
-    // their edits -- not forty PIN records the editor made up to have something to draw wires to.
+    // Strip the pins synthesizeMissingPins() invented, so a save writes the author's own PIN records,
+    // not forty the editor made up to have something to draw wires to.
     fmt::OcGraphData toWrite = graph_;
     if (!synthesizedPins_.empty()) {
         for (auto& n : toWrite.nodes) {
@@ -363,12 +337,11 @@ bool GraphEditor::save(std::string* why) {
     const std::filesystem::path p(path_);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
 
-    // Write to a temporary and swap, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the
-    // same pattern aver::fmt::saveOcSave and aver_settings_flush already use, lifted to the shared
-    // platform layer. This used to open `path_` directly with ios::trunc, the same bug saveOcgraph
-    // (OcGraph.cpp) has: that zeroes the file the instant it opens, before `text` lands a single
-    // byte, so a crash or full disk between open and write destroyed the graph rather than merely
-    // failing to update it.
+    // Write-to-temp-and-swap via writeFileTextAtomic (aver/platform/FileSystem.hpp), lifted to the
+    // shared platform layer -- the same pattern aver::fmt::saveOcSave and aver_settings_flush use. This
+    // used to open `path_` directly with ios::trunc -- the same bug saveOcgraph (OcGraph.cpp) has --
+    // which zeroes the file before `text` lands a byte, so a crash or full disk between open and write
+    // destroyed the graph outright.
     if (!writeFileTextAtomic(path_, text)) {
         if (why) *why = "could not write " + path_;
         return false;
@@ -378,10 +351,9 @@ bool GraphEditor::save(std::string* why) {
     return true;
 }
 
-// EXACTLY WHAT save() WOULD WRITE, factored out so validateNow() cannot check a different document
-// from the one that lands on disk. The synthesized-pin strip matters here as much as it does there:
-// validating with forty invented PIN records would ask the managed validator about pins the author
-// never wrote, and its answers would name them.
+// Exactly what save() would write, factored out so validateNow() can't check a different document
+// than the one that lands on disk -- including the synthesized-pin strip, or the validator's answers
+// would name pins the author never wrote.
 std::string GraphEditor::serializeForSave() const {
     fmt::OcGraphData toWrite = graph_;
     if (!synthesizedPins_.empty()) {
@@ -397,14 +369,13 @@ std::string GraphEditor::serializeForSave() const {
 }
 
 std::string GraphEditor::errorNodeId(const std::string& message, const fmt::OcGraphData& g) {
-    // A HEURISTIC OVER PROSE, and deliberately a timid one. The validator's messages are sentences
-    // written by hand -- "Node 'muzzle' is a Param node but has no param= attribute..." -- so there
-    // is no structured field to read; the node id is simply the first single-quoted token. What
-    // makes guessing safe is the second half: the token is returned ONLY if it is a real node id in
-    // this graph. A message quoting a pin name, an event name, a parameter or a function yields
-    // nothing at all, so a wrong guess cannot badge an innocent node -- it just badges none.
-    // The quote character named through a constant rather than a character literal, because writing
-    // it inline is what this file's history keeps getting mangled on -- see the escape-eating note.
+    // A deliberately timid heuristic: the validator's messages are hand-written sentences (e.g. "Node
+    // 'muzzle' is a Param node but has no param= attribute...") with no structured field to read, so
+    // the node id is just the first single-quoted token -- returned ONLY if it's a real node id in
+    // this graph, so a message quoting a pin/event/param/function name yields nothing rather than
+    // badging the wrong node.
+    // Quote character as a constant, not a literal: writing it inline is what this file's escapes
+    // keep getting mangled on (see the escape-eating-tooling note).
     const char kQuote = 0x27;   // '
     const usize a = message.find(kQuote);
     if (a == std::string::npos) return {};
@@ -434,17 +405,17 @@ bool GraphEditor::validateNow(std::string& err, std::string& offendingNode) {
 void GraphEditor::onFileChanged() {
     if (dirty_) return; // never clobber unsaved edits behind the user's back
     loadFromDisk();
-    // A reload is a new set of positions, so the view is pointed at them again -- an externally
-    // edited graph that moved every node would otherwise reopen looking at empty grid. AFTER the
-    // dirty guard, deliberately: a notification that reloads nothing must move nothing either.
+    // A reload is a new set of positions, so the view re-frames onto them -- an externally edited
+    // graph that moved every node would otherwise reopen looking at an empty grid. AFTER the dirty
+    // guard: a notification that reloads nothing must move nothing either.
     pendingFrame_ = true;
     viewTouched_ = false;
 }
 
 void GraphEditor::pushUndo() {
-    // A STANDING VALIDATION RESULT DESCRIBES THE GRAPH IT WAS RUN ON, and every caller of pushUndo is
-    // about to change that graph. Left up, the message would go on naming a node the author has just
-    // fixed (or deleted), which is worse than showing nothing: it reads as "still broken".
+    // A standing validation result describes the graph it was run on, and every pushUndo caller is
+    // about to change that graph -- left up, the message would go on naming a node just fixed or
+    // deleted, reading as "still broken" when it isn't.
     validateErr_.clear();
     validateNode_.clear();
 
@@ -499,11 +470,10 @@ std::string GraphEditor::makeUniqueEventName(const std::string& base) const {
     return base;
 }
 
-// THE NODE'S name= AND THE ENTRY RECORD SAY THE SAME THING TWICE, and that's the format, not a
-// choice made here: `ENTRY <nodeId> <eventName>` is the only thing that makes an event fire
-// (CompileEntryPoint matches on it alone). Exactly one function writes the ENTRY side and every path
-// that touches the name goes through it -- otherwise a rename would save, load and display fine while
-// the event silently stopped firing.
+// The node's name= and the ENTRY record say the same thing twice -- that's the format, not a choice
+// made here: `ENTRY <nodeId> <eventName>` is the only thing that makes an event fire (CompileEntryPoint
+// matches on it alone). One function writes the ENTRY side and every path touching the name goes
+// through it, or a rename would save/load/display fine while the event silently stopped firing.
 void GraphEditor::syncEventEntry(const std::string& nodeId, const std::string& eventName) {
     for (usize i = 0; i < graph_.entryPoints.size(); ++i) {
         if (graph_.entryPoints[i].first != nodeId) continue;
@@ -514,9 +484,8 @@ void GraphEditor::syncEventEntry(const std::string& nodeId, const std::string& e
     if (!eventName.empty()) graph_.entryPoints.emplace_back(nodeId, eventName);
 }
 
-// Which node vocabulary the open graph belongs to, read from the file's own DOMAIN record -- the
-// same answer the COMPILER gives, since an editor offering a palette its compiler then refused would
-// be worse than offering nothing.
+// Which node vocabulary the open graph belongs to, read from the file's own DOMAIN record -- the same
+// answer the compiler gives, so the palette never offers a node the compiler would then refuse.
 GraphNodeDomain GraphEditor::openGraphDomain() const {
     return fmt::ocGraphDomainOf(graph_) == fmt::OcGraphDomain::Material ? kDomainMaterial
                                                                         : kDomainGameplay;
@@ -548,14 +517,14 @@ bool GraphEditor::linkDropAccepts(const GraphNodeDesc& desc) const {
     if (!linkDropPending_) return false;
     if ((desc.domain & openGraphDomain()) == 0u) return false;
 
-    // THE SAME PREDICATE commitLink USES, not a second rule that happens to agree today. A palette
-    // that offers a node whose link is then refused is worse than one that offers nothing: the
-    // author has already committed to the gesture by the time they find out.
+    // The SAME predicate commitLink uses, not a second rule that happens to agree today -- so the
+    // palette never offers a node whose link then gets refused: the author has already committed to
+    // the gesture by the time they find out.
     const PinTypeCompat compat = openGraphDomain() == kDomainMaterial ? &materialPinTypeMatch
                                                                      : &exactPinTypeMatch;
     for (const auto& ps : desc.pins) {
-        // Dragging FROM an output looks for an INPUT to land on, and vice versa. The direction is
-        // half the filter, and getting it backwards would offer exactly the wrong half of the palette.
+        // Dragging FROM an output looks for an INPUT to land on, and vice versa; getting this
+        // backwards would offer exactly the wrong half of the palette.
         if (ps.isOutput == linkDropFromIsOutput_) continue;
         const bool ok = linkDropFromIsOutput_ ? compat(linkDropFromType_, ps.type)
                                               : compat(ps.type, linkDropFromType_);
@@ -571,7 +540,7 @@ std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2
     if (!desc) { linkDropPending_ = false; return {}; }
 
     // Resolve the target pin BEFORE spawning, so a type with no compatible pin costs no node and no
-    // undo step. Reached when a caller spawns something the filter would not have offered.
+    // undo step (reached when a caller spawns something the filter wouldn't have offered).
     const PinTypeCompat compat = openGraphDomain() == kDomainMaterial ? &materialPinTypeMatch
                                                                      : &exactPinTypeMatch;
     std::string targetPin;
@@ -579,9 +548,8 @@ std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2
         if (ps.isOutput == linkDropFromIsOutput_) continue;
         const bool ok = linkDropFromIsOutput_ ? compat(linkDropFromType_, ps.type)
                                               : compat(ps.type, linkDropFromType_);
-        // FIRST accepting pin in declaration order, which is the catalog's own reading order -- so
-        // a wire dropped near an Add lands on `a`, not on whichever pin a set happened to iterate
-        // first. Not the nearest pin geometrically: the node does not exist yet to measure against.
+        // First accepting pin in catalog declaration order (not nearest geometrically -- the node
+        // doesn't exist yet to measure against), so a wire dropped near Add lands on `a` consistently.
         if (ok) { targetPin = ps.name; break; }
     }
     if (targetPin.empty()) { linkDropPending_ = false; return {}; }
@@ -589,9 +557,8 @@ std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2
     const std::string newId = addNodeFromCatalog(typeId, canvasPos);
     if (newId.empty()) { linkDropPending_ = false; return {}; }
 
-    // commitLink pushes its own undo, so this gesture costs two steps -- one for the node, one for
-    // the wire. Deliberate: undoing once leaves the node you asked for, disconnected, which is a
-    // more useful place to land than back at nothing.
+    // commitLink pushes its own undo, so this gesture costs two steps (node, then wire) -- deliberate:
+    // undoing once leaves the node disconnected rather than back at nothing.
     if (linkDropFromIsOutput_) commitLink(linkDropFromNode_, linkDropFromPin_, newId, targetPin);
     else                       commitLink(newId, targetPin, linkDropFromNode_, linkDropFromPin_);
 
@@ -600,9 +567,9 @@ std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2
 }
 
 std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos) {
-    // DOMAIN-AWARE, because sixteen type names exist in both vocabularies with DIFFERENT PINS -- a
-    // gameplay Add takes two scalars, a material Add takes two float3s. Resolving by name alone
-    // handed a material graph the scalar shape and an author a node that fits nothing around it.
+    // Domain-aware: sixteen type names exist in both vocabularies with DIFFERENT PINS (a gameplay Add
+    // takes two scalars, a material Add takes two float3s). Resolving by name alone handed a material
+    // graph the scalar shape.
     const GraphNodeDesc* desc = findGraphNodeDescIn(typeId, openGraphDomain());
     if (!desc) return {};
 
@@ -618,15 +585,12 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
 
     // An event node with no `ENTRY <nodeId> <eventName>` record never runs -- the type is only a
     // label (docs/AVER_NODE_NODES.md's Flow section). Dropping an On Tick used to create the node and
-    // nothing else, saving and running while silently doing nothing.
-    //
-    // Event name defaults to the node TYPE (every ENTRY here reads `ENTRY tick OnTick`), driven off
-    // the catalog's own "Event" category rather than a second hand-maintained list --
-    // GraphNodeDefs.hpp's header explains why there is only one place a node type gets registered.
+    // nothing else, saving and running while silently doing nothing. Event name defaults to the node
+    // TYPE (`ENTRY tick OnTick`), driven off the catalog's own "Event" category rather than a second
+    // hand-maintained list (see GraphNodeDefs.hpp for why there's only one registration point).
     if (desc->category == "Event") {
-        // CustomEvent is the one event whose name is NOT its type. A fresh one gets a unique
-        // generated name rather than empty, since an ENTRY with no name is unrepresentable and a
-        // silently-non-firing node is exactly the On Tick failure this just got fixed for.
+        // CustomEvent is the one event whose name is NOT its type; a fresh one gets a unique generated
+        // name since an ENTRY with no name is unrepresentable.
         std::string eventName = desc->typeId;
         if (desc->typeId == "CustomEvent") {
             eventName = makeUniqueEventName("MyEvent");
@@ -635,9 +599,9 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
         syncEventEntry(node.id, eventName);
     }
 
-    // A NODE DROPPED ONTO A FUNCTION'S CANVAS BELONGS TO THAT FUNCTION. Without this it would be
-    // created in the event graph and vanish the instant it was drawn -- present in the file,
-    // invisible on the canvas that made it.
+    // A node dropped onto a function's canvas belongs to that function -- otherwise it lands in the
+    // event graph and vanishes the instant it's drawn: present in the file, invisible on the canvas
+    // that made it.
     if (!currentSubgraph_.empty()) setNodeAttribute(graph_.nodes.back(), "func", currentSubgraph_);
 
     displayPos_[node.id] = canvasPos;
@@ -647,9 +611,9 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
     return node.id;
 }
 
-// Bar height and grip size, in CANVAS units. Canvas units are logical pixels at zoom 1, which is why
-// both scale by dpi and NOT by view_.zoom -- the drawing code multiplies by zoom on its way to the
-// screen, so folding zoom in here as well would make the bar twice as tall each time it is asked.
+// Bar height and grip size, in CANVAS units (logical px at zoom 1) -- scale by dpi only, not
+// view_.zoom, since the drawing code already multiplies by zoom on its way to the screen; folding zoom
+// in here too would make the bar twice as tall.
 namespace {
 constexpr float kCommentBarPx  = 24.0f;
 constexpr float kCommentGripPx = 16.0f;
@@ -688,8 +652,8 @@ std::string GraphEditor::addComment(Vec2 a, Vec2 b, const std::string& text) {
 std::string GraphEditor::addCommentAroundSelection(float dpi) {
     if (selectedNodes_.empty()) return {};
     recomputeLayouts(dpi);
-    // Measured from the LAYOUTS, not from displayPos_, because a node position is its top-left and a
-    // box drawn to those would clip the right-hand pins off every node on its edge.
+    // Measured from the LAYOUTS, not displayPos_: a node position is its top-left, and a box drawn to
+    // those would clip the right-hand pins off every node on its edge.
     bool any = false;
     Vec2 lo{}, hi{};
     for (const auto& nl : layouts_) {
@@ -699,11 +663,10 @@ std::string GraphEditor::addCommentAroundSelection(float dpi) {
         hi.x = std::max(hi.x, nl.max.x); hi.y = std::max(hi.y, nl.max.y);
     }
     if (!any) return {};
-    // Margin on all sides, extra on top for the title bar (drawn inside the box, or it would hide the
-    // first row of node headers). Scaled by DPI: computeNodeLayout sizes nodes at DPI while position
-    // is unscaled, so an unscaled margin would run a third too narrow at 300% DPI. The box ends up
-    // loose if later viewed at lower DPI -- accepted, since the alternative is a box too small to
-    // enclose its own nodes on the machine that drew it.
+    // Margin on all sides, extra on top for the title bar (or it would hide the first row of node
+    // headers). Scaled by DPI, since computeNodeLayout sizes nodes at DPI while position is unscaled --
+    // an unscaled margin would run a third too narrow at 300% DPI. Runs loose at lower DPI later;
+    // accepted over a box too small to enclose its own nodes on the machine that drew it.
     const float kMargin = 24.0f * dpi;
     lo.x -= kMargin; hi.x += kMargin;
     lo.y -= kMargin + kCommentBarPx * dpi; hi.y += kMargin;
@@ -725,9 +688,9 @@ bool GraphEditor::deleteComment(const std::string& id) {
 bool GraphEditor::setCommentText(const std::string& id, const std::string& text) {
     fmt::OcGraphComment* c = findComment(id);
     if (!c) return false;
-    // A newline would end the record early, turning the tail of the title into a new record the
-    // parser reads separately -- folded to a space rather than refused, since the text arrives from a
-    // paste as often as a keystroke and losing a pasted title is worse than flattening it.
+    // A newline would end the record early, turning the title's tail into a separate record -- folded
+    // to a space rather than refused, since a pasted title is common and losing it is worse than
+    // flattening it.
     std::string flat = text;
     for (char& ch : flat) if (ch == 0x0a || ch == 0x0d) ch = 0x20;
     if (c->text == flat) return true;
@@ -767,9 +730,8 @@ std::vector<std::string> GraphEditor::nodesInsideComment(const std::string& id, 
 
 std::string GraphEditor::commentAtCanvas(Vec2 canvasPt, float dpi, bool* outOnGrip) const {
     if (outOnGrip) *outOnGrip = false;
-    // BACK TO FRONT. Boxes draw in file order, so the LAST one drawn is the one on top, and the one
-    // on top is the one a click belongs to. Scanning forwards would hand every click on an
-    // overlapping pair to the box underneath.
+    // Back to front: boxes draw in file order, so the last one drawn is on top and owns the click.
+    // Scanning forwards would hand an overlapping click to the box underneath.
     for (usize i = graph_.comments.size(); i-- > 0; ) {
         const auto& c = graph_.comments[i];
         const f64 barH  = kCommentBarPx * dpi;
@@ -806,8 +768,8 @@ void GraphEditor::setCurrentSubgraph(const std::string& funcName) {
     if (currentSubgraph_ == funcName) return;
     currentSubgraph_ = funcName;
     // A selection in the subgraph just left is invisible but Delete would still act on it, so it's
-    // cleared; the view re-frames onto the new subgraph's content, the same "the view is the editor's
-    // until you touch it" rule the framing code follows.
+    // cleared; the view re-frames onto the new subgraph's content ("the view is the editor's until
+    // you touch it", per the framing code).
     selectedNodes_.clear();
     selectedLink_ = -1;
     selectedComment_.clear();
@@ -1170,12 +1132,12 @@ void GraphEditor::drawFunctionsPanel(float dpi) {
 namespace {
 constexpr float kFramePaddingPx = 40.0f;
 
-// The zoom floor is DPI-relative (screen px per logical px), not an absolute zoom value -- a flat
-// floor bites too early on a high-DPI display, since what it's for ("don't shrink past a smear") is
-// really about zoom * dpi. Measured: AN_FPCharacter.ocgraph (63 nodes) auto-lays out to 11907x5400
-// canvas units at dpi 3, needing zoom 0.135 to fit an 1853px canvas -- the old flat 0.15 floor
-// clamped that short, so Frame All did not frame all. Only the floor scales, not the ceiling: zoom 4
-// at dpi 3 (12x) is unused headroom, and halving it would remove working range for no benefit.
+// Zoom floor is DPI-relative (screen px per logical px), not an absolute zoom value: the floor is
+// really about zoom * dpi ("don't shrink past a smear"), and a flat floor bites too early on
+// high-DPI. Measured: AN_FPCharacter.ocgraph (63 nodes) auto-lays out to 11907x5400 canvas units at
+// dpi 3, needing zoom 0.135 to fit an 1853px canvas -- the old flat 0.15 floor clamped that short, so
+// Frame All did not frame all. Only the floor scales, not the ceiling: zoom 4 at dpi 3 (12x) is unused
+// headroom, and halving it would remove working range for no benefit.
 constexpr float kMinScreenPxPerLogicalPx = 0.15f;
 constexpr float kMaxZoom = 4.0f;
 inline float minZoomForDpi(float dpi) { return kMinScreenPxPerLogicalPx / std::max(dpi, 0.25f); }
@@ -1191,8 +1153,8 @@ bool GraphEditor::contentBounds(float dpi, Vec2* outMin, Vec2* outMax) {
         hi.x = std::max(hi.x, b.x); hi.y = std::max(hi.y, b.y);
     };
     for (const auto& nl : layouts_) grow(nl.min, nl.max);
-    // COMMENT BOXES COUNT. A box is content -- often the largest thing on the canvas, and a frame
-    // that cropped one would look like the box had been resized rather than the view moved.
+    // Comment boxes count as content too -- often the largest thing on the canvas, and cropping one
+    // would look like the box was resized rather than the view moved.
     for (const auto& c : graph_.comments) {
         grow(Vec2{static_cast<f32>(c.x), static_cast<f32>(c.y)},
              Vec2{static_cast<f32>(c.x + c.w), static_cast<f32>(c.y + c.h)});
@@ -1230,18 +1192,16 @@ bool GraphEditor::selectionBounds(float dpi, Vec2* outMin, Vec2* outMax) {
 void GraphEditor::frameAll(Vec2 viewportPx, float dpi) {
     Vec2 lo, hi;
     if (!contentBounds(dpi, &lo, &hi)) return;
-    // The same zoom limits the wheel enforces, passed in rather than re-declared, so a framed view is
-    // always a view the wheel could also have reached -- a frame that landed outside the wheel range
-    // would snap on the next scroll notch.
+    // Same zoom limits the wheel enforces, passed in rather than re-declared, so a framed view is
+    // always one the wheel could also reach (otherwise it would snap on the next scroll notch).
     view_ = frameTransform(lo, hi, viewportPx, kFramePaddingPx * dpi, minZoomForDpi(dpi), kMaxZoom);
 }
 
 void GraphEditor::frameSelection(Vec2 viewportPx, float dpi) {
     Vec2 lo, hi;
     if (!selectionBounds(dpi, &lo, &hi)) { frameAll(viewportPx, dpi); return; }
-    // A SINGLE selected node would otherwise frame to a rectangle the size of one node and zoom to
-    // the 4x ceiling, which is disorienting rather than helpful -- you lose every neighbour and the
-    // wire you were following. Padding the box out to a minimum keeps some context in shot.
+    // A single selected node would otherwise frame to its own size and zoom to the 4x ceiling, losing
+    // every neighbour and the wire being followed -- padded out to a minimum for context.
     const f32 minSpan = 420.0f * dpi;
     const f32 padX = std::max(0.0f, (minSpan - (hi.x - lo.x)) * 0.5f);
     const f32 padY = std::max(0.0f, (minSpan * 0.6f - (hi.y - lo.y)) * 0.5f);
@@ -1260,15 +1220,14 @@ bool GraphEditor::applyAutoLayout(float dpi) {
             if (n.id != kv.first) continue;
             n.x = kv.second.x;
             n.y = kv.second.y;
-            // A node that carried NO position now carries one. That is the intended effect of
-            // pressing the button -- see the header -- and it is also the one thing this does that
-            // runAutoLayoutIfUnpositioned refuses to do behind the user's back.
+            // A node with no position now has one -- the intended effect of pressing the button, and
+            // the one thing runAutoLayoutIfUnpositioned refuses to do behind the user's back.
             n.hasPosition = true;
             break;
         }
     }
-    // The positions are the file's now, not an overlay, so the DPI-change re-layout in draw() must
-    // stop rewriting them -- it would fight every position the author just asked to keep.
+    // Positions are the file's now, not an overlay, so draw()'s DPI-change re-layout must stop
+    // rewriting them or it would fight every position the author just asked to keep.
     autoLaidOut_ = false;
     dirty_ = true;
     return true;
@@ -1286,8 +1245,8 @@ void GraphEditor::copySelection() {
     for (const fmt::OcGraphNode& n : graph_.nodes)
         if (selected(n.id)) clipNodes_.push_back(n);
 
-    // BOTH ENDS, OR NOT AT ALL -- see the header. A half-copied link would either dangle or, worse,
-    // point the copy back at the original.
+    // Both ends, or not at all (see header) -- a half-copied link would dangle or point the copy back
+    // at the original.
     for (const fmt::OcGraphLink& l : graph_.links)
         if (selected(l.sourceNode) && selected(l.destNode)) clipLinks_.push_back(l);
 }
@@ -1297,8 +1256,7 @@ void GraphEditor::pasteClipboard(Vec2 canvasPos) {
     pushUndo();
 
     // Pasted where asked, keeping the copied nodes' RELATIVE layout: the top-left of the copied set
-    // lands on canvasPos and everything keeps its offset from it. Pasting a shape and getting a pile
-    // would make the feature useless for the case it exists for.
+    // lands on canvasPos and everything keeps its offset from it, rather than piling up.
     Vec2 origin{static_cast<f32>(clipNodes_[0].x), static_cast<f32>(clipNodes_[0].y)};
     for (const fmt::OcGraphNode& n : clipNodes_) {
         origin.x = n.x < origin.x ? static_cast<f32>(n.x) : origin.x;
@@ -1316,9 +1274,8 @@ void GraphEditor::pasteClipboard(Vec2 canvasPos) {
         n.y = canvasPos.y + (src.y - origin.y);
         graph_.nodes.push_back(n);
 
-        // The same two things addNodeFromCatalog does after pushing, for the same reasons: an Event
-        // node with no ENTRY never runs, and a node pasted onto a function's canvas belongs to that
-        // function rather than to the event graph it would otherwise vanish into.
+        // Same two fixups addNodeFromCatalog does after pushing, for the same reasons (ENTRY for
+        // events, func= for a node pasted onto a function's canvas).
         const GraphNodeDesc* desc = findGraphNodeDescIn(n.type, openGraphDomain());
         if (desc && desc->category == "Event") {
             std::string eventName = desc->typeId;
@@ -1345,8 +1302,8 @@ void GraphEditor::pasteClipboard(Vec2 canvasPos) {
         graph_.links.push_back(l);
     }
 
-    // The paste becomes the selection, so it can be dragged into place immediately -- and so a second
-    // Ctrl+V does not silently stack a third copy on a selection the user thinks is the second.
+    // The paste becomes the selection, so it can be dragged into place immediately, and a second
+    // Ctrl+V doesn't silently stack a third copy on a selection the user thinks is the second.
     selectedNodes_ = pasted;
     selectedLink_ = -1;
     dirty_ = true;
@@ -1521,18 +1478,13 @@ bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key
         // half. Renaming the attribute without the record leaves a graph that looks renamed and
         // has silently stopped firing.
         if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, value);
-        // A CONSTANT IS WRITTEN TWICE INTO THE FILE, so both copies have to agree.
-        //
-        // A Const node carries its literal in two places: the NODE line's `value=` (which this row
-        // edits) and the output PIN's default, written at spawn. OcGraphParser.cs turns BOTH into a
-        // ConstantOutput for the same node id, and the compiler takes FirstOrDefault -- so today the
-        // attribute happens to win, purely because a NODE line precedes its own PIN lines in the
-        // file. That is a correct outcome resting on nothing but emission order, and a writer that
-        // ever grouped PIN records differently would silently flip every constant in every graph
-        // back to its spawn default.
-        //
-        // Writing both makes the file self-consistent, so the order stops mattering and a human
-        // reading the text is not shown two different numbers for one value.
+        // A Const node writes its literal twice: the NODE line's `value=` (this row) and the output
+        // PIN's default (written at spawn). OcGraphParser.cs turns both into a ConstantOutput for the
+        // same node id and the compiler takes FirstOrDefault, so the attribute wins today only because
+        // NODE precedes its own PIN lines -- correct by emission order alone, and fragile to it: a
+        // writer that ever grouped PIN records differently would silently flip every constant in every
+        // graph back to its spawn default. Writing both here keeps the file self-consistent regardless
+        // of order.
         if (key == "value") {
             for (fmt::OcGraphPin& p : n.pins)
                 if (p.isOutput && p.name == "value") p.defaultValue = value;
@@ -1549,9 +1501,8 @@ bool GraphEditor::clearAttribute(const std::string& nodeId, const std::string& k
         if (!getNodeAttribute(n, key).found) return false; // nothing to clear is not an edit
         pushUndo();
         removeNodeAttribute(n, key);
-        // The ENTRY record goes with it, for setAttribute's reason in reverse: an ENTRY with no
-        // event name is a record this format cannot express, so clearing the name has to mean the
-        // node stops being an entry point rather than becoming a malformed one.
+        // The ENTRY record goes with it (setAttribute's reason in reverse): an ENTRY with no event
+        // name can't be expressed, so clearing the name means the node stops being an entry point.
         if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, "");
         dirty_ = true;
         return true;
@@ -1568,10 +1519,8 @@ void GraphEditor::showRejectionBanner(const std::string& msg) {
 }
 
 void GraphEditor::reportLinkRejection(const GraphLinkCheck& check) {
-    // The "Connection refused: " prefix used to live in draw()'s overlay code, baked onto every
-    // lastRejectMsg_ regardless of source. Once deleteVariable (below) reused the same banner for an
-    // unrelated refusal, that prefix would have mislabelled it -- moved here, to the one call site
-    // that actually means it, so the banner draw can show lastRejectMsg_ verbatim.
+    // "Connection refused: " lives here, not in draw()'s overlay code, so a banner reused for an
+    // unrelated refusal (e.g. deleteVariable) isn't mislabelled -- draw() shows lastRejectMsg_ verbatim.
     showRejectionBanner("Connection refused: " + (check.message.empty() ? std::string("link refused") : check.message));
 }
 
@@ -1631,11 +1580,10 @@ bool GraphEditor::retypeVariable(const std::string& name, const std::string& new
     if (var->type == t) return true; // no-op, not a failure
     pushUndo();
     var->type = t;
-    // Deliberately does not touch any node's pins: a palette-spawned GetVar/SetVar has its own
-    // 'value' pin typed to the catalog default at spawn, so a later retype can leave it disagreeing.
-    // Rewriting it silently was rejected -- the user may already have wired a link against that
-    // visible type, and changing it invisibly could break the link with no visible cause. Left as a
-    // live mismatch note in the Variables panel instead (computed fresh every frame).
+    // Deliberately does not touch any node's pins: a palette-spawned GetVar/SetVar's own 'value' pin
+    // is typed at spawn, so a later retype can leave it disagreeing. Silently rewriting it was
+    // rejected -- a wired link could break with no visible cause -- so this surfaces as a live
+    // mismatch note in the Variables panel instead (computed fresh every frame).
     dirty_ = true;
     return true;
 }
@@ -1685,42 +1633,39 @@ void GraphEditor::recomputeLayouts(float dpi) {
     layouts_.clear();
     layouts_.reserve(graph_.nodes.size());
     for (const auto& n : graph_.nodes) {
-        // ONLY THE SUBGRAPH ON SCREEN. layouts_ is what the canvas draws, what hit-testing tests,
-        // what box-select selects and what framing measures -- so filtering here scopes all four
-        // at once, and there is no second place that could disagree about which nodes are visible.
+        // Only the subgraph on screen: layouts_ is what drawing, hit-testing, box-select and framing
+        // all read, so filtering here scopes all four at once with no second place to disagree.
         if (subgraphOf(n) != currentSubgraph_) continue;
-        fmt::OcGraphNode display = n; // substitute the DISPLAY position (a live drag only touches
-                                       // displayPos_) so drawing follows a drag without touching
-                                       // graph_ until it commits.
+        fmt::OcGraphNode display = n; // DISPLAY position (a live drag only touches displayPos_), so
+                                       // drawing follows a drag without touching graph_ until commit.
         auto it = displayPos_.find(n.id);
         if (it != displayPos_.end()) { display.x = it->second.x; display.y = it->second.y; }
         const GraphNodeDesc* desc = findGraphNodeDesc(n.type);
-        // The SAME string the header will draw -- a variable node is as wide as its variable's name,
-        // and computing the width from "Get Var" while drawing "PlayerSpeed" would clip it.
+        // The SAME string the header will draw -- computing width from "Get Var" while drawing
+        // "PlayerSpeed" would clip it.
         const std::string title = nodeTitle(n, desc, graph_.variables);
-        // `dpi` only, NOT dpi*zoom: canvas-space geometry is computed once at a fixed logical scale,
-        // and CanvasTransform::zoom applies uniformly afterward when converting to/from screen space
-        // (canvasToScreen/screenToCanvas) -- folding zoom in here too would double-apply it.
+        // `dpi` only, NOT dpi*zoom: canvas-space geometry is fixed-logical-scale, and
+        // CanvasTransform::zoom applies uniformly afterward (canvasToScreen/screenToCanvas) --
+        // folding zoom in here too would double-apply it.
         layouts_.push_back(computeNodeLayout(display, title, style_, dpi));
     }
 }
 
-// The details ("Gap B") column's default width and its persisted preference key -- a
-// DPI-INDEPENDENT PIXEL WIDTH, ActorEditor's own convention (ActorEditor.cpp), not the FRACTION
-// most other editors' splits use: see EditorWidgets.hpp's own top comment for why. 260.0f is this
-// tab's own PRE-EXISTING default -- it used to be `std::clamp(260.0f * dpi, 180.0f * dpi,
-// std::max(avail.x * 0.45f, 120.0f * dpi))`, recomputed fresh every frame with no persistence at
-// all -- kept exactly for the ordinary (wide-enough) case; see drawEventGraph() below for what
-// changed in the narrow-window squeeze that formula's middle branch also covered.
+// The details ("Gap B") column's default width and persisted pref key -- a DPI-INDEPENDENT PIXEL
+// WIDTH, ActorEditor's own convention (ActorEditor.cpp), not the fraction most other editors' splits
+// use (see EditorWidgets.hpp's top comment). 260.0f matches this tab's old un-persisted default
+// (`std::clamp(260.0f * dpi, 180.0f * dpi, std::max(avail.x * 0.45f, 120.0f * dpi))`), which recomputed
+// fresh every frame with no persistence at all -- kept for the ordinary wide-enough case; see
+// drawEventGraph() for the narrow-window behaviour that formula also covered.
 constexpr float kDefaultDetailsColumn = 260.0f;
 constexpr const char* kPrefDetailsColumn = "graphEditor.detailsColumn";
 
 void GraphEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
     const float dpi = g_graphEditorDpi;
-    // An auto-laid-out graph is spaced for one DPI. If that changed since (opened before applyDpi
-    // ran, or moved to a differently-scaled monitor), redo it or the boxes collide. Only auto-layout
-    // is redone -- positions the user dragged, or from the file, are theirs and stay untouched.
+    // An auto-laid-out graph is spaced for one DPI; if that changed (opened before applyDpi ran, or
+    // moved monitors), redo it or boxes collide. Only auto-layout is redone -- user-dragged or
+    // file positions stay untouched.
     if (autoLaidOut_ && dpi != autoLayoutDpi_) {
         autoLayoutDpi_ = dpi;
         const auto pos = autoLayoutPositions(graph_, style_, dpi);
@@ -1738,14 +1683,12 @@ void GraphEditor::draw(Engine& e) {
                                    keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[GraphEditor] save failed for '{}': {}", path_, why);
-        // CHECKED ON SAVE, BUT THE SAVE STILL HAPPENS. A half-built graph is the normal state of one
-        // being built, and an editor that refuses to write it would be unusable. The result is
-        // reported, not enforced.
+        // Checked on save, but the save still happens: a half-built graph is normal mid-build, and
+        // refusing to write it would be unusable. Result is reported, not enforced.
         else if (validate_) { validateNow(validateErr_, validateNode_); }
     }
     ImGui::SameLine();
-    // VALIDATE, as its own button as well as on save, because the question "is this finished" is one
-    // an author asks mid-build, not only when writing to disk.
+    // Also its own button, not just on save: "is this finished" is a question asked mid-build too.
     ImGui::BeginDisabled(!validate_);
     if (ImGui::Button("Validate")) {
         if (validateNow(validateErr_, validateNode_)) {
@@ -1760,8 +1703,8 @@ void GraphEditor::draw(Engine& e) {
     if (!validate_ && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("The .NET bridge exports no GraphValidate, so nothing can check this graph.");
     ImGui::SameLine();
-    // The standing result, so an author is not made to re-press Validate to remember what was wrong.
-    // Cleared by the next Validate, and by any edit that could have fixed it (see pushUndo).
+    // Standing result, so re-pressing Validate isn't needed to remember what was wrong; cleared by the
+    // next Validate or by any edit (see pushUndo).
     if (!validateErr_.empty()) {
         ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "%s%s",
                            validateNode_.empty() ? "" : (validateNode_ + ": ").c_str(),
@@ -1776,12 +1719,11 @@ void GraphEditor::draw(Engine& e) {
     if (ImGui::Button("Redo")) redo();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    // FRAME ALL AND AUTO-LAYOUT ARE BUTTONS, not just key bindings: someone who doesn't know this
-    // editor yet can find a graph that opens on an empty grid, but not a binding they'd need telling
-    // about -- the shortcut is in the label.
-    // A combo, not a second tab bar, for which subgraph the canvas shows: the number of functions is
-    // unbounded and the tab bar above already means something else (what the actor DOES vs IS).
-    // Absent until a graph declares its first function, so nothing changes for graphs that have none.
+    // Frame All and Auto-Layout are buttons, not just key bindings, so a first-time author can find a
+    // graph that opens on an empty grid without already knowing a shortcut.
+    // A combo, not a second tab bar, for which subgraph the canvas shows: function count is unbounded
+    // and the tab bar above already means something else (DOES vs IS). Absent until a graph declares
+    // its first function.
     if (!graph_.functions.empty()) {
         const std::string label = currentSubgraph_.empty() ? std::string("Event Graph") : currentSubgraph_;
         ImGui::SetNextItemWidth(180.0f * dpi);
@@ -1810,19 +1752,16 @@ void GraphEditor::draw(Engine& e) {
         ImGui::SetTooltip("Re-place every node in dependency columns, and SAVE those positions.\n"
                            "One undo step. Undo restores exactly where everything was.");
     ImGui::SameLine();
-    // The pan hint lives on the status line, not a tooltip -- a tooltip only reaches someone already
-    // hovering the thing it explains, backwards for a gesture whose problem is nobody knew to reach
-    // for it. Not aspirational: every gesture listed is wired in the block below.
+    // Pan hint on the status line, not a tooltip: a tooltip only reaches someone already hovering the
+    // thing, backwards for a gesture nobody knew to reach for. Every gesture listed is wired below.
     ImGui::TextDisabled("%s  |  %zu nodes, %zu links, %zu comments  |  zoom %.0f%%  |  pan: right- or middle-drag, or Space+drag  |  C: comment box",
                          path_.c_str(), graph_.nodes.size(), graph_.links.size(),
                          graph_.comments.size(), view_.zoom * 100.0f);
 
-    // The two tabs an actor gets: what it DOES (event graph), and what it IS (component tree).
-    // Blueprint's own split, not merely organisational -- a class graph carries both an exec graph
-    // and a COMPONENT TREE (fmt::OcGraphComponent) answering different questions, with no shared
-    // canvas, selection, or unit between them. A non-class graph still gets both tabs: hiding
-    // Viewport until a CLASS record exists would mean discovering a graph CAN be an actor requires
-    // already knowing it.
+    // The two tabs an actor gets: what it DOES (event graph) and what it IS (component tree,
+    // fmt::OcGraphComponent) -- Blueprint's own split, not merely organisational: the two share no
+    // canvas, selection, or unit. A non-class graph still gets both tabs: hiding Viewport until a CLASS
+    // record exists would mean discovering a graph CAN be an actor requires already knowing it.
     if (ImGui::BeginTabBar("##graphInnerTabs", ImGuiTabBarFlags_None)) {
         if (ImGui::BeginTabItem("Event Graph")) {
             drawEventGraph(dpi);
@@ -1842,10 +1781,10 @@ void GraphEditor::draw(Engine& e) {
 #endif
 }
 
-// Restores the canvas/details ("Gap B") split to its default width and persists that immediately --
-// see AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to
-// implement this rather than just ActorEditor. A no-op `#if AVER_WITH_IMGUI` is off: a headless
-// build never lays the panels out at all, so there is nothing for a reset to restore.
+// Restores the canvas/details ("Gap B") split to its default width and persists it immediately (see
+// AssetEditor.hpp's resetLayout() for why "Reset Tab Layout" needs every tab to implement this, not
+// just ActorEditor). No-op with ImGui off: a headless build never lays the panels out, so there's
+// nothing to restore.
 void GraphEditor::resetLayout() {
 #if AVER_WITH_IMGUI
     detailsColW_ = 0.0f;
@@ -1855,25 +1794,21 @@ void GraphEditor::resetLayout() {
 }
 
 // Refreshes schemeActionNames_ from the owning project's INPUT.SCHEME, for the action= attribute
-// picker on InputAction/InputActionPressed/InputActionReleased/RebindAction/GetActionKey. THROTTLED
-// to about once a second (schemeCacheAtSec_) -- called from the details panel every frame it is open,
-// and this editor has no file-watch mechanism to tell it a scheme changed, so it polls, but a stat()
-// call a second is not worth noticing next to a redraw.
+// picker on InputAction/InputActionPressed/InputActionReleased/RebindAction/GetActionKey. Throttled to
+// ~once/sec (schemeCacheAtSec_): called every frame the details panel is open, and this editor has no
+// file-watch, so it polls -- a stat() a second isn't worth noticing next to a redraw.
 //
-// WHY THIS RE-PARSES FROM DISK RATHER THAN ASKING THE RUNNING GAME: there is no running game here.
-// InputScheme.cs (C#) is what a Play session or a shipped game actually loads a scheme through, and it
-// exists behind the framework ABI (aver_fw_input_scheme_load) this contract's other lanes are adding --
-// but that ABI is a MAIN-THREAD SINGLETON slot ("Returned strings stay valid until the next
-// aver_fw_input_scheme_load"), shared with whatever a live Play session has loaded into it, and this
-// editor's own script host may not even be running (a graph can be opened with no project active at
-// all, e.g. --open-asset with a bare path). Calling through it here would either race a live Play
-// session's own load or require one to exist. Reading and parsing the .ocinput directly with
-// fmt::loadOcinput is the same data the ABI would report, with no such dependency.
+// Re-parses from disk rather than asking the running game: there is no running game here. The
+// framework ABI (aver_fw_input_scheme_load) InputScheme.cs actually loads through is a main-thread
+// singleton slot ("Returned strings stay valid until the next aver_fw_input_scheme_load"), shared with
+// a live Play session, and this editor's script host may not even be running (e.g. --open-asset with a
+// bare path). Calling through it here would race a live session's load or require one to exist;
+// reading .ocinput directly via fmt::loadOcinput is the same data with no such dependency.
 //
-// A SCHEME FILE, NOT THE C# BINDING TABLE: this shows what a rebinding session would START from --
-// the declared actions -- not live rebind state, which only exists once EnhancedInput has pushed a
-// context. The action= combo does not need to distinguish the two; it is a name picker, not a bound-
-// state readout (GetActionKey's own key pin is what answers "is it bound right now").
+// A scheme file, not the C# binding table: shows what a rebind session would START from (declared
+// actions), not live rebind state, which only exists once EnhancedInput has pushed a context -- the
+// action= combo is a name picker, not a bound-state readout (GetActionKey's own key pin answers "is it
+// bound right now").
 void GraphEditor::refreshSchemeActionsIfNeeded() {
 #if AVER_WITH_IMGUI
     const double now = ImGui::GetTime();
@@ -1894,7 +1829,7 @@ void GraphEditor::refreshSchemeActionsIfNeeded() {
     std::error_code ec;
     const auto writeTime = std::filesystem::last_write_time(schemePath, ec);
     if (ec) {
-        // Named in the manifest but missing/unreadable right now -- e.g. mid-edit in another tool.
+        // Named in the manifest but missing/unreadable now -- e.g. mid-edit in another tool.
         schemeFileFound_ = false;
         schemeActionNames_.clear();
         schemeResolvedPath_.clear();
@@ -1921,20 +1856,16 @@ void GraphEditor::refreshSchemeActionsIfNeeded() {
 }
 
 // The Event Graph tab: the node canvas and its details column. Lifted out of draw() unchanged when
-// the Viewport tab arrived -- draw() is now the tab bar and nothing else, which is the only way
-// either tab's body stays readable.
+// the Viewport tab arrived, so draw() is now just the tab bar -- the only way either tab's body stays
+// readable.
 void GraphEditor::drawEventGraph(float dpi) {
-    // WHICH NODES ARE RUNNING, refreshed once a frame. Cheap by construction: the managed side keys
-    // its table by graph NAME, so this asks only about the graph on this canvas, and the recording
-    // that fills it costs a static bool test when nothing is recording.
+    // Which nodes are running, refreshed once a frame. Cheap: the managed side keys its table by
+    // graph NAME, so this asks only about this canvas's graph, and recording costs a static bool test
+    // when off. SandboxApp arms it ONCE at editor start, deliberately (not per-tab, cheaper than
+    // tracking tab lifetimes); a packaged game never arms it.
     //
-    // (An earlier draft said "armed only while a tab is open". It is not: SandboxApp arms it ONCE
-    // when the editor starts, deliberately, because the managed table is keyed by graph NAME and
-    // costs a static bool test when off -- which is cheaper than tracking tab lifetimes. A packaged
-    // game, having no editor, never arms it at all.)
-    //
-    // CLEARED WHEN THERE IS NO SOURCE, so a set captured during Play cannot go on glowing after Play
-    // stops -- a highlight that outlives the execution it describes is a lie with a half-life.
+    // Cleared when there is no source, so a set captured during Play doesn't keep glowing after Play
+    // stops.
     if (nodeHits_) {
         std::vector<std::pair<std::string, f32>> hits;
         nodeHits_(graph_.name, kNodeHitFadeSec, hits);

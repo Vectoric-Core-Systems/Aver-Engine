@@ -1,6 +1,6 @@
-// Lifecycle: construction, the splash and log sink, config, DPI and fonts, onInit, onUpdate, onShutdown.
-// Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
-// verbatim; the class itself is declared in SandboxApp.hpp.
+// Lifecycle: construction, splash/log sink, config, DPI/fonts, onInit, onUpdate, onShutdown.
+// Split out of the single 29,952-line SandboxApp.cpp 2026-09-16 by moving method bodies verbatim;
+// class declared in SandboxApp.hpp.
 
 // The one translation unit that compiles stb_image_write's implementation.
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -18,10 +18,9 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
 }
 
 // Appends one engine log line to the Output Log buffer. Must not itself log: the core log mutex is held.
-// One log line, trimmed to something a single-line splash can show. The subsystem tag is kept
-// -- "[Material] foo.ocmat" says more than "foo.ocmat" -- but the level prefix and any absolute
-// path are not: DT_END_ELLIPSIS clips from the RIGHT, so a full path would show the drive letter
-// and hide the filename, which is the only part worth reading.
+// Trims a log line for a single-line splash: keeps the subsystem tag ("[Material] foo.ocmat" says
+// more than "foo.ocmat") but drops the level prefix and path directories -- DT_END_ELLIPSIS clips
+// from the right, so a full path would hide the filename behind the drive letter.
  std::string SandboxApp::splashTextFor(std::string_view msg) {
     std::string t(msg);
     if (!t.empty() && t[0] == '[') {                       // drop the level prefix, keep the tag
@@ -29,12 +28,8 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
         if (close != std::string::npos) t.erase(0, close + 1);
     }
     while (!t.empty() && t.front() == ' ') t.erase(0, 1);
-    // Keep the last THREE path segments of anything that looks like a path -- enough to read as
-    // "JungleRuins/Sponza/arch_stones_01.ocmesh" rather than a bare filename, which is what makes
-    // it obvious WHICH thing is loading rather than merely that something is. Not the whole path:
-    // DT_END_ELLIPSIS clips from the RIGHT, so a full absolute path spends the line on a drive
-    // letter and directories and hides the only part worth reading. Both separators, since these
-    // lines carry either.
+    // Keeps the last 3 path segments (e.g. "JungleRuins/Sponza/arch_stones_01.ocmesh") so the
+    // splash shows which asset is loading, not just a bare filename. Handles both separators.
     constexpr int kKeepSegments = 3;
     usize cut = std::string::npos;
     usize probe = t.find_last_of("\\/");
@@ -58,25 +53,14 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
     self->logLines_.push_back({level, std::string(msg)});
     if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
 
-    // THE LOADING SCREEN SAYS WHAT IS ACTUALLY LOADING, and this is where it learns it. The
-    // splash used to show only the half-dozen stage names Engine::run and applyProject hand it,
-    // so it read "Loading level" for the entire tail of a large project -- the log knew which
-    // mesh, material and texture were arriving, and the screen in front of the user did not.
-    //
-    // MAIN THREAD ONLY, and that is not caution, it is required: the splash's GDI objects belong
-    // to the thread that called show(), and Jolt wires JPH::Trace straight into AVER_INFO from
-    // its job pool, so a worker's log line arriving here would touch them from the wrong thread.
-    // A dropped line costs nothing -- the next main-thread line replaces it a moment later.
-    //
-    // AND IT MUST NOT LOG. This runs under the core log mutex, which is not recursive, so a
-    // single AVER_* call from inside here deadlocks against itself -- a trap this file has
-    // already been caught by once. Nothing below logs: setLoadingStatus sets a string and pumps
-    // a message queue, and the splash has no custom WndProc to log from.
-    // EITHER LOADING SCREEN, whichever is up. There are two: the engine's startup splash, which
-    // applyProject BORROWS when a project is named on the command line, and the one applyProject
-    // owns when a project is opened from the browser frames later. Only forwarding to the first
-    // meant a browser-opened project showed its six stage names and none of the assets, which is
-    // the case a user actually watches most often.
+    // Forwards Info+ lines (trimmed via splashTextFor) to whichever loading screen is active --
+    // the engine splash borrowed via a CLI project, or applyProject's own for a browser-opened one
+    // -- so it shows the actual asset loading instead of a handful of fixed stage names.
+    // MAIN THREAD ONLY: splash GDI objects belong to the thread that called show(), and Jolt wires
+    // JPH::Trace straight into AVER_INFO from its job pool; a dropped worker-thread line is just
+    // replaced by the next one.
+    // MUST NOT LOG: runs under the core log mutex (non-recursive); a single AVER_* call from in
+    // here has already deadlocked this file once. Nothing below logs.
     if (level >= LogLevel::Info && std::this_thread::get_id() == self->mainThreadId_) {
         const std::string text = splashTextFor(msg);
         if (self->projectLoading_) self->projectLoading_->stage(text.c_str());
@@ -84,47 +68,24 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
             self->engineForSplash_->setLoadingStatus(text);
     }
 
-    // GRAPH PRINTS ALSO GO ON SCREEN. Visual scripting had no debugging surface at all: a Print
-    // node wrote one line into a firehose of engine logging, so watching a graph run meant
-    // reading the Output Log for "[Graph]" among the render, asset and physics lines, and a
-    // print fired once during a jump was gone by the time you found it.
-    //
-    // FILTERED HERE rather than at draw time, and on the prefix GraphInterop writes, so the
-    // overlay costs one substring test per log line instead of a scan of the whole buffer every
-    // frame. rfind(x, 0) == 0 is "starts with" without allocating.
-    //
-    // NO TIMESTAMP TAKEN HERE. This runs under the core log mutex, from whichever thread logged,
-    // and the contract says be quick and do not log; the frame that draws it stamps it instead
-    // (see drawGraphPrintOverlay), which is also the clock the fade needs to agree with.
+    // Graph "Print" nodes get an on-screen overlay (see drawGraphPrintOverlay) instead of being
+    // lost in the Output Log. Filtered here on GraphInterop's "[Graph] " prefix -- cheaper than
+    // scanning at draw time; rfind(x,0)==0 is an allocation-free "starts with".
+    // No timestamp here (mutex held, must stay quick) -- the draw call stamps it instead, which
+    // is also the clock the fade needs to agree with.
     if (msg.rfind("[Graph] ", 0) == 0) {
         std::string text(msg.substr(8));
-        // CONSECUTIVE DUPLICATES COLLAPSE, and this is not tidiness -- without it the feature is
-        // unusable. A PrintString on an OnTick chain fires EVERY FRAME: sixty identical lines a
-        // second, a ring buffer that churns faster than anyone can read, and an overlay that is
-        // a solid block of the same sentence. Collapsed, that same graph shows one line with a
-        // rising count, which is also strictly more information -- "still firing, 143 times now"
-        // rather than "firing".
-        //
-        // CORRECTING THIS COMMENT'S FIRST DRAFT, which said the flood happens "just from having
-        // the level open" because the editor ticks graphs ungated on play state. IT DOES NOT.
-        // HostBridge.GraphTickBoundInstances is ungated INTERNALLY, and that callee comment is
-        // what I read -- but its caller gates it (see the tickGraphClassInstances call in this
-        // file, guarded on aver_fw_play_state() == AVER_FW_PLAY_PLAYING, with a long comment
-        // recording the measurement that forced that gate: 4003 tick lines and a VAR climbing to
-        // 12.31s while nobody pressed Play). Reading a callee's comment instead of tracing its
-        // caller is the exact mistake this codebase keeps paying for.
-        //
-        // The flood is real regardless -- it happens the moment you press Play, and in the
-        // packaged game every frame -- which is precisely when someone is watching this feed.
-        //
-        // CONSECUTIVE only, deliberately, not deduplicated across the whole buffer: two prints
-        // alternating (a Branch taking each arm in turn) is exactly the pattern an author is
-        // watching for, and merging those into two static rows would hide the alternation that
-        // is the whole signal.
+        // Collapses consecutive duplicate prints into one line with a rising count instead of
+        // flooding the buffer -- an OnTick PrintString fires every frame (60 lines/sec unfiltered).
+        // Consecutive only (not deduped across the buffer) so an alternating Branch still shows
+        // both arms. NOT gated by "level open": HostBridge.GraphTickBoundInstances is ungated
+        // internally; the caller gates it (tickGraphClassInstances in this file, on
+        // aver_fw_play_state()==AVER_FW_PLAY_PLAYING) -- ungated, this measured 4003 tick lines
+        // and a VAR climbing to 12.31s with nobody pressing Play.
         if (!self->graphPrints_.empty() && self->graphPrints_.back().text == text) {
             ++self->graphPrints_.back().count;
-            // Back to unstamped, so the next frame re-stamps it to now: a print that is still
-            // firing must not fade out underneath its own rising count.
+            // Unstamped so it re-stamps to now next frame: a still-firing print must not fade
+            // under its own rising count.
             self->graphPrints_.back().at = -1.0;
         } else {
             self->graphPrints_.push_back({std::move(text), -1.0, 1});
@@ -132,13 +93,9 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
         }
     }
 
-    // ERRORS AND CRITICALS BECOME NOTIFICATIONS, from inside THIS sink rather than a second one:
-    // setLogSink holds a single global slot (Log.cpp), and this application already owns it.
-    //
-    // Everything this call is allowed to do is written on pushFromLog itself, because the cost
-    // of getting it wrong is a deadlock rather than a failing test -- we are three locks deep
-    // here (the core log mutex, then logMutex_ above, then the queue's own), and a single
-    // AVER_* call from inside it would hang the editor against a non-recursive mutex.
+    // Errors/criticals also become notifications, from this sink (setLogSink is a single global
+    // slot) rather than a second one. Three locks deep here (core log mutex, logMutex_, queue's
+    // own) -- pushFromLog's own contract governs what it may do; a stray AVER_* call here deadlocks.
     editor::notifications().pushFromLog(level, msg);
 }
 
@@ -146,84 +103,41 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
 BootConfig SandboxApp::config() const  {
     BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
     c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
-    // WINDOWED, and borderless fullscreen only when it is ASKED FOR. This was the other way
-    // round -- an interactive run started borderless-fullscreen and --windowed opted out --
-    // which is the wrong default for an editor: it covers the taskbar and whatever the user
-    // was reading beside it, and an editor is a tool you sit next to other windows, not a
-    // game you launch into. --fullscreen asks for it explicitly now.
-    //
-    // maxFrames_ == 0 IS STILL PART OF THE TEST, and stays here rather than being dropped as
-    // redundant: a bounded capture run (--frames) is how every recorded gate baseline was
-    // measured, and its probes are pixels at a fixed rect in a fixed client area. Even an
-    // explicit --fullscreen must not reshape the window under a measurement.
+    // Windowed by default; borderless fullscreen only when --fullscreen asks for it explicitly
+    // (flipped from the old default, an interactive run starting borderless-fullscreen, which
+    // covers the taskbar). maxFrames_==0 check stays: every recorded gate baseline was measured
+    // via a bounded --frames capture at a fixed-rect pixel probe, and must not be reshaped even
+    // by --fullscreen.
     c.fullscreen = fullscreenOverride_ && maxFrames_ == 0;
     c.enableDebugLayer=debugLayer_;
     c.backend = backendName_.empty() ? nullptr : backendName_.c_str();
     return c;
 }
 
-// Has the project actually reached the screen? See Application::startupComplete.
-//
-// TWO CASES, and the empty one matters as much as the other. With NO project requested there is
-// nothing to wait for beyond the editor's own first frame, so one rendered frame is the whole
-// condition -- otherwise an empty editor would sit behind the splash for the full warm-up cap.
-//
-// With a project, the honest signal is that the scene has DRAWN something: lastSceneDrawn_ is
-// set from the per-frame walk and stays -1 until a frame has actually submitted meshes, which is
-// downstream of the mesh uploads, the material/texture residency and the first voxelisation --
-// exactly the work that used to happen after the splash had gone. A project that legitimately
-// draws nothing (an empty level) falls through to the engine's warm-up cap and costs a few
-// seconds; that is the right way round, because the alternative is calling a project loaded
-// before it is.
-// lastSceneDrawn_ IS THE FRAME COUNTER AS WELL AS THE DRAW COUNT: it starts at -1 and the scene
-// walk assigns it on the first frame that runs, whatever the count, so >= 0 means "a frame has
-// been walked" and > 0 means "a frame has drawn something". One member answers both halves and
-// there is no second counter to keep in step with it.
-// AND IT HAS TO STOP CHANGING, which is the half that was missing. "A frame drew something" is
-// true of the FIRST mesh, not the last: a project streams its meshes in over many frames, so the
-// splash lifted partway through with the rest of the level still arriving behind it. Waiting for
-// the draw count to hold steady for a few consecutive frames waits for the tail instead of the
-// head, and costs nothing on a project that is already settled -- the count is equal to itself
-// from the first frame and the run clears in kSettleFrames.
-//
-// A COUNT, NOT A TIMER. Frames are the unit the thing being waited on actually advances in, and a
-// wall-clock wait would be a different length on every machine for no reason. The engine's own
-// warm-up cap (600 frames / 20s) still bounds this, so a project that never settles -- streaming
-// that genuinely never ends -- costs seconds rather than the session.
-//
-// THE WHOLE DETECTOR IS SCENE WORK, and it reads three counters that say so in their own names --
-// lastSceneDrawn_ and the two settle members beside it, all declared `#if AVER_MODULE_SCENE` and
-// written only by the scene walk. This predicate is an Engine override and has to exist in every
-// build, so the guard goes around the body rather than around the function.
+// Has the project reached the screen? (Application::startupComplete override.)
+// No project requested: one rendered frame is enough. With a project: lastSceneDrawn_ is set on
+// every walked frame (>=0 = walked, >0 = drew something) and must hold STEADY for kSettleFrames
+// frames before returning true -- a project streams meshes in over many frames, so "drew one
+// thing" fires while the rest of the level is still arriving. Frame count, not wall-clock: that's
+// the unit the wait is measured in; still bounded by the engine's own warm-up cap (600 frames/20s).
+// The guard is around the body, not the function, since this override must exist in every build.
 bool SandboxApp::startupComplete() const  {
 #if AVER_MODULE_SCENE
     if (lastSceneDrawn_ < 0) return false;             // no frame has walked the scene yet
-    // THE LIVE PROJECT, NOT THE COMMAND LINE. projectPath_ is set once from argv and is empty
-    // for every project opened through the browser -- so asking it here answered "nothing was
-    // asked to load" for the most common way a project is actually opened, and the loading
-    // screen lifted on the first walked frame with the whole load still ahead of it. That is
-    // the midway disappearance, moved rather than fixed: the startup path was cured and the
-    // browser path still had it. project_ is assigned at the top of applyProject and tracks
-    // opens and switches, which is the same reason handleOpenRequest reads it instead.
-    // A FAILED OPEN leaves it empty and falls out here after one frame, which is right: there
-    // is nothing arriving to wait for, and the alternative is holding a splash over an error
-    // until the engine's 600-frame warm-up cap expires.
+    // project_ (not projectPath_, which is only the CLI arg) tracks the live project including
+    // ones opened from the browser -- see handleOpenRequest, same reasoning. Using projectPath_
+    // here previously cured the midway-disappearance bug for the CLI path only and left the
+    // browser path with it. A failed open also leaves this empty, so it falls out here too
+    // rather than waiting on the warm-up cap.
     if (project_.manifestPath.empty()) return true;    // no project is loading
     if (lastSceneDrawn_ == 0) return false;            // walked, but nothing has drawn yet
     constexpr int kSettleFrames = 8;
-    // Mutable because this is asked once per warm-up frame and there is nowhere else to tick
-    // from: Engine's loop calls exactly this, and a second per-frame hook to update a counter
-    // read only here would be two things to keep in step instead of one.
+    // Mutable: ticked from this call itself (once per warm-up frame), with nowhere else to hook in.
     if (lastSceneDrawn_ == startupSettleCount_) ++startupSettleFrames_;
     else { startupSettleCount_ = lastSceneDrawn_; startupSettleFrames_ = 0; }
     return startupSettleFrames_ >= kSettleFrames;
 #else
-    // NOTHING WALKS A SCENE IN THIS TREE, so there is no draw count to hold steady and the settle
-    // run above would never begin -- lastSceneDrawn_ would sit at its -1 start and this would
-    // answer "not yet" until the engine's 600-frame warm-up cap gave up, holding a loading screen
-    // over an editor that had finished loading. What the detector waits for is a level's meshes,
-    // materials and textures arriving behind the first drawn frame; with no world to instantiate
-    // them into there is no tail to wait for, and the editor is up as soon as the engine says so.
+    // No scene walk in this tree, so there's no draw count to settle on; up as soon as the engine says so.
     return true;
 #endif  // AVER_MODULE_SCENE
 }
@@ -245,9 +159,8 @@ void SandboxApp::setDebugLayer(bool d) { debugLayer_ = d; }
 // Rebuilds the ImGui style and font atlas for the given DPI scale.
 void SandboxApp::applyDpi(f32 dpi) {
     dpi_ = dpi;
-    // Pushed rather than pulled: AssetEditor::draw() carries no dpi argument, and widening that
-    // interface for one subclass is the wrong trade. ActorEditor's content-root setter set this
-    // precedent; GraphEditor follows it.
+    // Pushed not pulled: AssetEditor::draw() takes no dpi arg, and widening it for one subclass
+    // isn't worth it. Follows ActorEditor's content-root-setter precedent.
     editor::setGraphEditorDpi(dpi_);
     applyEditorMetrics();
     applyEditorColors();
@@ -272,8 +185,8 @@ void SandboxApp::applyDpi(f32 dpi) {
     mergeIconFont(px);
     if (fileExists(medium)) {
         fontMedium_ = io.Fonts->AddFontFromFileTTF(medium.c_str(), px);
-        // The medium weight gets its own copy of the icons: a font is a separate atlas entry,
-        // so an icon pushed under fontMedium_ would otherwise be a notdef box.
+        // Medium weight needs its own icon copy: fonts are separate atlas entries, else icons
+        // under fontMedium_ show as notdef boxes.
         if (fontMedium_) mergeIconFont(px);
     }
 }
@@ -292,9 +205,8 @@ void SandboxApp::mergeIconFont(f32 px) {
         return;
     }
     ImGuiIO& io = ImGui::GetIO();
-    // STATIC, because ImGui keeps the pointer rather than copying the range: a local array here
-    // would dangle the moment this function returned, and the atlas would build from freed
-    // stack memory. The terminating 0 is required.
+    // static: ImGui keeps this pointer rather than copying it; a local would dangle after return.
+    // Terminating 0 required.
     static const ImWchar range[] = { editor::kIconRangeFirst, editor::kIconRangeLast, 0 };
     ImFontConfig cfg;
     cfg.MergeMode = true;
@@ -376,16 +288,10 @@ void SandboxApp::loadCompileIcon(Engine& e) {
     AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
 }
 
-// ---- THE GAME UI'S FONT -----------------------------------------------------------------
-//
-// Aver.UI could not draw a character until now, so this is the first thing that gives it one.
-// The .ocfont and its atlas are staged beside the exe exactly like splash.png and the icon
-// sheets, and loaded the same way -- decodeImage plus createTexture plus uiTextureId, which is
-// the path the Compile C# icons already use.
-//
-// NON-FATAL, deliberately: a missing font leaves uiFont_ invalid, addText draws nothing, and
-// the HUD is a HUD without labels. An editor that refuses to start because a font is missing
-// would be a worse trade than one whose demo overlay is quieter.
+// ---- The game UI's font ----
+// Aver.UI could not draw a character until now. Staged beside the exe like splash.png/icon
+// sheets, loaded the same way (decodeImage + createTexture + uiTextureId).
+// Non-fatal: a missing font leaves uiFont_ invalid and addText draws nothing -- quieter beats refusing to start.
 void SandboxApp::loadGameUiFont(Engine& e) {
     rhi::IResourceFactory* res = e.device()->resources();
     if (!res) return;
@@ -428,11 +334,9 @@ void SandboxApp::loadGameUiFont(Engine& e) {
     td.initialRowPitch = img.rowPitch();
     uiFontTexture_ = res->createTexture(td);
     if (!uiFontTexture_) { AVER_WARN("[Sandbox] the game-UI font atlas could not be uploaded"); return; }
-    // THE RAW TextureHandle, NOT uiTextureId(). UiDrawCmd::texture is cast straight back to an
-    // rhi::TextureHandle by UiRenderer (`static_cast<rhi::TextureHandle>(c.texture)`), so this
-    // is the game UI's own texture channel and not ImGui's. uiTextureId returns a DESCRIPTOR
-    // handle for ImTextureID, and handing one to this path produced exactly what you would
-    // expect: "[RHI.D3D12] setSrv with an invalid handle", and no text.
+    // Raw TextureHandle, not uiTextureId(): UiRenderer casts c.texture straight back to
+    // rhi::TextureHandle, a different channel from ImGui's descriptor-based ImTextureID (which
+    // caused "[RHI.D3D12] setSrv with an invalid handle" here).
     uiFont_.atlasTexture = static_cast<u64>(uiFontTexture_);
     AVER_INFO("[Sandbox] game-UI font '{}' loaded: {} glyph(s), atlas {}x{}",
               uiFont_.name, uiFont_.glyphs.size(), img.width, img.height);
@@ -505,47 +409,42 @@ void SandboxApp::onInit(Engine& e)  {
     engineForSplash_ = &e;
     mainThreadId_ = std::this_thread::get_id();
     AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
-    // Latched once, because the Project Settings page shows it next to the backend the
-    // project ASKS for and has no Engine& in scope to ask again.
+    // Latched: Project Settings shows this beside the requested backend but has no Engine& to re-ask.
     runningBackend_ = rhi::backendName(e.device()->backend());
 #if AVER_MODULE_SR
-    // AverSR quality sets the same renderScaleOverride_ knob --render-scale drives, so an explicit
-    // --render-scale still wins (same 1.0-sentinel precedent loadEditorPreferences() uses). At Off
-    // (default) this is a no-op -- bit-identical to a tree without AverSR.
+    // AverSR quality drives the same renderScaleOverride_ knob as --render-scale; an explicit
+    // --render-scale still wins (1.0 sentinel, same precedent as loadEditorPreferences()). No-op at Off.
     if (averSrQuality_ != aver::sr::Quality::Off && renderScaleOverride_ == 1.0f)
         renderScaleOverride_ = aver::sr::renderScaleFor(averSrQuality_);
 #endif
-    // --render-scale F: applied once, here, before anything sizes itself off the device. 1.0 (no
-    // flag) is a no-op -- setRenderScale clamps into [0.25,1] but a backend without a swapchain
-    // yet just stores it for createSwapchainResources to pick up.
+    // --render-scale F: applied once here, before anything sizes off the device. 1.0 (no flag) is
+    // a no-op; setRenderScale clamps to [0.25,1], stored for createSwapchainResources if no swapchain yet.
     if (renderScaleOverride_ != 1.0f) {
         e.device()->setRenderScale(renderScaleOverride_);
         AVER_INFO("[Sandbox] render scale {:.2f} (--render-scale)", e.device()->renderScale());
     }
 #if AVER_MODULE_SR
-    // Constructs SpatialUpscaler -- a real GPU-resource-owning object, not the CLI-only
-    // renderScaleOverride_ float above -- whenever a non-Off level was requested. See
-    // logAverSrActive() for the honest limit of what that buys today.
+    // Constructs SpatialUpscaler (a real GPU-resource-owning object, unlike renderScaleOverride_
+    // above) whenever a non-Off level was requested; see logAverSrActive() for its current limits.
     if (averSrQuality_ != aver::sr::Quality::Off) {
         ensureAverSrUpscaler(e.device());
         logAverSrActive(e.device());
     }
-    // --edge-aa: see edgeAaEnabled_'s own member comment for why this shares AverSR's upscaler
-    // slot and who wins when both are requested. Off (the default) never constructs FxaaResolve
-    // and never touches the slot -- bit-identical to a build without this flag.
+    // --edge-aa shares AverSR's upscaler slot; see edgeAaEnabled_'s member comment for who wins
+    // when both are requested. Off (default): no-op, bit-identical to a build without the flag.
     if (edgeAaEnabled_) ensureEdgeAaUpscaler(e.device());
 #endif
-    // --depth-prepass: a same-frame depth-only pass ahead of the opaque colour walk -- see the
-    // entity loop's comment ("depth prepass phase") for the two-walk mechanism. Generic on
-    // IDevice: a no-op on any backend that never implements depthPrepassPipeline().
+    // --depth-prepass: same-frame depth-only pass ahead of the opaque colour walk -- see the
+    // entity loop's "depth prepass phase" comment for the two-walk mechanism. No-op on any
+    // backend that doesn't implement depthPrepassPipeline().
     if (depthPrepassOverride_) {
         e.device()->setDepthPrepassEnabled(true);
         AVER_INFO("[Sandbox] depth prepass enabled (--depth-prepass)");
     }
 
-    // GBufferDebugFeature registered unconditionally (mode defaults to Off) so the viewport
-    // view-mode dropdown can enable it live without a second registration. Whether the G-buffer is
-    // actually written is decided separately, per frame, in onUpdate (gbufferOverride_).
+    // Registered unconditionally (mode defaults to Off) so the view-mode dropdown can enable it
+    // live without a second registration; whether the G-buffer is written is decided per-frame in
+    // onUpdate (gbufferOverride_).
     e.device()->addRenderFeature(&gbufferDebugFeature_);
     gbufferDebugAttached_ = true;
 
@@ -556,73 +455,56 @@ void SandboxApp::onInit(Engine& e)  {
     // APPENDED, not inserted: AssetEditorHost::open() tries factories in registration order, so
     // moving this ahead of the others would change which editor claims a file they both accept.
     assetEditors_.registerFactory(&editor::makeGraphEditor);
-    // THE GRAPH EDITOR CAN FINALLY ASK WHETHER A GRAPH IS VALID. Graph.Validate() and
-    // OcGraphParser carry about thirty errors that name the offending node and say what to do,
-    // and nothing here had ever called one: the checks are C# and the editor is C++. Installed
-    // before any file opens, because makeGraphEditor takes only a path and hands the validator
-    // to each editor it builds.
+    // Wires the graph validator (Graph.Validate()/OcGraphParser, ~30 named node errors) into the
+    // editor via a lambda over scripts_ rather than a direct dependency, so GraphEditor keeps its
+    // Core+Formats+ImGui-only dependency set and stays drivable headless with no .NET runtime.
+    // graphValidateAvailable() is false against a bridge predating the GraphValidate export, so an
+    // old bridge greys the button rather than claiming every graph is fine.
     //
-    // A LAMBDA OVER scripts_, not a direct dependency, so GraphEditor keeps its Core + Formats +
-    // ImGui dependency set and stays drivable from a headless test with no .NET runtime at all.
-    // ScriptHost::graphValidate is itself a no-op returning "available? no" when the staged
-    // bridge predates the GraphValidate export, so an old bridge greys the button out rather
-    // than claiming every graph is fine.
-    //
-    // GUARDED ON SCRIPTING, and this whole run of four calls with it: every one of them reaches
-    // scripts_, which IS the .NET host (declared `#if AVER_MODULE_SCRIPTING` beside the rest of
-    // the bridge). The validator and the hit table are answers only managed code can give -- there
-    // is no C++ implementation of Graph.Validate to fall back on -- so a scripting-off tree leaves
-    // both seams uninstalled, which is the state GraphEditor already handles: setGraphValidator is
-    // never called, the Validate button greys out exactly as it does against an old bridge, and
-    // setGraphNodeHitSource's absence leaves the node-hit overlay with nothing to draw. The graph
-    // editor itself stays registered above, because opening and editing a .ocgraph needs no host.
+    // Guarded on AVER_MODULE_SCRIPTING along with the three calls below it, since the validator and
+    // hit table are answers only managed code can give. With scripting off, GraphEditor is still
+    // registered and still opens/edits .ocgraph -- it just never gets setGraphValidator/
+    // setGraphNodeHitSource, so Validate greys out and the node-hit overlay draws nothing.
 #if AVER_MODULE_SCRIPTING
     editor::setGraphValidator([this](const std::string& text, std::string& err) {
         if (!scripts_.graphValidateAvailable()) { err = "the .NET bridge exports no GraphValidate"; return false; }
         return scripts_.graphValidate(text, err);
     });
-    // AND WHICH NODES ARE RUNNING. Recording is armed here rather than per tab because the
-    // managed table is keyed by graph NAME and costs a static bool test when off -- arming it once
-    // while the editor is up is simpler than tracking tab lifetimes, and a packaged game (which
-    // has no editor) never arms it at all.
+    // Node-hit recording armed once here (not per tab): the managed table is keyed by graph name
+    // and costs only a static bool test when off; a packaged game (no editor) never arms it.
     editor::setGraphNodeHitSource([this](const std::string& graphName, f32 maxAge,
                                          std::vector<std::pair<std::string, f32>>& out) {
         scripts_.graphNodeHits(graphName, maxAge, out);
     });
     scripts_.graphSetHitRecording(true);
 #endif  // AVER_MODULE_SCRIPTING
-    // Appended for the same reason, and it claims only .ocbt, which nothing above accepts.
+    // Appended for the same reason; claims only .ocbt, which nothing above accepts.
     assetEditors_.registerFactory(&editor::makeBtEditor);
-    // And again for .ocsnd, which likewise nothing above claims. See SoundEditor.hpp.
+    // Appended for .ocsnd, likewise unclaimed above. See SoundEditor.hpp.
     assetEditors_.registerFactory(&editor::makeSoundEditor);
-    // And again for .ocparticle -- the format, the runtime and level-drop placement all already
-    // existed with zero authoring UI until now. See ParticleEditor.hpp.
+    // Appended for .ocparticle -- format/runtime/placement existed with no authoring UI until now.
+    // See ParticleEditor.hpp.
 #if AVER_MODULE_PARTICLES
     assetEditors_.registerFactory(&editor::makeParticleEditor);
 #endif
-    // And again for .ocfoliage -- the eighth factory. Unconditional, unlike the particle one just
-    // above: see FoliageTypeEditor.hpp/OcFoliage.hpp for why this tab needs no optional module.
+    // Appended for .ocfoliage -- the eighth factory, unconditional unlike particle above. See
+    // FoliageTypeEditor.hpp/OcFoliage.hpp.
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);
-    // And again for .ocinput -- the ninth factory. Unconditional, like the foliage one just above:
-    // see InputSchemeEditor.hpp/OcInput.hpp for why this tab needs no optional module either.
+    // Appended for .ocinput -- the ninth factory, also unconditional. See InputSchemeEditor.hpp/OcInput.hpp.
     assetEditors_.registerFactory(&editor::makeInputSchemeEditor);
-    // And again for the source image formats aver::decodeImage can actually read -- the tenth
-    // factory, read-only, unconditional. See TextureEditor.hpp for the two-line hook and for why
-    // .dds is not among the extensions it claims.
+    // Appended for the image formats decodeImage can read -- the tenth factory, read-only,
+    // unconditional; see TextureEditor.hpp for why .dds isn't among them.
     assetEditors_.registerFactory(&editor::makeTextureEditor);
     {
-        // What the tab needs to answer "is this the project's Input Scheme?" and to make it one --
-        // see InputSchemeEditorHooks' own comment (InputSchemeEditor.hpp) for why this is a hooks
-        // struct rather than a project pointer on AssetEditor itself.
+        // Answers "is this the project's Input Scheme?" and can set it; a hooks struct rather than
+        // a project pointer on AssetEditor -- see InputSchemeEditorHooks' comment (InputSchemeEditor.hpp).
         editor::InputSchemeEditorHooks hooks;
         hooks.contentDir = [this] { return project_.contentDir(); };
         hooks.projectInputScheme = [this] { return project_.inputScheme; };
         hooks.useAsProjectInputScheme = [this](const std::string& contentRelativePath) {
             if (!project_.valid()) return false;
-            // THE SAME projectDirty_ FLAG Project Settings > Description's own fields set
-            // (SandboxSettings.cpp's "Input Scheme" combo right beside this) -- the actual write
-            // happens on the existing autosave timer (maybeAutosaveProject) or that page's Save
-            // button, not here, so this button behaves exactly like typing a new Start Map there.
+            // Same projectDirty_ flag Project Settings > Description sets (SandboxSettings.cpp);
+            // the write happens on the autosave timer or that page's Save button, not here.
             project_.inputScheme = contentRelativePath;
             projectDirty_ = true;
             return true;
@@ -644,49 +526,42 @@ void SandboxApp::onInit(Engine& e)  {
             if (!editor::openInIde(ide, p)) AVER_WARN("[Editor] could not open {} in {}", p, ide.name);
         };
         hooks.ideName = cbIde().name;
-#endif  // AVER_WITH_IMGUI -- openInIde/ideName reach the content browser's IDE picker; without a
+#endif  // AVER_WITH_IMGUI -- openInIde/ideName need the content browser's IDE picker; without a
         // UI there is no picker and no actor editor to open a file from in the first place.
         editor::setActorEditorHooks(std::move(hooks));
     }
     window_ = e.window();
-    // The one event sink the editor installs, identical to GameApp's. Everything the window
-    // produces lands in the accumulator; nothing is filtered here, because filtering is policy
-    // and policy is decided per-consumer, per-frame, further down.
+    // The one event sink the editor installs (identical to GameApp's); everything lands in the
+    // accumulator unfiltered -- filtering is policy, decided per-consumer further down.
     if (window_) window_->setEventCallback(&sandboxWindowEvent, &input_);
-    // Dragging files in from Explorer. Off by default in Window itself (see
-    // Window::setAcceptDroppedFiles); the editor is the one host that wants it. Polled once a frame
-    // in onUpdate, next to the identically-shaped hasPendingOpenRequest().
+    // Drag-drop from Explorer, off by default in Window itself (Window::setAcceptDroppedFiles) --
+    // the editor is the one host that wants it. Polled once a frame in onUpdate.
     if (window_) window_->setAcceptDroppedFiles(true);
 
-    // Single-instance forwarding, receiver registration. singleInstanceEligible_ is a superset of
-    // the sender's own forward-attempt gate ("argc==2 and argv[1] doesn't start with '-'") by
-    // construction, so no separate bookkeeping is needed to keep them in sync. A --frames capture
-    // is a real windowed launch (Window.hpp:17) but always carries a flag, so it's ineligible --
-    // two concurrent captures never race to open the same named mutex.
+    // Single-instance forwarding receiver. singleInstanceEligible_ is by construction a superset
+    // of the sender's forward-attempt gate (argc==2, argv[1] not a flag), so no separate
+    // bookkeeping is needed. A --frames capture is a real windowed launch (Window.hpp:17) but
+    // always carries a flag, so it's ineligible -- concurrent captures never race on the same
+    // named mutex.
     if (window_ && window_->valid() && singleInstanceEligible_) {
         Window::registerAsSingleInstancePrimary(window_->nativeHandle());
-        // THE HOOK IS THE LEVEL-OPEN PATH, which is why it carries a guard the registration above
-        // does not: onOpenRequestThunk forwards to handleOpenRequest and on to requestOpenLevel
-        // (SandboxLevelEdit.cpp), all three declared `#if AVER_MODULE_SCENE` because what a
-        // forwarded path asks for is a level instantiated into a world. Staying the primary
-        // instance is still right in a scene-less tree -- a second launch should still focus this
-        // window rather than open a rival editor; it simply has nothing to open once it is here.
+        // Guarded here (unlike the registration above) because the hook is the level-open path:
+        // onOpenRequestThunk -> handleOpenRequest -> requestOpenLevel (SandboxLevelEdit.cpp), all
+        // needing a world to instantiate into. A scene-less tree still stays primary instance --
+        // a second launch focuses this window, it just has nothing to open once here.
 #if AVER_MODULE_SCENE
         window_->setOpenRequestHook(&SandboxApp::onOpenRequestThunk, this);
 #endif
     }
-    // THE WINDOW'S X BUTTON GOES THROUGH THE SAME UNSAVED-CHANGES CHECK AS File > Exit. It did
-    // not: WM_CLOSE set shouldClose_ and Engine::run tests that BEFORE the next frameStep, so
-    // the prompt could never be drawn and an unsaved level died with the window. Registered
-    // unconditionally, not behind singleInstanceEligible_ above -- a --frames capture wants this
-    // guard to say yes, which it does, rather than not to exist.
+    // The window's X button goes through the same unsaved-changes check as File > Exit (it didn't:
+    // WM_CLOSE set shouldClose_ before Engine::run's next frameStep could draw the prompt).
+    // Unconditional, not behind singleInstanceEligible_: a --frames capture wants this guard to
+    // exist and say yes.
     if (window_ && window_->valid()) window_->setCloseGuard(&SandboxApp::onCloseGuardThunk, this);
 
 #if AVER_MODULE_MCP
-    // 0 means --mcp was never given. mcpStart (SandboxMcp.cpp) is the whole of what used to be
-    // inline here: ABI registration, the UI-only widget hooks, and the listen itself, now shared
-    // with the status-bar widget's own Start button so the two can never start the channel two
-    // different ways.
+    // 0 = --mcp was never given. mcpStart (SandboxMcp.cpp) does ABI registration, widget hooks and
+    // the listen itself, shared with the status-bar Start button so the channel starts only one way.
     if (mcpPort_ && !mcpStart(mcpPort_))
         AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
                   "unaffected and carries on");
@@ -715,42 +590,35 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 
 #if AVER_MODULE_SCENE
-    // THE CONTROL RIG, registered and INSTALLED here for the same reason the Synapse systems are
-    // above: before any project opens, needing no level. Registration alone would be the defect
-    // this repository keeps finding -- a component type nothing ever reads -- so the system that
-    // applies it is installed in the same breath, as AnimSystem's pose modifier.
-    //
-    // Installed unconditionally rather than when a rig first appears: the modifier costs one
-    // component lookup per animated entity per tick and returns immediately when there is no
-    // CControlRig, whereas installing it lazily would mean a rig attached at run time did
-    // nothing until something noticed.
+    // Control rig: registered AND installed here (before any project opens, needing no level) so
+    // it isn't a component type nothing reads. Installed unconditionally, not lazily on first rig,
+    // since the modifier is one cheap component lookup per animated entity per tick and a lazy
+    // install would leave a runtime-attached rig doing nothing until noticed.
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
 #endif
 
-    // RESOLVED BEFORE THE PROJECT OPENS -- moved up from further down onInit, where the same code
-    // silently disabled the entire GPU per-cluster path for the process lifetime: loadProjectMeshes
-    // only builds meshClusterGpu_ under lodMeshShaderEnabled_, and ensureLodMeshPipeline latches
-    // "already tried" BEFORE testing the flag, with no warning at all.
+    // Moved up from later in onInit, where the same code silently disabled the whole GPU
+    // per-cluster path for the process lifetime (loadProjectMeshes gates meshClusterGpu_ on
+    // lodMeshShaderEnabled_, and ensureLodMeshPipeline latched "already tried" before the flag
+    // was even tested, with no warning).
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-    // OFF UNLESS ASKED FOR, a downgrade from "on by default where hardware allows" -- it was
-    // never actually on: the first real run measured 22% faster (frame 76.3->59.8ms, scene draw
-    // 51.7->41.5, triangles 8M->2.9M) but rendered every plant in Electric Dreams as a black
-    // shredded silhouette.
-    // SHADING FIXED since: PSClusterMain is now a real material shader (ClusterMaterialShader.hpp).
-    // STAGE 3 added shadows/GI (still opt-in): Voxi's GI volume and shadow map MERGE into this
-    // pipeline's table 0 (ensureLodMeshPipeline, D3D12Device.cpp's nullFill keeps
-    // rhi::kBindingTableCount at 2); PSClusterMain runs the same shadowFactor()/
-    // coneTracedIndirect() PSMainVoxi's non-ray-traced fallback does.
-    // STILL NOT PARITY, hence still off by default: no ray tracing on this path ever, so it looks
-    // visibly softer/un-reflective. D3D12 only; a build without AVER_MODULE_VOXI gets none of it.
+    // Off unless asked for -- a downgrade from "on by default where hardware allows", which was
+    // never actually true: first measured 22% faster (frame 76.3->59.8ms, scene draw 51.7->41.5,
+    // tris 8M->2.9M) but rendered every plant in Electric Dreams as a black shredded silhouette --
+    // shading is now fixed (PSClusterMain, ClusterMaterialShader.hpp, a real material shader).
+    // Stage 3 added opt-in shadows/GI: Voxi's GI volume and shadow map merge into this pipeline's
+    // table 0 (ensureLodMeshPipeline; D3D12Device.cpp's nullFill keeps kBindingTableCount at 2);
+    // PSClusterMain runs the same shadowFactor()/coneTracedIndirect() PSMainVoxi's non-RT fallback
+    // does. Still not parity (no ray tracing on this path) so still off by default. D3D12 only;
+    // needs AVER_MODULE_VOXI for GI.
     lodMeshShaderEnabled_ = lodMeshShaderRequest_ > 0;
     if (lodMeshShaderEnabled_) {
         const rhi::DeviceCaps mcaps = e.device()->caps();
-        // D3D12 only, enforced here: Voxi's merge into table 0 puts a Texture3D, an acceleration
-        // structure and structured buffers in a table Vulkan's descriptorLayout() still builds as
-        // if every slot were a Texture2D. meshShaderTier is NOT a backend proxy: VulkanDevice sets
-        // it from VK_EXT_mesh_shader, so a Vulkan device with mesh shaders passes every other check.
+        // D3D12 only, enforced here: Voxi's table-0 merge puts a Texture3D/acceleration
+        // structure/structured buffers where Vulkan's descriptorLayout() still assumes Texture2D.
+        // meshShaderTier isn't a backend proxy -- VulkanDevice sets it too (from VK_EXT_mesh_shader),
+        // so it alone won't catch this.
         const bool ok = mcaps.meshShaderTier > 0 && mcaps.shaderModel >= 65 && mcaps.dxcAvailable
 #if AVER_MODULE_VOXI
                         && e.device()->backend() == rhi::Backend::D3D12
@@ -759,11 +627,9 @@ void SandboxApp::onInit(Engine& e)  {
         lodMeshShaderEnabled_ = ok;
         if (ok) {
 #if AVER_MODULE_VOXI
-            // Receives AND casts: cluster-dispatch calls voxiRenderer_.submit() directly with the
-            // same (mesh, world, material) shape drawMesh() uses, even though it still skips
-            // IRenderFeature::submitDraw. A cluster-drawn plant's shadow proxy is now in the shadow
-            // cascade and GI voxelisation like any other instance; only its lit geometry stays
-            // cluster-dispatched, never ray traced.
+            // Cluster-dispatch calls voxiRenderer_.submit() directly (same (mesh,world,material)
+            // shape as drawMesh(), skipping IRenderFeature::submitDraw) so its shadow proxy joins
+            // the cascade and GI voxelisation like any instance; only lit geometry stays cluster-only.
             AVER_INFO("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "
                       "-- faster and textured, and casts cascade shadows and voxel-cone GI through "
                       "its own depth proxy (via voxiRenderer_.submit()), though PSClusterMain's own "
@@ -783,21 +649,19 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 
     if (!projectPath_.empty()) {
-        // Through the same gate as a click: a CLI-named project used to reach browser_.open()
-        // directly, skipping the upgrade prompt a double-clicked card got. When the gate declines,
-        // it has raised the modal, so this arms the browser rather than reporting failure.
-        // --open-legacy is the answer given in advance: it opens an older-series project WITHOUT
-        // upgrading, what a benchmark or capture wants and the modal can't express.
+        // Same gate as a double-clicked card (used to skip the upgrade prompt via browser_.open()
+        // directly). --open-legacy answers the prompt in advance: opens an older-series project
+        // without upgrading, for benchmarks/captures the modal can't express.
         std::string err;
         const bool opened = openLegacy_ ? browser_.open(projectPath_, &err)
                                         : browser_.openOrOfferUpgrade(projectPath_, &err);
         if (opened) applyProject(e);
         else if (!openLegacy_ && browser_.upgradePending()) {
             armBrowser(true);
-            // A question nobody is there to answer is a failed run: with a frame limit set, the
-            // session renders an EMPTY EDITOR and reports timings/screenshots that look ordinary
-            // and mean nothing (the tell, `over 0 entities`, is buried in a scene-walk line).
-            // maxFrames_ != 0 is this file's established test for "not interactive".
+            // A question nobody answers is a failed run: with a frame limit, the session renders
+            // an empty editor and reports timings/screenshots that look ordinary and mean nothing
+            // (the tell, `over 0 entities`, is buried in a scene-walk line).
+            // maxFrames_ != 0 is this file's test for "not interactive".
             if (maxFrames_ != 0) {
                 AVER_ERROR("[Sandbox] '{}' was made by an older series and this run has a frame "
                            "limit, so nothing can answer the upgrade prompt. THE PROJECT WILL NOT "
@@ -812,15 +676,10 @@ void SandboxApp::onInit(Engine& e)  {
             AVER_WARN("[Sandbox] '{}' not loaded: {}", projectPath_, err);
         }
     } else if (!openMapPath_.empty()) {
-        // A level with no project above it still opens: everything else hangs off applyProject,
-        // so without this branch a lone .ocmap would produce an empty editor with no explanation.
-        // Its placements won't resolve, but seeing the level's shape beats seeing nothing.
-        //
-        // GUARDED because loading a level IS instantiating entities: loadStartMap is declared
-        // `#if AVER_MODULE_SCENE` with the rest of the level verbs, and there is no world for a
-        // placement to become without the module. The path is still accepted off the command line,
-        // so the #else says it was seen and why it went nowhere -- which is the whole complaint
-        // the branch above exists to answer, an editor sitting empty with no explanation.
+        // A level with no project still opens: everything else hangs off applyProject, so without
+        // this a lone .ocmap gives an empty editor with no explanation. Placements won't resolve
+        // but the level's shape beats nothing. Guarded (loading IS instantiating entities): no
+        // world without AVER_MODULE_SCENE; the #else logs why it went nowhere instead of silence.
 #if AVER_MODULE_SCENE
         loadStartMap(e);
 #else
@@ -857,18 +716,15 @@ void SandboxApp::onInit(Engine& e)  {
     rhi::MeshHandle cube = e.device()->createMesh(gi_v.data(), (u32)gi_v.size(), ci.data(), (u32)ci.size());
 
 #if AVER_MODULE_SCENE
-    // Built-in primitive meshes (sphere/cube/drone), their bounds, and the named-surface look
-    // table gameplay can ask for all come from content_ now -- GameContent::registerBuiltins
-    // uploads the identical set. The hook below is this editor's own per-mesh follow-up (pick
-    // geometry, triangle counts; see onMeshLoaded), run once per built-in as it uploads.
+    // Built-in primitive meshes/bounds/look table come from content_ (GameContent::registerBuiltins
+    // uploads them); the hook below is this editor's per-mesh follow-up (pick geometry, tri counts).
     {
         MeshLoadPass pass; pass.app = this; pass.engine = &e;
         content_.setMeshLoadedHook(&SandboxApp::onMeshLoaded, &pass);   // seeds meshTris_ and pickGeometry_ per built-in
         content_.registerBuiltins(*e.device());
         content_.setMeshLoadedHook(nullptr, nullptr);
 
-        // The built-in unit cube's own handle, kept so a dev check can build geometry of its own
-        // without re-uploading a cube.
+        // Kept so a dev check can build geometry of its own without re-uploading a cube.
         unitCubeMesh_ = content_.meshFor(fnv1a64(std::string_view("Meshes/cube.ocmesh")));
     }
 #endif
@@ -923,8 +779,8 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 
 #if AVER_MODULE_SCENE
-    // The scene join. Registered HERE, before the Voxi renderer, for the reason spelled out
-    // below: features run prePass in registration order and Voxi reads vertex buffers in its.
+    // Scene join, registered before Voxi: features run prePass in registration order and Voxi
+    // reads vertex buffers in its own.
     skinnedScene_ = std::make_unique<aver::render::SkinnedScene>();
     if (skinnedScene_->init(*e.device())) {
         skinnedScene_->setResolvers(&game::GameContent::resolveAnimAsset, &game::GameContent::resolveSceneMesh, &content_);
@@ -933,8 +789,7 @@ void SandboxApp::onInit(Engine& e)  {
         skinnedScene_.reset();   // init already said why; skinned entities draw at rest
     }
 #if AVER_MODULE_RENDER_SOFTBODY
-    // The same two resolvers skinnedScene_ takes (id->path, id->MeshHandle already uploaded) --
-    // reused rather than adding a third pair, so both features agree on one resolver convention.
+    // Reuses skinnedScene_'s resolver pair (id->path, id->MeshHandle) rather than adding a third.
     softBodyScene_ = std::make_unique<aver::render::SoftBodyScene>();
     if (softBodyScene_->init(*e.device())) {
         softBodyScene_->setResolvers(&game::GameContent::resolveSceneMesh, &game::GameContent::resolveAnimAsset, &content_);
@@ -944,28 +799,25 @@ void SandboxApp::onInit(Engine& e)  {
     }
 #endif
 
-// The content browser's thumbnails. init() registers its own preview/copy-pass features
-// internally, so unlike skinnedScene_ above there's no addRenderFeature call here. A failed init()
-// leaves ready() false and textureId() permanently 0, which the gallery treats as "draw the typed icon".
+// Content browser thumbnails: init() registers its own preview/copy-pass features, so unlike
+// skinnedScene_ above there's no addRenderFeature call. Failed init -> ready() false, textureId()
+// stays 0, gallery draws the typed icon instead.
     thumbnails_.init(*e.device());
 
-    // --skin-scene-test <dir>: the same question as --skin-draw-test but through the WHOLE
-    // chain -- a real .ocmesh with skin streams, a real .ocskel, a real .ocanim, AnimSystem,
-    // SkinnedScene's per-entity target, and the substituted draw handle.
+    // --skin-scene-test <dir>: same question as --skin-draw-test but through the whole chain --
+    // real .ocmesh/.ocskel/.ocanim, AnimSystem, SkinnedScene's per-entity target, substituted draw handle.
     if (!skinSceneDir_.empty() && skinnedScene_) {
         skinScene_ = std::make_unique<aver::editor::SkinSceneTest>();
         u64 meshId = 0, skelId = 0, clipId = 0;
         u32 meshHandle = 0;
         if (skinScene_->setup(e, skinSceneDir_, &meshId, &skelId, &clipId, &meshHandle)) {
-            // The draw pass looks the entity's mesh up in content_'s meshes, and SkinnedScene
-            // resolves through the SAME table. Registering here is what makes a spawned
-            // entity actually reach a draw call without a project having been opened.
+            // The draw pass and SkinnedScene both resolve meshes through content_'s table;
+            // registering here is what makes a spawned entity reach a draw call with no project open.
             std::pair<Vec3, Vec3> bounds;
             skinScene_->restBounds(bounds.first, bounds.second);
             content_.registerMesh(meshId, meshHandle, bounds);
-            // The three ids the entities name, pointed at the cooked files. content_'s index is
-            // what AnimSystem and SkinnedScene both resolve through, so registering here is
-            // what makes the rig reachable without a project.
+            // The three ids the entities name, pointed at the cooked files -- content_'s index is
+            // what AnimSystem/SkinnedScene resolve through, making the rig reachable with no project.
             std::string d = skinSceneDir_;
             while (!d.empty() && (d.back() == 92 || d.back() == '/')) d.pop_back();
             content_.indexAsset(meshId, d + "/Rig.ocmesh");
@@ -983,33 +835,29 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 
 #if AVER_MODULE_FLUIDS
-    // Registered unconditionally, spawned only if a level asks for it -- an idle feature costs
-    // nothing, and this keeps feature order identical with/without fluid in a level. Still before
-    // Voxi: its acceleration-structure build reads the vertex buffer this feature's prePass writes;
-    // registered after, every ray-traced effect would see the volume one frame stale.
+    // Registered unconditionally, spawned only if a level asks for it (idle costs nothing, keeps
+    // feature order identical with/without fluid). Must precede Voxi: its acceleration-structure
+    // build reads the vertex buffer this feature's prePass writes; registered after, every
+    // ray-traced effect (not just GI) would see the volume one frame stale.
     water_.init(*e.device());
 #endif
 
 #if AVER_FLUIDS_SIMULATED
-    // The 3D-viewport icon renderer. Registered here because it draws in transparentPass (after
-    // every opaque draw and the deferred sky) but must exist before level loading creates a Player
-    // Start.
-    // A failed init is not fatal: viewportIconsReady_ staying false just means the Player Start
-    // keeps its old cube look -- permanent on Vulkan, which has no transparentPass call at all.
+    // 3D-viewport icon renderer: draws in transparentPass (after opaque + deferred sky) but must
+    // exist before level loading creates a Player Start. Failed init isn't fatal -- Player Start
+    // just keeps its cube look; permanent on Vulkan, which has no transparentPass call at all.
     viewportIconsReady_ = viewportIcons_.init(*e.device());
     if (viewportIconsReady_) {
         e.device()->addRenderFeature(&viewportIcons_);
         playerStartIcon_ = viewportIcons_.loadIcon(executableDir() + "\\" + "player-start-icon.png",
                                                    "PlayerStartIcon");
-        // No icon file, no icon renderer: falling back to the cube is better than a Player Start
-        // that is invisible because its picture failed to load.
+        // No icon file: fall back to the cube rather than an invisible Player Start.
         if (playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) viewportIconsReady_ = false;
     }
 #endif
 
-    // --furnace-test: does the shading model CONSERVE ENERGY? A uniform environment of
-    // radiance L and surfaces of albedo 1 -- every one must read the same, whatever its
-    // orientation and whatever surrounds it.
+    // --furnace-test: does the shading model conserve energy? Uniform env radiance L, albedo-1
+    // surfaces must all read the same regardless of orientation or surroundings.
     if (furnaceTest_) {
         objects_.clear();
         sel_ = -1;
@@ -1017,8 +865,8 @@ void SandboxApp::onInit(Engine& e)  {
         sky_.furnaceSun = furnaceSun_;
         sunAmbient_ = 1.0f;
 
-        // Albedo ONE, fully rough, non-metallic: the furnace's premise is a perfect Lambertian
-        // white, and any of those three wrong makes the answer legitimately not L.
+        // Albedo 1, fully rough, non-metallic: the furnace premise is a perfect Lambertian white;
+        // wrong on any of the three and the answer legitimately isn't L.
         const auto white = [&](const char* nm, Vec3 pos, Vec3 scale) {
             MeshObj o;
             o.name = nm;
@@ -1030,21 +878,20 @@ void SandboxApp::onInit(Engine& e)  {
             o.aabbMax = Vec3{ scale.x*1.1f,  scale.y*1.1f,  scale.z*1.1f};
             objects_.push_back(o);
         };
-        // A flat slab, and a tall one. Different faces point in different directions, so the
-        // probes across them sample several orientations of the same white surface.
+        // Flat + tall slabs: different faces sample several orientations of the same white surface.
         white("FurnaceFloor", Vec3{0, 0, -30}, Vec3{900.0f, 900.0f, 20.0f});
         white("FurnaceTall",  Vec3{0, 0, 200}, Vec3{160.0f, 160.0f, 220.0f});
-        // THE ONE THAT MATTERS: a box open only toward the camera, so its back surface is
-        // occluded from most of the hemisphere. In a furnace it must STILL read L, since the
-        // occluding walls emit L too -- where a forgetful occlusion term shows up.
+        // The one that matters: a box open only toward the camera, back surface occluded from most
+        // of the hemisphere -- must still read L (occluding walls emit L too); this is where a
+        // forgetful occlusion term shows up.
         white("FurnaceCaveBack",  Vec3{-520, -520, 160}, Vec3{20.0f, 200.0f, 200.0f});
         white("FurnaceCaveLeft",  Vec3{-330, -700, 160}, Vec3{200.0f, 20.0f, 200.0f});
         white("FurnaceCaveTop",   Vec3{-330, -520, 350}, Vec3{200.0f, 200.0f, 20.0f});
 
-        // --furnace-grid: the specular half of the same question. The boxes above are albedo 1,
-        // roughness 1, metallic 0, exercising only the diffuse path. A flat plate faces the camera
-        // down -X so each cell is at normal incidence (ndv=1, the SMALLEST the loss ever gets --
-        // a floor on the error, not the whole of it). Replaces the five boxes, so existing probes see the same thing.
+        // --furnace-grid: specular half of the same question (boxes above are albedo1/rough1/
+        // metal0, diffuse-only). Plate faces camera down -X, each cell at normal incidence (ndv=1,
+        // the smallest the loss ever gets -- a floor, not the whole error). Replaces the five boxes,
+        // so existing probes see the same thing.
         if (furnaceGrid_) {
             objects_.clear();
             const f32 rough[6] = {0.05f, 0.25f, 0.45f, 0.65f, 0.85f, 1.0f};
@@ -1058,16 +905,14 @@ void SandboxApp::onInit(Engine& e)  {
                     o.mesh = unitCubeMesh_;
                     // Columns march along +Y (right), rows up +Z, on one plane at +X.
                     o.pos   = Vec3{700.0f, -450.0f + 180.0f * (f32)ri, 60.0f + 140.0f * (f32)mi};
-                    // THIN, so a tilt shows the same face at a glancing angle rather than swapping
-                    // to the side one -- at 5cm thick and 75deg yaw the side face was wider on
-                    // screen than the front, and the tilt sweep came back flat and meant nothing.
+                    // Thin, so a tilt shows the same face at a glancing angle instead of swapping to
+                    // the side one (at 5cm thick/75deg yaw the side face read wider than the front,
+                    // and the tilt sweep came back flat and meant nothing).
                     o.scale = Vec3{0.5f, 60.0f, 60.0f};
-                    // --furnace-tilt rotates each plate about Z so the cell reads at grazing
-                    // incidence, not face-on -- single-scatter GGX loses most energy at low ndv.
-                    // What tilt cannot show: at albedo 1 a metal has F0=1 and averEnvBRDF keeps
-                    // dfg.x+dfg.y nearly constant in ndv there, so the white metal row reads the
-                    // same at every tilt regardless of correctness -- it only earns its keep on
-                    // coloured metals/dielectrics.
+                    // --furnace-tilt rotates each plate about Z for grazing incidence (single-scatter
+                    // GGX loses most energy at low ndv). Can't show white-metal error: at albedo 1,
+                    // F0=1, averEnvBRDF keeps dfg.x+dfg.y ~constant in ndv, so that row reads the
+                    // same at every tilt regardless of correctness -- only useful on coloured metals/dielectrics.
                     o.rotDeg = Vec3{furnaceTilt_, 0.0f, 0.0f};
                     o.color[0] = o.color[1] = o.color[2] = 1.0f;
                     o.metallic  = metal[mi];
@@ -1077,10 +922,10 @@ void SandboxApp::onInit(Engine& e)  {
                     objects_.push_back(o);
                 }
             }
-            // The plates normally have no material at all -- they draw through the fallback path
-            // with metallic/roughness per-draw, how every furnace measurement to date was taken;
-            // giving them materials unconditionally would move all of them. Only when a coat is
-            // asked for, since the furnace's oracle is intra-frame and nothing is compared across runs.
+            // Plates normally have no material (draw through the per-draw metallic/roughness
+            // fallback -- how every furnace measurement to date was taken; giving them materials
+            // unconditionally would move all of them); only given one when a coat is asked for,
+            // since the oracle is intra-frame and nothing compares across runs.
             if (coatWeight_ > 0.0f) {
                 for (MeshObj& o : objects_) makeMaterialFor(o);
                 AVER_INFO("[Furnace] grid plates given materials so the coat has somewhere to "
@@ -1100,14 +945,12 @@ void SandboxApp::onInit(Engine& e)  {
         objects_.clear();
         sel_ = -1;
 
-        // The mirror: a large flat quad at z=0, fully metallic and almost perfectly smooth, so
-        // what it shows is almost entirely the reflection rather than its own colour.
+        // Large flat quad at z=0, fully metallic and near-smooth, so it shows almost entirely reflection.
         MeshObj m;
         m.name = "ReflMirror";
         m.mesh = unitCubeMesh_;
         m.pos = Vec3{0, 0, -20.0f};
-        // HALF-EXTENTS IN CENTIMETRES: the unit cube is half-extent 1, so this is an 1800 cm
-        // mirror. The first version used 18 and made a 36 cm slab that every probe missed.
+        // Half-extents in cm (unit cube = half-extent 1): 1800cm mirror. (18 gave a 36cm slab every probe missed.)
         m.scale = Vec3{1800.0f, 1800.0f, 20.0f};
         m.color[0] = 0.02f; m.color[1] = 0.02f; m.color[2] = 0.02f;
         m.metallic = 1.0f; m.roughness = 0.03f;
@@ -1119,11 +962,9 @@ void SandboxApp::onInit(Engine& e)  {
         bcn.name = "ReflBeacon";
         bcn.mesh = unitCubeMesh_;
         bcn.pos = bp;
-        // Big enough to subtend several degrees from 5200 cm away, or the reflection of it
-        // lands between probes.
+        // Big enough to subtend several degrees from 5200 cm away, or its reflection lands between probes.
         bcn.scale = Vec3{700.0f, 700.0f, 700.0f};
-        // Emissive-bright green: nothing else in this scene is green, so a probe that turns
-        // green can only be showing the beacon.
+        // Emissive-bright green: nothing else in scene is green, so a green probe must be the beacon.
         bcn.color[0] = 0.02f; bcn.color[1] = 0.95f; bcn.color[2] = 0.05f;
         bcn.roughness = 1.0f;
         bcn.aabbMin = Vec3{-950, -950, -950}; bcn.aabbMax = Vec3{950, 950, 950};
@@ -1134,20 +975,19 @@ void SandboxApp::onInit(Engine& e)  {
         refl_->setVolumeExtent(giExtent_);
     }
 
-    // --skin-draw-test: the same question one level up -- does anything DRAW the skinned buffer.
-    // This block's position is the contract: prePass runs features in registration order, so a
-    // skinning dispatch must be registered BEFORE the scene renderer, whose Voxi replay reads the
-    // vertex buffer this dispatch writes -- registered after, it reads unwritten data every frame.
+    // --skin-draw-test: does anything draw the skinned buffer. Position is the contract: prePass
+    // runs features in registration order, so the skinning dispatch must register BEFORE the scene
+    // renderer, whose Voxi replay reads the vertex buffer this dispatch writes -- registered after,
+    // it reads unwritten data every frame.
     if (skinDrawTest_) {
         skinDraw_ = std::make_unique<aver::editor::SkinDrawTest>();
         if (skinDraw_->init(*e.device())) {
             e.device()->addRenderFeature(skinDraw_.get());
-            // The scene becomes exactly one object, so the probe reads the box or the sky and
-            // never an unrelated mesh that happens to sit behind it.
+            // Scene becomes exactly one object so the probe reads the box or sky, never an unrelated mesh.
             objects_.clear();
             sel_ = -1;
-            // The ground first, so it is behind the box in submission order as well as in
-            // depth. Pale and rough, because the assertion is about how much light reaches it.
+            // Ground first (behind the box in submission order and depth); pale/rough since the
+            // assertion is about how much light reaches it.
             MeshObj g;
             g.name = "SkinDrawTest.Ground";
             g.mesh = skinDraw_->ground();
@@ -1166,9 +1006,9 @@ void SandboxApp::onInit(Engine& e)  {
             o.aabbMax = Vec3{ 260,  260,  260};
             objects_.push_back(o);
 
-            // The ground probe is only an acceleration-structure test when ray tracing draws the
-            // shadow -- told rather than guessed, so the report says which question it answered.
-            // Whether RT is ON is the test's own schedule to drive: the experiment IS the toggle.
+            // Ground probe is only an acceleration-structure test when RT draws the shadow --
+            // told rather than guessed, so the report names which question it answered. Whether
+            // RT is on is the test's own schedule to drive: the experiment IS the toggle.
             skinDraw_->setRayTracingAvailable(e.device()->caps().rayTracingTier >= 11);
         } else {
             AVER_ERROR("[Skin] draw test unavailable on this device");
@@ -1182,80 +1022,63 @@ void SandboxApp::onInit(Engine& e)  {
         hd.scriptsDir = resolveScriptsDir();
         scripts_.init(hd);
 
-        // ANIMATION NOTIFIES: the editor wants this as much as a shipped game does (a clip
-        // previewed in Play mode should fire what it fires), and the sink survives every level/
-        // project reload, since AnimSystem::clear() drops clips and playheads without dropping the wire.
+        // Animation notifies: editor wants this as much as a shipped game (a Play-mode preview
+        // should fire what it fires); survives level/project reload since AnimSystem::clear() drops
+        // clips/playheads but not the wire.
         //
-        // THE WHOLE INSTALL NEEDS THE SCENE, not just the synapse half that already said so.
-        // aver::anim::animSystem() lives in Aver.Anim.Scene, which the root CMakeLists only adds
-        // inside `if(AVER_MODULE_SCENE)`, and the sink being installed -- animNotify -- takes a
-        // scene::Entity and is now declared under the same condition. A notify is a thing that
-        // happens TO AN ENTITY; with no entities there is nothing to route, so the sink is not
-        // installed rather than installed against a world that does not exist.
+        // Needs the scene, not just the synapse half: animSystem() lives in Aver.Anim.Scene (added
+        // only under AVER_MODULE_SCENE), and animNotify takes a scene::Entity. A notify happens TO
+        // an entity, so with no entities there's nothing to route -- the sink stays uninstalled.
 #if AVER_MODULE_SCENE
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&SandboxApp::animNotify, this);
 #if AVER_MODULE_SYNAPSE_SCENE
-            // The SAME sink as animNotify immediately above -- its body is just
-            // scripts_.graphFire(entity, name), nothing anim-specific, and PerceptionSystem's
-            // NotifyFn is byte-for-byte AnimNotifyFn's own signature (SynapsePerception.hpp).
+            // Same sink as animNotify above (just scripts_.graphFire(entity,name); NotifyFn matches
+            // AnimNotifyFn's signature byte-for-byte -- SynapsePerception.hpp). BT's FireEvent uses it too.
             synapse::perceptionSystem().setNotifySink(&SandboxApp::animNotify, this);
-            // The built-in "FireEvent" BT action reaches a graph the SAME way.
             synapse::btSystem().setNotifySink(&SandboxApp::animNotify, this);
 #endif
         }
 #endif  // AVER_MODULE_SCENE
 
-        // ANIMATION CURVES. The framework relays a query it cannot answer itself; this is where
-        // the answer comes from. Installed unconditionally -- unlike the notify sink it needs no
-        // scripting host, because a C++ caller can ask too.
-        //
-        // "UNCONDITIONALLY" MEANT "WITHOUT ASKING THE HOST", not "in every build": every
-        // aver_fw_* name in this run comes from aver/framework/framework_abi.h, which the header
-        // includes under `#if AVER_MODULE_FRAMEWORK`. The relay cannot exist without the thing
-        // relaying. Scripting is a separate option from the framework (module-matrix.ps1's
-        // scene-off row turns FRAMEWORK off and leaves SCRIPTING on), which is what exposed it.
+        // Animation curves: the framework relays a query it can't answer itself; this supplies the
+        // answer. Installed unconditionally (unlike the notify sink) since a C++ caller can ask too
+        // -- "unconditionally" means without asking the host, not in every build: aver_fw_* names
+        // only exist under AVER_MODULE_FRAMEWORK, a separate option from scripting (module-matrix.ps1's
+        // scene-off row turns FRAMEWORK off and leaves SCRIPTING on, which is what exposed it).
 #if AVER_MODULE_FRAMEWORK
         aver_fw_set_anim_curve_provider(&SandboxApp::animCurve, this);
 #endif
 
 #if AVER_MODULE_SYNAPSE_SCENE
-        // THE FRAMEWORK GUARD MOVED OUT to cover all three, because the two relays it did not
-        // cover are aver_fw_* names too -- it sat around the resolver alone, which reads as "the
-        // resolver is the framework-dependent one" when in fact it is the least so.
+        // Framework guard covers all three below: the two relays are aver_fw_* names too, not just
+        // the resolver (it used to sit around the resolver alone, reading as if the resolver were
+        // the framework-dependent one, when it's actually the least so).
 #if AVER_MODULE_FRAMEWORK
-        // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
-        // same reason and same placement as the anim-curve provider immediately above.
+        // GetSynapseTarget (Aver Node) reaches CSynapseAgent's waypoint through this -- same reason
+        // and placement as the anim-curve provider above.
         aver_fw_set_synapse_target_provider(&SandboxApp::synapseTarget, this);
-        // GetSynapsePerception (Aver Node) reaches CSynapsePerception's current sight state
-        // the same way.
+        // GetSynapsePerception (Aver Node) reaches CSynapsePerception's sight state the same way.
         aver_fw_set_synapse_perception_provider(&SandboxApp::synapsePerception, this);
-        // PerceptionSystem's own resolver seam (SynapsePerception.hpp), NOT a framework_abi.h
-        // relay -- see that header's own comment for why Aver.Synapse.Scene must not link
-        // Aver.Framework at all, so only a composition root (linking both) can answer this. It
-        // still needs the guard: synapseTargetResolver is itself declared under it.
+        // PerceptionSystem's own resolver seam (SynapsePerception.hpp), not a framework_abi.h relay:
+        // Aver.Synapse.Scene must not link Aver.Framework, so only a composition root (linking both)
+        // can answer this -- still needs the guard since synapseTargetResolver is declared under it.
         synapse::perceptionSystem().setTargetResolver(&SandboxApp::synapseTargetResolver, this);
 #endif
 #endif
 
-        // SAVE/LOAD, so a project can test its own save path in the editor rather than only in
-        // a shipped game -- which, given there is no packaged game today, is the only place it
-        // can be tested at all.
-        //
-        // BOTH CONDITIONS, not just the framework one the ABI call needs: saveWriteProvider and
-        // saveLoadProvider are the inline pair declared `#if AVER_MODULE_SCENE &&
-        // AVER_MODULE_FRAMEWORK` in the header (they save and load a whole scene::World through
-        // Aver.Save, which the root CMakeLists adds only with the scene on), so naming them here
-        // under a narrower condition than their own declaration would be the same inconsistency
-        // one level down.
+        // Save/load: lets a project test its save path in the editor rather than only in a
+        // shipped game (there is none today). Guarded on both conditions, not just the framework
+        // one the ABI call needs: saveWriteProvider/saveLoadProvider are declared `#if
+        // AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK` in the header (they save/load a whole
+        // scene::World through Aver.Save, itself scene-gated), so this must match.
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
         aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
 #endif
 
-        // Graph-as-class catch-up, for a project opened from the command line: applyProject's own
-        // "Starting scripts" stage already tries this, but a CLI project opens above this block,
-        // before the scripting host bootstraps, so scripts_.ready() was false and that attempt was
-        // a documented no-op. Both calls are idempotent, so calling them again here changes nothing.
+        // Graph-as-class catch-up for a CLI-opened project: applyProject's "Starting scripts" stage
+        // already tried this, but a CLI project opens before the scripting host bootstraps, so
+        // scripts_.ready() was false and that attempt was a no-op. Idempotent, so retrying here is safe.
 #if AVER_MODULE_FRAMEWORK
         if (scripts_.ready() && project_.valid()) {
             const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
@@ -1272,12 +1095,11 @@ void SandboxApp::onInit(Engine& e)  {
         // two hundred lines up, and shadowing it warned (C4456).
         const rhi::DeviceCaps caps = e.device()->caps();
 
-        // Virtualized geometry is on by default -- was opt-in behind --lod-mesh-shader, an
-        // indefensible default: pine_tree_01 is 17.18M triangles, and with the flag off the
-        // editor drew all of them at LOD0 (~258M triangles for "2 actors", 13 FPS). Auto (-1)
-        // decides from caps; the flag pins it either way.
-        // Decision moved to just before the project opens: it must precede applyProject, which
-        // loads meshes whose GPU cluster buffers are built only when this flag is already true.
+        // On by default now (was opt-in behind --lod-mesh-shader): pine_tree_01 is 17.18M
+        // triangles, and with the flag off the editor drew all of them at LOD0 (~258M triangles
+        // for "2 actors", 13 FPS). Auto (-1) decides from caps; the flag pins it either way. Decided just before the
+        // project opens since it must precede applyProject, whose mesh loads build GPU cluster
+        // buffers only when this flag is already true.
 
         voxi::DeviceInfo di;
         di.msaaMask = caps.msaaMask; di.maxMsaaSamples = caps.maxMsaaSamples;
@@ -1285,31 +1107,24 @@ void SandboxApp::onInit(Engine& e)  {
         di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
         di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
         di.dxcAvailable = caps.dxcAvailable;
-        // R1: computed only at this site and GameApp::attachVoxi's mirror, same expression both
-        // places -- see DeviceInfo::nrdSupported's own comment (Voxi.hpp) for why the struct only
-        // carries the answer rather than deriving it itself.
+        // R1: computed here and mirrored in GameApp::attachVoxi (same expression); see
+        // DeviceInfo::nrdSupported's comment (Voxi.hpp) for why the struct carries the answer
+        // rather than deriving it itself.
         di.nrdSupported = e.device()->backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available();
         voxi::Renderer::get().setDeviceInfo(di);
 
-        // THE PROJECT MANIFEST GOES IN HERE, BEFORE THE FLAGS AND BEFORE init().
-        //
-        // WHY BEFORE init(): init() calls createVoxelVolume(settings_.voxelResolution) and that
-        // is the ONLY place the volume is ever sized -- nothing in the renderer watches the field
-        // afterwards. The manifest used to arrive after init, via the post-attach
-        // applyProjectRenderSettings call, so every project ran the 128^3 default no matter what
-        // it asked for. PTTest states RENDER.VOXELRES 512 and ran a grid 64x smaller in every
-        // dimension, while the log said "applied render settings from ...". Seeding here means
-        // the volume is simply CREATED at the right size: no resize, no descriptor rebind, and
-        // no GPU resource recreated at a moment that could remove the device.
-        //
-        // WHY BEFORE THE FLAGS: `s` below is seeded FROM this singleton, and the flag block that
-        // follows writes over it. Putting the manifest first is what keeps "a flag is a human
-        // standing right there, a manifest is a recorded preference" true at startup, with no
-        // second precedence pass needed here -- the ordering does it. (applyProjectRenderSettings
-        // still runs its own take() pass later, for the mid-session project-open path where the
-        // flags were consumed long ago.)
-        //
-        // AFTER setDeviceInfo, because setSettings clamps against the device it is told about.
+        // Project manifest applied HERE: before the flags and before init(). Before init() because
+        // init() calls createVoxelVolume(settings_.voxelResolution) -- the only place the volume is
+        // ever sized. Seeding here means the volume is simply CREATED at the right size: no resize,
+        // no descriptor rebind, no GPU resource recreated at a moment that could remove the device.
+        // Arriving later (via the old post-attach applyProjectRenderSettings call) meant every
+        // project ran the 128^3 default regardless of what it asked for (PTTest's RENDER.VOXELRES
+        // 512 ran a grid 64x smaller while the log said "applied render settings from ..."). Before
+        // the flags because `s` below is seeded from this singleton and the flag block overwrites
+        // it -- ordering alone keeps "a flag is a human standing right there, a manifest is a
+        // recorded preference" true, no separate precedence pass needed.
+        // (applyProjectRenderSettings still runs its own take() later, for mid-session project-open.)
+        // After setDeviceInfo, since setSettings clamps against the device it's told about.
         applyProjectVoxiSettings();
 
         voxi::Settings s = voxi::Renderer::get().settings();
@@ -1318,50 +1133,43 @@ void SandboxApp::onInit(Engine& e)  {
         // --no-gi wins over --gi.
         if (giForceOff_)          s.globalIllumination = voxi::Quality::Off;
         else if (giOverride_ >= 0) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
-        // --no-rt wins over --rt, mirroring --no-gi above. No longer the ONLY way to reach Off --
-        // the tier overrides now use -1 for "not given", so `--rt 0` says it too -- but it stays
-        // since every existing script/gate config spells it this way.
+        // --no-rt wins over --rt (mirrors --no-gi). No longer the only way to reach Off (--rt 0
+        // does too, via the -1 "not given" sentinel), kept since existing configs spell it this way.
         if (rtForceOff_)          s.rayTracing = voxi::Quality::Off;
         else if (rtOverride_ >= 0) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
-        // Path tracing is its own tier, its own flag: gained one when ptBounces started gating on
-        // it, or --pt-bounces would be permanently inert in the automation context it's benchmarked
-        // in. No --no-pt; `--pt 0` turns the scene-suppressing path-traced view off.
+        // Path tracing is its own tier/flag: gained one when ptBounces started gating on it, or
+        // --pt-bounces would be inert where it's benchmarked. No --no-pt; `--pt 0` turns it off.
         if (ptOverride_ >= 0) s.pathTracing = static_cast<voxi::Quality>(ptOverride_);
         if (msOverride_) s.meshShaders = true;
-        // Applied to `s`, not voxiRenderer_ directly, and BEFORE the singleton below: setSettings()
-        // reruns every frame from voxi::Renderer::get().settings(), so a one-time poke would be
-        // overwritten. A negative count is reported, not cast-and-clamped (old warning read
-        // "4294967291 shadow rays clamped to 32").
-        // TIERS FIRST, IN THEIR OWN CALL: setSettings decides "did the caller set this" BY VALUE,
-        // so asking for the already-held value is indistinguishable from never asking, and the
-        // tier silently wins (`--rt 4 --rt-rays 1` measured the same 17.4ms as `--rt 4` alone).
-        // Two calls fixes it: apply tiers, read back, then apply explicit knobs in a SECOND call.
+        // Applied to `s`, not voxiRenderer_ directly, before the singleton below: setSettings() reruns every frame from
+        // voxi::Renderer::get().settings(), so a one-time poke would be overwritten. Negative counts
+        // are reported, not clamped (old warning: "4294967291 shadow rays clamped to 32").
+        // Tiers applied in their OWN call first: setSettings decides "did the caller set this" by
+        // value, so re-sending the already-held value is indistinguishable from not asking and the
+        // tier silently wins (`--rt 4 --rt-rays 1` measured the same 17.4ms as `--rt 4` alone). Two
+        // calls fixes it: tiers, read back, then explicit knobs in a second call.
         voxi::Renderer::get().setSettings(s);
         auto k = voxi::Renderer::get().settings();
         if (rtRaysOverride_ > 0) k.rtShadowRays = static_cast<u32>(rtRaysOverride_);
         else if (rtRaysOverride_ < 0)
             AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
                       rtRaysOverride_, k.rtShadowRays);
-        // >= 0, not > 0: 0 is a MEANING here (filter off), not "flag absent" -- the sentinel
-        // is -1, unlike its two neighbours whose valid range starts at 1.
+        // >=0 not >0: 0 means filter off here (sentinel is -1), unlike its two neighbours whose valid range starts at 1.
         if (rtShadowDenoiseOverride_ >= 0) k.rtShadowDenoise = static_cast<u32>(rtShadowDenoiseOverride_);
         if (rtRenderModeOverride_    >= 0) k.rtRenderMode    = static_cast<u32>(rtRenderModeOverride_);
         if (ptBouncesOverride_       >= 0) k.ptBounces       = static_cast<u32>(ptBouncesOverride_);
         if (layeredBsdfOverride_     >= 0) k.layeredBsdf     = static_cast<voxi::Quality>(layeredBsdfOverride_);
-        // IN THE SECOND CALL, and that is load-bearing rather than tidy: giSkyOcclusionRays is
-        // derived from the rayTracing tier on a tier CHANGE, and the block at the top of this
-        // function explains why a knob set during the FIRST call cannot be distinguished from one
-        // never set at all. >= 0 rather than > 0 because 0 means "use the cone gather's
-        // occlusion", not "flag absent".
+        // Load-bearing, not tidy, that this is in the SECOND call: giSkyOcclusionRays derives from
+        // the rayTracing tier on a tier change (see the two-call reasoning above). >=0 not >0
+        // because 0 means "use the cone gather's occlusion", not "flag absent".
         if (giSkyOccRaysOverride_ >= 0) k.giSkyOcclusionRays = static_cast<u32>(giSkyOccRaysOverride_);
         if (giSkyOccTileOverride_ >= 0) k.giSkyOcclusionTile = static_cast<u32>(giSkyOccTileOverride_);
         if (rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
         else if (rtPixelsPerRayOverride_ < 0)
             AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
                       rtPixelsPerRayOverride_, k.rtPixelsPerRayTile);
-        // Refraction's knobs go in the SECOND call for the reason the block above spells out:
-        // a tier is changing in the first, and refractionMode is tier-derived, so setting it
-        // there would be indistinguishable from not setting it and the tier would win.
+        // Refraction's knobs are in the SECOND call too: refractionMode is tier-derived, so setting
+        // it in the first (tier-changing) call would be indistinguishable from not setting it.
         if (refractionOverride_ >= 0)          k.refractionMode = static_cast<u32>(refractionOverride_);
         if (refractionStrengthOverride_ >= 0.0f) k.refractionStrength = refractionStrengthOverride_;
         if (refractionFadeOverride_ >= 0.0f)     k.refractionEdgeFade = refractionFadeOverride_;
@@ -1369,14 +1177,14 @@ void SandboxApp::onInit(Engine& e)  {
         else if (giUpdateIntervalOverride_ < 0)
             AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
                       giUpdateIntervalOverride_, k.giUpdateInterval);
-        // >= 0, not > 0: 0 is a real ESTIMATOR ("voxel cones"), not "flag not given" -- the
-        // sentinel is -1, same reasoning as rtShadowDenoiseOverride_ and giSkyOccRaysOverride_ above.
+        // >=0 not >0: 0 is a real estimator (voxel cones), not absent -- same -1-sentinel reasoning
+        // as rtShadowDenoiseOverride_ and giSkyOccRaysOverride_ above.
         if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
         // Same -1 sentinel reasoning: 0 is a real answer ("denoiser off"), not an absent flag.
         if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
-        // --reblur-accum N: the console's voxi.reblurMaxAccumulatedFrameNum, for a --frames run that
-        // has no console. No manifest key names it, and the manifest apply starts from the live
-        // settings, so setting it here once is enough; Voxi clamps it to NRD's own [0,63].
+        // --reblur-accum N: console's voxi.reblurMaxAccumulatedFrameNum, for a --frames run with no
+        // console. No manifest key names it; setting it here once is enough (manifest apply starts
+        // from live settings); clamped to NRD's [0,63].
         if (reblurAccumOverride_ >= 0) {
             k.reblurMaxAccumulatedFrameNum = static_cast<u32>(reblurAccumOverride_);
             AVER_INFO("[Voxi] --reblur-accum {}: REBLUR_DIFFUSE history depth", reblurAccumOverride_);
@@ -1385,8 +1193,7 @@ void SandboxApp::onInit(Engine& e)  {
         AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
         // Registration is non-owning: voxiRenderer_ must outlive the device, torn down in onShutdown.
-        // Read back from the singleton rather than reusing `s` directly, so this sees the same
-        // clamping voxi::Renderer::setSettings just applied.
+        // Read back from the singleton (not `s` directly) to see the clamping setSettings just applied.
         voxiRenderer_.setSettings(voxi::Renderer::get().settings());
         if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
         // Before init() below, which is where the pipelines -- and therefore the shader defines
@@ -1397,9 +1204,8 @@ void SandboxApp::onInit(Engine& e)  {
                       "This is a stopwatch for attributing PSRayDriven's cost, not a quality "
                       "setting -- see AVER_RD_ABLATE in voxi.hlsl.", rdAblate_);
         }
-        // Unlike --rd-ablate this is NOT a shader define, so it does not have to precede
-        // init() -- but it is set here anyway, beside its sibling, so both measurement
-        // dials are handed over in one place rather than one here and one somewhere else.
+        // Unlike --rd-ablate this isn't a shader define so needn't precede init(), but sits here
+        // beside its sibling so both measurement dials are handed over in one place.
         if (rtDenoiseMotionTaper_ > 0.0f) {
             voxiRenderer_.setRtDenoiseMotionTaper(rtDenoiseMotionTaper_);
             AVER_INFO("[Sandbox] --rt-denoise-motion {}: the shadow denoiser will fade out "
@@ -1412,9 +1218,9 @@ void SandboxApp::onInit(Engine& e)  {
             if (projectRenderPending_) applyProjectRenderSettings();
             if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
 #if AVER_WITH_IMGUI
-            // --import's deferred handshake, UI-only on purpose: importAsset belongs to the
-            // content-browser half of this file and calls cbIsEditable/cbInvalidate/importModel,
-            // which are the browser's own. A UI-less editor has no browser to import into.
+            // --import's deferred handshake, UI-only on purpose: importAsset calls
+            // cbIsEditable/cbInvalidate/importModel, the browser's own; a UI-less editor has no
+            // browser to import into.
             if (!importSrc_.empty() && !importDone_) {
                 importDone_ = true;
                 importAsset(importSrc_, importDst_);
@@ -1423,15 +1229,12 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_PBR
             content_.setTextureFactory(e.device()->resources());
             voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
-            // THE SAME RESOLVER, HANDED TO THE ASSET TABS' SHARED PREVIEW. It is the identical
-            // function and the identical GameContent, because a mesh's material must look the same
-            // in an asset tab as it does in the level -- two resolvers would be two answers to
-            // "what texture is this", and the one nobody is watching drifts.
-            //
-            // WITHOUT THIS THE PREVIEW SAMPLES ITS OWN IDENTITY TEXTURES and every material it
-            // shades comes out white, which is exactly the bug the animation editor's blank mesh
-            // turned out to be. Set here rather than inside the preview because the resolver needs
-            // content_, and ActorEditor.cpp has no business knowing what a project is.
+            // Same resolver, handed to the asset tabs' shared preview: identical function/
+            // GameContent so a mesh's material looks the same in a tab as in the level -- two
+            // resolvers would be two answers that silently drift. Without this the preview samples
+            // its own identity textures and shades white (the animation editor's blank-mesh bug).
+            // Set here, not in the preview, since the resolver needs content_ and ActorEditor.cpp
+            // shouldn't know what a project is.
             editor::setPreviewTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
             editor::setPreviewMaterialLookup(
                 [](const std::string& surface, void* user) -> u32 {
@@ -1449,26 +1252,23 @@ void SandboxApp::onInit(Engine& e)  {
     if (gameUi_) e.device()->addRenderFeature(gameUi_);
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-    // NOT an IRenderFeature: it has no prePass/scenePass, only two methods
-    // renderSceneEntities() calls directly from the CPU entity walk. Built unconditionally: cheap
-    // to own, and every call it drives is already gated on occlusionCullEnabled_.
+    // Not an IRenderFeature: no prePass/scenePass, just two methods renderSceneEntities() calls
+    // directly. Built unconditionally (cheap); every call is already gated on occlusionCullEnabled_.
     if (rhi::IResourceFactory* occRes = e.device()->resources()) {
         occluder_ = aver::occlusion::createOcclusionCuller(*occRes);
-        // --occlusion-waitidle's seed, applied once here and reasserted every frame from onUpdate
-        // (see occlusionDebugForceWaitIdleArg_'s own comment) -- editor::
-        // consoleOcclusionForceWaitIdleSlot() is EditorConsole.hpp's live source of truth from
-        // this point on, so a console `set occlusion.debugForceWaitIdle` and this CLI flag are the
-        // exact same switch, not two that can disagree.
+        // --occlusion-waitidle's seed, applied once here and reasserted every frame from onUpdate.
+        // editor::consoleOcclusionForceWaitIdleSlot() (EditorConsole.hpp) is the live source of truth
+        // from here on, so a console `set occlusion.debugForceWaitIdle` and this CLI flag are the
+        // same switch, not two that can disagree.
         editor::consoleOcclusionForceWaitIdleSlot() = occlusionDebugForceWaitIdleArg_;
         occluder_->setDebugForceWaitIdle(occlusionDebugForceWaitIdleArg_);
-        // Warmed up here, not on first per-frame call -- a safety requirement. ensureSized()
-        // builds the module's three compute pipelines, and D3D12RenderContext caches the bound
-        // pipeline as a raw pointer (pipe_): a push_back reallocating while another feature's
-        // pointer rests on the old array is a dangling-pointer read. Calling it lazily from the
-        // scene walk corrupted Voxi's cached pointer mid-frame and crashed the driver's shader
-        // compiler. Warming up before Engine::run's first beginFrame() means nothing has a live
-        // pointer into pipelines_ yet. A later resize still rebuilds the pyramid lazily -- accepted,
-        // since resizes are rare and user-driven.
+        // Warmed up here, not on first per-frame call: a safety requirement, not tidiness.
+        // ensureSized() builds 3 compute pipelines; D3D12RenderContext caches the bound pipeline as
+        // a raw pointer (pipe_), so a push_back reallocating while another feature's pointer rests
+        // on the old array is a dangling read -- calling this lazily from the scene walk once
+        // corrupted Voxi's cached pointer mid-frame and crashed the driver's shader compiler. Doing
+        // it before Engine::run's first beginFrame() means nothing yet holds a live pointer. A later
+        // resize still rebuilds the pyramid lazily -- accepted, since resizes are rare and user-driven.
         rhi::TextureDesc occSceneDesc;
         if (const rhi::TextureHandle occDepth = e.device()->sceneDepthTexture();
             occDepth && occRes->textureInfo(occDepth, occSceneDesc)) {
@@ -1478,18 +1278,17 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    // Registered unconditionally (like skinnedScene_ above): a project's own CParticleEmitter
-    // placements must draw without a command-line flag. Both the system and the effect library are
-    // process-global singletons, so registerEffect() anywhere reaches whatever ticks it.
+    // Registered unconditionally (like skinnedScene_ above): a project's CParticleEmitter
+    // placements must draw with no CLI flag. System and effect library are process-global
+    // singletons, so registerEffect() anywhere reaches whatever ticks it.
     particles::particleSystem().setEffectLibrary(&particles::particleEffects());
     if (particleRenderer_.init(*e.device())) {
         particleRenderer_.setSystem(&particles::particleSystem());
         e.device()->addRenderFeature(&particleRenderer_);
         particlesAttached_ = true;
 #if AVER_MODULE_VOXI
-        // DECIDED 4's seam, installed only once Voxi has attached (voxiAttached_) -- see
-        // particleGiPrepare/particleGiBind. particleRenderer_ never learns Voxi's name; this is the
-        // one call site handing it a way to reach it. --no-particle-gi skips just this line.
+        // Installed only once Voxi has attached (voxiAttached_) -- see particleGiPrepare/
+        // particleGiBind. particleRenderer_ never learns Voxi's name; --no-particle-gi skips this line.
         if (voxiAttached_ && !noParticleGi_) {
             particles::ParticleRenderer::GiSeam seam;
             seam.prepare = &SandboxApp::particleGiPrepare;
@@ -1503,13 +1302,11 @@ void SandboxApp::onInit(Engine& e)  {
     }
 
 #if AVER_MODULE_FLUIDS
-    // Water, registered on the same terms as everything else here: if init fails the editor is
-    // unaffected and simply has no water, because HLSL is compiled at RUNTIME and can fail on a
-    // machine whose build was perfectly green.
+    // Water, registered on the same terms as everything else here: failed init just means no water
+    // (HLSL compiles at RUNTIME and can fail on a machine whose build was perfectly green).
     if (waterEnabled_) {
-        // A default swell rather than a flat mirror: four waves at spread headings, so the
-        // surface reads as water immediately. Wavelengths are deliberately non-multiples of one
-        // another -- harmonic ones re-phase into a visibly repeating tile.
+        // Default swell (not a flat mirror): 4 waves at spread headings so it reads as water
+        // immediately. Wavelengths deliberately non-harmonic -- multiples re-phase into a visible tile.
         fluids::GerstnerWave waves[4];
         const f32 dirs[4][2] = {{1.0f, 0.15f}, {0.6f, -0.8f}, {-0.3f, 0.95f}, {-0.85f, -0.5f}};
         const f32 lengths[4] = {1450.0f, 890.0f, 520.0f, 310.0f};
@@ -1522,10 +1319,9 @@ void SandboxApp::onInit(Engine& e)  {
             waves[i].steepness    = 0.75f;
         }
         if (water_.attachSurface(*e.device(), waterHeightCm_, waves, 4)) {
-            // The simulated surface is the same number as the rendered one -- two independent
-            // heights would look like broken buoyancy rather than a mismatch, so the plane is set
-            // from water_'s own level. Guarded on PHYSICS, not just fluids: rendering a
-            // surface and giving things something to float on are different capabilities.
+            // Plane set from water_'s own level, not a second number: two independent heights would
+            // look like broken buoyancy. Guarded on PHYSICS too: rendering water and floating on
+            // it are different capabilities.
 #if AVER_MODULE_PHYSICS
             const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
             const f32 current[3] = {0.0f, 0.0f, 0.0f};
@@ -1542,9 +1338,8 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
     }
 
-    // --particle-test: a dust cloud straddling an opaque cube, so the transparent pass's own
-    // depth test is visible in one screenshot -- some particles nearer the camera than the cube,
-    // some farther and hidden behind it.
+    // --particle-test: dust cloud straddling an opaque cube so the transparent pass's depth test
+    // shows in one screenshot -- some particles nearer the camera, some farther and occluded.
     if (particleTest_) {
         objects_.clear();
         sel_ = -1;
@@ -1560,9 +1355,8 @@ void SandboxApp::onInit(Engine& e)  {
         occluderCube.aabbMax = Vec3{688.0f,  88.0f, 138.0f};
         objects_.push_back(occluderCube);
 
-        // A slow-drifting dust cloud spanning well in front of AND behind the cube along the
-        // camera's forward axis (+X) -- that spread is what makes the occlusion visible in a single
-        // static frame, without needing the camera or particles to move.
+        // Dust cloud spans well in front of AND behind the cube along the camera's forward axis
+        // (+X) -- that spread makes occlusion visible in one static frame, no motion needed.
         particles::ParticleEffect fx;
         fx.shape = particles::EmitterShape::Box;
         fx.shapeSize = Vec3{350.0f, 60.0f, 90.0f};
@@ -1596,9 +1390,9 @@ void SandboxApp::onInit(Engine& e)  {
         AVER_INFO("[Particles] --particle-test: dust cloud entity {} around effect 0x{:016X}",
                   emitter, kDustCloudEffectId);
 
-        // A second emitter, proving the opposite half of the seam: embers that ARE their own
-        // light source (receivesGI=false, additive), placed beside the cube so they never overlap
-        // the dust. If the dust's brightness changes under --no-particle-gi and this doesn't, that's the seam working.
+        // Second emitter proves the opposite half of the seam: embers ARE their own light source
+        // (receivesGI=false, additive), placed beside the cube so they never overlap the dust. If
+        // dust brightness changes under --no-particle-gi and embers don't, the seam works.
         particles::ParticleEffect emberFx;
         emberFx.shape = particles::EmitterShape::Sphere;
         emberFx.shapeSize = Vec3{10.0f, 0.0f, 0.0f};
@@ -1622,12 +1416,11 @@ void SandboxApp::onInit(Engine& e)  {
         constexpr u64 kEmberEffectId = 0x50415254'45420001ull;   // arbitrary, non-zero
         particles::particleEffects().set(kEmberEffectId, emberFx);
 
-        // High above the dust cloud's own top, clear of its footprint, so the two effects never
-        // overlap. Open sky, no occluder behind it -- deliberate: this placement first exposed the
-        // transparent-pass/sky ordering bug the reorder in D3D12Device::endFrame fixed (a particle
-        // with no opaque depth behind it was silently overdrawn by the sky's depth-EQUAL-clear
-        // fill). Left here rather than beside the cube: an emitter with nothing opaque behind it is
-        // the common case and must render correctly without one.
+        // High above the dust cloud, clear of its footprint, so the two effects never overlap. Open sky, no occluder behind it --
+        // deliberate: this placement first exposed the transparent-pass/sky ordering bug fixed in
+        // D3D12Device::endFrame (a particle with no opaque depth behind it was silently overdrawn
+        // by the sky's depth-EQUAL-clear fill). Kept here since that's the common case and must
+        // render correctly.
         Transform emberXf;
         emberXf.position = occluderCube.pos + Vec3{0.0f, 0.0f, 220.0f};
         const scene::Entity emberEmitter =
@@ -1639,10 +1432,10 @@ void SandboxApp::onInit(Engine& e)  {
         AVER_INFO("[Particles] --particle-test: ember entity {} around effect 0x{:016X} (receivesGI=false)",
                   emberEmitter, kEmberEffectId);
     }
-    // --particle-stress <N> <M>: VERIFICATION-ONLY test content for the parity-and-price pass.
-    // One fog/mist effect referenced by N emitter entities on a grid, each capped at M particles,
-    // so emitter count and per-emitter count can each be varied independently to price the system.
-    // No weapon vocabulary, no occluder: this measures cost, not the depth test --particle-test already proved.
+    // --particle-stress <N> <M>: verification-only test for the parity-and-price pass. One fog/mist
+    // effect referenced by N grid emitters, each capped at M particles, so emitter count and
+    // per-emitter count vary independently. No occluder: measures cost, not the depth test
+    // --particle-test already proved.
     else if (particleStressEmitters_ > 0) {
         objects_.clear();
         sel_ = -1;
@@ -1652,13 +1445,12 @@ void SandboxApp::onInit(Engine& e)  {
         fx.shapeSize = Vec3{350.0f, 60.0f, 90.0f};
         fx.emissionRate = 150.0f;   // a steady fog/mist emission rate, not a weapon effect
         fx.maxParticles = static_cast<u32>(particleStressMaxParticles_ > 0 ? particleStressMaxParticles_ : 400);
-        // PRICE MEASUREMENT: burst the whole cap on frame 1 so steady-state population (and its
-        // CPU/GPU cost) is reached immediately, instead of waiting emissionRate-many seconds for
-        // the accumulator to fill it -- a --particle-stress-only choice, not authored-effect data.
+        // Price measurement: bursts the whole cap on frame 1 so steady-state cost is reached
+        // immediately instead of waiting emissionRate-many seconds -- stress-harness-only choice,
+        // not authored-effect data.
         fx.burstCount = fx.maxParticles;
-        // PRICE MEASUREMENT: a long, near-constant lifetime keeps the burst-filled population
-        // steady for the whole capture window instead of decaying mid-run, which would contaminate
-        // the price with a shrinking population -- a stress-harness-only choice.
+        // Price measurement: long near-constant lifetime keeps the burst-filled population steady
+        // for the whole capture window instead of decaying and shrinking mid-run.
         fx.lifetimeMin = 120.0f;
         fx.lifetimeMax = 120.0f;
         fx.direction = Vec3{0.0f, 0.0f, 1.0f};
@@ -1696,9 +1488,8 @@ void SandboxApp::onInit(Engine& e)  {
         AVER_INFO("[Particles] --particle-stress: {} emitter(s), {} max particles each, effect 0x{:016X}",
                   n, fx.maxParticles, kStressEffectId);
 
-        // --particle-stress2: VERIFICATION-ONLY, adds a second, differently-blended (additive)
-        // small sparks-like emitter alongside the box mist above, so the price measurement can
-        // also cover a scene mixing both blend pipelines in one frame, not just one.
+        // --particle-stress2: verification-only; adds a second, additive sparks-like emitter beside
+        // the mist so the price measurement covers both blend pipelines mixed in one frame.
         if (particleStressSecondEmitter_) {
             particles::ParticleEffect fx2;
             fx2.shape = particles::EmitterShape::Sphere;
@@ -1737,29 +1528,29 @@ void SandboxApp::onInit(Engine& e)  {
     }
 #endif
 
-    // --skin-test: the GPU skinning pass against its CPU reference, on this machine's real
-    // device. Registered only when asked for (costs a waitIdle); typically run alongside
-    // --debug-layer, which catches a malformed descriptor as opposed to a wrong number.
+    // --skin-test: GPU skinning pass against its CPU reference, on the real device. Registered
+    // only when asked for (costs a waitIdle); typically run alongside --debug-layer, which catches
+    // a malformed descriptor as opposed to a wrong number.
     if (skinTest_) {
         skinSelfTest_ = std::make_unique<aver::render::SkinSelfTest>();
         if (skinSelfTest_->init(*e.device())) e.device()->addRenderFeature(skinSelfTest_.get());
         else { AVER_ERROR("[Skin] self-test unavailable on this device"); skinSelfTest_.reset(); }
     }
 
-    // --pt-furnace: does the PATH TRACER conserve energy? It brings its own geometry,
-    // acceleration structures and accumulators; the editor only supplies the furnace itself
-    // (setFurnaceTest put SkyAtmosphere::furnaceRadiance on, read through skyColor()).
+    // --pt-furnace: does the path tracer conserve energy? Brings its own geometry/acceleration
+    // structures/accumulators; the editor only supplies the furnace (setFurnaceTest puts
+    // SkyAtmosphere::furnaceRadiance on, read through skyColor()).
     if (ptFurnaceTest_) {
         ptFurnace_ = std::make_unique<aver::pt::PtFurnaceTest>();
         if (ptFurnace_->init(*e.device())) e.device()->addRenderFeature(ptFurnace_.get());
         else { AVER_ERROR("[PT] furnace unavailable on this device"); ptFurnace_.reset(); }
     }
 
-    // --pt-scene: the path tracer pointed at the REAL scene instead of the furnace's own private
-    // geometry -- a progressive, still-camera reference view that SUPPRESSES the raster scene
-    // while registered (sky plus one authored sun, static geometry, flat albedo only -- see
-    // PtSceneView.hpp). setPtSceneView() already set ptSceneViewWantEnabled_; this call turns that
-    // want into a registration, the same path the Path Tracing Quality combo uses later.
+    // --pt-scene: path tracer pointed at the REAL scene instead of the furnace's private geometry
+    // -- a progressive still-camera reference that suppresses the raster scene while registered
+    // (sky + one sun, static geometry, flat albedo -- PtSceneView.hpp). setPtSceneView() already set
+    // ptSceneViewWantEnabled_; this call turns that want into a registration, same path the Path
+    // Tracing Quality combo uses later.
     syncPtSceneView(e.device());
 
         tools_.setAutoCompileFlag(autoCompileFlag());
@@ -1774,10 +1565,8 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SCENE
     framedByLevel = !levelEntities_.empty();
 #endif
-    // A RESTORED CAMERA COUNTS AS FRAMED, or the default view below would throw it away. The
-    // entity test alone is not enough: a level can carry a CAMERA record and no placements at
-    // all -- an empty level somebody has started laying out is exactly that -- and without this
-    // the restore would be silently overwritten by the 700,700,450 fallback one line later.
+    // A restored camera counts as framed too, or the default view below would discard it: a level
+    // can carry a CAMERA record with no placements (an empty level being laid out).
     if (levelCameraRestored_) framedByLevel = true;
     if (!framedByLevel) {
         camPos_ = Vec3{700.0f, 700.0f, 450.0f};
@@ -1794,27 +1583,19 @@ void SandboxApp::onInit(Engine& e)  {
     }
 }
 
-// KEEPS THE TITLE BAR IN STEP WITH THE OPEN LEVEL. Before 2026-09-16 applyProject
-// (SandboxProject.cpp) set the title exactly once, to the project's name, and nothing ever
-// touched it again -- so two different levels in the same project showed the same title, and a
-// level with unsaved edits looked identical to one just saved. Called once a frame from onUpdate.
-//
-// NO PROJECT OPEN: LEAVES THE TITLE ALONE. There is nothing to build a level-qualified title
-// from, and BootConfig already put a sensible default there (see the constructor's `c.windowTitle`).
+// Keeps the title bar in step with the open level (called once a frame from onUpdate). Before
+// 2026-09-16, applyProject (SandboxProject.cpp) set the title once to the project's name and never
+// touched it again, so different levels -- and unsaved edits -- looked identical. No project open:
+// leaves the title alone; BootConfig's constructor default (`c.windowTitle`) already covers that case.
 void SandboxApp::refreshWindowTitle(Engine& e) {
     if (!e.window() || !project_.valid()) return;
-    // levelName_ FIRST: it is the level's own declared name (the world's `name` field on load, or
-    // what Save As just wrote it to), so it survives a level that has moved on disk since. Only a
-    // level that has never set one falls back to the saved file's stem -- and a level that has
-    // neither yet (a brand new, never-saved one) reads as "untitled", matching every other place
-    // in this file that names an unnamed level (see the exit prompt and Save Level As, both in
-    // SandboxShell.cpp).
+    // levelName_ first (the world's `name` field, survives the level moving on disk); falls back
+    // to the saved file's stem, then "untitled" for a never-saved level -- matching the exit prompt
+    // and Save Level As (SandboxShell.cpp).
     //
-    // THE LEVEL HALF IS GUARDED, the project half is not, and that split is the honest one: both
-    // levelName_ and levelPath_ are declared `#if AVER_MODULE_SCENE` beside levelEntities_, because
-    // every verb that can set either of them -- load, Save As, New Level -- is guarded there too.
-    // A tree with no scene can never have a level open, so it shows the project-only title this
-    // function was written to replace, rather than a permanent "untitled" naming nothing.
+    // Level half guarded, project half not: levelName_/levelPath_ are `#if AVER_MODULE_SCENE`
+    // (every verb that sets them -- load, Save As, New Level -- is too). A scene-less tree can
+    // never have a level open, so it falls back to the project-only title this function replaced.
     std::string title = "Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name;
 #if AVER_MODULE_SCENE
     std::string display = levelName_;
@@ -1834,18 +1615,15 @@ void SandboxApp::refreshWindowTitle(Engine& e) {
 
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
-    // --set NAME VALUE: applied once, at frame 5 rather than frame 1. The project's own
-    // RENDER.* apply runs during startup and would overwrite anything staged before it, so a
-    // capture's dials have to land AFTER that -- and a handful of frames costs nothing in a run
-    // long enough to measure a temporal artifact. runConsoleLine is the console's own entry point,
-    // so a --set takes exactly the text the drawer takes, and reports the same errors to the log.
-    //
-    // WHICH IS ALSO WHY IT IS GUARDED: "the console's own entry point" means runConsoleLine is
-    // part of the console, declared and defined `#if AVER_WITH_IMGUI` (SandboxShell.cpp). That
-    // macro is defined only when Aver.RHI.D3D12.ImGui is built, so -DAVER_RHI_D3D12=OFF takes the
-    // editor UI down with the backend and leaves this call naming nothing. The flag is still
-    // PARSED either way, and the #else says so rather than dropping a caller's dials in silence --
-    // the same choice waterEnabled_ makes for --water.
+    // --set NAME VALUE: applied once, at frame 5 not frame 1, since the project's own RENDER.*
+    // apply runs during startup and would overwrite anything staged earlier -- a handful of frames
+    // costs nothing in a run long enough to measure a temporal artifact. runConsoleLine is the
+    // console's own entry point, so a --set takes the same text the drawer takes and reports the
+    // same errors.
+    // Guarded because runConsoleLine is part of the console (`#if AVER_WITH_IMGUI`, SandboxShell.cpp),
+    // defined only when Aver.RHI.D3D12.ImGui is built, and disappears with -DAVER_RHI_D3D12=OFF; the
+    // flag is still PARSED either way, and the #else logs that rather than dropping the caller's
+    // dials in silence (same choice as waterEnabled_).
 #if AVER_WITH_IMGUI
     if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
         consoleSetsApplied_ = true;
@@ -1861,33 +1639,29 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                   consoleSets_.size());
     }
 #endif
-    // FIRST in the frame, so everything downstream (view matrix, gPrevViewProj reprojection,
-    // shadow history) sees one consistent camera. Latched base yaw rather than accumulating onto
-    // yaw_: accumulating would drift with floating-point error and never return exactly to the start.
-    // Set inside `#if AVER_MODULE_VOXI` just below, beside setViewDebug -- a build without the
-    // module never reaches that block, so this stays false and the post-process push far below
-    // (which runs unconditionally) never applies the debug-view exposure override.
+    // First in the frame so everything downstream (view matrix, gPrevViewProj reprojection, shadow
+    // history) sees one consistent camera; latched base yaw rather than accumulated onto yaw_
+    // (accumulating drifts with float error and never returns exactly to start).
+    // debugViewActiveThisFrame is set inside `#if AVER_MODULE_VOXI` below, beside setViewDebug -- a
+    // build without the module never reaches that block, so it stays false and the post-process
+    // push far below (which runs unconditionally) never applies the debug-view exposure override.
     bool debugViewActiveThisFrame = false;
 #if AVER_MODULE_VOXI
-    // THE VIEW MODE REACHES VOXI FROM onUpdate, NOT FROM THE SCENE PASS, and the difference
-    // is the whole reason unlit did nothing under ray-driven. Its twin, device()->setUnlit,
-    // is set and cleared around the scene draw because that flag rides per-draw state and
-    // would otherwise leak into editor chrome. Voxi does not read it per draw: it composes
-    // its frame constants in prePass, which the engine runs inside beginFrame -- BEFORE
-    // onRender. Setting it there meant prePass always read the value the previous frame had
-    // just cleared, so gViewParams.x was permanently 0 and PSRayDriven never took the branch.
-    // No clear is needed here for the same reason: nothing else draws through this pass.
+    // View mode reaches Voxi from onUpdate, NOT the scene pass -- the whole reason unlit did
+    // nothing under ray-driven. Its twin, device()->setUnlit, is set/cleared around the scene draw
+    // since that flag rides per-draw state and would leak into editor chrome; Voxi instead composes
+    // its frame constants in prePass (which beginFrame runs before onRender), so setting it there
+    // meant prePass always read last frame's already-cleared value (gViewParams.x stuck at 0,
+    // PSRayDriven never branching). No clear needed here: nothing else draws through this pass.
     voxiRenderer_.setUnlit(unlit_);
-    // debugView_'s own twin: Wireframe/a G-buffer debug view need the rasteriser, so a ray-hit/
-    // triangles debug view can only actually draw while ray-driven primary visibility is both
-    // selected AND available -- see ViewDebug's and setViewDebug's own comments
-    // (VoxiRenderer.hpp). Reasserted HERE, beside setUnlit, for the identical "before prePass"
-    // reason its comment above gives. The onUpdate scratch-copy block further down (this frame's
-    // Voxi settings) recomputes the SAME two conditions, independently, to decide vs.rtRenderMode
-    // -- see that block's own comment for why this is not simply read back from there instead.
+    // debugView_'s twin: wireframe/G-buffer debug need the rasteriser, so a ray-hit/triangles debug
+    // view can only draw while ray-driven primary visibility is selected AND available (see
+    // ViewDebug/setViewDebug, VoxiRenderer.hpp). Reasserted here, beside setUnlit, for the same
+    // "before prePass" reason. The scratch-copy block further down recomputes these two conditions
+    // independently for vs.rtRenderMode; see that block's comment for why it isn't read back from here instead.
     const bool viewModeNeedsRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
-    // A raster-only mode wins and CLEARS a ray-hit/triangles view rather than merely outranking it:
-    // wireframe_ can also be ticked from Settings and Preferences, which know nothing of debugView_,
+    // A raster-only mode CLEARS a ray-hit/triangles view rather than merely outranking it:
+    // wireframe_ can be ticked from Settings/Preferences too, which know nothing of debugView_,
     // and leaving it set would keep its name on the dropdown button over a raster frame.
     if (viewModeNeedsRaster) debugView_ = voxi::VoxiRenderer::ViewDebug::None;
     const bool viewModeNeedsRayDriven = !viewModeNeedsRaster &&
@@ -1895,11 +1669,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     voxiRenderer_.setViewDebug(viewModeNeedsRayDriven ? debugView_ : voxi::VoxiRenderer::ViewDebug::None);
     debugViewActiveThisFrame = viewModeNeedsRayDriven;
 #endif
-    // --cam-wobble-stop N: the wobble above runs only while the frame counter is below N, then the
-    // camera simply stays where that last update left it. Measuring an artifact that appears WHILE
-    // the camera moves and decays AFTER it stops needs both halves in one deterministic run: a
-    // capture at frame N+k is then "k frames after motion ended", which no continuous wobble can
-    // express. 0 (the default) leaves --cam-wobble exactly as it was.
+    // --cam-wobble-stop N: wobble runs only below frame N, then the camera holds. Measuring an
+    // artifact that appears WHILE moving and decays AFTER stopping needs both in one deterministic
+    // run ("k frames after motion ended"). 0 (default) leaves --cam-wobble unchanged.
     if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0 &&
         (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
@@ -1907,92 +1679,76 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         yaw_ = camWobbleBaseYaw_ + camWobbleDeg_ * 0.01745329252f * std::sin(phase);
     }
     // --cam-translate SPEED: see setCamTranslate's own comment. One fixed step per frame along
-    // whatever camForward() is THIS frame (after the wobble update above, so the two compose),
-    // so occlusion relationships -- what is in front of what -- change every frame instead of
-    // just the screen-space position of the same relationships a pure yaw wobble produces.
-    // --cam-wobble-stop N stops this too, not just the yaw above: "the camera stopped" has to mean
-    // ALL of its motion, or a capture after the stop frame is still translating and measures
-    // nothing about what decays once motion ends.
+    // this frame's camForward() (after the
+    // wobble update, so the two compose), so occlusion relationships change frame to frame instead
+    // of just their screen-space position under a pure yaw wobble. --cam-wobble-stop N stops this
+    // too: "the camera stopped" must mean ALL motion, or a post-stop capture still measures nothing useful.
     if (camTranslateSpeed_ != 0.0f &&
         (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         camPos_ += camForward() * camTranslateSpeed_;
     }
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-    // --no-occlusion-cull: see setOcclusionCullForceOff's own comment for why this cannot be a
-    // one-shot CLI setter -- applyProjectVoxiSettings rewrites occlusionCullEnabled_ from the
-    // manifest during project/level load, which happens after every CLI setter has already run.
-    // Reasserted every frame here, which also means it wins back over a LATER --open-level or
-    // project reload mid-run, not just the first one.
+    // --no-occlusion-cull: see setOcclusionCullForceOff's own comment for why it can't be a
+    // one-shot CLI setter -- applyProjectVoxiSettings rewrites
+    // occlusionCullEnabled_ from the manifest during project/level load, after CLI setters have run.
+    // Reasserted every frame so it also wins back over a later --open-level or project reload.
     if (occlusionCullForceOff_) occlusionCullEnabled_ = false;
-    // --occlusion-waitidle / occlusion.debugForceWaitIdle: reasserted every frame for the same
-    // reason -- and so a console `set` this frame is live on occluder_ before this SAME frame's
-    // testBatch() call runs (occlusionBuildAndTest() below onUpdate returns), not one frame late.
+    // --occlusion-waitidle/occlusion.debugForceWaitIdle: reasserted every frame so a console `set`
+    // this frame is live on occluder_ before this frame's testBatch() call (occlusionBuildAndTest(),
+    // below), not one frame late.
     if (occluder_) occluder_->setDebugForceWaitIdle(editor::consoleOcclusionForceWaitIdleSlot());
-    // 3B (occlusion-fix-plan.md): occlusion.showCulled / occlusion.cullUnderSuppression, read
-    // every frame beside debugForceWaitIdle's own reassertion just above, for the same reason --
-    // so a console `set` this frame is live for THIS SAME frame's onRender walk
-    // (chooseRoute()/occlusionTestShouldRun(), aver/game/SceneSubmission.hpp) rather than one frame
-    // late.
+    // 3B (occlusion-fix-plan.md): occlusion.showCulled/occlusion.cullUnderSuppression, read every
+    // frame for the same reason, so a console `set` is live for this frame's onRender walk
+    // (chooseRoute()/occlusionTestShouldRun(), SceneSubmission.hpp), not one frame late.
     occlusionShowCulled_ = editor::consoleOcclusionShowCulledSlot();
     occlusionCullUnderSuppression_ = editor::consoleOcclusionCullUnderSuppressionSlot();
 #endif
-    // Single-instance forwarding, drain. Polled rather than an Event (Event.hpp is a fixed POD
-    // with no string field), latched on window_ and drained unconditionally every frame -- safe
-    // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
+    // Single-instance forwarding, drain. Polled rather than an Event (fixed POD, no string field),
+    // drained unconditionally every frame -- safe since pumpEvents() runs BEFORE onUpdate and
+    // WM_COPYDATA is synchronous on this thread.
     maybeAutosave(t.dt);
     maybeAutosavePrefs(t.dt);
-    // Reasserted every frame, like the autosave calls just above: cheap when nothing about the
-    // level's name or dirty state has changed, since it only touches the window when the built
-    // string actually differs from what is already shown.
+    // Reasserted every frame like the autosave calls above; cheap since it only touches the window
+    // when the built string differs from what's shown.
     refreshWindowTitle(e);
 #if AVER_MODULE_SCENE
     // See multiStale(): anything that moved the anchor without touching the set means the
-    // selection collapsed to one, and this is where that is made true rather than merely
-    // believed.
+    // selection collapsed to one; this is where that is made true rather than merely believed.
     multiSyncToAnchor();
 #endif
-    // Project settings follow the same rule preferences do now: an edit reaches the file
-    // without anybody having to find a button.
+    // Project settings follow the same rule preferences do now: an edit reaches the file without
+    // anybody having to find a button.
     maybeAutosaveProject(t.dt);
-    // ONE LINE, ONCE, and not before frame 2. applyProject's scripting stage and
-    // spawnClassPlacements both run during startup, so a census taken on the first frame would
-    // report a world that is still filling -- and would then differ from the game's for a
-    // reason that is about timing rather than about content.
+    // One line, once, not before frame 2: applyProject's scripting stage and spawnClassPlacements
+    // both run during startup, so a frame-1 census would report a still-filling world, differing
+    // from the game's for a reason that's about timing, not content.
 #if AVER_MODULE_SCENE
     if (sceneCensus_ && !sceneCensusDone_ && t.frame >= 2) {
         sceneCensusDone_ = true;
-        // playerStart_ is excluded: the editor synthesises that marker from the level's SPAWN
-        // record and the shipped game does not, so counting it would report a divergence that is
-        // really the editor doing its job. See takeSceneCensus' own comment.
+        // playerStart_ excluded: the editor synthesises that marker from the level's SPAWN record
+        // but the shipped game doesn't, so counting it would be a false divergence. See
+        // takeSceneCensus' own comment.
         AVER_INFO("[Census] {}",
                   world::formatSceneCensus(
                       world::takeSceneCensus(scene::World::instance(), playerStart_)));
     }
 #endif
 #if AVER_MODULE_SCENE
-    // --save-level <out>: write the OPEN level to another path and log the result.
-    //
-    // saveLevel had no caller but a mouse click -- Ctrl+S, the File menu and the toolbar button
-    // -- so nothing could prove a round trip headlessly, which is the same gap the four project
-    // flags were added to close. Writes ELSEWHERE rather than over levelPath_, so proving the
-    // save never costs the content it proved on.
-    //
-    // IT SAVED THE WRONG LEVEL. This sat inside the one-shot block that runs when the Voxi
-    // renderer finishes initialising -- a convenient "once" hook that has nothing to do with
-    // saving -- which is the first frame, BEFORE --open-level has been applied. So
-    // `--open-level Arena --save-level out.ocworld` faithfully wrote the project's START map
-    // every time, with a log line naming the file it wrote and nothing naming the level it came
-    // from. Two runs of mine went by before I noticed the placement count was wrong.
-    //
-    // WAITS FOR EVERY PENDING OPEN, rather than merely moving later: --open-level is consumed on
-    // the first UI draw, a forwarded launch can arrive on any frame, and either can be sitting
-    // behind an unsaved-changes prompt. Saving what is open the moment nothing is queued to
-    // replace it is the only rule that is right for all three.
+    // --save-level <out>: writes the OPEN level to another path and logs the result. Writes
+    // ELSEWHERE rather than over levelPath_, so proving the save never costs the content it proved
+    // on -- needed since saveLevel previously had no caller but a mouse click (Ctrl+S, the File
+    // menu, the toolbar button), so nothing could prove a round trip headlessly, the same gap the
+    // four project flags were added to close.
+    // Used to save the WRONG level: this ran in the Voxi-init one-shot hook (frame 1, before
+    // --open-level applied), so `--open-level Arena --save-level out.ocworld` always wrote the
+    // project's start map -- two runs went by before the placement count was noticed wrong. Now
+    // waits for every pending open (--open-level, consumed on the first UI draw; a forwarded
+    // launch; an unsaved-changes prompt) rather than just moving later, since any of the three can
+    // still be queued.
     if (!saveLevelTo_.empty() && !saveLevelDone_ && !levelPath_.empty() &&
         openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
         saveLevelDone_ = true;
-        // The SOURCE is named too. A log line that says only where it wrote cannot tell you it
-        // saved the wrong thing, which is exactly how this went unnoticed.
+        // Source named too: a log line naming only the destination is how the wrong-level bug went unnoticed.
         if (saveLevel(saveLevelTo_))
             AVER_INFO("[Level] --save-level wrote '{}' ({}) to {}",
                       levelName_, levelPath_, saveLevelTo_);
@@ -2000,37 +1756,31 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
     }
 #endif
-    // GUARDED AS A WHOLE, unlike the dropped-files drain below, because nothing can ever be
-    // pending here without the scene: the queue is filled only by the open-request hook, and
-    // onInit installs that hook under the same condition (see setOpenRequestHook). requestOpenLevel
-    // and openLevelError_ are `#if AVER_MODULE_SCENE` for the same reason they are -- a forwarded
-    // path asks for a level in a world.
+    // Guarded as a whole (unlike the dropped-files drain below): the queue is filled only by the
+    // open-request hook, installed under the same condition (setOpenRequestHook). requestOpenLevel/
+    // openLevelError_ are `#if AVER_MODULE_SCENE` too -- a forwarded path asks for a level in a world.
 #if AVER_MODULE_SCENE
     if (window_ && window_->hasPendingOpenRequest()) {
         const std::string path = window_->takePendingOpenRequest();
         if (isLevelFile(path.c_str())) {
-            // Through the SAME funnel as the picker and the Content Browser: the unsaved-changes
-            // check and the class-placement spawn live in there, and this path used to do the
-            // first and forget the second.
+            // Same funnel as the picker/Content Browser: unsaved-changes check and class-placement
+            // spawn live there -- this path used to do the first and forget the second.
             if (!requestOpenLevel(path, "opened, forwarded from another launch"))
                 AVER_WARN("[Sandbox] forwarded level '{}': {}", path, openLevelError_);
         }
-        // A forwarded BARE PROJECT with no level attached has nothing further to do here:
-        // handleOpenRequest already confirmed it matches the live project, and Window::focus()
-        // already brought this window forward from the WM_COPYDATA receive itself.
+        // A forwarded bare project with no level has nothing more to do here: handleOpenRequest
+        // already confirmed it matches the live project, and Window::focus() already raised this window.
     }
 #endif  // AVER_MODULE_SCENE
-    // Files dragged in from Explorer, latched the same way as the open request just above (see
+    // Files dragged in from Explorer, latched like the open request above (see
     // Window::hasPendingDroppedFiles). Only meaningful with a project open -- importDroppedFiles
-    // imports into the Content Browser's current folder, and there is no Content Browser, and
-    // nowhere to copy TO, before a project exists.
+    // imports into the Content Browser's current folder, which doesn't exist before a project does.
     //
-    // THE DESTINATION IS THE CONTENT BROWSER, and that is the guard's whole justification: both
-    // importDroppedFiles and notifyOutcome are declared and defined `#if AVER_WITH_IMGUI`
-    // (SandboxContentBrowser.cpp), so a tree built without the D3D12 ImGui backend has neither the
-    // folder to import into nor the toast to report it with. THE QUEUE IS STILL DRAINED in both
-    // arms: Window keeps accepting WM_DROPFILES regardless of what is drawn on top of it, and a
-    // pending list nothing ever takes would grow for the life of the process.
+    // Destination is the Content Browser: importDroppedFiles/notifyOutcome are `#if AVER_WITH_IMGUI`
+    // (SandboxContentBrowser.cpp), so a build without the D3D12 ImGui backend has neither folder
+    // nor toast. The queue is
+    // still drained in both arms -- Window keeps accepting WM_DROPFILES regardless, and an undrained
+    // list would grow forever.
     if (window_ && window_->hasPendingDroppedFiles()) {
         const std::vector<std::string> dropped = window_->takePendingDroppedFiles();
 #if AVER_WITH_IMGUI
@@ -2046,9 +1796,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                   dropped.size());
 #endif
     }
-    // --pt-scene-toggle-on/-off: verification-only (see the members' own comment). Checked BEFORE
-    // syncPtSceneView() so the same onUpdate() that flips the want-flag is the same one that acts
-    // on it, rather than costing a whole extra frame of lag for no reason.
+    // --pt-scene-toggle-on/-off: verification-only. Checked BEFORE syncPtSceneView() so the same
+    // onUpdate() that flips the want-flag also acts on it, with no extra frame of lag.
     if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
     if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
     // --sun-set-at: the same write the Directional Light panel's Elevation/Azimuth sliders make.
@@ -2085,15 +1834,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Clears the render-scale crash cookie once this session proves the scale survivable. Thirty
     // frames, not one: device loss is noticed at Present.
     // --shader-source: pick up an HLSL edit without restarting.
-    // "ONLY THE FIRST EDIT IS EVER DELIVERED" was a measurement artifact: a `--frames 900
-    // --no-vsync` run lasts ~12s (measured: 900 frames, 12.0s, 75fps), so edits 2/3 of a 21-second
-    // test landed after the process had exited -- the log's own "stopped after 900 frame(s)" sits
-    // between append one and append two. Re-measured with `--frames 9000` and five edits nine
-    // seconds apart (via Add-Content/Set-Content/Copy-Item -Force): all delivered.
-    // This function only bumps an integer: rhi::reloadShaderFiles() drops the text cache and
-    // increments a revision. VoxiRenderer::prePass rebuilds pipelines THERE, where that's safe --
-    // doing it here would free pipelines a command list is recording against.
-    // Started lazily on first update, so the common no-flag case costs nothing.
+    // "Only the first edit is ever delivered" was a measurement artifact: `--frames 900 --no-vsync`
+    // lasts ~12s (measured: 900 frames/12.0s/75fps), so 2/3 of a 21-second test's edits landed
+    // after the process had exited (the log's own "stopped after 900 frame(s)" sits between append
+    // one and append two). Re-measured with `--frames 9000`, five edits nine seconds apart: all delivered.
+    // Only bumps an integer here: rhi::reloadShaderFiles() drops the text cache and increments a
+    // revision; VoxiRenderer::prePass rebuilds pipelines there, where it's safe (doing it here would
+    // free pipelines a command list is recording against). Started lazily, so no-flag costs nothing.
     if (!shaderSourceDir_.empty()) {
         if (!shaderWatch_.watching()) {
             if (shaderWatch_.start(shaderSourceDir_))
@@ -2119,10 +1866,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         editor::flushEditorPrefs();
     }
 #if AVER_MODULE_SR
-    // --aversr-cycle [N]: verification-only, exists because THIS TRANSITION HAD A BUG. Turning
-    // AverSR on then off crashed the editor -- Off's branch reset the unique_ptr while the device
-    // still held the raw pointer applyUpscalerSlot had given it, so the next composite called
-    // execute() on freed memory. --aversr only ever ATTACHES, so nothing exercised this path.
+    // --aversr-cycle [N]: verification-only, exists because this transition had a bug -- turning
+    // AverSR on then off crashed the editor: Off's branch
+    // reset the unique_ptr while the device still held the raw pointer applyUpscalerSlot gave it,
+    // so the next composite called execute() on freed memory. --aversr only ever ATTACHES, so
+    // nothing exercised this path.
     if (averSrCycleFrames_ > 0 && --averSrCycleFrames_ == 0) {
         AVER_INFO("[AverSR] --aversr-cycle: Performance -> Off, the transition that used to crash");
         applyAverSrQuality(e.device(), aver::sr::Quality::Performance);
@@ -2131,28 +1879,22 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
 #endif
 #if AVER_MODULE_VOXI
-    // N8 FIX, PART 1: THE PT VIEW NOW FOLLOWS A PATH TRACING TIER CHANGE FROM ANYWHERE. Before
-    // this, ptSceneViewWantEnabled_ was only ever flipped by four call sites this file's own
-    // ptSceneViewFromCli_ comment already lists (CLI, the settings-page Quality combo, the
-    // toggle-test flags, a project manifest) -- and NONE of them fired for a change made through
-    // the console's voxi.pathTracing var, the new Overall Quality preset (applyOverall,
-    // Scalability.hpp), or the new voxi.scalability var: all three write vx.settings().pathTracing
-    // directly, so the tier changed but the want flag, and therefore PtSceneView's registration,
-    // silently did not.
+    // N8 fix, part 1: the PT view now follows a path tracing tier change from anywhere. Before, only 4
+    // sites flipped ptSceneViewWantEnabled_ (CLI, Quality combo, toggle-test flags, manifest -- see
+    // ptSceneViewFromCli_'s comment); none fired for the console's voxi.pathTracing, Overall Quality
+    // (applyOverall, Scalability.hpp) or voxi.scalability, which write the tier directly.
     {
         const voxi::Quality curPtTier = voxi::Renderer::get().settings().pathTracing;
         if (curPtTier != ptTierSeen_) {
             if (curPtTier != voxi::Quality::Off) {
                 ptSceneViewWantEnabled_ = true;
-                // Quality::Low is 1, so the rung is one less; mirrors buildRenderingSettings'
-                // (page == 4) own live re-quality call for the case the view is already registered
-                // and only its accumulator resolution needs to move.
+                // Quality::Low is 1, so the rung is one less; mirrors buildRenderingSettings' (page
+                // == 4) re-quality call when the view is already registered and only its resolution moves.
                 if (ptSceneView_) ptSceneView_->setQuality(static_cast<u32>(curPtTier) - 1);
             } else if (!ptSceneViewFromCli_) {
-                // --pt-scene still wins even here: a console edit or a mid-session project open
-                // that turns Path Tracing Off must not silently take away a view the command line
-                // explicitly asked to keep, the same precedence applyProjectRenderSettings already
-                // honours for the manifest's own RENDER.PATHTRACING.
+                // --pt-scene still wins even here: a console edit or mid-session project open that
+                // turns PT Off must not silently drop a view the command line asked to keep (same
+                // precedence applyProjectRenderSettings honours for RENDER.PATHTRACING).
                 ptSceneViewWantEnabled_ = false;
             }
             ptTierSeen_ = curPtTier;
@@ -2162,20 +1904,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // BEFORE device_->beginFrame() (see Engine::frameStep()) -- the only safe place to add or
     // remove a render feature. See syncPtSceneView()'s own comment for why.
     syncPtSceneView(e.device());
-    // The path tracer's matched-environment legacy switch (contrast-fix plan F6/F7; root cause
-    // R5) -- OUTSIDE any AVER_MODULE_VOXI guard and right beside syncPtSceneView() rather than
-    // beside voxiRenderer_'s own reasserts further down, because ptSceneView_'s registration and
-    // tier selection have to keep working with AVER_MODULE_VOXI off (see ptSceneViewWantEnabled_'s
-    // own comment on this file), and consolePtLegacyEnvSlot() (EditorConsole.hpp) is declared
-    // outside that guard for the identical reason. Reasserted every frame regardless of whether
-    // the user just touched it, the same idiom as every other raw console slot in this file;
-    // PtSceneView::setLegacyEnvironment only acts, and re-arms accumulation, on an actual change.
+    // Path tracer's matched-environment legacy switch (contrast-fix F6/F7, root cause R5) --
+    // outside any AVER_MODULE_VOXI guard, beside syncPtSceneView(), because ptSceneView_'s
+    // registration/tier selection must keep working with the module off (see
+    // ptSceneViewWantEnabled_'s own comment), the same reason consolePtLegacyEnvSlot()
+    // (EditorConsole.hpp) is declared outside it. Reasserted every frame like every other raw
+    // console slot here; setLegacyEnvironment only acts (and re-arms accumulation) on an actual change.
     if (ptSceneView_) ptSceneView_->setLegacyEnvironment(editor::consolePtLegacyEnvSlot());
 #if AVER_MODULE_VOXI
-    // --pt-quality-ramp [N]: verification-only, exists because THIS TRANSITION HAD A BUG no flag
-    // could reach. Raising the PT rung on an already-rendered view re-arms PtSceneView at a new
-    // resolution, and used to point an over-sized descriptor at the denoiser's still-small buffers
-    // and remove the device -- reachable only by a human clicking the combo.
+    // --pt-quality-ramp [N]: verification-only, for a bug no flag could reach: raising the PT rung
+    // on an already-rendered view re-arms PtSceneView at a new resolution, and used to point an
+    // over-sized descriptor at the denoiser's still-small buffers and remove the device --
+    // reachable only by a human clicking the combo.
     if (ptQualityRampEvery_ > 0 && --ptQualityRampCountdown_ <= 0) {
         ptQualityRampCountdown_ = ptQualityRampEvery_;
         voxi::Settings ramped = voxi::Renderer::get().settings();
@@ -2189,9 +1929,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                       static_cast<u32>(ramped.pathTracing));
         }
     }
-    // The RUNG, reconciled on the same cadence as the registration: --pt N, a project manifest
-    // and the settings combo all write voxi::Settings, and this is the one place that want becomes
-    // a call. setQuality() is idempotent, so calling it every frame costs one comparison.
+    // Rung reconciled on the same cadence as registration: --pt N, a manifest and the settings
+    // combo all write voxi::Settings, and this is the one place that want becomes a call;
+    // setQuality() is idempotent so calling it every frame costs one comparison.
     if (ptSceneView_) {
         const voxi::Quality q = voxi::Renderer::get().settings().pathTracing;
         if (q != voxi::Quality::Off) ptSceneView_->setQuality(static_cast<u32>(q) - 1);
@@ -2217,25 +1957,21 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             applyDpi(dpi);
         }
     }
-    // THE ENGINE'S DEFAULT PAWN IS AN EXCEPTION TO "the game owns the input": leaving it out made
-    // PIE feel broken -- gameHasInput() is true for any live session, so the viewport camera stood
-    // down the moment Play possessed one (--pie-camera-test measured drift of exactly 0.0000,
-    // i.e. "nothing ran"). The engine's stand-in is the editor camera wearing a pawn, so it's the
-    // one session that must not stand the editor camera down.
-    // ONE ARBITRATION, handed to every consumer: computed once here instead of eleven slightly
-    // different spellings (InputOwnership.hpp).
+    // Engine's default pawn is an exception to "the game owns the input": leaving it out made PIE
+    // feel broken (gameHasInput() true for any live session stood the viewport camera down the
+    // moment Play possessed one -- --pie-camera-test measured drift of exactly 0.0000, "nothing
+    // ran"). The engine's stand-in is the editor camera wearing a pawn, the one session that must
+    // not stand down.
+    // One arbitration, handed to every consumer, computed once instead of eleven spellings (InputOwnership.hpp).
 #if AVER_WITH_IMGUI
-    // THE #if IS COMPILE-TIME AND THIS QUESTION IS NOT -- the same distinction the capture block
-    // below spells out. A headless run never calls uiInit() (no hwnd, so it early-returns), which
-    // means CreateContext() never ran and GImGui is null: GetIO() then returns a reference off a
-    // null pointer and the first member read faults. It did, at 0x00000000000000fa, which is
-    // offsetof(ImGuiContext, IO) + offsetof(ImGuiIO, WantTextInput) exactly.
-    //
-    // ASKING uiActive() AS THE GATE rather than adding a new flag, because the answer was already
-    // being computed one line down into ic.uiActive, whose own declaration in InputOwnership.hpp
-    // describes the false case as "a headless/no-UI build". Leaving own_ at its default costs
-    // nothing: resolveInputOwnership returns all-false for uiActive = false, which is the honest
-    // answer when there is no UI and nothing can own the devices.
+    // The #if is compile-time, this question is not (the same distinction the capture block below
+    // spells out): a headless run never calls uiInit() (no hwnd,
+    // early-returns), so CreateContext() never ran and GImGui is null -- GetIO() then faults reading
+    // off a null pointer (crashed at 0x00000000000000fa, exactly
+    // offsetof(ImGuiContext,IO)+offsetof(ImGuiIO,WantTextInput)).
+    // Asking uiActive() as the gate rather than a new flag: the answer is already computed into
+    // ic.uiActive one line down (InputOwnership.hpp calls false "a headless/no-UI build"). Leaving
+    // own_ at its default costs nothing: resolveInputOwnership returns all-false for uiActive=false.
     if (e.device()->uiActive()) {
         const ImGuiIO& oio = ImGui::GetIO();
         editor::InputConditions ic;
@@ -2246,10 +1982,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.uiWantsMouse      = oio.WantCaptureMouse;
         ic.playing           = playSessionActive();
         ic.releasedByUser    = releasedByUser_;
-        // LEFT AT ITS DEFAULT WITHOUT THE SCENE, not guarded away: defaultPawnPlay_ is declared
-        // `#if AVER_MODULE_SCENE` beside the Play snapshot it belongs to, and false is the honest
-        // value for a tree that cannot enter Play at all -- InputConditions is a plain struct with
-        // the field either way, so resolveInputOwnership still answers the same question.
+        // Left at its default without the scene, not guarded away: defaultPawnPlay_ is `#if
+        // AVER_MODULE_SCENE`, and false is honest for a tree that can't enter Play; InputConditions
+        // has the field either way.
 #if AVER_MODULE_SCENE
         ic.defaultPawnPlay   = defaultPawnPlay_;
 #endif
@@ -2257,21 +1992,16 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
         ic.drawerOpen        = drawer_ != Drawer::None;
         ic.landscapeMode     = mode_ == EditorMode::Landscape;
-        // --wheel-speed-test STANDS IN FOR A POINTER IN THE VIEWPORT. Headlessly there is no
-        // real cursor, so ImGui reports WantCaptureKeyboard and WantCaptureMouse -- measured as
-        // wantKb=1 wantMouse=1 ptrInViewport=0 -- and resolveInputOwnership correctly denies the
-        // tools. That is the right answer for an unhovered window and the wrong precondition for
-        // this test, which is about what happens once the gate is OPEN.
-        //
-        // These three values ARE the state of a person right-dragging the viewport, so asserting
-        // them is standing in for the human, not weakening the test: everything downstream --
-        // resolveInputOwnership itself, the flying_ block, the wheel read -- runs exactly as it
-        // does in a real session. Confined to the test's own frames.
-        //
-        // GUARDED TO MATCH ITS DECLARATION: wheelTestForceFly_ lives in the framework block with
-        // maybeWheelSpeedTest and the other Play self-tests, so -DAVER_MODULE_FRAMEWORK=OFF takes
-        // the flag and the test that sets it together. Nothing else in this frame changes: the
-        // three overrides only ever move off their real values while the test is running.
+        // --wheel-speed-test stands in for a pointer in the viewport: headlessly there's no real
+        // cursor, so ImGui reports wantKb=1 wantMouse=1 ptrInViewport=0 and resolveInputOwnership
+        // correctly denies the tools -- right for an unhovered window, wrong precondition for this
+        // test (which is about what happens once the gate is OPEN). These three overrides ARE the
+        // state of a person right-dragging, so setting them stands in for the human; everything
+        // downstream runs exactly as in a real session, confined to the test's own frames -- nothing
+        // else in this frame changes.
+        // Guarded to match its declaration: wheelTestForceFly_ lives in the framework block with
+        // maybeWheelSpeedTest and the other Play self-tests, so -DAVER_MODULE_FRAMEWORK=OFF removes
+        // flag and test together.
 #if AVER_MODULE_FRAMEWORK
         if (wheelTestForceFly_) {
             ic.uiWantsKeyboard = false;
@@ -2282,14 +2012,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         own_ = editor::resolveInputOwnership(ic);
     }
 #endif
-    // LEAVING FLY MODE IS UNCONDITIONAL, and must be: flying_ used to be cleared only inside the
-    // narrower gate below (which splits keyboard from mouse), so a focused text field or pointer
-    // off-viewport left the camera stuck in fly mode with the cursor hidden. Releasing the button
-    // always means stop flying, whoever owns input.
+    // Leaving fly mode is unconditional, and must be: flying_ used to clear only inside the
+    // narrower gate below (which splits keyboard from mouse), so a focused text field or
+    // off-viewport pointer left the camera stuck flying with the cursor hidden. Releasing the
+    // button always means stop flying, whoever owns input.
 #if AVER_WITH_IMGUI
-    // uiActive() first, for the reason given above: headless has no ImGui context to ask. Nothing
-    // is lost by skipping it there -- flying_ starts false and its only writer is the own_-gated
-    // block below, which cannot run without a UI.
+    // uiActive() first (headless has no ImGui context to ask). Nothing lost skipping it there --
+    // flying_ starts false and its only writer is the own_-gated block below, UI-only anyway.
     if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1]) flying_ = false;
 #endif
     if (own_.keyboardToTool || own_.mouseToTool) {
@@ -2304,64 +2033,39 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                       camPos_.x, camPos_.y, camPos_.z, yaw_);
 
         // Right mouse ENTERS fly mode here; LEAVING it is handled unconditionally above, outside
-        // this gate -- see that clear's own comment for why a state whose only reset lives inside
-        // a conditional block is the same defect as the input publisher that latched every key.
+        // this gate -- the same defect class as the input publisher that used to latch every key.
         if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
-        // --wheel-speed-test drives this directly; see maybeWheelSpeedTest for why it forces
-        // the state rather than synthesising the right-drag that normally opens it. Guarded for
-        // the same reason the InputConditions overrides above are -- the flag is declared with
-        // the test that owns it, inside the framework block.
+        // --wheel-speed-test drives this directly (see maybeWheelSpeedTest for why it forces state
+        // rather than synthesising the right-drag). Guarded like the InputConditions overrides above.
 #if AVER_MODULE_FRAMEWORK
         if (wheelTestForceFly_) flying_ = true;
 #endif
         if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
         if (flying_) {
-            // input_.mouseDX/DY AND NOT io.MouseDelta, FOR THE REASON THE WHEEL BLOCK BELOW
-            // ALREADY SPELLS OUT AT LENGTH -- this is the same phase bug, and only the wheel
-            // half of it was ever fixed.
-            //
-            // ImGui computes io.MouseDelta inside NewFrame (UpdateMouseInputs), and
-            // Engine::frameStep runs onUpdate BEFORE uiNewFrame. So every read of io.MouseDelta
-            // from this function sees the delta computed by the PREVIOUS frame's NewFrame: the
-            // camera turns by where the mouse was a frame ago, on every frame, by construction.
-            // That is not a stutter and not a GPU cost -- it is a fixed one-frame lag between
-            // the hand and the picture, which is what "it lags behind my inputs" describes.
-            //
-            // InputState is fed by pumpEvents (before frameStep) and rolled at the END of
-            // onRender, so during onUpdate it holds THIS frame's accumulated motion. It is the
-            // correctly-phased source for anything in this function.
+            // input_.mouseDX/DY, not io.MouseDelta -- same phase bug as the wheel block below, of
+            // which only the wheel half was ever fixed. ImGui computes io.MouseDelta inside
+            // NewFrame (UpdateMouseInputs), but Engine::frameStep runs onUpdate BEFORE uiNewFrame,
+            // so any read here sees the PREVIOUS frame's delta: not a stutter, not a GPU cost, but
+            // a fixed one-frame lag between hand and picture on every frame, by construction ("it
+            // lags behind my inputs"). InputState is fed by pumpEvents (before frameStep) and
+            // rolled at the end of onRender, so during onUpdate it holds THIS frame's motion --
+            // the correctly-phased source.
             yaw_   += static_cast<f32>(input_.mouseDX()) * lookSpeed_;
             pitch_ -= static_cast<f32>(input_.mouseDY()) * lookSpeed_;
             pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
-            // WHEEL WHILE FLYING CHANGES SPEED, and SCROLL UP MAKES IT FASTER -- Unreal's own
-            // direction, and the one that survived contact with a hand. It shipped inverted
-            // first because that was asked for; using it settled the question the other way.
-            // Which way a wheel means "more" is a preference, not a fact, so it is written
-            // down here rather than argued about: up is faster.
-            //
-            // MULTIPLICATIVE, so a notch feels the same at 1 as it does at 20: an additive step
-            // would be imperceptible when flying fast and violent when creeping. 1.25 per notch
-            // is roughly three notches to double, which is coarse enough to be useful in one
-            // flick and fine enough to settle on a speed.
-            //
-            // input_.wheel() AND NOT io.MouseWheel, WHICH IS ALWAYS ZERO HERE. This is the bug
-            // that made the whole control dead, and it was dead long before the direction was
-            // ever changed -- the previous `flySpeed_ *= (1.0f + io.MouseWheel * 0.15f)` sat on
-            // this exact line and could not fire either.
-            //
-            // WHY: Engine::frameStep runs onUpdate BEFORE uiNewFrame (Engine.cpp:208-212), and
-            // ImGui::EndFrame zeroes io.MouseWheel at the tail of the PREVIOUS frame
-            // (imgui.cpp:6420). NewFrame is the only thing that merges queued wheel events back
-            // in, and it has not run yet. So every read of io.MouseWheel from onUpdate observes
-            // the previous frame's reset -- not intermittently, but on every frame by
-            // construction. GraphEditor's and AssetEditor's wheel zoom work because they are
-            // drawn from onRender, which is after NewFrame.
-            //
-            // InputState is fed by pumpEvents, which runs before frameStep, and is rolled at the
-            // END of onRender (see input_.newFrame()) -- so during onUpdate it holds exactly this
-            // frame's accumulated notches. It is the correctly-phased source for anything in
-            // this function, and io.MouseWheel is the wrong one no matter how it is spelled.
+            // Wheel while flying changes speed, up = faster (Unreal's direction; shipped inverted
+            // first, then settled this way -- a preference, written down rather than re-argued).
+            // Multiplicative (1.25/notch, ~3 notches to double: coarse enough for one flick, fine
+            // enough to settle a speed) so a notch feels the same at speed 1 as at 20.
+            // input_.wheel(), not io.MouseWheel, which is ALWAYS zero here -- the bug that made the
+            // whole control dead (the old `flySpeed_ *= (1+io.MouseWheel*0.15)` sat on this exact
+            // line and never fired either). Same phase bug as the mouseDX/DY note above:
+            // Engine::frameStep runs onUpdate before uiNewFrame (Engine.cpp:208-212), and EndFrame
+            // zeroes io.MouseWheel at the tail of the previous frame (imgui.cpp:6420), so onUpdate
+            // only ever sees the stale reset. GraphEditor/AssetEditor's wheel zoom work because they
+            // run from onRender, after NewFrame. input_.wheel() (via pumpEvents/newFrame()) holds
+            // this frame's notches correctly.
             const f32 wheel = input_.wheel();
             if (wheel != 0.0f) {
                 flySpeed_ *= std::pow(1.25f, wheel);
@@ -2373,16 +2077,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         const Vec3 up{0, 0, 1};
         const Vec3 right = cross(up, fwd).getSafeNormal();
 
-        // SPECTATOR PLAY FLIES WITHOUT HOLDING THE RIGHT BUTTON: pressing Play with no GameMode
-        // hands you a plain camera, and having to hold a mouse button to walk it isn't what anyone
-        // means by that; mouse look still wants the button.
-        // A synthetic look enters here, where the real one does: --pie-camera-test used to bump
-        // yaw_/pitch_ from its own LATER tick, so the bump never carried into the pawn -- and
-        // drivePlayCamera restored it from the pawn's unchanged forward next frame, a "steady
-        // camera" that was actually just bad ordering, not ignored input.
-        // All four pieCam members are declared inside the framework block with maybePieCameraTest,
-        // which is honest -- there is no Play-in-Editor camera to test without a GameMode to enter
-        // Play through -- so the injection point is guarded to match rather than the members moved.
+        // Spectator Play flies without holding the right button: pressing Play with no GameMode
+        // gives a plain camera, and having to hold a button to walk it isn't what anyone means by
+        // that; mouse look still wants the button.
+        // Synthetic look enters here, where the real one does: --pie-camera-test used to bump
+        // yaw_/pitch_ from a later tick that never carried into the pawn, and drivePlayCamera
+        // restored the pawn's unchanged forward next frame -- a "steady camera" that was just bad
+        // ordering, not ignored input. All four pieCam members are declared with maybePieCameraTest
+        // in the framework block (no PIE camera without a GameMode), so the injection point matches
+        // rather than moving the members.
 #if AVER_MODULE_FRAMEWORK
         if (pieCamPendingLook_) {
             pieCamPendingLook_ = false;
@@ -2391,9 +2094,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             pieCamWantYaw_ = yaw_; pieCamWantPitch_ = pitch_;
         }
 #endif
-        // defaultPawnPlay_ is scene-guarded (see the InputConditions fill above). Without the
-        // module the editor camera flies on the right button alone, which is what it did before
-        // spectator Play existed and the only behaviour a scene-less tree can offer.
+        // defaultPawnPlay_ is scene-guarded (see InputConditions above). Without the module the
+        // camera flies on the right button alone, as it did before spectator Play existed.
 #if AVER_MODULE_SCENE
         if ((flying_ || defaultPawnPlay_) && !io.WantCaptureKeyboard) {
 #else
@@ -2408,9 +2110,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             if (ImGui::IsKeyDown(ImGuiKey_E)) step += up * sp;
             if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= up * sp;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-            // MOVE THE PAWN, NOT THE CAMERA, while the engine's default pawn is possessed:
-            // drivePlayCamera() rewrites the view from the pawn every frame, so a camPos_ nudge
-            // here would be overwritten before it was ever seen. Driving the pawn is what makes this a PAWN.
+            // Moves the PAWN, not the camera, while the default pawn is possessed: drivePlayCamera()
+            // rewrites the view from the pawn every frame, so a camPos_ nudge would be overwritten.
             if (defaultPawnPlay_) {
                 const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
                 if (pn) {
@@ -2431,11 +2132,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
             camPos_ += step;
         } else if (!overUI) {
-            // THE SAME DEFECT, in the scroll-to-dolly this branch exists for: it read
-            // io.MouseWheel from onUpdate, so it has never moved the camera either. Found by
-            // following the fly-speed bug rather than by anybody reporting it, which is what a
-            // control with no headless witness looks like when it breaks. See the long note on
-            // input_.wheel() in the flying_ block above for why the phase is wrong.
+            // Same defect as the fly-speed wheel bug: this scroll-to-dolly read io.MouseWheel too
+            // and never moved the camera either -- found by following that bug, not by a report,
+            // which is what a control with no headless witness looks like when it breaks. See the
+            // wheel note in the flying_ block above.
             const f32 wheel = input_.wheel();
             if (wheel != 0.0f) camPos_ += fwd * wheel * (flySpeed_ * 0.15f);
             // Same phase argument as the look block above: MMB pan read a frame-old delta too.
@@ -2444,60 +2144,51 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 camPos_ += up    * static_cast<f32>(input_.mouseDY()) * 0.02f;
             }
         }
-        // CTRL+S SAVES THE LEVEL, which the File menu has claimed it does for as long as that
-        // menu has existed -- the "Ctrl+S" beside Save Level is the shortcut-LABEL parameter of
-        // ImGui::MenuItem, which draws text and wires nothing. The only ImGuiKey_S in this file
-        // was the camera's strafe-left, so the shortcut a person reaches for by reflex while
-        // building a level did nothing at all, and there was no feedback to say so.
+        // Ctrl+S saves the level, which the File menu has claimed for as long as it's existed --
+        // that "Ctrl+S" label is just ImGui::MenuItem's shortcut-LABEL parameter, wiring nothing.
+        // The only ImGuiKey_S in this file was the camera's strafe-left, so the reflex shortcut did
+        // nothing, with no feedback to say so.
         //
-        // NOT GATED ON levelFocused_, unlike F below: saving is not a viewport gesture and
-        // wanting it while the cursor sits over the Outliner is not a mistake. It IS gated on
-        // WantTextInput, or renaming an entity would save the level on the "s" of a name.
+        // Not gated on levelFocused_ (unlike F below): saving isn't a viewport gesture. Gated on
+        // WantTextInput though, or renaming an entity would save on the "s" of its name.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::LevelSave, io))
             saveLevelInteractive();
 
-        // CTRL+SHIFT+S SAVES EVERYTHING: the level plus every dirty asset tab (saveAll(),
-        // SandboxShell.cpp). SAME SITE AS LEVELSAVE ABOVE, deliberately -- pressed() does not
-        // consult the live scope mask (EditorKeybinds.cpp), so this is already live from inside an
-        // asset editor tab exactly as LevelSave is from the Outliner, with no separate focus gate
-        // to add for it.
+        // Ctrl+Shift+S saves everything: the level plus every dirty asset tab (saveAll(),
+        // SandboxShell.cpp). Same site as LevelSave above, deliberately: pressed() doesn't consult
+        // the live scope mask (EditorKeybinds.cpp), so this is already live from inside an asset tab too.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::SaveAll, io))
             saveAll();
 
-        // CTRL+SHIFT+B / CTRL+SHIFT+R mirror the Tools menu's Compile/Reload Scripts items. Same
-        // site and same reasoning as SaveAll just above: these are not a viewport gesture either.
+        // Ctrl+Shift+B / Ctrl+Shift+R mirror the Tools menu's Compile/Reload Scripts items. Same
+        // site and reasoning as SaveAll above: not a viewport gesture either.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::CompileScripts, io))
             tools_.requestCompileScripts(project_);
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::ReloadScripts, io))
             tools_.requestReloadScripts(project_);
 
         // F frames the selection at a distance derived from its radius.
-        //
-        // THE OUTLINER AND DETAILS COUNT, for the reason the edit verbs below do: levelFocused_ is
-        // true only while the 3D VIEWPORT holds ImGui's keyboard focus, and clicking a row in the
-        // World Outliner -- the ordinary way to pick the thing you then want to look at -- moves
-        // focus to that panel. Select in the list, press F, nothing happens. Reported as "press F
-        // to focus is broken", and it is the identical gate that had Delete and Undo silently
-        // doing nothing from the same panel.
-        //
-        // SCENE-GUARDED AS A WHOLE: what F frames is a SELECTED ENTITY's bounds, and
-        // selectionBounds is declared `#if AVER_MODULE_SCENE` because it walks the selection set
-        // through the world. anySelected() is not guarded -- the sun, sky and post rows are
-        // selectable without a scene -- but none of those has bounds to frame a camera on, so the
-        // binding does nothing in that tree rather than framing a point at the origin.
+        // Outliner/Details count too: levelFocused_ is true only while the viewport holds ImGui's
+        // keyboard focus, and clicking an Outliner row (the ordinary way to pick something) moves
+        // focus there -- select in the list, press F, nothing happened. Reported as "press F to
+        // focus is broken"; same gate that had Delete/Undo silently doing nothing from the same panel.
+        // Scene-guarded as a whole: F frames a SELECTED ENTITY's bounds, and selectionBounds is
+        // `#if AVER_MODULE_SCENE`, walking the selection set through the world. anySelected() isn't
+        // guarded (sun/sky/post rows are selectable without a scene), but none of those has bounds
+        // to frame a camera on, so the binding just does nothing there rather than framing a point
+        // at the origin.
 #if AVER_MODULE_SCENE
         if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantCaptureKeyboard &&
             keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
-            // selectionBounds, NOT selectedXform/selectedRadius: those describe only the selection's
-            // ANCHOR, which is what the gizmo draws on, so a spread multi-selection framed around
-            // them put most of the set outside the view. This is the union of the whole selection.
+            // selectionBounds, not selectedXform/selectedRadius: those describe only the anchor
+            // (what the gizmo draws on), which put most of a spread multi-selection outside the
+            // view. This is the union of the whole selection.
             Vec3 center; f32 r;
             if (selectionBounds(center, r)) {
                 const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
                 camPos_ = center - fwd * d;
                 flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
-                // streaming_ carried its own `#if AVER_MODULE_SCENE` here, which the guard now
-                // opened above makes a repeat of itself -- one condition, stated once.
+                // streaming_'s own `#if AVER_MODULE_SCENE` here would repeat the guard already opened above.
                 streaming_.resetVelocityTracking();   // teleport; see frameCameraOnLevel for why
             }
         }
@@ -2508,52 +2199,46 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     scripts_.update(t.dt);
 #endif
 #if AVER_MODULE_FRAMEWORK
-    // --recapture-test OPTS IN, and it has to: the gesture it exercises lives entirely inside
-    // this block, so a bounded run that skips it cannot reach the bug. Safe now that mouse
-    // re-centring refuses to move a background window's cursor.
+    // --recapture-test opts in (the gesture it exercises lives entirely inside this block, so a
+    // bounded run that skips it can't reach the bug). Safe now that re-centring refuses to move a
+    // background window's cursor.
     const bool interactive = (maxFrames_ == 0 && !playTest_) || recapFrames_ > 0;
-    // THE #if IS NOT REDUNDANT WITH uiActive(): that's a RUNTIME question that doesn't help the
-    // ImGuiIO/ImGui:: names below COMPILE on a UI-less build (module-matrix.ps1's no-ui and
-    // d3d12-off rows both failed here). Guarding the whole block keeps the capture policy in one piece.
+    // The #if isn't redundant with uiActive(): that's runtime, and doesn't make ImGuiIO/ImGui::
+    // names below COMPILE on a UI-less build (module-matrix.ps1's no-ui/d3d12-off rows failed here).
 #if AVER_WITH_IMGUI
     if (e.device()->uiActive() && interactive) {
         // Clicking the viewport puts the mouse back in the game. Tested before wantCapture below.
         {
-            // levelHovered_, NOT !WantCaptureMouse -- the old test could never pass, since the 3D
-            // view is an ImGui dock window ImGui always wants the mouse over (measured
-            // mid-gesture: wantMouse=1 always). levelHovered_ asks the question actually meant: is
-            // the pointer over the LEVEL window, the same `overUI` idiom the fly camera uses.
+            // levelHovered_, not !WantCaptureMouse -- the old test could never pass since ImGui
+            // always wants the mouse over its own dock window (measured: wantMouse=1 always).
+            // levelHovered_ asks the question actually meant -- is the pointer over the LEVEL
+            // window, the same `overUI` idiom the fly camera uses.
             const ImGuiIO& mio = ImGui::GetIO();
             if (playSessionActive() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
                 levelHovered_ && inViewport(mio.MousePos.x, mio.MousePos.y)) {
                 releasedByUser_ = false;
-                // AND THAT CLICK IS NOT A TRIGGER PULL: it means "give the game the mouse back",
-                // and publishing it as MOUSE_LEFT would keep firing for as long as the button is
-                // held (a level-triggered fire gate behind a cooldown can't tell one long click
-                // from many). Eaten until the button comes up -- see pushInput, where the latch is consumed.
+                // That click is NOT a trigger pull, it means "give the mouse back" -- publishing it
+                // as MOUSE_LEFT would fire for as long as held (a level-triggered fire gate behind
+                // a cooldown can't tell one long click from many). Eaten until button-up (see pushInput).
                 eatRecaptureClick_ = true;
             }
         }
         const bool wantCapture = playSessionActive() && !releasedByUser_;
-        // ALT+P STARTS PLAY, the same anyPlayActive() precondition the toolbar's own Play button
-        // disables itself on (SandboxShell.cpp) -- the chord cannot layer a second session onto one
-        // already running any more than the button can.
+        // Alt+P starts Play, same anyPlayActive() precondition the toolbar Play button disables
+        // itself on -- can't layer a second session any more than the button can.
         if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
             keybinds_.pressed(editor::CommandId::PlayStart, ImGui::GetIO()))
             startPlay();
         if (keybinds_.pressed(editor::CommandId::PlayReleaseMouse, ImGui::GetIO()) && playSessionActive())
             releasedByUser_ = !releasedByUser_;
-        // ESCAPE STOPS PLAY-IN-EDITOR, the same as clicking Stop. Checked here rather than in
-        // pushInput: this must win over the game seeing the keypress, so a script reading Escape
-        // for its own pause menu doesn't race the editor for what the key means.
-        // Escape ends a drone stand-in too: Play started it, so Play's exit has to end it.
+        // Escape stops Play-in-Editor (same as Stop). Checked here, not pushInput, so this wins
+        // over the game seeing the keypress -- a script's own pause menu can't race the editor for it.
+        // Escape ends a drone stand-in too: Play started it, so Play's exit ends it.
         if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive() || spectatorPlayActive()))
             stopPlay();
-        // F9 SCREENSHOTS THE VIEWPORT, IN EDIT MODE OR DURING PLAY. Checked HERE rather than beside
-        // LevelSave above: this whole block runs whenever the UI is interactive, in edit mode AND
-        // through a play session alike, so one check covers both -- adding a second at LevelSave's
-        // site (which also runs in edit mode) would fire requestViewportScreenshot() twice on the
-        // same frame there.
+        // F9 screenshots the viewport, in edit mode or during Play. Checked here, not beside
+        // LevelSave above: this block runs in both modes, so one check covers both; a second check
+        // at LevelSave's (edit-mode-only) site would fire it twice.
         if (!ImGui::GetIO().WantTextInput && keybinds_.pressed(editor::CommandId::Screenshot, ImGui::GetIO()))
             requestViewportScreenshot();
         if (!playSessionActive()) releasedByUser_ = false;
@@ -2579,16 +2264,14 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
     else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
-    // THE FONT AND THE POINTER, BOTH LENT PER FRAME, right after the frame opens.
-    //
-    // The font is re-lent every frame rather than once at load because loadGameUiFont is non-fatal
-    // and can leave uiFont_ invalid; handing over the same address each frame costs a store and
-    // means a host that ever reloads a font does not have to remember a second call site.
+    // Font and pointer, both lent per frame, right after the frame opens. Font is re-lent every
+    // frame (not once at load) since loadGameUiFont is non-fatal and can leave uiFont_ invalid;
+    // handing over the same address each frame costs one store and spares a host that reloads a
+    // font a second call site.
     aver_ui_set_font(&uiFont_);
-    // THE POINTER IS CONVERTED HERE, and this is the only place that can do it correctly: the UI
-    // frame above is laid out against the VIEWPORT (or the HUD preview rect), not the window, so a
-    // window-relative cursor would miss every clickable rect by the dockspace's offset. Same rect
-    // in, same rect out.
+    // Pointer converted here, the only place that can do it correctly: the UI frame is laid out
+    // against the viewport (or HUD preview rect), not the window, so a window-relative cursor would
+    // miss every rect by the dockspace's offset.
     {
         const f32 ox = hudPreviewActive() ? hudRectX_ : static_cast<f32>(vpX_);
         const f32 oy = hudPreviewActive() ? hudRectY_ : static_cast<f32>(vpY_);
@@ -2597,9 +2280,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_WITH_IMGUI
         const ImGuiIO& uiIo = ImGui::GetIO();
         px = uiIo.MousePos.x; py = uiIo.MousePos.y;
-        // ImGui reports a cursor outside the window as -FLT_MAX. Left as-is it would land inside
-        // some rect after the offset subtraction on a wide enough viewport; pushed far negative it
-        // hits nothing, which is what "the mouse is not here" should mean.
+        // ImGui reports an outside cursor as -FLT_MAX; left as-is it could land inside a rect after
+        // offset subtraction on a wide viewport, so it's pushed further negative to hit nothing --
+        // that's what "not here" should mean.
         if (px < -1.0e6f || py < -1.0e6f) { px = -1.0e6f; py = -1.0e6f; }
         else { px -= ox; py -= oy; }
         for (int b = 0; b < 3; ++b)
@@ -2631,14 +2314,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
 #if AVER_MODULE_SCENE
     // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
-    // The animation clock runs UNCONDITIONALLY, not from the gameplay tick above: those tick groups
-    // gate on PLAYING, and hanging this off them would freeze every preview outside Play mode.
+    // Animation clock runs UNCONDITIONALLY, not off the gameplay tick above (which gates on
+    // PLAYING) -- hanging it there would freeze every preview outside Play mode.
     anim::animSystem().tick(scene::World::instance(), t.dt);
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    // Same "unconditionally, not from the gameplay tick" reasoning as the animation clock above:
-    // a preview outside Play mode should still show its effects playing.
-    // VERIFICATION-ONLY: the steady_clock pair brackets ONLY the CPU simulation call, isolated
-    // from the GPU draw the --frame-time report already accounts for separately.
+    // Same "unconditionally" reasoning as the animation clock above: previews outside Play should
+    // still show effects playing. Verification-only: steady_clock brackets only the CPU sim call,
+    // isolated from GPU draw (already covered by --frame-time).
     {
         const auto tickStart = std::chrono::steady_clock::now();
         particles::particleSystem().tick(scene::World::instance(), t.dt);
@@ -2646,29 +2328,24 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ++particleTickFrames_;
     }
 #endif
-    // AFTER the tick and BEFORE anything draws: update() is what creates the per-entity skin
-    // targets the draw pass is about to ask for, and what copies this frame's matrices out of
-    // the AnimSystem -- whose skinning() is only valid until the next tick.
+    // After the tick, before anything draws: update() creates the per-entity skin targets the
+    // draw pass asks for and copies this frame's matrices out of AnimSystem before its skinning() invalidates.
     if (skinnedScene_)
         skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
 #if AVER_MODULE_RENDER_SOFTBODY
-    // AFTER the physics step and World::flush, BEFORE the draw -- the draw asks drawHandle() for
-    // a handle that has to exist by then. Same ordering skinnedScene_ above requires, and for
-    // the same reason.
+    // After the physics step and World::flush, before the draw (drawHandle() must exist by then) --
+    // same ordering skinnedScene_ above requires, for the same reason.
     if (softBodyScene_) softBodyScene_->update(scene::World::instance(), *e.device());
 #endif
-    // ONCE per frame, BEFORE the render features run (see ThumbnailCache.hpp): update() points
-    // its preview at the next pending request, so the copy feature it registered has something
-    // fresh to copy by the time features draw this frame. Guarded on ready(), matching every other
-    // conditionally-initialised helper above.
+    // Once per frame, before the render features run (ThumbnailCache.hpp): update() points its
+    // preview at the next pending request so the copy feature has something fresh to copy this frame.
+    // Guarded on ready(), matching every other conditionally-initialised helper above.
     if (thumbnails_.ready()) thumbnails_.update();
-    // --drone: switches the graph-driven drone on N frames in, on its own, mirroring
-    // --chunk-stream immediately below so a --frames capture run can prove it without a human
-    // clicking Window > Drone.
+    // --drone: switches the graph-driven drone on N frames in, mirroring --chunk-stream below so a
+    // --frames capture can prove it without clicking Window > Drone.
     if (droneAutoFrames_ > 0 && --droneAutoFrames_ == 0) setDroneEnabled(true);
-    // --undo-test: fires runUndoTest() N frames in, then exits -- see its own comment for what it
-    // proves and why. runUndoTest() lives inside the same `#if AVER_WITH_IMGUI` block as the
-    // commands it proves, so this call site needs the same guard.
+    // --undo-test: fires runUndoTest() N frames in, then exits (see its own comment). Lives inside
+    // the same `#if AVER_WITH_IMGUI` block as the commands it proves, so this call site needs the same guard.
 #if AVER_WITH_IMGUI
     if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
     if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
@@ -2690,9 +2367,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
-    // Ticks the graph-driven drone, if one is live. Runs BEFORE chunk streaming below so this
-    // frame's drone position/velocity are what chunk streaming's extra StreamSource (and the log
-    // line right under it) see -- not last frame's.
+    // Ticks the graph-driven drone if live. Runs BEFORE chunk streaming below so its extra
+    // StreamSource (and the log line right under it) sees this frame's drone position/velocity, not last frame's.
     if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
         droneTimeSeconds_ += t.dt;
         scripts_.graphTick(static_cast<i32>(droneEntity_), droneTimeSeconds_);
@@ -2714,23 +2390,20 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             }
         }
     }
-    // GRAPH-AS-CLASS instances -- GATED ON PLAY. The old defence rested on a false premise ("a
-    // graph-only project never calls aver_fw_begin_play"). PTTest disproves it every Play:
+    // Graph-as-class instances, gated on Play. The old defence assumed "a graph-only project never
+    // calls aver_fw_begin_play" -- false, per PTTest's own logs every Play:
     //     [Graph] GameMode 'AN_FPRules' begins play with pawn='AN_FPCharacter' ...
     //     [Sandbox] Play: begin_play GameMode='AN_FPRules'
-    // HostBridge registers graph classes into the SAME native class registry a C# GameMode uses,
+    // HostBridge registers graph classes into the same native class registry a C# GameMode uses,
     // so a graph-only project reaches Play like any other.
-    // What ungated did: every class-placed graph ran OnTick every frame while someone just looked
-    // around. Measured on PTTest over 1000 frames, Play never pressed: AN_FPRules' `elapsed` VAR
-    // climbed from 3.6e-05 to 12.31s, 4003 tick lines written, no begin_play -- a graph is free to
-    // move entities, fire events and write VARs, so browsing a level mutated it.
-    // Same condition as the framework tick groups above, deliberately: one spelling, not two.
-    //
-    // WHICH IS ALSO WHY IT NEEDS THE FRAMEWORK GUARD the tick groups already have: the condition
-    // is spelled with aver_fw_play_state(), out of framework_abi.h, and this block sat under SCENE
-    // and SCRIPTING alone. There is nothing to relax here -- a graph CLASS is placed by a
-    // GameMode's world and ticked because Play began, so with no framework there is no Play to
-    // gate on and no class instances to tick.
+    // Ungated, every class-placed graph ran OnTick while someone just looked around: measured on
+    // PTTest over 1000 frames with Play never pressed, AN_FPRules' `elapsed` VAR climbed from
+    // 3.6e-05 to 12.31s, 4003 tick lines written, no begin_play -- a graph is free to move
+    // entities, fire events and write VARs, so browsing a level mutated it.
+    // Same condition as the framework tick groups above, one spelling not two (this block used to
+    // sit under SCENE and SCRIPTING alone) -- which is also why it needs their AVER_MODULE_FRAMEWORK
+    // guard: aver_fw_play_state() comes from framework_abi.h, a graph CLASS is ticked because Play
+    // began, and with no framework there's no Play to gate on and no class instances to tick.
 #if AVER_MODULE_FRAMEWORK
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
         scripts_.tickGraphClassInstances(t.dt);
@@ -2739,9 +2412,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
     // can prove it happened without a human clicking Window > Chunk Streaming.
     if (chunkStreamAutoFrames_ > 0 && --chunkStreamAutoFrames_ == 0) setChunkStreamingEnabled(true);
-    // Chunk streaming, if switched on. Runs here so it sees THIS frame's camPos_ (the WASD/fly
-    // block above already finalized it) and its evictions land in the flush() right below -- also
-    // runs while just idling in the editor outside Play, deliberately: that's exactly who this feature is for.
+    // Chunk streaming, if on. Runs here so it sees THIS frame's camPos_ (WASD/fly already
+    // finalized it) and evictions land in the flush() below -- runs while idling outside Play too,
+    // deliberately: that's exactly who this feature is for.
     if (streaming_.enabled()) {
         const game::GameStreaming::TriangleLookupFn tris = [this](u64 id) -> u32 {
             const auto it = meshTris_.find(id);
@@ -2759,17 +2432,17 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     scene::World::instance().flush();
 #if AVER_WITH_AUDIO_ABI
-    // Reclaim finished voices, every frame, Play or not -- the second half of the audio-device
+    // Reclaims finished voices every frame, Play or not -- the second half of the audio-device
     // gap: aver_audio_collect had the same single caller as aver_audio_init, so a graph-started
-    // voice was never reclaimed and its slot leaked until the mixer ran out. Not gated on Play:
-    // voices outlive a session, so gating this would leak voices that finish after Stop.
+    // voice leaked its slot until the mixer ran out.
+    // Not gated on Play: voices outlive a session, so gating would leak voices that finish after Stop.
     aver_audio_collect();
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
-    // GATED ON PLAY, matching the physics/fw_tick block above -- pathing and movement targets are
-    // gameplay, not an authoring-time preview (an AI agent chasing a goal has nothing meaningful to
-    // do while nothing else in the level is moving). Same condition as that block, re-evaluated
-    // here rather than threaded through as a local.
+    // Gated on Play, matching the physics/fw_tick block above: pathing/movement targets are
+    // gameplay, not an authoring-time preview (an AI agent chasing a goal has nothing meaningful
+    // to do while nothing else in the level is moving). Same condition, re-evaluated here rather
+    // than threaded through as a local.
     // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
     // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
@@ -2782,20 +2455,17 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // G-buffer: pushed every frame so a live dropdown click or --gbuffer-debug takes effect
     // immediately. OR'd together: --gbuffer alone must still write with no view selected, and a
-    // debug view alone must still turn the G-buffer on. No module gate -- default stays OFF for
-    // the render-gate oracle and the 89 headless suites.
-    // VOXI'S DENOISER IS THE THIRD REASON THE G-BUFFER EXISTS, alongside --gbuffer and the
-    // debug views. NRD is its only consumer in the engine and it reads these three targets every
-    // frame it runs, so the setting that turns it on has to turn them on too -- otherwise the
-    // checkbox in Project Settings silently does nothing, which is how this pass spent its whole
-    // life reachable only from a command line.
+    // debug view alone must still turn it on. No module gate -- default stays OFF for the
+    // render-gate oracle and the 89 headless suites.
+    // Voxi's denoiser is the third reason the G-buffer exists: NRD is its only engine consumer and
+    // reads these three targets every frame it runs, so turning NRD on has to turn them on too --
+    // otherwise the Project Settings checkbox silently did nothing (reachable only from CLI before).
 #if AVER_MODULE_VOXI
     // N3 fix: the raw `denoiser` checkbox no longer gates this alone -- a ticked denoiser that can
-    // never actually run (no NRD on this device, RT tier Off, nothing producing a signal to
-    // filter) must not still cost the ~54 MB G-buffer allocation every frame. See
-    // Resolution::denoiserGBufferWanted (RenderSettingsResolver.hpp) for the exact rule: wanted
-    // when denoiser is requested and nothing but the soft MSAA reason (if even that) stands
-    // between the request and NRD actually running.
+    // never actually run (no NRD, RT tier Off, nothing to filter) must not still cost the ~54 MB
+    // G-buffer allocation every frame. See Resolution::denoiserGBufferWanted
+    // (RenderSettingsResolver.hpp) for the exact rule: wanted unless only the soft MSAA reason, if
+    // even that, stands between the request and NRD actually running.
     voxi::Renderer& vx = voxi::Renderer::get();
     const bool wantGbufForDenoiser = voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted;
 #else
@@ -2804,9 +2474,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser ||
                                   gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
     gbufferDebugFeature_.setDevice(e.device());
-    // vpX_/vpY_/vpW_/vpH_ are this frame's 3D-viewport rect (see buildViewportOverlay), a frame
-    // stale at worst on the very first draw -- the identical tolerance captureCheck()'s own
-    // VIEWPORT-MOVED check already accepts for the pixel probe this view exists to feed.
+    // vpX_/vpY_/vpW_/vpH_: this frame's 3D-viewport rect (buildViewportOverlay), a frame stale at
+    // worst on the very first draw -- the same tolerance captureCheck()'s VIEWPORT-MOVED check accepts.
     gbufferDebugFeature_.setViewportRect(static_cast<u32>(vpX_), static_cast<u32>(vpY_),
                                          static_cast<u32>(vpW_), static_cast<u32>(vpH_));
     gbufferDebugFeature_.setMode(gbufferDebugView_);
@@ -2821,32 +2490,28 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
 
     if (voxiAttached_) {
-        // A COPY, and that is load-bearing: the controller must never write back into the
-        // singleton, or one throttled frame would become the new authored baseline and the
-        // quality could only ever ratchet down. Project Settings still shows what was authored.
+        // A copy, load-bearing: the controller must never write back into the singleton, or one
+        // throttled frame would become the new authored baseline and quality could only ratchet
+        // down. Project Settings still shows what was authored.
         voxi::Settings vs = voxi::Renderer::get().settings();
         frameBudgetTick(t.dt, vs);
         const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
-        // AUTO-SWITCH: a ray-hit/triangles debug view cannot draw through the rasteriser, and
-        // Wireframe/a G-buffer debug view cannot draw through ray-driven primary visibility --
-        // see ViewDebug's own comment (VoxiRenderer.hpp) for why they share one pass-level float.
-        // Applied to THIS SCRATCH COPY ONLY, exactly like frameBudgetTick just above: never
-        // written back into voxi::Renderer::get()'s singleton, so Project Settings and prefs
-        // still show whatever was actually authored, and the override is released the very next
-        // frame the raster- or ray-driven-only mode is left. See setViewDebug's own call site
-        // (just above, beside setUnlit) for why these two conditions are recomputed here rather
-        // than read back from there.
+        // Auto-switch: a ray-hit/triangles debug view can't draw through the rasteriser, and
+        // Wireframe/G-buffer debug can't draw through ray-driven primary visibility -- see
+        // ViewDebug's own comment (VoxiRenderer.hpp) for why they share one pass-level float.
+        // Applied to this scratch copy only, like frameBudgetTick above -- never
+        // written back to the singleton, so Project Settings/prefs still show what was authored,
+        // and the override releases the frame that mode is left. See setViewDebug's call site
+        // (above, beside setUnlit) for why these are recomputed here rather than read back from there.
         const bool needRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
         const bool needRayDriven = !needRaster &&
             debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
         if (needRaster) vs.rtRenderMode = 0;
         else if (needRayDriven) vs.rtRenderMode = 1;
-        // A renderer just switched INTO starts from stale history otherwise -- e.g. leaving
-        // Wireframe (which forced raster) back to a ray-driven project would show a few frames of
-        // the old raster image ghosting through ray-driven's own reprojection. Compared against
-        // last frame's EFFECTIVE mode (lastEffectiveRtRenderMode_), not the authored one, so an
-        // ordinary frame where neither override is active -- vs.rtRenderMode already equals what
-        // was authored -- never resets anything.
+        // A renderer just switched INTO starts from stale history otherwise (e.g. leaving Wireframe
+        // back to ray-driven ghosts old raster through the new reprojection). Compared against last
+        // frame's EFFECTIVE mode, not the authored one, so an ordinary frame with no override
+        // active never resets anything.
         if (static_cast<i32>(vs.rtRenderMode) != lastEffectiveRtRenderMode_) {
             voxiRenderer_.resetRtHistory(true);
             voxiRenderer_.resetAoHistory();
@@ -2854,29 +2519,23 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             voxiRenderer_.resetNrdHistory(true);
             lastEffectiveRtRenderMode_ = static_cast<i32>(vs.rtRenderMode);
         }
-        // UNDENOISED (--view-mode undenoised / the viewport dropdown's independent "Undenoised"
-        // toggle): a bundle of EXISTING runtime knobs, applied to this SAME scratch copy and
-        // never persisted, exactly like the auto-switch above -- see undenoised_'s own
-        // declaration (SandboxApp.hpp) for why it is not saved. Turns off:
+        // Undenoised (--view-mode undenoised / the dropdown's independent toggle): existing runtime
+        // knobs applied to this scratch copy only, never persisted (see undenoised_'s declaration,
+        // SandboxApp.hpp). Turns off:
         //   - NRD entirely (denoiser)
-        //   - the ray-tile amortisation, so every pixel traces every frame (rtPixelsPerRayTile 1
-        //     -- see that field's own comment: "bit-identical to no denoiser at all: no tiling,
-        //     no reprojected history, no temporal blend")
-        //   - the RT sun-shadow SPATIAL filter (rtShadowDenoise 0 -- the radius/take pair packed
-        //     into cb_.rtDenoiseParams.xy)
-        //   - ReSTIR GI's spatial reuse (giRestirSpatialSamples 0 -- 15 is AUTO; 0 "disables
-        //     spatial reuse OUTRIGHT" per that field's own comment)
-        // Temporal accumulation is turned off below, beside voxi.debugResetHistoryEveryFrame,
-        // rather than here.
+        //   - ray-tile amortisation (rtPixelsPerRayTile 1: no tiling, no reprojected history, no temporal blend)
+        //   - RT sun-shadow spatial filter (rtShadowDenoise 0 -- the radius/take pair packed into
+        //     cb_.rtDenoiseParams.xy)
+        //   - ReSTIR GI's spatial reuse (giRestirSpatialSamples 0; 15 is auto; 0 "disables spatial
+        //     reuse OUTRIGHT" per that field's own comment)
+        // Temporal accumulation is turned off below, beside voxi.debugResetHistoryEveryFrame.
         //
-        // NO RUNTIME KNOB EXISTS for the reflection spatial filter (rtReflectionSpatial,
+        // Known gap: no runtime knob exists for the reflection spatial filter (rtReflectionSpatial,
         // CSRdReflFilter) or a sky-occlusion spatial filter -- neither is gated by any Settings
         // field today (checked against Voxi.hpp/VoxiRenderer.cpp: rtReflectionSpatial runs
-        // unconditionally as part of the reflection compose, split or not, and sky occlusion has
-        // no spatial pass at all, only the TEMPORAL rtSkyOcclusionHalfRate toggle). Undenoised
-        // cannot turn either off without inventing a Settings field nothing else reads, so it
-        // leaves both running -- noted here, and in the EDITOR agent's report, rather than
-        // silently claimed as handled.
+        // unconditionally as part of the reflection compose, and sky occlusion has no spatial pass
+        // at all, only the temporal rtSkyOcclusionHalfRate toggle), so Undenoised leaves both
+        // running rather than claiming to handle them.
         if (undenoised_) {
             vs.denoiser = false;
             vs.rtPixelsPerRayTile = 1;
@@ -2885,19 +2544,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
         voxiRenderer_.setSettings(vs);
         // Consume-and-forward for the five reset* console commands (EditorConsole.hpp) -- one
-        // request flag per history, raised on voxi::Renderer (the settings singleton the console
-        // can reach) and consumed here, right beside setSettings, into the actual VoxiRenderer
-        // instance the console cannot reach directly. Same "raise on the singleton, consume once
-        // a frame" shape as consumeMsaaDirty() just above onUpdate's own Voxi block.
+        // request flag per history, raised on the singleton the console can reach, consumed here
+        // into the VoxiRenderer instance it can't reach directly (same shape as consumeMsaaDirty() above).
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
         if (voxi::Renderer::get().consumeAoHistoryResetRequest())  voxiRenderer_.resetAoHistory();
         if (voxi::Renderer::get().consumeNrdHistoryResetRequest()) voxiRenderer_.resetNrdHistory();
-        // voxi.debugResetHistoryEveryFrame, OR'd with Undenoised (undenoised_ resets the SAME
-        // three histories every frame it is on, for the identical "no temporal accumulation"
-        // reason -- see the UNDENOISED comment above): the console slot's own STORED value is
-        // only ever READ here, never written, so turning Undenoised off leaves whatever the
-        // console last set untouched.
+        // voxi.debugResetHistoryEveryFrame, OR'd with Undenoised (same "no temporal accumulation"
+        // reason as above): console slot is only ever READ here, so toggling Undenoised off leaves
+        // it untouched.
         const u32 everyFrame = editor::consoleResetHistoryEveryFrameSlot();
         if (everyFrame || undenoised_) {
             if ((everyFrame & 1u) || undenoised_) voxiRenderer_.resetGiHistory(/*quiet=*/true);
@@ -2905,59 +2560,48 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             if ((everyFrame & 4u) || undenoised_) voxiRenderer_.resetNrdHistory(/*quiet=*/true);
         }
         voxiRenderer_.setVolume(c, giExtent_);
-        // WHERE A BAKED VOLUME MAY BE REMEMBERED. Pushed every frame like everything else here,
-        // and empty with no project open -- which disables the cache rather than scattering
-        // derived data beside the executable. See VoxiRenderer::setGiCacheDir.
+        // Where a baked volume may be remembered. Pushed every frame like everything here; empty
+        // with no project open, which disables the cache rather than scattering data beside the exe.
+        // See VoxiRenderer::setGiCacheDir.
         voxiRenderer_.setGiCacheDir(project_.valid() ? fmt::giCacheDir(project_.dir) : std::string());
         voxiRenderer_.setDebugView(giDebugView_);
-        // voxi.giPoisonView: EditorConsole.hpp's own live source of truth, reasserted every frame
-        // the same way occlusion.debugForceWaitIdle already is -- see
-        // editor::consoleGiPoisonViewSlot()'s own comment.
+        // voxi.giPoisonView: EditorConsole.hpp's live source of truth, reasserted every frame like
+        // occlusion.debugForceWaitIdle (see consoleGiPoisonViewSlot()).
         voxiRenderer_.setGiPoisonView(editor::consoleGiPoisonViewSlot());
-        // voxi.nrdLegacyCamera: identical idiom, right beside the toggle it mirrors -- see
-        // editor::consoleNrdLegacyCameraSlot()'s own comment and VoxiRenderer::setNrdLegacyCamera's
-        // for what this reasserts and why the setter itself only acts on an actual change.
+        // voxi.nrdLegacyCamera: same idiom (see consoleNrdLegacyCameraSlot()/setNrdLegacyCamera) --
+        // the setter itself only acts on an actual change.
         voxiRenderer_.setNrdLegacyCamera(editor::consoleNrdLegacyCameraSlot());
-        // The lighting-contrast fix's legacy bitmask: identical idiom, right beside the toggle it
-        // mirrors -- see editor::consoleLightingLegacySlot()'s own comment and
-        // VoxiRenderer::setLightingLegacyBits' for the bit table and what reasserting this every
-        // frame (regardless of whether the user just touched it) costs versus what it buys.
+        // Lighting-contrast fix's legacy bitmask: same idiom (see consoleLightingLegacySlot()/
+        // setLightingLegacyBits for the bit table).
         voxiRenderer_.setLightingLegacyBits(editor::consoleLightingLegacySlot());
-        // engine-optimisation-plan wave 1 (M1-M4/W3/W12, C-2/C-5): identical idiom, right beside
-        // the toggles it mirrors just above -- see consoleGiForceRebuildSlot()'s own comment
-        // (EditorConsole.hpp) for why these three are raw slots rather than ordinary dials. Each
-        // setter acts only on an actual change and logs only on change (C-2's own contract), so
-        // reasserting all three unconditionally every frame costs nothing when nobody has touched
-        // the console since the last frame.
+        // Optimisation wave 1 (M1-M4/W3/W12, C-2/C-5): same idiom (consoleGiForceRebuildSlot(),
+        // EditorConsole.hpp) -- raw slots rather than ordinary dials. Each setter acts/logs only
+        // on an actual change (C-2's own contract), so reasserting all three every frame is
+        // free when untouched.
         voxiRenderer_.setGiForceRebuild(editor::consoleGiForceRebuildSlot());
         voxiRenderer_.setGiBoundedDispatch(editor::consoleGiBoundedDispatchSlot());
         voxiRenderer_.setGiFreeAccumulator(editor::consoleGiFreeAccumulatorSlot());
-        // optimisation-wave-2, U1/W6/M5: identical idiom, right beside the toggles it mirrors just
-        // above -- see consoleGiVisPathViewSlot()'s and consoleBlendedGiConeSlot()'s own comments
-        // (EditorConsole.hpp) for why these two are raw slots rather than ordinary dials. Both
-        // setters act only on an actual change, so reasserting them unconditionally every frame
-        // costs nothing when nobody has touched the console since the last frame.
+        // Optimisation wave 2 (U1/W6/M5): same idiom (consoleGiVisPathViewSlot()/
+        // consoleBlendedGiConeSlot()) -- raw slots rather than ordinary dials; both setters act
+        // only on an actual change, so reasserting both every frame is free when untouched.
         voxiRenderer_.setGiVisPathView(editor::consoleGiVisPathViewSlot());
         voxiRenderer_.setBlendedGiCone(editor::consoleBlendedGiConeSlot());
         // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
-        // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
-        // than only at attach time.
+        // setDebugView beside it, so it takes effect the instant the flag is set rather than only at attach time.
         voxiRenderer_.setConeTraceEnabled(!giConeTraceOff_);
 #if AVER_MODULE_SR
-        // optimisation-wave-2, U2 (3.3 A): resolves and applies AverSR's level fresh every frame
-        // from the SAME precedence chain the Project Settings upscaling line reads (CLI >
-        // --render-scale > the user's Display choice > the project manifest > the Overall rung's
-        // own ladder default). Auto is not a one-shot decision made at project-open time, because
-        // the rung it follows can change under it (a scalability button, a manifest reload) --
-        // outside beginFrame/endFrame, like every other Voxi reassert in this block.
+        // Optimisation wave 2, U2 (3.3 A): resolves AverSR's level fresh every frame from the same
+        // precedence chain Project Settings reads (CLI > --render-scale > Display choice > manifest
+        // > Overall rung default). Not a one-shot decision: the rung it follows can change under it
+        // (a scalability button, a manifest reload) -- outside beginFrame/endFrame, like every
+        // other Voxi reassert in this block.
         updateAverSrAuto(e);
 #endif
         const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                              sky_.sunDirection[2]}.getSafeNormal();
         if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
-        // Direction only. sunColor_ and sunAmbient_ reach the shaders through sky_ below
-        // (:1136, :1141) and the device's frame constants -- passing them here as well was
-        // storing a second copy nothing read.
+        // Direction only: sunColor_/sunAmbient_ reach the shaders through sky_ below (:1136, :1141)
+        // and the device's frame constants; passing them here too would store a second copy nothing reads.
         voxiRenderer_.setSunDirection(&sd.x);
     }
 #endif
@@ -2969,17 +2613,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     const game::CameraMatrices cam = game::pushCamera(*e.device(), camPos_, fwd, aspect);
     invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = camPos_;
 
-    // ONE MEMBER FOR ONE VALUE. This used to read `fog = fogDensity_` and then, on a level
-    // with a FOG record, overwrite it with a SECOND member `levelFog_` that saveLevel wrote
-    // and the slider never touched. So the Fog Density slider was dead in both directions:
-    // inert when the level had fog (levelFog_ won), and unsaved when it did not
-    // (hasLevelFog_ was false). The load now writes the slider's own member and the save
-    // reads it, so what is on screen is what is in the file.
+    // One member for one value: used to read `fog = fogDensity_` then overwrite it with a second
+    // member `levelFog_` the slider never touched, so Fog Density was dead both ways (inert when
+    // the level had fog, unsaved when it didn't). Load now writes the slider's own member; save reads it.
     f32 fog = fogDensity_;
 #if AVER_MODULE_SCENE
-    // OPT-IN, and overrides whatever the level/slider said while on: match fog density to the
-    // streaming load boundary instead. See fogDensityForOpacityAt and matchFogToStreamRadius_'s
-    // comment -- this makes the world visibly foggier, on purpose, only when asked for.
+    // Opt-in, overrides the level/slider while on: matches fog density to the streaming load
+    // boundary (fogDensityForOpacityAt) -- deliberately foggier, only when asked for.
     if (matchFogToStreamRadius_ && streaming_.enabled()) {
         const world::StreamSettings& st = streaming_.settings().stream;
         const f32 boundaryCm = static_cast<f32>(st.loadRadius) * static_cast<f32>(st.chunkSizeCm);
@@ -2995,21 +2635,16 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         sky_.horizon[i]  = skyHorizon_[i];
         sky_.fogColor[i] = fogColor_[i];
     }
-    // --sky-light N OUTRANKS THE LEVEL, and is applied HERE rather than once at startup because
-    // sunAmbient_ is overwritten by applyLevelSky every time a level opens -- a value set before
-    // that would be silently discarded, which is the precedence bug this file has already
-    // recorded four times over (see the --gi-update-interval note in the flag-override block).
-    //
-    // WHY THE KNOB EXISTS AT ALL: skyLightIntensity scales the ONLY term in the frame that is
-    // added without being occluded by anything but a six-cone AO -- diffAmbient in
-    // material_prelude.hlsl -- and it had a slider in the Rendering panel and no command-line
-    // twin, so its share of the image could never be swept or measured. That share is the open
-    // question behind "the colours look washed out": the sky is Rayleigh-blue and the bounce off
-    // stone is warm, so a large unoccluded ambient dilutes chroma toward grey.
+    // --sky-light N outranks the level, applied HERE not once at startup, since sunAmbient_ is
+    // overwritten by applyLevelSky every time a level opens -- the same precedence bug recorded
+    // several times in this file (see --gi-update-interval in the flag-override block).
+    // Why the knob exists: skyLightIntensity scales the one frame term added without being
+    // occluded by anything but a six-cone AO (diffAmbient, material_prelude.hlsl), previously
+    // sliderable but not CLI-measurable. That share is the open question behind "washed out"
+    // colours: sky is Rayleigh-blue, stone bounce is warm, so a large unoccluded ambient dilutes chroma toward grey.
     if (skyLightOverride_ >= 0.0f) sunAmbient_ = skyLightOverride_;
-    // --sky-physical / --sky-authored / the sun elevation, re-applied HERE for the same reason
-    // --sky-light is: applyLevelSky overwrites sky_ when a level opens, so anything written at
-    // startup is gone by the first frame. See setSkyPhysical for what that cost.
+    // --sky-physical/--sky-authored/sun elevation, re-applied HERE for the same reason --sky-light
+    // is: applyLevelSky overwrites sky_ on level open, so a startup write is gone by frame 1.
     if (skyModelOverride_ >= 0)
         sky_.model = skyModelOverride_ ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
     if (sunElevationOverride_ > -90.0f) {
@@ -3022,9 +2657,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     sky_.skyLightIntensity = sunAmbient_;
     sky_.fogDensity = fog;
     sky_.cloudTime = cloudTime_;
-    // UNDERWATER, APPLIED TO A COPY: sky_ is the AUTHORED sky and must stay that way, or folding
-    // the override back in would accumulate every frame spent below the surface, and a level saved
-    // from that state would carry underwater fog as its authored weather.
+    // Underwater fog applied to a copy: sky_ is the AUTHORED sky and must stay that way, or the
+    // override would accumulate every frame underwater and get saved as authored weather.
 #if AVER_MODULE_FLUIDS
     e.device()->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, camPos_.z));
 #else
@@ -3032,19 +2666,16 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // Outside the viewport rect is editor chrome, not sky.
     e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
-    // THE CONSOLE'S post.* VARIABLES WRITE THE DEVICE, NOT post_. Pushing post_ unconditionally every
-    // frame silently undid every one of them a frame later (post.exposureKey, post.tonemap, ...). If
-    // the device no longer holds what this editor last pushed, something else changed it on purpose:
-    // adopt that into post_ (so the Post panel shows it and prefs save it), then push as usual.
+    // Console post.* vars write the device, not post_ -- pushing post_ unconditionally undid them a
+    // frame later. If the device no longer holds what was last pushed, something changed it on
+    // purpose: adopt that into post_ (so the Post panel/prefs see it), then push as usual.
     if (postPushedValid_ && !rhi::postSettingsEqual(e.device()->postProcess(), postPushed_))
         post_ = e.device()->postProcess();
-    // A ray-hit/triangles debug view paints a flat diagnostic colour, not a lit scene -- auto
-    // exposure would chase that flat colour's luminance and bloom/local exposure would smear or
-    // re-grade it, defeating the point of a debug view (an unambiguous, comparable colour per
-    // pixel). Pushed as a COPY of post_, with postPushed_ set to that SAME copy rather than
-    // post_ itself: the adopt-if-changed check just above compares against postPushed_ next
-    // frame, so the override reading back from the device is never mistaken for something the
-    // user changed and folded into post_ -- and prefs, which only ever save post_, never see it.
+    // A debug view paints a flat diagnostic colour, not a lit scene -- auto exposure/bloom/local
+    // exposure would smear or re-grade it, defeating the point (an unambiguous, comparable colour
+    // per pixel). Pushed as a copy of post_, with postPushed_ set to that same copy, so the
+    // adopt-if-changed check above never mistakes the override for a user change and folds it into
+    // post_ -- prefs, which only save post_, never see it.
     if (debugViewActiveThisFrame) {
         rhi::PostSettings dbg = post_;
         dbg.autoExposure = false;
@@ -3062,9 +2693,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 }
 
 // Tears the editor down: MCP, prefs, physics, UI textures, materials, render features, scripts.
-// The process exit code. Non-zero when a test mode that was ASKED FOR did not pass.
-// Only modes the command line requested are judged: an ordinary session must exit 0, a test never
-// started is not a failure, but a requested test that never finished IS one -- silence would read as success.
+// The process exit code. Non-zero only when a REQUESTED test mode did not pass: an ordinary
+// session exits 0, an unstarted test is not a failure, but a requested test that never finished IS
+// one -- silence would read as success.
 int SandboxApp::exitCode() const  {
     if (skinScene_) {
         if (!skinScene_->finished()) {
@@ -3074,11 +2705,10 @@ int SandboxApp::exitCode() const  {
         }
         if (!skinScene_->passed()) return 1;
     }
-    // THE OTHER TWO SKIN TESTS, WHICH USED TO EXIT 0 WHATEVER THEY FOUND. Read from the latched
-    // scalars rather than the objects: onShutdown runs BEFORE this and destroys both, so asking
-    // skinDraw_/skinSelfTest_ here would always see null and always report success -- and a
-    // falsification written against that would pass while proving nothing.
-    // -1 means the test was never asked for, which is not a verdict and must not become one.
+    // The other two skin tests used to exit 0 whatever they found. Read from the latched scalars,
+    // not the objects: onShutdown runs BEFORE this and destroys both, so asking the objects here
+    // would always see null and report success -- and a falsification written against that would
+    // pass while proving nothing. -1 means never asked for, not a verdict.
     if (skinSelfTestExit_ > 0) {
         AVER_ERROR("[Skin] --skin-test reported {}", skinSelfTestExit_ == 2 ? "no verdict (it did "
                    "not finish)" : "FAIL");
@@ -3098,50 +2728,40 @@ void SandboxApp::onShutdown(Engine& e)  {
 #endif
     setLogSink(nullptr, nullptr);
 #if AVER_MODULE_VOXI
-    // THE BAKED GI GOES TO DISK HERE. Volumes are buffered in RAM while the editor runs and
-    // only reach the filesystem when the budget is exceeded or right now -- so without this
-    // line a whole session's lighting work would be thrown away and rebuilt on the next open.
-    // BEFORE the render features are torn down below: giCacheFlush only touches std::vectors
-    // and the filesystem, but it belongs with the state capture rather than after the device
-    // has started coming apart.
+    // Baked GI goes to disk here: volumes buffer in RAM and only reach the filesystem when the
+    // budget is exceeded or right now, so without this a whole session's lighting work would be
+    // thrown away and rebuilt on the next open. Before render features are torn down: giCacheFlush
+    // only touches std::vectors/filesystem, but belongs with the state capture rather than after
+    // the device has started coming apart.
     if (const u32 wrote = voxiRenderer_.giCacheFlush())
         AVER_INFO("[Editor] wrote {} buffered GI cache entr(ies) on shutdown", wrote);
 #endif
-    // ---- CAPTURE LIVE STATE BEFORE FLUSHING IT ----
-    // flushEditorPrefs() writes the pref STORE but does not look at the editor, so it only
-    // persists what saveEditorPreferences() already pushed in -- and that only runs from
-    // buildEditorPrefs()'s tail, which early-returns when the Preferences window is closed.
-    // Several settings change the member through a more convenient control that never reaches
-    // that function (mouse wheel -> flySpeed_, toolbar -> wireframe_, Content Browser Tiles/List
-    // and zoom, drawer grip -> drawerFrac_): change any the natural way, close the editor, and the
-    // value was silently gone.
+    // ---- Capture live state before flushing it ----
+    // flushEditorPrefs() writes the pref store but doesn't look at the editor -- it only persists
+    // what saveEditorPreferences() already pushed in, which only runs from buildEditorPrefs()'s
+    // tail and early-returns when Preferences is closed. Several settings bypass it entirely
+    // (mouse wheel -> flySpeed_, toolbar -> wireframe_, Content Browser Tiles/List and zoom,
+    // drawer grip -> drawerFrac_): change any the natural way, close the editor, value silently gone.
     // Calling the sync here reads the live members regardless of which UI last touched them --
     // safe unconditionally since setPref*/flushEditorPrefs() are no-ops on nothing dirty.
-    //
-    // "UNCONDITIONALLY" IS ABOUT THE DIRTY CHECK, not about the build: saveEditorPreferences is
-    // the Preferences window's own push and is declared and defined `#if AVER_WITH_IMGUI`
-    // (SandboxSettings.cpp), so it does not exist in a tree built without the D3D12 ImGui backend.
-    // flushEditorPrefs STAYS OUTSIDE the guard -- it is editor::, not a panel, and a pref set from
-    // the command line still deserves to reach disk in a build with no window to change it from.
+    // "Unconditionally" is about the dirty check, not the build: saveEditorPreferences is
+    // `#if AVER_WITH_IMGUI` (Preferences window's own push, SandboxSettings.cpp), so it does not
+    // exist in a tree built without the D3D12 ImGui backend. flushEditorPrefs stays outside
+    // the guard -- it is editor::, not a panel, and a CLI-set pref still deserves to reach disk with no window to change it from.
 #if AVER_WITH_IMGUI
     saveEditorPreferences();
 #endif
     editor::flushEditorPrefs();
-    // THE MANIFEST TOO, for the same reason and one the preferences do not have: the project
-    // autosave is a 0.5s DEBOUNCE (kProjectAutosaveSec), so an edit made and immediately
-    // followed by File > Exit or the window's X is still sitting in projectDirty_ when the
-    // process goes. Neither exit path checked it -- requestExitChecked and onCloseGuard both
-    // test only assetEditors_.anyDirty() || levelHasUnsavedEdits() -- so the edit was lost with
-    // no prompt and no log line.
-    //
-    // FLUSHED, NOT PROMPTED. A prompt would contradict the design stated at projectDirty_'s
-    // declaration: settings save on edit precisely so a page cannot be "edited and closed, and
-    // the edit gone". Writing here closes the window for EVERY exit path at once.
-    //
-    // THE maxFrames_ GUARD IS LOAD-BEARING, not tidiness -- maybeAutosaveProject documents why:
-    // --frames sets render settings from the command line and applyProjectRenderSettings marks
-    // the project dirty when it does, so flushing here unguarded would write a capture run's
-    // CLI flags into the user's manifest as if they had chosen them.
+    // The manifest too, same reason plus one prefs don't have: project autosave is a 0.5s debounce
+    // (kProjectAutosaveSec), so an edit immediately followed by exit was still sitting in
+    // projectDirty_ when the process went -- neither exit path checked it (requestExitChecked and
+    // onCloseGuard both test only anyDirty()/levelHasUnsavedEdits()), so the edit was lost with no
+    // prompt and no log line.
+    // Flushed, not prompted: a prompt would contradict "settings save on edit" (projectDirty_'s
+    // declaration). Writing here closes every exit path at once.
+    // maxFrames_ guard is load-bearing, not tidiness -- maybeAutosaveProject documents why:
+    // --frames sets render settings from the CLI and applyProjectRenderSettings marks the project
+    // dirty when it does, so an unguarded flush would write a capture run's flags into the user's manifest.
     if (maxFrames_ == 0 && projectDirty_ && project_.valid()) {
         std::string why;
         if (!saveProjectManifest(&why))
@@ -3154,9 +2774,9 @@ editor::shutdownAnimEditors();
 #endif
     setMouseCaptured(false);
 #if AVER_MODULE_FLUIDS
-    // BEFORE aver_phys_shutdown below, explicitly rather than leaving it to water_'s own
-    // destructor: that runs after onShutdown returns, when the solver is gone and retiring a live
-    // volume would call into a shut-down physics system.
+    // Before aver_phys_shutdown below, explicitly (not left to water_'s destructor, which runs
+    // after onShutdown returns, once the solver is gone and retiring a live volume would call
+    // into a shut-down physics system).
     water_.shutdown(e.device());
 #endif
 #if AVER_FLUIDS_SIMULATED
@@ -3166,21 +2786,19 @@ editor::shutdownAnimEditors();
         viewportIconsReady_ = false;
     }
 #endif
-    // THE SAME REASON, THE SAME FIX, one member along -- see the water_ note above:
-    // GBufferDebugFeature's destructor calls releaseGpu() after onShutdown returns, by which point
-    // the device and its resource factory are gone, so `res_` dangles and the process dies on the
-    // way out.
-    // MEASURED, NOT FEARED: `--gbuffer-debug velocity --msaa 1` exited 0xC0000005 with 0 debug-
-    // layer errors -- a clean frame followed by a CPU access violation at teardown.
+    // Same reason, same fix, one member along (see water_ above): GBufferDebugFeature's destructor
+    // calls releaseGpu() after onShutdown returns, once the device/resource factory are gone, so
+    // `res_` dangles. Measured, not feared: `--gbuffer-debug velocity --msaa 1` exited 0xC0000005
+    // with 0 debug-layer errors -- a clean frame followed by a CPU access violation at teardown.
     e.device()->removeRenderFeature(&gbufferDebugFeature_);
     gbufferDebugFeature_.shutdown();
 #if AVER_MODULE_PHYSICS
     aver_phys_shutdown();
 #endif
 #if AVER_WITH_AUDIO_ABI
-    // Stops the mixer, releases the device and forgets every loaded sound. Idempotent, and a
-    // no-op when the device was never opened -- so a build with no output device, or one that
-    // never reached the init above, is unaffected.
+    // Stops the mixer, releases the device, forgets every loaded sound. Idempotent and a no-op
+    // when the device was never opened -- so a build with no output device, or one that never
+    // reached the init above, is unaffected.
     aver_audio_shutdown();
 #endif
 #if AVER_WITH_IMGUI
@@ -3203,13 +2821,12 @@ editor::shutdownAnimEditors();
     content_.setTextureFactory(nullptr);
 #endif
 #if AVER_MODULE_SR
-    // DETACH FROM THE DEVICE FIRST, THEN DESTROY. The old comment said resetting the unique_ptrs
+    // Detach from the device first, then destroy: the old comment said resetting the unique_ptrs
     // was safe because "e.device() is still known good" -- the wrong question: it's
-    // `dev->upscaler()`, a RAW pointer set by applyUpscalerSlot(), that must stop pointing here
-    // first. --edge-aa's first --frames run crashed (SIGSEGV) AT PROCESS EXIT with the measurement
-    // already logged -- only teardown order was wrong. Clearing the slot unconditionally, for
-    // BOTH, before either reset() runs, is the exact bug clearAverSrUpscaler(dev) exists to
-    // prevent and was never called anywhere in this file.
+    // `dev->upscaler()`, a raw pointer applyUpscalerSlot() set, that must stop pointing here
+    // first. --edge-aa's first --frames run crashed (SIGSEGV at process exit, with the
+    // measurement already logged -- only teardown order was wrong). Clearing the slot for both,
+    // before either reset(), is the exact bug clearAverSrUpscaler(dev) exists to prevent and was never called here.
     e.device()->setUpscaler(nullptr);
     averSrUpscaler_.reset();
     edgeAaUpscaler_.reset();
@@ -3220,10 +2837,9 @@ editor::shutdownAnimEditors();
         gameUi_ = nullptr;
     }
     if (skinSelfTest_) {
-        // LATCHED BEFORE THE RESET, and that ordering is the whole point. Engine::run calls
-        // onShutdown and reads exitCode() AFTER it, so a verdict left inside the object is gone
-        // by the time anything can ask for it -- which is why --skin-test exited 0 however it
-        // went. --skin-scene-test only escaped this by never being reset here.
+        // Latched before the reset -- the whole point. Engine::run reads exitCode() AFTER
+        // onShutdown, so a verdict left inside the object is gone by then (why --skin-test used
+        // to exit 0 regardless). --skin-scene-test only escaped this by never being reset here.
         skinSelfTestExit_ = !skinSelfTest_->finished() ? 2 : (skinSelfTest_->passed() ? 0 : 1);
         e.device()->removeRenderFeature(skinSelfTest_.get());
         skinSelfTest_.reset();
@@ -3232,16 +2848,15 @@ editor::shutdownAnimEditors();
         e.device()->removeRenderFeature(ptFurnace_.get());
         ptFurnace_.reset();
     }
-    // GBufferDebugFeature: see its registration in onInit for why this is unconditional rather
-    // than gated on gbufferOverride_/gbufferDebugView_ -- the feature is always registered, so
-    // it must always be the thing that unregisters it.
+    // GBufferDebugFeature: unconditional, not gated on gbufferOverride_/gbufferDebugView_, since
+    // the feature is always registered (see onInit) so must always be unregistered here.
     if (gbufferDebugAttached_) {
         e.device()->removeRenderFeature(&gbufferDebugFeature_);
         gbufferDebugAttached_ = false;
     }
-    // Routed through the same reconciler the editor's live toggle uses (not a hand-written
-    // removeRenderFeature()+reset() here) so process-exit teardown and a user-driven "turn it off"
-    // are provably the same code path. onShutdown() runs well outside any frame, exactly as safe as its usual onUpdate() call site.
+    // Routed through the same reconciler the editor's live toggle uses, not a hand-written
+    // removeRenderFeature()+reset(), so exit teardown and a user "turn it off" are the same code
+    // path. onShutdown() runs well outside any frame, exactly as safe as its usual onUpdate() call site.
     ptSceneViewWantEnabled_ = false;
     syncPtSceneView(e.device());
     if (skinDraw_) {
@@ -3257,9 +2872,8 @@ editor::shutdownAnimEditors();
         e.device()->removeRenderFeature(skinnedScene_.get());
         skinnedScene_.reset();
     }
-    // copyFeature() is exposed for exactly this call (see its own comment): thumbnails_ owns and
-    // unregisters its ActorPreview internally in shutdown(), but the copy pass is the host's to
-    // remove, the same removeRenderFeature()-then-teardown shape as skinnedScene_ just above.
+    // copyFeature() is exposed for exactly this call: thumbnails_ owns/unregisters its ActorPreview
+    // internally, but the copy pass is the host's to remove (same shape as skinnedScene_ above).
     if (thumbnails_.ready()) e.device()->removeRenderFeature(thumbnails_.copyFeature());
     thumbnails_.shutdown();
 #endif

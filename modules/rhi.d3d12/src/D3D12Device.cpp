@@ -32,20 +32,17 @@
 #include <utility>
 #include <vector>
 
-// The abstract seam a UI toolkit's D3D12 backend plugs into. This file has no ImGui include and no
-// ImGui symbol anywhere in it -- see UiBackend.hpp for why, and modules/rhi.d3d12.imgui for where
-// Dear ImGui itself now lives.
+// Seam a UI toolkit's D3D12 backend plugs into; no ImGui symbol lives in this file -- see
+// UiBackend.hpp; Dear ImGui itself is in modules/rhi.d3d12.imgui.
 #include "aver/rhi/d3d12/UiBackend.hpp"
 
 using Microsoft::WRL::ComPtr;
 
 namespace aver::rhi {
 
-// How much disk the shader blob cache may keep. 256 MB is roughly two orders of magnitude more than
-// one full set of this engine's shaders, so an ordinary user never reaches it while a developer's
-// months of accumulated variants are trimmed to a working set rather than to nothing. Evicting to
-// zero on every launch would defeat the cache; not evicting at all is what this replaces. See
-// aver/rhi/ShaderCacheSweep.hpp for why the bound is bytes and the order is oldest-first.
+// Shader blob cache disk budget: 256 MB, ~100x one full shader set, so months of a dev's accumulated
+// variants get trimmed to a working set instead of evicted to zero on every launch (which would
+// defeat the cache) or never evicted at all (what this replaces). See ShaderCacheSweep.hpp (bytes, oldest-first).
 static constexpr u64 kShaderCacheBudgetBytes = 256ull * 1024ull * 1024ull;
 namespace {
 
@@ -135,17 +132,12 @@ public:
     // Compiles one entry point to bytecode. `target51` is the FXC target; `sm6` overrides the derived
     // SM6 target and requires DXC. `define` is a semicolon-separated -D list.
     //
-    // Blob cache: MEASURED BEFORE IT WAS BUILT -- 64 compiles, 5,601ms on a PTTest launch, no cache
-    // of any kind. Key is the whole input: source, -D list, entry, target profile, a hand-bumped
-    // format version, and a hash of every shader FILE (see below).
-    //
-    // "COMPOSED SOURCE" STOPPED BEING THE WHOLE INPUT and this comment said it was. When shaders were
-    // C++ string literals, `src` really did contain every prelude, so a changed prelude changed the
-    // key. Once shaders became files that pull in what they need, `src` is the top-level text alone
-    // -- and an edit to shared_prelude.hlsl (the sky, the fog, the tonemap, the frame constant
-    // buffer) left every key identical. The cache hit, DXC was never asked, and the edit did nothing,
-    // silently, for every shader. That is a correctness hole rather than a stale-cache annoyance, and
-    // it cost a debugging session before it was found: a sky change measured as a no-op three times.
+    // Blob cache: measured at 64 compiles / 5,601ms on a cold PTTest launch before this existed. Key
+    // is the whole input: source, -D list, entry, target profile, kCacheVersion, and a hash of every
+    // shader FILE (shared_prelude.hlsl -- sky, fog, tonemap, frame CB -- etc. are #included, not
+    // concatenated, so they must count too -- a prior version that hashed only `src` let a prelude
+    // edit go silently uncompiled for every shader, a correctness hole rather than mere staleness;
+    // caught after a sky change measured as a no-op three times).
     //
     // kCacheVersion is the dxcompiler.dll escape hatch: a newer DXC can emit different DXIL for
     // identical input, invisible to the cache. Bump it when the shipped compiler changes.
@@ -175,9 +167,9 @@ public:
         if (dir.empty()) return {};
         char name[32];
         std::snprintf(name, sizeof name, "%016llx.dxil", static_cast<unsigned long long>(key));
-        // std::filesystem JOINS THIS rather than pasting a separator into a literal -- an earlier
-        // "\ShaderCache\\" had an invalid \S escape MSVC silently dropped, so the cache landed in a
-        // SIBLING directory (AverEngineShaderCache) instead: it worked perfectly, in the wrong place.
+        // std::filesystem joins this rather than pasting a separator into a literal -- a literal
+        // "\ShaderCache\\" once had MSVC silently drop the invalid \S escape, caching perfectly into
+        // the wrong sibling dir (AverEngineShaderCache).
         return (std::filesystem::path(dir) / "ShaderCache" / name).string();
     }
 
@@ -247,35 +239,24 @@ public:
             L"-T", wTarget.c_str(),
             L"-Zpr",
             L"-HV", L"2021",
-            // ANGLED INCLUDES. A custom IDxcIncludeHandler is consulted for `#include "x"` on its
-            // own, because a quoted include searches the including file's own directory -- but
-            // `#include <x>` searches ONLY the -I list, and with no -I at all that list is empty,
-            // so DXC never asks the handler and reports `file not found with <angled> include; use
-            // "quotes" instead`. That is not a style note this engine can act on: the angled
-            // includes are inside VENDORED third-party HLSL (RTXDI's Utils/RandomSamplerState.hlsli
-            // includes <Rtxdi/Utils/Math.hlsli>), and rewriting a vendored tree to suit us is the
-            // thing third_party/*/AVER_README.md exists to avoid.
-            //
-            // "." IS NOT A FILESYSTEM PATH HERE. It only gives the angled search a single entry to
-            // form candidates from; the candidate ("./Rtxdi/Utils/Math.hlsli") still goes through
-            // DxcShaderInclude, which strips the "./" and resolves it against bin/shaders exactly
-            // as it does a quoted one. So this changes WHICH includes reach the handler, not where
-            // the handler looks -- --shader-source, the cache and hot reload all still apply.
+            // A quoted `#include "x"` reaches our IDxcIncludeHandler via the including file's own
+            // directory; an angled `#include <x>` needs a non-empty -I list or DXC never asks the
+            // handler at all (else: `file not found with <angled> include; use "quotes" instead`).
+            // Vendored HLSL (RTXDI's Utils/RandomSamplerState.hlsli, which includes
+            // <Rtxdi/Utils/Math.hlsli>) uses angled includes and can't be rewritten (see
+            // third_party/*/AVER_README.md), hence "-I .". "." is not a real path: DxcShaderInclude
+            // strips the "./" prefix from the resulting candidate and resolves it against bin/shaders
+            // exactly like a quoted include (--shader-source, cache, hot reload all still apply) --
+            // this only changes which includes reach the handler.
             L"-I", L".",
         };
-        // ONE DEFINE IS A FLAG, NOT A DEFINE: AVER_ENABLE_16BIT_TYPES asks DXC for real fp16
-        // (-enable-16bit-types) for THIS compile only, and is consumed here rather than passed on.
-        //
-        // WHY IT IS OPT-IN PER SHADER AND NOT A GLOBAL ARGUMENT. That switch changes what `half`
-        // MEANS: without it DXC widens half to fp32, with it half is genuinely 16-bit. There are 93
-        // uses of half/min16float across this engine's shaders -- water, the material prelude, the
-        // path tracer's denoiser among them -- every one of which would silently change precision
-        // the day the flag went on globally. That is a renderer-wide numerical change wearing the
-        // costume of a build flag, and it would not show up as a compile error anywhere.
-        //
-        // A shader that genuinely needs fp16 TYPES (float16_t and friends -- RTXGI's SHaRC packs
-        // its resolved radiance as float16_t4, and cannot compile at all without this) asks for it
-        // by name and gets it alone. Requires SM 6.2 or better; this engine targets 6.5.
+        // AVER_ENABLE_16BIT_TYPES is a flag, not a real -D: it asks DXC for real fp16
+        // (-enable-16bit-types) for this compile only, then is consumed here, not passed on.
+        // Opt-in per shader, not global: the switch changes what `half` MEANS (fp32-widened vs
+        // genuinely 16-bit) across 93 half/min16float uses engine-wide (water, the material prelude,
+        // the path tracer's denoiser among them), so a global flag would silently shift precision
+        // everywhere with no compile error. Shaders needing real fp16 TYPES (RTXGI SHaRC packs
+        // radiance as float16_t4) opt in by name; needs SM 6.2+ (target: 6.5).
         bool want16Bit = false;
         for (usize i = 0; i < wDefines.size();) {
             if (wDefines[i] == L"AVER_ENABLE_16BIT_TYPES") {
@@ -287,11 +268,10 @@ public:
         }
         if (want16Bit) args.push_back(L"-enable-16bit-types");
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
-        // A real include handler (rhi::shaderFile(), not DXC's default filesystem one -- see
-        // DxcShaderInclude.hpp: --shader-source, the cache, CRLF normalisation, hot reload) so a
-        // .hlsl can #include another instead of relying on concatenated preludes.
-        // A cache HIT skips DXC entirely; any read failure falls through to a normal compile -- a
-        // cache must never be the reason a pipeline fails to build.
+        // Custom include handler (rhi::shaderFile(), see DxcShaderInclude.hpp: --shader-source,
+        // cache, CRLF normalisation, hot reload) lets .hlsl #include instead of concatenated preludes.
+        // A cache hit skips DXC entirely; any read failure falls through to a normal compile -- the
+        // cache must never be why a pipeline fails to build.
         const u64 ckey = cacheKey(src, entry, t6.c_str(), defs);
         if (const std::string cp = cachePath(ckey); !cp.empty()) {
             std::ifstream f(cp, std::ios::binary | std::ios::ate);
@@ -460,26 +440,25 @@ struct GpuMesh {
     // IDevice::createSkinTargetMesh. `vb` points at the same resource either way; this only records
     // WHO writes it.
     BufferHandle vbBuffer = 0;
-    // Index buffer as an RHI buffer, plus vertexCount below -- so a SHADER can read this mesh's
-    // geometry (a ray hit has only a triangle index; reconstructing it needs descriptors over both
-    // streams). createMesh used to allocate raw committed resources with no RhiBuffer entry, so no
-    // descriptor could ever name them.
+    // Index buffer as an RHI buffer, plus vertexCount below -- lets a SHADER read this mesh's
+    // geometry via descriptors (a ray hit has only a triangle index, needing both streams to
+    // reconstruct it). createMesh used to allocate raw committed resources with no RhiBuffer entry,
+    // so no descriptor could ever name them.
     BufferHandle ibBuffer = 0;
     u32 vertexCount = 0;
-    // Whether a COMPUTE PASS writes these vertices, vs. merely living in an RHI buffer. Needed once
-    // createMesh started routing every mesh through the factory: every mesh then had a vbBuffer, so
-    // meshVertexBuffer's "zero for an ordinary mesh" contract broke and the renderer rebuilt every
-    // static mesh's acceleration structure every frame. Set by createSkinTargetMesh, and by
-    // createPosedPartMesh (whose vertices ARE a skin target's).
+    // Whether a COMPUTE PASS writes these vertices vs. living in an ordinary RHI buffer -- needed
+    // once createMesh started routing every mesh through the factory (every mesh then had a
+    // vbBuffer): without it, meshVertexBuffer's "zero for an ordinary mesh" contract broke and every
+    // static mesh's BLAS rebuilt every frame. Set by createSkinTargetMesh and createPosedPartMesh
+    // (skin-target vertices).
     bool computeWritten = false;
     // Local-space bounding sphere -- AABB midpoint and the distance to a corner, computed once in
     // createMesh. See IDevice::meshBounds for why a corner rather than the farthest actual vertex.
     f32 boundsCentre[3] = {0.0f, 0.0f, 0.0f};
     f32 boundsRadius = 0.0f;
-    // The box the sphere above was derived from, which createMesh used to compute and discard. A
-    // sphere is right for a frustum cull and wrong for "is this point inside the volume" -- the
-    // sphere around a wide shallow pool bulges above its surface, answering yes while standing on
-    // the deck. Six floats per mesh buys an exact answer.
+    // AABB the sphere above was derived from, which createMesh used to compute and discard. A sphere
+    // over-answers "is this point inside" for a wide shallow shape (bulges above the surface) --
+    // six floats buys an exact test.
     f32 boundsMin[3] = {0.0f, 0.0f, 0.0f};
     f32 boundsMax[3] = {0.0f, 0.0f, 0.0f};
 
@@ -492,15 +471,12 @@ struct GpuMesh {
     u32  ibShares = 0;
     MeshHandle ibSource = 0;
 
-    // W11: the mirror-image sharing relationship, for createMeshSharingVertices -- an LOD ladder's
-    // coarser levels reuse the SAME vertex stream (positions/normals/uvs never change across an
-    // asset's LODs) and thin out only which triangles reference it, the inverse split from a skin
-    // target's own-vertices/shared-indices shape just above. `vbOwned` is false on a sharer (never
-    // frees vb/vbBuffer); `vbShares` counts live sharers on the ROOT mesh (refuses destruction while
-    // any remain); `vbSource` is how a sharer finds its root to decrement on destruction. Deliberately
-    // NOT reusing ibSource/ibShares/ibOwned for this: a mesh can be both a skin target's index-sharing
-    // SOURCE and a vertex-sharing ROOT at once (nothing here rules that combination out), and one
-    // field per relationship is what keeps those two counts from being able to collide.
+    // W11 / createMeshSharingVertices: LOD levels share one vertex stream (positions/normals/uvs
+    // never change across an asset's LODs), thinning only which triangles reference it -- the
+    // inverse of the skin target's own-vertices/shared-indices split above. `vbOwned` false on a sharer (never frees vb/vbBuffer); `vbShares` counts live sharers
+    // on the ROOT (blocks its destruction); `vbSource` finds the root to decrement. Kept separate
+    // from ibSource/ibShares/ibOwned because a mesh can be both an index-sharing SOURCE and a
+    // vertex-sharing ROOT at once.
     bool vbOwned = true;
     u32  vbShares = 0;
     MeshHandle vbSource = 0;
@@ -756,10 +732,9 @@ void setDebugName(ID3D12Object* obj, const char* name) {
 // Both used only by D3D12Device::dumpDredOnDeviceRemoved, after the device that would otherwise
 // answer these enums with something friendlier is already gone.
 
-// Readable name for a DRED breadcrumb op. Covers the ops this engine's own recording can produce
-// (draws, dispatches, mesh dispatches, RT AS builds, the barriers/clears/copies/markers around
-// them) plus ExecuteIndirect; an op outside that set is printed by its raw D3D12_AUTO_BREADCRUMB_OP
-// value in the caller rather than guessed at here.
+// Readable name for a DRED breadcrumb op this engine's recording can produce (draws, dispatches,
+// mesh dispatches, RT AS builds, barriers/clears/copies/markers, ExecuteIndirect); anything else
+// is printed by its raw D3D12_AUTO_BREADCRUMB_OP value in the caller.
 const char* dredOpName(D3D12_AUTO_BREADCRUMB_OP op) {
     switch (op) {
     case D3D12_AUTO_BREADCRUMB_OP_SETMARKER:                            return "SetMarker";
@@ -810,12 +785,11 @@ std::string dredNarrow(const wchar_t* w) {
     return buf;
 }
 
-// Logs one DRED breadcrumb node IF it did not finish (*pLastBreadcrumbValue < BreadcrumbCount, or
-// no completed-count at all) -- returns false without logging anything for a node that finished
-// cleanly, so the caller can tally those into a one-line count instead of a wall of "this list was
-// fine" noise. Templated over NodeT (D3D12_AUTO_BREADCRUMB_NODE1 or the older, context-free
-// D3D12_AUTO_BREADCRUMB_NODE) so both DRED versions share this walk; `contextFor(i)` supplies the
-// breadcrumb-context string for op index i (or "" when the interface doesn't have one).
+// Logs one DRED breadcrumb node IF unfinished (*pLastBreadcrumbValue < BreadcrumbCount, or no
+// completed count) -- returns false for a clean node so the caller tallies those into one count
+// instead of a wall of "fine" noise. Templated over NodeT (NODE1 or the older context-free NODE)
+// so both DRED versions share this walk; `contextFor(i)` supplies the breadcrumb-context string
+// for op i (or "" when unavailable).
 template <typename NodeT, typename ContextFn>
 bool logBreadcrumbNodeIfUnfinished(u32 nodeIndex, const NodeT* node, ContextFn&& contextFor) {
     const UINT count = node->BreadcrumbCount;
@@ -925,10 +899,9 @@ public:
     VideoMemoryInfo videoMemory() const override;
 
     IResourceFactory* resources() override;
-    // Same context object drawMesh()'s overridesScenePipeline branch uses internally, exposed so a
-    // caller can interleave its own setPipeline/dispatchMeshClusters calls for a SUBSET of instances
-    // in the same frame. OUT-OF-LINE, same reason as sceneDepthTexture() above (D3D12RenderContext
-    // is only forward-declared this early).
+    // Same context drawMesh()'s overridesScenePipeline branch uses, exposed so a caller can
+    // interleave its own setPipeline/dispatchMeshClusters calls for a SUBSET of instances.
+    // OUT-OF-LINE like sceneDepthTexture() above (D3D12RenderContext only forward-declared this early).
     IRenderContext* renderContext() override;
     // NON-owning. Registering the same feature twice would double every hook, so it is ignored.
     void addRenderFeature(IRenderFeature* f) override;
@@ -969,10 +942,10 @@ public:
         if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
         const u32 cw = (x + w > width_) ? width_ - x : w;
         const u32 ch = (y + h > height_) ? height_ - y : h;
-        // Caller thinks in present-space pixels (editor confines the scene to a dockspace sub-rect),
-        // but the target these address is the SCENE one, smaller than the backbuffer whenever
-        // renderScale_ < 1 -- so the rect is scaled into scene-space here once, not at every reader.
-        // Identity at renderScale_ == 1.0 (scaleToSceneW/H(v) == v exactly).
+        // Caller thinks in present-space pixels (editor confines the scene to a dockspace sub-rect);
+        // the target is the SCENE one, smaller whenever renderScale_ < 1 -- scaled into scene-space
+        // here once, not at every reader. Identity at renderScale_ == 1.0 (scaleToSceneW/H(v) == v
+        // exactly).
         vpX_ = scaleToSceneW(x);  vpY_ = scaleToSceneH(y);
         vpW_ = scaleToSceneW(cw); vpH_ = scaleToSceneH(ch);
         if (vpW_ == 0) vpW_ = 1;
@@ -989,14 +962,11 @@ public:
     }
 
     void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) override {
-        // Snapshot OUTGOING viewProj as "previous" before overwrite: frameCB_.viewProj still holds
-        // the LAST setCamera's matrix here, the same value VoxiRenderer's curViewProj_ reads via
-        // camera() -- capturing off the same field keeps one clock rather than a second gPrevViewProj
-        // ticking separately (see prevViewProj_'s comment).
-        // Guarded on gbufCameraPrimed_ so the first call doesn't seed prevViewProj_ with frameCB_'s
-        // zero rest state, which never described a rendered frame. No caller reads it before
-        // gBufferHistoryInvalid() clears anyway, but this keeps the array honest for one that skips
-        // the validity check.
+        // Snapshot OUTGOING viewProj as "previous" before overwrite -- frameCB_.viewProj still holds
+        // the LAST call's matrix, the same value VoxiRenderer's curViewProj_ reads via camera(), so
+        // this stays one clock rather than a second gPrevViewProj (see prevViewProj_'s comment).
+        // gbufCameraPrimed_ guards the first call from seeding prevViewProj_ with frameCB_'s zero
+        // rest state; gBufferHistoryInvalid() covers callers anyway, this just keeps the array honest too.
         if (gbufCameraPrimed_) std::memcpy(prevViewProj_, frameCB_.viewProj, sizeof(prevViewProj_));
         gbufCameraPrimed_ = true;
 
@@ -1049,10 +1019,9 @@ public:
     void packAtmosphere(const SkyAtmosphere& s);
     void setPostProcess(const PostSettings& p) override { post_ = p; }
     PostSettings postProcess() const override { return post_; }
-    // See IDevice::postExposureReadout (RHI.hpp) for the contract. expReadoutValue_/
-    // expReadoutSeeded_ are filled a few frames late by collectExposureReadout, from a GPU copy
-    // runPostChain records only while auto exposure is actually running -- see expReadback_'s own
-    // comment for the whole pipeline.
+    // See IDevice::postExposureReadout (RHI.hpp). expReadoutValue_/expReadoutSeeded_ are filled a
+    // few frames late by collectExposureReadout, from a GPU copy runPostChain records only while
+    // auto exposure runs -- see expReadback_'s comment for the pipeline.
     bool postExposureReadout(f32& adaptedExposure) const override {
         if (!expReadoutSeeded_) return false;
         adaptedExposure = expReadoutValue_;
@@ -1134,9 +1103,8 @@ public:
     // mesh via meshVertexBuffer(mesh)==0, a compute-written one only if it is depthOnlyMesh_.
     void setNextDrawPrepassed(bool prepassed) override { nextDrawPrepassed_ = prepassed; }
 
-    // Translucency: blended-mesh path -- see IDevice::setDrawBlended (RHI.hpp) for the mechanism
-    // (capture at drawMesh(), replay in endFrame() between the deferred sky and transparentPass, and
-    // what excluding a draw from the BLAS/voxel-GI/shadow costs). STICKY like setDrawBinding, unlike
+    // Blended-mesh path -- see IDevice::setDrawBlended (RHI.hpp): capture at drawMesh(), replay in
+    // endFrame between the deferred sky and transparentPass. STICKY like setDrawBinding, unlike
     // setNextDrawPrepassed: reset only in beginFrame, so a run of glass panes sets this once.
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     bool drawBlended() const override { return drawBlended_; }
@@ -1186,20 +1154,18 @@ public:
     u32  gpuStamp();
     void collectGpuTiming();
     void collectExposureReadout();
-    // Same span bookkeeping as pushMarker/popMarker, for phases NOT inside any render feature's
-    // markers -- the opaque scene draw and the post/composite/UI chain -- without which the two
-    // largest items in the frame land in "unmarked".
-    //
-    // NOT a ScopedGpuStat (RHIResources.hpp): the begin/end calls here don't share a C++ scope
-    // (beginGpuSpan at the tail of beginFrame, endGpuSpan at the top of endFrame, with a whole
-    // frame's drawMesh calls between), and RAII can only close what a destructor sees go out of
-    // scope. This and its "sky+post+ui" twin below are the only pairs that don't fit in one function.
+    // Same bookkeeping as pushMarker/popMarker, for phases outside any render feature's markers
+    // (the opaque scene draw, the post/composite/UI chain) -- without it the two largest frame
+    // items land in "unmarked".
+    // NOT a ScopedGpuStat (RHIResources.hpp): begin/end don't share a C++ scope (beginFrame's tail
+    // to endFrame's top, a whole frame's drawMesh calls between), so RAII can't close it. This and
+    // the "sky+post+ui" twin below are the only pairs not fitting one function.
     void beginGpuSpan(const char* label) {
         if (!tsEnabled_) return;
-        // Parent is whatever is already open (kNoParent if none), pushed BEFORE this span's own slot
-        // so it's never its own parent. THE CAP IS ENFORCED HERE (previously only assumed): a
-        // dropped span's children reparent to whatever is still open -- one missing profile row beats
-        // a silently wrong tree.
+        // Parent is whatever is already open (kNoParent if none), pushed before this span's own
+        // slot so it's never its own parent. Cap enforced here (previously only assumed): a dropped
+        // span's children reparent to whatever is still open -- one missing profile row beats a
+        // silently wrong tree.
         if (tsSlice_[frameIndex_].size() >= kMaxGpuSpans) { ++tsDropped_; return; }
         const u32 parent = tsOpen_.empty() ? kNoParent : tsOpen_.back();
         tsSlice_[frameIndex_].push_back({label, gpuStamp(), kMaxGpuStamps, parent});
@@ -1272,10 +1238,10 @@ private:
     // re-adopted the current depthBuffer_.
     bool depthTexDirty_ = true;
 
-    // G-buffer: velocity + view-space depth + normal/roughness. See IDevice::setGBufferEnabled
-    // (RHI.hpp) for the contract and createGBufferTargets() for the MSAA decision. OFF by default;
-    // every member below stays zero/null/false until enabled -- what makes "never call this" (every
-    // build today) bit-identical to a build without this feature.
+    // G-buffer: velocity + view-space depth + normal/roughness (IDevice::setGBufferEnabled
+    // contract; MSAA decision in createGBufferTargets()). OFF by default; every member below stays
+    // zero/null/false until enabled, keeping "never call this" (every build today) bit-identical to
+    // a build without it.
     bool gbufferEnabled_ = false;
     // ALWAYS single-sample -- see createGBufferTargets() for why, and what that forces beginFrame's
     // bind-time branch to do when sampleCount_ > 1.
@@ -1332,34 +1298,28 @@ private:
     u32 frameIndex_ = 0;
     u32 rtvSize_ = 0;
 
-    // Per-pass GPU timing. Five theories about frame time (shadow cascades, scene walk, chunk
-    // streaming, volumetric clouds, build config) were argued from a whole-frame CPU delta and were
-    // all wrong -- a number that includes waiting for the GPU can't say which PASS is expensive.
-    // Rides on the existing pushMarker/popMarker nesting: a timestamp on each side costs one
-    // EndQuery per marker, about a dozen a frame, no new call sites.
+    // Per-pass GPU timing: a whole-frame CPU delta can't say which pass is expensive (five wrong
+    // theories -- shadow cascades, scene walk, chunk streaming, volumetric clouds, build config --
+    // were argued from one before this existed). Rides the existing pushMarker/popMarker nesting --
+    // one EndQuery per marker side, ~a dozen a frame, no new call sites.
     //
-    // THE MARKERS WERE ALWAYS CORRECTLY NESTED; THE ACCOUNTING WAS NOT. The old bug was in
-    // collectGpuTiming: it folded every span into one flat list and computed "unmarked" as frame
-    // minus their sum -- correct only when spans are disjoint. Once a span opens while a parent is
-    // already open (permitted; VoxiRenderer::prePass's outer scope does it), the child gets summed
-    // once alone and again inside its parent, so "unmarked" goes low or negative. GpuSpan::parent
-    // and the GpuAccum tree let collectGpuTiming sum only TOP-LEVEL spans.
+    // Markers were always correctly nested; collectGpuTiming's old accounting was not: it summed a
+    // flat list and took "unmarked" as frame minus that sum, which double-counts once a span opens
+    // while a parent is already open (VoxiRenderer::prePass does), so "unmarked" went low or
+    // negative. GpuSpan::parent + the GpuAccum tree let it sum only TOP-LEVEL spans instead.
     //
-    // READ TWO FRAMES LATE: results resolve into a per-frame readback slice read at the top of the
-    // next frame reusing that slice. Reading this frame's own timings would stall the GPU to ask how
-    // fast it was -- the measurement would create the stall it reports.
+    // Read two frames late (a per-frame readback slice, reused next frame) -- reading this frame's
+    // own timings would stall the GPU to ask how fast it was.
     static constexpr u32 kMaxGpuSpans = 64;
     static constexpr u32 kMaxGpuStamps = kMaxGpuSpans * 2;
-    // Sentinel for "no parent, top-level". NOT kMaxGpuSpans, which is what this was and why it broke:
-    // nothing enforced the span vector stayed under that size, so a 65th open span landed at real
-    // index 64 -- bit-identical to the sentinel -- and its children silently reparented to
-    // "top-level", double-counted under their real parent AND as a root. Fixed twice: the sentinel
-    // is now a value no index can take, and the push is actually bounded.
+    // Sentinel for "no parent, top-level" -- a value no real index can take. Was kMaxGpuSpans, which
+    // an unbounded 65th span could collide with (index 64), silently reparenting its children to
+    // "top-level" -- double-counted under their real parent AND as a root. Fixed by this sentinel
+    // plus bounding the push.
     static constexpr u32 kNoParent = 0xFFFFFFFFu;
-    // Begin/end say how long a span took, not where it sits -- fine while spans are disjoint, wrong
-    // once one nests (a feature's pushMarker inside the pass wrapping it). This is what lets
-    // collectGpuTiming build a tree instead of assuming disjointness. Set from tsOpen_.back() (the
-    // innermost still-open span) when this one opens.
+    // Begin/end say how long a span took, not where it sits -- wrong once one nests (a pushMarker
+    // inside the pass wrapping it). Lets collectGpuTiming build a tree instead of assuming
+    // disjointness; set from tsOpen_.back() (innermost open span) when this one opens.
     struct GpuSpan { const char* label = nullptr; u32 begin = 0; u32 end = 0; u32 parent = kNoParent; };
     ComPtr<ID3D12QueryHeap> tsHeap_;
     ComPtr<ID3D12Resource>  tsReadback_;
@@ -1392,47 +1352,38 @@ private:
     u32  tsReports_ = 0;
     bool tsEnabled_ = false;
 
-    // Redundant-state elision for the feature-overridden scene draw. One drawMesh per entity --
-    // 1,656 of them on Electric Dreams -- used to re-send the SAME pipeline, table-0 binding set and
-    // frame constant block every time. setPipeline rebinding a root signature per draw makes the GPU
-    // re-fetch all root data; the frame CBV copy is why a 2MB ring exhausted and doubled every frame.
-    //
-    // Only ever elided as a GROUP: setPipeline's bindDeclaredRootCbvs resets the FEATURE frame slot
-    // to the zero CBV, so skipping the constant buffer alone would leave the shader reading zeroes.
+    // Redundant-state elision for the feature-overridden scene draw: one drawMesh per entity (1,656
+    // on Electric Dreams) previously re-sent the SAME pipeline, table-0 set and frame constant block
+    // every time -- setPipeline rebinding a root signature per draw makes the GPU re-fetch all root
+    // data, and the redundant frame CBV copy is why the 2MB constant ring doubled every frame.
+    // Elided only as a GROUP: setPipeline's bindDeclaredRootCbvs resets the FEATURE frame slot to
+    // the zero CBV, so skipping just the constant buffer would leave the shader reading zeroes.
     PipelineHandle   fovPso_ = 0;
     BindingSetHandle fovSet_ = 0;
     u32              fovCbBytes_ = 0;
     std::vector<u8>  fovCb_;
-    // Cleared by anything that could bind something else since the last draw: setPipeline always,
-    // setBindingSet on TABLE 0 only (table 1 is per-material and legitimately changes every draw),
-    // bindGraphicsRoot on a genuine root signature change (see that function's comment: this was
-    // missing for a long time -- the same hole dbValid_ shipped with until d8326985 fixed it there
-    // alone -- until it was closed here too), and the start of each frame / endFrame's post chain.
+    // Cleared by anything that could bind something else since the last draw: setPipeline, table-0
+    // setBindingSet (table 1 changes every draw legitimately), a genuine bindGraphicsRoot signature
+    // change (missing here until d8326985's fix, first applied to dbValid_ alone), frame start/end.
     bool             fovValid_ = false;
 
-    // TABLE 1's OWN redundant-state elision -- the per-draw material binding set plus its b2
-    // constant block, applied by D3D12RenderContext::applyDrawBinding. See that function for the
-    // full justification, the default-off toggle, and why this exists at all (fov* above is
-    // deliberately blind to table 1, on purpose, for a different reason).
-    //
-    // A DELIBERATE SEPARATE FLAG FROM fovValid_, not a reuse of it, even though both die at the same
-    // setPipeline/beginFrame/endFrame events: fovValid_ is ALSO cleared by setBindingSet on table 0
-    // (its own comment explains why table 0 rebinding must not touch table 1), and folding this into
-    // fovValid_ would wrongly throw this cache away on every table-0 rebind too, defeating most of
-    // what it exists to save. dbSet_/dbConstants_/dbConstantBytes_ mirror what applyDrawBinding last
-    // actually BOUND on the command list, not merely what a caller last requested -- see that
-    // function for why the distinction matters.
+    // TABLE 1's OWN redundant-state elision -- the per-draw material set plus its b2 constant
+    // block, applied by D3D12RenderContext::applyDrawBinding (see there for full justification and
+    // the default-off toggle; fov* above is deliberately blind to table 1).
+    // Separate flag from fovValid_, not a reuse: fovValid_ is ALSO cleared by table-0 setBindingSet
+    // (which must not touch table 1), so sharing it would throw this cache away on every table-0
+    // rebind too. dbSet_/dbConstants_/dbConstantBytes_ mirror what applyDrawBinding last actually
+    // BOUND on the command list, not merely what a caller last requested.
     BindingSetHandle dbSet_ = 0;
     u8               dbConstants_[kMaxDrawConstantBytes] = {};
     u32              dbConstantBytes_ = 0;
     bool             dbValid_ = false;
 
     // (set base, table, pipeline base) triples already reported by setBindingSet's register-mismatch
-    // check. ONE BINDING SET LEGITIMATELY SERVES TWO PIPELINES AT TWO BASES (the shared material
-    // system stamps a set with whichever layout initialised it, e.g. Voxi's t9, while the cluster
-    // pipeline's table 1 sits at t4) -- correct, but without this the warning fires on every cluster
-    // draw and drowns the log. Kept as a once-per-shape diagnostic: on a single-consumer pipeline it
-    // still catches a real mistake.
+    // check. One set can legitimately serve two pipelines at two bases (the shared material system
+    // stamps a set with whichever layout initialised it, e.g. Voxi's t9 vs. cluster's t4), so this
+    // dedupes per-shape rather than drowning the log -- a single-consumer pipeline still catches a
+    // real mistake.
     std::vector<u64> bindingBaseWarned_;
 
     ComPtr<ID3D12RootSignature> rootSig_;
@@ -1464,16 +1415,11 @@ private:
     // that expose it) ----
     bool drawBlended_ = false;   // sticky, like drawBinding_ just above; reset to false in beginFrame
 
-    // One drawMesh() call captured while drawBlended_ was true, queued here instead of being drawn
-    // immediately -- see setDrawBlended's comment for why the deferred sky forces this to be a
-    // capture-and-replay rather than something a caller could sort into place itself. `binding`
-    // reuses the SAME DrawBinding struct and storeDrawBinding() helper drawBinding_ itself uses just
-    // above: setDrawBinding's own contract ("constants is COPIED; the caller may reuse its buffer
-    // immediately") has to keep holding all the way to this capture's eventual replay in endFrame,
-    // frames' worth of other drawMesh calls later, not merely until drawMesh() returns -- exactly
-    // the guarantee storeDrawBinding's memcpy-into-a-fixed-array already gives drawBinding_, so
-    // capturing through it rather than a second copy of the same copying logic is free correctness,
-    // not a convenience.
+    // One drawMesh() call captured while drawBlended_ was true, queued instead of drawn immediately
+    // -- see setDrawBlended's comment for why the deferred sky forces capture-and-replay. `binding`
+    // reuses the same DrawBinding struct/storeDrawBinding() as drawBinding_ above: setDrawBinding's
+    // "constants is COPIED" contract must hold until this capture's eventual replay in endFrame,
+    // not just until drawMesh() returns -- storeDrawBinding's memcpy already gives that, for free.
     struct BlendedDraw {
         MeshHandle mesh = 0;
         f32 world[16] = {};
@@ -1482,20 +1428,13 @@ private:
         f32 roughness = 0.0f;
         DrawBinding binding{};
     };
-    // Filled by drawMesh() between beginFrame and endFrame, drained (sorted back-to-front and
-    // replayed) by endFrame's own flush, cleared at the top of the NEXT beginFrame -- see that
-    // clear's own comment for why clearing only there, and not right after the flush drains it, is
-    // both sufficient and the simpler invariant to maintain.
+    // Filled by drawMesh() between beginFrame/endFrame, drained (sorted back-to-front, replayed) by
+    // endFrame's flush, cleared at the top of the NEXT beginFrame rather than right after the flush
+    // -- simpler invariant, same effect.
     std::vector<BlendedDraw> blendedDraws_;
-    // The "no feature offers scenePipeline(..., blended=true)" warning, said at most once PER FRAME
-    // -- reset in beginFrame, UNLIKE drawBindingIgnored_ just above, which is said once in the
-    // entire run and never reset. The two conditions are not the same shape: drawBindingIgnored_
-    // guards a static fact about which pipeline the whole scene draws through, true or false for the
-    // life of the process, so repeating it would just print the identical line forever. A feature
-    // offering no blended pipeline is a condition that can persist for the entire run just as easily
-    // (nobody has authored a blended Voxi PSO, say) -- and under a once-ever warning that would mean
-    // printing on frame one and then falling silent while every pane of glass after it kept
-    // invisibly vanishing, which is a worse outcome for exactly the person trying to find out why.
+    // The "no feature offers scenePipeline(..., blended=true)" warning, reset per-frame unlike
+    // drawBindingIgnored_'s once-ever: a missing blended pipeline can persist the whole run, and
+    // warning only on frame one would leave later glass silently vanishing with no clue why.
     bool blendedPipelineMissingWarned_ = false;
 
     // ---- same-frame depth prepass (see IDevice::setDepthPrepassEnabled and drawMesh below) ----
@@ -1505,9 +1444,9 @@ private:
     // setNextDrawPrepassed's own interface comment for why this must not be sticky.
     bool nextDrawPrepassed_ = false;
     // The mesh drawMeshDepthOnly() last ACTUALLY depth-drew, or 0. drawMesh() honours
-    // nextDrawPrepassed_ for a compute-written (skinned/soft-body) mesh only when it is this exact
-    // handle: that mesh's posed vertex buffer IS its vbv, so the depth-only draw and the colour draw
-    // read the same bytes. Consumed (zeroed) by every drawMesh() and by beginFrame, like the flag.
+    // nextDrawPrepassed_ for a compute-written (skinned/soft-body) mesh only for this exact handle
+    // (its posed vbv is shared, so depth and colour read the same bytes). Consumed by every
+    // drawMesh() and beginFrame.
     MeshHandle depthOnlyMesh_ = 0;
 
     bool skyEnabled_ = false;
@@ -1545,15 +1484,14 @@ private:
     D3D12_RESOURCE_STATES bloomState_[kMaxBloomMips] = {};
     ComPtr<ID3D12Resource> histBuf_, expBuf_;    // 256-bin histogram, and the one adapted exposure
     bool expSeeded_ = false;
-    // Per-frame-slot READBACK copy of expBuf_'s first 8 bytes, for IDevice::postExposureReadout --
-    // a live UI number with no business stalling the frame on the GPU. runPostChain records the
+    // Per-frame-slot READBACK copy of expBuf_'s first 8 bytes, for IDevice::postExposureReadout (a
+    // live UI number with no business stalling the frame on the GPU). runPostChain records the
     // copy right after CSExposure runs (only while autoExp is true, so a slot never gets a copy of
     // a value CSExposure did not just produce); collectExposureReadout maps and reads it back once
-    // THIS slot's fence has retired, same discipline as tsReadback_/collectGpuTiming above. Created
-    // in createPostTargets/released in releasePostTargets rather than alongside expBuf_ itself --
-    // fixed 8 bytes, so resize's waitForGpu() makes recreating it there exactly as safe, and it
-    // keeps the readback tied to the one function pair that already owns "the GPU is idle, drop
-    // anything mid-flight".
+    // THIS slot's fence retires, same discipline as tsReadback_ above. Created/released alongside
+    // createPostTargets/releasePostTargets, not expBuf_ itself -- fixed 8 bytes, so resize's
+    // waitForGpu() covers it too, and it ties the readback to the one function pair that already
+    // owns "the GPU is idle, drop anything mid-flight".
     ComPtr<ID3D12Resource> expReadback_[kFrameCount];
     // Set by runPostChain right after it records that slot's copy; cleared by collectExposureReadout
     // once consumed, so a slot autoExp skipped (or one a resize just recreated) is never misread as
@@ -1563,10 +1501,9 @@ private:
     // copy, a few frames behind expBuf_ itself.
     f32  expReadoutValue_ = 0.0f;
     bool expReadoutSeeded_ = false;
-    // Local exposure's bilateral grid, raw (u2) and blurred (u3) -- SCENE-SIZE DEPENDENT, unlike
-    // histBuf_/expBuf_ above: (re)created in createPostTargets/releasePostTargets, not
-    // createPostPipelines, sized for the CURRENT sceneWidth_/sceneHeight_. Null (and the passes that
-    // write them skipped) if the allocation ever fails; see createPostTargets.
+    // Local exposure's bilateral grid, raw (u2) and blurred (u3) -- SCENE-SIZE DEPENDENT unlike
+    // histBuf_/expBuf_: (re)created in createPostTargets/releasePostTargets, not createPostPipelines,
+    // sized for the current scene. Null (writers skipped) if allocation fails; see createPostTargets.
     ComPtr<ID3D12Resource> localGridBuf_, localGridBlurBuf_;
     u32 localGridW_ = 0, localGridH_ = 0;        // grid dimensions in tiles, matching the buffers above
     ComPtr<ID3D12DescriptorHeap> postRtvHeap_;   // one RTV per bloom mip
@@ -1641,18 +1578,15 @@ private:
     // (sceneWidth_ == width_, so v * sceneWidth_ / width_ == v).
     u32 scaleToSceneW(u32 v) const { return width_  ? static_cast<u32>((static_cast<u64>(v) * sceneWidth_)  / width_)  : v; }
     u32 scaleToSceneH(u32 v) const { return height_ ? static_cast<u32>((static_cast<u64>(v) * sceneHeight_) / height_) : v; }
-    // DEFERRED TO A FRAME BOUNDARY, ALWAYS. Applying a scale change where asked destroys and recreates
-    // the depth buffer, MSAA target and post chain -- but the editor's preference load runs from
-    // buildUI(), between beginFrame() and endFrame(), so that frame's command list had already bound
-    // resources rebuildSceneTargets went on to free, and endFrame presented dead resources: device
-    // removed AT PRESENT. The tell: --render-scale on the command line, applying from onInit outside
-    // any frame, worked fine at the identical value -- same function, only the timing differed.
-    //
-    // waitForGpu() inside rebuildSceneTargets does NOT save this -- it drains submitted work, not a
-    // command list still being recorded on the CPU.
-    //
-    // So the value is parked and applied at the top of the next beginFrame, unconditionally: no
-    // caller should have to know, and a rule with no exceptions cannot be got wrong by the next one.
+    // DEFERRED TO A FRAME BOUNDARY, ALWAYS: applying a scale change where asked destroys/recreates
+    // the depth buffer, MSAA target and post chain, but the editor's preference load runs from
+    // buildUI() mid-frame (between beginFrame/endFrame), so a bound resource rebuildSceneTargets
+    // freed left endFrame presenting dead resources -- device removed AT PRESENT. (--render-scale
+    // on the command line, applying from onInit outside any frame, worked fine at the identical
+    // value -- only the timing differed.) waitForGpu() inside rebuildSceneTargets doesn't save
+    // this: it drains submitted work, not a command list still being recorded on the CPU.
+    // So the value is parked and applied at the top of the next beginFrame, unconditionally -- a
+    // rule with no exceptions can't be got wrong by the next caller.
     void setRenderScale(f32 scale) override {
         const f32 asked = scale;
         scale = std::fmax(0.25f, std::fmin(1.0f, scale));
@@ -1697,11 +1631,9 @@ private:
         vpX_ = vpY_ = vpW_ = vpH_ = 0;   // stored in scene-space; stale until the next setViewportRect
         createDepthBuffer();
         createMsaaColor();
-        // Same "reset then recreate at the new scene size" every OTHER scene target here just did --
-        // GATED on gbufferEnabled_, unlike depthBuffer_/msaaColor_ just above, which are unconditional:
-        // those two exist for every build; these three exist ONLY while a caller has explicitly opted
-        // in, and recreating them regardless of that flag would allocate ~54 MB no build asking
-        // for "off" ever agreed to pay for. See createGBufferTargets' own comment for everything else.
+        // Same reset-then-recreate as depthBuffer_/msaaColor_ above, but GATED on gbufferEnabled_:
+        // those two exist for every build, these three only when opted in -- unconditional
+        // recreation would allocate ~54 MB no "off" build agreed to pay for. See createGBufferTargets.
         if (gbufferEnabled_) {
             gbufVelocity_.Reset();    gbufViewZ_.Reset();    gbufNormalRough_.Reset();
             if (!createGBufferTargets())
@@ -1789,35 +1721,24 @@ private:
     TextureHandle blendBackdropTex_ = 0;
     u32           blendBackdropW_ = 0, blendBackdropH_ = 0;
     bool          blendBackdropCopyLogged_ = false;
-    // Per-layer backdrop RE-capture: how many extra MSAA resolves one frame's translucency may buy,
-    // on top of the one capture that is never counted here (see resolveBlendBackdrop's call sites in
-    // endFrame). EIGHT IS A BUDGET, NOT AN ALGORITHM LIMIT -- each re-capture is a full-target
-    // resolve, so this keeps "correct stacked glass" from turning a hundred panes into a hundred
-    // resolves. Eight covers every arrangement seen so far (water under a glass walkway under a rail
-    // is three); surfaces beyond it degrade to the single-capture behaviour that shipped before -- a
-    // known approximation, not a new failure.
-    //
-    // ONLY COUNTS CAPTURES A DRAW ACTUALLY NEEDED. A capture (first or repeat) now only happens ahead
-    // of a draw whose material reads the backdrop (IRenderFeature::blendedDrawReadsBackdrop) -- a
-    // frame of pure decals never calls resolveBlendBackdrop at all, let alone this many times, so this
-    // budget is spent only by the surfaces it was ever meant for (glass, water, anything refractive or
-    // attenuating).
+    // Per-layer backdrop RE-capture budget (extra MSAA resolves translucency may buy beyond the one
+    // always-uncounted capture; see resolveBlendBackdrop in endFrame). A budget, not an algorithm
+    // limit: each re-capture is a full-target resolve, so this caps stacked glass at 8 (covers
+    // every arrangement seen, e.g. water/walkway/rail = 3); deeper stacks degrade to the old
+    // single-capture behaviour, a known approximation.
+    // Only counts captures a draw actually needed -- fires only ahead of a draw whose material
+    // reads the backdrop (IRenderFeature::blendedDrawReadsBackdrop), so all-decal frames spend none.
     static constexpr u32 kMaxBlendLayerResolves = 8;
     bool          blendLayerCapWarned_ = false;
-    // M3: a cheap on-change log of what the blended replay actually did, so a session's log can
-    // answer "is this frame even doing translucency work" without turning on GPU timing. Widened
-    // rather than once-per-change (a scene that gains and loses one pane of glass every other frame
-    // would otherwise log every other frame forever): see the log site for the power-of-two gate.
-    // ~0u is not a real (draws, resolves, captures) triple -- it forces the FIRST comparison after
-    // startup to count as a change and log once, rather than requiring the accidental all-zero case
-    // to already match.
+    // M3: cheap on-change log of what the blended replay did, so the log answers "is this frame
+    // doing translucency work" without GPU timing. Power-of-two gated, not once-per-change (a
+    // flickering pane would log forever) -- see the log site.
+    // ~0u is not a real triple, so the FIRST comparison after startup always counts as a change.
     u32 blendStatDrawsLogged_ = ~0u;
     u32 blendStatResolvesLogged_ = ~0u;
-    // Total backdrop captures this frame (the uncounted first one AND every counted re-capture) --
-    // logged alongside blendStatResolvesLogged_ because the two can now differ even when neither
-    // changes: a frame whose translucent draws are all decals captures 0 regardless of how many draws
-    // there are, which the draws/resolves pair alone does not distinguish from "captured once, up
-    // front, the old way".
+    // Total backdrop captures this frame (uncounted first + every re-capture), logged alongside
+    // blendStatResolvesLogged_: an all-decal frame captures 0, which draws/resolves alone can't
+    // tell apart from "captured once, the old way".
     u32 blendStatCapturesLogged_ = ~0u;
     u32 blendStatChanges_ = 0;
     // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
@@ -1840,15 +1761,12 @@ struct RhiTexture {
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
     ComPtr<ID3D12DescriptorHeap> dsvHeap;
     TextureDesc desc{};                     // resolved: `mips` holds the real count, never 0
-    // DELIBERATELY NOT UNDER AVER_RHI_TRACK_STATE, unlike the state array below. That macro buys
-    // per-subresource STATE TRACKING, a real debug-only cost; a NAME is identity, needed most in the
-    // build a user actually runs -- sweeping the two together made release diagnostics silently
-    // anonymous, and in Vulkan (two messages read the name outside the guard) didn't COMPILE under
-    // NDEBUG.
-    //
-    // MEASURED before making it unconditional: a 60-frame editor session ends with 23 textures and
-    // 33 buffers, all named, 952 bytes of names total, 29 long enough to escape the small-string
-    // buffer. That's the entire cost.
+    // Deliberately not under AVER_RHI_TRACK_STATE unlike the state array below: that macro buys
+    // real debug-only, per-subresource state tracking, but a NAME is identity, needed most in
+    // release -- sweeping both together made release diagnostics silently anonymous, and in Vulkan
+    // (two messages read the name outside the guard) didn't compile under NDEBUG.
+    // Measured cost: a 60-frame editor session ends with 23 textures + 33 buffers named, 952 bytes
+    // total, 29 escaping the small-string buffer.
     //
     // Owned copy: desc.debugName is the caller's pointer, nulled at creation once copied.
     std::string debugName;
@@ -1922,15 +1840,14 @@ struct RhiPipeline {
 // end of the kinds arrays are null-filled as a 2D texture.
 //
 // VERSIONED: every write (setSrv/setUav/clearSrv/setSrvTlas/setSrvBuffer/setUavBuffer/nullFill)
-// lands in `stageBase`, a range in a CPU-only staging heap, and bumps `version`. `stageBase` is
-// authoritative; nothing ever reads it directly on the GPU. There is one shader-visible copy per
-// frame in flight (`gpuBase[f]`), and setBindingSet refreshes gpuBase[fi] from stageBase only when
-// gpuVersion[fi] is behind version. This is what makes an in-place-write into a live shader-visible
-// heap (the previous scheme) safe again: with kFrameCount=2 and beginFrame waiting only on the
-// fence for THIS backbuffer, the CPU can be recording frame N+1 while the GPU still executes frame
-// N against gpuBase[N]'s contents -- a set rewritten for frame N+1 must not touch what frame N's
-// not-yet-retired dispatches will read. gpuBase[fi] is only ever rewritten once beginFrame has
-// waited for the frame that last used slot fi, so the copy can never race a GPU read of that slot.
+// lands in `stageBase` (CPU-only staging heap) and bumps `version`; stageBase is authoritative,
+// never read directly by the GPU. One shader-visible copy per frame in flight (`gpuBase[f]`);
+// setBindingSet refreshes gpuBase[fi] from stageBase only when gpuVersion[fi] is behind version.
+// This fixes the previous in-place-write-into-live-heap scheme: with kFrameCount=2 and beginFrame
+// waiting only on the fence for THIS backbuffer, the CPU can record frame N+1 while the GPU still
+// reads gpuBase[N] for frame N, so a rewrite for N+1 must not touch what N's not-yet-retired
+// dispatches will read. gpuBase[fi] is only rewritten once beginFrame has waited for the frame that
+// last used slot fi, so the copy never races a GPU read.
 struct RhiBindingSet {
     u32 srvCount = 0, uavCount = 0;
     // The run of shader registers the set was built for.
@@ -2024,15 +1941,13 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
 
 // Descriptors every binding set suballocates from: one shader-visible heap for the whole device.
 constexpr u32 kRhiHeapSize = 65536;
-// Transient constant bytes per frame in flight. The upload ring's STARTING size; grows on demand
-// (ringAlloc), so this is a floor for a quiet scene, not a budget.
-//
-// 2MB, raised from 1MB: overflow isn't free -- ringAlloc returns 0 on the frame it runs out, and
-// growth only takes effect next epoch, so the overflowing frame renders wrong. Every session on any
-// real scene opened with "upload ring (1024 KB) exhausted this frame; growing to 2048 KB" -- one
-// visibly wrong frame at startup nobody read as a defect. 2MB is MEASURED, not guessed; it doesn't
-// remove the failure mode for a heavier scene (which wants ringAlloc to fall back to a one-off
-// allocation instead of returning 0), it removes the case hitting every single run.
+// Transient constant bytes per frame in flight -- the upload ring's STARTING size; grows on
+// demand (ringAlloc), so this is a floor for a quiet scene, not a budget.
+// Raised 1MB -> 2MB (measured): overflow isn't free (ringAlloc returns 0 that frame; growth takes
+// effect only next epoch, so the frame renders wrong), and every real scene opened with "upload
+// ring (1024 KB) exhausted this frame; growing to 2048 KB" -- one visibly wrong frame at startup
+// nobody read as a defect. 2MB removes that universal case; a heavier scene can still hit it
+// (wants a one-off fallback allocation instead of returning 0).
 constexpr u64 kRhiRingBytes = 2u << 20;
 // Growth ceiling. 64MB is ~260,000 per-draw constant slices in one frame -- far past any interactive
 // draw count, so hitting it means something is wrong upstream. The buffer is CPU-visible upload
@@ -2133,24 +2048,15 @@ private:
     bool uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td, const TextureDesc& d,
                            u32 mips);
 
-    // W4: fills one or more freshly created DEFAULT-heap buffers via a single UPLOAD-heap staging
-    // buffer and a one-shot command list, blocking until the copy has retired -- the same shape as
-    // uploadInitialData just above, generalised from one texture's mip chain to an arbitrary set of
-    // buffer destinations. Exists because writeBuffer() refuses any buffer that isn't mapped (i.e.
-    // BufferKind::Upload), and a mesh created on the Default heap (setStaticMeshHeapDefault) still
-    // has to receive its vertex/index bytes from SOMEWHERE before the first frame that might draw or
-    // BLAS-build it -- see D3D12Device::createMesh and ::createMeshSharingVertices, its two callers.
-    //
-    // Every `dst` MUST already be a freshly created Default-heap buffer in D3D12_RESOURCE_STATE_COMMON
-    // (createBuffer's own initial state for BufferKind::Default): with no prior history on the
-    // resource, the runtime implicitly promotes it to COPY_DEST on this list's own CopyBufferRegion,
-    // exactly as seedSkinTargets' own comment explains for the identical situation. This function then
-    // transitions each `dst` explicitly back to COMMON before closing the list, so that promotion does
-    // not linger for whatever list a caller records next -- the same explicit undo seedSkinTargets
-    // performs on its own copy.
-    //
-    // Returns false on any failure (staging allocation, the one-shot list, or the fence wait); the
-    // caller is then responsible for falling back or leaving its destination buffers unpopulated.
+    // W4: fills freshly created DEFAULT-heap buffers via one UPLOAD staging buffer + a one-shot
+    // command list, blocked on until retired -- generalised uploadInitialData, for
+    // setStaticMeshHeapDefault meshes (writeBuffer() refuses non-mapped buffers); see
+    // createMesh/createMeshSharingVertices.
+    // Every `dst` MUST be a freshly created Default-heap buffer in COMMON: with no prior history it
+    // implicitly promotes to COPY_DEST on this CopyBufferRegion (as seedSkinTargets), so this
+    // explicitly transitions each `dst` back to COMMON before closing the list.
+    // False on any failure (staging alloc, list, fence wait); caller then falls back or leaves the
+    // destination unpopulated.
     bool uploadBuffers(std::initializer_list<BufferUploadItem> items);
 
     // Table lookups. Every one returns nullptr for an out-of-range or freed handle; callers log.
@@ -2210,24 +2116,17 @@ private:
     std::vector<RhiTexture>    textures_;
     std::vector<RhiBuffer>     buffers_;
     std::vector<RhiShader>     shaders_;
-    // std::deque, NOT std::vector -- the odd one out among its neighbours, on purpose.
-    //
-    // D3D12RenderContext::setPipeline caches a raw `const RhiPipeline* pipe_` (&pipelines_[h-1]);
-    // setBindingSet/setConstants/setConstantBuffer/applyDrawBinding/drawMeshInstanced/dispatchMeshFor/
-    // dispatchMeshClusters/dispatch all read root-parameter indices through it for the rest of the
-    // pass, feeding SetGraphicsRootDescriptorTable -- a stale read doesn't fault, it hands the driver
-    // a plausible root parameter belonging to nothing, in an already-recorded command list.
-    //
-    // A vector's push_back relocates every element on growth, and pipelines ARE created mid-recording
+    // std::deque, NOT std::vector, deliberately: D3D12RenderContext::setPipeline caches a raw
+    // `const RhiPipeline* pipe_` (&pipelines_[h-1]) that setBindingSet/setConstants/etc. (nine read
+    // sites) all read root-parameter indices through for the rest of the pass -- a stale read hands
+    // the driver a plausible-but-wrong root parameter, not a fault.
+    // A vector's push_back relocates on growth, and pipelines ARE created mid-recording
     // (OcclusionCuller::ensureSized builds PSOs inside the per-frame entity walk on a resolution
-    // change). MEASURED: an ordinary 60-frame editor run relocates this table twelve times, and on the
-    // twelfth -- the 95th pipeline, capacity 94->141 -- the context is holding a pipe_ the relocation
-    // just freed. Only the next setPipeline overwriting pipe_ before anything reads it saves this
-    // today; nothing enforces that ordering.
-    //
-    // deque::push_back never invalidates references to existing elements, so the cached pointer can't
-    // go stale -- cheaper than re-resolving the handle at every one of the nine read sites. Neighbours
-    // below stay vectors: nothing caches a raw pointer into them across a call that could grow them.
+    // change). MEASURED: a 60-frame editor run relocates twelve times; on the
+    // twelfth (95th pipeline, capacity 94->141) the context held a pipe_ the relocation just freed,
+    // saved today only by the next setPipeline overwriting it first -- nothing enforces that order.
+    // deque::push_back never invalidates existing-element references, fixing this for free. Sibling
+    // vectors below stay vectors: nothing caches a raw pointer into them across a growing call.
     std::deque<RhiPipeline>    pipelines_;
     std::vector<RhiBindingSet> bindingSets_;
     std::vector<RhiBindlessTable> bindlessTables_;
@@ -2438,16 +2337,14 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         }
     }
 
-    // BOUND THE SHADER BLOB CACHE. Its key is the whole compiler input, which is what makes it
-    // correct with no invalidation logic -- a changed input simply misses -- and the price of that is
-    // that nothing ever becomes stale, so nothing was ever removed. Every shader edit left its
-    // predecessor behind in a machine-wide directory no UI and no CLI could clear. On a machine that
-    // has been developing shaders for months, that is the whole history of every variant compiled.
-    //
-    // ONCE AT DEVICE INIT, not per compile: the sweep is a directory walk, and doing it per miss
-    // would put a stat of the whole cache on the path whose cost the cache exists to remove.
-    // Failure is ignored on purpose -- a cache that cannot be swept still serves hits, and a startup
-    // that refused to run because it could not delete a file would be a far worse trade.
+    // Bounds the shader blob cache: its key is the whole compiler input, so a changed input simply
+    // misses rather than needing invalidation -- but nothing ever becomes stale either, so every
+    // shader edit left its predecessor behind in a machine-wide directory with no UI or CLI to
+    // clear it (months of variants on a dev machine).
+    // Swept ONCE at device init, not per compile: the sweep is a directory walk, and doing it per
+    // miss would put that cost on the path the cache exists to remove. Failure is ignored on
+    // purpose -- a cache that can't be swept still serves hits, better than refusing to start over
+    // a delete failure.
     {
         const std::string udir = aver::userDataDir();
         if (!udir.empty()) {
@@ -2473,12 +2370,10 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     if (!createPipeline()) return false;
     if (!createPostPipelines()) return false;
 
-    // DXR 1.1 needs only caps_ and device_, both valid here -- same as VulkanDevice::init(). This
-    // backend used to call initAccelerationStructures() from createSwapchainResources() instead,
-    // gated on cmdList4_ (only exists once a swapchain's command list does), so "ray tracing works"
-    // depended on "a window was created": every --headless run silently carried device5_ == null
-    // while the caps line claimed RT tier 11. Calling it here matches Vulkan's shape and makes
-    // device5_ available headless too.
+    // DXR 1.1 needs only caps_ and device_, both valid here -- matches VulkanDevice::init(). Was
+    // previously called from createSwapchainResources() (gated on cmdList4_, which only exists once
+    // a swapchain's command list does), so --headless carried device5_ == null while caps claimed
+    // RT tier 11; calling it here fixes that.
     initAccelerationStructures();
 
     rhiFactory_ = new D3D12ResourceFactory(this);
@@ -2512,10 +2407,9 @@ void D3D12Device::drainDebugMessages() {
         }
         const u32 id = static_cast<u32>(m->ID);
         const std::string text(m->pDescription, m->DescriptionByteLength ? m->DescriptionByteLength - 1 : 0);
-        // ONE LINE PER ID, EXCEPT GPU-BASED VALIDATION: its messages all share one ID (e.g. 1358,
-        // "incompatible barrier layout") and differ only in the resource and dispatch they name, so
-        // deduping on the ID alone hid every offender after the first. Those are deduped on their
-        // text instead, capped so a per-draw flood stays readable.
+        // One line per ID, except GPU-based validation: its messages share one ID (e.g. 1358,
+        // "incompatible barrier layout") differing only in resource/dispatch, so ID-deduping hid
+        // every offender after the first -- these dedupe on text instead, capped for a per-draw flood.
         const bool gbv = text.rfind("GPU-BASED VALIDATION", 0) == 0;
         bool seen = false;
         if (gbv) {
@@ -2570,10 +2464,9 @@ VideoMemoryInfo D3D12Device::videoMemory() const {
     return info;
 }
 
-// See RHI.hpp's comment on IDevice::sceneDepthTexture. Lazily (re)adopts depthBuffer_ whenever
-// createDepthBuffer() has run since the last call -- see depthTexDirty_'s comment for why that flag,
-// not a size comparison, is the trigger: this method can't cheaply tell "the SAME resource" from
-// "one that happens to be the same size".
+// See RHI.hpp's IDevice::sceneDepthTexture. Lazily re-adopts depthBuffer_ when createDepthBuffer()
+// has run since the last call -- depthTexDirty_ (not a size check) is the trigger, since this
+// can't cheaply tell "the SAME resource" from "one that happens to be the same size".
 TextureHandle D3D12Device::sceneDepthTexture() {
     if (!depthBuffer_ || !rhiFactory_) return 0;
     if (depthTexDirty_) {
@@ -2596,11 +2489,9 @@ void D3D12Device::setGBufferEnabled(bool on) {
     if (on == gbufferEnabled_) return;
     gbufferEnabled_ = on;
     gbufMsaaWarned_ = false;   // the mismatch this guards, if any, is a NEW one under the new state
-    // Forced true DIRECTLY here, not left to notifyRenderTargetsChanged()'s gate below: that gate
-    // fires only on a sampleCount_/format/sceneWidth_/sceneHeight_ change, which this toggle is not,
-    // so calling it alone would silently miss invalidating history right when it matters most --
-    // beginFrame's own bind-time decision reasserts this every frame regardless (see
-    // gbufHistoryInvalid_'s comment), so this assignment only has to be right for the next frame.
+    // Forced true directly here, not via notifyRenderTargetsChanged()'s gate below (which only
+    // fires on a size/format/sample change, not this toggle) -- beginFrame reasserts this every
+    // frame regardless (see gbufHistoryInvalid_), so this only needs to be right for the next frame.
     gbufHistoryInvalid_ = true;
     if (!hasSwapchain_) return;   // applied next createSwapchainResources, same as setRenderScale
     waitForGpu();
@@ -2622,10 +2513,9 @@ void D3D12Device::setGBufferEnabled(bool on) {
     notifyRenderTargetsChanged();
 }
 
-// Re-adopts all three G-buffer resources in one place, so any of the three accessors below refreshes
-// every handle regardless of which is asked first -- see gbufTexDirty_'s comment. Does NOT check
-// gbufferEnabled_ itself: every caller has already done so, and this would be a second place that
-// check could drift out of sync.
+// Re-adopts all three G-buffer resources in one place, so any accessor refreshes every handle
+// regardless of which is asked first (see gbufTexDirty_). Does NOT check gbufferEnabled_ itself:
+// every caller already has, and a second check here could drift out of sync.
 void D3D12Device::refreshGBufferTexHandles() {
     if (!gbufTexDirty_) return;
     gbufVelocityTexHandle_ = rhiFactory_->adoptExternalRenderTargetTexture(
@@ -2640,10 +2530,9 @@ void D3D12Device::refreshGBufferTexHandles() {
     gbufTexDirty_ = false;
 }
 
-// Each accessor below re-checks gbufferEnabled_ (NOT just its own resource) before returning
-// anything -- see IDevice::gBufferVelocityTexture (RHI.hpp) for why "0 means off" must hold even
-// right after setGBufferEnabled(false), when the adopted handle integers are deliberately left
-// non-zero (see releaseGBufferTargets' comment).
+// Each accessor re-checks gbufferEnabled_ (not just its own resource) before returning anything --
+// see IDevice::gBufferVelocityTexture for why "0 means off" must hold right after
+// setGBufferEnabled(false), when the handles are deliberately left non-zero (releaseGBufferTargets).
 TextureHandle D3D12Device::gBufferVelocityTexture() {
     if (!gbufferEnabled_ || !gbufVelocity_ || !rhiFactory_) return 0;
     refreshGBufferTexHandles();
@@ -2701,10 +2590,9 @@ void D3D12Device::queryCaps() {
         caps_.conservativeRaster = o.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
         caps_.resourceBindingTier = static_cast<u32>(o.ResourceBindingTier);
     }
-    // 64-BIT SHADER ATOMICS, asked of the DEVICE. See DeviceCaps::shaderInt64Atomics for why this
-    // is not read off the shader model. OPTIONS1 carries Int64ShaderOps, which is the plain
-    // 64-bit integer op support a buffer atomic needs; a driver too old to know the query simply
-    // fails it and leaves the bit false, which is the correct conservative answer.
+    // 64-bit shader atomics, asked of the DEVICE not the shader model (see
+    // DeviceCaps::shaderInt64Atomics). OPTIONS1's Int64ShaderOps is the plain 64-bit op support a
+    // buffer atomic needs; a driver too old to know the query leaves the bit false, correctly.
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1{};
         if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1))))
@@ -2733,14 +2621,11 @@ void D3D12Device::queryCaps() {
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
 
-    // DERIVED AFTER THE CLAMP, ON PURPOSE. --force-caps no-rt exercises the non-RT fallback on
-    // hardware that doesn't need it; deriving this before the clamp would leave the bit set while
-    // rayTracingTier read 0, so the one flag meant to disable this path wouldn't. Reading the clamped
-    // value means every existing override already covers the new bit.
-    //
-    // Tier 1_1 is the floor the ray-driven path demands, and any device offering it is assumed
-    // D3D12_RESOURCE_BINDING_TIER_3 -- checked, since being wrong here means an out-of-bounds
-    // descriptor index, not a missing feature.
+    // Derived AFTER the clamp on purpose: deriving before it would leave this bit set while
+    // --force-caps no-rt zeroed rayTracingTier, defeating the flag meant to disable this path.
+    // Reading the clamped value means every existing override already covers the new bit.
+    // Tier 1_1 is the ray-driven path's floor; any device offering it is assumed tier-3 binding --
+    // checked, since being wrong means an out-of-bounds descriptor index, not a missing feature.
     caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && caps_.resourceBindingTier >= 3;
     if (caps_.rayTracingTier >= 11 && caps_.resourceBindingTier < 3)
         AVER_WARN("[RHI.D3D12] DXR 1.1 with resource binding tier {} -- not the tier 3 this path "
@@ -2752,12 +2637,10 @@ void D3D12Device::queryCaps() {
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster,
               caps_.resourceBindingTier);
     AVER_INFO("[RHI.D3D12] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
-    // LOGGED BESIDE THE SHADER MODEL ON PURPOSE, because the two disagree here and the disagreement
-    // is the point: this engine COMPILES at shader model 6.5 while the device may REPORT 6.6, and a
-    // consumer that infers 64-bit atomic support from the compile target -- which is exactly what
-    // RTXGI's SHaRC does by default -- gets a different answer from the one the hardware just gave.
-    // Printing both is what lets somebody notice that rather than discover it as a corrupted hash
-    // map or a needlessly allocated lock buffer.
+    // Logged beside the shader model on purpose: this engine compiles at SM 6.5 while the device
+    // may report 6.6, and inferring atomic support from the compile target (what RTXGI's SHaRC
+    // does by default) gives a different answer than the hardware just did -- printing both
+    // surfaces that before it shows up as a corrupted hash map.
     AVER_INFO("[RHI.D3D12] 64-bit shader atomics: {}", caps_.shaderInt64Atomics ? "yes" : "no");
     if (capsOverride().active)
         AVER_WARN("[RHI.D3D12] caps CLAMPED by --force-caps; the hardware reports MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
@@ -2781,10 +2664,9 @@ bool D3D12Device::setSampleCount(u32 samples) {
         msaaColor_.Reset();
         if (!createDepthBuffer() || !createMsaaColor()) { AVER_ERROR("[RHI.D3D12] MSAA {}x target creation failed", samples); return false; }
         releasePostTargets();
-        // G-buffer targets themselves need no resize -- always single-sample, unaffected by
-        // sampleCount_ -- but WHETHER they can be BOUND alongside msaaColor_ just changed (see
-        // createGBufferTargets' MSAA comment), so a warning that fired for the old sampleCount_
-        // mustn't suppress the one a NEW mismatch deserves.
+        // G-buffer targets need no resize (always single-sample), but WHETHER they can bind
+        // alongside msaaColor_ just changed (see createGBufferTargets' MSAA comment) -- a warning
+        // for the old sampleCount_ mustn't suppress the one a new mismatch deserves.
         gbufMsaaWarned_ = false;
     }
     notifyRenderTargetsChanged();
@@ -2837,11 +2719,10 @@ void D3D12Device::notifyRenderTargetsChanged() {
     notifiedDepth_   = depthFormat();
     notifiedWidth_   = sceneWidth_;
     notifiedHeight_  = sceneHeight_;
-    // Same reasoning VoxiRenderer applies to rtHistValid_ here: whatever the G-buffer held belonged
-    // to a resolution/sample-count/format that no longer exists, so reprojecting against it now would
-    // reproject against a frame that never happened. beginFrame's bind-time decision is the only
-    // other writer and runs AFTER this every frame, so this reset is visible only in the brief window
-    // between here and that -- see gbufHistoryInvalid_'s comment for the full contract.
+    // Same reasoning as VoxiRenderer's rtHistValid_: the G-buffer held a resolution/format that no
+    // longer exists, so reprojecting against it would reproject a frame that never happened.
+    // beginFrame's bind-time decision is the only other writer and runs after this every frame, so
+    // this reset is visible only in the brief window between here and there.
     gbufHistoryInvalid_ = true;
     for (IRenderFeature* f : features_)
         f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), sceneWidth_, sceneHeight_);
@@ -3011,9 +2892,8 @@ struct alignas(void*) Subobject {
 };
 
 // The subobject stream a mesh-shader PSO is created from. `as` is OPTIONAL: a default-constructed
-// Subobject holds a zero-length D3D12_SHADER_BYTECODE, which the runtime treats exactly as if the AS
-// subobject were omitted -- so D3D12Device::initMeshShaders' fixed voxelisation PSO, which never
-// touches `s.as`, is unaffected by this member existing on the shared struct.
+// Subobject holds a zero-length bytecode, which the runtime treats as omitted -- so
+// initMeshShaders' fixed voxelisation PSO, which never touches `s.as`, is unaffected by it existing.
 struct MeshPsoStream {
     Subobject<ID3D12RootSignature*,     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE>    rootSig;
     Subobject<D3D12_SHADER_BYTECODE,    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS>                as;
@@ -3103,51 +2983,26 @@ void D3D12Device::bindGraphicsRoot(ID3D12RootSignature* rs) {
     if (boundRootSig_ == rs) return;
     boundRootSig_ = rs;
     cmdList_->SetGraphicsRootSignature(rs);
-    // A ROOT SIGNATURE CHANGE DISCARDS EVERY BOUND ROOT ARGUMENT: table 1 and the b2 draw CBV that
-    // applyDrawBinding's dbValid_ assumes survived, AND table 0 and the feature frame CBV that
-    // drawMesh's fovValid_ assumes survived, both stale the instant this line runs. Cleared HERE
-    // rather than at this function's call sites because there are several (beginFrame, drawMesh's raw
-    // path, drawLines, the sky dome, the blended replay's setup bind, transparentPass's setup bind)
-    // and a new one would not think to do it -- and the failure mode is not a slow frame but a draw
-    // reading whatever the previous root signature left behind, which is the black-foliage bug
-    // SandboxRender.cpp:1188 records for table 1's own history (d8326985's own comment here cited
-    // :1112, which was already wrong when it was written -- the walk had moved past that line by
-    // then; corrected while this paragraph was being rewritten rather than left to mislead a second
-    // reader). Only reached on a genuine change, because of the early-out above, so an unchanged root
-    // signature still costs nothing.
+    // A root signature change discards every bound root argument -- table 1's b2 CBV (dbValid_)
+    // and table 0's frame CBV (fovValid_) are both stale the instant this runs. Cleared HERE, not
+    // at each of this function's several call sites (beginFrame, drawMesh's raw path, drawLines,
+    // the sky dome, the blended replay and transparentPass setup binds), because a new call site
+    // would not think to do it -- the failure mode is a draw silently reading the previous root
+    // signature's leftovers, the black-foliage bug SandboxRender.cpp:1188 records for table 1.
     //
-    // fovValid_ USED TO BE DELIBERATELY LEFT OUT HERE (see d8326985, which gave dbValid_ this clear
-    // alone, reasoning that fovValid_ "has exactly the same exposure, predates this cache, and ships
-    // today" but that fixing it belonged in its own change rather than being smuggled into one meant
-    // to be provably inert). This IS that change. The mechanism: drawMesh's feature-pipeline branch
-    // can leave fovValid_ true while forcing boundRootSig_/boundPso_ to nullptr right after its draw
-    // (so THIS backend's own raw path never mistakes the feature's root signature for its own) --
-    // if any later bindGraphicsRoot call is then reached before fovValid_ is next cleared some other
-    // way, it sees boundRootSig_ == nullptr, takes the branch above for real, and silently discards
-    // the table-0 binding and frame CBV that a subsequent "same pipeline as fovPso_/fovSet_/fovCb_"
-    // comparison in drawMesh (or drawMeshDepthPrepass, or the blended replay) would then trust without
-    // re-sending them -- a draw reading whatever this function's root signature and PSO left behind
-    // instead of the feature's, a wrong image rather than a slow one, the exact shape of the foliage
-    // bug above, just for table 0 instead of table 1.
+    // fovValid_'s clear was deliberately left out when d8326985 gave dbValid_ this fix alone. This
+    // is that follow-up: drawMesh's feature-pipeline branch can leave fovValid_ true while nulling
+    // boundRootSig_/boundPso_ right after its draw; if bindGraphicsRoot is then reached before
+    // fovValid_ is cleared some other way, it would silently discard table 0's binding instead of
+    // re-sending it -- the same bug, for table 0.
     //
-    // NOT KNOWN TO FIRE TODAY: every bindGraphicsRoot call this file makes outside drawMesh's own raw
-    // path (beginFrame's opening bind, the sky dome, the blended replay's setup bind, transparentPass's
-    // setup bind, all in endFrame) runs after endFrame's own top-of-function fovValid_ = false, with
-    // nothing in between able to set it true again before each of those sites is reached in turn --
-    // traced by hand, not assumed, which is why THOSE three sites in runPostChain that gained a
-    // matching dbValid_ clear in d8326985 (its own opening bind, the eye-adaptation compute round
-    // trip, and the post-upscaler restore) are deliberately NOT given one here: dbValid_'s clears
-    // there are the same kind of already-redundant belt-and-suspenders dbValid_ got everywhere a root
-    // signature changes, not evidence fovValid_ needs the same at those particular three -- adding it
-    // there would be inert churn, not a fix. And within drawMesh's own raw path, VoxiRenderer (the one
-    // feature shipped today that overridesScenePipeline()) only ever answers scenePipeline() with 0
-    // for wireframe_, a flag that does not vary between entities within one frame, so today's single
-    // feature cannot actually produce the mid-walk mix of feature-path and raw-path draws the
-    // mechanism above needs. The gap was real and reachable in principle regardless -- RHIResources.hpp
-    // documents a feature answering scenePipeline() per draw as ordinary, drawMesh's `if (!fp) break`
-    // exists specifically to fall back correctly when it does, and nothing stops a second feature or a
-    // future VoxiRenderer change from making that per-draw answer vary -- which is why this is fixed
-    // now rather than left for whichever future feature trips it first.
+    // NOT KNOWN TO FIRE TODAY (traced by hand): every non-drawMesh call site here already runs
+    // after endFrame's own fovValid_ = false, and the one feature shipped (VoxiRenderer) never
+    // varies its scenePipeline() answer per draw within a frame -- the three runPostChain sites
+    // that got a matching dbValid_ clear in d8326985 deliberately get no fovValid_ one here, since
+    // that would be inert churn, not evidence of a gap there. But RHIResources.hpp documents a
+    // per-draw answer as ordinary, so the gap is real in principle -- fixed now rather than left
+    // for whoever hits it first.
     fovValid_ = false;
     dbValid_ = false;
     cmdList_->SetGraphicsRootConstantBufferView(kSceneFrameParam, frameCBs_[frameIndex_]->GetGPUVirtualAddress());
@@ -3204,11 +3059,9 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
 
     if (!createDepthBuffer()) return false;
     if (!createMsaaColor()) return false;
-    // Only when a caller enabled the feature BEFORE this swapchain existed (setGBufferEnabled's early
-    // return defers to here for that case) -- an ordinary build, which never calls
-    // setGBufferEnabled, skips this and stays bit-identical to before this feature existed. NOT fatal
-    // to swapchain creation on failure, unlike the depth/colour targets above: this is optional and
-    // additive, so the swapchain still comes up, just without the G-buffer.
+    // Only fires if a caller enabled the feature before this swapchain existed (defers here); an
+    // ordinary build stays bit-identical. Not fatal on failure -- optional/additive, unlike
+    // depth/colour above, so the swapchain still comes up without the G-buffer.
     if (gbufferEnabled_ && !createGBufferTargets()) {
         AVER_ERROR("[RHI.D3D12] G-buffer target creation failed at swapchain creation; disabling the feature");
         releaseGBufferTargets();
@@ -3303,20 +3156,16 @@ bool D3D12Device::createMsaaColor() {
 }
 
 // Creates the three G-buffer targets at the CURRENT scene size (sceneWidth_/sceneHeight_, matching
-// createDepthBuffer/createMsaaColor, not width_/height_ -- the editor docks the 3D view in a
-// sub-rect, and the wrong pair would crash on a mismatched bind or sample the wrong texel). Callers
+// createDepthBuffer/createMsaaColor, NOT width_/height_ -- the editor docks the 3D view in a
+// sub-rect, and the wrong pair crashes on a mismatched bind or samples the wrong texel). Callers
 // Reset() the three ComPtrs first.
-//
-// ALWAYS SINGLE-SAMPLE regardless of sampleCount_: a G-buffer is read back by a COMPUTE pass (the
-// FidelityFX denoiser, eventually FSR2/3/TAA/SSR), none of which consume Texture2DMS -- designing
-// that consumer is out of scope here -- and velocity/depth/normal are per-sample data MSAA
-// averaging wouldn't correctly resolve anyway (pick-one-sample, not blend).
-//
-// CONSEQUENCE: OMSetRenderTargets requires every bound target to share one SampleDesc, so when
-// sampleCount_ > 1 these can't be bound alongside msaaColor_. beginFrame's bind-time branch skips
-// binding these three then, still clears them to their "nothing here" sentinel, and warns once
-// (gbufMsaaWarned_). setGBufferEnabled(true) with MSAA on is accepted, not refused, but silently
-// yields an all-sentinel G-buffer without that warning.
+// ALWAYS SINGLE-SAMPLE regardless of sampleCount_: read back by a COMPUTE pass (FidelityFX
+// denoiser, eventually FSR2/3/TAA/SSR) that doesn't consume Texture2DMS, and velocity/depth/normal
+// are per-sample data MSAA averaging can't correctly resolve anyway.
+// CONSEQUENCE: OMSetRenderTargets needs one shared SampleDesc, so sampleCount_ > 1 can't bind
+// these alongside msaaColor_ -- beginFrame's bind-time branch skips binding, still clears to the
+// sentinel, warns once (gbufMsaaWarned_). setGBufferEnabled(true) with MSAA on is accepted, not
+// refused, silently yielding an all-sentinel G-buffer without that warning.
 bool D3D12Device::createGBufferTargets() {
     if (sceneWidth_ == 0 || sceneHeight_ == 0) return false;
 
@@ -3366,12 +3215,9 @@ bool D3D12Device::createGBufferTargets() {
     return true;
 }
 
-// Releases the three G-buffer targets and their RTV heaps, the mirror of createGBufferTargets(),
-// called from setGBufferEnabled(false) so disabling frees its ~54 MB immediately rather than leaving
-// them on the GPU for the rest of the run. The three adopted TextureHandles are deliberately left as
-// they are: every accessor checks gBufferEnabled() FIRST and returns 0 without looking at the handle,
-// so nothing outside this file can observe a handle that outlived its resource (RHI.hpp's "check the
-// flag, not the handle" contract).
+// Mirror of createGBufferTargets(), freeing the ~54 MB immediately rather than leaving it on the
+// GPU. The three TextureHandles are deliberately left as-is: every accessor checks
+// gBufferEnabled() first (RHI.hpp's "check the flag, not the handle" contract).
 void D3D12Device::releaseGBufferTargets() {
     gbufVelocity_.Reset();    gbufVelocityRtvHeap_.Reset();
     gbufViewZ_.Reset();       gbufViewZRtvHeap_.Reset();
@@ -3409,10 +3255,9 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     m.indexCount = icount;
     m.vertexCount = vcount;
 
-    // ONE PASS OVER THE VERTICES, ONCE, AT CREATION. An AABB, not a tight sphere: min/max per axis,
-    // centre = midpoint, radius = distance to a CORNER of the box (not the farthest actual vertex),
-    // so it's never smaller than a true bounding sphere -- conservative in the direction a culling
-    // test wants: false positives cost GPU cycles, false negatives cost a wrong picture.
+    // One pass over the vertices, once, at creation. An AABB, not a tight sphere: radius = distance
+    // to a box CORNER (not the farthest vertex), so it's never smaller than a true bounding sphere
+    // -- conservative the way culling wants: false positives cost GPU cycles, false negatives a wrong picture.
     {
         f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
         f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
@@ -3428,20 +3273,16 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
 
-    // W4: which heap this mesh's buffers land on. Starts as the caller's current standing request
-    // (setStaticMeshHeapDefault) and is forced false below if the Default-heap path fails, so one
-    // mesh's bad luck (an out-of-memory staging allocation, say) falls back instead of failing this
-    // call outright -- the Upload heap is what every mesh already lived on before this flag existed.
+    // W4: which heap this mesh's buffers land on. Starts as the caller's standing request
+    // (setStaticMeshHeapDefault), forced false below if the Default-heap path fails, so one mesh's
+    // bad luck falls back to Upload (what every mesh lived on before this flag existed) instead of failing.
     bool useDefault = staticMeshDefaultHeap_;
 
-    // THROUGH THE FACTORY, not CreateCommittedResource: same heap and contents either way, but only
-    // a factory buffer has an RhiBuffer entry and can be given a descriptor -- without it a shader
-    // could never read a mesh's own geometry, which a ray needs beyond a plain hit test.
-    //
-    // A lambda rather than inlining the Default/Upload branches into two near-duplicate blocks below:
-    // it is called once for the caller's requested heap and, on failure of a Default-heap attempt,
-    // called again for Upload -- the ONLY two call shapes this needs, and writing the allocate+upload
-    // sequence out twice is exactly how the two copies drift (one gets a bugfix the other doesn't).
+    // Through the FACTORY, not CreateCommittedResource: only a factory buffer has an RhiBuffer
+    // entry and can be given a descriptor, without which a shader could never read a mesh's
+    // geometry (a ray needs more than a hit test).
+    // A lambda, not inlined twice: called once for the requested heap, again for Upload on a
+    // Default-heap failure -- writing the allocate+upload sequence out twice is how two copies drift.
     auto allocateAndUpload = [&](bool onDefaultHeap) -> bool {
         BufferDesc vd;
         vd.bytes = vbytes;
@@ -3467,15 +3308,13 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
         m.ib = irb->res;
 
         if (onDefaultHeap) {
-            // SYNCHRONOUS, deliberately, not queued the way seedSkinTargets defers its own copy:
-            // createMesh is also called MID-FRAME (the scene walk streaming a chunk in, SandboxApp's
-            // part split), and a mesh drawn or BLAS-built later in that SAME frame must never read
-            // uninitialised Default-heap memory. Queuing this the way skin targets are seeded would
-            // reopen exactly that window for every ordinary static mesh. The one-shot list this
-            // issues reaches the queue and is waited on before createMesh returns, so the frame's own
-            // command list -- recorded afterwards -- is guaranteed to see initialised data.
-            // UNMEASURED: the GPU round trip this adds at load time, once per mesh, has not been
-            // timed against the per-frame bus traffic it removes; see W4's brief.
+            // SYNCHRONOUS, deliberately, unlike seedSkinTargets' deferred copy: createMesh runs
+            // MID-FRAME too (chunk streaming, SandboxApp's part split), and a mesh drawn/BLAS-built
+            // later that same frame must never read uninitialised Default-heap memory. The one-shot
+            // list is waited on before createMesh returns, so the frame's own command list is
+            // guaranteed initialised data.
+            // UNMEASURED: the GPU round trip this adds per mesh at load time vs. the per-frame bus
+            // traffic it removes; see W4's brief.
             if (!rhiFactory_->uploadBuffers({{m.vb.Get(), verts, vbytes}, {m.ib.Get(), indices, ibytes}})) {
                 rhiFactory_->destroyBuffer(m.vbBuffer); m.vbBuffer = 0; m.vb.Reset();
                 rhiFactory_->destroyBuffer(m.ibBuffer); m.ibBuffer = 0; m.ib.Reset();
@@ -3515,10 +3354,9 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     return static_cast<MeshHandle>(meshes_.size());
 }
 
-// W11: creates a mesh that SHARES `source`'s vertex buffer and owns its own index buffer -- the
-// inverse split from createSkinTargetMesh just below (shared indices, own compute-written vertices).
-// See IDevice::createMeshSharingVertices (RHI.hpp) for the full refcounting and refusal contract;
-// this is its D3D12 implementation.
+// W11: a mesh that SHARES `source`'s vertex buffer and owns its own index buffer -- the inverse
+// of createSkinTargetMesh below (shared indices, own compute-written vertices). See
+// IDevice::createMeshSharingVertices (RHI.hpp) for the refcounting/refusal contract this implements.
 MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
     return shareVertices(source, indices, indexCount, /*posed=*/false);
 }
@@ -3535,10 +3373,9 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
         return 0;
     }
     const GpuMesh& src = meshes_[source - 1];
-    // Silent refusals, the same shape as createSkinTargetMesh's own "not fully formed" checks just
-    // below: a caller offering one of these is expected to fall back to createMesh (IDevice's own
-    // contract says so), not to be told why in the log every time an LOD importer merely PROBES
-    // whether sharing is available for a given asset.
+    // Silent refusals, same shape as createSkinTargetMesh's "not fully formed" checks below: a
+    // caller is expected to fall back to createMesh (IDevice's contract), not be told why every
+    // time an LOD importer merely PROBES whether sharing is available.
     if (!src.alive || !src.vb || src.vbv.SizeInBytes == 0) return 0;
     // LOD sharing refuses a compute-written source SILENTLY (its caller probes and falls back); a
     // posed part REQUIRES one and says so -- its caller's only fallback is the whole-mesh draw.
@@ -3558,9 +3395,8 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
             }
     }
 
-    // Collapse a sharing CHAIN to its one root rather than letting a sharer become another sharer's
-    // source: sharing FROM `source` shares the SAME underlying buffer `source` itself shares (or
-    // owns), so the root is source's own root when source is itself a sharer. This is what keeps
+    // Collapses a sharing CHAIN to its one root, rather than letting a sharer become another
+    // sharer's source: the root is source's own root when source is itself a sharer. Keeps
     // destroyMesh's give-back a single decrement on one root, never a walk through N levels.
     const MeshHandle root = src.vbOwned ? source : src.vbSource;
     if (root == 0 || root > meshes_.size() || !meshes_[root - 1].alive) return 0;
@@ -3586,10 +3422,9 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
     m.computeWritten = posed;   // a posed part IS posed geometry; see createPosedPartMesh
 
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
-    // Through the SAME Upload/Default policy createMesh() itself uses (staticMeshDefaultHeap_ and its
-    // one-mesh fallback-on-failure), so a coarser LOD level built while --mesh-heap default is set
-    // behaves exactly like an ordinary mesh created under it -- see createMesh's own comment on why
-    // this is a lambda rather than a second near-duplicate of the allocate+upload sequence.
+    // Through the SAME Upload/Default policy createMesh() uses (staticMeshDefaultHeap_ + its
+    // fallback-on-failure), so a coarser LOD level behaves like an ordinary mesh under
+    // --mesh-heap default -- a lambda, not a duplicate, for the same reason as createMesh's own.
     bool useDefault = staticMeshDefaultHeap_;
     auto allocateIndices = [&](bool onDefaultHeap) -> bool {
         BufferDesc idd;
@@ -3678,25 +3513,24 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     m.ibv = src.ibv;
     m.indexCount = src.indexCount;
     m.vbBuffer = vh;
-    // Otherwise defaults to centre (0,0,0), radius 0: createMesh measures an AABB at creation, but a
-    // skin target has no CPU vertices (the skinning pass writes them on the GPU), so every soft body
-    // and skinned mesh reported a radius-0 sphere at the origin -- a frustum cull could vanish the
-    // whole body once that point left view, the same failure shape as the cull that once starved
-    // shadows/GI of off-screen casters. Found when a point-in-volume test against the pool's water
-    // reported the camera outside a sphere it was 20cm inside of.
-    //
-    // The source's bounds are honest, not perfect: the seed shell is where geometry starts and stays
-    // at rest, but deformation (a sloshing fluid) can push a vertex outside it -- still strictly
-    // better than a point at the origin, and the only answer available without a GPU readback.
+    // Otherwise defaults to centre (0,0,0), radius 0: a skin target has no CPU vertices to measure
+    // an AABB from, so every soft body/skinned mesh reported a radius-0 sphere at the origin,
+    // letting a frustum cull vanish the whole body once that point left view -- the same failure
+    // shape as the cull that once starved shadows/GI of off-screen casters. Found via a
+    // point-in-volume test against the pool's water reporting the camera outside a sphere it was
+    // 20cm inside of.
+    // The source's bounds are honest, not perfect: deformation (a sloshing fluid) can push a
+    // vertex outside the seed shell -- still better than a point at the origin, the only answer
+    // without a GPU readback.
     m.boundsCentre[0] = src.boundsCentre[0];
     m.boundsCentre[1] = src.boundsCentre[1];
     m.boundsCentre[2] = src.boundsCentre[2];
     m.boundsRadius    = src.boundsRadius;
     for (int a = 0; a < 3; ++a) { m.boundsMin[a] = src.boundsMin[a]; m.boundsMax[a] = src.boundsMax[a]; }
-    // THE INDEX BUFFER'S HANDLE COMES ACROSS TOO, not just its raw pointer: meshGeometry() refuses
-    // on `!m.vbBuffer || !m.ibBuffer`, and ibBuffer defaulted to 0 here, so every skin target reported
-    // "no readable geometry" though its indices are perfectly readable -- one skinned entity switched
-    // ray-traced reflections off for the whole scene because the BLAS build couldn't see its geometry.
+    // The index buffer's HANDLE comes across too, not just its pointer: meshGeometry() refuses on
+    // `!m.vbBuffer || !m.ibBuffer`, and ibBuffer defaulting to 0 made every skin target report "no
+    // readable geometry" though its indices were perfectly readable -- one skinned entity switched
+    // off ray-traced reflections scene-wide because the BLAS build couldn't see its geometry.
     m.ibBuffer = src.ibBuffer;
     // ...and with it, the record that these indices are BORROWED. Without this the skin target
     // would free the source's index buffer on destruction and every mesh still drawing with it
@@ -3735,16 +3569,13 @@ void D3D12Device::seedSkinTargets() {
         GpuMesh& d = meshes_[sd.dst - 1];
         const GpuMesh& s = meshes_[sd.src - 1];
         if (!d.vb || !s.vb) continue;
-        // The destination is a fresh Default-heap buffer in COMMON, so it PROMOTES to COPY_DEST
-        // implicitly and needs no barrier to get there. The source USED TO BE guaranteed an
-        // upload-heap resource permanently in GENERIC_READ, needing no barrier either -- W4 broke
-        // that guarantee: with --mesh-heap default, `s` may itself be a Default-heap mesh (an
-        // ordinary static mesh someone is skinning FROM), whose buffer this same copy also promotes
-        // implicitly, COMMON -> COPY_SOURCE this time, and which therefore needs the identical
-        // explicit undo the destination gets below. An upload-heap source is NEVER barriered here --
-        // GENERIC_READ is that heap type's one fixed state (RhiBuffer::stateFixed under
-        // AVER_RHI_TRACK_STATE refuses any transition off it), and the runtime never actually moves
-        // it off GENERIC_READ for a copy source in the first place.
+        // Destination is a fresh Default-heap buffer in COMMON, implicitly promoting to COPY_DEST
+        // with no barrier needed. Source was previously always an upload-heap resource in
+        // GENERIC_READ (also no barrier) until W4: with --mesh-heap default, `s` may itself be a
+        // Default-heap mesh, implicitly promoted COMMON -> COPY_SOURCE too, needing the same
+        // explicit undo as the destination below. An upload-heap source is never barriered:
+        // GENERIC_READ is its one fixed state (RhiBuffer::stateFixed, under AVER_RHI_TRACK_STATE,
+        // refuses any transition off it), never moved for a copy source anyway.
         const bool srcIsDefault = [&] {
             RhiBuffer* srb = rhiFactory_->buffer(s.vbBuffer);
             return srb && srb->desc.kind == BufferKind::Default;
@@ -3752,9 +3583,8 @@ void D3D12Device::seedSkinTargets() {
         cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
 
         // The promotion LASTS FOR THE REST OF THE COMMAND LIST -- decay happens at submit, not at
-        // the end of the copy. Without this the skinning pass's first barrier claims Common on a
-        // resource the runtime knows is COPY_DEST, and the debug layer reports it once per frame
-        // forever.
+        // the copy's end. Without this, the skinning pass's first barrier claims Common on a
+        // resource the runtime knows is COPY_DEST, and the debug layer reports it every frame forever.
         auto back = transition(d.vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                D3D12_RESOURCE_STATE_COMMON);
         cmdList_->ResourceBarrier(1, &back);
@@ -4115,14 +3945,12 @@ void D3D12Device::beginFrame() {
         ++claimants;
         if (!winner) winner = f;
     }
-    // WHO IS PAINTING THE SCENE, SAID OUT LOUD, once per change -- silence here is what made this
-    // expensive. The trap is NOT the two-claimant case: a manifest asking for both a path-traced
-    // reference view and ray-driven primary visibility has two claimants, ray-driven wins on
-    // registration order, and turning ray-driven off to "compare against the rasteriser" leaves
-    // exactly ONE claimant (the path tracer) quietly taking the frame while raster never runs. That
-    // measured a fullscreen path-traced blit as "the raster path" (`scene draw 0.1ms` against a
-    // 3.7ms ray span, reported as a 3x). So the single-claimant case is logged too, at INFO -- a
-    // legitimate configuration, just never silent. See IRenderFeature::suppressesScene.
+    // WHO IS PAINTING THE SCENE, said out loud once per change -- silence here is what made this
+    // expensive. The trap isn't the two-claimant case (ray-driven wins on registration order); it's
+    // turning ray-driven off to "compare against raster" and leaving ONE claimant (the path tracer)
+    // quietly taking the frame while raster never runs -- measured as a fullscreen PT blit reported
+    // as `scene draw 0.1ms` against a 3.7ms ray span (a false 3x). So the single-claimant case logs
+    // too, at INFO: a legitimate configuration, just never silent. See IRenderFeature::suppressesScene.
     if (winner != lastSuppressWinner_ || claimants != lastSuppressClaimants_) {
         if (claimants > 1)
             AVER_WARN("[RHI.D3D12] {} render features claim the whole scene; '{}' wins on "
@@ -4147,13 +3975,11 @@ void D3D12Device::beginFrame() {
         return;
     }
 
-    // THE SKY NO LONGER DRAWS HERE. It used to run first, depth-disabled, at 100% coverage regardless
-    // of how much the final image's opaque geometry would go on to cover -- the most expensive shader
-    // in this file (PSky's atmosphere march) paying full price behind every wall, tree and character.
-    // It now draws at the START of endFrame, after every opaque drawMesh this frame, once the depth
-    // buffer holds real depth -- see that function and the sky PSO's now depth-tested creation above
-    // for why this is correct: it lands on the SAME still-bound render target and depth buffer,
-    // before endFrame's first GPU work (the MSAA resolve) reads either.
+    // The sky no longer draws here: it used to run first, depth-disabled, at full coverage --
+    // PSky's atmosphere march (the most expensive shader here) paying full price behind every
+    // wall, tree and character. It now draws at the START of endFrame, once real depth exists (see
+    // the sky PSO's depth-tested creation above) -- same render target/depth buffer, before
+    // endFrame's first GPU work (the MSAA resolve) reads either.
     cmdList_->SetPipelineState(pso_.Get());
 }
 
@@ -4227,15 +4053,13 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     return true;
 }
 
-// Draws `mesh`'s depth only, through whichever feature's depthPrepassPipeline() offers one -- see
-// IDevice's comment for the contract, and VoxiRenderer::depthPrepassPipeline for the one
-// implementation today. STRUCTURALLY A SMALL COPY OF drawMesh()'s feature-pipeline branch below
-// (same fovPso_/fovSet_/fovCbBytes_ caching, table-1 rebind, PerObject world write) -- same kind of
-// draw through the same seam, just a different pipeline and no colour/material tail. NOT folded into
-// drawMesh() itself: called from a SEPARATE, earlier walk (SandboxApp's prepass phase), never
-// interleaved per-instance with colour draws -- that would split one contiguous "depth prepass" GPU
-// span into hundreds of one-draw slivers, and this engine's GPU stat tree budgets 64 open spans a
-// frame, not one per entity.
+// Draws `mesh`'s depth only, via whichever feature's depthPrepassPipeline() offers one (see
+// IDevice's contract; VoxiRenderer::depthPrepassPipeline is the one implementation). Structurally
+// a small copy of drawMesh()'s feature-pipeline branch (same fovPso_/fovSet_/fovCbBytes_ caching,
+// table-1 rebind, PerObject world write), just a different pipeline and no colour tail. Not
+// folded into drawMesh(): called from a separate, earlier walk
+// (SandboxApp's prepass phase) so one contiguous "depth prepass" GPU span isn't split into
+// hundreds of slivers -- the GPU stat tree budgets 64 open spans a frame, not one per entity.
 // The frame-wide prepass, gated on its switch.
 void D3D12Device::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     if (!depthPrepassEnabled_) return;
@@ -4378,56 +4202,30 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
-        // UNLIT STAYS ON THE FEATURE'S PIPELINE. It used to break out to this backend's own PSO,
-        // on the reasoning that the unlit bypass lived only in the shared prelude's
-        // `gMaterial.z > 0.5` and Voxi's scene shader had no unlit branch to take. The premise was
-        // true and the consequence was PURE WHITE: the backend's fallback shader is compiled before
-        // the material prelude exists, so it cannot sample a base-colour texture, and the draw loops
-        // deliberately hand it gBaseColor = 1,1,1 for every authored material precisely because the
-        // real colour is supposed to arrive through a texture binding it never reads. Unlit on any
-        // textured mesh was therefore a white silhouette rather than its flat albedo.
+        // UNLIT stays on the feature's pipeline, not this backend's fallback PSO: the fallback
+        // shader pre-dates the material prelude and never samples a base-colour texture (gBaseColor
+        // is hardcoded 1,1,1), so routing unlit there gave every textured mesh a white silhouette.
+        // Fixed by writing gShadingModel (writeShadingConstants used to hardcode STANDARD on both
+        // backends) so the feature's own shader resolves unlit via averDisplayColour/s.display.
+        // Wireframe keeps its own route (needs a different rasteriser state, not a shading branch);
+        // VoxiRenderer::scenePipeline declines it by returning 0.
+        // `blended` explicit false: the opaque walk. A translucent mesh never reaches here
+        // (diverted above by setDrawBlended(true)), so this says so rather than relying on the default.
         //
-        // The material prelude has had the right mechanism the whole time -- s.display and
-        // s.displayColor, gated on gShadingModel == AVER_MODEL_UNLIT, which PSMainVoxi already
-        // checks through averDisplayColour. Nothing ever WROTE that model; writeShadingConstants
-        // hardcoded STANDARD on both backends. It is written now, so the feature's own shader
-        // resolves unlit against the sampled material and this diversion is no longer needed.
-        //
-        // Wireframe is NOT the same case and keeps its own route: it needs a different rasteriser
-        // state, not a different shading branch, and VoxiRenderer::scenePipeline declines it one
-        // level down by returning 0.
-        // `blended` explicit and false: the OPAQUE scene walk. A translucent mesh never reaches here
-        // -- setDrawBlended(true) diverts it into the capture-and-replay path above -- so writing
-        // false out loud says so, rather than leaning on the parameter's default.
-        // ---- A PREPASSED DRAW GOES DOWN THE SAME GEOMETRY PATH ITS DEPTH WAS WRITTEN THROUGH ----
-        //
-        // drawMeshDepthPrepass above ALWAYS draws through the input assembler and vsMain -- it has
-        // no mesh-shader twin -- and the whole premise of the LessEqual/no-write colour pipelines
-        // is that the colour pass reproduces that depth bit for bit. VoxiRenderer::scenePipeline
-        // says so outright: "the prepass is only offered to the plain drawMesh() path, so
-        // `depthPrepassed && meshShaders` should never both be true". This call site never honoured
-        // it. It passed msActive_ unconditionally, so with the device on mesh shaders
-        // (RENDER.MESHSHADERS 1, which PTTest sets) every prepassed draw asked for the ORDINARY
-        // mesh-shader pipeline -- Less, depth write on -- and then tested against the depth the
-        // prepass had just written for the identical triangle. Less rejects equal. Every eligible
-        // fragment was discarded, and with [earlydepthstencil] on PSMainVoxi it happened before the
-        // pixel shader ran, which is why the broken frame was also 47x cheaper:
-        //
-        //   raster scene draws  47.51ms -> 1.02ms   and the image 0.1% bit-identical, MAD 19.4
-        //
-        // Two earlier diagnoses missed it for a reason worth keeping. --no-lod-mesh-shader turns off
-        // TRIFACTOR's LOD mesh shaders, not this device path (the log still read "geometry path:
-        // mesh shaders"), and forcing scenePipeline's prepassed branch off changed nothing because
-        // that branch was never being reached. Both "eliminations" tested a switch that was already
-        // in the state the test assumed.
-        //
-        // Routing the prepassed draw onto the input assembler restores the contract exactly: same
-        // compiled vsMain in both passes, so identical positions, identical rasteriser snapping,
-        // identical depth -- and LessEqual then keeps precisely the visible surface. MSMain computes
-        // the position with the same two multiplies (shared_prelude.hlsl), so this is not expected
-        // to move a pixel against the mesh-shader frame either, but the depth equality this pass
-        // RELIES on no longer depends on two different shader stages happening to round alike.
-        // Only prepassed draws move; everything else keeps the mesh-shader path it had.
+        // A PREPASSED DRAW MUST USE THE SAME GEOMETRY PATH ITS DEPTH WAS WRITTEN THROUGH: the depth
+        // prepass always runs through the IA/vsMain (no mesh-shader twin), and LessEqual colour
+        // passes depend on reproducing that depth bit for bit -- VoxiRenderer::scenePipeline says so
+        // outright ("`depthPrepassed && meshShaders` should never both be true"), which this call
+        // site never honoured. It passed msActive_ unconditionally, so with mesh shaders on
+        // (RENDER.MESHSHADERS 1, which PTTest sets), every prepassed draw took the ordinary
+        // Less/depth-write mesh pipeline and rejected the depth its own prepass had just written --
+        // every fragment discarded before the pixel shader ran thanks to [earlydepthstencil] on
+        // PSMainVoxi, which is why the broken frame was also 47x cheaper (measured: raster scene
+        // draws 47.51ms -> 1.02ms, image 0.1% bit-identical, MAD 19.4). Two earlier diagnoses missed
+        // this because they toggled switches that were never actually reached (--no-lod-mesh-shader;
+        // forcing scenePipeline's prepassed branch off). Fixed by routing a prepassed draw onto the
+        // IA path (same vsMain, same rounding) so LessEqual keeps the visible surface; only
+        // prepassed draws move, everything else keeps mesh shaders.
         const bool featureMs = msActive_ && msPso_ && !prepassed;
         const PipelineHandle fp = f->scenePipeline(featureMs, wireframe_, prepassed, false);
         if (!fp) break;
@@ -4475,11 +4273,10 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     const GpuMesh& m = meshes_[mesh - 1];
     const bool useMs = msActive_ && msPso_ && !wireframe_;
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
-    // GUARDED THE SAME WAY bindGraphicsRoot already guards the root signature, above. A scene is
-    // typically hundreds to thousands of drawMesh calls sharing one PSO, and this used to re-issue
-    // SetPipelineState on every one regardless -- a command-list entry paid for nothing. boundPso_ is
-    // invalidated everywhere boundRootSig_ already is, since anything that can change the root
-    // signature can just as well change which PSO is bound.
+    // Guarded like bindGraphicsRoot's root-signature check above: a scene is hundreds to thousands
+    // of drawMesh calls sharing one PSO, so re-issuing SetPipelineState every time paid for
+    // nothing. boundPso_ is invalidated everywhere boundRootSig_ is, since anything that changes
+    // the root signature can just as well change which PSO is bound.
     ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : (wireframe_ ? wirePso_.Get() : pso_.Get());
     if (wantPso != boundPso_) { cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
     f32 consts[kObjectConstantDwords];
@@ -4749,25 +4546,18 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     // wants the sky's irradiance wants the same nine numbers.
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
-    // THE SKY IS ALREADY ON THE SUN'S SCALE -- 1, NOT THE 8 THIS USED TO BE.
-    //
-    // The atmosphere's source term is sigma * phase * sunTransmittance * E0 (Atmosphere.cpp), so these
-    // coefficients are radiance in E0's own units and need no conversion. Integrated over the upper
-    // hemisphere they give a clear-sky diffuse share of ~16% on a horizontal surface at 45 degrees of
-    // sun elevation -- inside AtmosphereTest's 15-30% gate for the dome, and where a real clear sky
-    // sits (10-20% of the sun's horizontal irradiance).
-    //
-    // THE 8 CAME FROM A DISPLAY-SPACE MEASUREMENT: luminance percentiles of a tonemapped frame (p50
-    // 119 -> 125 with sky light 0 -> 1), with the p50 change divided by the MAX pixel, which sits on
-    // the tonemap's shoulder. The same post-tonemap-metric trap that once "measured" NRD losing 40-80%
-    // of GI. It made the diffuse sky ~1.5x the sun's own horizontal irradiance -- outdoor shadows at
-    // ~40% of sunlit and blue, where physics says ~10-20% -- while the visible dome and reflections
-    // stayed at 1x, so the sky lit the scene 8x brighter than it looked. Removed on the owner's call
-    // (2026-09-24). Judge any future sky-scale change in linear HDR (--tonemap 0), never on 8-bit.
-    //
-    // Kept as a named constant so skyLightIntensity (an authored multiplier, written back on save)
-    // is never the place a calibration gets folded in: a scale applied on load would compound on
-    // every round trip. The Vulkan twin carries the same value.
+    // Sky is on the sun's own scale -- 1, not the 8 this used to be. The atmosphere's source term
+    // is sigma*phase*sunTransmittance*E0 (Atmosphere.cpp), so these coefficients need no conversion
+    // and give a clear-sky diffuse share of ~16% at 45deg sun elevation -- inside AtmosphereTest's
+    // 15-30% gate, matching real clear sky (10-20%).
+    // The 8 came from a display-space measurement (tonemapped p50 119->125 with sky 0->1, divided
+    // by the shoulder-clipped MAX pixel -- the same post-tonemap trap that once "measured" NRD
+    // losing 40-80% of GI), which made diffuse sky ~1.5x the sun's horizontal irradiance (~40%
+    // shadows vs physics' 10-20%) while the visible dome and reflections stayed at 1x, so the sky
+    // lit the scene 8x brighter than it looked. Removed on the owner's call (2026-09-24); judge any
+    // future sky-scale change in linear HDR (--tonemap 0), never on 8-bit.
+    // Kept as a named constant, not folded into skyLightIntensity, so a load-time scale can't
+    // compound on save/reload round trips. The Vulkan twin carries the same value.
     constexpr f32 kSkyIrradianceCalibration = 1.0f;
     for (int k = 0; k < 9; ++k) {
         for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i] * kSkyIrradianceCalibration;
@@ -5049,16 +4839,13 @@ bool D3D12Device::createPostTargets() {
     writeTriple(kPostTripleHistogram, scene, 0, scene, 0, false);
     writeTriple(kPostTripleComposite, scene, 0, bloomTex_.Get(), 0, true);
 
-    // AverSR's two intermediates, and the composite triple that reads the upscaled one. GUARDED ON
-    // upscaler_, ALL OF IT: creating these unconditionally costs every Off build two HDR textures it
-    // never samples, and writing the triple unconditionally would hand rhiFactory_->texture(0) to a
-    // writeTriple that dereferences it, crashing createPostTargets on the DEFAULT path (an
-    // adversarial review caught this exact null-deref before it was written).
-    //
-    // THE BLENDED PASS'S BACKDROP, created whether or not anything upscales -- glass needs it always.
-    // Same shape as the AverSR alias below (SRV only, a CopyResource fills it): `scene` is a raw
-    // ComPtr with no TextureHandle, and a binding set needs one. See
-    // IDevice::sceneColorBackdropTexture for what it's for.
+    // AverSR's two intermediates + the composite triple reading the upscaled one, GUARDED ON
+    // upscaler_ entirely: unconditional creation costs every Off build two unused HDR textures, and
+    // writing the triple unconditionally would hand a null texture(0) to writeTriple (caught by
+    // review before it shipped).
+    // THE BLENDED PASS'S BACKDROP, created regardless -- glass needs it always. Same shape as the
+    // AverSR alias below (SRV only, filled by CopyResource): `scene` is a raw ComPtr with no
+    // TextureHandle, and a binding set needs one. See IDevice::sceneColorBackdropTexture.
     if (D3D12ResourceFactory* f = rhiFactory_) {
         TextureDesc bdz;
         bdz.width = sceneWidth_; bdz.height = sceneHeight_;
@@ -5217,12 +5004,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
     const bool autoExp = post_.autoExposure && caps_.computeShaders;
     ID3D12Resource* scene = msaa ? sceneResolved_.Get() : msaaColor_.Get();
-    // THE SCENE IS READ BY COMPUTE HERE, NOT ONLY BY PIXEL SHADERS: CSHistogram and CSLocalGrid meter
-    // it before the composite samples it, so it has to sit in both read states. It used to go to
-    // PIXEL_SHADER_RESOURCE alone, which D3D12 does not allow a compute read from. The blended replay's
-    // backdrop copy (COPY_SOURCE, just before this) happened to leave the target in a layout compute
-    // reads correctly, which hid it on any frame with a translucent draw on screen; on every other
-    // frame auto-exposure metered the scene wrong.
+    // Read by COMPUTE here, not just pixel shaders: CSHistogram/CSLocalGrid meter the scene before
+    // the composite samples it, so it needs both read states -- PIXEL_SHADER_RESOURCE alone (the
+    // old state) disallows a compute read. The blended replay's backdrop copy (COPY_SOURCE, just
+    // before this) happened to leave the right layout, masking the bug on any frame with a
+    // translucent draw; every other frame auto-exposure metered the scene wrong.
     const D3D12_RESOURCE_STATES kSceneRead =
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
@@ -5269,14 +5055,13 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // The post chain drives the command list directly, below the context that owns table 1's cache,
     // so nothing HERE would tell that cache its root arguments are gone.
     //
-    // REDUNDANT TODAY, AND KEPT ANYWAY -- said plainly because the first version of this comment
+    // Redundant today, kept anyway -- said plainly because the first version of this comment
     // claimed the clear was needed, which was wrong. endFrame force-clears both caches at its own
-    // top, before it calls this function, and nothing between there and here can set dbValid_ true
-    // again; that was traced by hand rather than assumed. So this is belt-and-braces at a site that
-    // genuinely does discard root arguments, not a fix for a live gap. It stays because the cost is
-    // one store per frame and the alternative is a correctness argument that depends on the call
-    // order of a function three levels up. fovValid_ is deliberately NOT given a matching clear here
-    // for the same reason -- see bindGraphicsRoot, which is where the one REAL gap was.
+    // top before calling this, and nothing between there and here sets dbValid_ true again (traced
+    // by hand). Kept as belt-and-braces at a site that genuinely discards root arguments: the cost
+    // is one store per frame, cheaper than a correctness argument depending on a call order three
+    // levels up. fovValid_ gets no matching clear here for the same reason -- see bindGraphicsRoot,
+    // where the one REAL gap was.
     dbValid_ = false;
     boundRootSig_ = nullptr;
     boundPso_ = nullptr;
@@ -5317,23 +5102,17 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         cb.clampRadiance[2] = post_.localExposureHighlights;
         cb.clampRadiance[3] = 1.0f - std::exp(-post_.exposureSpeedDark * frameSeconds_);
 
-        // gPostRegion: the docked editor's viewport sub-rect, in the post chain's own normalised
-        // SOURCE space -- gPostSceneTex/gPostBloomTex/the local-exposure grid, all of which are sized
-        // off sceneWidth_/sceneHeight_ (or, on the AverSR path, presentHdrTex_ -- see the composite's
-        // own comment for why the same normalised rect still applies there).
-        //
-        // vpX_/vpY_/vpW_/vpH_ ARE ALREADY SCENE-SPACE, NOT PRESENT-SPACE -- setViewportRect converts
-        // the caller's present-space pixels via scaleToSceneW/H before storing them (see that
-        // function's own comment), so normalising by sceneWidth_/sceneHeight_ here, not width_/
-        // height_, is what turns them into gPostSceneTex's own uv. Dividing by width_/height_ instead
-        // would undershoot whenever renderScale_ < 1 (sceneWidth_ < width_), reading the wrong,
-        // smaller fraction of the scene texture than the docked panel actually covers.
-        //
-        // (0,0,1,1) identity whenever no sub-rect is set (undocked editor / game runtime, vpW_==0),
-        // so every pass on that path samples exactly what it did before this field existed. The
-        // sceneWidth_/sceneHeight_ > 0 guards are belt-and-braces against a division by zero: vpW_/
-        // vpH_ each floor to 1 in setViewportRect even if scaleToSceneW/H returned 0, so a 0-sized
-        // scene target (window not yet sized) could otherwise pair a nonzero vpW_ with a zero divisor.
+        // gPostRegion: the docked editor's viewport sub-rect, normalised in the post chain's own
+        // SOURCE space (gPostSceneTex/gPostBloomTex/local-exposure grid, sized off sceneWidth_/
+        // sceneHeight_, or presentHdrTex_ on the AverSR path -- see the composite's comment for why
+        // the rect still applies there).
+        // vpX_/vpY_/vpW_/vpH_ are already SCENE-space (setViewportRect scales present-space pixels
+        // via scaleToSceneW/H), so normalising by sceneWidth_/sceneHeight_, not width_/height_,
+        // gives the right uv; dividing by width_/height_ would undershoot whenever renderScale_ < 1.
+        // (0,0,1,1) identity when no sub-rect is set (vpW_==0), matching pre-existing behaviour.
+        // The sceneWidth_/sceneHeight_ > 0 guards avoid a division by zero: vpW_/vpH_ floor to 1
+        // even if scaleToSceneW/H returned 0, which could pair a nonzero vpW_ with a zero-sized
+        // scene target (window not yet sized).
         if (vpW_ > 0 && vpH_ > 0 && sceneWidth_ > 0 && sceneHeight_ > 0) {
             cb.region[0] = std::fmin(std::fmax(static_cast<f32>(vpX_) / static_cast<f32>(sceneWidth_),  0.0f), 1.0f);
             cb.region[1] = std::fmin(std::fmax(static_cast<f32>(vpY_) / static_cast<f32>(sceneHeight_), 0.0f), 1.0f);
@@ -5390,11 +5169,10 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // hw/hh (the downscaled dispatch grid) and the src dims below both derive from the SCENE target
     // this samples -- sceneWidth_/sceneHeight_, not the present width_/height_.
     //
-    // DOCKED: metered over the sub-rect's OWN scene-pixel extent (vpW_/vpH_, already scene-space --
-    // see fillCommon's gPostRegion comment), not the whole scene target, so auto-exposure stops
-    // averaging in the black dead zone outside the 3D viewport panel that CSHistogram's uv mapping
-    // (gPostRegion, below) now confines the actual sampling to. Full scene extent, unchanged, when
-    // undocked (vpW_/vpH_ == 0).
+    // DOCKED: metered over the sub-rect's own scene-pixel extent (vpW_/vpH_, scene-space -- see
+    // fillCommon's gPostRegion comment), so auto-exposure stops averaging the black dead zone
+    // outside the viewport panel that CSHistogram's uv mapping now confines sampling to. Full
+    // scene extent, unchanged, when undocked (vpW_/vpH_ == 0).
     if (autoExp) {
         const u32 regionW = vpW_ ? vpW_ : sceneWidth_;
         const u32 regionH = vpH_ ? vpH_ : sceneHeight_;
@@ -5521,16 +5299,12 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         bloomTo(0, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
-    // AverSR: Pass A, the upscale (HDR, before the tonemap).
-    //
-    // ONLY WHEN AN UPSCALER IS SET: with none (default, quality Off) not a line of this runs and the
-    // composite below takes exactly the path it always did -- the whole of docs/AVERSR.md's "Off
-    // must be bit-identical" invariant, one branch on one pointer.
-    //
-    // BEFORE THE TONEMAP, deliberately: the composite fuses resize + exposure + bloom + ACES + gamma
-    // into one pass, so an upscaler can't simply replace it. Running the resample on scene RADIANCE
-    // and handing the composite an already present-sized image leaves that shader and pipeline
-    // untouched -- its resample degenerates to 1:1.
+    // AverSR: Pass A, the upscale (HDR, before the tonemap). Only runs with an upscaler set -- none
+    // (default) means the composite below takes the path it always did, docs/AVERSR.md's "Off must
+    // be bit-identical" invariant on one branch.
+    // Before the tonemap deliberately: the composite fuses resize+exposure+bloom+ACES+gamma into
+    // one pass an upscaler can't simply replace, so this resamples scene RADIANCE and hands the
+    // composite an already present-sized image -- its own resample degenerates to 1:1, untouched.
     bool srUpscaled = false;
     if (upscaler_ && sceneColorTex_ && presentHdrTex_ && rhiFactory_ && rhiContext_) {
         RhiTexture* srcT = rhiFactory_->texture(sceneColorTex_);
@@ -5599,24 +5373,21 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     }
 
     // ---- composite ----
-    // dst is present-space (backbuffer or viewport texture, both width_/height_); src is the scene
-    // target this upscales (or 1:1 samples at renderScale_ == 1.0) from -- sceneWidth_/sceneHeight_.
-    // This IS the render-scale upscale: the composite shader already samples by normalized UV
-    // through a bilinear sampler (gPostSamp), so telling it a different source size is all it takes.
-    //
-    // ON THE AverSR PATH t0 is already present-sized and gPostSamp's stretch does nothing -- AverSR's
-    // filter produced those pixels. src STAYS THE SCENE SIZE there all the same: PSComposite never
-    // reads src for its own sampling (it samples by UV), and local exposure reads it as the size its
-    // grid was built at, which is always the scene's.
+    // dst is present-space (backbuffer/viewport texture, width_/height_); src is the scene target
+    // this upscales from (1:1 at renderScale_==1.0) -- sceneWidth_/sceneHeight_. This IS the
+    // render-scale upscale: the composite already samples by normalised UV via a bilinear sampler
+    // (gPostSamp), so a different source size is all it takes.
+    // ON THE AverSR PATH, t0 is already present-sized (AverSR's filter produced those pixels) so
+    // gPostSamp's stretch does nothing; src still STAYS THE SCENE SIZE -- PSComposite never
+    // samples src directly (UV-only), and local exposure reads it at its grid's size, always the
+    // scene's.
     fillCommon(width_, height_, sceneWidth_, sceneHeight_);
     const u32 compositeTriple = srUpscaled ? kPostTripleCompositeUpscaled : kPostTripleComposite;
 
-    // THE COMPOSITE'S OWN VIEWPORT/SCISSOR, confined to the docked sub-rect gPostRegion (just written
-    // above by fillCommon) already describes in normalised source space -- scaled back up into
-    // PRESENT-space pixels here since the destination (viewport texture or backbuffer) is present-
-    // sized, unlike gPostRegion's scene-space source. Full canvas (0,0,width_,height_) whenever
-    // region is the (0,0,1,1) identity -- vx==0, vy==0, compositeW==width_, compositeH==height_ --
-    // so this is byte-identical to before this feature existed on every undocked path.
+    // Composite's own viewport/scissor, confined to gPostRegion's docked sub-rect (normalised
+    // source space) scaled back up into PRESENT-space pixels, since the destination is
+    // present-sized unlike gPostRegion's scene-space source. Full canvas at the (0,0,1,1) identity
+    // -- byte-identical to before this feature existed on every undocked path.
     u32 compositeX = static_cast<u32>(cb.region[0] * static_cast<f32>(width_)  + 0.5f);
     u32 compositeY = static_cast<u32>(cb.region[1] * static_cast<f32>(height_) + 0.5f);
     u32 compositeW = static_cast<u32>(cb.region[2] * static_cast<f32>(width_)  + 0.5f);
@@ -5699,24 +5470,18 @@ void D3D12Device::endFrame() {
     D3D12_VIEWPORT sceneVp{rx, ry, rw, rh, 0.0f, 1.0f};
     D3D12_RECT sceneSc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
 
-    // Reordered from a shape whose comment reasoned that sky-first meant "a particle would blend onto
-    // sky that can never be un-drawn" -- false: sky draws OPAQUE with DepthFunc EQUAL against the
-    // clear depth, so with transparency running FIRST and depth-write off, a particle over open air
-    // sat at clear depth (1.0), and the sky's EQUAL test overwrote its blended colour with flat sky --
-    // smoke, snow, mist invisible against open sky. Found via --particle-test: an emitter reprojected
-    // correctly into NDC yet rendered nothing with no opaque occluder behind it; every earlier
-    // screenshot happened to place particles in front of a cube.
-    //
-    // This order fixes it without reopening the old problem: the sky still only fills pixels still at
-    // clear depth (unchanged EQUAL test, nothing else touches depth before it), so it fills exactly
-    // the same pixels regardless of order. The transparent pass runs AFTER it: an occluded pixel still
-    // fails the particle's depth test exactly as before (occlusion untouched), while an unoccluded
-    // pixel now holds the sky's real colour to blend onto -- only what colour it blends onto changes.
-    //
+    // Reordered: the previous shape ran transparency before the sky, reasoning "sky-first can't be
+    // un-drawn" -- but the sky's opaque DepthFunc=EQUAL test against clear depth (1.0) overwrote
+    // any particle's blended colour sitting at that same clear depth, making smoke/snow/mist
+    // invisible against open sky. Found via --particle-test (an emitter reprojected correctly but
+    // rendered nothing with no occluder behind it); every earlier screenshot happened to place
+    // particles in front of a cube.
+    // Sky-then-transparency fixes it without reopening the old problem: the sky still fills only
+    // clear-depth pixels (same EQUAL test), an occluded particle still fails its depth test as
+    // before, and an unoccluded one now blends onto the sky's real colour instead of the clear value.
     // Gated on frameSuppressed_, not sceneSuppressed_: ray-driven primary visibility suppresses the
-    // scene without owning the frame, and writes depth 1.0 on a miss -- exactly what DepthFunc=EQUAL
-    // looks for -- so the sky still fills missed pixels. Testing the wrong flag left that mode with
-    // no clouds, atmosphere or sun.
+    // scene without owning the frame and writes depth 1.0 on a miss (what EQUAL looks for), so the
+    // sky still fills missed pixels -- testing the wrong flag left that mode with no sky at all.
     if (skyEnabled_ && !frameSuppressed_) {
         // Nested spans, reversing an earlier decision: "sky+post+ui" measured 8.2ms, 46% of the frame
         // and the largest span in it, conflating a fullscreen atmosphere march with an editor's UI
@@ -5734,14 +5499,12 @@ void D3D12Device::endFrame() {
         endGpuSpan();   // "sky dome"
     }
 
-    // THE BLENDED-MESH FLUSH: every drawMesh() call this frame that ran with drawBlended_ true was
-    // captured instead of drawn -- see IDevice::setDrawBlended (RHI.hpp) for why. This replay has to
-    // land in EXACTLY this gap: after the sky draw above (whose depth-EQUAL opaque fill would
-    // otherwise overwrite a blended mesh drawn earlier, the same failure the particle pass was moved
-    // to fix), and before IRenderFeature::transparentPass below, which particles already expect to be
-    // the last thing touching the render target before the post chain. A caller sorting its own draw
-    // list could never get this ordering right -- the sky isn't in that list -- which is why the
-    // capture exists rather than a sorted replay at the call site.
+    // THE BLENDED-MESH FLUSH: every drawMesh() call with drawBlended_ true was captured instead of
+    // drawn -- see IDevice::setDrawBlended (RHI.hpp). Must land in EXACTLY this gap: after the sky
+    // (whose depth-EQUAL fill would overwrite an earlier blended mesh, the same failure the
+    // particle pass was moved to fix) and before transparentPass below, which expects to be the
+    // last thing touching the target before the post chain. A caller sorting its own draw list
+    // could never get this right -- the sky isn't in that list -- hence capture-and-replay instead.
     //
     // Guarded on frameSuppressed_, not sceneSuppressed_: a feature owning only the raster surface
     // still wants its sky/particles/glass; captured draws a whole-frame owner never saw just sit
@@ -5751,33 +5514,31 @@ void D3D12Device::endFrame() {
     // "sky+post+ui", and a missing blended pipeline already logs by name
     // (blendedPipelineMissingWarned_).
     if (!blendedDraws_.empty() && rhiContext_ && !frameSuppressed_) {
-        // MEASURED: even after splitting the sky dome, post chain, overlay and ImGui out of
-        // "sky+post+ui", that span still reported 4.7ms exclusive -- more than those four combined,
-        // and this replay was the only unmarked thing left. The glass was the cost, not "sky and post".
+        // MEASURED: even after splitting sky/post/overlay/ImGui out of "sky+post+ui", this replay
+        // still reported 4.7ms exclusive -- more than those four combined. The glass was the cost,
+        // not "sky and post".
 
-        // The backdrop copy runs only ahead of a draw whose material actually reads it
-        // (IRenderFeature::blendedDrawReadsBackdrop, checked per draw in the loop below) -- a decal
-        // like NewSponza's floor dirt never triggers this at all. When it does run, it captures
-        // whatever the target holds AT THAT POINT -- the opaque scene for the very first capture,
-        // or everything drawn since the previous one for a later re-capture -- so it is not simply
-        // "before the first translucent draw" any more. Copies FROM msaaColor_, not `scene`: `scene`
-        // is the resolve destination and the resolve hasn't run yet.
+        // Backdrop copy runs only ahead of a draw whose material reads it
+        // (IRenderFeature::blendedDrawReadsBackdrop, checked per draw below) -- a decal (e.g.
+        // NewSponza's floor dirt) never triggers it. Captures whatever the target holds AT THAT
+        // POINT (opaque scene for the first capture, everything since for a re-capture) -- not
+        // simply "before the first translucent draw" any more. Copies FROM msaaColor_, not `scene`:
+        // `scene` is the resolve destination and the resolve hasn't run yet.
         //
-        // The size check is load-bearing -- omitting it removed the device on every resize.
-        // CopyResource/ResolveSubresource require matching dimensions, and a window resize,
-        // render-scale change or AverSR rung change can briefly mismatch the backdrop (sized from
-        // sceneWidth_/sceneHeight_ in createPostTargets) against the scene colour target (recreated
-        // by the swapchain path). Skip cleanly instead of asserting: the shader's GetDimensions guard
-        // falls back to a scalar composite for one frame, beating a removed device.
+        // The size check is LOAD-BEARING -- omitting it removed the device on every resize.
+        // CopyResource/ResolveSubresource require matching dimensions, and a resize/render-scale/
+        // AverSR change can briefly mismatch the backdrop (sized off sceneWidth_/sceneHeight_ in
+        // createPostTargets) against the scene colour target (recreated by the swapchain path).
+        // Skipped cleanly instead of asserting: the shader's GetDimensions guard falls back to a
+        // scalar composite for one frame, beating a removed device.
 
-        // A lambda because one capture per frame isn't enough for stacked translucency:
-        // averBlendedOutputBackdrop subtracts a sample of this texture to cancel the hardware's
-        // dst*(1-alpha) blend, which only holds for the FIRST translucent surface over a pixel -- a
-        // second surface's backdrop doesn't yet contain the first, so the residue can go negative (a
-        // black artefact under the tonemap clamp). MEASURED on PTTest's glass walkway over the pool:
-        // it read pale and opaque, hiding the water, and the sun grew a black crescent where the
-        // water alone gave a clean disc. Re-resolving between layers (furthest-first sort below)
-        // keeps dst and this texture in agreement.
+        // A lambda because one capture/frame isn't enough for stacked translucency:
+        // averBlendedOutputBackdrop cancels the hardware's dst*(1-alpha) blend by subtracting a
+        // sample of this texture, which only holds for the FIRST surface over a pixel -- a second
+        // surface's backdrop doesn't contain the first, so the residue can go negative. MEASURED on
+        // PTTest's glass walkway over a pool: it read pale and opaque, hiding the water, with a black
+        // crescent where the sun should be a clean disc. Re-resolving between layers (furthest-first
+        // sort below) keeps dst and this texture in agreement.
         auto resolveBlendBackdrop = [&]() {
             if (blendBackdropTex_ && rhiFactory_ && msaaColor_ &&
                 blendBackdropW_ == sceneWidth_ && blendBackdropH_ == sceneHeight_) {
@@ -5995,21 +5756,19 @@ void D3D12Device::endFrame() {
         endGpuSpan();   // "blended replay"
     }
 
-    // IRenderFeature::transparentPass, called here because every opaque drawMesh and the deferred sky
-    // above have already run: the depth buffer holds every real occluder and the target holds real
-    // colour everywhere, so a particle here always blends onto something real (see the sky draw's
-    // comment for the failure this reorder fixes). A feature that doesn't override the default empty
-    // implementation leaves the frame bit-for-bit unchanged.
-    //
-    // Depth-test on, depth-write off is the pipeline contract every feature here must build: write
-    // must stay off, since with back-to-front sorting a fragment that wrote depth would make every
-    // fragment meant to blend under it fail the depth test -- a smoke plume would render as one
-    // opaque slice at its nearest layer. Test stays on so a particle behind a wall is still hidden.
-    //
-    // Viewport/scissor are preset to the scene rect; the pipeline is not. Root signature and viewport
-    // are re-set explicitly rather than trusted from the sky draw: cheap, idempotent, correct
-    // regardless of what ran in between. Gated on frameSuppressed_ like the sky: a particle in a
-    // ray-driven frame is as real as a rastered one, and the ray pass writes real SV_DEPTH.
+    // IRenderFeature::transparentPass, called here because every opaque drawMesh and the deferred
+    // sky have already run: the depth buffer holds every real occluder and the target holds real
+    // colour everywhere, so a particle always blends onto something real (see the sky draw's
+    // comment for the failure this reorder fixes). A feature that doesn't override the default
+    // empty implementation leaves the frame unchanged.
+    // Contract every feature here must build: depth-test on, depth-write OFF -- with back-to-front
+    // sorting, a fragment that wrote depth would fail every fragment meant to blend under it (a
+    // smoke plume would render as one opaque slice). Test stays on so a particle behind a wall
+    // stays hidden.
+    // Viewport/scissor are already preset to the scene rect; the pipeline is not. Root
+    // signature/viewport re-set explicitly rather than trusted from the sky draw: cheap,
+    // idempotent, correct regardless of what ran between. Gated on frameSuppressed_ like the sky:
+    // a ray-driven frame's particle is as real as a rastered one, and the ray pass writes real SV_DEPTH.
     if (rhiContext_ && !frameSuppressed_) {
         cmdList_->RSSetViewports(1, &sceneVp);
         cmdList_->RSSetScissorRects(1, &sceneSc);
@@ -6588,12 +6347,12 @@ void D3D12ResourceFactory::noteBindingSetWritten(BindingSetHandle set, RhiBindin
 // Writes a null view of the declared dimension into every slot of a set. Tier 1 hardware reads
 // undefined data from any descriptor in a bound table that was never written.
 //
-// PER-SLOT SlotKind IS WHAT MAKES A MIXED TABLE 0 POSSIBLE, unlike the other backend: Stage 3's GPU
-// per-cluster path merges Voxi's table-0 union (a Texture3D, an AccelerationStructure, three
-// StructuredBuffers, four Texture2Ds) into its own table 0 because this loop and setSrv/setUav
-// switch on SlotKind per slot rather than assuming one shape. VulkanPipeline.cpp's
-// descriptorLayout() assumes every table-0 slot is a Texture2D (already wrong for Voxi, a
-// pre-existing defect not fixed here) -- the merge stays D3D12 only, a property of the whole design.
+// PER-SLOT SlotKind is what makes a mixed table 0 possible, unlike Vulkan: Stage 3's GPU
+// per-cluster path merges Voxi's table-0 union (Texture3D, AccelerationStructure, three
+// StructuredBuffers, four Texture2Ds) because this loop and setSrv/setUav switch on SlotKind
+// per slot, not one assumed shape. VulkanPipeline.cpp's descriptorLayout() assumes every
+// table-0 slot is a Texture2D (already wrong for Voxi, a pre-existing defect not fixed here)
+// -- the merge stays D3D12 only.
 // The null view for one SRV slot, by kind. Lifted out of nullFill so clearSrv writes the identical
 // descriptor: a slot returned to null later must be indistinguishable from one that was never bound.
 D3D12_SHADER_RESOURCE_VIEW_DESC D3D12ResourceFactory::nullSrvDesc(SlotKind kind) {
@@ -6843,16 +6602,13 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         params[n].Descriptor.ShaderRegister = declaredSrvCount(layout) + (mesh ? 2 : 0);
         e.instanceWorldParam = static_cast<i32>(n++);
     }
-    // THE BINDLESS TEXTURE TABLE, APPENDED LAST AND IN REGISTER SPACE 1.
-    //
-    // Last, so every layout leaving bindlessTextureCount at 0 (every raster pipeline, including all
-    // on the FL 11_0 minimum-spec path) serialises to exactly the bytes it did before this branch
-    // existed -- nothing above this line reads the new field.
-    //
-    // Space 1, so the range can't collide with any t-register the two ordinary tables, the mesh
-    // geometry SRVs or the instanced world-matrix SRV already claimed in space 0 (assigned by
-    // arithmetic over declaredSrvCount(), frozen by the RHI header and shader prelude). A separate
-    // space costs nothing and cannot alias.
+    // The bindless texture table, appended LAST and in REGISTER SPACE 1. Last, so every layout
+    // leaving bindlessTextureCount at 0 (every raster pipeline, including the FL 11_0 minimum-spec
+    // path) serialises to exactly the bytes it did before this branch existed -- nothing above this
+    // line reads the new field. Space 1, so the range can't collide with any t-register the two
+    // ordinary tables, mesh geometry SRVs or the instanced world-matrix SRV already claimed in
+    // space 0 (assigned by declaredSrvCount(), frozen by the RHI header and shader prelude) -- a
+    // separate space costs nothing and cannot alias.
     D3D12_DESCRIPTOR_RANGE bindlessRange{};
     if (layout.bindlessTextureCount) {
         bindlessRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -7877,16 +7633,14 @@ void D3D12ResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle 
     if (!s || !t) { AVER_ERROR("[RHI.D3D12] setUav with an invalid handle"); return; }
     if (slot >= s->uavCount) { AVER_ERROR("[RHI.D3D12] setUav slot {} past the {} declared", slot, s->uavCount); return; }
     if (mip == kAllMips || mip >= t->desc.mips) { AVER_ERROR("[RHI.D3D12] setUav needs a single valid mip"); return; }
-    // REFUSED RATHER THAN ATTEMPTED, BECAUSE ATTEMPTING IT REMOVES THE DEVICE. A texture created
-    // without ResourceBind::UnorderedAccess has no D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, and
-    // CreateUnorderedAccessView on one is not a failed call that returns an error -- D3D12 treats it
-    // as undefined behaviour and triggers RemoveDevice with DXGI_ERROR_INVALID_CALL on the spot. The
-    // whole adapter goes, the upload ring and every later CreateRootSignature fail, and the post
-    // chain cannot present. With the debug layer off it is completely silent about the cause; with it
-    // on it is debug layer #340, which is how this was finally found after it had been misattributed
-    // to NRD dispatch counts, to a resource state and to an unbound root CBV in turn.
-    //
-    // One line here converts the worst diagnostic in the engine into a named texture and a live frame.
+    // Refused rather than attempted, because attempting it removes the device: a texture without
+    // ResourceBind::UnorderedAccess has no ALLOW_UNORDERED_ACCESS flag, and CreateUnorderedAccessView
+    // on one isn't a failed call -- D3D12 triggers RemoveDevice with DXGI_ERROR_INVALID_CALL
+    // outright, taking the whole adapter down: the upload ring and every later CreateRootSignature
+    // fail, and the post chain cannot present. Silent with the debug layer off; with it on, it's
+    // #340 -- found only after being misattributed to NRD dispatch counts, a resource state, and an
+    // unbound root CBV in turn. One check here converts the worst diagnostic in the engine into a
+    // named texture and a live frame.
     if (!(static_cast<u32>(t->desc.bind) & static_cast<u32>(ResourceBind::UnorderedAccess))) {
         AVER_ERROR("[RHI.D3D12] setUav slot {} binds texture '{}' ({}x{}), which was created without "
                    "ResourceBind::UnorderedAccess -- refusing, because creating the view would remove "
@@ -7911,16 +7665,13 @@ void D3D12ResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle 
     noteBindingSetWritten(set, *s);
 }
 
-// Writes an acceleration-structure SRV into one slot of a binding set.
 // Returns one SRV slot to null. See IResourceFactory::clearSrv for why a stale descriptor is a
 // device removal rather than a wrong pixel.
-//
-// The write lands in the STAGING heap, never the shader-visible one the GPU can be reading mid-frame
-// -- see RhiBindingSet's comment. It cannot race a GPU read because nothing reads the staging heap;
-// setBindingSet is the only thing that ever copies out of it, into whichever frame's range is safe to
-// touch. What this must NOT do is nothing -- the caller reaches this because the texture it was
-// showing is being destroyed, and leaving the old descriptor live in the eventual GPU copy is the one
-// outcome that crashes.
+// The write lands in the STAGING heap, never the live shader-visible one the GPU can be reading
+// mid-frame -- see RhiBindingSet's comment. Can't race a GPU read: only setBindingSet ever copies
+// out of staging, into whichever frame's range is safe to touch. This must NOT be a no-op: the
+// caller reaches here because the texture it showed is being destroyed, and leaving the old
+// descriptor live in the eventual GPU copy is what crashes.
 void D3D12ResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
     RhiBindingSet* s = bindingSet(set);
     if (!s) { AVER_ERROR("[RHI.D3D12] clearSrv with an invalid set"); return; }
@@ -7930,6 +7681,7 @@ void D3D12ResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
     noteBindingSetWritten(set, *s);
 }
 
+// Writes an acceleration-structure SRV into one slot of a binding set.
 void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle h) {
     RhiBindingSet* s = bindingSet(set);
     RhiTlas* t = tlas(h);
@@ -7945,18 +7697,14 @@ void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle
     noteBindingSetWritten(set, *s);
 }
 
-// True when a structured view of `count` elements of `stride` starting at `firstElement` fits
-// inside the buffer it is being created over. Logs and returns false when it does not.
-//
-// Checked here, not left to the debug layer: an overrunning view isn't rejected by D3D12 at creation,
-// so the first thing that notices is a shader reading/writing past the allocation, surfacing as
-// DXGI_ERROR_DEVICE_HUNG on a different thread with no reference to the descriptor that caused it.
-//
-// Cost this project exactly that once: the path tracer's denoise buffers, allocated at 480x270, were
-// handed a 1280x720 view when the quality rung changed, and the report was "sometimes path tracing
-// crashes the engine at higher settings" -- the only lead was --debug-layer, which nobody runs by
-// default. One comparison at descriptor-write time turns that into a log line naming the slot, the
-// counts and the buffer.
+// True when a structured view of `count` elements of `stride` from `firstElement` fits inside the
+// buffer. Checked here, not left to the debug layer: D3D12 doesn't reject an overrunning view at
+// creation, so the first symptom is a shader walking off the end, surfacing as
+// DXGI_ERROR_DEVICE_HUNG on an unrelated thread with no reference to the descriptor that caused it.
+// Cost this project exactly that once: the path tracer's denoise buffers (480x270) were handed a
+// 1280x720 view on a quality change, reported as "sometimes crashes at higher settings" with
+// --debug-layer (which nobody runs by default) the only lead. One comparison here turns that into
+// a log line naming the slot, counts and buffer.
 bool viewFitsBuffer(const RhiBuffer& b, u32 stride, u32 count, u32 firstElement, const char* what,
                     u32 slot) {
     const u64 needed = (static_cast<u64>(firstElement) + count) * stride;
@@ -8452,64 +8200,46 @@ void D3D12RenderContext::setDrawBinding(BindingSetHandle set, const void* consta
 
 // Binds the sticky per-draw state, if the current pipeline declared anywhere to put it.
 //
-// TABLE 1 REDUNDANT-STATE ELISION, OFF BY DEFAULT. Read the whole comment before touching either
-// half below: getting this cache's invalidation wrong is not a slow frame, it is a WRONG-MATERIAL
-// DRAW whose failure mode is a plausible image. This house has that scar already -- SandboxRender.cpp
-// records a cluster-dispatch path that once left table 1 sticky from an earlier draw's material, and
-// the mesh rendered black "even though every value measured correct for a different material". A
-// broken frame from a stale table 1 does not look broken; it looks like a different, wrong object.
+// TABLE 1 REDUNDANT-STATE ELISION, OFF BY DEFAULT. Read fully before touching either half below:
+// getting this cache's invalidation wrong is not a slow frame, it's a WRONG-MATERIAL DRAW that
+// looks like a different, valid object -- SandboxRender.cpp records a cluster-dispatch path that
+// once left table 1 sticky from an earlier draw's material and rendered black "even though every
+// value measured correct for a different material".
 //
-// THE FINDING this closes. setBindingSet's own comment a few dozen lines above explains why the fov*
-// group (pipeline + table 0 + the feature frame CBV) deliberately EXCLUDES table 1 from ITS elision
-// -- invalidating fov* on every table-1 rebind would mean fov* never once survived to the next
-// entity, since table 1 legitimately changes whenever the material does. That reasoning is about
-// fov*, and it is correct. It is silent on a different question: whether table 1 can ALSO be elided
-// on its OWN terms, by comparing THIS draw's (drawSet_, drawConstants_) against the PREVIOUS draw's
-// rather than against table 0. Until this change, nothing did. setBindingSet(drawSet_, 1) below and
-// the b2 constant-buffer upload after it both ran UNCONDITIONALLY on every one of this function's
-// five call sites (drawMesh, drawMeshInstanced, dispatchMeshFor, dispatchMeshClusters, drawIndexed)
-// -- a descriptor-table bind, a 256-byte-aligned ring allocation, a memcpy and a root CBV set, every
-// single draw, even across thousands of consecutive draws sharing one material. Verified before
-// writing this: setBindingSet(_, 1) has exactly one call site in this whole file, the one inside
-// this very function below, so there is no other path that can move table 1 behind this cache's
+// setBindingSet's comment explains why fov* (pipeline + table 0 + feature frame CBV) deliberately
+// excludes table 1 from ITS elision -- invalidating fov* on every table-1 rebind would mean fov*
+// never survives to the next entity, since table 1 changes every draw legitimately. This closes a
+// separate question: whether table 1 can ALSO be elided on its OWN terms, by comparing THIS draw's
+// (drawSet_, drawConstants_) against the PREVIOUS draw rather than against table 0. Until this
+// change nothing did: setBindingSet(drawSet_, 1) and the b2 upload after it ran unconditionally on
+// all five call sites (drawMesh, drawMeshInstanced, dispatchMeshFor, dispatchMeshClusters,
+// drawIndexed) -- a table bind, a 256-byte-aligned ring allocation, a memcpy and a root CBV set,
+// even across thousands of consecutive draws sharing one material. setBindingSet(drawSet_, 1)
+// below is this file's only call site for it, so nothing else can move table 1 behind this cache's
 // back.
 //
-// WHY ELIDING IS SAFE HERE. dev_->dbSet_/dbConstants_/dbConstantBytes_ mirror what this function
-// last actually BOUND on the command list, not merely what a caller last requested through
-// setDrawBinding -- each half below only updates its own cached copy at the moment it issues the
-// real call, so a half this function SKIPS never drifts the cache away from hardware truth, and a
-// draw that changes only one half (same material set, different shading constants, or the reverse)
-// still pays only for the half that changed. dev_->dbValid_ is cleared at every point that can
-// invalidate root arguments out from under this cache WITHOUT going through setBindingSet or
-// setConstantBuffer: D3D12RenderContext::setPipeline (a new root signature discards every bound root
-// argument, and bindDeclaredRootCbvs re-zeroes this cache's own b2 slot immediately afterwards
-// regardless), D3D12Device::beginFrame (cmdList_->Reset leaves nothing bound at all), and the two
-// points in D3D12Device::endFrame where the sky/post chain and the blended-mesh replay's own
-// pipeline swaps touch the command list directly, bypassing setPipeline -- the exact same reason
-// fovValid_ is force-cleared at those same two points. dbValid_ is a SEPARATE bool from fovValid_,
-// not a reuse of it: fovValid_ is ALSO cleared by setBindingSet on table 0 (see that function's
-// comment for why), and table 0 rebinding must NOT throw this cache away -- folding the two together
-// would silently undo most of what this one exists to save.
+// SAFE BECAUSE dbSet_/dbConstants_/dbConstantBytes_ mirror what was actually BOUND, not merely
+// requested -- each half below updates its cache only when it issues the real call, so a skipped
+// half never drifts from hardware truth, and a draw changing only one half still pays only for
+// that half. dbValid_ is cleared everywhere root arguments can be discarded without going through
+// setBindingSet/setConstantBuffer: setPipeline (a new root sig discards every bound root argument;
+// bindDeclaredRootCbvs re-zeroes this cache's b2 slot regardless), beginFrame's cmdList_->Reset,
+// and the two points in endFrame where the sky/post chain and the blended replay touch the command
+// list directly -- the same points fovValid_ is force-cleared at. Kept as a SEPARATE bool from
+// fovValid_ because fovValid_ is ALSO cleared by table-0 setBindingSet, which must NOT throw this
+// cache away -- folding the two together would silently undo most of what this one exists to save.
 //
-// STILL DEFAULT OFF. A state cache is the category with the worst track record in this codebase --
-// the fov* comment two functions up names its own near-miss, and SandboxRender.cpp's foliage above
-// is a second one, in a different cache entirely -- and this one cannot be validated the way the
-// previous two commits in this programme were, by construction rather than by a screenshot: eliding
-// a redundant bind has no visible effect to diff UNLESS the elision is wrong, and a wrong elision's
-// image does not necessarily look wrong either (see the foliage scar again). The only real evidence
-// is a PIX capture showing table 1's root-parameter set and the b2 CBV set visibly disappearing
-// between consecutive same-material draws, paired with an image diff against the same capture with
-// the toggle off showing zero pixel difference. Until the user has run that A/B, this stays off.
-// AVER_D3D12_ELIDE_DRAW_BINDING flips it without a rebuild specifically so that A/B is one binary,
-// not a rebuild-and-compare against a second one that could differ for reasons having nothing to do
-// with this cache.
+// STILL DEFAULT OFF: state caches have this codebase's worst track record (fov*'s own near-miss,
+// and the foliage bug above, in a different cache) and this one can't be validated by a screenshot
+// diff -- a wrong elision doesn't necessarily look wrong. Needs a PIX capture showing table 1's
+// bind and the b2 CBV set visibly disappearing between same-material draws, paired with a zero-diff
+// A/B; stays off until the user has run that A/B. AVER_D3D12_ELIDE_DRAW_BINDING flips it without a
+// rebuild so that A/B is one binary.
 //
-// VULKAN HAS NO TWIN OF THIS YET. VulkanDevice.cpp's own drawMesh comment says outright that backend
-// re-binds its pipeline and b0 set on every single call, "redundant, not incorrect... an
-// optimisation left for later" -- table 1 there is further behind than table 0 was on THIS backend
-// before the profiler and the mesh-probe cache that preceded this change even existed. The owner's
-// stated goal is Vulkan parity, so this cache will want a twin on that backend eventually. Not built
-// here: this pass touches D3D12Device.cpp only.
+// VULKAN HAS NO TWIN YET: VulkanDevice.cpp still re-binds pipeline and b0 every call ("redundant,
+// not incorrect... an optimisation left for later") -- table 1 there is further behind than table 0
+// was on this backend before this cache existed. Parity is the stated goal eventually; not built
+// here.
 void D3D12RenderContext::applyDrawBinding() {
     if (!pipe_) return;
 

@@ -1,13 +1,10 @@
-// Vulkan backend for Aver.RHI: instance/device bring-up, the swapchain, frame pacing, the
-// backend's own fixed scene/sky/line/mesh pipelines, the camera post chain, and createVulkanDevice
-// itself. This file owns everything the FILE MAP banner at the top of VulkanCommon.hpp assigns to
-// VulkanDevice.cpp; read that banner before adding anything here, and see D3D12Device.cpp for the
-// BEHAVIOUR this is matching -- structure differs a great deal, semantics should not.
+// Vulkan backend for Aver.RHI: instance/device bring-up, swapchain, frame pacing, this backend's
+// fixed scene/sky/line/mesh pipelines, camera post chain, createVulkanDevice. Owns everything the
+// FILE MAP banner in VulkanCommon.hpp assigns to VulkanDevice.cpp; match D3D12Device.cpp's
+// BEHAVIOUR, not its structure.
 //
-// UNVERIFIED. House rule: no build, no run. Every signature below was checked BY EYE against the
-// vendored vulkan_core.h (header version 1.3.296) and against VulkanCommon.hpp's own declarations,
-// not compiled. See the honestState this session reports alongside this file for the specific
-// places that could not be checked any other way.
+// UNVERIFIED: no build/run. Checked BY EYE against vendored vulkan_core.h 1.3.296 and
+// VulkanCommon.hpp; see this session's honestState for what could not be checked otherwise.
 #include "VulkanCommon.hpp"
 #include "aver/rhi/ShaderFiles.hpp"   // scene.hlsl is loaded, not compiled in
 #include "aver/rhi/vulkan/UiBackend.hpp"
@@ -31,43 +28,40 @@ namespace aver::rhi::vkb {
 // ================================================================================================
 namespace {
 
-// Bloom pyramid depth cap and post-pass-slot bookkeeping. Vulkan-side twin of D3D12Device.cpp's
-// identical constants; kept private to this TU exactly as D3D12's are private to its own.
+// Bloom pyramid depth cap + post-pass-slot bookkeeping; twin of D3D12Device.cpp's constants,
+// private to this TU too.
 constexpr u32 kMaxBloomMips = 6;
 constexpr u32 kPostSlotPrefilter  = 0;
 constexpr u32 kPostSlotHistogram  = 1;
 constexpr u32 kPostSlotComposite  = 2;
 constexpr u32 kPostSlotDownBase   = 3;
 constexpr u32 kPostSlotUpBase     = kPostSlotDownBase + (kMaxBloomMips - 1);
-// The AverSR path's own composite slot: same PSO as kPostSlotComposite but t0 is presentHdrTex_
-// (already upscaled, HDR, present-sized) instead of the scene view. Written only when an upscaler is
-// set (D3D12's kPostTripleCompositeUpscaled twin); an unwritten slot is never sampled since
-// runPostChain only selects it after that frame's copy-and-execute succeeded.
+// AverSR composite slot: same PSO as kPostSlotComposite, but t0 = presentHdrTex_ (upscaled HDR,
+// present-sized), not the scene view. D3D12 twin: kPostTripleCompositeUpscaled. Written only when an
+// upscaler is set; safe unwritten since runPostChain selects it only after copy-and-execute succeeds.
 constexpr u32 kPostSlotCompositeUpscaled = kPostSlotUpBase + (kMaxBloomMips - 1);
 constexpr u32 kPostSlotCount      = kPostSlotCompositeUpscaled + 1;
 constexpr f32 kHistogramMinLogLum = -10.0f;
 constexpr f32 kHistogramMaxLogLum = 12.0f;
 constexpr u32 kHistogramDownscale = 4;
 
-// Local exposure's bilateral grid of log-luminance: one 32x32-scene-pixel tile per cell, 16
-// luminance bins per cell, (sum, count) as two asuint floats per bin -- see CSLocalGrid/CSLocalBlur
-// in post.hlsl for the layout this sizes gPostLocalGrid/gPostLocalGridBlur to.
+// Local exposure's bilateral log-luminance grid: 32x32-px tile per cell, 16 luminance bins per
+// cell, (sum,count) as two asuint floats per bin. Sizes gPostLocalGrid/gPostLocalGridBlur; see
+// CSLocalGrid/CSLocalBlur in post.hlsl for the layout.
 constexpr u32 kLocalExpTile      = 32;
 constexpr u32 kLocalExpBins      = 16;
 constexpr u32 kLocalExpCellBytes = 8;   // one asuint(sum) + one count, per bin
 
-// The mesh-shader geometry registers this backend's OWN fixed pipeline chooses, mirroring
-// D3D12Device.cpp's kSceneMeshSrvBase=3 (an arbitrary frozen constant, not derived from any
-// PipelineLayout -- see that constant's own comment). -D'd into the AVER_MS block the same way.
+// Mesh-shader geometry register base this backend's fixed pipeline uses; mirrors D3D12Device.cpp's
+// kSceneMeshSrvBase=3 (frozen, arbitrary, not derived from any PipelineLayout). -D'd into AVER_MS.
 constexpr u32 kMeshSrvBase = 3;
 
-// The scene/sky/line shading now lives in modules/rhi/shaders/scene.hlsl, loaded through
-// rhi::shaderFile() and shared by both backends -- see that file for why it stopped being two
-// hand-synced copies.
+// scene/sky/line shading lives in modules/rhi/shaders/scene.hlsl (rhi::shaderFile()), shared by
+// both backends instead of two hand-synced copies.
 
-// The prelude and this backend's own shaders, joined once (Vulkan twin of D3D12Device.cpp's
-// sceneShaderSource()). Keyed on shaderFileRevision(): a plain static made hot reload recompile
-// stale text forever.
+// Prelude + this backend's shaders joined once (Vulkan twin of D3D12Device.cpp's
+// sceneShaderSource()). Keyed on shaderFileRevision(); a plain static kept serving stale text
+// forever across hot reloads.
 const std::string& sceneShaderSource() {
     static std::string src;
     static u64 built = ~0ull;
@@ -79,38 +73,26 @@ const std::string& sceneShaderSource() {
 }
 
 // ---- the push-constant patch --------------------------------------------------------------------
-// WHY: section 4 of VulkanCommon.hpp commits kObjectConstantRegister (b1) and MeshCB's triangle
-// count (b5) to PUSH CONSTANTS -- the Vulkan analogue of D3D12's root 32-bit constants. DXC only
-// emits a SPIR-V PushConstant block for an HLSL cbuffer annotated
-// `[[vk::push_constant]]` in the SOURCE TEXT -- no compile flag promotes an ordinary
-// `cbuffer X : register(bN)` -- and the shared prelude (RHIShaders.cpp, off-limits here) declares
-// PerObject/MeshCB as ordinary cbuffers because D3D12 shares it and has no such concept. So this
-// file patches the annotation into the ASSEMBLED source string it alone controls, before compiling.
+// WHY: VulkanCommon.hpp section 4 puts kObjectConstantRegister (b1) and MeshCB's triangle count (b5)
+// in PUSH CONSTANTS -- the Vulkan analogue of D3D12's root 32-bit constants. DXC only emits a SPIR-V
+// PushConstant block for a cbuffer annotated `[[vk::push_constant]]` in the HLSL source text, but the
+// shared prelude (RHIShaders.cpp) declares PerObject/MeshCB as ordinary cbuffers (D3D12 has no such
+// concept) -- so this file patches the annotation into its own assembled source before compiling.
+// PerObject+MeshCB merge into ONE block because SPIR-V allows
+// only one PushConstant interface block per entry point (mesh bytes appended after PerObject's tail;
+// keeps PushConstantLayout's [0,128) object / mesh-count-after layout). gVerts/gIndices are NOT part
+// of this patch: DXC always lowers StructuredBuffer<T>/ByteAddressBuffer to a descriptor-bound
+// resource -- see dispatchMesh() for how the fixed mesh pipeline binds them instead (this backend's
+// sharpest divergence from D3D12's raw root-SRV bind).
+// Finds `cbuffer <name>` at the head of a line (not in prose) and returns its opening brace, or npos.
 //
-// PerObject and MeshCB merge into ONE patched block, not two: SPIR-V allows at most one
-// PushConstant interface block per entry point and MSMain uses fields from both (mesh bytes folded
-// onto PerObject's tail, keeping PushConstantLayout's [0,128) object / mesh-count-after layout).
+// Matches BY NAME, NOT REGISTER: register-spelled needles like "cbuffer PerObject : register(b1) {"
+// broke silently when the prelude switched to `register(AVER_CB_JOIN(b, AVER_OBJECT_CB))` -- every
+// fixed pipeline fell back to D3D12 (compiled green; AVER_RHI_VULKAN was OFF in every shipped config,
+// so the fallback went unnoticed). Matching the declaration instead of the register spelling removes
+// that tripwire.
 //
-// gVerts/gIndices are NOT part of this patch: DXC's SPIR-V backend always lowers
-// StructuredBuffer<T>/ByteAddressBuffer to a descriptor-bound resource, with no un-annotated HLSL
-// spelling for a bare pointer -- see dispatchMesh() for how the fixed mesh pipeline binds them
-// instead (a fresh descriptor set per draw), this backend's sharpest divergence from D3D12's raw
-// root-SRV bind.
-// Finds `cbuffer <name>` where it is DECLARED -- at the head of a line -- and returns the offset of
-// its opening brace, or npos.
-//
-// BY NAME, NOT BY REGISTER, AND THAT IS THE WHOLE POINT. Every needle in this file used to spell the
-// register out: "cbuffer PerObject : register(b1) {". The shared prelude now emits register numbers
-// from C++ instead of hardcoding them --
-//     cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {
-// -- so every one of those needles missed, every fixed pipeline refused to build, and the backend
-// fell back to D3D12 with a warning. It compiled green the whole time, because AVER_RHI_VULKAN was
-// OFF in every shipped configuration. Matching the declaration and letting the register spelling be
-// whatever the prelude wants removes a tripwire that fires on an unrelated edit and is invisible
-// until someone turns this backend on.
-//
-// The line-head test keeps prose out: several files here discuss these cbuffers in comments, and
-// patching one of those would produce a silently wrong shader instead of an error.
+// Line-head-only avoids patching a cbuffer mentioned in a comment instead of declared.
 size_t findCbufferBrace(const std::string& src, const char* name, size_t* declPos = nullptr) {
     const std::string needle = std::string("cbuffer ") + name;
     size_t pos = src.find(needle);
@@ -138,20 +120,20 @@ size_t findCbufferBrace(const std::string& src, const char* name, size_t* declPo
 }
 
 bool patchPushConstants(std::string& src, bool mesh) {
-    // Same reason as the call in patchCbuffersForLayout: findCbufferBrace matches the declaration,
-    // but the body it extracts must not carry an unexpanded register macro into AverPcBlock.
+    // Same as patchCbuffersForLayout: expand register macros here too, so none leak into AverPcBlock.
     expandCbufferRegisters(src);
-    // NOT ON A cbuffer -- the first version put it there, and DXC rejects that outright:
+    // [[vk::push_constant]] must go on a struct, not a cbuffer directly -- the first version put it
+    // there, and DXC rejects that outright:
     //     error: 'push_constant' attribute only applies to global variables of struct type
-    // Invisible until a compiler that could actually emit SPIR-V surfaced it (compilation used to
-    // die earlier on "SPIR-V CodeGen not available").
+    // Invisible until a compiler could actually emit SPIR-V (compilation used to die earlier on
+    // "SPIR-V CodeGen not available").
     //
-    // DXC wants a struct + ConstantBuffer<> of it, so each field is aliased back to a global of the
-    // same name (`static float4x4 gWorld = gAverPc.gWorld;` is legal -- HLSL scopes struct members
-    // separately from globals) so the prelude's own gWorld/... keeps resolving unchanged.
+    // So each field is aliased back to a global of the same name (`static float4x4 gWorld =
+    // gAverPc.gWorld;` -- legal, HLSL scopes struct members separately from globals) so the
+    // prelude's own gWorld/... keeps resolving unchanged.
     //
-    // THE ALIAS LIST IS HARDCODED AGAINST THE PRELUDE: if PerObject gains/loses a field this stops
-    // matching and says so, rather than silently compiling a layout that disagrees with PushConstantLayout.
+    // ALIAS LIST IS HARDCODED AGAINST THE PRELUDE: if PerObject gains/loses a field, this stops
+    // matching instead of silently compiling a layout PushConstantLayout disagrees with.
     size_t pos = std::string::npos;
     const size_t openBrace = findCbufferBrace(src, "PerObject", &pos);
     if (openBrace == std::string::npos) {
@@ -165,14 +147,12 @@ bool patchPushConstants(std::string& src, bool mesh) {
         AVER_ERROR("[RHI.Vulkan] PerObject cbuffer has no closing brace; the shared prelude has drifted");
         return false;
     }
-    // Kept verbatim (comments too) so the byte layout PushConstantLayout assumes stays exact.
-    // From just past the opening brace, so the register spelling -- however the prelude writes it --
-    // is dropped along with the `cbuffer PerObject : register(...)` header itself.
+    // Kept verbatim (comments too) so PushConstantLayout's assumed byte layout stays exact. Starts
+    // just past the opening brace, so the register spelling is dropped with the declaration header.
     const size_t bodyBegin = openBrace + 1;
     std::string body = src.substr(bodyBegin, close - bodyBegin);
 
-    // Folded into the SAME block (see file header) -- its own declaration is deleted below. Located
-    // the same way and for the same reason as PerObject: its register is emitted from C++ too.
+    // Folded into the same block as PerObject (see file header); its declaration is deleted below.
     size_t meshDecl = std::string::npos;
     const size_t meshBrace = mesh ? findCbufferBrace(src, "MeshCB", &meshDecl) : std::string::npos;
     size_t meshEnd = std::string::npos;
@@ -206,9 +186,8 @@ bool patchPushConstants(std::string& src, bool mesh) {
 
     src.replace(pos, (close + 2) - pos, repl);
 
-    // Delete MeshCB's own block now that its fields live in AverPcBlock. RE-LOCATED rather than
-    // reusing the offsets found above: the replace() just above changed the string's length, so
-    // meshDecl/meshEnd are stale the moment PerObject is rewritten.
+    // Delete MeshCB's block now its fields live in AverPcBlock. RE-LOCATED, not reusing offsets
+    // found above: the replace() just above changed the string length, so meshDecl/meshEnd are stale.
     if (haveMesh) {
         size_t decl2 = std::string::npos;
         const size_t brace2 = findCbufferBrace(src, "MeshCB", &decl2);
@@ -242,12 +221,12 @@ VkImageMemoryBarrier2 imgBarrier(VkImage image, VkImageAspectFlags aspect, VkIma
 }
 void pipelineBarrier(const VulkanApi& api, VkCommandBuffer cmd, const VkImageMemoryBarrier2* imgs, u32 imgCount,
                      const VkBufferMemoryBarrier2* bufs = nullptr, u32 bufCount = 0) {
-    // A barrier against a resource that does not exist is DROPPED HERE, the one choke point every
-    // device-side barrier goes through, rather than reaching the driver as
-    //     "pImageMemoryBarriers[0].image Invalid VkImage Object 0x0"
-    // -- naming the barrier but not which of this file's dozen-odd render targets was never created.
-    // Callers build their arrays from members that are null until the target exists (msaaColor_,
-    // sceneResolved_, bloom chain, presentHdrTex_, ...); this makes the gap harmless and LOUD.
+    // Barriers against a not-yet-created resource are DROPPED HERE (the one choke point every
+    // device-side barrier goes through) instead of reaching the driver as an unhelpful
+    // "pImageMemoryBarriers[0].image Invalid VkImage Object 0x0" -- names the barrier, not which of
+    // this file's dozen-odd render targets was never created. Callers build arrays from members
+    // null until the target exists (msaaColor_, sceneResolved_, bloom chain, presentHdrTex_...);
+    // this makes the gap harmless and loud (via the warning below).
     VkImageMemoryBarrier2 live[16];
     u32 liveCount = 0;
     for (u32 i = 0; i < imgCount; ++i) {
@@ -277,11 +256,10 @@ VkBufferMemoryBarrier2 bufBarrier(VkBuffer buf, VkAccessFlags2 srcAccess, VkPipe
     return b;
 }
 
-// A zero-binding descriptor set layout, for a VkPipelineLayout slot section 4's scheme reserves
-// (kVkSetTable0/1) but this backend's fixed pipelines never populate. Vulkan requires a real layout
-// object at every set index up to the highest used -- no "skip this slot" -- but per spec a
-// descriptor set layout need not outlive the vkCreatePipelineLayout call that consumes it, so callers
-// create one, build the pipeline layout, and destroy it immediately; nothing here keeps it alive.
+// Zero-binding descriptor set layout, for a VkPipelineLayout slot section 4 reserves (kVkSetTable0/1)
+// but this backend's fixed pipelines never populate. Vulkan requires a real layout object at every
+// set index up to the highest used; per spec it need not outlive the vkCreatePipelineLayout call, so
+// callers create one, build the layout, and destroy it immediately.
 VkDescriptorSetLayout makeEmptySetLayout(const VulkanApi& api, VkDevice device) {
     VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     ci.bindingCount = 0;
@@ -291,9 +269,9 @@ VkDescriptorSetLayout makeEmptySetLayout(const VulkanApi& api, VkDevice device) 
 }
 
 
-// Writes the default shading model + params into the tail of a per-draw b1 block. Byte-for-byte
-// mirror of D3D12Device.cpp's writeShadingConstants: the PerObject cbuffer's tail fields
-// (gShadingModel, gReflectance, gF90, _objPad, gEmissive) are the same 8 dwords on both backends.
+// Writes the default shading model + params into a per-draw b1 block's tail. Byte-for-byte mirror
+// of D3D12Device.cpp's writeShadingConstants (gShadingModel, gReflectance, gF90, _objPad, gEmissive
+// -- same 8 dwords on both backends).
 void writeShadingConstants(f32* block, bool unlit = false) {
     const u32 model = unlit ? 1u : 0u;   // AVER_MODEL_UNLIT / AVER_MODEL_STANDARD
     std::memcpy(block + 24, &model, sizeof(model));
@@ -461,12 +439,11 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
     AVER_VK_DEV(CreateSampler);
     AVER_VK_DEV(DestroySampler);
 #undef AVER_VK_DEV
-    // NOT GUARDED BY has() -- A REAL BUG. VK_EXT_debug_utils is an INSTANCE extension, pushed into
-    // instExts not deviceExtensions, so has() (device-list only) was always false: all three
-    // pointers stayed null, every validation message showed a bare handle with no resource name
-    // (e.g. "VkImage 0x27b000000027b"), and
-    // pushMarker/popMarker were silently inert (no RenderDoc/Nsight pass labels). Loading them
-    // unconditionally is self-guarding: vkGetDeviceProcAddr returns null when the instance didn't
+    // NOT GUARDED BY has(): VK_EXT_debug_utils is an INSTANCE extension (in instExts, not
+    // deviceExtensions), so has() (device-list only) was always false -- pointers stayed null, no
+    // resource names in validation messages (e.g. "VkImage 0x27b000000027b"), pushMarker/popMarker
+    // silently inert (no RenderDoc/Nsight pass labels). Loading
+    // unconditionally is self-guarding: vkGetDeviceProcAddr returns null if the instance didn't
     // enable the extension, and all three call sites already null-check.
     {
         api.CmdBeginDebugUtilsLabelEXT = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
@@ -620,11 +597,10 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     ici.pApplicationInfo = &appInfo;
     ici.enabledExtensionCount = static_cast<u32>(instExts.size());
     ici.ppEnabledExtensionNames = instExts.data();
-    // VK_LAYER_KHRONOS_validation, requested only when both asked for AND present. Requesting it
-    // unconditionally fails instance creation without the SDK (most machines); never asking made
-    // --debug-layer a misnomer -- only the debug-utils messenger installed, reporting what the
-    // DRIVER volunteers, silent while it access-violated. Enumerated, not assumed, like every
-    // optional extension here.
+    // VK_LAYER_KHRONOS_validation: requested only when asked for AND present (enumerated, not
+    // assumed). Unconditional request fails instance creation without the SDK (most machines); never
+    // requesting made --debug-layer a misnomer (only driver-volunteered messages, silent while it
+    // access-violated).
     std::vector<const char*> instLayers;
     if (desc.enableDebug && api_.EnumerateInstanceLayerProperties) {
         u32 layerCount = 0;
@@ -715,10 +691,8 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     const bool wantMeshShader = std::find(devExts.begin(), devExts.end(), std::string(VK_EXT_MESH_SHADER_EXTENSION_NAME)) != devExts.end();
     const bool wantAccelStruct = std::find(devExts.begin(), devExts.end(), std::string(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) != devExts.end();
     const bool wantRayQuery = std::find(devExts.begin(), devExts.end(), std::string(VK_KHR_RAY_QUERY_EXTENSION_NAME)) != devExts.end();
-    // M6: no feature struct to chain and enable -- VK_EXT_memory_budget adds only a queryable
-    // pNext struct (VkPhysicalDeviceMemoryBudgetPropertiesEXT), never a VkPhysicalDeviceFeatures2
-    // bit -- so "was it in the enabled list" is the whole story, recorded here from the same
-    // devExts vector every other want* bool above reads.
+    // M6: VK_EXT_memory_budget has no feature bit to enable, only a queryable pNext struct
+    // (VkPhysicalDeviceMemoryBudgetPropertiesEXT); "was it in the enabled list" is the whole story.
     memoryBudgetExt_ = std::find(devExts.begin(), devExts.end(), std::string(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) != devExts.end();
 
     VkPhysicalDeviceMeshShaderFeaturesEXT meshFeat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
@@ -737,10 +711,9 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     v12.bufferDeviceAddress = VK_TRUE;   // already confirmed supported above
     v12.timelineSemaphore = VK_TRUE;
 
-    // THE THREE BITS THE RAY PATH'S BINDLESS TABLE NEEDS, required explicitly rather than left to
-    // chance: v12 already carries every bit the device SUPPORTS and gets handed to vkCreateDevice as
-    // the set to ENABLE, so these would likely be enabled incidentally -- fine on the machine it was
-    // written on, fragile on a driver that reports differently.
+    // The three bits the ray path's bindless table needs, required explicitly rather than left to
+    // incidental support (v12 carries every bit the device SUPPORTS, handed to vkCreateDevice as the
+    // set to ENABLE -- fragile across drivers if left to chance):
     //
     //   runtimeDescriptorArray                    -- index an array whose size the shader doesn't know
     //   shaderSampledImageArrayNonUniformIndexing -- index varies ACROSS THE WAVE (neighbouring pixels
@@ -835,10 +808,8 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     if (!rhiFactory_->init()) { delete rhiFactory_; rhiFactory_ = nullptr; }
     else rhiContext_ = new VulkanRenderContext(this, rhiFactory_);
 
-    // M6: one snapshot at init, same C-7 shape the D3D12 backend's own init-time line uses (and the
-    // one gpuTiming()-adjacent host-side "[GPU] video memory: ..." line reads this same call every
-    // frame thereafter) -- MB, not bytes, since a raw byte count on a multi-GB budget is not
-    // something a log line should make a human parse.
+    // M6: one snapshot at init, same C-7 shape as D3D12's init-time line (also read every frame by
+    // the gpuTiming()-adjacent "[GPU] video memory: ..." line). MB, not raw bytes, for readability.
     {
         const VideoMemoryInfo vmem = videoMemory();
         if (vmem.supported) {
@@ -856,13 +827,11 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
 }
 
 VulkanDevice::~VulkanDevice() {
-    // THE UI TOOLKIT FIRST, unconditionally -- as ~D3D12Device does. Without this the toolkit's own
-    // Vulkan objects (descriptor pool, font atlas, per-frame vertex/index rings) are never destroyed
-    // here: they die later, with the backend object Sandbox owns, which by then is calling into a
-    // VkDevice that no longer exists --
+    // UI TOOLKIT FIRST, unconditionally (as ~D3D12Device does): its Vulkan objects (descriptor pool,
+    // font atlas, per-frame vertex/index rings) otherwise outlive VkDevice destruction --
     //     [Vulkan Loader] ERROR: vkDestroyBuffer: Invalid device
-    // -- and the layer counts all of them leaked at vkDestroyDevice (40, vs 13 before a UI backend
-    // existed). uiShutdown waits for the GPU itself, so this is safe as teardown's first act.
+    // -- leaking 40 objects at vkDestroyDevice (vs 13 without a UI backend). uiShutdown waits for the
+    // GPU itself, so this is safe as teardown's first act.
     uiShutdown();
     waitForGpu();
     delete rhiContext_;
@@ -893,9 +862,8 @@ VulkanDevice::~VulkanDevice() {
     }
     if (histBuf_) destroyBufferCommitted(*this, histBuf_, histMemory_);
     if (expBuf_) destroyBufferCommitted(*this, expBuf_, expMemory_);
-    // Scene-sized (createPostTargets destroys and rebuilds them on every resize, in place -- see
-    // that function), but this is still where the LAST generation's free lives, exactly like
-    // histBuf_/expBuf_ just above: nothing else in this destructor's path touches them.
+    // Scene-sized; createPostTargets destroys/rebuilds these in place on every resize, but this is
+    // still where the LAST generation's free lives (like histBuf_/expBuf_ above).
     if (localGridBuf_) destroyBufferCommitted(*this, localGridBuf_, localGridMemory_);
     if (localGridBlurBuf_) destroyBufferCommitted(*this, localGridBlurBuf_, localGridBlurMemory_);
     if (captureBuf_) destroyBufferCommitted(*this, captureBuf_, captureMemory_);
@@ -945,16 +913,15 @@ VulkanDevice::~VulkanDevice() {
 IResourceFactory* VulkanDevice::resources() { return rhiFactory_; }
 IRenderContext* VulkanDevice::renderContext() { return rhiContext_; }
 
-// M6. Sums VkPhysicalDeviceMemoryBudgetPropertiesEXT's two per-heap arrays into the LOCAL/NON_LOCAL
-// split VideoMemoryInfo declares (RHI.hpp), matching D3D12's own DXGI_MEMORY_SEGMENT_GROUP split in
-// spirit: LOCAL is the heaps flagged VK_MEMORY_HEAP_DEVICE_LOCAL_BIT (VRAM on a discrete card, the
-// whole pool on a UMA/integrated one), NON_LOCAL is every other heap. Polled live, not cached at
-// init, since the whole point of "budget" is that it moves as other processes and the desktop
-// compositor claim or release their own share.
+// M6. Sums VkPhysicalDeviceMemoryBudgetPropertiesEXT's per-heap arrays into VideoMemoryInfo's
+// LOCAL/NON_LOCAL split (RHI.hpp), matching D3D12's DXGI_MEMORY_SEGMENT_GROUP split: LOCAL = heaps
+// flagged VK_MEMORY_HEAP_DEVICE_LOCAL_BIT (VRAM on discrete, the whole pool on UMA/integrated),
+// NON_LOCAL = every other heap. Polled live, not cached, since budget moves as other
+// processes/the compositor claim or release their share.
 //
-// UNMEASURED: this backend has no editor UI session on this machine to run it through (house rule:
-// no run, no build). Checked by eye against the vendored vulkan_core.h struct layout and against
-// D3D12Device's own videoMemory() contract in RHI.hpp; not exercised on a live VkDevice.
+// UNMEASURED: no editor UI session on this machine to run it through (house rule: no run/build).
+// Checked by eye against vulkan_core.h and D3D12Device's videoMemory() contract; not exercised on a
+// live VkDevice.
 VideoMemoryInfo VulkanDevice::videoMemory() const {
     VideoMemoryInfo out;
     if (!memoryBudgetExt_ || !api_.GetPhysicalDeviceMemoryProperties2 || !physicalDevice_) return out;
@@ -964,10 +931,9 @@ VideoMemoryInfo VulkanDevice::videoMemory() const {
     props2.pNext = &budget;
     api_.GetPhysicalDeviceMemoryProperties2(physicalDevice_, &props2);
 
-    // Heap COUNT/FLAGS come from memoryProps_ (queried once at init via the plain, non-"2" call;
-    // see its own field comment) rather than props2.memoryProperties above -- a physical device's
-    // heap layout is architecturally fixed for its life either way, so this just avoids depending on
-    // the "2" struct's own copy of the same fixed data being filled the way this call expects.
+    // Heap COUNT/FLAGS come from memoryProps_ (queried once at init, non-"2" call) rather than
+    // props2.memoryProperties: heap layout is fixed for the device's life either way, so this avoids
+    // depending on the "2" struct's copy being filled the way this call expects.
     for (u32 i = 0; i < memoryProps_.memoryHeapCount && i < VK_MAX_MEMORY_HEAPS; ++i) {
         const bool local = (memoryProps_.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
         (local ? out.localBudgetBytes : out.nonLocalBudgetBytes) += budget.heapBudget[i];
@@ -993,10 +959,9 @@ TextureHandle VulkanDevice::sceneDepthTexture() {
 }
 
 // ================================================================================================
-// The in-window UI seam. Every one of these is a pass-through to whatever vkb::IUiBackend Sandbox
-// installed, and a no-op returning IDevice's own default when none was -- which is every game
-// build. NOTHING ABOUT DEAR IMGUI APPEARS IN THIS MODULE; see UiBackend.hpp for why the split
-// exists and why its handles cross as opaque u64s.
+// In-window UI seam: pass-throughs to whatever vkb::IUiBackend Sandbox installed, no-op (IDevice's
+// default) when none was -- every game build. No Dear ImGui here; see UiBackend.hpp for the split
+// and why handles cross as opaque u64s.
 // ================================================================================================
 bool VulkanDevice::uiInit(void* windowHandle) {
     if (!uiBackend_ || uiUp_) return uiUp_;
@@ -1121,16 +1086,15 @@ void VulkanDevice::queryCaps() {
     if (caps_.meshShaderTier > 0) caps_.shaderModel = 65;   // this backend's mesh path needs ms_6_5
 
     // No numbered DXR tier in Vulkan; report 11 (DXR-1.1-shaped: inline RayQuery only, no hit-group
-    // pipeline) when the inline-query extension set is present, 0 otherwise -- a judgment call, not a
-    // hardware-reported number (see kOptionalDeviceExtensions on why VK_KHR_ray_tracing_pipeline is
-    // deliberately out of scope).
+    // pipeline) when the inline-query extension set is present, 0 otherwise -- a judgment call, not
+    // a hardware number (VK_KHR_ray_tracing_pipeline is deliberately out of scope; see
+    // kOptionalDeviceExtensions).
     //
-    // rtSupported_ was set in init() from extension + feature-bit presence alone, before
-    // shaderModel/dxcAvailable existed; RayQuery needs SM 6.5 like the mesh path, so that gate is
-    // applied HERE. initAccelerationStructures() (called right after) narrows it once more,
-    // confirming the acceleration-structure pointers actually resolved; not expected to fail if the
-    // extension was genuinely present, but see this backend's own honestState for the residual,
-    // unverified case.
+    // rtSupported_ was set in init() from extension+feature-bit presence alone, before
+    // shaderModel/dxcAvailable existed; RayQuery needs SM 6.5 like the mesh path, so that gate
+    // applies HERE. initAccelerationStructures() (called next)
+    // narrows it once more by confirming the AS pointers actually resolved; see honestState for the
+    // residual unverified case.
     rtSupported_ = rtSupported_ && caps_.shaderModel >= 65 && caps_.dxcAvailable;
     caps_.rayTracingTier = rtSupported_ ? 11u : 0u;
 
@@ -1138,38 +1102,28 @@ void VulkanDevice::queryCaps() {
     // inventing a mapping from descriptor-indexing bits this backend doesn't otherwise rely on.
     caps_.resourceBindingTier = 0;
 
-    // NOT DERIVED FROM resourceBindingTier (hardcoded 0 above): Vulkan answers this with
-    // descriptor-indexing bits decided at device creation (bindlessCapable_) instead. Ray tracing is
-    // still required, so --force-caps no-rt disables this too -- hence reading the CLAMPED tier below.
+    // NOT derived from resourceBindingTier (hardcoded 0 above): Vulkan answers this via
+    // descriptor-indexing bits decided at device creation (bindlessCapable_). Ray tracing is still
+    // required too, so --force-caps no-rt disables this -- hence reading the CLAMPED tier below.
 
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
 
-    // caps_.rayTracingTier >= 11 && bindlessCapable_ is what the HARDWARE AND DRIVER can genuinely
-    // do here: descriptor indexing really was requested and came back enabled above (:734-757), and
-    // the inline-query ray path really works. That is deliberately NOT what this bit reports, though.
-    // It hardcodes false regardless of those two conditions, because createBindlessTextureTable()
-    // near the bottom of this file is a stub that always returns 0 -- this backend has no real
-    // implementation to hand out yet. Reporting the hardware bit here would tell
-    // VoxiRenderer::ensureTextureTable and PathTracer::ensureTexturing, both gated on exactly this
-    // flag and nothing else, to go ahead and call a function that can only fail them, with nothing in
-    // the log connecting a "yes" capability to the flat-albedo shading it actually produces. Consumers
-    // across both backends treat this flag as "this device can hand me a working table", not merely
-    // "the hardware bits are present" -- see RHIResources.hpp's own comment on
-    // createBindlessTextureTable -- so honesty toward that contract means reading false here until
-    // the stub below is replaced with a real implementation, at which point this should go back to
-    // the hardware expression above.
+    // hwBindlessCapable is what hardware+driver can genuinely do (descriptor indexing enabled
+    // above :734-757, inline-query ray path works). caps_.rtBindlessTextures hardcodes false anyway:
+    // createBindlessTextureTable() below is a stub returning 0, and callers (VoxiRenderer::
+    // ensureTextureTable, PathTracer::ensureTexturing), both gated on exactly this flag and nothing
+    // else, treat it as "a working table", not just "hardware bits present" -- reporting the hardware
+    // bit would send them into a stub that can only fail them, with nothing in the log connecting a
+    // "yes" to the flat-albedo shading it actually produces (see RHIResources.hpp's own comment on
+    // createBindlessTextureTable). Revert to the hardware expression once the stub is replaced.
     const bool hwBindlessCapable = caps_.rayTracingTier >= 11 && bindlessCapable_;
     caps_.rtBindlessTextures = false;
     AVER_INFO("[RHI.Vulkan] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster, caps_.resourceBindingTier);
-    // Mirrors D3D12Device.cpp's own "ray-traced bindless textures: yes/no" line so the two backends'
-    // logs read the same way for the same question, and adds the one thing D3D12 doesn't need: a
-    // WARN, said once at device creation, for the specific case that would otherwise go unexplained
-    // -- hardware that could do this sitting behind a flag that says no because the backend can't
-    // deliver yet. Without this line, a reader sees "no" above and has to already know about the
-    // stub to understand why capable hardware isn't being used.
+    // Mirrors D3D12Device.cpp's "ray-traced bindless textures: yes/no" line, plus a WARN (once, at
+    // device creation) D3D12 doesn't need: explains why capable hardware still reads "no" here.
     AVER_INFO("[RHI.Vulkan] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
     if (hwBindlessCapable)
         AVER_WARN("[RHI.Vulkan] descriptor indexing and inline ray query are both present and enabled "
@@ -1196,11 +1150,10 @@ bool VulkanDevice::initAccelerationStructures() {
 // 5. The backend's own fixed scene/sky/wire/line pipelines.
 // ================================================================================================
 bool VulkanDevice::createPipeline() {
-    // setSampleCount() calls this repeatedly to rebuild every PSO's baked-in rasterizationSamples --
-    // unlike D3D12's ComPtr, a VkPipeline overwritten by vkCreateGraphicsPipelines without an
-    // explicit vkDestroyPipeline first is simply leaked. Set/pipeline-LAYOUT objects are deliberately
-    // NOT re-destroyed here (they don't depend on sampleCount_, only the PSOs built from them do),
-    // matching the `if (!X)` guards on each block below.
+    // setSampleCount() calls this repeatedly to rebuild each PSO's baked-in rasterizationSamples --
+    // unlike D3D12's ComPtr, an overwritten VkPipeline leaks without an explicit vkDestroyPipeline
+    // first. Set/pipeline-LAYOUT objects are NOT re-destroyed here (only the PSOs depend on
+    // sampleCount_), matching the `if (!X)` guards below.
     for (VkPipeline* pso : {&scenePso_, &skyPso_, &wirePso_, &linePso_, &lineOverlayPso_}) {
         if (*pso) { api_.DestroyPipeline(device_, *pso, nullptr); *pso = VK_NULL_HANDLE; }
     }
@@ -1349,9 +1302,9 @@ bool VulkanDevice::createPipeline() {
     stages[1].module = skyPsMod; stages[1].pName = "PSky";
     VkPipelineVertexInputStateCreateInfo emptyVin{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     gp.pVertexInputState = &emptyVin;
-    // EQUAL, not GREATER_EQUAL: VSky pins clip-space depth at exactly 1.0 (the far plane, this
-    // scene's clear value), so EQUAL is the real "nothing closer was written here" test --
-    // GREATER_EQUAL would be trivially true everywhere and paint the sky's cost over every opaque pixel.
+    // EQUAL not GREATER_EQUAL: VSky pins clip depth at exactly 1.0 (far plane, this scene's clear
+    // value), so EQUAL is the real "nothing closer was written" test -- GREATER_EQUAL would be
+    // trivially true everywhere and paint the sky's cost over every opaque pixel.
     ds.depthCompareOp = VK_COMPARE_OP_EQUAL;
     ds.depthWriteEnable = VK_FALSE;
     if (!vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &skyPso_), "sky pso")) return false;
@@ -1394,23 +1347,21 @@ bool VulkanDevice::createPipeline() {
 
 bool VulkanDevice::initMeshShaders() {
     msSupported_ = false;
-    // Same reason as createPipeline()'s identical guard (see above): an overwritten VkPipeline with
-    // no vkDestroyPipeline first is a leak, not a rebuild.
+    // Same reason as createPipeline()'s guard above: an overwritten VkPipeline without
+    // vkDestroyPipeline first leaks.
     if (meshPso_) { api_.DestroyPipeline(device_, meshPso_, nullptr); meshPso_ = VK_NULL_HANDLE; }
     if (caps_.meshShaderTier == 0 || caps_.shaderModel < 65 || !caps_.dxcAvailable || !api_.CmdDrawMeshTasksEXT) return false;
-    // The merged push-constant range is kObjectBytes+16 = 144 bytes, over the 128-byte floor every
-    // Vulkan implementation is REQUIRED to support (VkPhysicalDeviceLimits::maxPushConstantsSize's
-    // guaranteed minimum) -- unlike the plain scene pipeline's range, which fits inside it. Checked
-    // explicitly so hardware at the floor gets the same "falls back to the input assembler" outcome.
+    // Merged push-constant range is kObjectBytes+16 = 144 bytes, over the 128-byte floor every
+    // Vulkan impl is REQUIRED to support (maxPushConstantsSize's guaranteed minimum) -- unlike the
+    // plain scene pipeline's range. Checked explicitly so floor hardware falls back to the IA path.
     if (maxPushConstantsSize_ < PushConstantLayout::kObjectBytes + 16) {
         AVER_INFO("[RHI.Vulkan] mesh-shader push-constant range needs {} bytes; this device's "
                   "maxPushConstantsSize is only {}", PushConstantLayout::kObjectBytes + 16, maxPushConstantsSize_);
         return false;
     }
 
-    // set 0 (kVkSetTable0), bindings kMeshSrvBase/+1: gVerts/gIndices, SSBOs, FRESH per draw -- see
-    // dispatchMesh() for why (same StructuredBuffer-always-descriptor-bound reason as this file's
-    // header comment).
+    // set 0 (kVkSetTable0), bindings kMeshSrvBase/+1: gVerts/gIndices SSBOs, FRESH per draw -- see
+    // dispatchMesh() (same StructuredBuffer-always-descriptor-bound reason as the file header).
     if (!meshGeomLayout_) {
         VkDescriptorSetLayoutBinding binds[2] = {};
         binds[0].binding = kMeshSrvBase; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -1526,14 +1477,13 @@ void VulkanDevice::setMeshShaders(bool enabled) {
     msActive_ = want;
 }
 
-// Mesh-shader draw. Allocates a FRESH descriptor set for gVerts/gIndices from THIS frame-in-flight
-// slot's pool (reset once per beginFrame, after that slot's fence wait proves the GPU is done with
-// what the pool held two frames ago -- the same double-buffering discipline every other
-// kFrameCount-sized array in this class already relies on) rather than rewriting one set in place: a descriptor set's
-// binding is not a snapshot once recorded -- every vkCmdBindDescriptorSets referencing the SAME set
-// sees whatever it was LAST written to by execution time, so reuse across draws in one frame would
-// make earlier draws silently read the LAST mesh's geometry. A fresh set per draw costs an
-// allocation, not correctness.
+// Mesh-shader draw. Allocates a FRESH descriptor set for gVerts/gIndices per draw, from this
+// frame-in-flight slot's pool (reset once per beginFrame, after that slot's fence wait proves the
+// GPU is done with what the pool held two frames ago -- same double-buffering discipline as every
+// other kFrameCount-sized array here) -- not rewritten in place: a descriptor set binding is not a
+// snapshot, every vkCmdBindDescriptorSets on the SAME set sees whatever it was LAST written to by
+// execution time, so reuse across draws in one frame would make earlier draws silently read the
+// LAST mesh's geometry. A fresh set per draw costs an allocation, not correctness.
 void VulkanDevice::dispatchMesh(const GpuMesh& m) {
     const u32 tris = m.indexCount / 3;
     if (!tris || !m.vb || !m.ib) return;
@@ -1590,10 +1540,10 @@ bool VulkanDevice::createSwapchainResources(const SwapchainDesc& d) {
     // A plain UNORM surface, not sRGB: PSComposite already applies toGamma() (rhi::postShaderSource()),
     // matching D3D12's non-sRGB backbuffer -- sRGB would gamma-encode a SECOND time on top.
     swapchainFormat_ = VK_FORMAT_UNDEFINED;
-    // RGBA FIRST, AND THE ORDER IS LOAD-BEARING. B8G8R8A8_UNORM used to be preferred, but nothing in
-    // rhi::Format can name it (fromVkFormat has no case, returns Unknown) -- ensureViewportTexture
-    // asked, got Unknown, and createTexture refused it 80 times a run: why the editor's 3D viewport
-    // was black on Vulkan while the UI around it drew fine. R8G8B8A8_UNORM also matches D3D12 (above).
+    // RGBA FIRST, ORDER LOAD-BEARING: rhi::Format has no case for B8G8R8A8_UNORM (fromVkFormat
+    // returns Unknown) -- ensureViewportTexture asked, got Unknown, and createTexture refused it 80
+    // times a run: the editor's 3D viewport was black on Vulkan while the UI drew fine. R8G8B8A8_UNORM
+    // also matches D3D12.
     for (VkFormat want : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM}) {
         for (const auto& f : fmts) if (f.format == want) { swapchainFormat_ = f.format; swapchainColorSpace_ = f.colorSpace; break; }
         if (swapchainFormat_ != VK_FORMAT_UNDEFINED) break;
@@ -1690,11 +1640,11 @@ bool VulkanDevice::createDepthBuffer() {
     ci.mipLevels = 1; ci.arrayLayers = 1;
     ci.samples = toVkSampleCount(sampleCount_);
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-    // SAMPLED, not just DEPTH_STENCIL_ATTACHMENT: IDevice::sceneDepthTexture() promises a "sampleable
-    // handle", and modules/occlusion's HZB seed pass binds it as an SRV in a compute shader. Without
-    // VK_IMAGE_USAGE_SAMPLED_BIT, the view adoptExternalDepthTexture builds over this same image
-    // would violate the image's declared usage flags -- validation error at best, UB at worst. This
-    // is additive: DEPTH_STENCIL_ATTACHMENT_BIT is unchanged, so depthView_'s per-frame use is as before.
+    // SAMPLED, not just DEPTH_STENCIL_ATTACHMENT: IDevice::sceneDepthTexture() promises a sampleable
+    // handle, and modules/occlusion's HZB seed pass binds it as an SRV in a compute shader. Without
+    // SAMPLED_BIT, the view
+    // adoptExternalDepthTexture builds would violate the image's usage flags (validation error at
+    // best, UB at worst). Additive: DEPTH_STENCIL_ATTACHMENT_BIT unchanged, depthView_ use as before.
     ci.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (!createImageCommitted(*this, ci, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthBuffer_, depthMemory_, "scene depth")) return false;
@@ -1704,9 +1654,9 @@ bool VulkanDevice::createDepthBuffer() {
     vi.format = kVkDepthFormat;
     vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     const bool viewOk = vkOk(api_.CreateImageView(device_, &vi, nullptr, &depthView_), "depth view");
-    // The resource just changed identity; sceneDepthTexture() re-adopts it lazily on next ask rather
-    // than eagerly here, where rhiFactory_ isn't guaranteed to exist yet (this runs during swapchain
-    // (re)creation, ahead of the first VulkanResourceFactory). Mirrors D3D12's identical depthTexDirty_=true.
+    // Resource just changed identity; sceneDepthTexture() re-adopts it lazily on next ask, not
+    // eagerly here (rhiFactory_ isn't guaranteed to exist yet during swapchain (re)creation).
+    // Mirrors D3D12's identical depthTexDirty_=true.
     depthTexDirty_ = true;
     return viewOk;
 }
@@ -1733,21 +1683,16 @@ bool VulkanDevice::createMsaaColor() {
 }
 
 // IDevice::setRenderScale, twin of D3D12Device::setRenderScale (C2-13, aver-render-scale-device-
-// loss): clamp and early-out on no change against whichever value is currently authoritative --
-// the parked one if a change is already pending, renderScale_ otherwise -- then PARK the new value
-// rather than rebuilding here. This used to call rebuildSceneTargets() immediately, which was safe
-// only as long as nothing called this mid-frame; the editor's preference load runs from buildUI(),
-// between beginFrame() and endFrame(), and AverSR Auto's onUpdate reassert (wave 2) now calls this
-// on every launch at Medium/Low's non-1.0 default. rebuildSceneTargets() frees and recreates the
-// depth buffer, MSAA target and post chain while that frame's command buffer may already have them
-// bound; waitForGpu() inside it only drains work already SUBMITTED, not a command buffer still
-// being recorded on the CPU -- so a mid-frame call recorded a submit against freed images, which is
-// what actually lost the device at present. So the value is parked and applied at the top of the
-// next beginFrame, unconditionally, by applyPendingRenderScale(): no caller needs to know, and a
-// rule with no exceptions cannot be got wrong by the next one. Before a swapchain exists there is
-// no frame to be inside and nothing to rebuild -- createSwapchainResources()'s own
-// computeSceneSize() picks up whatever renderScale_ was last set to, so that path still applies
-// immediately, exactly as before.
+// loss): clamps, early-outs on no change against whichever value is currently authoritative (the
+// parked one if a change is pending, renderScale_ otherwise), then PARKS the new value instead of
+// rebuilding here. Used to call rebuildSceneTargets() immediately, but a mid-frame caller (editor
+// preference load from buildUI(), AverSR Auto's onUpdate reassert (wave 2), now called on every
+// launch at Medium/Low's non-1.0 default) could free the depth/MSAA/post
+// targets a command buffer still being recorded on the CPU already had bound -- waitForGpu() inside
+// it only drains SUBMITTED work, not that -- which lost the device. So the value is parked and
+// applied unconditionally at the top of the next beginFrame by applyPendingRenderScale(). Before a
+// swapchain exists there's no frame to be inside, so createSwapchainResources()'s computeSceneSize()
+// just picks up renderScale_ directly, applying immediately as before.
 void VulkanDevice::setRenderScale(f32 scale) {
     const f32 asked = scale;
     scale = std::fmax(0.25f, std::fmin(1.0f, scale));
@@ -1777,9 +1722,8 @@ void VulkanDevice::applyPendingRenderScale() {
 }
 
 // Tears down and rebuilds every target sized off sceneWidth_/sceneHeight_ after renderScale_ moves
-// with a swapchain already live. Structural mirror of D3D12Device::rebuildSceneTargets; the one
-// difference is Vulkan's explicit VkImageView teardown (D3D12's ComPtr::Reset() frees the view
-// implicitly -- a VkImageView is its own object here, destroyed by name before its VkImage).
+// with a swapchain already live. Mirrors D3D12Device::rebuildSceneTargets structurally; the one
+// difference is Vulkan's explicit VkImageView teardown (D3D12's ComPtr::Reset() frees it implicitly).
 void VulkanDevice::rebuildSceneTargets() {
     waitForGpu();   // nothing sized off the OLD scene extent may still be in flight when it is freed
     if (depthView_) { api_.DestroyImageView(device_, depthView_, nullptr); depthView_ = VK_NULL_HANDLE; }
@@ -1831,12 +1775,11 @@ void VulkanDevice::waitForGpu() {
 }
 
 // ================================================================================================
-// 9. Meshes, skin targets, lines. Vertex/index buffers for an ordinary mesh go THROUGH the generic
-//    factory (rhiFactory_->createBuffer), exactly as D3D12Device::createMesh routes through
-//    D3D12ResourceFactory -- this is what gives every mesh an RHI BufferHandle a shader can be given
-//    descriptors over (IDevice::meshGeometry). Line meshes and per-frame CBs do NOT: they use
-//    createBufferCommitted directly, per that free function's own comment, since nothing needs a
-//    descriptor over a line list or this device's own per-frame constants.
+// 9. Meshes, skin targets, lines. An ordinary mesh's vertex/index buffers go THROUGH the generic
+//    factory (rhiFactory_->createBuffer), like D3D12Device::createMesh -- gives every mesh an RHI
+//    BufferHandle a shader can get descriptors over (IDevice::meshGeometry). Line meshes and
+//    per-frame CBs use createBufferCommitted directly instead: nothing needs a descriptor over a
+//    line list or this device's own per-frame constants.
 // ================================================================================================
 MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) {
     if (!device_ || !rhiFactory_ || vcount == 0 || icount == 0) return 0;
@@ -1857,13 +1800,11 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
 
-    // W4: --mesh-heap default (setStaticMeshHeapDefault) moves new static meshes off the Upload
-    // heap this backend has always used, trading a one-shot upload-time staging copy for the
-    // per-frame bus traffic every draw/shadow/voxelisation/BLAS-build fetching an Upload-heap
-    // buffer back across the bus on a discrete card otherwise pays -- see IDevice's own contract
-    // (RHI.hpp) and VoxiRenderer's BLAS-backing buffers, which already made this exact trade for
-    // ray-tracing geometry. UNMEASURED here: this backend has no editor session on this machine to
-    // run a load through (house rule: no run, no build).
+    // W4: --mesh-heap default (setStaticMeshHeapDefault) moves new static meshes off the Upload heap
+    // this backend has always used, trading a one-shot staging copy for the per-frame bus traffic a
+    // discrete card otherwise pays fetching Upload-heap buffers every draw/shadow/voxelisation/
+    // BLAS-build (see IDevice's contract, RHI.hpp; VoxiRenderer's BLAS buffers made the same trade).
+    // UNMEASURED here (house rule: no run/build).
     const bool useDefaultHeap = staticMeshDefaultHeap_;
     const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
     BufferDesc vd; vd.bytes = vbytes; vd.kind = kind; vd.debugName = "mesh vertices";
@@ -1883,12 +1824,10 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
 
     if (useDefaultHeap) {
-        // ONE staging buffer, ONE one-shot submit for both buffers together -- see
-        // uploadToDeviceBuffers' own comment for why this has to be synchronous (createMesh runs
-        // mid-frame too -- the editor calls it from inside its own draw walk, e.g.
-        // sandbox/src/SandboxRender.cpp's colourDecide building a cluster mesh, and from panel
-        // code such as AssetEditor/AnimEditor) and why a SEPARATE command buffer is what makes
-        // that legal (vkCmdCopyBuffer inside beginFrame's dynamic-rendering scope is not).
+        // ONE staging buffer, ONE one-shot submit for both buffers -- see uploadToDeviceBuffers for
+        // why this must be synchronous (createMesh runs mid-frame too, e.g. from SandboxRender.cpp's
+        // colourDecide or AssetEditor/AnimEditor panels) and why a SEPARATE command buffer makes that
+        // legal (vkCmdCopyBuffer inside beginFrame's dynamic-rendering scope is not).
         const VkBuffer dsts[2] = {m.vb, m.ib};
         const void* srcs[2] = {verts, indices};
         const VkDeviceSize sizes[2] = {vbytes, ibytes};
@@ -1900,11 +1839,10 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
             }
         } else {
             // FALL BACK TO THE UPLOAD HEAP FOR THIS ONE MESH, not globally: staticMeshDefaultHeap_
-            // stays on, so the NEXT mesh tries Default again -- a transient failure (a one-shot
-            // command-buffer submit racing device teardown, say) should not silently downgrade every
-            // later mesh for the rest of the run. WARN once: the failure mode that actually recurs
-            // (out of device-local memory, a driver refusal) is systemic, and a line per mesh during
-            // a big scene load would flood the log for one cause already stated once.
+            // stays on so the NEXT mesh tries Default again -- a transient failure (a one-shot
+            // command-buffer submit racing device teardown, say) shouldn't downgrade every later
+            // mesh. WARN once: the failure mode that actually recurs (OOM, driver refusal) is
+            // systemic, and a line per mesh would flood the log for one cause.
             if (!meshDefaultHeapFallbackWarned_) {
                 meshDefaultHeapFallbackWarned_ = true;
                 AVER_WARN("[RHI.Vulkan] Default-heap mesh upload failed; falling back to the Upload "
@@ -1938,12 +1876,11 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     return static_cast<MeshHandle>(meshes_.size());
 }
 
-// W11: a new mesh sharing `source`'s vertex buffer, with its own independent index buffer -- the
-// LOD-ladder case IDevice::createMeshSharingVertices exists for (RHI.hpp's full contract): a
-// coarser LOD level keeps the same vertex positions/normals/uvs and only thins out which triangles
-// reference them, so duplicating the vertex stream per level is pure waste. See GpuMesh's
-// vbOwned/vbShares/vbSource fields for the bookkeeping this mirrors from the existing
-// ibOwned/ibShares/ibSource (createSkinTargetMesh) scheme, in the opposite direction.
+// W11: a new mesh sharing `source`'s vertex buffer, with its own index buffer -- the LOD-ladder case
+// IDevice::createMeshSharingVertices exists for (RHI.hpp's full contract): a coarser LOD keeps the
+// same vertex positions/normals/uvs, only thinning triangles, so duplicating the vertex stream per
+// level is pure waste. See GpuMesh's vbOwned/vbShares/vbSource fields (mirrors ibOwned/ibShares/
+// ibSource from createSkinTargetMesh, in the opposite direction).
 MeshHandle VulkanDevice::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
     return shareVertices(source, indices, indexCount, /*posed=*/false);
 }
@@ -1962,9 +1899,9 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     const GpuMesh& src = meshes_[source - 1];
     if (!src.alive || !src.vb || src.vertexCount == 0) return 0;
     // A compute-written (skin target) source's vertex buffer is rewritten every frame by whatever
-    // last posed it -- sharing it would make every sharer's geometry jitter with that pose instead
-    // of drawing its own, unposed LOD, which is not a bug a caller would think to suspect. RHI.hpp's
-    // own contract states this refusal explicitly.
+    // last posed it -- sharing it would make every sharer jitter with that pose instead of drawing
+    // its own, unposed LOD, not a bug a caller would think to suspect. RHI.hpp's contract states this
+    // refusal explicitly.
     if (src.computeWritten != posed) {
         if (posed) AVER_WARN("[RHI.Vulkan] createPosedPartMesh refused: mesh {} is not compute-written", source);
         else       AVER_WARN("[RHI.Vulkan] createMeshSharingVertices refused: source mesh {} is compute-written (a skin target)", source);
@@ -1980,11 +1917,11 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
             }
     }
 
-    // THE BUFFER THIS SHARE ACTUALLY POINTS AT: `source` itself when source owns its vertices, or
-    // source's own root when source is ALREADY a share. A share never points at another share -- see
-    // the vbShares increment below, which always lands on THIS resolved root, so a chain of
-    // createMeshSharingVertices calls off the same original mesh collapses to one shared buffer and
-    // one share count, never a multi-hop chain destroyMesh would have to walk.
+    // THE BUFFER THIS SHARE ACTUALLY POINTS AT: `source` when it owns its vertices, or source's own
+    // root when source is ALREADY a share -- a share never points at another share. The vbShares
+    // increment below always lands on this resolved root, so a chain of createMeshSharingVertices
+    // calls off one original mesh collapses to one shared buffer and one share count, never a
+    // multi-hop chain destroyMesh would have to walk.
     const MeshHandle root = src.vbOwned ? source : src.vbSource;
     if (root == 0 || root > meshes_.size()) return 0;
     const GpuMesh& rootMesh = meshes_[root - 1];
@@ -2015,9 +1952,8 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     m.indexCount = indexCount;
     // ibOwned stays true (GpuMesh's default): this mesh's OWN index buffer, never shared.
 
-    // Bounds are copied from `source` (RHI.hpp's contract), not from `root` -- identical today since
-    // createSkinTargetMesh never changes bounds either, but the two need not always coincide and the
-    // contract names source specifically.
+    // Bounds copied from `source` (RHI.hpp's contract), not `root` -- identical today since
+    // createSkinTargetMesh never changes bounds, but the two need not always coincide.
     m.boundsCentre[0] = src.boundsCentre[0]; m.boundsCentre[1] = src.boundsCentre[1]; m.boundsCentre[2] = src.boundsCentre[2];
     m.boundsRadius = src.boundsRadius;
 
@@ -2104,8 +2040,8 @@ MeshHandle VulkanDevice::createSkinTargetMesh(MeshHandle source, BufferHandle* o
 }
 
 // Drains the queue of skin-target meshes awaiting their rest-pose seed, via the SAME IRenderContext
-// a feature module would use -- correct because seedSkinTargets always runs after rhiContext_
-// exists (createMesh/createSkinTargetMesh both require rhiFactory_, which is what constructs it).
+// a feature module uses -- valid because this always runs after rhiContext_ exists (createMesh/
+// createSkinTargetMesh both require rhiFactory_, which constructs it).
 void VulkanDevice::seedSkinTargets() {
     if (skinSeeds_.empty() || !rhiContext_) return;
     for (const SkinSeed& sd : skinSeeds_) {
@@ -2132,19 +2068,18 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
         AVER_WARN("[RHI.Vulkan] destroyMesh({}) refused: {} skin target(s) still share its indices", mesh, m.ibShares);
         return false;
     }
-    // W11: symmetric to the ibShares refusal above, for the other buffer this GpuMesh can share --
-    // freeing a mesh whose VERTEX buffer a createMeshSharingVertices() LOD sibling still points at
-    // would leave that sibling drawing freed memory.
+    // W11: symmetric to the ibShares refusal above: freeing a mesh whose VERTEX buffer a
+    // createMeshSharingVertices() LOD sibling still points at would leave it drawing freed memory.
     if (m.vbShares > 0) {
         AVER_WARN("[RHI.Vulkan] destroyMesh({}) refused: {} LOD mesh(es) still share its vertices", mesh, m.vbShares);
         return false;
     }
     if (rhiFactory_) rhiFactory_->destroyBlasForMesh(mesh);
     if (rhiFactory_) {
-        // Only destroy the vertex buffer when THIS mesh owns it -- a share's vbBuffer handle names
-        // the ROOT's buffer (createMeshSharingVertices copies it verbatim), and destroying it here
-        // would free memory the root and every OTHER sharer still draws. Mirrors the ibOwned gate on
-        // the very next line, which has made the identical check for the index buffer all along.
+        // Only destroy the vertex buffer when THIS mesh owns it -- a share's vbBuffer names the
+        // ROOT's buffer (createMeshSharingVertices copies it verbatim), and destroying it here would
+        // free memory the root and every OTHER sharer still draws. Mirrors the ibOwned gate on the
+        // next line (same check, index buffer).
         if (m.vbOwned && m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
     }
@@ -2241,9 +2176,9 @@ void VulkanDevice::drawLines(LineHandle mesh, const f32 world[16]) {
     api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, kVkSetConstants, 1,
                                &sceneFrameSet_[frameIndex_], 1, &zeroOffset);
     api_.CmdPushConstants(cmd, scenePipelineLayout_, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, 64, world);
-    // Byte 65 onward is gBaseColor, whose .x carries the glow multiplier -- PSLine reads nothing else
-    // from it. Pushed on EVERY line draw because push constants persist: otherwise the grid/sculpt
-    // ring would inherit the last mesh's base-colour red as brightness. Mirrors D3D12Device::drawLines.
+    // Byte 65 onward is gBaseColor.x, the glow multiplier (PSLine reads nothing else from it).
+    // Pushed on EVERY line draw since push constants persist -- else grid/sculpt ring would inherit
+    // the last mesh's base-colour red as brightness. Mirrors D3D12Device::drawLines.
     api_.CmdPushConstants(cmd, scenePipelineLayout_, VK_SHADER_STAGE_ALL,
                           PushConstantLayout::kObjectOffset + 64, 4, &lineGlow_);
     VkDeviceSize off = 0;
@@ -2260,10 +2195,9 @@ void VulkanDevice::setViewportRect(u32 x, u32 y, u32 w, u32 h) {
     if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
     const u32 cw = (x + w > width_) ? width_ - x : w;
     const u32 ch = (y + h > height_) ? height_ - y : h;
-    // The caller thinks in present-space pixels, but the render target is the SCENE one --
-    // msaaColor_/depthBuffer_ are sceneWidth_ x sceneHeight_, smaller than the backbuffer whenever
-    // renderScale_ < 1 -- so the rect is scaled into scene space here once, rather than at every
-    // reader. Identity at renderScale_==1.0. Mirrors D3D12Device::setViewportRect.
+    // Caller thinks in present-space pixels, but the render target is SCENE-space (msaaColor_/
+    // depthBuffer_ are sceneWidth_ x sceneHeight_, smaller than the backbuffer whenever renderScale_ < 1)
+    // -- scaled here once rather than at every reader. Identity at renderScale_==1.0. Mirrors D3D12Device::setViewportRect.
     vpX_ = scaleToSceneW(x);  vpY_ = scaleToSceneH(y);
     vpW_ = scaleToSceneW(cw); vpH_ = scaleToSceneH(ch);
     if (vpW_ == 0) vpW_ = 1;
@@ -2281,9 +2215,9 @@ bool VulkanDevice::camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPo
     return true;
 }
 bool VulkanDevice::sceneViewport(f32 rect[4]) const {
-    // Same rect beginFrame() sets as the scene's Vulkan viewport -- vpW_==0 means no sub-rect, i.e.
-    // the whole scene target. SCENE-space: what a reprojecting feature needs, since its history
-    // textures are sized off sceneWidth_/sceneHeight_, not width_/height_. Mirrors D3D12Device::sceneViewport.
+    // Same rect beginFrame() sets as the Vulkan viewport; vpW_==0 means no sub-rect (whole scene
+    // target). SCENE-space: reprojecting features' history textures are sized off sceneWidth_/
+    // sceneHeight_, not width_/height_. Mirrors D3D12Device::sceneViewport.
     if (!rect) return true;
     rect[0] = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
     rect[1] = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
@@ -2320,10 +2254,9 @@ void VulkanDevice::setSkyAtmosphere(const SkyAtmosphere& s) {
     f32 sun[3] = {s.sunColor[0], s.sunColor[1], s.sunColor[2]};
     if (s.sunTemperatureK > 0.0f) {
         blackbodySrgb(s.sunTemperatureK, sun);
-        // Mirrors D3D12Device::setSkyAtmosphere: blackbodySrgb returns LINEAR sRGB, but
-        // lightColor is DISPLAY-ENCODED (packAtmosphere's e0 below and the shared HLSL prelude's
-        // srgbToLin(gLightColor) both decode it with pow(x, 2.2)), so the kelvin path has to
-        // re-encode here or a temperature-driven sun gets decoded twice.
+        // Mirrors D3D12Device::setSkyAtmosphere: blackbodySrgb returns LINEAR sRGB, but lightColor
+        // is DISPLAY-ENCODED (packAtmosphere's e0 below and the shared HLSL prelude's srgbToLin(gLightColor)
+        // both decode with pow(x, 2.2)), so the kelvin path must re-encode or a temperature sun decodes twice.
         for (int i = 0; i < 3; ++i) sun[i] = std::pow(std::fmax(sun[i], 0.0f), 1.0f / 2.2f);
     }
     for (int i = 0; i < 3; ++i) frameCB_.lightColor[i] = sun[i];
@@ -2438,10 +2371,9 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
     // Mirrors D3D12Device::packAtmosphere field for field; see its comment.
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
-    // THE SAME CALIBRATION D3D12Device APPLIES, and it has to be the same or the two backends
-    // disagree about how much light the sky delivers -- see that copy for why it is 1 (the
-    // atmosphere's SH is already in the sun's units) and where the old 8 came from. Change one,
-    // change both.
+    // Same calibration D3D12Device applies (must match, or the two backends disagree on sky
+    // brightness) -- see that copy for why it's 1 (SH is already in the sun's units) and where
+    // the old 8 came from. Change one, change both.
     constexpr f32 kSkyIrradianceCalibration = 1.0f;
     for (int k = 0; k < 9; ++k) {
         for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i] * kSkyIrradianceCalibration;
@@ -2450,20 +2382,18 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
 }
 
 // ================================================================================================
-// 11. The central per-instance draw. Structurally identical to D3D12Device::drawMesh: every
-//     feature's submitDraw first, then suppression, then any overridesScenePipeline feature's own
-//     PSO/bindings for THIS draw, then the backend's own fixed pipeline as the fallback.
+// 11. The central per-instance draw. Structurally identical to D3D12Device::drawMesh: submitDraw on
+//     every feature, then suppression, then an overridesScenePipeline feature's own PSO/bindings,
+//     then this backend's fixed pipeline as fallback.
 //
-//     UNLIKE D3D12Device, there is no boundRootSig_/boundPso_ cache: this backend re-binds the
-//     pipeline and b0 descriptor set on every call. Redundant, not incorrect -- an optimisation left
-//     for later, not a behavioural difference a caller could observe.
+//     UNLIKE D3D12Device, no boundRootSig_/boundPso_ cache: re-binds pipeline + b0 set every call --
+//     redundant, not incorrect; an optimisation left for later, not a behavioural difference a caller could observe.
 // ================================================================================================
 void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) {
-    // AUTO-CONSUME nextDrawPrepassed_ before any early return, per its contract (RHI.hpp:462-475),
-    // same as D3D12Device::drawMesh (D3D12Device.cpp:3096-3100): the flag must not leak onto a later,
-    // unrelated draw just because this one bailed out early (dead mesh, no swapchain).
-    // A compute-written mesh counts as prepassed ONLY if drawMeshDepthOnly just depth-drew this exact
-    // handle -- see D3D12Device::drawMesh's twin.
+    // AUTO-CONSUME nextDrawPrepassed_ before any early return, per its contract (RHI.hpp:462-475,
+    // D3D12Device.cpp:3096-3100): must not leak onto a later, unrelated draw just because this one
+    // bailed early (dead mesh, no swapchain). A compute-written mesh counts as prepassed ONLY if
+    // drawMeshDepthOnly just depth-drew this exact handle -- see D3D12Device::drawMesh's twin.
     const bool prepassed = nextDrawPrepassed_ &&
         (meshVertexBuffer(mesh) == 0 || (depthOnlyMesh_ != 0 && mesh == depthOnlyMesh_));
     nextDrawPrepassed_ = false;

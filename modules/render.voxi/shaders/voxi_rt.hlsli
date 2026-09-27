@@ -1,73 +1,43 @@
-// voxi_rt.hlsli -- the ray-traced lighting estimators voxi.hlsl's entry points shade with, split out
-// of voxi.hlsl's #if AVER_RT region. This is everything that region held BEFORE the ReSTIR GI block
-// (voxi_restir.hlsli, #include'd immediately after this file, still inside the same guard) -- the
+// voxi_rt.hlsli -- RT lighting estimators split out of voxi.hlsl's #if AVER_RT region: everything that
+// region held BEFORE the ReSTIR GI block (voxi_restir.hlsli, #include'd right after, same guard). The
 // scene/material resource layer a ray hit reads, the RayQuery helpers built on it, the sampling
-// primitives, and the estimators themselves. None of it is ReSTIR; ReSTIR calls INTO it.
-//
-// WHAT THIS FILE HOLDS, IN DECLARATION ORDER:
-//   - the RT scene/geometry/material resources: gScene (t2), RtVertex/RtInstance/RtMaterial,
-//     gRtVerts/gRtIndices/gRtInstances (t3/t4/t5), gRtMaterials (t9); under AVER_RT_BINDLESS, the
-//     bindless texture table gRtTextures (t0, space1) and the AVER_RD_ABLATE measurement-mode enum;
-//     the material-graph adapter built on top of it (averRtSampleSlot, averRtSampleSlotGraph,
-//     averRtUvGrad, averRtSurfaceUV, averRtPerturbNormal).
-//   - the cutout-aware RayQuery helpers every ray in this file, and in voxi_restir.hlsli, calls
-//     through: averRtCandidateOpaque, averRtProceedSolid.
-//   - the ray-traced history textures: gRtShadowHist/gRtShadowHistOut (t6/u2), gAoHist/gAoHistOut
-//     (t11/u4), gAoHitDistOut (u5), gNrdAo (t14), gGiRadianceOut/gNrdGi (u9/t15),
-//     gRtReflHist/gRtReflHistOut (t7/u3), gGBufNormalHist (t10, under AVER_GBUFFER_HISTORY).
-//   - the low-discrepancy sampling primitives: rtHash, rtRadicalInverse2, rtDiscSample.
-//   - the estimators: rtShadow; the local-light (lamp) struct RdLocalLight and its rdLocalIrradiance/
-//     rdLocalShadow; AverAmbientTraced/rtAmbientTraced/rtSkyOcclusion;
-//     rtReprojectTexel/rtReprojectHistory/rtReprojectAo; rtAoSpatial/rtShadowSpatial;
-//     rtSkyOcclusionTemporal; averShadowLum/averShadowTint/rtShadowTemporal; rtReflection.
-//
-// WHAT MUST PRECEDE THIS FILE'S #include LINE IN voxi.hlsl:
-//   - cbuffer VoxiFrame and the volume/shadow/backdrop resources and defines that sit above the
-//     #if AVER_RT guard in voxi.hlsl -- gVoxelParams, gRtParams, gRtHistParams, gAmbientParams,
-//     gRtDenoiseParams, gGiRestirParams and the rest of the cbuffer; AVER_VOX_*, AVER_AO_*,
-//     AVER_REFL_MIRROR_ROUGH, AVER_RT_MASK_* defines; gShadowTex/gShadowSamp (t1/s1); gGiShadowTex
-//     (t8); gBlendBackdrop (t10); averCausticFocus. All unconditional, all declared before AVER_RT
-//     opens.
-//   - the #if AVER_RT guard itself. This file carries no #if AVER_RT of its own -- like
-//     voxi_restir.hlsli, it is plain, guard-free text spliced into an already-open conditional,
-//     exactly as if it had never left voxi.hlsl.
-//   - the shared and material preludes voxi.hlsl is textually the tail of: gCamPos, gViewProj,
-//     gInvViewProjRel and the rest of the camera block; gMaterialSampler; the AVER_MAT_* flag bits;
-//     averVolumeTransmittance, averSunRadiance, averSkyIrradiance, averSkyRadianceCheap, gAmbient,
-//     PI. See voxi.hlsl's own file-level comment for what those preludes are and why a bad
-//     declaration anywhere in this chain fails every entry point at once, not just the ones that
-//     call this file's functions.
-//
-// WHAT DEPENDS ON THIS FILE:
-//   - voxi_restir.hlsli, included immediately after this one (still inside AVER_RT):
-//     giTraceInitialCandidate traces gScene directly through averRtProceedSolid and shades hits
-//     through the same material adapter this file builds -- its own header comment says so.
-//   - the backdrop/refraction glue and the reflection temporal/spatial wrappers further down
-//     voxi.hlsl, still inside AVER_RT, call rtReflection and rtShadow.
-//   - PSMainVoxi and PSRayDriven, after AVER_RT closes, call rtShadowTemporal and
-//     rtSkyOcclusionTemporal directly.
-//
-// THE ONE FORWARD DECLARATION IN THIS FILE, CARRIED OVER FROM voxi.hlsl UNCHANGED AND FOR THE SAME
-// REASON: `voxelUVW` and `insideVolume` are declared but not defined here, just above
-// rtAmbientTraced, because their real definitions sit with the cone tracer in voxi.hlsl's untouched
-// tail, well over a thousand lines below where AVER_RT closes. Do not "fix" this by moving the
-// definitions up, and do not delete the forward declaration as redundant -- both halves are
-// load-bearing exactly as split, and the declaration site still carries voxi.hlsl's own comment
-// explaining why.
-//
-// PRE-EXISTING, NOT INTRODUCED BY THIS SPLIT: gGBufNormalHist below is declared at register t10,
-// the same slot gBlendBackdrop uses above the AVER_RT guard in voxi.hlsl. Both sites call their own
-// slot a guess pending confirmation against the C++ side (same reasoning as gRtMaterials' t9).
-// Reported here rather than fixed -- moved verbatim, unchanged.
+// primitives, and the estimators. None of it is ReSTIR; ReSTIR calls INTO it.
+// HOLDS, in order: RT scene/geometry/material resources (gScene t2, RtVertex/RtInstance/RtMaterial,
+// gRtVerts/gRtIndices/gRtInstances t3/t4/t5, gRtMaterials t9; under AVER_RT_BINDLESS the bindless
+// texture table gRtTextures t0/space1 and the AVER_RD_ABLATE measurement enum; the material-graph
+// adapter averRtSampleSlot(Graph)/averRtUvGrad/averRtSurfaceUV/averRtPerturbNormal); the cutout-aware
+// RayQuery helpers every ray here (and in voxi_restir.hlsli) calls through: averRtCandidateOpaque,
+// averRtProceedSolid; the RT history textures (gRtShadowHist/Out t6/u2, gAoHist/Out t11/u4,
+// gAoHitDistOut u5, gNrdAo t14, gGiRadianceOut/gNrdGi u9/t15, gRtReflHist/Out t7/u3, gGBufNormalHist
+// t10 under AVER_GBUFFER_HISTORY); the LD samplers rtHash/rtRadicalInverse2/rtDiscSample; the
+// estimators rtShadow, lamp struct RdLocalLight + rdLocalIrradiance/rdLocalShadow,
+// AverAmbientTraced/rtAmbientTraced/rtSkyOcclusion, rtReprojectTexel/History/Ao,
+// rtAoSpatial/rtShadowSpatial, rtSkyOcclusionTemporal, averShadowLum/Tint/rtShadowTemporal, rtReflection.
+// MUST PRECEDE THIS #include IN voxi.hlsl: cbuffer VoxiFrame and the volume/shadow/backdrop
+// resources/defines above the AVER_RT guard (gVoxelParams, gRtParams, gRtHistParams, gAmbientParams,
+// gRtDenoiseParams, gGiRestirParams, AVER_VOX_*/AVER_AO_*/AVER_REFL_MIRROR_ROUGH/AVER_RT_MASK_* defines,
+// gShadowTex/gShadowSamp t1/s1, gGiShadowTex t8, gBlendBackdrop t10, averCausticFocus); the #if AVER_RT
+// guard itself (this file carries none of its own -- plain text spliced into an already-open
+// conditional); the shared/material preludes (gCamPos, gViewProj, gInvViewProjRel, gMaterialSampler,
+// AVER_MAT_* flags, averVolumeTransmittance, averSunRadiance, averSkyIrradiance, averSkyRadianceCheap,
+// gAmbient, PI -- see voxi.hlsl's file comment for why a bad declaration here fails every entry point).
+// DEPENDS ON THIS FILE: voxi_restir.hlsli (giTraceInitialCandidate traces gScene through
+// averRtProceedSolid, shades through the same material adapter); the backdrop/refraction glue and
+// reflection wrappers further down voxi.hlsl call rtReflection/rtShadow; PSMainVoxi/PSRayDriven call
+// rtShadowTemporal/rtSkyOcclusionTemporal directly.
+// FORWARD DECLARATION: voxelUVW/insideVolume are declared, not defined, just above rtAmbientTraced --
+// real definitions sit with the cone tracer over a thousand lines below where AVER_RT closes. Both
+// halves are load-bearing as split; don't move the definitions up or delete the declaration.
+// gGBufNormalHist below is guessed at t10, the slot gBlendBackdrop uses above the AVER_RT guard --
+// unconfirmed against the C++ side, same as gRtMaterials' t9 guess. Moved verbatim, unchanged.
 
 // DXR 1.1 inline ray tracing: traced from the pixel shader, no state objects or binding tables.
 RaytracingAccelerationStructure gScene : register(t2);
 
-// The flat geometry a reflection ray reads after it hits something. Four descriptors for the whole
-// scene rather than one per mesh or per material, because this RHI uses explicit descriptor tables
-// and not bindless: dynamic indexing INTO one bound resource (a StructuredBuffer read at a runtime
-// index, below) is a Tier 1 feature everywhere -- indexing into a descriptor HEAP, which none of
-// these are, is the only thing "bindless" actually means in this codebase.
+// The flat geometry a ray reads after hitting something. Four descriptors for the whole scene, not
+// per-mesh/material: this RHI uses explicit descriptor tables, not bindless -- indexing a bound
+// StructuredBuffer at a runtime index is Tier 1 everywhere; indexing a descriptor HEAP is the only
+// thing "bindless" means here, and none of these are that.
 struct RtVertex   { float3 pos; float3 nrm; float2 uv; };
 struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo;
                     float metallic; float roughness; uint materialIndex; };
@@ -76,21 +46,16 @@ StructuredBuffer<uint>       gRtIndices   : register(t4);
 StructuredBuffer<RtInstance> gRtInstances : register(t5);
 
 // ---- per-material data for a ray hit, keyed by RtInstance::materialIndex ----
-//
-// WHAT materialIndex REPLACES: `pad`, a u32 nothing on either side of this ABI ever read (grep
-// confirmed zero references before this change). A ray hit therefore had no per-material data
-// reachable at all. Repurposing an already-unread field costs zero bytes: RtInstance stays 96 bytes,
-// its C++-side static_assert (VoxiRenderer.hpp) is unchanged, and no existing pixel that never read
-// `pad` is affected by it meaning something now.
-//
+// materialIndex repurposes `pad`, a u32 nothing read (grep confirmed zero refs) -- zero extra bytes,
+// RtInstance stays 96 bytes (VoxiRenderer.hpp static_assert unchanged).
 // RtMaterial mirrors pbr::MaterialConstants (MaterialGpu.hpp) field-for-field, same order as
 // `cbuffer AverMaterial` (PbrShaders.cpp) -- a mismatched order reads a neighbour's bytes with no
 // compile error. Unread fields stay declared in order for the same reason: no partial
 // StructuredBuffer element in HLSL.
 #ifdef AVER_RT_BINDLESS
-// Ray path's texture array, in space1 to avoid colliding with space0's descriptor tables/SRVs/matrices.
-// AVER_RT_TEX_CAPACITY must equal PipelineLayout::bindlessTextureCount exactly (declaring more reads
-// past the root signature's range); fixed-size because this backend serialises root signature 1.0.
+// Ray path's texture array, space1 to avoid colliding with space0's descriptor tables/SRVs/matrices.
+// AVER_RT_TEX_CAPACITY must equal PipelineLayout::bindlessTextureCount exactly (more reads past the
+// root signature's range); fixed-size because this backend serialises root signature 1.0.
 #ifndef AVER_RT_TEX_CAPACITY
 #error "AVER_RT_TEX_CAPACITY must be defined by the pipeline that declares the bindless table"
 #endif
@@ -124,9 +89,8 @@ struct RtMaterial {
     uint   graphId;
     float  ior;
     float  transmission;
-    // These two mirror MaterialConstants::subsurfaceWeight/subsurfaceRadius, which spent the
-    // _pad0/_pad1 this used to declare. Same order, same offsets as MaterialConstants; the fields
-    // below take the struct to 176 bytes in all (MaterialGpu.hpp's static_assert).
+    // Mirrors MaterialConstants::subsurfaceWeight/subsurfaceRadius, replacing the _pad0/_pad1 this used
+    // to declare; same order/offsets (struct totals 176 bytes, MaterialGpu.hpp's static_assert).
     float  subsurfaceWeight;
     float  subsurfaceRadius;
     // Coat row, same order as MaterialConstants and the material_prelude.hlsl cbuffer -- three
@@ -145,27 +109,27 @@ struct RtMaterial {
     float3 attenuationColor;
     float  attenuationDistance;
 
-    // Lamp brightness at 1 metre in the sun's units, mirroring MaterialConstants::lightIntensity at
-    // offset 160 (took the struct from 160 to 176 bytes). > 0 is what sets AVER_MAT_LIGHT, which turns
-    // each draw using the material into a sphere light (gRdLocalLights, voxi.hlsl). The RT table
-    // uploads MaterialConstants bytes verbatim, so the pad must stay declared for the stride.
+    // Lamp brightness at 1m in the sun's units, mirrors MaterialConstants::lightIntensity (offset 160,
+    // taking the struct to 176 bytes). >0 sets AVER_MAT_LIGHT, turning the draw into a sphere light
+    // (gRdLocalLights, voxi.hlsl). Table uploads MaterialConstants bytes verbatim, so the pad must stay
+    // declared for the stride.
     float  lightIntensity;
     float3 _lightPad;
 };
 
 #ifdef AVER_RT_BINDLESS
-// One material map at a ray hit, or `fallback` where nothing bound. SampleLevel, never Sample: a
-// fullscreen ray pass's neighbour pixels may hit unrelated triangles, so implicit derivatives (and
-// the mip they pick) are garbage at every silhouette -- mip 0 aliases in the distance, but predictably.
-// NonUniformResourceIndex because neighbouring pixels genuinely hit different materials; without it
-// the hardware may broadcast one lane's index across the wave.
+// One material map at a ray hit, or `fallback` where nothing bound. SampleLevel, never Sample: implicit
+// derivatives are garbage at a fullscreen ray pass's silhouettes (neighbour pixels may hit unrelated
+// triangles) -- mip 0 aliases in the distance, but predictably. NonUniformResourceIndex because
+// neighbouring pixels genuinely hit different materials; without it the hardware may broadcast one
+// lane's index across the wave.
 // ---- AVER_RD_ABLATE: a measurement switch, not a feature ----
 // Ray-driven primary costs ~6.7ms of 14.55ms on PTTest vs raster's 7.82ms (RT on in both), strongly
-// pixel-bound, but no RT quality dial moves it (--rt-rays 4/2/1: 14.49/14.46/14.44). GPU spans bracket
-// draws not terms, so the only way to attribute cost is to neutralise one term at a time and diff.
-// EVERY NON-ZERO VALUE RENDERS A DELIBERATELY WRONG FRAME -- never wire one to a quality tier; 0 is
-// the only correct value and the default everywhere. Terms should roughly sum to the raster gap
-// (7.82ms); if ablating everything doesn't approach that, the ablation isn't measuring what it claims.
+// pixel-bound; no RT quality dial moves it (--rt-rays 4/2/1: 14.49/14.46/14.44). GPU timing spans
+// bracket draws, not terms, so terms are isolated by neutralising one at a time and diffing.
+// EVERY NON-ZERO VALUE RENDERS A DELIBERATELY WRONG FRAME -- never wire to a quality tier; 0 is the
+// only correct/default value. Terms should roughly sum to the raster gap (7.82ms); if they don't,
+// the ablation isn't measuring what it claims.
 #ifndef AVER_RD_ABLATE
 #define AVER_RD_ABLATE 0
 #endif
@@ -179,14 +143,12 @@ struct RtMaterial {
 // fallback, so roughness jumps past the `s.rough <= 0.75` gate and REROUTES onto the voxel-cone
 // fallback -- why mode 5 combined with others was SLOWER than sky alone, and deltas didn't add up.
 #define AVER_RD_ABL_ALL     6   // shadow + GI + reflection + sky -- the method check
-// 7 differs from the others: restores ACCEPT_FIRST_HIT_AND_END_SEARCH on the sun-shadow ray (dropped
-// so glass could attenuate rather than stop a shadow), measuring that decision's cost. Knowingly
-// breaks tinted shadows through glass; never wire it to a quality tier either.
+// 7: restores ACCEPT_FIRST_HIT_AND_END_SEARCH on the sun-shadow ray (dropped so glass could attenuate
+// rather than stop a shadow), pricing that decision. Knowingly breaks tinted shadows through glass;
+// never wire it to a quality tier either.
 #define AVER_RD_ABL_SHADOW_FIRSTHIT 7
-// 8..11 CLOSE THIS HARNESS'S OWN BLIND SPOTS. Modes 1-6 above between them leave four of the pass's
-// larger terms unmeasurable, which matters more than it sounds: a sweep that reports 1-6 looks
-// complete and silently attributes none of the cost below, so the residual gets blamed on whatever
-// mode happened to be biggest.
+// 8..11 close blind spots modes 1-6 leave in four larger terms; without them a 1-6 sweep looks
+// complete and blames the residual on whatever mode was biggest.
 #define AVER_RD_ABL_SKYOCC   8  // the sky-visibility ray (rtSkyOcclusion) -- ambient occlusion
 // The SPECULAR cone, traced in the rough-surface branch. NOT covered by AVER_RD_ABL_GI, which only
 // skips coneTracedIndirect -- so mode 2 has always left a 14th cone running and called it "GI off".
@@ -194,30 +156,24 @@ struct RtMaterial {
 // skyColor in the ROUGH branch. Mode 4 ablates only the reflection branch's march; this is the other
 // call site, and it is the one an ENCLOSED scene actually takes.
 #define AVER_RD_ABL_ROUGHSKY 10
-// averApplyFog: a 4-step aerial march plus a possible second 32-step atmosphere march, run
-// unconditionally per pixel. This function is recorded elsewhere in the tree as having once been
-// 41% of a frame. MEASURED on Sponza it is now 0.22 ms of a 16.83 ms pass -- 1.3% -- so that
-// history is a reason to keep it attributable, not a reason to assume it is still expensive.
+// averApplyFog: 4-step aerial march + possible 32-step atmosphere march, run unconditionally per
+// pixel. Once 41% of a frame (elsewhere in the tree); MEASURED on Sponza now 0.22ms/16.83ms (1.3%) --
+// history to keep it attributable, not a reason to assume it's still expensive.
 #define AVER_RD_ABL_FOG      11
-// The AERIAL HALF of averApplyFog alone -- the 4-step atmosphere march between camera and
-// surface -- with height fog left running, since mode 11 removes both and cannot separate them.
-// EXISTS BECAUSE A GATE WAS PROPOSED FOR THAT MARCH and there was no way to price it: it is the
-// only term in averApplyFog with no magnitude threshold, which makes it look like the eager-lerp
-// bug this codebase has fixed twice. It measured 0.19 ms, 1.1% of the pass, while changing 28.6%
-// of the frame by up to 37 codes -- used, not discarded -- so no gate was added. Kept so the next
-// person to notice the missing threshold can re-run the number instead of re-deriving it.
+// The AERIAL HALF alone (the 4-step march), height fog left running since mode 11 removes both and
+// can't separate them. Exists because a gate was proposed for this march (it's the only term in
+// averApplyFog with no magnitude threshold, so it looks like the eager-lerp bug fixed twice before):
+// measured 0.19ms/1.1% of the pass while changing 28.6% of the frame by up to 37 codes -- used, not
+// discarded, so no gate was added. Kept so the number can be re-run rather than re-derived.
 #define AVER_RD_ABL_AERIAL   12
 
-// READ THIS BEFORE SUBTRACTING TWO ABLATION NUMBERS. Several modes REROUTE work rather than removing
-// it, so the deltas are not additive and a term can measure NEGATIVE:
-//   - Mode 3 (REFL) leaves specHit false, which makes `!specHit || skyW > 0.0` always true and forces
-//     a full 32-step skyColor(R) march that a committed hit would have skipped. Mode 3's delta is
-//     therefore (reflection cost) MINUS (added sky march).
-//   - Mode 5 (TEX) is the documented one, above -- and additionally makes every alpha-masked cutout
-//     candidate commit, terminating traversal EARLIER than reality, so it can read faster than truth.
-//   - Mode 1 (SHADOW) replaces only the primary rtShadowTemporal call. The reflection's inner shadow
-//     ray and the bounce loop's shadow ray both keep running, so it measures the primary shadow
-//     estimator, NOT all shadow rays in the pass.
+// READ BEFORE SUBTRACTING TWO ABLATION NUMBERS: several modes REROUTE work rather than removing it,
+// so deltas are not additive and a term can measure NEGATIVE.
+//   - Mode 3 (REFL): specHit false makes `!specHit || skyW > 0.0` always true, forcing a full 32-step
+//     skyColor(R) march a hit would've skipped, so its delta is (reflection cost) MINUS (added sky march).
+//   - Mode 5 (TEX): also commits every alpha-masked cutout candidate, ending traversal EARLY.
+//   - Mode 1 (SHADOW): replaces only the primary rtShadowTemporal call; the reflection's and bounce
+//     loop's shadow rays keep running, so it measures the primary estimator only.
 
 float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 gy, float4 fallback) {
     const uint idx = mat.texIndex[slot];
@@ -234,23 +190,17 @@ float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 
 #endif
 }
 
-// ---- the material-graph adapter for this pass ---------------------------------------------------
-//
-// A generated material graph emits `averSampleSlot(slot, uv)`, which reads the eight BOUND texture
-// registers through the material cbuffer's sampler. A ray hit has neither: its maps live in the
-// bindless gRtTextures array, indexed through the hit's own RtMaterial. So the generated body cannot
-// be used here verbatim -- and that, not any missing feature, is why "no material GRAPH runs on any
-// ray path" was true for the renderer that is the DEFAULT path.
-//
-// MaterialGraphHlsl.cpp emits a second copy of every graph body with `averSampleSlot(` rewritten to
-// `averRtSampleSlotGraph(`, so the two copies differ in exactly one token and cannot drift.
-//
-// THE MATERIAL TRAVELS IN A STATIC, NOT A PARAMETER, and that is the part worth explaining. The
-// generated body is written by a module that cannot see RtMaterial -- Aver.Render.PBR.Materials has
-// no idea this backend exists, and teaching it would invert the dependency. Threading `mat` through
-// would mean the emitter naming a type it must not know. A per-thread static costs nothing (HLSL
-// statics are per-invocation, not shared) and keeps the emitter ignorant, which is the seam that
-// matters. Set these immediately before calling the graph; nothing else reads them.
+// ---- the material-graph adapter for this pass ----
+// A generated graph emits `averSampleSlot(slot, uv)`, reading the eight BOUND texture registers through
+// the material cbuffer's sampler; a ray hit has neither (its maps live in bindless gRtTextures, indexed
+// via RtMaterial), so the generated body can't be used verbatim -- not a missing feature, why no
+// material GRAPH ran on any ray path for the DEFAULT renderer. MaterialGraphHlsl.cpp emits a second
+// copy with `averSampleSlot(` rewritten to `averRtSampleSlotGraph(`, differing by one token.
+// MATERIAL TRAVELS IN A STATIC, NOT A PARAMETER: the generated body's module can't see RtMaterial
+// (Aver.Render.PBR.Materials doesn't know this backend exists), so threading `mat` through would mean
+// naming a type it must not know. A per-thread static costs nothing (HLSL statics are per-invocation,
+// not shared) and keeps the emitter ignorant. Set immediately before calling the graph; nothing else
+// reads them.
 static RtMaterial gAverGraphMat;
 static float2     gAverGraphGx;
 static float2     gAverGraphGy;
@@ -264,14 +214,11 @@ float4 averRtSampleSlotGraph(uint slot, float2 uv) {
 }
 
 // The UV-space footprint of one pixel's primary ray, for SampleGrad.
-//
-// WHY THIS IS NOT ddx(uv)/ddy(uv). A pixel shader's implicit derivatives describe the SCREEN
-// coordinate; in a fullscreen ray pass the neighbouring lane may have hit a different triangle, a
-// different object, or nothing, so those derivatives are meaningless here. What IS available is
-// rdRayDx/rdRayDy -- the neighbouring pixels' own primary rays, reconstructed analytically via
-// averViewRayDir (through gInvViewProjRel) and scaled by this ray's hitT, already built in this
-// shader for the shadow disc.
-// That is a real world-space footprint; this turns it into a UV-space one.
+// NOT ddx(uv)/ddy(uv): implicit derivatives describe the screen coordinate, meaningless in a
+// fullscreen ray pass where the neighbour lane may have hit an unrelated triangle. Uses
+// rdRayDx/rdRayDy instead -- neighbouring pixels' primary rays, reconstructed via averViewRayDir
+// (gInvViewProjRel) and scaled by this ray's hitT, already built here for the shadow disc -- a real
+// world-space footprint that this turns into a UV-space one.
 void averRtUvGrad(RtMaterial mat, RtInstance inst, float3 N,
                   float3 p0, float3 p1, float3 p2,
                   float2 t0, float2 t1, float2 t2,
@@ -325,10 +272,10 @@ void averRtUvGrad(RtMaterial mat, RtInstance inst, float3 N,
 }
 
 // The texture coordinate a ray hit samples at: mesh UV, or a planar projection for world-aligned UV.
-// The first version of this path sampled every material at mesh UV, which read as noise on any mesh
-// whose UVs don't match its projection (PTTest's floor/concrete, worlduv=1) -- missed because
-// ElectricDreams terrain, where this was first measured, doesn't set the flag.
-// Mirrors averSurfaceUV (material_prelude.hlsl), inst.objectToWorld standing in for gWorld.
+// Sampling every material at mesh UV read as noise on a mesh whose UVs don't match its projection
+// (PTTest's floor/concrete, worlduv=1) -- missed initially since ElectricDreams terrain, where this
+// was first measured, doesn't set the flag. Mirrors averSurfaceUV (material_prelude.hlsl),
+// inst.objectToWorld standing in for gWorld.
 float2 averRtSurfaceUV(RtMaterial mat, RtInstance inst, float3 wpos, float3 N, float2 meshUV) {
     if (!(mat.flags & AVER_MAT_WORLD_UV)) return meshUV;
     const float3 ax = normalize(inst.objectToWorld[0].xyz);
@@ -398,32 +345,22 @@ float3 averRtPerturbNormal(RtMaterial mat, RtInstance inst, float3 N, float3 nTS
 }
 #endif
 // SLOT t9 IS A GUESS: table 0's next free SRV after t8. kGiSrvCount (VoxiGiShaders.hpp) must become
-// 10 for table 1 (material textures) to auto-rebase from t9 to t10 (see giLayout()). Follows the
-// t3/t4/t5 recipe: one more setSrvBuffer call, built like gRtInstances. C++ side (kGiSrvCount,
-// giTableKinds, the per-frame buffer) owned by a concurrent agent on VoxiRenderer.hpp/.cpp -- if
-// their actual slot differs from t9, move THIS line.
+// 10 for table 1 (material textures) to auto-rebase t9->t10 (see giLayout()) -- one more setSrvBuffer
+// call, built like gRtInstances. C++ side (kGiSrvCount, giTableKinds, the per-frame buffer) owned by a
+// concurrent agent on VoxiRenderer.hpp/.cpp -- if their actual slot differs from t9, move THIS line.
 StructuredBuffer<RtMaterial> gRtMaterials : register(t9);
 
-// ---- ALPHA-TESTED GEOMETRY, SEEN BY A RAY --------------------------------------------------------
-//
-// THE HOLE A LEAF CARD IS MADE OF DID NOT EXIST FOR ANY RAY. createBlas marks every geometry OPAQUE
-// and, until this change, only a BLENDED material un-opaqued its instance -- so an alpha-MASKED
-// material (foliage, chain-link, grates: opaque where it is opaque, absent where it is not) was
-// traced as a solid sheet. The raster depth prepass clips it correctly (material_prelude.hlsl's
-// `clip(s.alpha - a.alphaCutoff)`), so the two paths disagreed, and the ray-driven path -- the
-// standing default -- was the wrong one. Every leaf rendered as its bounding rectangle.
-//
-// WHAT THE FIX COSTS: an alpha-masked instance is now FORCE_NON_OPAQUE, which gives up the
-// hardware's right to skip any-hit on it. Each candidate on such an instance pays an index fetch,
-// three vertex reads and one texture sample. Opaque geometry is untouched and keeps the fast path.
-//
-// TAKES THE RayQuery BY REFERENCE and is written against the ONE template argument every trace in
-// this file uses. A second flag set would need its own copy -- HLSL has no way to be generic over
-// the flags, which is exactly why the loops below call this rather than inlining it six times.
-// GUARDED ON AVER_RT_BINDLESS, which is what gates the material and texture tables this reads
-// (averRtSampleSlot and averRtSurfaceUV are both inside that block). Without them a cutout cannot be
-// expressed at all -- there is no alpha to fetch -- so every candidate is exactly as solid as its
-// geometry says, which is the behaviour this file had before any of this.
+// ---- ALPHA-TESTED GEOMETRY, SEEN BY A RAY ----
+// createBlas marks every geometry OPAQUE; only BLENDED materials un-opaqued their instance, so an
+// alpha-MASKED one (foliage, chain-link, grates) traced as a solid sheet -- every leaf rendered as its
+// bounding rectangle -- disagreeing with the raster depth prepass's correct
+// `clip(s.alpha - a.alphaCutoff)` (material_prelude.hlsl). FIX COST: an alpha-masked instance is now
+// FORCE_NON_OPAQUE (gives up the hardware's any-hit skip); each candidate pays an index fetch, three
+// vertex reads, one texture sample. Opaque geometry is untouched.
+// BY REFERENCE, against the ONE RayQuery template argument every trace in this file uses (HLSL can't
+// be generic over the flags, why the loops below call this rather than inlining it six times). Guarded
+// on AVER_RT_BINDLESS, which gates the material/texture tables this reads; without it no cutout can be
+// expressed, so every candidate is as solid as its geometry.
 bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
 #ifndef AVER_RT_BINDLESS
     return true;
@@ -466,15 +403,12 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
 }
 
 // Runs a query to its nearest genuinely-solid hit, honouring cutouts on the way.
-//
-// REPLACES `RAY_FLAG_FORCE_OPAQUE` + a single `Proceed()`. That idiom was correct while the only
-// non-opaque instances were translucent ones, which these rays exclude by mask -- its own comment
-// called FORCE_OPAQUE "provably a no-op here", and it was, right up until an alpha-masked instance
-// could appear in the opaque lane. With the flag left on, the hardware commits the leaf card and
-// never asks; without it, a candidate arrives and this decides.
-//
-// STILL BOUNDED IN PRACTICE by the mask: only alpha-masked instances produce candidates on these
-// rays, so a scene with no cutout materials loops exactly as many times as it used to.
+// Replaces `RAY_FLAG_FORCE_OPAQUE` + a single `Proceed()`, correct only while non-opaque instances
+// were all translucent (excluded by mask, once called "provably a no-op here") -- once an
+// alpha-masked instance could appear in the opaque lane, that flag made the hardware commit the leaf
+// card without asking.
+// Still bounded in practice: only alpha-masked instances produce candidates here, so a scene with no
+// cutout materials loops exactly as before.
 void averRtProceedSolid(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
     while (q.Proceed()) {
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE && averRtCandidateOpaque(q))
@@ -492,56 +426,37 @@ RWTexture2D<float2> gRtShadowHistOut : register(u2);
 // pairs at once and no fourth constant is needed.
 Texture2D<float2>   gAoHist    : register(t11);
 RWTexture2D<float2> gAoHistOut : register(u4);
-// THE SAME RAY'S HIT DISTANCE, WRITTEN AND NEVER READ BACK by anything in this file.
-//
-// [0,1] as a fraction of the ray's own TMax (gVoxelParams.z, Settings::giMaxDistance): 1 means
-// every sample escaped to the sky, 0 means every sample hit something at the shading point. It is
-// deliberately NOT normalised the way any particular denoiser wants it -- an external filter's
-// normalisation curve is that filter's business, and baking one in here would make this texture
-// mean whatever the current consumer happens to be. A consumer that wants world units multiplies
-// by giMaxDistance, which it has.
-//
-// WHY THE OCCLUSION ALONE IS NOT ENOUGH, since that is the obvious question. A filter that only
-// knows "this pixel is 30% occluded" cannot tell a wide, distant opening from a tight crevice, so
-// it cannot choose how far to spread a sample without crossing an edge that is really there.
-// Distance is what sets that radius. NVIDIA NRD calls this IN_DIFF_HITDIST and REBLUR_DIFFUSE_
-// OCCLUSION does not run without it -- see modules/render.nrd/README.md.
-//
-// GUARDED BY gRtDenoiseParams.w, the same flag as the u4/t11 pair above, because it is allocated
-// and bound under exactly the same condition (VoxiRenderer::aoHistoryWanted). Low and Medium do
-// not trace this ray at all, so at those tiers the slot is genuinely absent and must not be
-// touched -- writing a null UAV is undefined, not merely wasted.
+// The same ray's hit distance, written and never read back by anything in this file. [0,1] as a
+// fraction of TMax (gVoxelParams.z, giMaxDistance): 1 = escaped to sky, 0 = hit at the shading point.
+// Deliberately NOT normalised to any denoiser's curve -- a consumer wanting world units multiplies by
+// giMaxDistance. DISTANCE MATTERS BECAUSE OCCLUSION ALONE CAN'T: "30% occluded" can't distinguish a
+// wide distant opening from a tight crevice, so a filter can't size its spread radius without it.
+// NVIDIA NRD calls this IN_DIFF_HITDIST; REBLUR_DIFFUSE_OCCLUSION won't run without it (see
+// modules/render.nrd/README.md).
+// Guarded by gRtDenoiseParams.w (same flag/condition as u4/t11, VoxiRenderer::aoHistoryWanted).
+// Low/Medium never trace this ray, so the slot is genuinely absent there and must not be touched --
+// writing a null UAV is undefined, not merely wasted.
 RWTexture2D<float>  gAoHitDistOut : register(u5);
 
-// t14: the same signal, one frame later, after NVIDIA NRD has filtered it.
-//
-// DECLARED HERE RATHER THAN BESIDE ITS REGISTER NEIGHBOURS t12/t13, which sit ~700 lines further
-// down with the ReSTIR block: HLSL has no forward declarations, and rtSkyOcclusionTemporal -- the
-// only reader -- comes BEFORE them. Beside the u5 it filters is also where it explains itself, since
-// the two textures hold the same quantity in the same encoding (see AverAmbientTraced::hitDist).
-//
-// ROUTINELY ABSENT, AND THE READER MUST TEST FOR IT. The pass needs NRD in the build, a D3D12
-// device (NRD wants its constant buffer and samplers in register space 1, which Vulkan refuses on
-// purpose) and the G-buffer, which is off by default. VoxiRenderer clears this slot on any frame it
-// did not denoise, so GetDimensions() returning 0 means "not denoised THIS frame" rather than
-// "never" -- a frozen last-good image would be the worse failure.
+// t14: the same signal, one frame later, after NVIDIA NRD has filtered it. Declared here rather than
+// beside its t12/t13 register neighbours (~700 lines down with ReSTIR): HLSL has no forward
+// declarations and rtSkyOcclusionTemporal, the only reader, comes before them -- and here is beside
+// the u5 it filters, same quantity/encoding (see AverAmbientTraced::hitDist).
+// ROUTINELY ABSENT -- readers must test for it. Needs NRD in the build, D3D12 (Vulkan refuses NRD's
+// space-1 layout) and the G-buffer (off by default). VoxiRenderer clears this slot on any undenoised
+// frame, so GetDimensions()==0 means "not denoised this frame", not "never" -- a frozen last-good
+// image would be the worse failure.
 Texture2D<float>    gNrdAo        : register(t14);
 
 // u9/t15: the ReSTIR GI radiance on its way to NRD's REBLUR_DIFFUSE, and on its way back.
-//
-// rgb = the indirect diffuse radiance giRestirIndirect produced for this pixel, a = the NORMALISED
-// distance the candidate ray travelled to find it. NRD packs and unpacks that pair itself, so both
-// channels are written raw -- and the normalisation is by the SAME giMaxDistance the sky-occlusion
-// hit distance uses (gVoxelParams.z), which is what lets one hitDistParams describe both signals.
-//
-// WHY THE RADIANCE NEEDS ITS OWN TEXTURE rather than riding the occlusion one: they are different
-// quantities with different denoisers. Occlusion is a scalar NRD filters with
-// REBLUR_DIFFUSE_OCCLUSION; this is colour, filtered by REBLUR_DIFFUSE, which keeps its own separate
-// history. Sharing a texture would mean sharing a history, and the two signals decorrelate.
-//
-// BOTH ARE ABSENT UNLESS ReSTIR GI IS ON *AND* NRD IS RUNNING, and the readers test for that the
-// same way t14's does -- a null-filled Texture2D reports zero dimensions. Writing is guarded on
-// gGiRestirParams.x, which already says whether this frame bound the ReSTIR slots at all.
+// rgb = giRestirIndirect's indirect diffuse radiance for this pixel; a = the candidate ray's distance,
+// normalised by the SAME giMaxDistance the sky-occlusion hit distance uses (one hitDistParams
+// describes both signals). NRD packs/unpacks the pair itself.
+// OWN TEXTURE, NOT SHARED WITH OCCLUSION: different denoisers with separate histories (scalar
+// REBLUR_DIFFUSE_OCCLUSION vs colour REBLUR_DIFFUSE) -- sharing a texture would share a history, and
+// the two signals decorrelate.
+// BOTH ABSENT UNLESS ReSTIR GI IS ON *AND* NRD IS RUNNING; readers test via zero dimensions like
+// t14's. Writing is guarded on gGiRestirParams.x (says whether ReSTIR slots are bound this frame).
 RWTexture2D<float4> gGiRadianceOut : register(u9);
 Texture2D<float4>   gNrdGi         : register(t15);
 
@@ -551,20 +466,16 @@ Texture2D<float4>   gRtReflHist    : register(t7);
 RWTexture2D<float4> gRtReflHistOut : register(u3);
 
 // ---- Last frame's normal-roughness G-buffer, read-only, for the spatial denoisers' crease term ----
-// NOT the same resource as SV_TARGET3 below: that's THIS frame's, bound as an RTV by the same draw
-// that would need it as an SRV, which no backend allows and no pixel shader could see anyway
-// (not-yet-written neighbour output). Same ping-pong fix as rtShadowHist_/rtReflHist_, applied to
-// this channel -- SV_TARGET3 stays the "write" half, this is the "read last frame" half.
-//
-// Gated behind its OWN define, not AVER_GBUFFER: that only proves the single non-ping-ponged target
-// exists. Reading an unbound register is a silent null-descriptor read on real hardware and a
-// Vulkan validation failure, so this stays off until the ping-ponged pair (VoxiRenderer.hpp/.cpp,
-// D3D12Device.cpp, VulkanDevice.cpp) exists -- compiled in only with AVER_GBUFFER_HISTORY=1 on top
-// of AVER_GBUFFER=1, a host-side contract this file does not itself enforce.
-//
-// SLOT t10 IS A GUESS (same reasoning as gRtMaterials' t9): move this line if the real slot differs.
-// Assumed the same resolution as gRtShadowHist -- tap loops below reuse ITS GetDimensions()/bounds
-// check rather than querying this texture separately; unverified here since allocation is C++-side.
+// NOT the same resource as SV_TARGET3 below (this frame's, bound as an RTV by the same draw -- no
+// backend allows reading that as an SRV, and a pixel shader couldn't see unwritten neighbour output
+// anyway). Same ping-pong fix as rtShadowHist_/rtReflHist_ applied to this channel.
+// Gated on its OWN define, not AVER_GBUFFER (which only proves the non-ping-ponged target exists):
+// reading an unbound register is a silent null-descriptor read / Vulkan validation failure, so this
+// stays off until the ping-ponged pair (VoxiRenderer.hpp/.cpp, D3D12Device.cpp, VulkanDevice.cpp)
+// exists -- AVER_GBUFFER_HISTORY=1 on top of AVER_GBUFFER=1, enforced host-side, not here.
+// SLOT t10 IS A GUESS (same reasoning as gRtMaterials' t9). Assumed same resolution as
+// gRtShadowHist -- tap loops reuse ITS GetDimensions() rather than querying this separately;
+// unverified since allocation is C++-side.
 #if AVER_GBUFFER_HISTORY
 Texture2D<float4> gGBufNormalHist : register(t10);
 #endif
@@ -580,13 +491,13 @@ float rtHash(float2 p) {
 }
 
 
-// Radical inverse of `i` in base 2 (bits reflected about the binary point) in [0,1). Makes the
-// sample sequence NESTED, unlike the sqrt((k+0.5)/n) it replaced: that put sample k at a radius
-// depending on the TOTAL ray count, so n=2 and n=4 were unrelated estimators with no shared samples.
-// phi(k) depends on k alone, so raising the ray count keeps every ray already traced and fills in
-// between -- what lets a ray-count sweep read as convergence and one baseline serve every count.
+// Radical inverse of `i` in base 2 (bits reflected about the binary point) in [0,1). Sample sequence
+// is NESTED (unlike the sqrt((k+0.5)/n) it replaced, which put sample k's radius at a radius
+// depending on total ray count n -- so n=2 and n=4 were unrelated estimators, no shared samples):
+// phi(k) depends on k alone, so raising ray count fills in between existing samples rather than
+// replacing them, letting a ray-count sweep read as convergence.
 // EXACT on every adapter (unlike a hash): reversebits + IEEE round-to-nearest + 2^-32 being a power
-// of two make the multiply exact, which the gate oracle's bit-exact 9-configuration comparison needs.
+// of two make the multiply exact, which the gate oracle's bit-exact 9-configuration comparisons need.
 float rtRadicalInverse2(uint i) {
     return (float)reversebits(i) * 2.3283064365386963e-10;   // 1 / 2^32
 }
@@ -604,40 +515,25 @@ float2 rtDiscSample(uint k, float ang0) {
 }
 
 // ---- F1 (R0): A COSINE-WEIGHTED HEMISPHERE SAMPLE, NOT A FIXED 45-DEGREE RING ----
-//
-// THE BUG THIS REPLACES. rtDiscSample(0, ang0) always returns a point at radius sqrt(0.5) on the
-// unit disc -- k=0 makes rtRadicalInverse2(k+1) exactly 0.5, so sqrt of that is fixed regardless of
-// ang0, which only rotates the azimuth. Lifted onto the hemisphere by cosTheta = sqrt(1 -
-// dot(xi,xi)), that is cosTheta == 1/sqrt(2) for EVERY pixel, on EVERY frame: not a noisy cosine
-// sample, a deterministic 45-degree ring. The ReSTIR candidate (giTraceInitialCandidate, below in
-// voxi_restir.hlsli) and the sky-occlusion ray just below in this file both drew from it. A roof
-// edge, or any occluder boundary that does not happen to sit at 45 degrees, reads too open or too
-// closed by a fixed, scene-dependent step -- and no amount of temporal accumulation can average that
-// away, because every frame draws the identical direction (this file's own words on rtAmbientTraced's
-// per-pixel-only hash, a few hundred lines below, are the same disease: "a deterministic wrong answer
-// is exactly what temporal accumulation cannot fix").
-//
-// WHY A NEW FUNCTION RATHER THAN FIXING rtDiscSample ITSELF: rtShadow and rtReflection (both this
-// file, further down) call rtDiscSample too, deliberately, for a sun disc and a fixed specular ring
-// respectively -- neither wants a cosine-hemisphere distribution, and changing what
-// rtDiscSample returns out from under them would silently retarget two features this task does not
-// own. This is a sibling sampler for the one caller that actually wanted Malley's method: a uniform
-// point on the unit disc (u in [0,1), not the radical-inverse radius above), lifted onto the
-// hemisphere via sqrt(u). For a cosine-weighted disc sample, P(cosTheta < c) = c^2 -- the correct
-// cosine law -- which the fixed-ring sampler above never had regardless of how ang0 was chosen.
-//
-// idx = frameIdx * n + k KEEPS THE SEQUENCE NESTED ACROSS RAY COUNT, exactly like rtRadicalInverse2's
-// own comment: raising n does not renumber the samples a lower n already drew, it only appends past
-// them within the same frame's block. u then folds a fresh radical-inverse term together with a
-// per-pixel, per-stream hash (streamSalt keeps two callers at the same (pixel, frame, k) -- the
-// ReSTIR candidate at streamSalt 0.0 and the sky-occlusion ray at 0.37 -- from ever drawing the same
-// u), so successive frames sweep u across [0,1) rather than repeating one radius forever.
-//
-// DETERMINISTIC IN (pixel, frame index) ONLY, no true per-frame RNG: this file's standing rule that
-// RT sampling be a pure function of its inputs for the gate oracle (voxi_rt.hlsli:1652-1659, on
-// exactly this question for rtShadowTemporal's own frameIdx use) applies here the same way -- a
-// --frames N run always ends on the same frameIdx, so the same run reproduces the same pixel, and
-// this sampler is safe for the same reason that one already is.
+// BUG THIS REPLACES: rtDiscSample(0, ang0) always returns radius sqrt(0.5) (k=0 makes
+// rtRadicalInverse2(k+1) exactly 0.5); lifted via cosTheta = sqrt(1-dot(xi,xi)), that's cosTheta ==
+// 1/sqrt(2) for every pixel on every frame -- a deterministic 45-degree ring, not a cosine sample.
+// The ReSTIR candidate (giTraceInitialCandidate, voxi_restir.hlsli) and the sky-occlusion ray both
+// drew from it; an occluder boundary off 45 degrees reads too open/closed by a fixed step that no
+// temporal accumulation can fix (same disease as rtAmbientTraced's per-pixel-only hash below: "a
+// deterministic wrong answer is exactly what temporal accumulation cannot fix").
+// NEW FUNCTION, NOT A FIX TO rtDiscSample: rtShadow and rtReflection deliberately reuse rtDiscSample
+// for a sun disc / fixed specular ring, neither wanting a cosine-hemisphere distribution --
+// retargeting rtDiscSample itself would silently break two features this task doesn't own. This is a
+// sibling sampler using Malley's method: a uniform disc point (u in [0,1)) lifted via sqrt(u), giving
+// the correct cosine law P(cosTheta < c) = c^2.
+// idx = frameIdx*n+k keeps the sequence NESTED across ray count, same reasoning as
+// rtRadicalInverse2. streamSalt keeps two callers at the same (pixel, frame, k) (ReSTIR at 0.0,
+// sky-occlusion at 0.37) from drawing the same u, so successive frames sweep u across [0,1) instead
+// of repeating one radius.
+// Deterministic in (pixel, frame index) only, no true per-frame RNG -- same rule and reasoning as
+// rtShadowTemporalEx's own FRAME INDEX IS SAFE note on its frameIdx use: a --frames N run always ends
+// on the same frameIdx, so results reproduce.
 float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float streamSalt) {
     const uint  idx = frameIdx * max(n, 1u) + k;
     const float u   = frac(rtRadicalInverse2(idx + 1u) + rtHash(pixelKey + float2(streamSalt, 17.0 + streamSalt)));
@@ -645,35 +541,18 @@ float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float st
     return float2(cos(a), sin(a)) * sqrt(u);
 }
 
-// Traces occlusion rays toward the sun's DISC and returns the fraction that reached it: 0 fully
-// shadowed, 1 fully lit, everything between a real penumbra.
-//
-// The single ray this replaced returned exactly 0.0 or 1.0 -- a hard aliased edge next to the
-// cascade path's 3x3 filter, so ray tracing ON made shadows look worse. The sun subtends about half
-// a degree, and that angle sets how fast an edge softens; gRtParams.x carries its tangent so the
-// softening is the SUN's property, not a tuned constant.
-//
-// Bias scales with camera distance: a fixed 0.02cm offset is ~300 float ulp at 1000cm but under 3
-// at 100000cm, so distant geometry self-intersects and speckles like flickering rather than acne.
-//
-// `dpx`/`dpy` (the receiver's screen-space footprint) are PASSED IN rather than taken via
-// ddx/ddy(wpos) here: that is only correct for a primary surface, and wrong for a reflected hit,
-// whose neighbouring pixels land on different triangles metres apart (and a derivative inside
-// divergent flow is undefined in HLSL regardless). A reflected caller passes zero for a point
-// sample.
-//
-// `rays` is explicit, not read from the cbuffer, so a secondary ray can ask for fewer than a
-// primary one -- a reflection is already an approximation, and a full disc sweep on its shadow buys
-// detail nobody can resolve.
-//
-// `frameJitter` is ADDED to the per-pixel rotation and is NOT part of rtHash, which stays a pure
-// function of the pixel for the gate oracle's bit-exact probes. Only rtShadowTemporal passes a
-// nonzero value, and only when pixel tiling is on -- that's what lets tiling converge instead of
-// repeating one sample forever.
-//
-// `kFirst` (rtShadowEx only) starts the walk at sample kFirst instead of 0. It exists for
-// CSRdShadowProbe, which traces ONE of this pixel's real samples and has to be able to pick which
-// (see that stage). Every other caller goes through rtShadow below, which passes 0.
+// Traces occlusion rays toward the sun's DISC: 0 fully shadowed, 1 fully lit, between is a real
+// penumbra (the single ray this replaced gave a hard 0/1 edge). gRtParams.x carries the sun's angular
+// tangent (~half a degree), so softening is the sun's own property, not a tuned constant.
+// Bias scales with camera distance (0.02cm is ~300 ulp at 1000cm, <3 at 100000cm -- else distant
+// geometry self-intersects and flickers).
+// `dpx`/`dpy`: receiver's screen-space footprint, PASSED IN rather than ddx/ddy(wpos) -- only valid
+// for a primary surface, wrong for a reflected hit. A reflected caller passes zero.
+// `rays`: explicit, not from the cbuffer, so a secondary ray can ask for fewer than a primary one.
+// `frameJitter`: added to the rotation, NOT folded into rtHash (pure-per-pixel for the gate oracle).
+// Only rtShadowTemporal passes nonzero, only with tiling on.
+// `kFirst` (rtShadowEx only): starts at sample kFirst instead of 0, for CSRdShadowProbe (picks one of
+// this pixel's real samples). Other callers use rtShadow, which passes 0.
 float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                   float frameJitter, uint kFirst) {
     const uint  n    = max(rays, 1u);
@@ -685,14 +564,11 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
     float3 T  = normalize(cross(up, L));
     float3 B  = cross(L, T);
 
-    // THE PIXEL'S OWN FOOTPRINT ON THE SURFACE, from the screen-space derivatives of world
-    // position -- this is what actually fixes the jagged edge, not the sun's disc: the sun's
-    // angular radius (~a quarter degree) makes the true penumbra far narrower than a pixel at
-    // contact distances, so spreading rays across the disc alone gives the same binary answer
-    // everywhere except a single edge pixel. Meanwhile the shadow term is computed once per pixel
-    // while geometry beside it resolves at 8x MSAA, so the boundary stair-steps against smooth
-    // silhouettes. Jittering the ray ORIGIN across the footprint turns the per-pixel test into an
-    // area estimate -- antialiasing the shadow rather than blurring it.
+    // THE PIXEL'S OWN FOOTPRINT (screen-space derivatives of world position) is what fixes the
+    // jagged edge, not the sun's disc: at contact distances the true penumbra is far narrower than a
+    // pixel, so the disc alone gives the same binary answer except at one edge pixel, and the
+    // once-per-pixel shadow term stair-steps against geometry resolved at 8x MSAA. Jittering the ray
+    // ORIGIN across the footprint turns the per-pixel test into an area estimate.
     const float ang0 = rtHash(pixel) * 6.2831853 + frameJitter;
     float3 vis = float3(0.0, 0.0, 0.0);
 
@@ -712,11 +588,10 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
         r.Direction = dir;
         r.TMin      = bias;
         r.TMax      = 100000.0;
-        // NO ACCEPT_FIRST_HIT: right for a binary shadow, wrong for a transmissive one -- glass IS
-        // the first thing touched, so stopping there makes it a wall. The ray instead runs its own
-        // traversal, multiplying a running transmittance by each translucent surface it crosses.
-        // THE COST IS REAL: every shadow ray now walks to an opaque hit or the structure's end,
-        // including rays that never meet a pane. Measure before assuming it's small.
+        // NO ACCEPT_FIRST_HIT: right for a binary shadow, wrong for a transmissive one (glass would
+        // stop the ray like a wall). Instead runs its own traversal, multiplying transmittance per
+        // translucent surface crossed. COST IS REAL: every shadow ray now walks to an opaque hit or
+        // the structure's end, even rays that never meet a pane -- measure before assuming it's small.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
         // BOTH LANES: this is the one ray that wants to see translucent geometry.
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW_FIRSTHIT
@@ -730,18 +605,17 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
 
         // ---- Two models, material picks which ----
         // A VOLUME material (attenuationDistance > 0) is Beer-Lambert attenuated over distance
-        // travelled inside it; otherwise the per-crossing surface rule applies (a thin sheet).
-        // Gathers spans rather than multiplying as it goes, since a path length needs both ends and
-        // the exit candidate can arrive anywhere in the walk.
+        // travelled inside it; otherwise the per-crossing surface rule applies (a thin sheet). Gathers
+        // spans rather than multiplying as it goes, since a path length needs both ends.
         // PAIRED BY MIN/MAX t, never arrival order or facing: DXR doesn't guarantee non-opaque
-        // candidates arrive nearest-first, and CandidateTriangleFrontFace() is worse -- winding is
-        // exactly what broke volume absorption on the pool (fluid box winds opposite the cube).
+        // candidates arrive nearest-first, and winding (CandidateTriangleFrontFace()) is worse -- it's
+        // what broke volume absorption on the pool (fluid box winds opposite the cube).
         //   one hit  -> ray started inside the medium, t is the distance out (pool floor under water)
         //   two hits -> entered and exited; the span between is the thickness (a pane)
         //   more     -> concave/overlapping geometry; the outer span is the honest estimate
-        // TWO SLOTS AS SCALARS, NOT AN ARRAY -- MEASURED: loop-indexed local arrays spilled out of
-        // registers on the wave-bound sun shadow, 7.96ms -> 9.95ms (25% regression). Two slots is
-        // what the scene needs (glass over water); a third medium falls through to the surface rule.
+        // TWO SLOTS AS SCALARS, NOT AN ARRAY: loop-indexed local arrays spilled out of registers on
+        // the wave-bound sun shadow, MEASURED 7.96ms -> 9.95ms (25% regression). Two is what the
+        // scene needs (glass over water); a third medium falls through to the surface rule.
         uint  med0Iid = 0xffffffffu, med1Iid = 0xffffffffu;
         float med0Min = 0.0, med0Max = 0.0, med1Min = 0.0, med1Max = 0.0;
         uint  med0Hits = 0u, med1Hits = 0u;
@@ -756,17 +630,11 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
             const uint iid = q.CandidateInstanceID();
             const RtMaterial m = gRtMaterials[gRtInstances[iid].materialIndex];
 
-            // ---- A CUTOUT IS NOT A MEDIUM -------------------------------------------------------
-            //
-            // Alpha-masked instances are non-opaque now, so they arrive here alongside glass. They
-            // must NOT fall into the transmittance walk below: a leaf is not a pane, it has no
-            // thickness and no attenuation colour, and treating it as one would tint the shadow it
-            // casts by whatever the fallback medium happens to be.
-            //
-            // The rule is binary. Above the cutoff the leaf is solid: commit it and the ray is
-            // blocked, exactly as an opaque hit would have been. Below it, the ray is passing
-            // through a hole and the leaf is not there at all -- continue without touching
-            // transmittance, so a gap between leaves casts no shadow.
+            // ---- A CUTOUT IS NOT A MEDIUM ----
+            // Alpha-masked instances are non-opaque now, so they arrive here alongside glass, but
+            // must NOT enter the transmittance walk: a leaf has no thickness/attenuation colour.
+            // Binary rule: above cutoff, commit (fully blocked); below it, the ray passes through
+            // the hole -- continue without touching transmittance.
             if (m.flags & AVER_MAT_ALPHA_MASK) {
                 if ((m.flags & AVER_MAT_CAST_SHADOW) && averRtCandidateOpaque(q)) {
                     q.CommitNonOpaqueTriangleHit();
@@ -836,21 +704,13 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
     return rtShadowEx(wpos, N, L, pixel, dpx, dpy, rays, frameJitter, 0u);
 }
 
-// Decodes gGiShadowParams.w's runtime bit-field -- see that cbuffer field's own header comment
-// (voxi.hlsl) for what each bit means and who reads it. One accessor so T1 below, T2
-// (rtSkyOcclusionTemporal, further down this file) and T3 (rtReflectionTemporalEx, voxi.hlsl) all
-// decode the same field the same way rather than three independent (uint) casts that could drift if
-// the field is ever renumbered.
-//
-// THE SINGLE-PASS PSRayDriven COMPILE (AVER_RD_SINGLE_PASS, set only on its four variants in
-// VoxiRenderer::createScenePipelines) SEES CONSTANTS INSTEAD: T1 on, T2/T3/T4 off. Every runtime bit
-// compiles BOTH of its paths into the shader, and that megakernel -- shadow, GI, reflection and sky
-// occlusion in one pixel shader -- grew past what the AMD driver handles: MEASURED 2026-09-26 (RX 7800
-// XT), the device was lost on its first frame (DRED: that draw, a page fault at a fixed VA with no
-// allocation), at any resolution; removing ANY one stage, sky occlusion included, stopped it, and so did
-// folding these bits to constants with every stage kept. The staged passes, which split the same work
-// across smaller shaders, keep all four toggles live. Anything added to the single-pass path can push it
-// back over: run it (--rd-stages 0 --dred) after changing it.
+// Decodes gGiShadowParams.w's runtime bit-field (voxi.hlsl has the per-bit meaning). One accessor so
+// T1 below, T2 (rtSkyOcclusionTemporal) and T3 (rtReflectionTemporalEx, voxi.hlsl) can't drift.
+// THE SINGLE-PASS PSRayDriven COMPILE (AVER_RD_SINGLE_PASS) SEES CONSTANTS INSTEAD: T1 on, T2/T3/T4
+// off. Compiling every runtime bit's both paths made that megakernel (shadow+GI+reflection+sky in one
+// PS) exceed the AMD driver's limit: MEASURED 2026-09-26 RX 7800 XT, device lost on frame 1 at any
+// resolution; removing any one stage, or folding bits to constants with all stages kept, fixed it.
+// Staged passes keep all four toggles live. Re-run (--rd-stages 0 --dred) after touching this path.
 #ifndef AVER_RD_SINGLE_PASS
 #define AVER_RD_SINGLE_PASS 0
 #endif
@@ -860,23 +720,19 @@ uint rtGiShadowBits() { return 1u; }
 uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
 #endif
 
-// Where a shadow ray along `dir` leaves the surface at wpos: rtShadowEx's distance-scaled bias, and the
-// offset along the normal AND along the ray (see rtShadowEx for why both). The bias/origin half of
-// rtShadowRay0 below, shared with rdLocalShadow (further below) so a lamp's shadow ray leaves the
-// surface exactly as the sun's does -- the same two statements, in the same order, rtShadowRay0 had
-// inline. rtShadowEx keeps its own inline copy, for the hot-loop reason rtShadowRay0's comment gives.
+// Where a shadow ray along `dir` leaves the surface at wpos: rtShadowEx's distance-scaled bias, offset
+// along the normal AND the ray (see rtShadowEx for why both). Shared with rdLocalShadow so a lamp's
+// shadow ray leaves the surface exactly as the sun's does. rtShadowEx keeps its own inline copy
+// instead of calling this, to avoid touching its measured hot loop.
 void rtShadowRayStart(float3 wpos, float3 N, float3 dir, out float3 origin, out float bias) {
     bias   = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
     origin = wpos + N * bias + dir * bias;
 }
 
-// The ray a single rtShadowEx sample would build at rays=1, kFirst=0, zero footprint (dpx=dpy=0 --
-// what every caller of rtShadowOpaque below passes). Factored out so rtShadowOpaque cannot drift from
-// rtShadowEx's own formula: same T/B frame around L, same ang0 = rtHash(pixel)*2pi+frameJitter, same
-// rtDiscSample(0, ang0), same bias. rtShadowEx does NOT call this -- its own loop already IS this
-// formula at k=0, and reaching into the wave-bound hot loop this file's own cost comments measure
-// (aver-raydriven-pass-cost) to make it call out, for a caller that only ever wants n=1, would risk
-// every OTHER caller's measured cost for this one's benefit.
+// The ray a single rtShadowEx sample would build at rays=1, kFirst=0, zero footprint -- what every
+// caller of rtShadowOpaque below passes. Factored out so rtShadowOpaque can't drift from rtShadowEx's
+// formula. rtShadowEx does not call this itself, to avoid touching its measured hot loop for a
+// caller that only wants n=1.
 void rtShadowRay0(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitter,
                   out float3 dir, out float3 origin, out float bias) {
     float3 up = abs(L.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
@@ -889,28 +745,19 @@ void rtShadowRay0(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitt
     rtShadowRayStart(wpos, N, dir, origin, bias);
 }
 
-// T1 (Settings::rtSecondaryShadowOpaque, console voxi.rtSecondaryShadowOpaque): the cheap sun-shadow
-// ray for a SECONDARY hit -- rtReflection's own hit (below in this file) and the ReSTIR GI candidate's
-// hit (giTraceInitialCandidate, voxi_restir.hlsli) -- where rtShadow's transmittance walk buys detail
-// neither caller can resolve. ONE ray, ACCEPT_FIRST_HIT_AND_END_SEARCH, against the same opaque-
-// including-cutouts lane CSRdVisibility's own primary ray traces (AVER_RT_MASK_OPAQUE_ALL -- not the
-// bare AVER_RT_MASK_OPAQUE that ray uses, since the owner-hidden exclusion that's for is a property of
-// the VIEWER's own primary ray, not a secondary one), resolved through averRtProceedSolid exactly as
-// that ray resolves a cutout -- a leaf still casts the shadow of its alpha-tested SHAPE, not its
-// bounding rectangle.
-//
-// THE TRADE, STATED PLAINLY: a translucent instance (glass, water -- AVER_RT_MASK_TRANSLUCENT) is
-// excluded by mask here, not walked and attenuated the way rtShadow's own transmittance loop does, so
-// it casts NO shadow for these two callers. A reflection bounce or a GI candidate loses the coloured
-// tint a pane would have cast on it; the PRIMARY sun shadow (rtShadowTemporalEx / CSRdShadow /
-// CSRdShadowProbe) is untouched by this function and keeps the tint. That lost walk -- up to 8
-// transmittance steps against the whole scene, RAY_FLAG_NONE against AVER_RT_MASK_ALL -- is the whole
-// saving; this ray pays one BVH traversal to the first opaque hit (or none) and stops.
-//
-// Builds the identical ray rtShadowEx(rays=1, kFirst=0, dpx=dpy=0) would, via rtShadowRay0 above, so a
-// caller flipping this bit on sees the same ray it always traced, just without the walk behind it.
-// Returns float3 (0 or 1 per channel, never fractional) so it drops into either call site unchanged --
-// both already carry a float3 result through to a tinted shading term.
+// T1 (Settings::rtSecondaryShadowOpaque): the cheap sun-shadow ray for a SECONDARY hit --
+// rtReflection's hit and the ReSTIR GI candidate's hit (giTraceInitialCandidate, voxi_restir.hlsli) --
+// where rtShadow's transmittance walk buys detail neither caller can resolve. ONE ray,
+// ACCEPT_FIRST_HIT_AND_END_SEARCH, against AVER_RT_MASK_OPAQUE_ALL (not the bare _OPAQUE CSRdVisibility's
+// primary ray uses -- that's the owner-hidden exclusion, a property of the primary ray only), resolved
+// through averRtProceedSolid so a leaf still casts its alpha-tested SHAPE's shadow, not its bounding rectangle.
+// THE TRADE: a translucent instance (glass, water) is excluded by mask, not walked/attenuated, so it
+// casts NO shadow for these two callers -- losing the coloured tint a pane would cast. The PRIMARY sun
+// shadow (rtShadowTemporalEx / CSRdShadow / CSRdShadowProbe) keeps the tint. Saving: up to 8 transmittance
+// steps (RAY_FLAG_NONE, AVER_RT_MASK_ALL) traded for one BVH traversal to the first opaque hit.
+// Builds the identical ray rtShadowEx(rays=1, kFirst=0, dpx=dpy=0) would, via rtShadowRay0, so
+// flipping this bit changes cost, not the ray itself. Returns float3 (0 or 1 per channel) to drop
+// into either call site unchanged.
 float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitter) {
     float3 dir, origin;
     float  bias;
@@ -930,19 +777,15 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
 }
 
 // ---- LOCAL LIGHTS: lamps lit the way the sun is ----
-//
-// A material with lightIntensity > 0 (AVER_MAT_LIGHT) turns every draw using it into a small SPHERE
-// light: the draw's world bounding sphere, coloured by its emissiveFactor. VoxiRenderer gathers at most
-// 32 of them per frame into gRdLocalLights (t18, voxi.hlsl). Each lit pixel gets ONE stochastic shadow
-// ray toward one of them, accumulated over frames through the sun history's own reprojection
-// (rdLocalLightsVisibility, voxi.hlsl), and every light in range shaded through the sun's own BRDF
-// times that visibility (rdLocalLightsShade, voxi.hlsl) -- in the staged passes (CSRdLocalLights +
-// Stage B), the single-pass PSRayDriven and PSMainVoxi alike.
-//
-// Declared here rather than beside gRdLocalLights because voxi_restir.hlsli, #included straight after
-// this file and before voxi.hlsl's staged declarations, needs rdLocalCarriesEmitters() too (the
-// emitter's own emission leaves ReSTIR GI's candidate hits while these lights carry it).
-//
+// A material with lightIntensity > 0 (AVER_MAT_LIGHT) turns its draw into a small SPHERE light (world
+// bounding sphere, coloured by emissiveFactor). VoxiRenderer gathers up to 32/frame into
+// gRdLocalLights (t18, voxi.hlsl). Each lit pixel gets ONE stochastic shadow ray toward one of them,
+// accumulated via the sun history's own reprojection (rdLocalLightsVisibility, voxi.hlsl), and every
+// light in range shaded through the sun's BRDF times that visibility (rdLocalLightsShade, voxi.hlsl) --
+// in the staged passes (CSRdLocalLights + Stage B), single-pass PSRayDriven, and PSMainVoxi alike.
+// Declared here (not beside gRdLocalLights) because voxi_restir.hlsli, #included right after this
+// file and before voxi.hlsl's staged declarations, needs rdLocalCarriesEmitters() too (an emitter's
+// own emission leaves ReSTIR GI's candidate hits while these lights carry it).
 // posRadius     = world centre (cm), sphere radius (cm, >= 1).
 // radianceRange = rgb: colour * (the sphere's own 1-metre irradiance, from its emissive peak and
 //                 posRadius.w, times lightIntensity -- VoxiRenderer::buildLocalLights derives this,
@@ -952,39 +795,34 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
 // the neighbour's bytes with no compile error.
 struct RdLocalLight { float4 posRadius; float4 radianceRange; };
 
-// LAMPS IN THE SINGLE-PASS COMPILE: AVER_RD_SINGLE_PASS_LAMPS (default 1) keeps them in that megakernel
-// -- one shadow ray, one reprojection and a BRDF loop on top of what already sat at the AMD driver's
-// register limit (rtGiShadowBits() above). ";AVER_RD_SINGLE_PASS_LAMPS=0" on the single-pass defines
-// takes them back out entirely: every lamp function and call in these files sits under AVER_RD_LAMPS or
-// !AVER_RD_SINGLE_PASS (only the struct and resource declarations do not, and a shader that never reads
-// them drops them), so that compile then holds no lamp code at all. Every other compile (staged, raster,
-// compute) always carries them.
+// AVER_RD_SINGLE_PASS_LAMPS (default 1) keeps lamps in the single-pass megakernel, already at the AMD
+// driver's register limit (rtGiShadowBits() above). ";AVER_RD_SINGLE_PASS_LAMPS=0" strips them: every
+// lamp function/call sits under AVER_RD_LAMPS or !AVER_RD_SINGLE_PASS (only the struct/resource
+// declarations do not, and an unread declaration drops for free), so that compile holds no lamp code.
+// Every other compile always carries them.
 #ifndef AVER_RD_SINGLE_PASS_LAMPS
 #define AVER_RD_SINGLE_PASS_LAMPS 1
 #endif
 #define AVER_RD_LAMPS (!AVER_RD_SINGLE_PASS || AVER_RD_SINGLE_PASS_LAMPS)
 
 #if AVER_RD_LAMPS
-// gCameraMedium.z/.w -- see that cbuffer field's own comment (voxi.hlsl). Count 0 means local lights are
-// off or unavailable this frame; every reader treats it as "no lamps", never as "read the buffer".
+// gCameraMedium.z/.w (voxi.hlsl has the field comment). Count 0 means lamps off/unavailable; every
+// reader treats it as "no lamps", never "read the buffer".
 uint rdLocalLightCount() { return (uint)(gCameraMedium.z + 0.5); }
-// gRdLocalHist (t19) holds a usable previous frame for the SAME light set (gCameraMedium.w bit 1). False
-// restarts accumulation: a visibility accumulated against a different set of lights is an answer to
-// another question.
+// gRdLocalHist (t19) holds a usable previous frame for the SAME light set (bit 1). False restarts
+// accumulation -- a visibility accumulated against a different light set answers another question.
 bool rdLocalHistValid()  { return ((uint)(gCameraMedium.w + 0.5) & 1u) != 0u; }
-// Every lamp-flagged draw is a live light this frame (gCameraMedium.w bit 2), so a GI estimator that
-// hits one may leave its emission out -- the direct term already carries it. False when any flagged lamp
-// missed the list (the 32 cap, no bounds): that lamp keeps its glow in GI rather than going dark.
+// Every lamp-flagged draw is a live light this frame (bit 2), so a GI estimator hitting one may skip
+// its emission (direct term already carries it). False when a flagged lamp missed the 32-cap list --
+// it keeps its GI glow instead of going dark.
 bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0u; }
 
 // One sphere light's DIFFUSE IRRADIANCE at wpos, before visibility: inverse square from the centre,
-// normalised so d = 100 cm gives radianceRange.rgb exactly (already the lamp's own 1-metre irradiance
-// times lightIntensity, computed on the C++ side -- see RdLocalLight's own comment above), clamped at
-// the sphere's own radius so a receiver touching the bulb does not blow up, and faded to
-// exactly zero at the range by the windowed falloff (1 - (d/range)^4)^2 -- a hard cut at the range
-// would draw a visible ring on every surface the light reaches. The weights rdLocalLightsVisibility
-// (voxi.hlsl) picks its shadowed light by; rdLocalLightAt (voxi.hlsl) shades with the SAME falloff minus
-// the N.L, which the BRDF applies itself. Change one, change both.
+// normalised so d=100cm gives radianceRange.rgb exactly (already lightIntensity-scaled, C++ side),
+// clamped at the sphere's radius so a receiver touching the bulb doesn't blow up, faded to zero at
+// range by (1-(d/range)^4)^2 (a hard cut would ring).
+// rdLocalLightsVisibility (voxi.hlsl) picks its shadowed light by this weight; rdLocalLightAt shades
+// with the SAME falloff minus N.L (the BRDF applies that itself). Change one, change both.
 float3 rdLocalIrradiance(RdLocalLight l, float3 wpos, float3 N) {
     const float3 toC   = l.posRadius.xyz - wpos;
     const float  d2    = dot(toC, toC);
@@ -999,16 +837,12 @@ float3 rdLocalIrradiance(RdLocalLight l, float3 wpos, float3 N) {
 }
 
 // ONE opaque shadow ray from wpos toward a point on the light's sphere: 1 unoccluded, 0 blocked. The
-// sun's own recipe with the sphere standing in for the sun's disc -- the same T/B frame around the
-// light direction, the same per-pixel rotated disc sample (rtHash + frameJitter, rtDiscSample(0, .)),
-// scaled by the sphere's radius instead of the sun's angular tangent, and the same surface start
-// (rtShadowRayStart). The same single first-hit ray, opaque-including-cutouts lane, as rtShadowOpaque:
-// a pane of glass casts no lamp shadow, the rtShadowOpaque trade.
-//
-// TMax STOPS SHORT OF THE SPHERE (distance to centre - 1.25 radius), so the bulb's own surface -- which
-// sits inside its bounding sphere -- never shadows the light it is. A receiver that close to or inside
-// the sphere has no room for an occluder and returns 1 without tracing, which also keeps the frame
-// below well-defined (dist > 1.25 r >= 1.25 cm, never the zero vector).
+// sun's own recipe (T/B frame, per-pixel rotated disc sample via rtHash + frameJitter, rtDiscSample(0, .),
+// rtShadowRayStart) with the sphere's radius standing in for the sun's tangent; same first-hit
+// opaque-including-cutouts lane as rtShadowOpaque, so glass casts no lamp shadow either.
+// TMax stops short of the sphere (distance to centre - 1.25 radius) so the bulb's own surface never
+// shadows the light it is; a receiver that close has no room for an occluder and returns 1 without
+// tracing (dist > 1.25r >= 1.25cm, never the zero vector).
 float rdLocalShadow(float3 wpos, float3 N, RdLocalLight l, float2 pixel, float frameJitter) {
     const float3 toC  = l.posRadius.xyz - wpos;
     const float  dist = length(toC);
@@ -1042,106 +876,73 @@ float rdLocalShadow(float3 wpos, float3 N, RdLocalLight l, float2 pixel, float f
 }
 #endif
 
-// The fraction of the hemisphere above `N` from which the SKY is actually reachable: 1 fully open,
-// 0 fully enclosed. This is the scalar `diffAmbient` multiplies the sky irradiance by, traced
-// instead of estimated.
+// The fraction of the hemisphere above `N` from which the SKY is actually reachable: 1 fully open, 0
+// fully enclosed. The scalar `diffAmbient` multiplies the sky irradiance by, traced not estimated.
 //
-// WHY IT EXISTS. coneTracedIndirect's `ao` is six 60-degree cones marching the voxel volume, and a
-// cone that widens into a coarse mip averages a thin wall with the empty space beside it and passes
-// through. In an OPEN scene that estimate is approximately right and this function is a waste of
-// four rays -- which is exactly why it is Epic-only. In an enclosed one it is optimistic, MEASURED
-// on Sponza against a converged path-traced reference as shadowed pixels reading [25,26,30] where
-// the reference says [7,7,7], blue-biased because what leaks in is sky.
-//
-// COSINE-WEIGHTED BY CONSTRUCTION, via Malley's method: a uniform point on the unit disc lifted onto
-// the hemisphere IS a cosine-weighted direction, so the average of a binary visibility test over
-// these directions is already the cosine-weighted integral `diffAmbient` wants. No per-sample weight
-// and no normalisation beyond the count. rtDiscSample supplies the disc point, so this shares the
-// shadow ray's NESTED sequence -- raising the ray count refines the estimate rather than replacing it.
-//
-// NO FRAME TERM, DELIBERATELY, and this is a hard constraint rather than an oversight: every RT
-// sampler in this file is a pure function of pixel position because the gate oracle compares exact
-// pixels across runs. A frame-varying sample set would decorrelate beautifully, denoise well, and
-// make 181 gates non-reproducible. The cost is that the noise here is FIXED per pixel -- stable and
-// non-flickering, but structured, and it does not average away over time the way a jittered one
-// would. If this ever needs to be smoother, the answer is more rays or a spatial filter, not a
-// frame counter.
-//
-// A MISS IS SKY. The ray is a plain occlusion query against the opaque lane with
-// ACCEPT_FIRST_HIT_AND_END_SEARCH: unlike the sun ray directly above, which walks past glass
-// accumulating transmittance, this one only asks whether anything is in the way at all.
-// FORWARD-DECLARED because the voxel helpers are defined with the cone tracer, roughly nine hundred
-// lines below this ray, and HLSL needs a declaration before the call. Moving their definitions up
-// instead would drag the whole clipmap block above the RT section for one caller's benefit.
+// WHY: coneTracedIndirect's `ao` (six 60-degree cones marching the voxel volume) averages a thin
+// wall with empty space beside it once the cone widens into a coarse mip, and passes through. Roughly
+// right in an OPEN scene (so Epic-only there); optimistic in an enclosed one -- MEASURED on Sponza
+// against a converged path-traced reference: shadowed pixels read [25,26,30] vs reference [7,7,7],
+// blue-biased because what leaks in is sky.
+// COSINE-WEIGHTED BY CONSTRUCTION via Malley's method: a uniform disc point lifted onto the
+// hemisphere IS a cosine-weighted direction, so averaging a binary visibility test over them already
+// gives the cosine-weighted integral. rtDiscSample supplies the point, sharing the shadow ray's
+// NESTED sequence.
+// NO FRAME TERM: every RT sampler here is a pure function of pixel position so the gate oracle's
+// exact-pixel comparison stays reproducible (a frame-varying set would denoise better but break 181
+// gates). Noise here is FIXED per pixel -- stable, structured, doesn't average away over time. To
+// smooth it, add rays or a spatial filter, not a frame counter.
+// A MISS IS SKY: a plain occlusion query, ACCEPT_FIRST_HIT_AND_END_SEARCH, against the opaque lane --
+// unlike the sun ray above, it only asks whether anything is in the way.
+// FORWARD-DECLARED: the voxel helpers are defined with the cone tracer ~900 lines below, and HLSL
+// needs the declaration before the call; moving the definitions up would drag the whole clipmap block
+// above the RT section.
 float3 voxelUVW(float3 wp);
 bool   insideVolume(float3 uvw);
 
-// F2's RECONSTRUCTED path (voxi_restir.hlsli, 2.10 B of the optimisation-wave-2 plan) needs one
-// voxel-cone march, and needs it long before voxi_cone.hlsli's real definition is reachable: that
-// file is #include'd only after voxi_restir.hlsli (voxi.hlsl:798, following the #include at :297),
-// so this is the SAME forward-declare-then-define split the two lines above already use, for the
-// identical reason. Defined at voxi_cone.hlsli:62; signature copied verbatim from there, so a
-// changed definition that forgets to update this prototype fails loudly (a mismatched forward
-// declaration is a compile error, not a silent drift) rather than being missed.
+// F2's RECONSTRUCTED path (voxi_restir.hlsli) needs one voxel-cone march before voxi_cone.hlsli's
+// real definition is reachable (#include'd only after voxi_restir.hlsli) -- same forward-declare
+// split as the two lines above, for the same reason. Defined at voxi_cone.hlsli; signature copied
+// verbatim, so a changed definition that forgets to update this fails loudly (compile error, not
+// silent drift).
 float4 traceCone(float3 originWS, float3 dir, float aperture);
 
-// What one hemisphere gather learned. (A closest-hit variant that also returned the visible sky and
-// the bounce at the hit, AVER_AO_UNIFIED, was measured 2026-09-27 at +1.3 ms per frame and removed.)
+// What one hemisphere gather learned. (A closest-hit variant also returning visible sky + bounce at
+// the hit, AVER_AO_UNIFIED, measured 2026-09-27 at +1.3ms/frame and was removed.)
 struct AverAmbientTraced {
     float  open;    // fraction of samples that reached the sky
-    // MEAN DISTANCE TRAVELLED, as a fraction of TMax, over ALL n samples -- a sample that escaped
-    // contributes a full 1.0. Averaging only over the hits would say the opposite of the truth in the
-    // open sky. Always computed: one mad per sample, for the external denoiser's hit-distance input.
+    // Mean distance travelled as a fraction of TMax over ALL n samples (an escaped sample contributes
+    // 1.0 -- averaging only hits would invert the truth in open sky). Always computed (one MAD/sample),
+    // for the external denoiser's hit-distance input.
     float  hitDist;
 };
 
 AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays) {
     const uint n = clamp(rays, 1u, 32u);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
-    // ROTATION SHARED ACROSS A TILE, NOT PER PIXEL -- a coherence dial, and the only lever the
-    // measurements actually support for this ray.
-    //
-    // WHY NOT "USE SIMD": this already runs under SIMT, 32-64 lanes in lockstep, and the cost is not
-    // arithmetic. Adding three more SUN rays costs 0.05 ms while removing the shadow ray entirely
-    // saves 11.95 ms -- rays 2-4 are nearly free because they all point at the sun and walk the same
-    // BVH nodes, so ray one pays the traversal and the rest ride its cache. This ray is the opposite:
-    // cosine-distributed over the hemisphere, so every lane in a wave descends a different part of
-    // the tree and the wave runs at the speed of its unluckiest lane. That is why it costs 5.37 ms
-    // for one ray where the sun gets four for less.
-    //
-    // Sharing the azimuth across an NxN tile makes neighbouring lanes trace near-PARALLEL rays, which
-    // touch the same nodes and the same cache lines. The price is correlated noise inside a tile
-    // rather than independent noise per pixel -- acceptable for a low-frequency term like ambient
-    // occlusion, and exactly the wrong trade for anything with sharp detail.
-    //
-    // HARDWARE AGNOSTIC BY CONSTRUCTION: plain HLSL, no wave intrinsics, no vendor extension, no
-    // capability gate. Shader Execution Reordering would attack the same problem more directly and is
-    // deliberately NOT used -- ReorderThread is vendor-specific and DXR 1.2's MaybeReorderThread needs
-    // a tier this engine does not require, so either would make this path exist on some GPUs only.
-    //
-    // 1 REPRODUCES THE PREVIOUS BEHAVIOUR EXACTLY (floor(pixel/1) == pixel), so this is a dial with a
-    // no-op setting rather than a rewrite, and the tile size can be measured rather than argued.
-    // RUNTIME, from gAmbientParams.y, with the compile-time define as the floor. It was a #define
-    // alone, set nowhere, which made the one lever this ray's own comment names unmeasurable -- the
-    // same shape of gap as the ray count beside it.
-    // max() rather than a branch: 1 reproduces the per-pixel rotation exactly (floor(p/1) == floor(p)),
-    // so there is no "off" case to test for.
+    // ROTATION SHARED ACROSS A TILE, NOT PER PIXEL: the only lever measurements support here. Cost is
+    // not arithmetic (this already runs 32-64 lanes in lockstep under SIMT) -- 3 more SUN rays cost
+    // 0.05ms (removing the shadow ray entirely would save 11.95ms) since they walk the same BVH nodes,
+    // ray 1 pays traversal, the rest ride cache; while this cosine-distributed ray costs 5.37ms for ONE,
+    // because every lane descends a different part of the tree and the wave runs at its unluckiest
+    // lane's speed. Sharing azimuth across an NxN tile makes neighbours trace near-parallel rays
+    // touching the same cache lines, trading independent noise for correlated noise within a tile --
+    // fine for a low-frequency term like AO, wrong for sharp detail.
+    // Hardware-agnostic (plain HLSL, no wave intrinsics/vendor extension) rather than Shader Execution
+    // Reordering, which is vendor-specific or needs a tier this engine doesn't require.
+    // Tile size 1 reproduces the old per-pixel rotation exactly (floor(p/1)==p), so this is a runtime
+    // dial (gAmbientParams.y, compile-time define as floor) with a true no-op setting, not a rewrite --
+    // was a #define alone, set nowhere, unmeasurable like the ray-count gap beside it.
     const float aoTileEdge = max(gAmbientParams.y, AVER_AO_COHERENCE_TILE);
     const float2 aoTile = floor(pixel / aoTileEdge);
-    // A DIFFERENT DIRECTION EVERY FRAME, and without this the history pair below buys nothing.
-    //
-    // rtHash(aoTile) is a function of the PIXEL and nothing else, so before this term every pixel
-    // traced the same hemisphere direction on every frame it ever rendered. That makes the estimator
-    // deterministic rather than noisy -- and a deterministic wrong answer is exactly what temporal
-    // accumulation cannot fix, because averaging ten identical samples returns the sample. A pixel
-    // whose one ray happened to escape read fully open forever, next to neighbours whose ray happened
-    // to hit, which is the white salt-and-pepper on shadowed surfaces: not noise that settles, a
-    // fixed per-pixel pattern that no weight could touch. It is also why raising the accumulation
-    // weight from 0.9 to 0.95 measured no change at all -- there was nothing different to average.
-    //
-    // THE GOLDEN ANGLE, the same 2.39996323 the tiled shadow path already spends for the same reason:
-    // successive frames land far apart on the disc rather than drifting, so ~10 frames of history is
-    // ~10 well-spread samples instead of one sample counted ten times.
+    // A DIFFERENT DIRECTION EVERY FRAME, or the history pair below buys nothing. rtHash(aoTile) alone
+    // is a pure function of pixel, so every pixel traced the same hemisphere direction forever --
+    // deterministic, and a deterministic wrong answer can't be fixed by temporal accumulation
+    // (averaging ten identical samples returns the sample). That produced fixed per-pixel salt-and-
+    // pepper on shadowed surfaces, and explains why raising the accumulation weight 0.9->0.95 measured
+    // no change: nothing different to average. THE GOLDEN ANGLE (2.39996323, same as the tiled shadow
+    // path) spreads successive frames far apart on the disc, so ~10 frames give ~10 spread samples
+    // instead of one counted ten times.
     const float ang0 = rtHash(aoTile) * 6.2831853 + gRtHistParams.z * 2.39996323;
     float3 T, B;
     // Matches ptBasis/averBasis convention: any orthonormal pair about N will do, since the disc
@@ -1158,12 +959,10 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     const float aoTMax = max(gVoxelParams.z, 1.0);
     [loop] for (uint k = 0; k < n; ++k) {
         // ---- F1 (R0), gAmbientParams.z bit 1: legacy 45-degree ring vs. the cosine hemisphere ----
-        // true (bit set) keeps this ray on rtDiscSample's fixed ring for comparison, exactly as it
-        // always sampled; false (the corrected default) draws rtHemiDiscSample instead -- see that
-        // function's own comment for why the ring was wrong and what replaces it. aoTile, not pixel,
-        // because this ray already shares its azimuth across a coherence tile (see ang0 above);
-        // streamSalt 0.37 keeps this stream's u apart from the ReSTIR candidate's own 0.0 at the same
-        // (pixel, frame, k).
+        // Bit set keeps rtDiscSample's fixed ring for comparison; default draws rtHemiDiscSample (see
+        // its own comment for why the ring was wrong). aoTile, not pixel, since azimuth is already
+        // tile-shared (see ang0); streamSalt 0.37 separates this stream's u from ReSTIR's own 0.0 at
+        // the same (pixel, frame, k).
         const float2 d = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(k, ang0) : rtHemiDiscSample(k, n, (uint)gRtHistParams.z, aoTile, 0.37);
         // Malley: lift the disc point onto the hemisphere. r^2 + z^2 == 1 by construction, so the
         // result is unit length without a normalize() that would perturb the very cosine
@@ -1176,64 +975,45 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
         r.Origin    = wpos + N * bias + dir * bias;
         r.Direction = dir;
         r.TMin      = bias;
-        // BOUNDED, NOT 1 km -- AND MEASURED TO CHANGE NOTHING HERE, which is written down because
-        // the obvious assumption is that it should. The sun ray above runs to 100000 because a
-        // shadow caster can be any distance away and missing one is a visibly wrong hard edge.
-        // Ambient is a smooth local quantity, so bounding it LOOKS like the optimisation. On Sponza
-        // it is worth exactly nothing: 65.716 ms bounded against 65.715 ms unbounded, and a
-        // byte-identical viewport mean. Every ray in an enclosed scene hits something long before
-        // 40 m, so there was no traversal to save.
-        //
-        // THE COST IS RAY INCOHERENCE, NOT RAY LENGTH. These directions are cosine-distributed over
-        // the hemisphere, so neighbouring lanes walk unrelated parts of the BVH -- unlike the sun
-        // rays, which all point one way and traverse together. That is why four of these cost far
-        // more than the four sun rays already in the frame, and why the lever is ray COUNT or
-        // amortisation, not distance.
-        //
-        // Kept anyway, because an unbounded ambient ray is wrong in principle and this scene simply
-        // cannot show it: gVoxelParams.z is Settings::giMaxDistance, already the authored answer to
-        // "how far does indirect light travel here" and already where traceCone stops, so the traced
-        // estimate and the cone estimate it replaces measure the same extent of world.
+        // BOUNDED, NOT 1km -- MEASURED TO CHANGE NOTHING (written down because the obvious assumption
+        // is that it should). The sun ray runs to 100000 because a missed shadow caster is a visibly
+        // wrong hard edge; ambient is smooth, so bounding it LOOKS like an optimisation but on Sponza
+        // is worth nothing (65.716ms bounded vs 65.715ms unbounded, byte-identical viewport mean) --
+        // every ray in an enclosed scene hits something well under 40m. THE COST IS INCOHERENCE, NOT
+        // LENGTH: cosine-distributed directions send neighbouring lanes into unrelated BVH parts
+        // (unlike parallel sun rays), so the lever is ray count/amortisation, not distance. Kept
+        // unbounded anyway: gVoxelParams.z (giMaxDistance) is the authored "how far light travels
+        // here" and where traceCone stops too, so both estimates measure the same extent of world.
         r.TMax      = max(gVoxelParams.z, 1.0);
 
-        // THE TEMPLATE ARGUMENT LOST ACCEPT_FIRST_HIT_AND_END_SEARCH, and the flag moved to the
+        // THE TEMPLATE ARGUMENT LOST ACCEPT_FIRST_HIT_AND_END_SEARCH; the flag moved to the
         // TraceRayInline call:
         //
-        //   averRtProceedSolid is written against exactly one RayQuery template argument, and says so
-        //   ("A second flag set would need its own copy -- HLSL has no way to be generic over the
-        //   flags"). This ray was the ONE ray in this file still calling a bare Proceed() with no
-        //   candidate test, and the bug that left is the OPPOSITE of the obvious guess -- it is not
-        //   that a leaf occluded with its bounding rectangle instead of its cutout. Alpha-masked
-        //   instances stay in the OPAQUE lane but carry FORCE_NON_OPAQUE (VoxiRenderer.cpp, "NOT THE
-        //   MASK, only the flags"), and this file's own mask comment states the consequence: "a
-        //   RayQuery meeting one does not commit it, so a single Proceed()+CommittedStatus traversal
-        //   would stop AT the pane and miss whatever is behind it." CommittedStatus then reads
+        //   averRtProceedSolid needs one RayQuery template argument, so this was the one ray still
+        //   calling a bare Proceed() with no candidate test. The resulting bug is the OPPOSITE of the
+        //   obvious guess: alpha-masked instances stay in the OPAQUE lane but carry FORCE_NON_OPAQUE
+        //   (VoxiRenderer.cpp: "NOT THE MASK, only the flags"), so an uncommitted RayQuery meeting one
+        //   stops traversal AT the pane. CommittedStatus then reads
         //   COMMITTED_NOTHING and the sample was counted as HAVING REACHED THE SKY.
         //
-        //   So a leaf did not over-occlude, it made ambient light LEAK: any direction whose traversal
-        //   surfaced a cutout candidate first was scored fully open no matter what solid wall stood
-        //   behind it, brightening exactly the enclosed, foliage-heavy interiors this ray was added
-        //   to darken. Running the shared loop resolves each candidate against its alpha and keeps
-        //   traversing, which is what every other ray in this file already did.
+        //   So a leaf made ambient light LEAK, not over-occlude: any direction surfacing a cutout
+        //   candidate first scored fully open regardless of the solid wall behind it, brightening
+        //   exactly the enclosed, foliage-heavy interiors this ray was added to darken. The shared loop
+        //   now resolves each candidate against its alpha and keeps traversing, like every other ray here.
         //
-        // Runtime flags OR with template flags, so this is the same query as before, just spelled at
-        // the call rather than in the type.
+        // Runtime flags OR with template flags: the same query as before, just spelled at the call.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
         q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
         averRtProceedSolid(q);
 
-        // ONE `if`, BOTH ANSWERS. CommittedRayT() is meaningful only on a hit; on a miss the ray
-        // ran its whole length, which IS the distance and is why the miss branch adds aoTMax rather
-        // than skipping the term.
+        // ONE `if`, BOTH ANSWERS: CommittedRayT() is meaningful only on a hit; on a miss the ray ran
+        // its whole length, which IS the distance, hence the miss branch adds aoTMax.
         //
-        // THIS IS A FIRST HIT, NOT THE NEAREST ONE, and that is worth knowing rather than
-        // discovering. The query carries ACCEPT_FIRST_HIT_AND_END_SEARCH: traversal stops at whatever triangle it reaches first
-        // within TMax, which need not be the closest. The distance is therefore an upper-bounded
-        // estimate, never longer than the true one and usually equal to it in the enclosed
-        // geometry this term exists for. Making it exact means dropping the flag and paying full
-        // traversal on the most incoherent ray in the frame -- 5.37 ms for one ray, per this
-        // function's own measurement -- to sharpen a filter radius. Not worth it; recorded so the
-        // next reader does not assume precision that is not here.
+        // FIRST HIT, NOT NEAREST: ACCEPT_FIRST_HIT_AND_END_SEARCH stops at whatever triangle is
+        // reached first within TMax, not necessarily the closest -- an upper-bounded estimate, usually
+        // exact in the enclosed geometry this term targets. Exact would mean dropping the flag and
+        // paying full traversal on the frame's most incoherent ray (5.37ms for one, measured above) to
+        // sharpen a filter radius; not worth it.
         if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
             res.open    += 1.0;
             res.hitDist += aoTMax;
@@ -1245,10 +1025,8 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     // DIVIDED BY n, NOT BY A HIT COUNT: these are Monte Carlo estimates of hemisphere integrals.
     const float inv = 1.0 / (float)n;
     res.open    *= inv;
-    // Divided by TMax as well, which is what makes it the [0,1] fraction the declaration promises
-    // rather than a world distance. saturate() because CommittedRayT can land a hair past TMax on a
-    // ray that hit almost exactly at its own limit, and a consumer told to expect [0,1] should get
-    // [0,1] rather than 1.0000001.
+    // Divided by TMax too, making it the [0,1] fraction promised rather than a world distance.
+    // saturate() since CommittedRayT can land a hair past TMax on a near-limit hit.
     res.hitDist = saturate(res.hitDist * inv / aoTMax);
     return res;
 }
@@ -1260,17 +1038,17 @@ float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
 
 // Reprojects wpos through LAST frame's camera to sample the ray-traced shadow history. False when
 // unusable: off-screen, behind last frame's near plane, or a DISOCCLUSION (stored depth disagrees
-// with the reprojected texel). `hist`/`velocityPx` are untouched on a false return.
-// `velocityPx` is the reprojection's screen-space displacement from `pixel`, so the caller can
-// discount a moved sample -- the depth test alone can't tell "same surface, slid since last frame".
+// with the reprojected texel) -- `hist`/`velocityPx` untouched on false. `velocityPx` is the
+// reprojection's screen-space displacement from `pixel`, letting the caller discount a moved sample
+// (depth alone can't tell "same surface, slid since last frame").
 // NDC -> LAST frame's VIEWPORT rect (gSceneViewport), not [0,1] of the whole texture: the editor
 // docks the 3D view in a sub-rect, and plain ndc*0.5+0.5 lands on the wrong texel otherwise. Caught
-// by the shadow-rt/penumbra-rt gates (moved by a full shade), not shipped.
-// NEAREST, not bilinear -- REVERSED from an earlier version, because who calls it changed: that
-// version was read every frame in sync, so a bilinear tap blended in something nearly identical.
-// This tiled path is deliberately out of sync, so bilinear mixed in a stale neighbour across a
-// penumbra: MEASURED to converge to a stable but WRONG value (a 4x4 tile settled at 46,46,47 vs a
-// true ~23,27,32, unmoved 300-1500 frames). Nearest guarantees reading this pixel's own last write.
+// by the shadow-rt/penumbra-rt gates, not shipped.
+// NEAREST, not bilinear -- REVERSED from an earlier version that was read every frame in sync (a
+// bilinear tap blended in something nearly identical there): this tiled path reads out of sync between
+// neighbours, and bilinear mixed a stale neighbour across a penumbra -- MEASURED to converge to a
+// stable but WRONG value (a 4x4 tile settled at 46,46,47 vs a true ~23,27,32, unmoved 300-1500 frames).
+// Nearest guarantees this pixel's own last write.
 bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
@@ -1286,38 +1064,30 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     gRtShadowHist.GetDimensions(texW, texH);
     float2 px = gSceneViewport.xy +
                 float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
-    // FLOOR, not round: for a static pixel, `px` lands on index+0.5, exactly the tie round() breaks
+    // FLOOR, not round: `px` for a static pixel lands on index+0.5, a tie round() breaks
     // inconsistently (round-half-to-even) by index parity, sending ~half of pixels to the wrong
-    // neighbour. floor() of that centre is exactly `index`, matching how the WRITE side indexes
-    // (gRtShadowHistOut[uint2(pixel)] truncates SV_Position) -- MEASURED: round() converged to a
-    // stable but wrong value (penumbra-rt settled at 78,75,70 vs a true ~23,27,32).
+    // neighbour. floor() matches
+    // how the WRITE side indexes (gRtShadowHistOut[uint2(pixel)] truncates SV_Position) -- MEASURED:
+    // round() converged to a stable but wrong value (penumbra-rt settled at 78,75,70 vs true ~23,27,32).
     int2 texel = int2(floor(px));
     if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
 
     const float2 stored = gRtShadowHist.Load(int3(texel, 0));   // x = visibility, y = linear depth
-    // clip.w is the expected depth (same as VSMain's o.pos.w for wpos, through LAST frame's camera).
-    // Comparing it to the stored depth catches a disocclusion a screen-position check alone can't: a
-    // silhouette edge can reproject onto an already-populated texel at a completely different depth.
-    // THE TOLERANCE FOLLOWS THE DEPTH GRADIENT, and a flat 3% is what made grazing surfaces speckle.
+    // clip.w is the expected depth (VSMain's o.pos.w for wpos, through LAST frame's camera); comparing
+    // to stored depth catches a disocclusion a screen-position check alone can't (a silhouette edge
+    // can reproject onto an already-populated texel at a different depth).
     //
-    // `stored.y` is the depth recorded at the TEXEL WE LANDED ON, up to half a texel from where this
-    // pixel actually reprojected to. On a surface seen face-on that is a few millimetres and 3%
-    // covers it easily. On one seen EDGE-ON -- a floor stretching away, the base of a column -- half
-    // a texel of screen space is metres of depth, so the test rejects a history that was perfectly
-    // good, the pixel falls back to its raw ONE-RAY estimate, and at one ray that estimate is
-    // BINARY. A field of pixels each independently choosing 0 or 1 is precisely salt and pepper, and
-    // it appears exactly where the geometry is grazing, which is where the user reported it.
+    // TOLERANCE FOLLOWS THE DEPTH GRADIENT: a flat 3% made grazing surfaces speckle. `stored.y` is up
+    // to half a texel from where this pixel reprojected; face-on that's millimetres and 3% covers it,
+    // but edge-on (a floor stretching away) half a texel of screen space is metres of depth, so the
+    // test rejected good history and fell back to the raw ONE-RAY (BINARY) estimate -- salt-and-pepper
+    // exactly where geometry grazes, which is where the user reported it. (|ddz/dx|+|ddz/dy|)*2 adds
+    // the depth change this surface's own slope makes unavoidable across a pixel; face-on geometry
+    // (gradient ~0) keeps the old tolerance.
     //
-    // (|ddz/dx| + |ddz/dy|) is how much depth legitimately changes across one pixel here, so
-    // allowing two pixels of it turns "3% of the depth" into "3% of the depth, plus whatever this
-    // surface's own slope makes unavoidable". Face-on geometry has a gradient near zero and keeps
-    // exactly the old tolerance, so this loosens the test only where it was wrong.
-    //
-    // ddx/ddy ARE SAFE HERE, and that is worth stating because rtShadowSpatial carries a warning
-    // about the opposite case: derivatives in DIVERGENT flow difference against a lane that never
-    // ran. The branch above this call is on gAmbientParams.x, a constant-buffer value, so it is
-    // uniform across the wave -- and the gradient is taken before any of this function's own
-    // early-outs.
+    // ddx/ddy ARE SAFE HERE (unlike rtShadowSpatial's warning about derivatives in divergent flow
+    // differing against a lane that never ran): the branch above this call is on gAmbientParams.x, a
+    // uniform cbuffer value, and the gradient is taken before any early-out.
     const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;   // 3% relative, +1cm floor at grazing distances
     if (abs(clip.w - stored.y) > tol) return false;
 
@@ -1326,13 +1096,11 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     return true;
 }
 
-// THE LOCAL-LIGHT TWIN of rtReprojectHistory, for rdLocalLightsVisibility (voxi.hlsl): the same
-// reprojection and the same depth test against the SUN history's stored depth -- depth validity is a
-// property of the surface, not of the light, so the lamp history (gRdLocalHist) needs no depth channel
-// of its own -- returning the texel instead of the sun's visibility. A NEAR-COPY ON PURPOSE, like rtReprojectAo
-// below: routing rtReprojectHistory through a shared helper added phis to the register-bound
-// CSRdShadow (its outputs must be defined on every early return). The arithmetic is IDENTICAL; see
-// rtReprojectHistory for why each part is what it is. Change one, change both.
+// THE LOCAL-LIGHT TWIN of rtReprojectHistory, for rdLocalLightsVisibility (voxi.hlsl): same
+// reprojection and depth test against the SUN history's depth (validity is a property of the
+// surface, not the light, so gRdLocalHist needs no depth channel), returning the texel instead of
+// visibility. Near-copy on purpose (a shared helper would add phis to the register-bound CSRdShadow);
+// arithmetic IDENTICAL to rtReprojectHistory -- see there for why. Change one, change both.
 bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velocityPx) {
     texel = int2(0, 0);
     velocityPx = 0.0;
@@ -1356,18 +1124,15 @@ bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velo
     return true;
 }
 
-// The AMBIENT twin of rtReprojectHistory, against gAoHist. A near-copy on purpose: HLSL below SM 6.6
-// cannot take a Texture2D parameter, and the alternative -- folding both into one function
-// behind a flag -- would put a branch in the hot path of every pixel to save nine lines. The
-// arithmetic is deliberately IDENTICAL, including floor() over round() and the 3% depth tolerance;
-// see the original for why each of those is what it is. Change one, change both.
+// The AMBIENT twin of rtReprojectHistory, against gAoHist. Near-copy on purpose: HLSL below SM 6.6
+// can't take a Texture2D parameter, and folding both behind a flag would branch in every pixel's hot
+// path to save nine lines. Arithmetic IDENTICAL (floor over round, the 3% depth tolerance) -- see
+// rtReprojectHistory for why. Change one, change both.
 bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
     float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
-    // Taken HERE, above every early-out, so the derivative is never evaluated in divergent flow --
-    // see the tolerance below for what it is for.
-    const float dzdx = ddx(clip.w);
+    const float dzdx = ddx(clip.w);   // before every early-out, so never evaluated in divergent flow
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
     float3 ndc = clip.xyz / clip.w;
@@ -1379,26 +1144,6 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
     int2 texel = int2(floor(px));
     if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
     const float2 stored = gAoHist.Load(int3(texel, 0));   // x = openness, y = linear depth
-    // THE TOLERANCE FOLLOWS THE DEPTH GRADIENT, and a flat 3% is what made grazing surfaces speckle.
-    //
-    // `stored.y` is the depth recorded at the TEXEL WE LANDED ON, up to half a texel from where this
-    // pixel actually reprojected to. On a surface seen face-on that is a few millimetres and 3%
-    // covers it easily. On one seen EDGE-ON -- a floor stretching away, the base of a column -- half
-    // a texel of screen space is metres of depth, so the test rejects a history that was perfectly
-    // good, the pixel falls back to its raw ONE-RAY estimate, and at one ray that estimate is
-    // BINARY. A field of pixels each independently choosing 0 or 1 is precisely salt and pepper, and
-    // it appears exactly where the geometry is grazing, which is where the user reported it.
-    //
-    // (|ddz/dx| + |ddz/dy|) is how much depth legitimately changes across one pixel here, so
-    // allowing two pixels of it turns "3% of the depth" into "3% of the depth, plus whatever this
-    // surface's own slope makes unavoidable". Face-on geometry has a gradient near zero and keeps
-    // exactly the old tolerance, so this loosens the test only where it was wrong.
-    //
-    // ddx/ddy ARE SAFE HERE, and that is worth stating because rtShadowSpatial carries a warning
-    // about the opposite case: derivatives in DIVERGENT flow difference against a lane that never
-    // ran. The branch above this call is on gAmbientParams.x, a constant-buffer value, so it is
-    // uniform across the wave -- and the gradient is taken before any of this function's own
-    // early-outs.
     const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;
     if (abs(clip.w - stored.y) > tol) return false;
     hist = stored.x;
@@ -1408,43 +1153,33 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
 
 // AMBIENT OCCLUSION, ACCUMULATED OVER TIME instead of over rays.
 //
-// At one ray per pixel this estimator is `open = hit ? 0 : 1` -- a binary mask, the noisiest thing
-// a Monte Carlo estimate can be, and its MEAN is already correct (a probe read the same value at 1
-// ray and at 4, which is exactly why no probe could see the problem: a probe cannot measure
-// variance). The previous answer was four rays sharing one azimuth across a 4x4 tile, which buys
-// five quantisation levels instead of two and correlates them into visible BLOCKS -- the tile
-// comment above says as much, and names this function's approach as the real fix.
+// At one ray/pixel this estimator is `open = hit ? 0 : 1`, a binary mask whose MEAN is already
+// correct (a probe read the same value at 1 ray and at 4 -- a probe can't measure variance, which is
+// why one never caught this). The old fix -- four
+// rays sharing one azimuth across a 4x4 tile -- bought five quantisation levels over two but
+// correlated them into visible BLOCKS. Accumulating instead gets sample count from FRAMES: at weight
+// 0.9 the history averages ~10 of them, so one ray behaves like ten and the tile can shrink to 1 --
+// strictly cheaper, which is what lets sky occlusion drop off the Epic-only rung.
 //
-// Accumulating gets the sample count from FRAMES rather than from rays: at weight 0.9 the history
-// is an exponential average over ~10 of them, so one ray behaves like ten and the tile can go back
-// to 1 (independent noise per pixel, then averaged away). That is strictly cheaper than what it
-// replaces -- one coherent-free ray instead of four -- which is what lets sky occlusion come down
-// off the Epic-only rung it was priced onto.
+// VELOCITY TERM AND 32-PIXEL BUDGET ARE THE SHADOW PATH'S, DELIBERATELY: this history is also exactly
+// one frame old with its own depth test, so velocity only pays for sub-texel alignment (bounded at
+// half a texel at any speed by the nearest-neighbour lookup). AO tolerates a stale sample better than
+// a shadow edge does, not worse.
 //
-// THE VELOCITY TERM AND THE 32-PIXEL BUDGET ARE THE SHADOW PATH'S, DELIBERATELY. This history is
-// also exactly one frame old and also guarded by a depth test, so the thing velocity still has to
-// pay for is sub-texel alignment -- bounded at half a texel at any speed by the nearest-neighbour
-// lookup. Ambient occlusion tolerates a stale sample better than a shadow edge does, not worse.
-// THE SPATIAL HALF OF THE DENOISER, WHICH THE AMBIENT TERM NEVER HAD.
+// THE SPATIAL HALF THE AMBIENT TERM NEVER HAD: the sun shadow is denoised twice (rtShadowTemporal
+// accumulates, rtShadowSpatial filters on read); sky occlusion got only the first, so its residual
+// variance is ~6/7 of this renderer's measured frame flicker (still camera, one frame apart: 0.158%
+// of channels past 8 codes with it on, 0.026% off, 0.000% with RT off entirely).
 //
-// The sun shadow is denoised twice: rtShadowTemporal accumulates over frames, and rtShadowSpatial
-// then filters across pixels on read. Sky occlusion got only the first of those -- so its residual
-// variance had nowhere to go but the screen, and it is ~6/7 of this renderer's measured frame-to-
-// frame flicker (still camera, two captures one frame apart: 0.158% of channels past 8 codes with
-// it on, 0.026% with it off, 0.000% with ray tracing off entirely).
+// NEAR-COPY OF rtShadowSpatial (same reason as rtReprojectAo: no Texture2D parameters below SM 6.6,
+// and a flag would branch a hot path). IDENTICAL arithmetic (plane-distance rejection in last frame's
+// depth, Gaussian sigma=radius/2, normal crease test, velocity taper) except radius is at least 2
+// (5x5): one ray/pixel at half rate has more variance than the sun's penumbra -- at Epic's shadow
+// radius 1 the AO view read high-pass RMS 12.45, at 2 it's 6.44 for +0.09ms, no measurable image
+// change still or moving (textures mask it; untextured surfaces show it). 0 (Undenoised) still turns it off.
 //
-// A NEAR-COPY OF rtShadowSpatial, ON PURPOSE AND FOR THE REASON ALREADY DOCUMENTED at rtReprojectAo:
-// HLSL below SM 6.6 cannot take a Texture2D as a parameter, and folding the two behind a flag would
-// put a branch in a hot per-pixel path to save a page. The arithmetic is deliberately IDENTICAL --
-// the same plane-distance rejection expressed in last frame's depth, the same Gaussian with
-// sigma = radius/2, the same normal crease test, the same velocity taper. Change one, change both.
-// ONE DIFFERENCE: the radius is at least 2 (5x5). Sky visibility is low-frequency and one ray per pixel
-// at half rate leaves more variance than the sun's penumbra; at Epic's shadow radius 1 the AO view
-// read high-pass RMS 12.45, at 2 it reads 6.44, for +0.09 ms, with no measurable lit-image change
-// still or moving (textures mask it; untextured surfaces show it). 0 (Undenoised) still turns it off.
-//
-// It reads gAoHist -- LAST frame's openness -- exactly as the shadow filter reads last frame's
-// visibility, which is what makes the reprojected centre the right place to gather around.
+// Reads gAoHist -- LAST frame's openness -- exactly as the shadow filter does, making the reprojected
+// centre the right place to gather around.
 float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
     const int shadowRadius = (int)gRtDenoiseParams.x;
     if (shadowRadius <= 0 || gRtHistParams.y < 0.25 || gRtDenoiseParams.w < 0.5) return centre;
@@ -1507,106 +1242,84 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
         }
     }
 
-    // ---- THE CLAMP, WHICH IS WHAT ACTUALLY REMOVES SALT AND PEPPER ---------------------------
+    // ---- THE CLAMP, WHICH IS WHAT ACTUALLY REMOVES SALT AND PEPPER ----
     //
-    // The Gaussian above is the wrong instrument for an isolated extreme and always was: a LINEAR
-    // filter SPREADS an impulse over its kernel rather than removing it, turning one bright pixel
-    // into a bright smudge and lowering the peak just enough to look like progress. MEASURED on a
-    // still frame as deviation from the 3x3 MEDIAN -- the quantity "salt and pepper" actually names,
-    // and a different one from the frame-to-frame flicker measured earlier: 0.248% of pixels past 64
-    // codes with ray tracing on, against 0.019% with it off. Raising the SHADOW ray count to 4
-    // changed it to 0.242%, i.e. not the shadow; switching traced sky occlusion off took it to
-    // 0.082%, i.e. mostly this term.
+    // The Gaussian above is the wrong tool for an isolated extreme: a LINEAR filter spreads an
+    // impulse over its kernel instead of removing it. MEASURED on a still frame as deviation from the
+    // 3x3 MEDIAN: 0.248% of pixels past 64 codes with RT on vs 0.019% off; raising shadow rays to 4
+    // barely moved it (0.242%, not the shadow), disabling traced sky occlusion did (0.082%, mostly
+    // this term).
     //
-    // Clamping to the neighbourhood's own mean +/- k*sigma is what temporal antialiasing has used
-    // against fireflies for years, and it works here for the same reason: an impulse is BY
-    // DEFINITION a value its neighbours do not share, so a statistic taken from the neighbours
-    // bounds it without knowing anything about the scene. A genuine feature -- a real shadow edge,
-    // a real crease -- is supported by neighbours on one side and survives, which is why this is not
-    // simply a blur with extra steps.
-    //
-    // 2 SIGMA, and the two failure directions are not symmetric. Tighter starts eating real
-    // gradients, which is the artefact this renderer has already paid for once by over-filtering.
-    // Looser stops catching anything: the outliers here are many sigma out, not marginal. The
-    // minimum tap count is what stops a pixel with two surviving neighbours -- a silhouette, where
-    // the depth and normal rejects have thrown most of the kernel away -- from being clamped to a
-    // statistic built out of nothing.
+    // Clamping to the neighbourhood's mean +/- k*sigma (the firefly fix TAA has used for years) works
+    // because an impulse is BY DEFINITION a value its neighbours don't share; a real feature survives
+    // because it's supported on one side. 2 SIGMA: tighter eats real gradients (this renderer has
+    // already paid for that once), looser misses outliers that are many sigma out. Minimum tap count
+    // 3 stops a silhouette pixel (most of its kernel rejected) from being clamped to nothing.
     float clamped = centre;
     if (nCount >= 3.0) {
         const float mean  = nSum / nCount;
         const float sigma = sqrt(max(nSum2 / nCount - mean * mean, 0.0));
-        // A FLOOR UNDER SIGMA. A perfectly flat neighbourhood has zero variance, and clamping to
+        // Floor under sigma: a perfectly flat neighbourhood has zero variance, and clamping to
         // [mean, mean] there would erase the centre's own legitimate detail along with its noise.
         const float k = 2.0 * max(sigma, 0.02);
         clamped = clamp(centre, mean - k, mean + k);
-        // The blurred average carried the UNCLAMPED centre at weight 1; correct it in place rather
-        // than re-running the loop, so the filter and the clamp agree about what the centre is.
+        // The blurred average carried the UNCLAMPED centre at weight 1; correct in place rather than
+        // re-running the loop.
         acc += clamped - centre;
     }
 
     const float velPx = reproj ? length(centrePx - pixel) : 0.0;
     const float trust = gRtDenoiseParams.z > 0.0 ? saturate((3.0 - velPx) * gRtDenoiseParams.z) : 1.0;
-    // CLAMPED FIRST, THEN BLENDED, so the impulse is gone before the linear filter ever sees it --
-    // and so that a run with the blur turned down to nothing still gets the clamp, which is the part
-    // that actually addresses this artefact.
+    // Clamped first, then blended, so the impulse is gone before the linear filter sees it, and a
+    // run with the blur turned down still gets the clamp.
     return saturate(lerp(clamped, acc / wsum, saturate(gRtDenoiseParams.y) * trust));
 }
 
-// `coneAo` is the cone gather's own occlusion -- smooth, deterministic, and ALREADY COMPUTED at
-// every tier. At Epic it was computed and then thrown away (coneTracedIndirect says exactly that of
-// its own `rdAo`). Passing it in as the PRIOR therefore costs nothing.
-// `nrdAoUsable` SAYS WHETHER THIS PASS'S OWN INPUTS PRODUCED gNrdAo, and it exists because the
-// zero-dimensions test below answers a DIFFERENT question than the one that matters.
+// `coneAo`: the cone gather's own occlusion -- smooth, deterministic, ALREADY COMPUTED at every tier
+// (at Epic it was computed then thrown away -- coneTracedIndirect's own `rdAo` comment says so). Free
+// as a prior.
+// `nrdAoUsable`: whether this pass's OWN inputs produced gNrdAo -- the zero-dimensions test below only
+// tells "allocated" vs "absent", not "produced from this frame's inputs".
 //
-// MEASURED 2026-09-22, PTTest NewSponza, default camera, fixed exposure, viewport crop, deep shadow
-// (path-traced reference < 8 luminance, 71% of the viewport). Ray-driven primary visibility read
-// 12.68 against raster's 7.87 and a path-traced truth of 1.58 -- washed-out darks, reported by the
-// owner as "raster looks more realistic, the darkness is truly dark". Bisecting every term in BOTH
-// paths found the whole of it here: the FRESH trace agrees between the two paths to within noise
-// (median 0.00 in both -- correctly fully occluded), and only after this function's NRD override
-// does ray-driven diverge to ~0.83 open while raster stays at ~0.
+// MEASURED 2026-09-22, PTTest NewSponza, deep shadow (reference <8 luminance, 71% of viewport):
+// ray-driven primary visibility read 12.68 vs raster's 7.87 vs path-traced truth 1.58 -- washed-out
+// darks, reported by the owner as "raster looks more realistic, the darkness is truly dark".
+// Bisecting every term in both paths found the whole of it here: the FRESH trace agreed between
+// paths (median 0.00, correctly occluded); only after NRD's override did ray-driven diverge to
+// ~0.83 open while raster stayed ~0.
 //
-// WHY: gNrdAo is REBLUR_DIFFUSE_OCCLUSION's output, and REBLUR reprojects using motion vectors,
-// depth and normals that the RASTER path writes. Ray-driven primary visibility runs with the
-// G-buffer off (VoxiRenderer selects rayDrivenTexPso_ precisely when it is), so those inputs are not
-// this frame's, and the denoised answer it hands back is not about this frame's geometry. The
-// texture is still BOUND and still reports non-zero dimensions, so the test below cannot see this --
-// it distinguishes "allocated" from "absent", never "produced from inputs this pass actually wrote".
+// WHY: gNrdAo (REBLUR_DIFFUSE_OCCLUSION) reprojects using motion vectors/depth/normals the RASTER
+// path writes. Ray-driven primary visibility runs with the G-buffer off (VoxiRenderer selects
+// rayDrivenTexPso_ precisely then), so those inputs aren't this frame's, and the denoised answer
+// isn't about this frame's geometry -- but the texture stays bound and non-zero-dimensioned, so the
+// test can't see the mismatch.
 //
-// DISABLING IT FOR RASTER WOULD BE A REGRESSION, which is why this is a parameter and not a removal:
-// the same experiment moved raster from 7.87 to 25.30 (mean absolute difference from the reference
-// 10.63 -> 22.75). Raster DEPENDS on this denoised answer. Ray-driven is harmed by it: 12.68 -> 8.98,
-// MAD 12.59 -> 9.83, i.e. closer to ground truth than raster itself, and the high-frequency energy
-// falls from 1.486 to 1.172 against raster's 1.035 -- so it is also the less noisy answer, which is
-// the second half of what the owner reported.
+// A PARAMETER, NOT A REMOVAL: disabling it regressed raster (7.87->25.30, MAD 10.63->22.75; raster
+// DEPENDS on this denoised answer) while helping ray-driven (12.68->8.98, MAD 12.59->9.83, closer to
+// truth than raster; high-freq energy 1.486->1.172 vs raster's 1.035).
 //
-// THE BETTER FIX, NOT TAKEN HERE: give ray-driven correct NRD inputs (motion vectors and depth for a
-// ray-traced primary hit) so the denoiser earns its place on that path too. That is a real piece of
-// work in VoxiRenderer/NRD wiring, not a shader change, and shipping the measured improvement should
-// not wait on it. When it lands, this parameter is what gets flipped back to true.
+// BETTER FIX, NOT TAKEN: give ray-driven correct NRD inputs (motion vectors/depth for a ray-traced
+// primary hit) so the denoiser earns its place there too -- VoxiRenderer/NRD wiring work, not a
+// shader change. When it lands, flip this parameter back to true.
 //
-// `coneAoIsGather` SAYS WHETHER `coneAo` WAS MEASURED. It is only when coneTracedIndirect ran; under
-// ReSTIR GI (giMode 1) or with GI off, the caller's `ao` is still the 1.0 it was initialised with.
+// `coneAoIsGather`: whether `coneAo` was actually measured (coneTracedIndirect ran); under ReSTIR GI
+// or with GI off the caller's `ao` is still its 1.0 init.
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo,
                              bool coneAoIsGather, bool nrdAoUsable) {
-    // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
-    // reflection pairs exist at every ray-tracing tier, but this one is allocated only while a sky
-    // occlusion ray is wanted (VoxiRenderer::aoHistoryWanted), and touching a null UAV is undefined
-    // rather than merely wasteful. With rays > 0 that means a TRANSITIONAL frame -- the first after
-    // a resize, a render-scale change or sky occlusion being switched on, before the pair exists --
-    // or an allocation that failed. T2 (rtSkyOcclusionHalfRate, below) never applies here: there is no
-    // AO history pair to reproject against on a transitional frame, so this branch always traces.
+    // gRtDenoiseParams.w, NOT gRtHistParams.x: the shadow/reflection pairs exist at every RT tier, but
+    // this AO history pair is allocated only while a sky occlusion ray is wanted (VoxiRenderer::
+    // aoHistoryWanted; touching a null UAV is undefined). rays>0 here means a TRANSITIONAL frame (just
+    // after a resize/render-scale change/AO switched on, before the pair exists) or a failed allocation
+    // -- T2 below never applies since there's no history pair.
     //
-    // THE CONE'S ANSWER ONLY WHEN THE CONE ANSWERED. A real gather is smooth and beats a lone binary
-    // ray. Under ReSTIR GI `coneAo` is the constant 1.0, and returning it painted full sky ambient on
-    // every enclosed surface for that frame -- the same "fully open" constant whose use as the
-    // reprojection prior below was the ray-driven motion wash. This pixel's own trace is right in
+    // THE CONE'S ANSWER ONLY WHEN THE CONE ANSWERED: under ReSTIR GI `coneAo` is the constant 1.0, and
+    // returning it painted full sky ambient on every enclosed surface (same constant that caused the
+    // ray-driven motion wash as a reprojection prior below) -- this pixel's own trace is right in
     // expectation instead.
     if (gRtDenoiseParams.w < 0.5) {
-        // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
-        // distance: the wrapper exists to throw away everything but `.open`, and this function is one
-        // of the callers its own comment describes as "meaning to use them". Identical cost -- the
-        // wrapper was a field select, not a second trace.
+        // rtAmbientTraced, not the rtSkyOcclusion wrapper: this function needs the hit distance too --
+        // one of the callers the wrapper's own comment calls "meaning to use them" -- and the wrapper
+        // is just a field select at identical cost.
         const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
         return coneAoIsGather ? coneAo : amb.open;
     }
@@ -1614,24 +1327,21 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
 
     // ---- T2 (Settings::rtSkyOcclusionHalfRate, console voxi.rtSkyOcclusionHalfRate) -- DECIDED
-    // BEFORE THE TRACE, NOT AFTER, so a skip actually avoids the ray rather than discarding it ----
+    // BEFORE THE TRACE so a skip avoids the ray rather than discarding it ----
     //
-    // Reprojection is hoisted up here from where it used to sit (just above the blend, further down)
-    // for exactly that reason: `rtReprojectAo` is a texture lookup, not a ray, so evaluating it before
-    // the trace decision costs nothing extra -- it is the SAME call this function always made, only
-    // earlier in program order. With the bit clear, `skipTrace` is always false below and every line
-    // from here to the trace computes exactly what it did before this task.
+    // Reprojection is hoisted up here (a texture lookup, not a ray, so free to evaluate early) so the
+    // skip decision can see it before tracing. With the bit clear, skipTrace is always false and every
+    // line from here to the trace computes exactly what it did before this hoist.
     //
-    // A WHOLE 8x8 TILE (one staged compute thread group -- CSRdSkyOcc dispatches this grid) shares the
-    // skip decision, viewport-relative (gSceneViewportCur.xy) so the tile lines up with the group that
-    // actually dispatched it. Parity alternates by gRtHistParams.z (the frame index), so a tile that
-    // skips this frame traces next -- half the tiles trace every frame, not the same half forever.
+    // A WHOLE 8x8 TILE (one CSRdSkyOcc thread group) shares the skip decision, viewport-relative
+    // (gSceneViewportCur.xy) so it lines up with the dispatched group. Parity alternates by frame
+    // index, so a skipping tile traces next frame -- half the tiles trace every frame, not the same
+    // half forever.
     //
     // SKIPPING ONLY WHEN THIS PIXEL'S OWN HISTORY REPROJECTS VALIDLY is the whole safety condition: a
-    // disoccluded pixel always traces, whatever its tile's parity says. That is the ray-driven motion-
-    // wash lesson the paragraph below (SEEDED FROM THIS PIXEL'S OWN TRACE) already paid for once --
-    // standing on a prior for a newly revealed surface reads as a grey wash that takes ~33 frames of
-    // history to clear. A tile skip is only safe where there is real history to stand on instead.
+    // disoccluded pixel always traces regardless of tile parity -- the same ray-driven motion-wash
+    // lesson below (SEEDED FROM THIS PIXEL'S OWN TRACE): standing on a prior for newly revealed
+    // surface reads as a grey wash taking ~33 frames to clear.
     float histV = 0.0;
     float2 velocityPx = 0.0;
     const bool haveHist = gRtHistParams.y > 0.25 && rtReprojectAo(wpos, pixel, histV, velocityPx);
@@ -1642,92 +1352,59 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
         skipTrace = ((tile.x ^ tile.y ^ (uint)gRtHistParams.z) & 1u) != 0u;
     }
 
-    // `tracedNow` GATES THE HIT-DISTANCE WRITE, FURTHER DOWN. gAoHitDistOut (u5) is not ping-ponged --
-    // there is no history texture for it in this shader, only NRD's own external accumulation reads it
-    // back -- so a skipped pixel simply leaves it UNWRITTEN: NRD keeps reading whatever this same texel
-    // held after its last real trace, at most one frame old under this checkerboard (a tile that skips
-    // this frame traced last frame and will trace next). That is the "last value" this function keeps
-    // well-defined on a skipped pixel; there is no reprojected hit distance to keep instead -- gAoHist
-    // (the AO reprojection source above) carries (openness, depth), not hit distance.
+    // `tracedNow` GATES THE HIT-DISTANCE WRITE below. gAoHitDistOut (u5) is not ping-ponged -- only
+    // NRD's external accumulation reads it back -- so a skipped pixel leaves it UNWRITTEN, at most one
+    // frame stale under this checkerboard (a skipping tile traced last frame, will trace next); gAoHist
+    // carries (openness, depth), not hit distance, so there's no reprojected value to write instead.
     float fresh;
     float hitDist = 0.0;
     bool  tracedNow;
     if (skipTrace) {
-        // The reprojected history IS this frame's fresh estimate -- see the SEEDED FROM comment just
-        // below: `vis = fresh` followed by `vis = lerp(fresh, histV, weight)` reduces to `histV`
-        // exactly, for any weight, because lerp(a, a, t) == a. The temporal blend "keeps it" without
-        // needing a special case, and the spatial filter at the end of this function still runs.
+        // The reprojected history IS this frame's fresh estimate: `vis = lerp(fresh, histV, weight)`
+        // with fresh=histV reduces to histV exactly (lerp(a,a,t)==a), so the temporal blend "keeps it"
+        // with no special case, and the spatial filter below still runs.
         fresh = histV;
         tracedNow = false;
     } else {
-        // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
-        // distance: the wrapper exists to throw away everything but `.open`, and this function is one
-        // of the callers its own comment describes as "meaning to use them". Identical cost -- the
-        // wrapper was a field select, not a second trace.
         const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
         fresh = amb.open;
         hitDist = amb.hitDist;
         tracedNow = true;
     }
-    // ---- SEEDED FROM THIS PIXEL'S OWN TRACE. IT USED TO BE SEEDED FROM `coneAo`, AND THE ARGUMENT
-    // FOR THAT WAS SOUND RIGHT UP UNTIL THE PREMISE STOPPED HOLDING ----
+    // ---- SEEDED FROM THIS PIXEL'S OWN TRACE, not `coneAo` as before ----
     //
-    // The old reasoning, kept because it is still correct on its own terms: at one ray `fresh` is
-    // BINARY -- 0 or 1 -- so a pixel with no usable history puts a coin flip on screen and writes
-    // that coin flip into the history for its neighbours to read next frame. Measured with a
-    // scale-free metric (each image normalised to its OWN mean, because an absolute-code metric and
-    // a divide-by-local-median one are both confounded by the brightness an ablation changes -- two
-    // rankings were discarded before that was measured honestly), seeding from the cone instead took
-    // bright speckle from 0.071% of pixels to 0.012%. The cone gather answers the same question --
-    // how much of the hemisphere is open -- smoothly and deterministically, so it was the right
-    // thing to stand on when the traced estimate had nothing to average against.
+    // Old reasoning (still correct on its own terms): at one ray `fresh` is BINARY, so an unseeded
+    // disocclusion writes a coin flip into history. Measured scale-free (each image normalised to its
+    // own mean; two other metrics were tried and discarded as confounded by the exposure an ablation
+    // changes), seeding from the cone took bright speckle from 0.071% of pixels to 0.012%.
     //
-    // THE PREMISE IS THAT `coneAo` IS A GATHER. UNDER giMode=1 IT IS A HARDCODED 1.0.
-    // giRestirIndirect (voxi_restir.hlsli) declares `out float ao`, sets it to 1.0 on its first
-    // line and NEVER ASSIGNS IT AGAIN -- the identifier appears exactly twice in an 800-line body --
-    // and when ReSTIR GI is the active estimator, voxi.hlsl takes that branch instead of calling
-    // coneTracedIndirect at all. PTTest.ocproject sets RENDER.GIMODE 1, so this is the shipped path
-    // for the scene every measurement in this project is taken on, not a corner.
+    // BUT under giMode=1, `coneAo` is a hardcoded 1.0 (giRestirIndirect in voxi_restir.hlsli sets it
+    // once and never reassigns it -- the identifier appears exactly twice in an 800-line body, and
+    // voxi.hlsl skips coneTracedIndirect entirely in that mode), and PTTest.ocproject ships giMode 1
+    // -- the scene every measurement here uses.
+    // MEASURED: `ao`/`rdAo` render flat 1.0 in both paths, deep shadow included (230.71 vs white
+    // 230.81), while the cone gather itself is healthy (alpha 0.90, would give ao=0.10); `fresh` is
+    // nearly exact instead (1.50 vs truth 1.35). So the real choice is "constant FULLY OPEN" vs "this
+    // pixel's own noisy-but-correct-in-expectation measurement", and a prior is only consulted on
+    // disocclusion -- exactly where a full-open constant paints sky and takes ~33 frames to clear.
     //
-    // MEASURED, and this is what makes the trade go the other way: `ao`/`rdAo` render as a flat 1.0
-    // in BOTH primary-visibility paths, deep shadow included (230.71 against a white of 230.81),
-    // while the cone gather itself is healthy and simply bypassed (traceCone's own alpha measures
-    // 0.90, which would give ao = 0.10). And `fresh` is not merely plausible here, it is nearly
-    // exact: 1.50 in deep shadow against a converged path-traced truth of 1.35.
-    //
-    // So the choice is no longer "smooth prior versus binary noise". It is "a constant that says
-    // FULLY OPEN versus this pixel's own measurement of the hemisphere, which is right in
-    // expectation and noisy". A prior is only consulted where reprojection FAILED -- disocclusions,
-    // which is exactly where a full-open constant paints sky onto newly revealed interior surfaces
-    // and then takes ~33 frames of history to walk it back. Noise that is correct on average is the
-    // better failure.
-    //
-    // ---- THIS IS THE FIX FOR RAY-DRIVEN'S GREY WASH WHILE THE CAMERA MOVES. An earlier version of
-    // this comment called it invisible; that was a measurement taken with motion too gentle to fail
-    // reprojection anywhere that mattered ----
-    //
-    // The owner's report: flying in ray-driven mode, every shadowed wall goes a mottled grey (its
-    // own albedo lit by full sky ambient) and clears about a second after stopping. Their two shots
-    // at one pose fit an ADDITIVE lift, not an exposure change: no single gain matches every band
-    // (the darkest would need x22, the brightest x1.08). It is this prior: a revealed strip has no
-    // history, reads `vis` = coneAo = 1.0, and takes the whole sky.
-    //
-    // MEASURED, PTTest's own gallery (--cam -577 85 746 0 90), matched pose (--cam-wobble 30 16
-    // --cam-wobble-stop 60, 63 frames against 180), the moving frame against the settled one:
+    // THE FIX FOR RAY-DRIVEN'S GREY WASH WHILE THE CAMERA MOVES (an earlier version of this comment
+    // called it invisible; that measurement's motion was too gentle to fail reprojection anywhere that
+    // mattered): every shadowed wall going mottled grey, clearing ~1s after stopping -- a revealed
+    // strip with no history read coneAo=1.0. The owner's shots fit an ADDITIVE lift, not exposure (no
+    // single gain matches every band: darkest needs x22, brightest x1.08). MEASURED, PTTest gallery
+    // (--cam -577 85 746 0 90), matched pose (--cam-wobble 30 16 --cam-wobble-stop 60, 63 vs 180
+    // frames), moving vs settled:
     //   coneAo prior, auto-exposure on:  +10.14 mean, 12.1% of pixels past 32 codes -- the report
     //   fresh prior,  auto-exposure on:   -0.15 mean,  0.4%
     //   coneAo prior, fixed exposure 4:   +6.78        fresh: -0.09
     //   flying 30/frame down the gallery: +2.93        fresh: +0.63
-    // And with voxi.debugResetHistoryEveryFrame 2 (EVERY pixel on the prior, still camera):
-    // coneAo +31.2 with deep shadow gone (11% -> 0.07% of the frame); fresh +0.02.
+    // voxi.debugResetHistoryEveryFrame 2 (every pixel on the prior, still camera): coneAo +31.2 (deep
+    // shadow 11%->0.07%); fresh +0.02. Still-frame numbers unchanged (3.61 raster / 3.71 ray-driven vs
+    // reference, parity 0.98). A gentle rig (--cam-translate 3 --cam-wobble 8 40) barely moved it
+    // (4.10->4.09): a matched-pose rig only tests a prior if the motion reveals real screen area.
     //
-    // The still-frame numbers are unchanged either way (3.61 raster / 3.71 ray-driven against the
-    // path-traced reference, parity 0.98), and the old gentle rig (--cam-translate 3 --cam-wobble
-    // 8 40) moved 4.10 -> 4.09: at 8 degrees per 40 frames almost nothing is ever revealed.
-    // THE LESSON: a matched-pose rig only tests a prior if the motion reveals real screen area.
-    //
-    // THE SIBLING CASE, the early-out above for a frame with no AO pair bound, now makes the same
-    // choice -- see coneAoIsGather there.
+    // THE SIBLING CASE (early-out above, no AO pair bound) makes the same choice -- see coneAoIsGather.
     float vis = fresh;
     // haveHist/histV/velocityPx: the SAME rtReprojectAo call this function always made here, just
     // hoisted above (see the T2 comment) so the skip decision could see it before tracing.
@@ -1739,100 +1416,69 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
         // noise, and that floor is the same in every configuration measured (the old four-ray tile
         // scored 0.3929 on it). Deeper history is not free -- it is lag on a disocclusion the depth
         // test does not catch -- so the value that buys nothing is not the one to ship.
-        // 0.97, NOT 0.9, AND THE PARAGRAPH ABOVE IS OUT OF DATE RATHER THAN WRONG. It records that
-        // 0.95 "measured no change", and that was true when it was measured: what remained in a
-        // still frame was Sponza's stone TEXTURE, not sampling noise, so a deeper history had
-        // nothing left to average. The sky irradiance calibration removed that premise -- the
-        // ambient this occlusion multiplies is now eight times larger, so the same relative variance
-        // is eight times more visible, and this term rather than the texture is the floor.
-        // ~33 frames of history against ~10.
+        // 0.97, not 0.9 (the paragraph above is stale, not wrong): 0.95 once measured no change when a
+        // still frame's residual was Sponza's stone TEXTURE, not sampling noise. The sky irradiance
+        // calibration made the ambient this multiplies 8x larger, so the same relative variance is now
+        // 8x more visible, and this term (not the texture) is the floor. ~33 frames of history vs ~10.
         const float weight = lerp(0.97, 0.5, t);
-        // History exists, so the traced sample is the UPDATE and the prior above goes unused.
-        vis = lerp(fresh, histV, weight);
+        vis = lerp(fresh, histV, weight);   // history exists, so the traced sample is the UPDATE
     }
-    // ---- NRD's ANSWER WINS WHEN THERE IS ONE, and it replaces the blend above rather than
-    // filtering it ----
+    // ---- NRD's ANSWER WINS WHEN THERE IS ONE, REPLACING the blend above rather than filtering it ----
     //
-    // gNrdAo holds LAST frame's hit distance run through NVIDIA's REBLUR_DIFFUSE_OCCLUSION. Both
-    // quantities are the same thing in the same units: AverAmbientTraced::hitDist is the mean
-    // distance travelled as a FRACTION OF TMax with an escaping sample contributing a full 1.0, so
-    // 1 is "nothing in the way" and 0 is "blocked at once" -- exactly the polarity and range of the
-    // openness `vis` carries. No remap, and none should be invented here.
+    // gNrdAo (REBLUR_DIFFUSE_OCCLUSION on last frame's hit distance) shares AverAmbientTraced::hitDist's
+    // units exactly (fraction of TMax, 1="nothing in the way"), so no remap.
     //
-    // IT REPLACES THE EMA RATHER THAN FEEDING IT. Handing a denoised value back into the 0.97
-    // history blend would be feeding a filter its own output -- the IIR trap the history write
-    // below spends a paragraph avoiding -- and it would also double-count NRD's own temporal
-    // accumulation, which is the whole thing NRD's permanent pool exists to do.
+    // REPLACES THE EMA, DOESN'T FEED IT: handing a denoised value into the 0.97 blend would feed a
+    // filter its own output and double-count NRD's own temporal accumulation.
     //
-    // THE ZERO-DIMENSIONS TEST IS THE BOUND-OR-NOT SIGNAL, the same one averBlendBackdropValid uses
-    // for the backdrop: the pass is absent on Vulkan, absent without NRD in the build, and absent
-    // without the G-buffer, so the shader cannot assume t14 exists. A null-filled Texture2D reports
-    // zero dimensions, which the descriptor already tells us -- no fourth mirror of the constant
-    // block, which is a trap this file has been caught by before.
+    // ZERO-DIMENSIONS TEST is the bound-or-not signal (same one averBlendBackdropValid uses): absent
+    // on Vulkan, without NRD, or without the G-buffer -- t14 can't be assumed present.
     uint nrdW = 0, nrdH = 0;
     gNrdAo.GetDimensions(nrdW, nrdH);
-    // W6/M5: `gAverHistoryWrite &&` LEADS THIS TEST NOW -- a blended-replay fragment (voxi.hlsl's
-    // PSMainVoxi, this frame's translucent pane) must not read back the OPAQUE surface's own
-    // denoised answer, the exact mis-attribution this task's C9 finding names ("a pane is handed
-    // the denoised GI/AO of the surface behind it"). Skipping the readback leaves `vis` at the
-    // fresh/history blend just above -- this fragment's own measurement, not someone else's -- and
-    // the pane's own write below is gated the same way, so neither half of the pair mixes the two
-    // surfaces' signals. See voxi.hlsl's own gAverHistoryWrite/averDrawIsTranslucent for the gate's
-    // definition and voxi_restir.hlsli's identical readback gate (gGiRadianceOut's NRD GI readback)
-    // for the sibling fix.
+    // W6/M5: `gAverHistoryWrite &&` leads this test so a blended-replay fragment (glass/water pane,
+    // PSMainVoxi) doesn't read back the OPAQUE surface's own denoised answer -- the mis-attribution
+    // this task's C9 finding named ("a pane handed the denoised GI/AO of the surface behind it").
+    // Skipping leaves `vis` at this fragment's own fresh/history blend; the pane's write below is
+    // gated the same way. See voxi.hlsl's gAverHistoryWrite/averDrawIsTranslucent, and
+    // voxi_restir.hlsli's identical gate on gGiRadianceOut's NRD GI readback.
     if (nrdAoUsable && gAverHistoryWrite && nrdW > 0u && nrdH > 0u) {
-        // STILL WRITTEN TO THE HISTORY BELOW, because that history is what the NEXT frame's
-        // reprojection reads and what the pass falls back to the moment NRD stops running -- a
-        // frame where the G-buffer is switched off would otherwise resume from a stale average.
+        // Still written to history below: next frame's reprojection reads it, and the pass falls
+        // back to it the moment NRD stops running (e.g. G-buffer switched off).
         vis = saturate(gNrdAo.Load(int3(pixel, 0)).r);
     }
 
-    // The ACCUMULATED value, not the fresh one -- writing `fresh` here would restart the average
-    // every frame and buy nothing, the same trap the shadow path documents.
+    // ACCUMULATED, not fresh (writing fresh would restart the average every frame, same trap the
+    // shadow path documents), and RAW, never filtered (feeding the spatially filtered result back
+    // would make this an IIR filter whose artefacts compound; the filter applies on the way OUT,
+    // below).
     //
-    // AND RAW, NEVER FILTERED, which is the same single most important line the shadow path has:
-    // feeding the spatially filtered result back into the history turns this into an IIR filter
-    // whose artefacts compound every frame. The filter applies on the way OUT, below.
-    //
-    // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- see voxi.hlsl's own
-    // gAverHistoryWrite/averDrawIsTranslucent comment for the flag's definition and
-    // voxi.hlsl's PSMainVoxi for where it is set per fragment. Before this gate, PSMainVoxi's
-    // blended (glass/water) replay pass wrote THIS texel a second time with the PANE's own AO
-    // measurement, overwriting the opaque surface's -- the "non-atomic double write" this file's
-    // own C9 comment used to describe as accepted-but-unfixed. voxi.legacyBlendedHistoryWrite
-    // (gAmbientParams.z bit 32) restores the old unconditional write, byte-identical, for A/B.
+    // W6/M5: gated on gAverHistoryWrite (on by default, D3 decision) -- see voxi.hlsl's
+    // gAverHistoryWrite/averDrawIsTranslucent. Before this gate, a blended (glass/water) replay pass
+    // wrote this texel a second time with the PANE's own measurement, overwriting the opaque
+    // surface's (the "non-atomic double write" this file's C9 comment used to accept unfixed).
+    // voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the old write, byte-identical,
+    // for A/B.
     if (gAverHistoryWrite) gAoHistOut[uint2(pixel)] = float2(vis, curDepth);
-    // THE RAW MEASUREMENT, NOT THE ACCUMULATED ONE -- the exact opposite of the line above it, and
-    // deliberately so. The history write is accumulated because THIS shader is the thing that
-    // consumes it next frame and wants the average. This one goes to an external denoiser that
-    // keeps its own history and does its own accumulation; handing it a value already blended
-    // against ten previous frames would be feeding a filter its own output, which is the IIR trap
-    // the line above spends a paragraph avoiding.
+    // THE RAW MEASUREMENT, deliberately the opposite of the accumulated write above (safe to touch
+    // only after the gRtDenoiseParams.w early-out above): this goes to an external denoiser with its
+    // own history, so handing it an already-blended value would be the same IIR trap -- worse here
+    // than the write above, since a glass pane's replay used to overwrite it with the PANE's hit
+    // distance going straight out as THIS FRAME'S measurement, unaveraged. Gated the same way, for the
+    // same reason -- this write, the one above, and gRtShadowHistOut further down are all now
+    // consistent about which fragment last wrote them.
     //
-    // AFTER the gRtDenoiseParams.w early-out above, which is what makes the slot safe to touch.
-    //
-    // W6/M5: GATED THE SAME WAY, FOR THE SAME REASON, AND THE THREE ARE NOW FIXED TOGETHER.
-    // PSMainVoxi runs for the translucent replay too (its own PSO, same pixel shader), so a glass
-    // pane in front of an opaque surface used to write this texel a second time with the PANE's
-    // measurement -- worse here than at the history write just above, because this value goes
-    // straight out as THIS FRAME'S measurement with nothing to average it against, so an external
-    // denoiser was handed the pane's hit distance for the surface behind it. The three history
-    // writes this file's own comment used to call inconsistent-if-only-one-were-guarded (gAoHistOut
-    // just above, this one, and gRtShadowHistOut further down) are gated identically now, so none of
-    // them can disagree about which fragment last wrote them.
-    //
-    // tracedNow &&: T2's own gate, see its header comment above -- a skipped pixel has no fresh
-    // hitDist to offer and leaves this texel exactly as its last real trace left it.
+    // tracedNow &&: T2's own gate (see its header above) -- a skipped pixel has no fresh hitDist and
+    // leaves this texel as its last real trace left it.
     if (tracedNow && gAverHistoryWrite) gAoHitDistOut[uint2(pixel)] = hitDist;
     return rtAoSpatial(vis, wpos, N, pixel, curDepth);
 }
 
 // The SPATIAL denoiser: average this pixel's shadow with its neighbours' from the history texture,
 // weighted by how well each neighbour's surface agrees with this one's.
-// READS LAST FRAME'S TEXTURE SAFELY: t6/u2 are different ping-ponged textures, t6 resting in
-// ShaderResource for the whole colour pass, so this is a plain load needing no barrier -- unlike the
-// TEMPORAL path above, which reuses a value up to 2^(2*tileBits) frames old AS the answer, here the
-// centre always contributes its own fresh trace and a failing neighbour is DROPPED, never substituted.
+// READS LAST FRAME'S TEXTURE SAFELY: t6/u2 are different ping-ponged textures (t6 rests in
+// ShaderResource for the whole colour pass), a plain load needing no barrier. Unlike the TEMPORAL
+// path's reuse of a value up to 2^(2*tileBits) frames old, the centre here always contributes its
+// own fresh trace and a failing neighbour is DROPPED, never substituted.
 // AVERAGING IS AN ESTIMATE, NOT A BLUR: rtShadow jitters the ray origin across the pixel's own
 // footprint, so neighbours on one flat receiver already sample different points of the same surface.
 float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
@@ -1870,49 +1516,41 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     }
     const int2 base = int2(floor(centrePx));
 
-    // Plane-distance rejection, not a raw depth delta: centre depth + its screen-space gradient
-    // defines the receiver's plane, so a neighbour on it is kept regardless of depth while one at
-    // the same depth on a different surface is dropped. A plain |dz| test fails on a grazing floor.
+    // Plane-distance rejection, not a raw depth delta: centre depth + screen-space gradient defines
+    // the receiver's plane, so a neighbour ON it is kept regardless of depth. A plain |dz| test fails
+    // on a grazing floor.
     //
-    // EXPRESSED IN LAST FRAME'S DEPTH WHENEVER THE GATHER REPROJECTED, and that is the motion fix.
-    // Every tap below loads gRtShadowHist, whose .y is LAST frame's depth, but this predictor was
-    // built from curDepth -- THIS frame's. Standing still the two are the same number and the
-    // mismatch cannot be seen; under camera motion they diverge with the yaw rate, so the 2%
-    // tolerance is spent asymmetrically across the kernel, accepting taps on the receding side and
-    // rejecting them on the approaching one. A one-sided accept set is a biased average, which is
-    // why the artefact is a region shifting brightness rather than noise, and why it worsened with
-    // radius: the further the tap, the larger the frame-to-frame depth disagreement.
+    // EXPRESSED IN LAST FRAME'S DEPTH WHENEVER THE GATHER REPROJECTED -- the motion fix. Taps load
+    // gRtShadowHist's LAST-frame depth, but a predictor built from curDepth (THIS frame's) diverges
+    // under motion with the yaw rate, spending the 2% tolerance asymmetrically (accept receding side,
+    // reject approaching) -- a biased average that reads as a region shifting brightness, worsening
+    // with radius since farther taps disagree more.
     const float planeDepth = reproj ? pdepth : curDepth;
     const float dzdx       = reproj ? dpdx   : cdx;
     const float dzdy       = reproj ? dpdy   : cdy;
 
-    // A GAUSSIAN falloff (used to give every accepted neighbour weight 1.0 -- a flat kernel rings in
-    // frequency response, a visible square halo around a bright feature). sigma = radius/2, matched
-    // to rtReflectionSpatial's kernel so two filters over the same geometry don't disagree in shape.
+    // Gaussian falloff (used to give every accepted neighbour weight 1.0 -- a flat kernel rings in
+    // frequency response, a visible square halo around a bright feature). sigma = radius/2, matched to
+    // rtReflectionSpatial's so the two filters don't disagree in shape.
     //
-    // LIVE AT EVERY REAL TIER -- a comment that used to sit here claimed the opposite (shipped inert
-    // because rtShadowDenoiseForQuality returns 0 at every tier). FALSE: Voxi.cpp returns 2 for
-    // Low/Medium/High, 1 for Epic (only Off/unknown return 0), and Medium is the DEFAULT tier.
-    //
-    // CAUGHT BY THE ORACLE, NOT BY READING: re-recording the gates moved 15 values, three in every
-    // ray-tracing-capable configuration including WARP:
+    // LIVE AT EVERY REAL TIER (a comment here used to claim the opposite, that rtShadowDenoiseForQuality
+    // returns 0 at every tier -- FALSE: Voxi.cpp returns 2 for Low/Medium/High, 1 for Epic, only
+    // Off/unknown return 0; Medium is default). CAUGHT BY THE ORACLE: re-recording gates moved 15
+    // values, three in every RT-capable configuration, including WARP:
     //   penumbra-rt   33,39,48 -> 62,64,66      partially occluded, much brighter
     //   rt-penumbra   91,88,85 -> 96,93,89      partially occluded, brighter
     //   ms-rt-gi      52,19,13 -> 38,15,11      same sunVis feeding the GI-composited path
-    // shadow-rt/shadow-ms-rt moved NOT AT ALL, the signature of a reweighting: full umbra pins every
-    // tap at 0, while a penumbra's old flat kernel dragged the estimate toward far neighbours that
-    // the Gaussian now discounts (0.135 at distance 2, 0.018 at the corner) -- bit-identical across
-    // hardware and WARP, over a record and an independent verify pass.
-    //
-    // THE LESSON IS THE FALSE CLAIM, NOT THE FILTER: an "inert" change is one nobody reviews visually.
+    // shadow-rt/shadow-ms-rt didn't move at all -- full umbra pins every tap at 0, while a penumbra's
+    // old flat kernel dragged the estimate toward far neighbours the Gaussian now discounts (0.135 at
+    // distance 2, 0.018 at the corner) -- bit-identical across hardware/WARP, confirmed by an
+    // independent verify pass. Lesson: an "inert" change is one nobody reviews visually.
     const float sigma  = max((float)radius * 0.5, 0.5);
     const float inv2s2 = 1.0 / (2.0 * sigma * sigma);
 
     float acc = centre;
     float wsum = 1.0;
-    // Neighbourhood statistics for the clamp below, EXCLUDING the centre -- the question is whether
-    // the centre disagrees with its neighbours, and a statistic containing it cannot answer that.
-    // Free: these taps are already loaded, depth-tested and crease-tested.
+    // Neighbourhood statistics for the clamp below, EXCLUDING the centre (a statistic containing it
+    // can't say whether the centre disagrees). Free: taps already loaded/depth/crease-tested.
     float nSum = 0.0, nSum2 = 0.0, nCount = 0.0;
     [loop] for (int oy = -radius; oy <= radius; ++oy) {
         [loop] for (int ox = -radius; ox <= radius; ++ox) {
@@ -1920,20 +1558,18 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
             const int2 t = base + int2(ox, oy);
             if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
             const float2 st = gRtShadowHist.Load(int3(t, 0));
-            // What this neighbour's depth WOULD be if it sat on the centre's plane -- in the same
-            // frame st.y was recorded in, see planeDepth.
+            // What this neighbour's depth WOULD be on the centre's plane, in the same frame st.y was
+            // recorded (see planeDepth).
             const float predicted = planeDepth + dzdx * (float)ox + dzdy * (float)oy;
             const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
             if (abs(st.y - predicted) > tol) continue;
 #if AVER_GBUFFER_HISTORY
-            // THE CREASE TERM: a depth-plane test can't see a normal DISCONTINUITY -- two surfaces at
-            // similar depth (a wall meeting a floor) can pass it and bleed shadow across a crease.
-            // Sampled at LAST frame's normal (same tap `t`): comparing to THIS frame's would mix
-            // moments, same reason gRtShadowHist itself reads last frame.
+            // CREASE TERM: a depth-plane test can't see a normal DISCONTINUITY (wall meeting floor).
+            // Sampled at LAST frame's normal (same tap `t`) to match gRtShadowHist's own frame.
             const float3 nb = gGBufNormalHist.Load(int3(t, 0)).xyz * 2.0 - 1.0;
-            // HARD REJECT: a disagreeing normal is the wrong surface, not noise. cos(60 deg), not
-            // tighter: averPackNormalRoughness quantises to RGB10A2, and tighter would reject a FLAT
-            // surface's own quantisation noise as a crease.
+            // HARD REJECT: a disagreeing normal is the wrong surface, not noise. cos(60deg), not
+            // tighter -- averPackNormalRoughness quantises to RGB10A2, so tighter rejects a flat
+            // surface's own quantisation noise.
             if (dot(N, nb) < 0.5) continue;
 #endif
             const float w = exp(-(float)(ox * ox + oy * oy) * inv2s2);
@@ -1943,48 +1579,34 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
         }
     }
 
-    // gRtDenoiseParams.y: blend weight of the filtered value. At 0 taps still run (radius is a
-    // runtime constant, not optimised away) but this returns `centre` exactly -- the
-    // cost-measurement configuration.
+    // gRtDenoiseParams.y: blend weight of the filtered value. At 0, taps still run (radius is a
+    // runtime constant) but this returns `centre` exactly -- the cost-measurement configuration.
     //
-    // TAPERED BY THIS FILTER'S OWN REPROJECTION VELOCITY, which is what stops the shadows flickering
-    // while the camera moves. MEASURED on Sponza, comparing a still camera against a six-degree
-    // wobble AT A MATCHED POSE (both at sin(phase)=0, so the only difference is motion history),
-    // reading the population of differing pixels rather than a mean -- a mean is 0.01 of a code here
-    // because the affected pixels are a few percent of the frame changing a lot:
-    //
+    // TAPERED BY THIS FILTER'S OWN REPROJECTION VELOCITY, to stop shadows flickering under camera
+    // motion. MEASURED on Sponza, still camera vs six-degree wobble at a matched pose (both at
+    // sin(phase)=0, isolating motion history as the only difference), population of differing pixels
+    // (a mean is 0.01 of a code -- the affected pixels are few but change a lot):
     //   radius 0 (filter off)   9-32 codes: 0.000%   33+: 0.000%   max delta   4
     //   radius 1                9-32 codes: 0.187%   33+: 0.002%   max delta  60
     //   radius 2 (the default)  9-32 codes: 2.445%   33+: 0.177%   max delta  95
     //   radius 2, 8 rays/pixel  9-32 codes: 0.205%   33+: 0.003%   max delta  64
+    // Mechanism is THE KERNEL'S SAMPLE SET SLIDING, not staleness or the plane test: rtShadow's
+    // per-pixel jitter (rtHash(pixel)) makes the raw estimate at a given pose the SAME every frame
+    // (filter off: moving and still agree to 4 codes), but once the gather centre reprojects each
+    // frame averages a DIFFERENT 25 taps of one static noise field -- spatially noisy but temporally
+    // stable becomes temporally unstable. Scales with radius; 8 rays largely fixes it (not affordable,
+    // this taper is).
     //
-    // Read those together and the mechanism is not staleness and not the plane test -- it is THE
-    // KERNEL'S SAMPLE SET SLIDING. rtShadow jitters by rtHash(pixel), anchored to the pixel index,
-    // so the raw one-ray estimate at a given pose is the SAME every frame: with the filter off, a
-    // moving camera and a still one agree to 4 codes. Switch the filter on and the gather centre
-    // reprojects, so each frame averages a DIFFERENT 25 taps out of one static noise field, and a
-    // spatially noisy but temporally stable estimate becomes a temporally unstable one. That is why
-    // it scales with radius (more reach, more resampling) and why eight rays largely fix it (a
-    // quieter field to resample). Eight rays are not affordable; this is.
+    // NOT A DISOCCLUSION TEST (rtReprojectHistory already rejects depth-disagreeing taps) -- this is
+    // about taps that are all individually valid and still average to a different number. Full
+    // strength below half a pixel of drift (stationary camera bit-for-bit unchanged), gone by three.
+    // gRtDenoiseParams.z is the falloff rate; 0 means NO TAPER, not "taper to nothing instantly" -- a
+    // knob whose off position silently disabled the whole filter would be measured by accident.
     //
-    // NOT A DISOCCLUSION TEST: rtReprojectHistory already rejects taps whose depth disagrees. This
-    // is about the taps that are all individually VALID and still average to a different number.
-    // Full strength below half a pixel of drift, so a stationary camera is bit-for-bit unchanged and
-    // the recorded gates do not move; gone by three, where a fresh unfiltered trace is the more
-    // stable answer anyway.
-    // gRtDenoiseParams.z is the taper's falloff rate, and 0 means NO TAPER (the pre-existing
-    // behaviour) rather than "taper instantly to nothing" -- a knob whose off position silently
-    // disables the whole filter is the kind of default that gets measured by accident.
-    // THE OUTLIER CLAMP THIS FILTER NEVER HAD, and its AO twin already argues the case: a Gaussian
-    // is LINEAR, so an isolated extreme is SPREAD across the kernel rather than removed. That is
-    // why raising the shadow ray count from 1 to 16 moved the impulse metric not at all (0.080% ->
-    // 0.080% of pixels past 64 codes) -- more angular samples cannot fix an unclamped impulse, and
-    // measuring ray count was what ruled the sampler out and pointed at the filter.
-    //
-    // Same shape as rtAoSpatial: mean +/- 2 sigma over the accepted neighbours, a floor under sigma
-    // so a perfectly flat neighbourhood does not erase the centre's own detail along with its noise,
-    // and a three-tap minimum so a silhouette pixel -- where the depth and crease rejects have
-    // thrown most of the kernel away -- is not clamped against a statistic built out of nothing.
+    // THE OUTLIER CLAMP THIS FILTER NEVER HAD (its AO twin already argues the case: a Gaussian is
+    // LINEAR, spreading an isolated extreme rather than removing it -- raising shadow rays 1->16
+    // moved the impulse metric not at all, 0.080%->0.080% past 64 codes, ruling out the sampler).
+    // Same shape as rtAoSpatial: mean +/- 2 sigma, sigma floor, three-tap minimum.
     float clamped = centre;
     if (nCount >= 3.0) {
         const float mean  = nSum / nCount;
@@ -2005,18 +1627,15 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 // footprint, frameJitter=0, and never touches history: blending in a reflected surface's shadow
 // would overwrite this pixel's history with a value unrelated to the primary ray's estimate.
 // gRtHistParams.w is the pixels-per-ray TILE EDGE as a bit count (0 = off, every pixel traces every
-// frame). At 0 it now ACCUMULATES: the fresh trace is blended against reprojected history and the
-// blended value is what gets stored. It used to be bit-for-bit rtShadow() alone with a plain write to
-// keep the buffer live for when tiling turned on -- which meant that at every shipped tier (the tile
-// edge is 1 everywhere) every previous measurement was discarded and the one-ray estimate stood
-// alone. Tiling still cuts ray COUNT; blending is what makes one ray behave like ten.
+// frame). At 0 it now ACCUMULATES (blends fresh against reprojected history) instead of the old plain
+// write, which discarded every previous measurement at every shipped tier (tile edge 1 everywhere).
+// Tiling cuts ray COUNT; blending is what makes one ray behave like ten.
 // Splits a tinted visibility into the scalar the denoiser filters and the colour it does not.
 //
-// WHY THE HISTORY DIDN'T GROW: occlusion is binary/noisy (what the filters smooth); a medium's tint
-// is smooth and near-noise-free, so filtering it buys nothing -- the scalar keeps the existing
-// RG32Float history bit-for-bit and the tint rides unfiltered on top. RGBA32Float would double two
-// ~56MB buffers; RGBA16Float would drop the depth channel (clip-space w in cm, tens of thousands on
-// terrain) to 8cm precision where the disocclusion test reads it. Not worth it for an unfiltered value.
+// WHY THE HISTORY DIDN'T GROW: occlusion is binary/noisy (what filters smooth); a medium's tint is
+// smooth and near-noise-free, so filtering it buys nothing. Scalar keeps the existing RG32Float
+// history bit-for-bit; RGBA32Float would double two ~56MB buffers, RGBA16Float would drop the depth
+// channel to 8cm precision where the disocclusion test reads it.
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
 
 // The normalised colour of a tinted visibility. White when there is effectively nothing to tint --
@@ -2026,20 +1645,17 @@ float3 averShadowTint(float3 v, float lum) {
     return (lum > 1e-4) ? (v / lum) : float3(1.0, 1.0, 1.0);
 }
 
-// A: SUN SHADOW SPLIT (Settings::rayDrivenShadowTiles) -- EVERY CALLER'S SHAPE, PLUS ONE ESCAPE HATCH.
+// A: SUN SHADOW SPLIT (Settings::rayDrivenShadowTiles) -- every caller's shape, plus one escape hatch.
 // `haveFresh`/`freshIn` let a caller that has ALREADY CLASSIFIED this pixel's fresh trace (CSRdShadow's
-// own AVER_RD_SHADOW_TILES compile, voxi.hlsl: a 3x3 probe-tile neighbourhood that agrees "fully lit" or
-// "fully blocked") hand that classification in directly and skip the ray loop below -- while still
-// running every temporal/spatial step this function already does with it (accumulation, history write,
-// rtShadowSpatial). THE SKIP IS EXACT ONLY WHERE THE NEIGHBOURHOOD TRULY IS UNIFORM, and that is a
-// sampling claim, not an identity: at one ray the probe IS this pixel's only ray, but at 4 or 8 the
-// probe sees one rotated sample per pixel, and "every probe in 576 pixels agreed" stands in for "every
-// sample of this pixel would agree". CSRdShadowProbe rotates which sample each pixel traces so that
-// every disc radius the real trace uses is represented in every tile -- see its own comment for the
-// fixed-radius version that failed this. `false`/anything is the ordinary path:
-// every `if (!haveFresh) ... rtShadow(...)` below then reduces to the plain rtShadow(...) call it
-// replaced, which is exactly what rtShadowTemporal's own one-line wrapper, just past this function's
-// end, asks for -- so nothing that already calls rtShadowTemporal changes behaviour.
+// AVER_RD_SHADOW_TILES compile: a 3x3 probe-tile neighbourhood agreeing "fully lit"/"fully blocked")
+// hand that in directly, skipping the ray loop while still running every temporal/spatial step. THE
+// SKIP IS EXACT ONLY WHERE THE NEIGHBOURHOOD TRULY IS UNIFORM (a sampling claim, not an identity --
+// "every probe in 576 pixels agreed" stands in for "every sample would agree"; at 4/8 rays the probe
+// sees one rotated sample per pixel; CSRdShadowProbe rotates which sample each pixel traces to
+// represent every disc radius in every tile -- see its own comment for the fixed-radius version that
+// failed this). `false`/anything is the ordinary path: every `if (!haveFresh)` below reduces to the
+// plain rtShadow(...) it replaced, exactly what rtShadowTemporal's own wrapper asks for, so nothing
+// already calling it changes behaviour.
 float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                           bool haveFresh, float3 freshIn) {
     // gRtHistParams.x is 0 when t6/u2 aren't bound this frame (VoxiRenderer::beginShadowHistory) --
@@ -2058,84 +1674,64 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
 
     const uint tileBits = (uint)gRtHistParams.w;
     if (tileBits == 0u) {
-        // THE SAME GOLDEN-ANGLE FRAME JITTER THE TILED PATH BELOW PASSES, and passing 0.0 here
-        // instead is what made this whole branch's accumulation buy nothing.
+        // SAME GOLDEN-ANGLE FRAME JITTER AS THE TILED PATH BELOW -- passing 0.0 here instead is what
+        // made this branch's accumulation buy nothing: rtShadow's ang0 becomes a pure function of the
+        // PIXEL with jitter=0, so it traces one fixed direction forever, and the exponential average
+        // below then averages ten copies of one sample (a comment here once said this "converges
+        // toward the many-ray answer" -- it can't). At rays=1 (every shipped tier below Epic) a
+        // partially occluded pixel reported one hard 0/1-ish sample forever.
         //
-        // rtShadow builds its sample angle as `ang0 = rtHash(pixel) * 2pi + frameJitter`. With a
-        // jitter of zero that is a pure function of the PIXEL: one fixed direction on the sun's
-        // disc, traced identically every frame for the life of the process. The exponential average
-        // below then averages ten copies of one sample, which is one sample -- so the comment that
-        // used to say the estimate "converges toward the many-ray answer" was describing something
-        // this branch could not do. At rays = 1, which is every shipped tier below Epic, a partially
-        // occluded pixel therefore reported a single hard 0/1-ish sample forever.
-        //
-        // MEASURED at the rt-penumbra probe (gates.ps1:296, --sun-angle 8.0, 1204 frames), against a
-        // converged reference of 16 rays at tile 1 -- which is motion-invariant and so is a real
-        // ground truth, 139,136,133 still and 137,134,133 moving:
-        //
+        // MEASURED, rt-penumbra probe (gates.ps1:296, --sun-angle 8.0, 1204 frames) vs a converged
+        // 16-ray/tile-1 ground truth (motion-invariant, so a real ground truth; 139,136,133 still,
+        // 137,134,133 moving):
         //   tile 1, 1 ray (EVERY SHIPPED TIER)   88,92,99    error -51
         //   tile 2, 1 ray                        132,129,128 error  -7
         //   tile 4, 1 ray                        137,134,132 error  -2
+        // The amortised tiles differ only by passing this jitter, and are an order of magnitude more
+        // accurate. Tell: tile 1 read 126 moving vs 88 still -- motion was accidentally decorrelating
+        // it via reprojection across different rtHash values (an estimator that improves when shaken
+        // is not sampling).
         //
-        // The amortised paths are an order of magnitude more accurate than the default, and the only
-        // thing they do differently to the estimate is pass this jitter. The other tell is in the
-        // same table: tile 1 reads 126 with the camera MOVING against 88 still -- motion was
-        // accidentally supplying the decorrelation, because reprojection walked the estimate across
-        // pixels with different rtHash values. An estimator that gets better when you shake the
-        // camera is not sampling.
-        //
-        // WHY THE FRAME INDEX IS SAFE HERE, given this file's standing rule that RT sampling must be
-        // a pure function of pixel position for the gate oracle: the rule exists so a probe is
-        // reproducible, and frameIdx is deterministic -- a --frames N run always ends on the same
-        // index, so the same run gives the same pixel. It is only a hazard when indexed INTO the
-        // radical-inverse sequence on the tiled path, where a pixel traces every 2^(2*tileBits)
-        // frames and that power-of-two stride pins the sequence's low bits (measured, and recorded
-        // as a disproven fix). This is an angular offset, not a sequence index, and here the stride
-        // is 1. Recorded RT gate values move; they are re-recorded, not suppressed.
+        // FRAME INDEX IS SAFE HERE despite the standing pure-function-of-pixel rule for the gate
+        // oracle: frameIdx is deterministic (a --frames N run always ends on the same index). It's
+        // only a hazard when indexed INTO the tiled path's radical-inverse sequence (a power-of-two
+        // stride pins low bits -- measured, and recorded as a disproven fix); this is an angular
+        // offset with stride 1. Recorded RT gate values move; they are re-recorded, not suppressed.
         const float frameJitter = (float)((uint)gRtHistParams.z) * 2.39996323;
         float3 fresh3 = freshIn;
         if (!haveFresh) fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         const float  fresh   = averShadowLum(fresh3);
         const float3 tint    = averShadowTint(fresh3, fresh);
 
-        // TEMPORAL ACCUMULATION, and the reason it belongs on THIS branch specifically.
+        // TEMPORAL ACCUMULATION belongs on THIS branch specifically: tiling is RAY AMORTISATION
+        // (trace one pixel in N, reuse the rest), and switching it off means "trace every pixel every
+        // frame", not "discard every previous measurement" -- but this branch used to write the raw
+        // trace to history and never read it back, so at rtPixelsPerRayTile 1 (every shipped tier)
+        // reprojection was dead code.
         //
-        // The early-return above conflates two separate things under one flag. Tiling is RAY
-        // AMORTISATION -- trace one pixel in N and reuse the rest -- and switching it off correctly
-        // means "trace every pixel every frame". It does not mean "throw away every previous
-        // measurement", but that is what this branch did: it wrote the raw one-ray trace to history
-        // and never read history back, so at rtPixelsPerRayTile 1 (every shipped tier) the entire
-        // reprojection path below was dead code and each frame's estimate stood alone.
+        // MEASURED: one ray/pixel's noise is what shadows were flickering with. The spatial filter
+        // gathers 25 taps around a REPROJECTING centre, so a moving camera averages a different
+        // subset of one static noise field each frame. Sponza, still vs six-degree wobble at matched
+        // pose, counting pixels: filter off agrees to 4 codes; radius 1, 60; radius 2 (default), 95
+        // with 2.4% of the frame past 9 codes. Raw trace is temporally stable/spatially noisy; the
+        // filter converts one into the other. 8 rays/pixel cuts it ~12x (not affordable).
         //
-        // One ray per pixel is a very noisy estimate, and MEASURED, that noise is what the shadows
-        // were flickering with: the spatial filter gathers 25 taps around a centre that REPROJECTS,
-        // so a moving camera averages a different subset of one static, pixel-anchored noise field
-        // every frame. Sponza, still camera against a six-degree wobble at a matched pose, counting
-        // pixels rather than averaging them -- filter off, the moving and still images agree to 4
-        // codes; radius 1, 60; radius 2 (the default), 95, with 2.4% of the frame past 9 codes. The
-        // raw trace is temporally STABLE and spatially noisy; the filter converts the one into the
-        // other. Eight rays per pixel cut it ~12x, which names the cause as variance and prices the
-        // obvious fix out of reach.
+        // Accumulating buys the same variance reduction for one texture read: at rest the 0.9 weight
+        // averages ~10 frames, converging toward the many-ray answer. rtReprojectHistory's depth test
+        // keeps it honest across a disocclusion; the velocity term discounts history as reprojection
+        // gets less trustworthy -- both already written, unreachable until now.
         //
-        // Accumulating instead buys the same variance reduction for one texture read: at rest the
-        // 0.9 weight is an exponential average over ~10 frames, so the estimate converges toward the
-        // many-ray answer rather than resampling noise. rtReprojectHistory's depth test is what
-        // keeps it honest across a disocclusion, and the velocity term discounts history as the
-        // reprojection gets less trustworthy -- both already written and, until now, unreachable.
-        //
-        // THE ACCUMULATED VALUE IS WHAT GETS STORED, not the fresh trace. That is what makes it
-        // compound; writing `fresh` here would restart the average every frame and buy nothing.
+        // THE ACCUMULATED VALUE IS STORED, not the fresh trace -- writing fresh would restart the
+        // average every frame.
         float vis = fresh;
         float histV = 0.0;
         float2 velocityPx = 0.0;
-        // A FAR LOOSER VELOCITY BUDGET THAN THE TILED PATH BELOW, and the difference is not a tuning
-        // preference. There, history can be 2^(2*tileBits) frames old, so its own staleness compounds
-        // with motion and 6 pixels is a fair place to stop trusting it. Here it is always EXACTLY one
-        // frame old, and the thing that can go wrong -- landing on a different surface -- is caught by
-        // rtReprojectHistory's depth test, not by the velocity. What velocity still costs is
-        // sub-texel alignment, and that error is bounded by half a texel at ANY speed because the
-        // lookup is nearest-neighbour. Reusing 6 here throttled the weight to 0.1 at the six-degree
-        // wobble's 24.7 px/frame, i.e. switched accumulation off in exactly the case it was added for.
+        // FAR LOOSER VELOCITY BUDGET THAN THE TILED PATH: there, history can be 2^(2*tileBits) frames
+        // old so staleness compounds with motion (6px is fair). Here history is always EXACTLY one
+        // frame old; landing on a different surface is caught by the depth test, not velocity, and
+        // sub-texel error is bounded to half a texel at any speed (nearest-neighbour). Reusing 6
+        // throttled weight to 0.1 at the six-degree wobble's 24.7 px/frame -- switching accumulation
+        // off in exactly the case it was added for.
         if (gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, histV, velocityPx)) {
             // 0.9 is an exponential average over ~1/(1-w) = 10 frames, the effective sample count
             // that makes a one-ray trace behave roughly like a ten-ray one, falling to 0.5 (two
@@ -2147,28 +1743,23 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
             const float weight = lerp(0.9, 0.5, t);
             vis = lerp(fresh, histV, weight);
         }
-        // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- see voxi.hlsl's own
-        // gAverHistoryWrite/averDrawIsTranslucent comment for the flag's definition. Before this
-        // gate, a blended (glass/water) replay fragment overwrote this texel with the PANE's own
-        // shadow measurement, the same "non-atomic double write" this file's AO history writes
-        // documented above. voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the
-        // old unconditional write, byte-identical, for A/B.
+        // W6/M5: gated on gAverHistoryWrite (on by default, D3 decision) -- see voxi.hlsl's
+        // gAverHistoryWrite/averDrawIsTranslucent. Before this gate, a blended (glass/water) replay
+        // fragment overwrote this texel with the PANE's own measurement (same non-atomic double
+        // write as the AO history above). voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32)
+        // restores the old unconditional write, byte-identical, for A/B.
         if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
-        // FILTERED HERE TOO -- this branch is what Medium (the DEFAULT tier) runs, and used to
-        // return `fresh` unfiltered, leaving the default's hard 0/1 shadow untouched: the penumbra
-        // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
-        // two call sites -- easy for a later edit to drop one again.
-        // SATURATED. `tint` is this pixel's RAW ratio v/lum, deliberately unfiltered (see
-        // averShadowTint), while `vis` has been through a 0.97 temporal blend and a spatial filter.
-        // The identity tint * lum == v holds only while vis == lum, and the two are designed to
-        // disagree -- so wherever the filters move vis away from the fresh trace, the product is
-        // free to exceed the transmittance it came from. averShadowTint bounds its DENOMINATOR at
-        // 1e-4 and not its quotient: the per-channel maximum is 1/0.0722 = 13.85 on blue. A deeply
-        // shadowed pixel with vis 0.05 and a saturated tint therefore reports 0.69 -- two thirds
-        // lit -- and that lands in AverLight::visibility, which material_prelude documents as
-        // "(1,1,1) = fully lit" and multiplies straight into the sun's radiance.
-        //
-        // A visibility cannot exceed one. Saturating says so, and costs nothing.
+        // FILTERED HERE TOO: this branch is what Medium (default tier) runs, and used to return
+        // `fresh` unfiltered, leaving the default's hard 0/1 shadow untouched -- the penumbra probe
+        // read an unchanged 61,59,59 at every radius, which caught it. Two returns, two call sites --
+        // easy for a later edit to drop one again.
+        // SATURATED: `tint` is the RAW ratio v/lum (unfiltered), while `vis` went through a 0.97
+        // temporal blend and spatial filter -- the two are designed to disagree, so tint*lum can
+        // exceed the transmittance it came from -- averShadowTint's denominator floor (1e-4) bounds
+        // the quotient to 1/0.0722=13.85 on blue, so vis=0.05 with a saturated tint reports 0.69
+        // (two-thirds lit) into AverLight::visibility, which material_prelude documents as "(1,1,1)
+        // = fully lit".
+        // A visibility can't exceed one; saturating costs nothing.
         return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
     }
 
@@ -2217,22 +1808,16 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
     }
 
     // WRITE THE RAW VALUE, NEVER FILTERED -- the single most important line in the denoiser. Feeding
-    // a filtered value back into gRtShadowHistOut makes this an IIR filter (a temporal filter by
-    // another name) whose artefacts compound every frame. The filter applies on READ, below; writing
-    // it here to "save work" is the bug, not the optimisation.
-    //
-    // W6/M5: same gate, same reason, as the tiled branch's own copy of this write above -- see there
-    // for the full account of what an unguarded write to this texture used to cost a blended pane's
-    // opaque background.
+    // a filtered value back would make this an IIR filter whose artefacts compound every frame; the
+    // filter applies on READ, below -- writing it here to "save work" is the bug, not the
+    // optimisation. Same gate/reason as the branch above.
     if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
-    // The same saturate, and for the same reason -- see the tiled branch above.
     return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
 }
 
-// The ordinary entry point every caller before this task used, and still the only one most of them
-// need: haveFresh=false makes every `if (!haveFresh)` above take its rtShadow(...)
-// branch, so this is rtShadowTemporalEx exactly as it read before A (this file's own comment on that
-// function, just above) split the trace out from under it.
+// The ordinary entry point most callers need (every caller before this task used it): haveFresh=false
+// makes every `if (!haveFresh)` above take its rtShadow(...) branch, so this is rtShadowTemporalEx
+// exactly as before A split the trace out from under it.
 float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
     return rtShadowTemporalEx(wpos, N, L, pixel, dpx, dpy, rays, false, float3(0.0, 0.0, 0.0));
 }
@@ -2288,14 +1873,11 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     r.TMax      = 100000.0;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Opaque lane only (AVER_RT_MASK_OPAQUE_ALL): this ray wants solid surfaces, and excludes the
-    // translucent lane by mask rather than by flag.
-    //
-    // FORCE_OPAQUE USED TO BE A PROVABLE NO-OP HERE and is now provably WRONG. The old proof was
-    // that createBlas marks every geometry OPAQUE and only the translucent lane -- excluded by this
-    // mask -- was ever un-opaqued. Alpha-masked instances broke that: they stay in the OPAQUE lane
-    // (they occlude, they cast shadow) and are non-opaque so a ray can see the holes in them. With
-    // the flag on, the hardware committed the leaf card and never asked.
+    // Opaque lane only (AVER_RT_MASK_OPAQUE_ALL): wants solid surfaces, excludes translucent by mask.
+    // FORCE_OPAQUE used to be a no-op here (createBlas marks every geometry OPAQUE, so only the
+    // excluded translucent lane was ever un-opaqued) and is now provably WRONG: alpha-masked instances
+    // stay in the OPAQUE lane (they occlude, they cast shadow) but are non-opaque so a ray can see
+    // their holes. With the flag on, the hardware would commit the leaf card unasked.
     q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
@@ -2318,27 +1900,20 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     if (dot(nWS, dir) > 0.0) nWS = -nWS;   // face the ray, so a back-facing hit is not lit from behind
 
     float3 hitPos = wpos + dir * q.CommittedRayT();
-    // Whether the SUN reaches the reflected surface -- without this every reflection glows as if
-    // nothing could shadow it. Seeded from the PIXEL with NO footprint: seeding from hitPos.xy would
-    // make the pattern depend on ray distance, which is what's most likely to differ between a
-    // hardware adapter and WARP. ONE ray, not the full disc -- the single largest saving in the ray
-    // path (was 1 reflection + 4-ray disc, 5 rays where 2 do now; a reflected penumbra isn't
-    // resolvable in a one-bounce mirror image anyway). float3: a tinted medium tints this too.
-    // frameJitter, NOT 0.0, AND THE ZERO WAS A FROZEN SAMPLE. rtShadow builds its disc angle as
-    // rtHash(pixel) * 2pi + frameJitter, so passing 0 here made this ray a pure function of the
-    // PIXEL: one direction on the sun's disc, identical on every frame for the life of the process.
-    // At one ray that is a binary value, and temporal accumulation downstream converges TO it rather
-    // than averaging it away -- an estimator cannot be denoised into correctness when every sample
-    // it will ever take is the same sample.
+    // Whether the SUN reaches the reflected surface (without this every reflection glows unshadowed).
+    // Seeded from the PIXEL with NO footprint (seeding from hitPos.xy would make it depend on ray
+    // distance, likely to differ between adapter and WARP). ONE ray, not the full disc -- the single
+    // largest saving in the ray path (was 5 rays, now 2; a reflected penumbra isn't resolvable in a
+    // one-bounce mirror image anyway). float3: a tinted medium tints this too.
+    // frameJitter, NOT 0.0: rtShadow's disc angle is rtHash(pixel)*2pi + frameJitter, so zero froze
+    // this ray to one pixel-pure direction forever, a binary value that temporal accumulation
+    // converges TO rather than averages away -- the identical defect fixed for
+    // the PRIMARY shadow ray (421a01e3), left behind here. MEASURED: of isolated bright outliers in a
+    // shadowed frame, 60.7% sit on the same pixels two frames running (98.0% of dark ones) -- a
+    // deterministic per-pixel error, not sampling noise.
     //
-    // This is the identical defect fixed for the PRIMARY shadow ray in 421a01e3, which left this
-    // inner one behind. MEASURED consequence: of the isolated bright outliers left in a shadowed
-    // frame, 60.7% sit on the SAME pixels two frames running, and 98.0% of the dark ones do -- the
-    // signature of a deterministic per-pixel error rather than of sampling noise.
-    //
-    // T1 (Settings::rtSecondaryShadowOpaque): hitPos is a SECONDARY hit, exactly what rtShadowOpaque
-    // exists for -- see its own header comment for the ray it builds and the translucent-tint trade it
-    // makes. if/else, not ?:, so the bit is the one and only thing selecting which ray runs.
+    // T1 (Settings::rtSecondaryShadowOpaque): hitPos is a SECONDARY hit, what rtShadowOpaque exists
+    // for (see its header for the ray/trade). if/else, not ?:, so the bit alone selects the ray.
     float3 shadow;
     if ((rtGiShadowBits() & 1u) != 0u) {
         shadow = rtShadowOpaque(hitPos, nWS, L, pixel, frameJitter);
@@ -2346,13 +1921,12 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
         shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
     }
 
-    // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance's reference:
-    //     E = sunIrradiance*ndl + PI*skyRadiance*ambient;   return albedo * E / PI;
-    // so radiance is albedo*sunIrradiance*ndl/PI (sun) + albedo*skyRadiance*ambient (sky, PI cancels).
-    // Omitting the divide made every SUNLIT reflection 3.14x too bright (shaded ones stayed correct,
-    // reading as an exposure bug) -- moved the lit ray-traced gates from 94,27,14 to 131,58,40.
-    // THE WHITE FURNACE DOES NOT CATCH THIS: it turns the sun off, testing only the ambient half.
-    // A furnace with a sun is a second mode worth having.
+    // LAMBERTIAN EXITANT RADIANCE; the /PI is the whole point (averGroundRadiance's reference:
+    // E = sunIrradiance*ndl + PI*skyRadiance*ambient; return albedo*E/PI -- sky's PI cancels, sun's
+    // doesn't). Omitting it made SUNLIT reflections 3.14x too bright (shaded ones stayed correct,
+    // read as an exposure bug) -- moved lit ray-traced gates from 94,27,14 to 131,58,40. The white
+    // furnace (sun off) doesn't catch this, since it tests only the ambient half; a furnace with a
+    // sun would be worth having.
     float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow / PI;
     float3 ambient = averSkyIrradiance(nWS) * gAmbient.r;
     hit = true;

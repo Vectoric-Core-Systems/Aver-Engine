@@ -47,11 +47,10 @@ struct DeviceInfo {
     u32 shaderModel = 50;      // 60 = SM 6.0, 65 = SM 6.5
     u32 meshShaderTier = 0;    // 0 = none, 1 = Tier 1
     bool dxcAvailable = false; // DXIL compiler present
-    // D3D12 with the NVIDIA denoiser library actually built in AND willing to run on this backend --
-    // see RenderSettingsResolver.hpp's DisableReason::RequiresNrd. Computed by the host at the same
-    // two call sites that already know both halves (`backend() == rhi::Backend::D3D12 &&
-    // render::nrd::Denoiser::available()`); this struct only carries the answer, it does not derive
-    // it, so this core-only library still depends on nothing RHI-shaped.
+    // D3D12 + NVIDIA denoiser library available on this backend (see RenderSettingsResolver.hpp's
+    // DisableReason::RequiresNrd). Computed by the host at the same two call sites that check
+    // `backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available()`; this struct only
+    // carries the answer so it stays free of any RHI dependency.
     bool nrdSupported = false;
 };
 
@@ -59,124 +58,98 @@ struct DeviceInfo {
 struct Settings {
     Msaa    msaa               = Msaa::X4;
     Quality globalIllumination = Quality::Medium;
-    // ON BY DEFAULT, AT MEDIUM, AND THE TWO KNOBS BELOW ARE MEDIUM'S RUNGS BY CONSTRUCTION -- see
-    // rtShadowRays/rtPixelsPerRayTile for why that sentence is load-bearing rather than decorative.
+    // ON BY DEFAULT AT MEDIUM; rtShadowRays/rtPixelsPerRayTile below are Medium's rungs by
+    // construction (see those fields).
     //
-    // MEASURED COST. Release build, ElectricDreams, windowed at the editor's default 1600x900,
-    // --no-vsync, --frames 200, whole-frame median: 11.86 ms with --no-rt, 18.44 ms at this tier's
-    // rungs. +55%, and the cheapest honest way to have ray-traced sun shadows at all -- the naive
-    // version of this change (flip the tier, leave the knobs at Epic's 4 rays) measures 23.39 ms,
-    // almost exactly double the Off baseline. One machine, one GPU, one window size: the RELATIVE
-    // ladder should hold anywhere, the absolute milliseconds are this card's (RX 7800 XT) and they
-    // move with resolution, so quote the window when quoting the number.
+    // MEASURED (Release, ElectricDreams, windowed 1600x900, --no-vsync, --frames 200, whole-frame
+    // median): 11.86 ms with --no-rt, 18.44 ms at Medium's rungs (+55%, the cheapest honest way to
+    // have ray-traced sun shadows at all); the naive version (flip the tier, leave knobs at Epic's
+    // 4 rays) measures 23.39 ms, ~2x Off. One GPU (RX 7800 XT), one window size -- the relative
+    // ladder should hold elsewhere, the absolute ms won't.
     //
-    // HOW TO MEASURE THIS WITHOUT MEASURING NOTHING, because that is the trap and it has now been
-    // fallen into twice. The .ocproject path is POSITIONAL -- there is no --project flag, so
-    // `Sandbox.exe --project <path>` silently opens no project at all. And even given the path
-    // correctly, a project whose CREATEDWITH names an older series raises a modal and waits, so a
-    // --frames run scores an EMPTY editor. Both failures look exactly like a successful benchmark:
-    // plausible milliseconds, no error, a screenshot nobody opened. The tell is in the log --
-    // "scene walk ... over 0 entities" means nothing loaded, and the honest baseline here is 14
-    // entities and about 18 ms. Read that line before believing any number out of this ladder.
+    // BENCHMARK TRAP (fallen into twice): --project is POSITIONAL, not a flag (`Sandbox.exe
+    // --project <path>` silently opens nothing), and a CREATEDWITH mismatch raises a blocking modal
+    // -- both give a clean, empty-editor "benchmark" with plausible numbers and no error. Check the
+    // log for "scene walk ... over 0 entities" before trusting any number here; honest baseline is
+    // 14 entities, ~18 ms.
     //
-    // A KNOWN WAY TO MAKE THIS LOOK BROKEN, recorded because it cost an afternoon to bisect: brighter
-    // direct light on a surface means more INDIRECT light bounced off it, and the GI here does not
-    // clamp what it gathers. Enough large, saturated, brightly-lit geometry and the bounce runs away
-    // and floods the frame with that surface's colour -- three 1.8-metre pure-red spheres under a
-    // 100,000-lux sun did exactly that, and turning RT on was merely what pushed it over, since it
-    // lights those spheres more brightly than the voxel-cone path did. Scaling them down fixed it.
-    // The scene was unreasonable; that the renderer answers it with a red screen rather than a clamp
-    // is still the renderer's defect, and it is tracked. Nothing about it is hardware-specific.
+    // GI RUNAWAY TRAP (cost an afternoon to bisect): the GI gather has no clamp, so bright light on
+    // large saturated surfaces can flood the frame with their colour (three 1.8 m pure-red spheres
+    // under a 100,000-lux sun did this; RT merely exposed it by lighting them brighter than the
+    // voxel-cone path did -- scaling the spheres down fixed it). Scene defect, but answering with a
+    // red screen instead of a clamp is a tracked renderer bug, not hardware-specific.
     Quality rayTracing         = Quality::Medium;
     Quality pathTracing        = Quality::Off;
 
-    // A LAYERED BSDF ALONGSIDE THE STANDARD BRDF, not instead of it. Off is today's
-    // metallic-roughness Cook-Torrance response, byte for byte; the rungs above it add a coat lobe
-    // over the existing base and, later, further layers.
+    // A layered BSDF alongside the standard BRDF (not instead of it): Off is today's
+    // metallic-roughness Cook-Torrance response byte for byte; higher rungs add a coat lobe (and
+    // later, further layers).
     //
-    // A Quality rather than a bool because the layers genuinely ladder: a coat evaluated with its own
-    // GGX and split-sum environment term is not free, and a project should be able to ask for the
-    // cheap version. Off is not "the feature is broken", it is a real, supported, and currently
-    // default answer -- the same shape pathTracing has.
+    // Quality, not bool, because a coat's own GGX + split-sum env term is not free -- projects need
+    // the cheap (Off) option; Off is not a broken feature, it's a real supported default, same
+    // status as pathTracing's Off.
     //
-    // NOT LIVE-SWITCHABLE, and that is a deliberate limitation rather than an oversight.
-    // VoxiRenderer builds twenty-odd raster PSOs at init, compiled through DXC at runtime with no
-    // disk cache; compiling a second matrix for a layered variant would double that on every launch
-    // of every project, including ones that never turn this on. So the value is read once, before
-    // the pipelines are built, and changing it takes a project reload. Making it free when Off
-    // matters more than making it instant.
+    // NOT LIVE-SWITCHABLE: VoxiRenderer compiles ~20 raster PSOs at init with no disk cache;
+    // compiling a second matrix for layered would double that for every project, even ones that
+    // never enable it. Read once before pipelines build; changing it needs a project reload -- free
+    // when Off matters more than instant.
     Quality layeredBsdf        = Quality::Off;
     bool    meshShaders        = false;
 
-    // Cubic voxel grid edge; the volume's memory and per-voxel GPU cost are both O(this^3). Defaults
-    // to Medium's rung (128) below. Renderer::setSettings derives this from globalIllumination
-    // whenever the tier changes and this field arrives unchanged -- see voxelResolutionForQuality
-    // and setSettings. Set it explicitly (a different value than what's currently active, in the
-    // same call that changes the tier) to override the tier's rung.
+    // Cubic voxel grid edge; memory and per-voxel GPU cost are O(this^3). Defaults to Medium's rung
+    // (128). Derived from globalIllumination on a tier change when left unchanged (see
+    // voxelResolutionForQuality/setSettings); set explicitly, to a value different from what's
+    // currently active, in the same call to override.
     u32 voxelResolution = 128;
 
-    // HOW MANY CONES THE DIFFUSE GATHER TRACES, total, including the axial one along the normal.
-    // Defaults to Medium's rung (6) below, and derived from globalIllumination on a tier change
-    // exactly as voxelResolution above it is.
+    // Total cones the diffuse gather traces, including the axial one. Defaults to Medium's rung (6),
+    // derived from globalIllumination on a tier change like voxelResolution above.
     //
-    // THIS IS THE GI SETTING THAT ACTUALLY COSTS ANYTHING, and until now the tier did not touch it.
-    // globalIllumination derived voxelResolution and giUpdateInterval, both of which move the
-    // volume BUILD -- measured at 0.4-0.5 ms -- while the per-pixel GATHER, measured at 1.3 ms and
-    // by far the larger half, was a hardcoded six for every tier. Turning GI down bought almost
-    // nothing, and turning it up to High made the frame SLOWER with no way to spend the budget
-    // (6.0 -> 6.4 ms: a bigger volume to sample, same number of samples).
+    // THE GI SETTING THAT ACTUALLY COSTS: volume BUILD (voxelResolution/giUpdateInterval) measures
+    // 0.4-0.5 ms; per-pixel GATHER measures 1.3 ms and was hardcoded to six regardless of tier, so
+    // turning GI down bought nothing either, and raising it to High made the frame SLOWER with no
+    // way to spend the budget (6.0 -> 6.4 ms, bigger volume, same sample count). Cost is
+    // LINEAR here, ~0.22 ms/cone (24-step march bound unreachable at diffuse aperture -- cones exit
+    // early), so this is the one GI number worth laddering.
     //
-    // Cost is LINEAR in this and independent of the march length -- measured at about 0.22 ms per
-    // cone, with the 24-step loop bound unreachable at the diffuse aperture because the cones exit
-    // early. So this is the one GI number worth putting on a ladder.
-    //
-    // ON THE LADDER NOW: Low 3, Medium 6, High 9, Epic 13. See giConesForQuality in Voxi.cpp for the
-    // per-rung reasoning and the measured per-tier cost (FirstPerson range, scene draw: Low 3.3 ms
-    // through Epic 5.4 ms, 0.21 ms/cone, confirming the 0.22 ms/cone figure above from a second
-    // experiment) -- and for why a "two cones moved a probe by 2/255" claim living elsewhere in this
-    // tree is deliberately not repeated here as settled: it predates this ladder and was never
-    // re-measured against it.
+    // Ladder: Low 3, Medium 6, High 9, Epic 13 (giConesForQuality in Voxi.cpp; measured FirstPerson
+    // Low 3.3 ms - Epic 5.4 ms, 0.21 ms/cone, confirms the figure above). A "two cones moved a probe
+    // by 2/255" claim elsewhere in this tree predates this ladder and was never re-measured against it.
     u32 giCones         = 6;
-    // Sky-visibility rays the AMBIENT term traces per pixel (sweep: --gi-sky-occlusion-rays N). 0 means
-    // "estimate it from the cone gather" -- optimistic in enclosed geometry, because widening cones see
-    // through thin walls: Sponza shadowed pixels read [25,26,30] against a path-traced [7,7,7], blue-biased
-    // by leaked sky. Under ReSTIR GI the cone gather does not run at all and 0 means NO occlusion.
+    // Sky-visibility rays the AMBIENT term traces per pixel (--gi-sky-occlusion-rays N). 0 = estimate
+    // from the cone gather -- optimistic in enclosed geometry (widened cones see through thin walls:
+    // Sponza shadowed pixels read [25,26,30] vs path-traced [7,7,7], blue-biased by leaked sky).
+    // Under ReSTIR GI (no cone gather) 0 means NO occlusion. Attenuates only the SKY term; bounced
+    // light is the GI estimator's.
     //
-    // DERIVED FROM rayTracing on a tier change: 0 at Low (it rasterises), ONE at Medium, High and Epic.
-    // The default is 1 because the default tier is Medium, and the derivation only fires on a CHANGE.
+    // Derived from rayTracing on a tier change: 0 at Low (it rasterises), 1 at Medium/High/Epic
+    // (default 1, Medium's rung). Accumulated against a reprojected history (rtSkyOcclusionTemporal)
+    // rather than retraced every frame -- cosine-distributed so lanes walk unrelated BVH nodes,
+    // unlike the coherent sun rays (~0.017 ms each).
     //
-    // ONE RAY, accumulated against a reprojected history (rtSkyOcclusionTemporal), not four: unlike the
-    // coherent sun rays (~0.017 ms each) this ray is cosine-distributed, so lanes walk unrelated BVH nodes.
-    // Sweep (Sponza, one camera, "Voxi ray-driven primary"): 0 rays 10.92 ms, probe 20,20,22; 1 ray
-    // 12.25 ms, 11,11,13; 4 rays 15.58 ms, 11,11,13 -- the first ray buys the correction, more buy nothing.
-    // Medium at the default half rate: +0.5 ms, frame mean 33.4 -> 16.1 (Epic 16.2).
-    // It attenuates only the SKY term; the bounced light is the GI estimator's.
+    // Sweep (Sponza, "Voxi ray-driven primary"): 0 rays 10.92 ms/[20,20,22], 1 ray 12.25 ms/[11,11,13],
+    // 4 rays 15.58 ms/[11,11,13] -- first ray buys the correction, more buy nothing. Medium at the
+    // default half rate: +0.5 ms, frame mean 33.4 -> 16.1 (Epic 16.2).
     u32 giSkyOcclusionRays = 1;
-    // Edge, in pixels, of the square that SHARES one sky-occlusion ray direction. 1 is a fresh
-    // rotation per pixel and is what this renderer did before the dial was wired up.
+    // Edge, in pixels, of the square SHARING one sky-occlusion ray direction. 1 = fresh rotation per
+    // pixel (pre-dial behaviour).
     //
-    // WHY IT EXISTS: the ray is cosine-distributed over the hemisphere, so neighbouring lanes descend
-    // unrelated parts of the BVH and the wave runs at the speed of its unluckiest lane. Sharing the
-    // azimuth across a tile makes those lanes trace near-PARALLEL rays that touch the same nodes and
-    // the same cache lines. MEASURED on Sponza, marginal cost of going from 1 ray to 4:
+    // WHY: the ray is cosine-distributed, so neighbouring lanes descend unrelated BVH nodes and the
+    // wave runs at its unluckiest lane's speed. Sharing azimuth across a tile makes lanes trace
+    // near-PARALLEL rays touching the same nodes/cache lines. MEASURED (Sponza, marginal cost of 1->4
+    // rays): tile 1 +3.56 ms, tile 2 +2.85 ms, tile 4 +2.21 ms -- a 38% cut, funding the extra samples.
     //
-    //     tile 1  +3.56 ms      tile 2  +2.85 ms      tile 4  +2.21 ms
+    // PRICE: CORRELATED noise inside a tile rather than independent per-pixel noise -- right for
+    // low-frequency AO, wrong for anything sharp (do not reuse for shadows/reflections).
     //
-    // -- a 38% cut in what an extra ray costs, which is what buys the extra SAMPLES below.
-    //
-    // THE PRICE IS CORRELATED NOISE inside a tile rather than independent noise per pixel. That is
-    // the right trade for ambient occlusion, which is low-frequency by nature, and exactly the wrong
-    // one for anything with sharp detail -- do not reuse this dial for a shadow or a reflection.
-    //
-    // RUNTIME, NOT A #define. It was a compile-time constant with no plumbing at all, which meant the
-    // one lever the shader names for this ray could not be swept by anyone -- the same gap
-    // giSkyOcclusionRays had. Rides gAmbientParams.y, a row already reserved for it.
+    // Runtime, not a #define (was compile-time-only, unsweepable, same gap giSkyOcclusionRays had).
+    // Rides gAmbientParams.y, a row already reserved for it.
     u32 giSkyOcclusionTile = 1;
     f32 giIntensity     = 1.0f;
-    // CAUSTICS: how strongly light focused by a water surface brightens what is beneath it.
-    // 0 switches the term off entirely (and the shader's own branch then costs nothing measurable).
-    // Not on the quality ladder: it is a LOOK, not a fidelity rung -- a pool with caustics at Low
-    // and none at Epic would be the same scene lit differently, which is not what a tier means.
+    // Caustics: how strongly light focused by a water surface brightens what's beneath. 0 = off (the
+    // shader's own branch then costs nothing measurable). Not on the quality ladder -- it's a LOOK,
+    // not a fidelity rung: caustics at Low and none at Epic would just be the same scene lit
+    // differently, not a fidelity step.
     f32 causticStrength = 0.6f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
 

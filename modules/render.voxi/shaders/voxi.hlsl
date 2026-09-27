@@ -2,9 +2,9 @@
 // Feature-owned frame constants, at the register RHIResources.hpp reserves for a render feature.
 #define AVER_SHADOW_CASCADES 4
 
-// register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)), never a literal b4: rhi::kFeatureFrameConstantRegister
-// is the one definition (shaderConstantsHlsl() emits this #define; ClusterFrameCB binds the same way). A
-// literal would keep compiling against a renumbered slot while the C++ side moved to the new one.
+// Use AVER_CB_JOIN, never a literal register (e.g. b4): rhi::kFeatureFrameConstantRegister is the sole
+// definition (shaderConstantsHlsl() emits it; ClusterFrameCB binds the same way); a literal keeps
+// compiling against a stale slot if it moves.
 cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
@@ -18,13 +18,12 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // y = occlusion rays per pixel; z = ray bias in world units at the near plane;
     // w = 1 once the flat geometry table is ready for a reflection ray's hit lookup.
     float4   gRtParams;
-    // x = 1 while t6/u2 (gRtShadowHist / gRtShadowHistOut) are bound to real textures this frame;
-    // y = 1 once gRtShadowHist ALSO holds a real previous frame (0 right after creation/resize);
-    //     0.5 = it does, but the sun changed this frame (VoxiRenderer::beginShadowHistory), so the
-    //     sun-DEPENDENT histories (shadow, reflection) test > 0.75 and skip it while the sun-INDEPENDENT
-    //     one (sky occlusion) tests > 0.25 and keeps accumulating;
-    // z = the current frame index, a pure per-frame count, never wall-clock;
-    // w = the pixels-per-ray tile edge as its BIT COUNT (0 = no tiling, every pixel traces).
+    // x = 1 while t6/u2 (shadow hist/histOut) are bound this frame;
+    // y = 1 once t6 holds a real previous frame (0 right after create/resize); 0.5 = valid but sun moved
+    //     this frame (beginShadowHistory) -- sun-dependent histories (shadow, reflection) test > 0.75 and
+    //     skip it, sky occlusion (sun-independent) tests > 0.25 and keeps accumulating;
+    // z = current frame index (per-frame count, not wall-clock);
+    // w = pixels-per-ray tile edge as its BIT COUNT (0 = no tiling).
     float4   gRtHistParams;
     // LAST frame's camera view-projection, for reprojecting a pixel's world position into
     // gRtShadowHist. Only meaningful while gRtHistParams.y is set.
@@ -36,15 +35,14 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // THIS frame's scene viewport rect, same (x, y, w, h) in target pixels. Paired with gViewProj,
     // where gSceneViewport above is paired with gPrevViewProj. w == 0 means the device had none.
     float4   gSceneViewportCur;
-    // x = 1 when the eye is inside a blended single-sided volume, y = that medium's ior.
-    // Computed once per frame on the CPU -- a pixel cannot know whether its own volume encloses the
-    // camera. See VoxiRenderer's own comment for why a loose bounding-sphere test is safe here.
-    // z/w are LOCAL LIGHTS (lamps, voxi_rt.hlsli's RdLocalLight), unrelated to x/y and sharing the row
-    // only because it had two spare floats: z = how many lights gRdLocalLights (t18) holds this frame,
-    // as a float (0 = local lights off or unavailable -- every reader then behaves as before they
-    // existed); w = two bits as a float: 1 when gRdLocalHist (t19) holds a usable previous frame for the
-    // SAME light set, 2 when every lamp-flagged draw is in the list so GI may drop emitters' own emission.
-    // Decode through rdLocalLightCount()/rdLocalHistValid()/rdLocalCarriesEmitters() (voxi_rt.hlsli).
+    // x = 1 when the eye is inside a blended single-sided volume, y = that medium's ior. Computed once per
+    // frame on the CPU (a pixel can't know if its own volume encloses the camera; see VoxiRenderer for
+    // why a loose bounding-sphere test is safe here).
+    // z/w are unrelated LOCAL LIGHTS (lamps, voxi_rt.hlsli's RdLocalLight) sharing this row for space: z =
+    // light count in gRdLocalLights/t18 as a float (0 = off/unavailable); w = bits as a float: 1 =
+    // gRdLocalHist (t19) has a valid previous frame for the same light set, 2 = every lamp-flagged draw is
+    // listed (GI may drop emitters' own emission). Decode via
+    // rdLocalLightCount()/rdLocalHistValid()/rdLocalCarriesEmitters() (voxi_rt.hlsli).
     float4   gCameraMedium;
     // The caustic caster's world box: min.xyz / max.xyz, min.w = 1 when one exists, max.w strength.
     // max.z is the surface light refracts through. See VoxiRenderer for why a box and not a sphere.
@@ -57,168 +55,114 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // x = 1/kGiShadowSize, y = 1 once the GI-only map is usable (0 = fall back to unshadowed
     // indirect), z = normal-offset bias in world units.
     //
-    // w WAS UNUSED, and is now a RUNTIME BIT-FIELD, not a float value -- decode with
-    // `uint bits = (uint)gGiShadowParams.w`, never compared or lerped as a float. C++ assembles it
-    // every frame (VoxiRenderer.cpp, after fitGiShadow -- see that function's own comment for why it
-    // no longer zeroes this field) from four independent Settings toggles (bits 1/2/4 ON by default
-    // since 896c5187, bit 8 OFF), each an A/B-measured trade against the staged ray-driven cost
-    // breakdown, not a correctness fix:
-    //   bit 1 (Settings::rtSecondaryShadowOpaque, console voxi.rtSecondaryShadowOpaque): rtReflection's
-    //     hit and giTraceInitialCandidate's hit (voxi_restir.hlsli) call rtShadowOpaque (voxi_rt.hlsli)
-    //     instead of rtShadow for their own sun-shadow ray -- one first-hit-terminated ray against the
-    //     opaque-including-cutouts lane, trading away the tinted shadow a translucent pane would cast
-    //     on a SECONDARY hit. Primary shadows (rtShadowTemporalEx / CSRdShadow / CSRdShadowProbe) are
-    //     untouched.
-    //   bit 2 (Settings::rtSkyOcclusionHalfRate, console voxi.rtSkyOcclusionHalfRate):
-    //     rtSkyOcclusionTemporal (voxi_rt.hlsli) skips its rtAmbientTraced ray on half of this frame's
-    //     8x8 tiles (alternating which half by frame), wherever that pixel's reprojected AO history is
-    //     valid -- the reprojected value stands in as this frame's fresh estimate.
-    //   bit 4 (Settings::rtReflectionHalfRate, console voxi.rtReflectionHalfRate): rtReflectionTemporalEx
-    //     (voxi.hlsl) skips its rtReflection ray the same tiled way, for a ROUGH pixel only -- a mirror
-    //     (lobeRough == 0) always retraces, since a reprojected mirror reflection is wrong under motion.
-    //   bit 8 (Settings::rtGiHitShadowMap, console voxi.rtGiHitShadowMap): giTraceInitialCandidate's hit
-    //     takes its sun visibility from this GI-only shadow map (giHitShadowMapVisibility,
-    //     voxi_restir.hlsli) instead of a ray, falling back to the ray where the map cannot answer.
-    // Bits 1/2/4/8 above are reassembled FROM SCRATCH every frame by VoxiRenderer::prePass; bit 16
-    // below is NOT one of them -- it is OR'd in separately, afterward:
-    //   bit 16 (Settings::blendedReuseStagedLighting, console voxi.blendedReuseStagedLighting): set by
-    //     VoxiRenderer::recordStagedRayDriven itself, at the very end of that function, once Stage B
-    //     has written this frame's gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex (and, with lamps lit,
-    //     CSRdLocalLights its gRdLocalOut visibility). Tells the blended replay
-    //     pass (PSMainVoxi below) that those textures hold THIS frame's staged lighting and the setting
-    //     is on, so a translucent fragment sitting on the opaque surface they already lit may read them
-    //     back instead of re-tracing (see PSMainVoxi's own rdReuse for the full per-pixel contract).
-    //     Because prePass's bits-1/2/4/8 assembly above runs BEFORE recordStagedRayDriven and never
-    //     touches this bit, it clears itself on any frame the staged ray-driven path does not run (RT
-    //     off, or a quality tier below Ray-Driven) -- no separate "did staged run" flag needed.
-    // With every bit above clear this field reads 0.0, exactly as it always has, and every shader here
-    // computes exactly what it did before these existed.
+    // w WAS UNUSED; NOW A RUNTIME BIT-FIELD (decode via `(uint)gGiShadowParams.w`, never as a float).
+    // Assembled every frame by VoxiRenderer::prePass from four Settings toggles (bits 1/2/4 default ON
+    // since 896c5187, bit 8 default OFF), each an A/B-measured trade against ray-driven cost, not a
+    // correctness fix:
+    //   bit 1  Settings::rtSecondaryShadowOpaque -- rtReflection/giTraceInitialCandidate's secondary-hit
+    //          sun-shadow ray uses rtShadowOpaque (opaque-including-cutouts lane) instead of rtShadow,
+    //          trading away a translucent pane's tinted shadow on a secondary hit. Primary shadows
+    //          (rtShadowTemporalEx / CSRdShadow / CSRdShadowProbe) untouched.
+    //   bit 2  Settings::rtSkyOcclusionHalfRate -- rtSkyOcclusionTemporal skips its ray on half of this
+    //          frame's 8x8 tiles (alternating by frame) wherever the reprojected AO history is valid.
+    //   bit 4  Settings::rtReflectionHalfRate -- rtReflectionTemporalEx skips its ray the same tiled way,
+    //          except for a mirror (lobeRough == 0), which always retraces (a reprojected mirror is wrong
+    //          under motion).
+    //   bit 8  Settings::rtGiHitShadowMap -- giTraceInitialCandidate's hit reads sun visibility from the
+    //          GI-only shadow map (giHitShadowMapVisibility) instead of a ray, falling back to the ray
+    //          where the map can't answer.
+    // Bit 16 is OR'd in separately, AFTER prePass's bits 1/2/4/8 assembly, by
+    // VoxiRenderer::recordStagedRayDriven itself:
+    //   bit 16 Settings::blendedReuseStagedLighting -- set once Stage B has written this frame's
+    //          gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex (+ gRdLocalOut). Tells PSMainVoxi's blended
+    //          replay that a translucent fragment on the opaque surface Stage B lit may reuse those
+    //          textures instead of retracing (see PSMainVoxi's rdReuse). Clears itself on any frame the
+    //          staged path doesn't run (RT off, or a tier below Ray-Driven), since prePass never touches
+    //          it -- no separate flag needed.
+    // All bits clear -> field reads 0.0, exactly as before this existed.
     float4   gGiShadowParams;
-    // The SPATIAL shadow denoiser. x = filter radius in pixels (0 = off); y = how much of the
-    // filtered value to take (0 = none: taps still run and the result is discarded -- the
-    // cost-measurement configuration; lerp(v, f, 0) is v exactly for any finite f); z, w unused.
-    // Radius lives in a CONSTANT, not a #define, so the tap loop stays dynamic and can't be
-    // unrolled away at zero taps -- a compile-time 0 would measure nothing and call it free.
+    // The SPATIAL shadow denoiser. x = filter radius in px (0 = off); y = blend weight of the filtered
+    // value (0 = taps still run, discarded -- cost-measurement config; lerp(v,f,0)==v exactly); z,w unused.
+    // Radius is a CONSTANT not a #define so the tap loop stays dynamic and isn't unrolled away at 0.
     float4   gRtDenoiseParams;
     float4   gPtBounceParams;
-    // x = total cones the diffuse gather traces, including the axial one.
-    // y/z/w are REFRACTION, not spare: y = mode (Settings::refractionMode, 0 = off),
-    // z = strength, w = edge fade. averRefractedBackdropUV below reads all three. They said
-    // "unused" for as long as refraction has existed -- the feature landed in a row this
-    // comment still described as free, which is exactly how the next person adding a field
-    // near here would have overwritten it.
+    // x = total cones the diffuse gather traces (incl. axial). y/z/w are REFRACTION, not spare: y = mode
+    // (Settings::refractionMode, 0 = off), z = strength, w = edge fade -- read by averRefractedBackdropUV.
+    // Warning from experience: this row was called "spare" while unused for years, then overwritten when
+    // refraction landed -- keep field comments here current.
     float4   gGiParams;
-    // x = sky-visibility rays the ambient term traces per pixel; 0 means "use the cone gather's own
-    // occlusion instead", which is every tier below the top and is what this shader did before the
-    // rays existed.
-    // y = the COHERENCE TILE EDGE those rays share a direction across (1 = per-pixel). Claimed within
-    // days of this row being written down as spare, which is what gGiParams directly above warns
-    // happens.
-    // z = LIGHTING LEGACY BITS (VoxiRenderer::setLightingLegacyBits; a u32 bitmask stored as a float,
-    // 0 meaning everything corrected -- a block that has never been written is all zeros, which is
-    // exactly the "corrected" state). Each bit restores one pre-fix behaviour for A/B comparison only;
-    // decoded INLINE at each reader as `((uint)gAmbientParams.z & <bit>u) != 0u`, never through a
-    // shared helper, so every reader stays independently grep-able:
-    //   bit 1  (R0) the ReSTIR candidate ray and the sky-occlusion ray sample a fixed 45-degree ring
-    //          again, instead of a cosine hemisphere (voxi_restir.hlsli, voxi_rt.hlsli).
-    //   bit 2  (R1) a ReSTIR-supplied receiver's own sky is counted twice again -- once through the
-    //          traced miss, once more through ind4.ambient/ind.ambient. THIS FILE reads this bit: see
-    //          the sky-ownership subtraction in PSMainVoxi and PSRayDriven below (F4).
-    //   bit 4  (R2) a ReSTIR candidate's hit point reads the sky again with no visibility test and no
-    //          cosine weighting (voxi_restir.hlsli).
-    //   bit 8  (R3) a reused ReSTIR sample is shaded again with no visibility test between the shading
-    //          point and the sample (voxi_restir.hlsli).
-    //   bit 16 (R6) the cone gather's directions are weighted by cosine again on top of an already
-    //          cosine-distributed direction, i.e. cos^2 (voxi_cone.hlsli, voxi_gi.hlsli).
-    //   bit 32 (W6) a blended-replay fragment (glass/water) writes its own per-pixel history --
-    //          reservoir, surface history, NRD GI input, RT shadow/AO/reflection history -- again,
-    //          instead of leaving the opaque surface's own history alone (voxi_restir.hlsli,
-    //          voxi_rt.hlsli, PSMainVoxi's rtReflectionTemporal below). Console
+    // x = sky-visibility rays the ambient term traces per pixel; 0 = use the cone gather's own occlusion
+    // instead (every tier below the top; the pre-existing behaviour).
+    // y = COHERENCE TILE EDGE those rays share a direction across (1 = per-pixel). Claimed for another
+    // use within days of being marked spare -- the fate gGiParams above warns about.
+    // z = LIGHTING LEGACY BITS (VoxiRenderer::setLightingLegacyBits, u32 as float; 0 = everything
+    // corrected). Each bit restores one pre-fix behaviour for A/B only; decoded inline at each reader as
+    // `((uint)gAmbientParams.z & <bit>u) != 0u`, never via a shared helper, so every reader stays
+    // grep-able:
+    //   bit 1  (R0) ReSTIR candidate/sky-occlusion ray samples a fixed 45-deg ring instead of a cosine
+    //          hemisphere (voxi_restir.hlsli, voxi_rt.hlsli).
+    //   bit 2  (R1) a ReSTIR receiver's own sky is double-counted (traced miss + ind.ambient). THIS FILE
+    //          reads this bit for the sky-ownership subtraction in PSMainVoxi/PSRayDriven (F4).
+    //   bit 4  (R2) a ReSTIR candidate hit reads sky with no visibility test or cosine weight
+    //          (voxi_restir.hlsli).
+    //   bit 8  (R3) a reused ReSTIR sample is shaded with no visibility test to the sample
+    //          (voxi_restir.hlsli).
+    //   bit 16 (R6) cone gather directions are cosine-weighted twice, i.e. cos^2 (voxi_cone.hlsli,
+    //          voxi_gi.hlsli).
+    //   bit 32 (W6) a blended fragment (glass/water) writes its own history again -- reservoir, surface
+    //          history, NRD GI input, RT shadow/AO/reflection history -- instead of leaving the opaque
+    //          surface's alone (voxi_restir.hlsli, voxi_rt.hlsli, rtReflectionTemporal below).
     //          voxi.legacyBlendedHistoryWrite; --lighting-legacy 32.
     //
-    // w carries GI-VISIBILITY (U1) and BLENDED-HISTORY (W6/M5) bits, decoded the same inline way as z
-    // above -- NOT through packAmbientW's own inverse at the read site, only at the one C++ writer
-    // (VoxiRenderer::beginShadowHistory, aver::voxi::givis::packAmbientW):
-    //   bits 0-1 RestirVisibility mode (Settings::giRestirVisibility, clamped 0..3): 0 No ray,
-    //          1 Reconstructed, 2 HalfResolution, 3 Full. Decoded once, at the top of
-    //          giRestirIndirect (voxi_restir.hlsli), into f2Path/f3Path -- every other reader of
-    //          this mode reads those two derived values, never this field a second time.
-    //   bit 4  the half-resolution visibility pair (gGiVisHist/gGiVisHistOut, t16/u10,
-    //          voxi_restir.hlsli) is bound THIS frame. Mode 2 with this bit clear means the pair
-    //          failed to allocate (2.11) and behaves as Full, not a null-descriptor read.
-    //   bit 8  gGiVisHist (t16) holds a REAL previous frame, not just-created or just-resized
-    //          storage -- the sibling of gGiRestirParams.y for this pair.
-    //   bit 16 (W6/M5) a blended-replay fragment takes the voxel-cone gather instead of ReSTIR for
-    //          its diffuse term -- voxi.blendedGiCone / --blended-gi cone, PSMainVoxi's own M5
-    //          branch below. Default restir (this bit clear): today's image, unchanged.
-    //   bit 32 the RENDERING BACKEND replayed translucent draws blended THIS frame (D3D12 only --
-    //          Vulkan never marks a draw blended, VulkanDevice.cpp, C10) -- what actually enables
-    //          W6's per-fragment discriminator (averDrawIsTranslucent() below) to mean anything;
-    //          without it every fragment behaves as opaque for history-write purposes regardless of
-    //          material, which is the correct answer on a backend that has no blended replay pass to
-    //          protect history from in the first place.
-    //   bit 64 voxi.giVisPathView (2.10 I): paints giRestirIndirect's own F2 path colour in place of
-    //          shading, suppressed while the poison view (gGiRestirParams.w) above is also on.
-    //   bits 7-11 (>> 7 & 31u) Settings::giRestirMovingAge (0..31, clamped): the moving-camera
-    //          ReSTIR reservoir-age cap, decoded by giRestirIndirect (voxi_restir.hlsli) alongside
-    //          visMode and applied to stparams.maxReservoirAge AFTER the motion discount below it is
-    //          computed, not beside this decode. 0 (THE DEFAULT) means legacy -- always the existing
-    //          30-frame cap, byte-identical to every image this renderer produced before this field
-    //          existed. Was meant to remove a fade left behind by a moving camera's reservoirs keeping
-    //          stale, often brighter reprojected radiance for up to the full 30-frame cap after the
-    //          camera stops -- BUT THE OWNER TESTED A NONZERO DEFAULT (3, bd6e2045) BY HAND AND THE
-    //          FADE CAME BACK UNCHANGED, so this cap was never the carrier either (see
-    //          Settings::giRestirMovingAge's own comment for the full account); the field, its bits
-    //          and the console variable all stay as a legitimate dial, only the silent nonzero default
-    //          is gone. NOT the spatial-reuse motion discount 3dbc9a42 targeted and 8daed7f1 reverted,
-    //          which freed these five bits first -- a moving-vs-still discount, a moving-vs-still
-    //          RESERVOIR AGE, and the spatialSamples/reuse-tolerance split just below are three
-    //          different attempts at the same still-open fade, tried in that order.
-    //   bits 12-15 (>> 12 & 15u) Settings::giRestirSpatialSamples (0..15, clamped): overrides the
-    //          spatial-reuse tap count (stparams.numSamples) the motion discount above would otherwise
-    //          compute, decoded by giRestirIndirect alongside visMode/movingAge and applied AFTER that
-    //          same discount, splitting spatial reuse from temporal reuse to localise the fade neither
-    //          of the two bit ranges above it fixed. 15 means AUTO -- leave the discount alone, byte-
-    //          identical to today's image; 0 disables spatial reuse outright (temporal only); 1..8 pin
-    //          the count. See Settings::giRestirSpatialSamples's own comment (Voxi.hpp) for the
-    //          bisection this is one half of; gViewParams.z/.w below are the other half (the RTXDI
-    //          reuse-similarity tolerances, too continuous a value to pack into bits here).
+    // w carries GI-VISIBILITY (U1) and BLENDED-HISTORY (W6/M5) bits, decoded the same inline way, written
+    // only by VoxiRenderer::beginShadowHistory (aver::voxi::givis::packAmbientW):
+    //   bits 0-1 RestirVisibility mode (Settings::giRestirVisibility, 0..3: No ray/Reconstructed/
+    //          HalfRes/Full). Decoded once in giRestirIndirect into f2Path/f3Path; other readers use those.
+    //   bit 4  half-res visibility pair (gGiVisHist/gGiVisHistOut, t16/u10) bound this frame; mode 2 with
+    //          this clear means the pair failed to allocate (2.11) and behaves as Full, not a
+    //          null-descriptor read.
+    //   bit 8  gGiVisHist (t16) holds a real previous frame (sibling of gGiRestirParams.y).
+    //   bit 16 (W6/M5) blended fragment takes the voxel-cone gather instead of ReSTIR for diffuse --
+    //          voxi.blendedGiCone / --blended-gi cone (PSMainVoxi's M5). Clear = default, unchanged image.
+    //   bit 32 backend replayed translucent draws blended THIS frame (D3D12 only -- Vulkan never marks a
+    //          draw blended, VulkanDevice.cpp C10); gates averDrawIsTranslucent() meaning anything --
+    //          without it every fragment behaves as opaque for history writes, correct on a backend with
+    //          no blended replay pass to protect history from.
+    //   bit 64 voxi.giVisPathView: paints giRestirIndirect's F2 path colour instead of shading, suppressed
+    //          under the poison view (gGiRestirParams.w).
+    //   bits 7-11  Settings::giRestirMovingAge (0..31): moving-camera ReSTIR reservoir-age cap, applied in
+    //          giRestirIndirect after the motion discount. 0 = legacy 30-frame cap (default, unchanged
+    //          image). Meant to fix a moving-camera reservoir fade; a nonzero default (3, bd6e2045) was
+    //          tried and measured no different, so kept only as a manual dial (see Settings' own comment).
+    //          NOT the spatial-reuse motion discount 3dbc9a42 targeted and 8daed7f1 reverted -- one of
+    //          three different attempts (with spatialSamples below) at this same still-open fade.
+    //   bits 12-15 Settings::giRestirSpatialSamples (0..15): overrides the spatial-reuse tap count after
+    //          the same discount. 15 = AUTO (unchanged image), 0 = temporal only, 1..8 pin the count. See
+    //          Settings::giRestirSpatialSamples (Voxi.hpp); gViewParams.z/.w are the other half of this
+    //          bisection (RTXDI reuse-similarity tolerances).
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x is a small integer VIEW-DEBUG MODE
-    // (VoxiRenderer::ViewDebug, VoxiRenderer.hpp): 0 = normal shading, 1 = Unlit (this field's
-    // original, sole value -- see PSRayDriven's `vmode == 1u` read), 2 = RayHitInstance,
-    // 3 = RayHitMaterial, 4 = RayHitDistance, 5 = Triangles -- PSRayDriven's own ray-hit/triangle
-    // debug visualisations, further down this file (search "vmode"); PSMainVoxi never reads this
-    // field, so none of the four has a rasterised equivalent.
-    // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
-    // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
-    // y WAS SPARE; NOW the live GI radiance ceiling (Settings::giRadianceCeiling) -- see
-    // AVER_VOX_MAXRAD below, which reads this field with a fallback to today's 16.0 literal.
-    // z = 1 when ReSTIR GI is the CHOSEN diffuse estimator (VoxiRenderer::giRestirWanted(), a
-    // settings-level answer), 0 otherwise -- read by PSVoxel to leave the sky out of the volume. NOT
-    // gGiRestirParams.x, which also drops to 0 on a frame the estimator merely cannot run (the GI
-    // debug view, an empty TLAS): keying the bake on that rebuilt the volume twice per debug-view
-    // toggle. w = the staged ray-driven passes' visibility-record row pitch while they record, 0 for
-    // every other pass (see gRdVisBuf). (z/w briefly carried RTXDI's reuse tolerances during the
-    // ReSTIR fade bisection; those went back to literals in voxi_restir.hlsli.)
+    // x = VIEW-DEBUG MODE (VoxiRenderer::ViewDebug): 0 normal, 1 Unlit, 2 RayHitInstance, 3 RayHitMaterial,
+    // 4 RayHitDistance, 5 Triangles -- PSRayDriven's debug visualisations only (search "vmode");
+    // PSMainVoxi never reads this field. Mirrors FrameConstants::viewParams, appended at the end (see
+    // VoxiRenderer.hpp's static_assert).
+    // y = GI radiance ceiling (Settings::giRadianceCeiling); AVER_VOX_MAXRAD below falls back to 16.0 if 0.
+    // z = 1 when ReSTIR GI is the CHOSEN estimator (VoxiRenderer::giRestirWanted()), read by PSVoxel to
+    // leave sky out of the volume -- NOT gGiRestirParams.x, which also drops to 0 when the estimator
+    // merely can't run this frame (GI debug view, empty TLAS), which would rebuild the volume twice per
+    // toggle. w = staged RD passes' visibility-record row pitch while recording, 0 otherwise (gRdVisBuf).
+    // (z/w briefly carried RTXDI's reuse tolerances during the ReSTIR fade bisection; moved to literals
+    // in voxi_restir.hlsli.)
     float4   gViewParams;
-    // RTXDI ReSTIR GI control (Settings::giMode) -- mirrors FrameConstants::giRestirParams, also
-    // appended at the end for the same reason gViewParams was. x = 1 while giMode==1 is ACTUALLY
-    // running this frame (VoxiRenderer::giRestirWanted(), never the raw setting -- see that
-    // member's own comment for why touching t12/t13/u6/u7/u8 on the raw setting alone would be a
-    // null-descriptor read on hardware that cannot run this). y = 1 once gGiSurfPosHist/
-    // gGiSurfNrmHist ALSO hold a real previous frame. z = which of RTXDI's two reservoir-array
-    // slices THIS frame writes (the other is last frame's, read as this frame's temporal source).
-    // w = the ReSTIR-GI poison debug view (voxi.giPoisonView / VoxiRenderer::setGiPoisonView): >0.5
-    // makes voxi_restir.hlsli's giRestirIndirect paint an unmistakable colour per non-finite guard
-    // instead of the real indirect diffuse -- see that function's own POISON DEBUG VIEW comment for
-    // the legend. ALSO READ DIRECTLY IN THIS FILE, in BOTH PSMainVoxi and PSRayDriven, for an EIGHTH
-    // colour (violet) that has nothing to do with giRestirIndirect: the ray-traced SPECULAR indirect
-    // term (ind4.specular / ind.specular) has its own AVER_VOX_MAXRAD ceiling clamp, and this flag
-    // makes a pinned pixel there paint violet too (B1/F5) -- see aver_IsGiRestirPoisonColour's own
-    // comment, just above PSMainVoxi, for the precedence chosen between the two families. UNLIKE the
-    // seven giRestirIndirect colours, this eighth one is NOT giMode-gated: the RT specular ray runs
-    // under either diffuse estimator, so it fires on giMode 0 too. Was "spare"; this is a repurposed
+    // RTXDI ReSTIR GI control (Settings::giMode); mirrors FrameConstants::giRestirParams, appended at the
+    // end. x = 1 while giMode==1 is ACTUALLY running (VoxiRenderer::giRestirWanted(), never the raw
+    // setting -- touching t12/t13/u6/u7/u8 on the raw setting alone would null-descriptor-read on
+    // hardware that can't run this). y = 1 once gGiSurfPosHist/gGiSurfNrmHist hold a real previous frame.
+    // z = which of RTXDI's two reservoir slices this frame writes (the other is last frame's temporal
+    // source). w = ReSTIR-GI poison debug view (voxi.giPoisonView): >0.5 makes giRestirIndirect paint a
+    // colour per non-finite guard (see that function's POISON DEBUG VIEW legend) instead of shading. Also
+    // read directly in PSMainVoxi/PSRayDriven for an eighth (violet) colour on the ray-traced SPECULAR
+    // indirect term's own AVER_VOX_MAXRAD clamp (B1/F5, not giMode-gated -- see
+    // aver_IsGiRestirPoisonColour for precedence between the two families). Was "spare"; a repurposed
     // bit, not a new field -- packing/size unchanged.
     float4   gGiRestirParams;
 };
@@ -234,47 +178,31 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 
 // Fixed-point scale radiance is multiplied by before accumulation and divided by in CSResolve.
 #define AVER_VOX_FIXED 16384.0
-// THE CEILING ON VOXEL/GI RADIANCE -- NOW A LIVE PER-FRAME VALUE, not a compile-time constant. Rides
-// gViewParams.y (Settings::giRadianceCeiling -> VoxiRenderer::prePass -> cb_.viewParams[1], see that
-// field's cbuffer comment above and Voxi.hpp's own comment on the field for the full story of what
-// this caps and why 16.0 is not a headroom number). Falls back to today's literal 16.0 whenever the
-// field reads exactly 0 -- an UNSET FrameConstants block (giFrameConstants() read before this
-// renderer's first prePass ever ran; SandboxApp.cpp's cluster-GI binder documents exactly that
-// all-zero-block window) -- so this macro is BYTE-IDENTICAL to the #define it replaces until a
-// project or the console (voxi.giRadianceCeiling) actually asks for a different number.
-// Parenthesised as a single expression so every existing `AVER_VOX_MAXRAD` use site (a runtime
-// function argument in every case in this file, never a static const initialiser) stays live without
-// being rewritten.
+// Ceiling on voxel/GI radiance -- now a LIVE per-frame value (gViewParams.y, Settings::giRadianceCeiling
+// -> VoxiRenderer::prePass; see Voxi.hpp for what this caps). Falls back to the old literal 16.0 when the
+// field reads exactly 0 (an unset FrameConstants block before the first prePass -- SandboxApp.cpp's
+// cluster-GI binder). Parenthesised as a single expression so every use site (always a runtime function
+// argument here, never a static const initialiser) stays valid unrewritten.
 #define AVER_VOX_MAXRAD (gViewParams.y > 0.0 ? gViewParams.y : 16.0)
-// The aperture of the single cone PSVoxel traces into the previous bake, as tan(half-angle).
-// 0.577 is tan(30), a 60-degree cone -- the same shape the forward gather's own axial cone uses, so
-// the two agree about how much of the hemisphere a voxel can see rather than being two different
-// estimates of the same quantity. Wide on purpose: this is a hemisphere-coverage question, not a
-// directional one, and a narrow cone would answer it with a single corridor.
+// Aperture of the single cone PSVoxel traces into the previous bake, as tan(half-angle). 0.577 = tan(30),
+// a 60-deg cone matching the forward gather's own axial cone, so both agree on hemisphere coverage
+// rather than being two different estimates. Wide on purpose: a coverage question, not a directional one.
 #define AVER_VOX_INJECT_APERTURE 0.577
-// How much of the light already in the room is re-emitted on the next bake. THIS IS A COMPENSATION
-// CONSTANT, not a physical quantity: this cone estimates radiance along the surface normal from a
-// single 60-degree cone, while the forward gather it feeds integrates thirteen cones over the
-// hemisphere and normalises by their cosine weights -- one cone under-counts what the gather
-// actually integrates, and the multiplier makes up the difference. 1.0 and 8.0 were measured (8.0
-// ran far too hot); 3.0 was checked once against the path tracer on Sponza (commit c6d1a750,
-// scripts/pt-compare.ps1) and closed most of the gap to the reference. It is not derived
-// analytically -- a proper sweep would likely move it. Kept as a named constant because it is the
-// first dial anyone will reach for if a scene ever blows up, and because 0 turns the second bounce
-// off for an A/B without touching anything else.
+// Re-emission gain for the next bake -- a COMPENSATION CONSTANT, not physical: this single 60-deg cone
+// under-counts what the 13-cone hemisphere gather it feeds actually integrates, and this multiplier makes
+// up the difference. 1.0 and 8.0 were measured (8.0 too hot); 3.0, checked once against the Sponza path
+// tracer (c6d1a750, scripts/pt-compare.ps1), closed most of the gap -- not derived analytically. First
+// dial to reach for if a scene blows up; 0 turns the second bounce off for an A/B.
 #define AVER_VOX_FEEDBACK 3.0
 
-// The ceiling on albedo x AVER_VOX_FEEDBACK, per channel. Every rebuild re-reads the previous bake, so
-// the bake is an iteration and its per-bounce gain must stay below 1 in EVERY channel or it runs away
-// instead of settling: with the x3 compensation, anything reflecting over a third of one channel (red
-// cloth in red) gained energy each rebuild, and a sun drag -- a rebuild per frame -- drove NewSponza's
-// curtains room to a solid red that the GI cache then kept. Below the cap (stone, most albedos) the
-// calibrated gain is unchanged.
+// Ceiling on albedo x AVER_VOX_FEEDBACK, per channel. The bake re-reads the previous one, so per-bounce
+// gain must stay < 1/channel or it runs away: with x3 compensation, anything reflecting over a third of a
+// channel gained energy each rebuild -- a sun drag (rebuild/frame) drove NewSponza's curtains room to
+// solid red, kept by the GI cache. Below the cap (stone, most albedos) the calibrated gain is unchanged.
 #define AVER_VOX_MAX_BOUNCE_GAIN 0.8
 
-// Edge, in pixels, of the tile that shares one sky-occlusion ray direction. See rtSkyOcclusion for
-// why coherence rather than ray count is the lever here. 1 = a fresh rotation per pixel, which is
-// what this shader did before the dial existed and is bit-identical to it.
+// Edge, in px, of the tile sharing one sky-occlusion ray direction (see rtSkyOcclusion for why coherence
+// is the lever here, not ray count). 1 = fresh rotation per pixel, bit-identical to before this existed.
 #ifndef AVER_AO_COHERENCE_TILE
 #define AVER_AO_COHERENCE_TILE 1.0
 #endif
@@ -286,29 +214,23 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 #define AVER_REFL_MIRROR_ROUGH 0.1
 
 // TLAS instance-mask lanes. MUST MATCH kRtMaskOpaque/kRtMaskTranslucent in VoxiRenderer.cpp -- no
-// shared-source mechanism ties C++ and HLSL, so a value changed on one side only is an image bug
-// with no build error, like the cbuffer mirrors this file already warns about.
+// shared-source mechanism ties C++ and HLSL, so a mismatch is a silent image bug, not a build error.
 //
-// Every ray but the shadow ray asks for OPAQUE only. Translucent panes sit in the structure marked
-// FORCE_NON_OPAQUE; a RayQuery meeting one does not commit it, so a single Proceed()+CommittedStatus
-// traversal (every non-shadow ray here) would stop AT the pane and miss whatever is behind it.
-// Narrowing the mask keeps those rays from ever seeing translucent geometry, so their single-Proceed
-// stays valid.
+// Every ray but the shadow ray asks for OPAQUE only: translucent panes are FORCE_NON_OPAQUE, and a
+// single Proceed()+CommittedStatus traversal (every non-shadow ray) would stop AT an uncommitted hit --
+// narrowing the mask keeps those rays from ever meeting translucent geometry.
 #define AVER_RT_MASK_OPAQUE      0x01
 #define AVER_RT_MASK_TRANSLUCENT 0x02
-// THE VIEWER'S OWN BODY: an opaque instance every ray may hit EXCEPT the ray-driven primary one. A
-// first-person camera sits inside its own character's head, so an unfiltered primary ray hits the
-// inward-facing mesh and fills the screen with the character's own skin.
+// THE VIEWER'S OWN BODY: an opaque instance every ray may hit EXCEPT the ray-driven primary one -- an
+// unfiltered primary ray inside a first-person head would fill the screen with the character's own skin.
 //
-// scene::kMeshRendererHiddenFromOwner already exists for this; the raster walk in SandboxApp skips
-// drawMesh() for it but deliberately keeps it in the acceleration structure (still a shadow caster,
-// still in the GI volume) so raster primary visibility is unaffected. Ray-driven primary visibility
-// -- the DEFAULT -- traces the TLAS directly, so "hidden" never reaches it. Measured: identical pose
-// and log, probe 43,33,28 (ray-driven) vs 206,215,218 (--rt-render-mode 0).
+// scene::kMeshRendererHiddenFromOwner skips drawMesh() in the raster walk but keeps the instance in the
+// TLAS (still a shadow caster, still in the GI volume), so only ray-driven primary visibility (the
+// default, which traces the TLAS directly) needs this mask. Measured: probe 43,33,28 (ray-driven) vs
+// 206,215,218 (--rt-render-mode 0), same pose.
 //
-// A third lane rather than removing the instance: every ray except the primary one still wants this
-// geometry (shadow, GI bounce, mirrors, glass). The shadow ray masks AVER_RT_MASK_ALL and picks up
-// this lane for free.
+// A third lane rather than removing the instance: every other ray (shadow, GI bounce, mirrors, glass)
+// still wants this geometry; the shadow ray masks AVER_RT_MASK_ALL and picks it up for free.
 #define AVER_RT_MASK_OWNER_HIDDEN 0x04
 // Opaque geometry as a SECONDARY ray sees it: solid surfaces including the viewer's own body. Every
 // opaque traversal but the ray-driven primary ray uses this.
@@ -323,56 +245,46 @@ SamplerComparisonState    gShadowSamp : register(s1);
 // which is compiled without ray tracing, so a declaration inside the guard would vanish exactly
 // where it is needed. Shares gShadowSamp -- same comparison state, different texture.
 Texture2D<float>          gGiShadowTex : register(t8);
-// THE OPAQUE SCENE, COPIED BEFORE TRANSLUCENCY REPLAYS -- see IDevice::sceneColorBackdropTexture.
-// It exists so a blended surface can tint what is behind it PER CHANNEL. Hardware blending gives one
-// scalar (1 - src.a) for the destination, and volume absorption is per-channel by definition, so
-// without this a pane of glass can only get darker with depth, never greener.
+// THE OPAQUE SCENE, COPIED BEFORE TRANSLUCENCY REPLAYS (IDevice::sceneColorBackdropTexture). Lets a
+// blended surface tint what's behind it PER CHANNEL -- hardware blending gives only one scalar
+// (1 - src.a), so without this glass could only darken with depth, never turn greener.
 //
-// MAY BE NULL-FILLED: before the first resize, under MSAA (the copy is invalid from a multisampled
-// target), or on a backend that does not implement it. averBlendBackdropValid() below is how a
-// caller asks, and every use falls back to the scalar composite when it says no.
+// MAY BE NULL-FILLED: before the first resize, under MSAA (copy invalid from a multisampled target), or
+// on a backend without it. averBlendBackdropValid() below is the check; every use falls back to the
+// scalar composite when it says no.
 Texture2D<float4>         gBlendBackdrop : register(t10);
 
 // ---- Occlusion-aware fog: the air sky-visibility volume ----
 //
-// PROBLEM: height fog (averFogFactor/averFogInscatter/averApplyFog, shared_prelude.hlsl) and the
-// aerial-perspective term (averApplyFogAirVis's own `aerial` branch) both add in-scattered SKY light
-// along every view ray with NO occlusion. The air inside an enclosed room sees almost none of the
-// sky, yet fog adds sky radiance as though it stood in the open -- washing bounce-lit walls into a
-// flat blue veil. Gating this on the surface's own screen-space AO history was tried and reverted
+// PROBLEM: height fog and the aerial-perspective term (shared_prelude.hlsl, averApplyFogAirVis) add
+// in-scattered SKY light along every view ray with NO occlusion, washing bounce-lit interiors into a flat
+// blue veil. Gating on the surface's own screen-space AO history was tried and reverted
 // (aver-fog-skyvis-failed.md): fog is a property of the CAMERA-TO-SURFACE PATH, not the surface's
-// hemisphere, and a per-pixel, temporally-accumulated signal flashes open on camera motion
-// (disocclusion falls back to "open"). This volume is PATH-based and WORLD-SPACE instead -- every
-// cell answers "how much of the upper hemisphere of sky can the air HERE see" -- with NO per-pixel
-// history and NO jitter, so camera motion cannot make it flash.
+// hemisphere, and a per-pixel accumulated signal flashes open on camera motion (disocclusion falls back
+// to "open"). This volume is instead
+// PATH-based and WORLD-SPACE -- each cell answers "how much sky can the air HERE see" -- with no
+// per-pixel history or jitter, so camera motion can't make it flash.
 //
-// gAirVis covers EXACTLY the GI voxel volume, the SAME mapping voxelUVW/insideVolume already use
-// (uvw = (p - gVoxelOrigin.xyz) * gVoxelOrigin.w, voxi_cone.hlsli) -- just at its own fixed 32x32x32
-// resolution, independent of gVoxelParams.x (the GI radiance volume's own, tier-dependent, resolution;
-// see AVER_AIRVIS_RES, further down this file, by CSAirVis). gAirVis (t17) is what the shade passes
-// read (voxiAirVisibility, further down); gAirVisOut (u16) is CSAirVis's write target -- the same
-// SRV/UAV split gVoxelTex/gVoxelUAV already use for the radiance volume, and for the same reason: one
-// resource can't be bound as both in the same descriptor table slot.
+// Covers EXACTLY the GI voxel volume (same uvw = (p - gVoxelOrigin.xyz) * gVoxelOrigin.w mapping as
+// voxelUVW/insideVolume, voxi_cone.hlsli), at
+// its own fixed 32x32x32 resolution independent of gVoxelParams.x (see AVER_AIRVIS_RES, by CSAirVis).
+// gAirVis (t17) is read by voxiAirVisibility (below); gAirVisOut (u16) is CSAirVis's write target -- same
+// SRV/UAV split as gVoxelTex/gVoxelUAV, for the same reason (one resource can't be both in one slot).
 //
-// kVoxiSrvCount 17 -> 18, kVoxiUavCount 16 -> 17 (VoxiRenderer.cpp, not this file) -- the next free
-// slot after this table's t16/u15 (voxi_restir.hlsli's gGiVisHist, and gRdReflTex above), so no other
-// SRV/UAV register moves and no material texture register (based at t(kVoxiSrvCount)) is touched.
+// kVoxiSrvCount 17->18, kVoxiUavCount 16->17 (VoxiRenderer.cpp) -- next free slot after t16/u15.
 //
-// WHEN THE FEATURE IS OFF, OR THE VOLUME DOESN'T EXIST YET (VoxiRenderer.cpp, not this file): BOTH
-// slots stay bound to a 1x1x1 placeholder. voxiAirVisibility treats "gAirVis dimensions <= 1" as "no
-// volume" and returns 1.0 -- today's unoccluded behaviour -- so a build or a frame with the setting
-// off is bit-identical to what stood here before this feature existed.
+// OFF, OR VOLUME NOT YET BUILT: both slots stay bound to a 1x1x1 placeholder. voxiAirVisibility treats
+// dimensions <= 1 as "no volume" and returns 1.0 -- bit-identical to before this feature existed.
 Texture3D<float>          gAirVis    : register(t17);
 RWTexture3D<float>        gAirVisOut : register(u16);
 
-// Placed above AVER_RT (used to sit inside it, silently losing the definition for the shadow and
-// GI-shadow pipelines and breaking 4 of them): pure arithmetic on the clock and a box, no rays needed.
 // ---- CAUSTICS: light focused by the water surface onto what lies under it ----
-// Projected from the volume (gCausticMin/Max), not painted into a material, so it stops exactly
-// where the water stops rather than bleeding onto any surface sharing that material.
-// Approximates caustic brightness as the Laplacian of the height field, analytic for a sum of sines
-// (-k^2*sin(phase) per term) -- differentiates the same three sines the ripple graph uses, twice.
-// NOT real caustics: no light-path/sun-angle/wall dependence, just a focus term under a flat pool.
+// Placed above AVER_RT (used to sit inside it, silently breaking 4 of the shadow/GI-shadow pipelines
+// that don't define it): pure arithmetic on the clock and a box, no rays needed.
+// Projected from the volume (gCausticMin/Max), not painted into a material, so it stops exactly where
+// the water stops. Approximates brightness as the Laplacian of the height field (analytic for a sum of
+// sines, -k^2*sin(phase) per term) -- differentiates the same three sines the ripple graph uses, twice.
+// NOT real caustics (no light-path/sun-angle/wall dependence), just a focus term under a flat pool.
 // Shares one wave set with the ripple graph via averWaveFocus/averWaveNormal (shared_prelude.hlsl).
 float averCausticFocus(float3 wpos) {
     if (gCausticMin.w < 0.5 || gCausticMax.w <= 0.0) return 0.0;
@@ -400,33 +312,24 @@ float averCausticFocus(float3 wpos) {
 
 // ---- W6/M5: THE PER-FRAGMENT HISTORY-WRITE DISCRIMINATOR (D3: on by default, no tier drop) ----
 //
-// DECLARED UNCONDITIONALLY, ABOVE THE #if AVER_RT BELOW, EVEN THOUGH EVERY READER OF IT LIVES INSIDE
-// THAT GUARD -- because PSMainVoxi, which SETS it (see this function's own top, after N is built), is
-// NOT itself behind #if AVER_RT: a rasteriser-only build (AVER_RT 0) must still compile that
-// assignment, even though gAverHistoryWrite then goes unread all the way down. The alternative --
-// declaring it inside the guard, beside its only readers -- would fail that build on an undeclared
-// identifier, exactly the kind of "compiles on one variant, breaks the other silently at a DIFFERENT
-// build's compile time" trap this file's own header comments warn about elsewhere (voxi_restir.hlsli's
-// ordering-contract note, most explicitly).
+// Declared UNCONDITIONALLY, above #if AVER_RT, even though every reader is inside that guard: PSMainVoxi
+// (which SETS it) is not itself guarded, so a rasteriser-only build (AVER_RT 0) must still compile the
+// assignment even though the variable then goes unread. The alternative -- declaring it inside the guard,
+// beside its only readers -- would fail that build on an undeclared identifier; see voxi_restir.hlsli's
+// ordering-contract note for this compiles-one-variant-breaks-the-other trap.
 //
-// `static`, NOT a cbuffer field or a new gAmbientParams bit: like gGiPoisonPdfHit (voxi_restir.hlsli),
-// this is per-invocation storage, fresh for every pixel-shader thread, set once near the top of
-// whichever entry point runs (PSMainVoxi below; PSRayDriven sets it unconditionally true, see that
-// function's own comment) and read by every gated history write between here and the end of the
-// translation unit. true is the correct default: an entry point that never touches it (VSMain, VSky,
-// PSVoxel, ...) behaves exactly as if the write were unconditional, which is what every one of them
-// was before this task.
+// `static`, not a cbuffer field: per-invocation storage like gGiPoisonPdfHit (voxi_restir.hlsli), set once
+// near the top of whichever entry point runs (PSRayDriven sets it unconditionally true) and read by every
+// gated history write below. Default true = unconditional write, matching every entry point that never
+// touches it (VSMain, VSky, PSVoxel, ...).
 static bool gAverHistoryWrite = true;
 
 // Is THIS fragment a translucent (glass/water) draw, replayed blended? Mirrors pbr::isTranslucent
-// (Material.cpp:70-72: `alphaMode == Blend || transmission > 0`) exactly, and for the same reason
-// that function checks both: AVER_MAT_ALPHA_BLEND alone is set only for AlphaMode::Blend
-// (MaterialGpu.cpp:94), so an opaque-flagged material authored with transmission > 0 (frosted glass
-// with no alpha blending, say) would otherwise fall through this test and keep writing history it
-// should not. gTransmission is a material constant (material_prelude.hlsl:66); AVER_MAT_ALPHA_BLEND
-// is defined at material_prelude.hlsl:113. Called only from behind gAmbientParams.w bit 32 (PSMainVoxi,
-// below) -- on Vulkan, where that bit is never set, this function is declared but never evaluated at
-// runtime for any fragment, matching C10's own finding that Vulkan never marks a draw blended.
+// (Material.cpp:70-72) exactly: AVER_MAT_ALPHA_BLEND alone is set only for AlphaMode::Blend
+// (MaterialGpu.cpp:94), so frosted glass (transmission > 0, no alpha blend) needs the OR too, or it
+// would keep writing history it shouldn't. gTransmission: material_prelude.hlsl:66; AVER_MAT_ALPHA_BLEND:
+// material_prelude.hlsl:113. Called only behind gAmbientParams.w bit 32 -- on Vulkan, never set (C10),
+// so this is declared but never evaluated at runtime there.
 bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) != 0u || gTransmission > 0.0; }
 
 #if AVER_RT
@@ -436,150 +339,109 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 
 // ---- STAGED RAY-DRIVEN PASSES (milestone 1): the visibility record and resolved sun visibility ----
 //
-// voxi.rayDrivenStages (Settings::rayDrivenStages, RENDER.RDSTAGES, --rd-stages, u32 0/1/2) splits the
-// single PSRayDriven fullscreen draw below into three GPU passes when set to 1 (or 2, below): a compute
-// pass traces the primary ray and writes one record per pixel here (CSRdVisibility, further down this
-// file, under this same AVER_RT region); a second compute pass reads it, reconstructs the surface and
-// resolves the sun shadow into gRdSunVisTex (CSRdShadow); and PSRayDriven itself, compiled a second time
-// with AVER_RD_SPLIT=1, reads both instead of tracing and calling rtShadowTemporal -- everything after
-// that point is the SAME shading code the single pass already runs, unchanged. At 0 (the default) none
-// of this exists at runtime: no new resource is bound, no new pipeline is built, and PSRayDriven's own
-// AVER_RD_SPLIT=0 compile is byte-for-byte the single pass this file already had.
+// voxi.rayDrivenStages (Settings::rayDrivenStages, --rd-stages, u32 0/1/2) splits the single PSRayDriven
+// fullscreen draw into GPU passes at 1+: CSRdVisibility traces the primary ray into a record per pixel
+// here; CSRdShadow reads it, reconstructs the surface, resolves sun shadow into gRdSunVisTex; PSRayDriven
+// (compiled again with AVER_RD_SPLIT=1) reads both instead of tracing -- shading after that point is
+// unchanged. At 0 (default): no new resource/pipeline, AVER_RD_SPLIT=0 is byte-identical to before.
 //
-// VALUE 2 (milestone 4) is 1 PLUS one more thing: CSRdGi, further down this file, is compiled a second
-// time with AVER_GI_CHECKERBOARD=1 and traces ReSTIR GI's candidate for only half the pixels each frame,
-// in NRD's own checkerboard pattern, leaving REBLUR to reconstruct the rest -- see that compile's own
-// header comment and voxi_restir.hlsli's AVER_GI_CHECKERBOARD section for the full contract. Every OTHER
-// stage (CSRdVisibility/CSRdShadow/CSRdSkyOcc/CSRdRefl, PSRayDriven both variants) runs unchanged at 2;
-// only CSRdGi's own dispatch gains the extra compile.
+// VALUE 2 (milestone 4) adds: CSRdGi compiled again with AVER_GI_CHECKERBOARD=1, tracing ReSTIR GI's
+// candidate for half the pixels/frame in NRD's checkerboard pattern, REBLUR reconstructing the rest (see
+// that compile's header and voxi_restir.hlsli's AVER_GI_CHECKERBOARD). Every other stage is unchanged.
 //
-// TWO NEW UAV REGISTERS, u11/u12 -- the next two free slots after gGiVisHistOut's u10 (voxi_restir.
-// hlsli). Bound in every stage through the SAME descriptor table the single pass already uses
-// (kVoxiUavCount 11->13, VoxiRenderer.cpp, not this file), so no SRV slot moves and no material
-// texture register is touched.
+// u11/u12: next free UAV slots after gGiVisHistOut's u10 (kVoxiUavCount 11->13, VoxiRenderer.cpp).
 //
-// gRdVisBuf: one uint4 per pixel, index = pixel.y * pitch + pixel.x, pitch = rdRowPitch() -- this
-// cbuffer's own w field, "spare, written 0" until this feature -- VoxiRenderer::recordStagedRayDriven
-// sets it to the row pitch in pixels for the staged uploads and back to 0 after, so every other pass
-// still reads 0. A HIT is uint4(instanceID, primitiveIndex, asuint(bary.x),
-// asuint(bary.y)); a MISS is x == 0xFFFFFFFFu (y/z/w undefined, never read on that path).
+// gRdVisBuf: one uint4/pixel, index = pixel.y * pitch + pixel.x, pitch = rdRowPitch() (this cbuffer's w
+// field, else 0). HIT = uint4(instanceID, primitiveIndex, asuint(bary.x), asuint(bary.y)); MISS = x ==
+// 0xFFFFFFFFu (y/z/w undefined).
 RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
-// gRdSunVisTex: this frame's resolved sun visibility, one RGBA16F texel per pixel, rgb = the same
-// tinted transmittance rtShadowTemporal returns (already through its own temporal/spatial filters).
-// alpha = M6: no longer unused -- the primary surface's LINEAR VIEW DEPTH at this pixel
-// (mul(float4(wpos, 1.0), gViewProj).w, the SAME formula PSMainVoxi's rtViewZ uses), 0.0 for a
-// sky/no-surface pixel. Added so a blended-replay fragment (PSMainVoxi, gGiShadowParams.w bit 16) can
-// PROVE it sits on the opaque surface Stage S lit for this pixel before reusing rgb instead of tracing
-// its own sun-shadow ray -- see PSMainVoxi's own rdReuse for the full contract. Written once by
-// CSRdShadow (every write site, including the sky sentinel and the AVER_RD_SHADOW_TILES ablation, sets
-// both channels together), read by PSRayDriven's AVER_RD_SPLIT branch (rgb only) and, when it reuses
-// staged lighting, by PSMainVoxi's blended replay (rgb AND alpha). Not itself a history buffer --
-// rtShadowTemporal's own gRtShadowHist/gRtShadowHistOut pair still owns the actual frame-to-frame
-// history underneath it; this texture only ferries one frame's answer from Stage S to its readers.
+// gRdSunVisTex: this frame's resolved sun visibility, one RGBA16F texel/pixel. rgb = the tinted
+// transmittance rtShadowTemporal returns (post temporal/spatial filters). alpha = primary surface's
+// LINEAR VIEW DEPTH (mul(float4(wpos,1), gViewProj).w, same formula as PSMainVoxi's rtViewZ), 0.0 for
+// sky -- lets a blended-replay fragment (gGiShadowParams.w bit 16) PROVE it sits on the surface Stage S
+// lit before reusing rgb instead of retracing (see PSMainVoxi's rdReuse). Written once by CSRdShadow
+// (both channels together, every write site); read by PSRayDriven's AVER_RD_SPLIT branch (rgb) and
+// PSMainVoxi's blended replay (rgb+alpha). NOT a history buffer itself -- gRtShadowHist/gRtShadowHistOut
+// still own the real frame-to-frame history; this only ferries one frame's answer to its readers.
 RWTexture2D<float4>       gRdSunVisTex : register(u12);
 
-// A: SUN SHADOW SPLIT (Settings::rayDrivenShadowTiles) -- CSRdShadowProbe's OWN OUTPUT, further down
-// this file: one uint per 8x8 tile of the FULL render target (same W/H/pitch ensureRdStagedResources
-// sizes rdVisBuf_ from), classifying that tile's shadow answer as it looked to one probe ray per pixel
-// -- bit 1 set if EVERY probed pixel in the tile was fully blocked, bit 2 if EVERY one was fully lit,
-// bit 4 if any pixel disagreed (a real penumbra, an alpha-tinted hit, or a mix of the two). 0 means
-// nothing in the tile had a surface to test (every pixel out of viewport or sky). CSRdShadow's own
-// AVER_RD_SHADOW_TILES compile ORs its 3x3 tile neighbourhood's worth of these and skips its ray loop
-// only where that OR is EXACTLY 1 or EXACTLY 2 -- see that compile's own header for why 3x3, not 1x1.
+// A: SUN SHADOW SPLIT (Settings::rayDrivenShadowTiles) -- CSRdShadowProbe's output: one uint per 8x8 tile
+// of the full render target, classifying its shadow answer from one probe ray per pixel -- bit 1 = every
+// probed pixel fully blocked, bit 2 = every one fully lit, bit 4 = disagreement (penumbra/tinted hit/mix),
+// 0 = no surface in the tile. CSRdShadow's AVER_RD_SHADOW_TILES compile ORs a 3x3 tile neighbourhood of
+// these and skips its ray loop only where that OR is EXACTLY 1 or 2 (see that compile's header for 3x3).
 //
-// kVoxiUavCount 17 -> 19, u17/u18 (VoxiRenderer.cpp, not this file) -- gRdGiCand (voxi_restir.hlsli, B1)
-// takes u17 first since that file is #included above this point; this is the next free slot after it.
+// u17/u18 (kVoxiUavCount 17->19, VoxiRenderer.cpp) -- gRdGiCand (voxi_restir.hlsli, B1) takes u17 first.
 #ifndef AVER_RD_SHADOW_TILES
 #define AVER_RD_SHADOW_TILES 0
 #endif
 RWStructuredBuffer<uint> gRdShadowTiles : register(u18);
 
-// gRdGiTex / gRdAoTex -- MILESTONE 2's pair, splitting PSRayDriven's own diffuse-GI and sky-occlusion
-// answers the same way milestone 1 split its shadow answer above: one RGBA16F texel per pixel, each
-// written once by its own dedicated compute stage (CSRdGi / CSRdSkyOcc, further down this file, under
-// this same AVER_RT region) and read once by PSRayDriven's AVER_RD_SPLIT branch, further down still.
-// Like gRdSunVisTex, NEITHER is itself a history buffer: the real frame-to-frame state each answer
-// depends on (gGiReservoirs/gGiSurfPosHist/gGiSurfNrmHist for GI, gAoHist/gAoHitDistOut for sky
-// occlusion, all voxi_restir.hlsli/voxi_rt.hlsli-owned) is untouched by this pair -- these two textures
-// only ferry ONE frame's answer from their own compute stage to Stage B.
+// gRdGiTex / gRdAoTex -- MILESTONE 2's pair, splitting diffuse-GI and sky-occlusion the same way
+// milestone 1 split shadow: one RGBA16F texel/pixel, each written by its own compute stage (CSRdGi /
+// CSRdSkyOcc) and read once by PSRayDriven's AVER_RD_SPLIT branch. Like gRdSunVisTex, NEITHER is a
+// history buffer -- the real state (gGiReservoirs/gGiSurfPosHist/gGiSurfNrmHist; gAoHist/gAoHitDistOut)
+// is untouched; these just ferry one frame's answer to Stage B.
 //
-// kVoxiUavCount 13 -> 15 (VoxiRenderer.cpp, not this file) -- the next two free slots after
-// gRdSunVisTex's u12, same descriptor table every other stage already uses, so no SRV slot moves.
+// u13/u14 (kVoxiUavCount 13->15, VoxiRenderer.cpp) -- next two free slots after gRdSunVisTex's u12.
 //
 // gRdGiTex: rgb = giRestirIndirect's diffuse radiance, alpha unused. Written by CSRdGi only when GI is
-// actually ReSTIR this frame (gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5) -- the cone-traced
-// branch has no per-pixel history to split out this way and stays inside Stage B itself, unchanged.
+// actually ReSTIR this frame (gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5); cone-traced GI has no
+// per-pixel history to split out and stays in Stage B unchanged.
 RWTexture2D<float4>       gRdGiTex     : register(u13);
-// gRdAoTex: r = rtSkyOcclusionTemporal's occlusion, g/b/a unused (a is 1 on every write so the texel is
-// never left at a defined-but-meaningless alpha). Written by CSRdSkyOcc only in the two cases where
-// PSRayDriven's own rdAo is still its un-gathered initial 1.0 -- ReSTIR supplies diffuse, or there is
-// no voxel GI at all -- because in cone-GI mode the occlusion rides the cone gather's own accumulator
-// and stays in the shade pass. See CSRdSkyOcc's own header for the exact gate.
+// gRdAoTex: r = rtSkyOcclusionTemporal's occlusion, g/b/a unused (a=1 always, avoiding a meaningless
+// alpha). Written by CSRdSkyOcc only when PSRayDriven's rdAo is still its initial 1.0 (ReSTIR supplies
+// diffuse, or there's no voxel GI) -- cone-GI mode rides the cone gather's own accumulator instead. See
+// CSRdSkyOcc's header for the exact gate.
 RWTexture2D<float4>       gRdAoTex     : register(u14);
 
-// gRdReflTex -- MILESTONE 3's addition: splitting PSRayDriven's own ray-traced REFLECTION answer the
-// same way milestones 1/2 split shadow/GI/sky-occlusion above. One RGBA16F texel per pixel, written
-// once by its own dedicated compute stage (CSRdRefl, further down this file, under this same AVER_RT
-// region) and read once by PSRayDriven's AVER_RD_SPLIT branch, further down still. Like gRdSunVisTex/
-// gRdGiTex/gRdAoTex, NOT itself a history buffer: the real frame-to-frame state (gRtReflHist/
-// gRtReflHistOut, t7/u3, this file's own rtReflectionTemporal) is untouched by this texture -- it only
-// ferries ONE frame's answer from CSRdRefl to Stage B.
+// gRdReflTex -- MILESTONE 3: splits PSRayDriven's ray-traced REFLECTION answer the same way, one
+// RGBA16F texel/pixel, written by CSRdRefl and read by PSRayDriven's AVER_RD_SPLIT branch. NOT a history
+// buffer -- gRtReflHist/gRtReflHistOut (t7/u3, rtReflectionTemporal) own the real history; this only
+// ferries one frame's answer to Stage B.
 //
-// kVoxiUavCount 15 -> 16 (VoxiRenderer.cpp, not this file) -- the next free slot after gRdAoTex's u14,
-// same descriptor table every other stage already uses, so no SRV slot moves.
+// u15 (kVoxiUavCount 15->16, VoxiRenderer.cpp) -- next free slot after gRdAoTex's u14.
 //
-// rgb = the same clamped specular colour PSRayDriven's own reflection branch computes today (a real
-// mirror/glossy hit, the atmosphere march blended in at a rough surface's sky weight, or plain sky --
-// see CSRdRefl's own body for which of those three a given pixel took).
+// rgb = the clamped specular colour (mirror/glossy hit, atmosphere-blended sky weight at a rough
+// surface, or plain sky -- see CSRdRefl's body for which).
 //
-// ALPHA IS NOT "unused" THE WAY THE OTHER THREE STAGED TEXTURES' SPARE CHANNELS ARE: it is THE STAGE'S
-// OWN DECISION, exactly the phrase this field's contract uses -- 1.0 where CSRdRefl actually traced
-// this pixel (its own copy of PSMainVoxi's `gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <=
-// 0.75` gate; 2.0 when that traced value also hit the radiance ceiling before its clamp, for the poison
-// view), 0.0 everywhere else (roughness routed the pixel to the cone/sky fallback instead, or
-// there was no surface at all). Stage B reads this alpha, not a recomputed roughness test, to choose
-// between the traced answer and its OWN cone/sky fallback -- see PSRayDriven's AVER_RD_SPLIT branch,
-// further down this file, and rdSurfaceRoughness's own header for why the roughness test cannot simply
-// be repeated there instead.
+// alpha is the STAGE'S OWN DECISION, not spare: 1.0 where CSRdRefl actually traced (its copy of
+// PSMainVoxi's `gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75` gate), 2.0 if that traced
+// value also hit the radiance ceiling (poison view), 0.0 otherwise (roughness routed to the cone/sky
+// fallback, or no surface). Stage B reads this alpha rather than recomputing the roughness test (see
+// PSRayDriven's AVER_RD_SPLIT branch, rdSurfaceRoughness's header).
 //
-// A FOURTH ALPHA, ONLY UNDER AVER_RD_REFL_SPLIT (Settings::rayDrivenReflSplit): alpha < -0.5 is PENDING,
-// written by CSRdRefl's own R1 compile in place of composing, when a history was bound to defer
-// rtReflectionSpatial's gather into CSRdReflFilter's own R2 pass rather than pay it here -- rgb carries
-// that pixel's skyR and alpha is a plain -1.0 flag (never colliding with a real 0.0/1.0/2.0 output).
-// CSRdReflFilter overwrites every PENDING texel with a real one before Stage B ever reads this texture;
-// see CSRdRefl's and CSRdReflFilter's own comments, further down this file, for the full two-pass
-// contract.
+// Under AVER_RD_REFL_SPLIT (Settings::rayDrivenReflSplit) only: alpha < -0.5 is PENDING -- CSRdRefl's R1
+// compile defers rtReflectionSpatial's gather to CSRdReflFilter's R2 pass; rgb carries skyR meanwhile.
+// CSRdReflFilter overwrites every PENDING texel before Stage B reads this texture (see both functions'
+// own comments for the full two-pass contract).
 RWTexture2D<float4>       gRdReflTex   : register(u15);
 
 // ---- LOCAL LIGHTS (lamps): the light list, their visibility history, and the two halves that light ----
 //
-// gRdLocalLights: this frame's sphere lights, at most 32, rdLocalLightCount() of them live (gCameraMedium.z
-// -- see that field's own comment); the struct and what each field means are voxi_rt.hlsli's RdLocalLight.
-// gRdLocalHist/gRdLocalOut: one RGBA16F texel per pixel, the size of the sun's shadow history and
-// PING-PONGED WITH IT on the same index (VoxiRenderer's rtHistWriteIdx_), so last frame's lamp texel sits
-// at the same reprojected texel the sun's does. a = the accumulated visibility, the one channel any shader
-// reads back; rgb is written as 0 (RGBA16F only because it shares its creation path). Written by
-// rdLocalLightsVisibility (below) from whichever pass lights the frame's opaque surfaces -- CSRdLocalLights
-// (staged), the single-pass PSRayDriven, or PSMainVoxi's opaque draws (raster) -- and read back through
-// rdLocalVisFiltered (below; a RW read, exactly as gRdSunVisTex's) by Stage B and by a blended pane
-// reusing Stage B's surface. t19 is therefore read from compute (CSRdLocalLights) AND from pixel shaders.
-// Unlike gRdSunVisTex this pair IS a history, and it carries no depth: rdLocalLightsVisibility validates
-// against the sun history's depth at the same texel (rtReprojectTexel).
+// gRdLocalLights: this frame's sphere lights, at most 32, rdLocalLightCount() live (gCameraMedium.z);
+// struct/fields in voxi_rt.hlsli's RdLocalLight.
+// gRdLocalHist/gRdLocalOut: one RGBA16F texel/pixel, sized like and PING-PONGED WITH the sun's shadow
+// history (same index, rtHistWriteIdx_), so last frame's lamp texel matches the sun's reprojected one.
+// a = accumulated visibility (the only channel read back); rgb written 0. Written by
+// rdLocalLightsVisibility from whichever pass lights opaque surfaces (CSRdLocalLights staged,
+// single-pass PSRayDriven, or PSMainVoxi raster); read back via rdLocalVisFiltered by Stage B and by a
+// blended pane reusing its surface -- so t19 is read from both compute and pixel shaders. Unlike
+// gRdSunVisTex this pair IS a history and carries no depth of its own: validated against the sun
+// history's depth at the same texel (rtReprojectTexel).
 //
-// kVoxiSrvCount 18 -> 20 (t18, t19) and kVoxiUavCount 19 -> 20 (u19) (VoxiRenderer.cpp, not this file) --
-// the next free slots after gAirVis's t17 and gRdShadowTiles' u18. Every slot holds a placeholder on any
-// frame the real resource is absent, so a read with a count of 0 is never a null-descriptor read.
+// t18/t19 (kVoxiSrvCount 18->20) and u19 (kVoxiUavCount 19->20) -- next free slots after gAirVis's t17
+// and gRdShadowTiles' u18. Every slot holds a placeholder when absent, so a 0-count read is never null.
 StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
 Texture2D<float4>              gRdLocalHist   : register(t19);
 RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
 // AVER_RD_LAMPS (voxi_rt.hlsli): every compile but a single-pass one with AVER_RD_SINGLE_PASS_LAMPS 0.
 #if AVER_RD_LAMPS
-// One neighbour of rdLocalVisFiltered's 5x5. The weight falls linearly to zero at the reprojection depth
-// test's own tolerance (3% of the depth plus 1 cm, rtReprojectTexel) so a tap across a silhouette -- a
-// different surface, behind a different set of occluders -- contributes nothing. A sky tap (alpha
-// <= 0, gRdSunVisTex's own sentinel) is skipped outright. Clamped into THIS frame's viewport: texels
-// outside it are never written by the staged passes and may hold any earlier frame's values.
+// One neighbour of rdLocalVisFiltered's 5x5. Weight falls linearly to zero at the reprojection depth
+// test's tolerance (3% of depth + 1 cm, rtReprojectTexel), so a tap across a silhouette contributes
+// nothing; a sky tap (alpha <= 0) is skipped outright. Clamped into THIS frame's viewport -- texels
+// outside it may hold stale, unwritten values.
 void rdLocalVisTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout float wsum) {
     const uint2 q  = uint2(clamp(p, lo, hi));
     const float zt = gRdSunVisTex[q].a;
@@ -592,15 +454,13 @@ void rdLocalVisTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout fl
     }
 }
 
-// The staged read of CSRdLocalLights' VISIBILITY, for Stage B and for a blended pane reusing Stage B's
-// surface: the 5x5 around this pixel, weighted by view-depth similarity (gRdSunVisTex.a is this frame's
-// linear view depth, 0 for sky). One stochastic shadow ray per pixel per turn leaves grain the temporal
-// accumulation has not yet averaged, above all on a moving camera where its history weight falls. 5x5,
-// not 3x3: MEASURED on the penumbra a lantern's cap throws on the vault above it, the 3x3 left sparse
-// dots that the 5x5 takes down to the lamps-off noise floor (see rdLocalLightsVisibility's accumulation
-// comment for the numbers), for 48 texel reads per pixel. STAGED ONLY: gRdSunVisTex's depth exists only
-// on a frame the staged passes ran. 1 (unshadowed) where Stage S found no surface, which neither caller
-// reaches.
+// The staged read of CSRdLocalLights' VISIBILITY, for Stage B and a blended pane reusing its surface: a
+// 5x5 around this pixel weighted by view-depth similarity (gRdSunVisTex.a). One stochastic shadow ray per
+// pixel per turn leaves grain the temporal accumulation hasn't averaged yet, worse under camera motion.
+// 5x5 not 3x3: MEASURED on a lantern's vault penumbra, 3x3 left sparse dots, 5x5 reaches the lamps-off
+// noise floor (see rdLocalLightsVisibility's accumulation comment for numbers) -- 48 texel reads/pixel.
+// STAGED ONLY: gRdSunVisTex's depth exists only when the staged passes ran. Returns 1 (unshadowed) where
+// Stage S found no surface -- a branch neither caller reaches.
 float rdLocalVisFiltered(uint2 pixel) {
     const float zc = gRdSunVisTex[pixel].a;
     if (zc <= 0.0) return 1.0;
@@ -617,12 +477,10 @@ float rdLocalVisFiltered(uint2 pixel) {
     return sum / wsum;
 }
 
-// The lamp-HISTORY twin of rdLocalVisTap, one neighbour of rdLocalHistFiltered's 3x3: the same weight
-// shape and tolerance, but read against LAST frame's stored depth (gRtShadowHist.y, at the texel
-// gRdLocalHist ping-pongs on) rather than this frame's gRdSunVisTex.a -- depth validity belongs to the
-// surface, not the light, exactly as rtReprojectTexel's own header explains, which is why gRdLocalHist
-// carries none of its own. p is clamped into the rectangle the caller already intersected from the
-// history texture's bounds and last frame's viewport.
+// The lamp-HISTORY twin of rdLocalVisTap for rdLocalHistFiltered's 3x3: same weight shape/tolerance, but
+// against LAST frame's stored depth (gRtShadowHist.y, at gRdLocalHist's ping-ponged texel) instead of
+// this frame's gRdSunVisTex.a -- depth belongs to the surface, not the light (rtReprojectTexel), which is
+// why gRdLocalHist carries none of its own.
 void rdLocalHistTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout float wsum) {
     const int2  q  = clamp(p, lo, hi);
     const float zt = gRtShadowHist.Load(int3(q, 0)).y;
@@ -634,15 +492,12 @@ void rdLocalHistTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout f
     }
 }
 
-// THE HISTORY READ rdLocalLightsVisibility blends its fresh sample into, in every mode alike (raster,
-// single-pass and staged) -- unrelated to Stage B's THIS FRAME filter above. A depth-weighted 3x3 around
-// the REPROJECTED history texel (rtReprojectTexel's own `texel` out-param), against the SUN history's
-// stored depth (gRtShadowHist.y) rather than this frame's, because gRdLocalHist carries no depth of its
-// own. Bounds: gRtShadowHist's own dimensions (as rtReprojectTexel clamps into) intersected with the
-// PREVIOUS frame's viewport, gSceneViewport (xy origin, zw size) -- rtReprojectTexel maps its `pixel`
-// argument through this same rect, so a tap outside either lands on a texel an earlier, differently
-// sized frame wrote and nothing has touched since. Why the caller reads this average rather than the
-// bare texel: rdLocalLightsVisibility's own accumulation comment, below.
+// THE HISTORY READ rdLocalLightsVisibility blends its fresh sample into (all modes) -- unrelated to
+// Stage B's THIS FRAME filter above. A depth-weighted 3x3 around the REPROJECTED history texel
+// (rtReprojectTexel's `texel` out-param), against the SUN history's stored depth (gRdLocalHist has none
+// of its own). Bounds: gRtShadowHist's dimensions intersected with the PREVIOUS frame's viewport
+// (gSceneViewport) -- a tap outside either lands on a stale, differently sized frame's texel. Why an
+// average, not the bare texel: see rdLocalLightsVisibility's accumulation comment below.
 float rdLocalHistFiltered(int2 texel) {
     float texW, texH;
     gRtShadowHist.GetDimensions(texW, texH);
@@ -662,31 +517,27 @@ float rdLocalHistFiltered(int2 texel) {
 
 // ---- THE VISIBILITY HALF: one shadow ray for every lamp, accumulated the way the sun's is ----
 //
-// At one surface point: the summed diffuse irradiance of every light in range (rdLocalIrradiance,
-// voxi_rt.hlsli), ONE light picked in proportion to its luminance share of that sum, ONE shadow ray toward
-// a jittered point on it (rdLocalShadow), and that 0/1 answer accumulated over frames. Returns the
-// accumulated visibility -- 1 where no light reaches, so a caller that shades anyway takes nothing away --
-// and, when writeHistory and gAverHistoryWrite both allow, stores it in gRdLocalOut[pixel] for next frame
-// (and, staged, for Stage B's filter). wpos/N: the surface and its normal FACING THE VIEWER, the side a
-// lamp lights; pixelC: the pixel centre (velocityPx is measured from it, as rtShadowTemporal's is).
+// At one surface point: summed diffuse irradiance of every light in range (rdLocalIrradiance,
+// voxi_rt.hlsli), ONE light picked in proportion to its luminance share, ONE shadow ray toward a jittered
+// point on it (rdLocalShadow), accumulated over frames as a 0/1 answer. Returns accumulated visibility (1
+// where no light reaches, so a caller that shades anyway takes nothing away); stores to gRdLocalOut[pixel]
+// when writeHistory && gAverHistoryWrite allow (staged, also feeds Stage B's filter). wpos/N: the surface
+// and its viewer-facing normal; pixelC: pixel centre (velocityPx measured from it, as rtShadowTemporal's is).
 //
-// ONE VISIBILITY STANDS FOR EVERY LIGHT, and that is sound in expectation: picking light i with
-// probability w_i/wsum makes the expected visibility sum_i (w_i/wsum) v_i, so the summed irradiance times it is
-// sum_i E_i v_i in luminance -- one ray whatever the lamp count. Where it approximates is colour: a spot
-// one lamp shadows and a differently coloured one still lights comes out as the mix of both, dimmed,
-// rather than as the second lamp's colour (and the first lamp's highlight stays, dimmed, with it).
+// ONE VISIBILITY STANDS FOR EVERY LIGHT -- sound in expectation (picking i w.p. w_i/wsum gives expected
+// luminance sum_i E_i v_i, one ray regardless of lamp count). Approximates COLOUR only: a spot shadowed by
+// one lamp but lit by a differently-coloured one comes out as a dimmed mix of both, not the second
+// lamp's own colour (the first lamp's highlight stays, dimmed, too).
 //
-// THE SUN'S HISTORY MACHINERY: rtReprojectTexel is the sun's reprojection and depth test (its arithmetic
-// twin -- see its header for why a twin), against the sun history's stored depth at the same texel (depth
-// is a property of the surface, not of the light), and gRdLocalHist ping-pongs with gRtShadowHist on the
-// same index, so that texel is where last frame's lamp answer for this surface sits. That one texel alone
-// is a noisy read of it -- rdLocalHistFiltered (above, beside rdLocalVisTap/rdLocalVisFiltered) widens it
-// to a depth-weighted 3x3 around the same texel before this function blends its fresh sample in.
+// HISTORY: uses the sun's own reprojection/depth test (rtReprojectTexel, its arithmetic twin -- see its
+// header for why a twin) against the sun history's depth (a property of the surface, not the light);
+// gRdLocalHist ping-pongs with gRtShadowHist on the same index. That one texel is noisy alone --
+// rdLocalHistFiltered widens it to a depth-weighted 3x3 first.
 //
-// DERIVATIVES: rtReprojectTexel takes ddx/ddy of depth, so it runs FIRST, ahead of every data-dependent
-// branch in here, behind a condition that reads only constant-buffer values. The callers hold the same
-// line: CSRdLocalLights (SM 6.6, 8x8 threads = 2x2 quads, as CSRdShadow's header explains) calls it after
-// only CSRdShadow's own early-outs, and the pixel shaders only behind rdLocalLightCount(), a constant.
+// DERIVATIVES: rtReprojectTexel takes ddx/ddy of depth, so it must run first, behind only a
+// constant-buffer condition -- callers (CSRdLocalLights, SM 6.6 8x8=2x2 quads per CSRdShadow's header,
+// after only CSRdShadow's own early-outs; and the pixel shaders behind rdLocalLightCount()) hold that
+// same ordering.
 float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel, bool writeHistory) {
     // gRtHistParams.x: t6/u2 are bound this frame. gRtHistParams.y > 0.25, not the shadow's > 0.75: t6
     // holds a real previous frame, and its DEPTH stays valid on a frame only the sun moved (the
@@ -708,30 +559,27 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
         prevVisF = rdLocalHistFiltered(texel);
     }
 
-    // HALF RATE: a pixel with a usable history traces on alternate frames, in a checkerboard that swaps
-    // every frame, and carries its STORED visibility (prevVisC) forward untouched on the other -- no ray,
-    // and, for the compute stage's own call (which discards this function's return), no filter tap either.
-    // Raster and the single-pass PSRayDriven still shade that off turn with prevVisF, rdLocalHistFiltered's
-    // 3x3 -- see the HISTORY READ comment above for why a bare carried texel is not enough on its own.
-    // MEASURED on NewSponza's 22 lamps: tracing every pixel every frame cost ~1 ms of this pass, the rays
-    // toward different lamps being far less coherent than the sun's. A pixel WITHOUT history always
-    // traces, so a disocclusion never waits a frame for its first answer.
+    // HALF RATE: a pixel with usable history traces on alternate frames (checkerboard swapping every
+    // frame), carrying STORED visibility (prevVisC) forward untouched on the other -- no ray, no filter
+    // tap in the compute stage. Raster/single-pass PSRayDriven still shade the off turn with prevVisF
+    // (rdLocalHistFiltered's 3x3; see HISTORY READ above for why a bare texel isn't enough). MEASURED on
+    // NewSponza's 22 lamps: tracing every pixel every frame cost ~1 ms (less coherent than the sun's rays).
+    // A pixel WITHOUT history always traces, so disocclusion never waits a frame.
     //
-    // THE PIXEL'S OWN TURN COUNT drives its sequences, not the frame index: its turns all fall on frames of
-    // ONE parity, so rtRadicalInverse2(frameIdx + 1) would only ever see odd arguments (always >= 0.5) or
-    // only even ones (always < 0.5) -- each pixel's pick confined to half the lights' cumulative weight, a
-    // lamp that shadows it never picked, and the neighbour that does pick it shadowed every turn: a fixed
-    // per-pixel speckle no accumulation removes. frameIdx >> 1 counts this pixel's turns one by one.
+    // THE PIXEL'S OWN TURN COUNT drives its sequences, not the frame index: its turns fall on frames of
+    // ONE parity, so rtRadicalInverse2(frameIdx + 1) would see only odd (always >= 0.5) or only even
+    // (always < 0.5) arguments -- each pixel's pick confined to half the lights' weight (a lamp that
+    // shadows it never picked, the neighbour that does pick it shadowed every turn): a fixed per-pixel
+    // speckle no accumulation removes. frameIdx >> 1 counts this pixel's turns one by one.
     const uint frameIdx = (uint)gRtHistParams.z;
     const bool myTurn   = !haveHist || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
     const uint turn     = haveHist ? (frameIdx >> 1) : frameIdx;
     float vis     = prevVisF;
     float histVis = prevVisC;
     if (myTurn) {
-        // LOOP 1: the unshadowed sum, and each light's luminance as its weight for the pick below.
-        // Recomputed in loop 2 rather than kept in a 32-entry local array: loop-indexed arrays spill out
-        // of registers (rtShadowEx's own measured 25% regression), and a light's irradiance is a few ALU
-        // ops.
+        // LOOP 1: unshadowed sum, each light's luminance as its pick weight. Recomputed in loop 2 rather
+        // than cached in a 32-entry array: loop-indexed arrays spill registers (rtShadowEx measured a 25%
+        // regression), and a light's irradiance is a few ALU ops.
         const uint n = min(rdLocalLightCount(), 32u);
         float wsum    = 0.0;
         uint  lastLit = 0u;
@@ -747,11 +595,10 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
         // one ray.
         vis = 1.0;
         if (wsum > 0.0) {
-            // LOOP 2: walk the cumulative weights to the light u lands in. u is the pixel's own hash
-            // (salted so it is not rdLocalShadow's disc angle) rotated by the radical inverse of its turn --
-            // exact, and evenly spread over turns, so each light's turns come in proportion to its share
-            // rather than in runs. lastLit, not n - 1, is the fallback: u * wsum can round up to wsum
-            // itself, and the last light may be one that contributes nothing here.
+            // LOOP 2: walk cumulative weights to the light u lands in. u = pixel hash (salted apart from
+            // rdLocalShadow's disc angle) rotated by the radical inverse of its turn -- spreads picks
+            // evenly across turns rather than in runs. lastLit, not n-1: u*wsum can round up to wsum, and
+            // the last light may contribute nothing here.
             const float u      = frac(rtHash(pixelC + float2(0.37, 11.0)) + rtRadicalInverse2(turn + 1u));
             const float target = u * wsum;
             uint  pick = lastLit;
@@ -766,28 +613,23 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
             const float frameJitter = (float)turn * 2.39996323;
             const float v = rdLocalShadow(wpos, N, gRdLocalLights[pick], pixelC, frameJitter);
 
-            // Exponential accumulation, 0.95 history at rest (~20 of this pixel's turns) falling to 0.5 by
-            // 8 px/frame of motion. UNMEASURED: 8 px is tighter than the sun's measured 32 px budget
-            // (rtShadowTemporalEx) and is the first number to revisit if lamp shadows smear or crawl under
-            // a moving camera; the slow at-rest weight is the price of a quiet still image, paid as about
-            // a third of a second for a lamp shadow to settle after something moves through it.
+            // Exponential accumulation: 0.95 history at rest (~20 turns), falling to 0.5 by 8 px/frame of
+            // motion. UNMEASURED (tighter than the sun's measured 32 px budget, rtShadowTemporalEx) --
+            // first number to revisit if lamp shadows smear/crawl under motion; the slow at-rest weight
+            // costs ~1/3 s for a shadow to settle after motion.
             //
-            // Blended into prevVisF, not the bare stored texel prevVisC: an EMA fed a Bernoulli 0/1 trace
-            // never settles, and its steady-state standard deviation is sqrt(alpha/(2-alpha) * p(1-p)) --
-            // about 11% of full visibility at a half-lit penumbra (p = 0.5) with alpha 0.1, 8% with 0.05.
-            // Folding rdLocalHistFiltered's roughly nine depth-similar neighbours into the read this turn
-            // blends into divides that variance by about the same nine; the resulting histVis (below) then
-            // carries that averaged value forward as prevVisC until this pixel's next turn folds nine more
-            // in. The cost is a penumbra widened by a pixel or two each time, which a lamp's soft shadow
-            // tolerates. MEASURED on NewSponza's lantern vault at dusk (high-pass RMS of an 8-bit crop in
-            // the cap's shadow, AverSR on): 11.0 with neither this filter nor the 0.05 and Stage B's 5x5,
-            // 3.7 with this filter alone, 2.0 with all three -- the scene's own 2.0 with lamps off.
+            // Blended into prevVisF, not bare prevVisC: an EMA fed a Bernoulli 0/1 trace never settles
+            // (steady-state stddev sqrt(alpha/(2-alpha)*p(1-p)), ~11% at a half-lit penumbra with alpha
+            // 0.1, 8% with 0.05); folding rdLocalHistFiltered's ~9 neighbours in divides that variance by
+            // ~9, at the cost of a penumbra widened a pixel or two. MEASURED on NewSponza's lantern vault
+            // at dusk (high-pass RMS, AverSR on): 11.0 with neither filter, 3.7 with this filter alone,
+            // 2.0 with all three -- matching the scene's own 2.0 with lamps off.
             vis = v;
             if (haveHist) {
                 const float alpha = lerp(0.05, 0.5, saturate(length(velocityPx) / 8.0));
                 vis = lerp(prevVisF, v, alpha);
             }
-            histVis = vis;
+            histVis = vis;   // carried forward as next frame's prevVisC, to fold into rdLocalHistFiltered's 3x3 again
         }
     }
     // Only .a is ever read back (rdLocalVisFiltered this frame; prevVisC and prevVisF, through
@@ -799,14 +641,14 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
 
 // ---- THE SHADING HALF: every lamp through the sun's own BRDF ----
 //
-// One lamp as the BRDF sees it from wpos: an AverLight toward its centre carrying rdLocalIrradiance's
-// falloff WITHOUT the N.L (averDirectTerms applies that itself), visibility 1 (the caller scales by the
-// shared one afterwards), and `s` RE-AIMED at it: s.H and s.F were built for the SUN, and a highlight
-// computed from them would sit where the sun's does. False past the range, tested before any sqrt or BRDF
-// work so an out-of-range lamp costs one dot product; `l`/`sL` then hold nothing to shade.
+// One lamp as the BRDF sees it from wpos: an AverLight toward its centre with rdLocalIrradiance's falloff
+// WITHOUT N.L (averDirectTerms applies that), visibility 1 (caller scales by the shared one after), and
+// `s` RE-AIMED at it (s.H/s.F were built for the SUN; unaimed, a highlight from them would sit where the
+// sun's does). False past range, tested before any sqrt/BRDF work so an out-of-range lamp costs one dot
+// product -- `l`/`sL` then hold nothing to shade.
 //
 // THE SPHERE WIDENS THE LOBE: roughness + r/(2d) from the sphere's angular size, clamped to [rough, 1], so
-// a large, close bulb spreads its highlight rather than printing a point light's pinpoint.
+// a large close bulb spreads its highlight instead of a point light's pinpoint.
 bool rdLocalLightAt(RdLocalLight ll, AverSurface s, float3 wpos, out AverLight l, out AverSurface sL) {
     sL = s;
     l.direction  = float3(0.0, 0.0, 1.0);
@@ -828,10 +670,9 @@ bool rdLocalLightAt(RdLocalLight ll, AverSurface s, float3 wpos, out AverLight l
     return true;
 }
 
-// Every lamp in range through averShadeDirect -- the SAME Cook-Torrance GGX, multiscatter compensation and
-// subsurface terms the sun's direct term runs -- times the ONE visibility rdLocalLightsVisibility resolved
-// for this point (see its header for why one stands for all). Diffuse AND specular. Radiance, for the
-// caller to add beside the sun's.
+// Every lamp in range through averShadeDirect (same Cook-Torrance GGX/multiscatter/subsurface terms as
+// the sun) times the ONE visibility rdLocalLightsVisibility resolved for this point (see its header for
+// why one stands for all). Diffuse+specular radiance, for the caller to add beside the sun's.
 float3 rdLocalLightsShade(AverSurface s, float3 wpos, float vis) {
     float3 acc = float3(0.0, 0.0, 0.0);
     const uint n = min(rdLocalLightCount(), 32u);
@@ -844,11 +685,10 @@ float3 rdLocalLightsShade(AverSurface s, float3 wpos, float vis) {
     return acc * vis;
 }
 
-// The same lamps for a BLENDED surface, kept in averShadeSplit's two buckets instead of summed: specular
-// into `specular` (full strength through the premultiplied blend), diffuse and subsurface into `diffuse`
-// (weighted by coverage) -- how averShadeSplit apportions the sun's direct term, from the same
-// averDirectTerms, so a pane composites its lamps as it composites its sun. Nothing for an unlit surface,
-// as averShadeSplit's own direct half adds nothing there either.
+// Same lamps for a BLENDED surface, split into averShadeSplit's two buckets instead of summed: specular
+// full-strength (premultiplied blend), diffuse/subsurface weighted by coverage -- how averShadeSplit
+// apportions the sun's direct term too, so a pane composites lamps like it composites the sun. Nothing
+// for unlit surfaces, matching averShadeSplit's own direct half.
 void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
                              inout float3 diffuse, inout float3 specular) {
     if (s.model == AVER_MODEL_UNLIT) return;
@@ -871,21 +711,19 @@ void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
 }
 #endif
 
-// gViewParams.w carries the staged buffers' row pitch as an exact integer (see gRdVisBuf's own header
-// comment above) PLUS, from milestone 4 on, per-dispatch flag bits above it -- bit 16 is CSRdGi's
-// half-rate-GI checkerboard parity (AVER_GI_CHECKERBOARD, voxi_restir.hlsli), set only for that one
-// dispatch's own constant-buffer upload; VoxiRenderer::recordStagedRayDriven restores the plain pitch
-// immediately afterward, so every OTHER decode of this field must mask the flag bits away rather than
-// read them as part of the pitch. After the staged passes, on a frame CSRdGi packed NRD's input, the
-// field holds bit 17 (plus that parity in bit 16) and no pitch for the rest of the frame --
-// giRestirIndirect's non-checkerboard NRD-input write reads it to follow the packing. Declared here, before every stage that decodes a pitch (PSRayDriven's
-// AVER_RD_SPLIT branch is the first, further down), so it is in scope everywhere it is needed.
+// gViewParams.w carries the staged buffers' row pitch as an exact integer (see gRdVisBuf's header), PLUS
+// (milestone 4+) flag bits above it: bit 16 = CSRdGi's half-rate-GI checkerboard parity
+// (AVER_GI_CHECKERBOARD, voxi_restir.hlsli), set only for that dispatch's own upload and restored to plain
+// pitch right after (recordStagedRayDriven) -- every OTHER decode must mask flag bits away. After the
+// staged passes, on a frame CSRdGi packed NRD's input, the field holds bit 17 (+ that parity) and no pitch
+// -- giRestirIndirect's non-checkerboard NRD-input write reads it to follow the packing. Declared here so
+// it's in scope before every stage that decodes a pitch.
 uint rdRowPitch() { return (uint)gViewParams.w & 0xFFFFu; }
 
-// The surface PSRayDriven reconstructs from a ray hit, minus everything that hit computed for itself
-// (bary, dir, N before its face-the-ray flip): what Stage S and Stage B's AVER_RD_SPLIT branch both
-// need afterward, and nothing they don't -- dpx/dpy (the shadow-ray footprint) and L (the light
-// direction) are cheap and hit-independent, so each caller keeps computing those itself.
+// The surface PSRayDriven reconstructs from a ray hit, minus what the hit itself already computed (bary,
+// dir, pre-flip N): what Stage S/Stage B's AVER_RD_SPLIT branch both need, nothing more -- dpx/dpy (the
+// shadow-ray footprint) and L (the light direction) are cheap and hit-independent, so each caller computes
+// those itself.
 struct RdSurface {
     RtInstance inst;
     uint       i0, i1, i2;
@@ -898,17 +736,14 @@ struct RdSurface {
 };
 
 // Rebuilds a PSRayDriven-shaped surface from CSRdVisibility's record instead of a live RayQuery.
-// TRANSCRIBED FROM PSRayDriven'S OWN POST-TRACE STATEMENTS (this file, the AVER_RD_SPLIT==0 branch of
-// PSRayDriven below): inst/tri/i0/i1/i2/w/nObj/N/hitUV/mat are copied verbatim, substituting the
-// record's fields for the RayQuery accessors they came from. KEEP THE TWO IN STEP -- a change to
-// PSRayDriven's own reconstruction that isn't mirrored here silently diverges the staged path from the
-// single pass it exists to reproduce.
+// TRANSCRIBED FROM PSRayDriven'S OWN POST-TRACE STATEMENTS (AVER_RD_SPLIT==0 branch, below) --
+// inst/tri/i0/i1/i2/w/nObj/N/hitUV/mat copied verbatim. KEEP THE TWO IN STEP: no shared code, so a
+// change to PSRayDriven's reconstruction not mirrored here silently diverges the staged path.
 //
-// `hitT`/`wpos` are the one part that cannot be copied verbatim: PSRayDriven reads hitT straight off
-// its own RayQuery (q.CommittedRayT()), which no longer exists here. Instead this rebuilds the world
-// hit point P by the SAME barycentric interpolation already used for the normal and UV above, projects
-// (P - camera) onto `dir` to recover hitT, then forms wpos the same way PSRayDriven's own line does
-// (gCamPos + dir * hitT) -- so a caller holding `wpos`/`hitT` cannot tell which path produced them.
+// `hitT`/`wpos` can't be copied verbatim (PSRayDriven's q.CommittedRayT() doesn't exist here): instead
+// rebuilds world hit point P by the same barycentric interpolation, projects (P - camera) onto `dir` to
+// recover hitT, then forms wpos the same way (gCamPos + dir * hitT) -- a caller holding wpos/hitT can't
+// tell which path produced them.
 RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     RdSurface o;
     o.inst = gRtInstances[rec.x];
@@ -927,10 +762,8 @@ RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
 
     o.mat = gRtMaterials[o.inst.materialIndex];
 
-    // World hit point P, from the SAME three vertices already fetched above, transformed to world
-    // space the way this file's own gWorld transforms (voxi.hlsl, VSMain) transform i.pos, then
-    // blended by the SAME barycentric weights `w` -- see this function's own header for why hitT/wpos
-    // derive from P rather than a stored ray distance.
+    // World hit point P: same three vertices, transformed the way VSMain transforms i.pos, blended by
+    // the same barycentric weights `w` (see this function's header for why hitT/wpos derive from P).
     const float3 p0 = mul(float4(gRtVerts[o.i0].pos, 1.0), o.inst.objectToWorld).xyz;
     const float3 p1 = mul(float4(gRtVerts[o.i1].pos, 1.0), o.inst.objectToWorld).xyz;
     const float3 p2 = mul(float4(gRtVerts[o.i2].pos, 1.0), o.inst.objectToWorld).xyz;
@@ -940,34 +773,28 @@ RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     return o;
 }
 
-// MILESTONE 3. The one number CSRdRefl needs out of PSRayDriven's own material block before it can
-// even decide whether to trace a reflection ray: the hit's ROUGHNESS. TRANSCRIBED FROM PSRayDriven'S
-// OWN MATERIAL BLOCK (this file, the AVER_RT_BINDLESS branch of "THE STOCK MATERIAL AT A RAY HIT",
-// further down) -- uvS/averRtUvGrad/the slot-1 metal-rough sample/the AVER_MAT_SLOPE_BLEND layer-1
-// blend/the final clamp are copied verbatim, keeping only the statements roughness actually depends
-// on. NOT a full rebuild of AverSurface: mapBase, occlusion, emissive and the normal map are read by
-// PSMainVoxi/PSRayDriven for shading but never feed `s.rough`, so a caller that only wants the gate
-// value (this one) has nothing to do with them -- and CSRdRefl never reads them back, so computing
-// them here would be dead work every one of this pass's pixels pays for nothing.
+// MILESTONE 3. The one number CSRdRefl needs from PSRayDriven's material block before deciding whether
+// to trace a reflection ray: the hit's ROUGHNESS. TRANSCRIBED FROM PSRayDriven'S OWN MATERIAL BLOCK
+// (AVER_RT_BINDLESS branch of "THE STOCK MATERIAL AT A RAY HIT", below) -- uvS/averRtUvGrad/the slot-1
+// metal-rough sample/the AVER_MAT_SLOPE_BLEND layer-1 blend/the final clamp copied verbatim, keeping only
+// the statements roughness depends on. NOT a full AverSurface rebuild: mapBase/occlusion/emissive/normal
+// feed PSMainVoxi/PSRayDriven's shading but never `s.rough`, and CSRdRefl never reads them back, so
+// computing them here would be dead work.
 //
-// KEEP IN STEP WITH PSRayDriven's OWN COPY BY HAND -- the same rule rdSurfaceFromRecord's own header
-// states just above, and for the same reason: no shared statement, so a change to one does not update
-// the other. A future edit to PSRayDriven's roughness computation (a new map, a different clamp) that
-// isn't mirrored here silently gives CSRdRefl's gate and rtReflectionTemporal call a stale roughness
-// while the shade pass's own s.rough (still computed there in full, and still what the cone/sky
-// fallback below uses) moves on without it.
+// KEEP IN STEP WITH PSRayDriven's OWN COPY BY HAND (same rule as rdSurfaceFromRecord above, same reason:
+// no shared statement). A future roughness edit not mirrored here silently gives CSRdRefl's gate and
+// rtReflectionTemporal a stale value, while the shade pass's own s.rough (still computed in full; still
+// what the cone/sky fallback below uses) moves on without it.
 //
-// WHY THIS CAN'T JUST RE-CHECK `rough <= 0.75` A SECOND TIME AT STAGE B INSTEAD OF READING gRdReflTex's
-// alpha: Stage B has no cheap way to know CSRdRefl's own roughness without redoing this same
-// reconstruction itself, which is exactly the register-pressure cost splitting the reflection out of
-// the shade pass exists to remove (see CSRdRefl's own header). Reading gRdReflTex[pixel].a instead asks
-// the stage that already paid for this answer, once.
+// WHY STAGE B CAN'T JUST RE-CHECK `rough <= 0.75` INSTEAD OF READING gRdReflTex's alpha: it has no cheap
+// way to know CSRdRefl's roughness without redoing this reconstruction -- exactly the register-pressure
+// cost splitting reflection out of the shade pass exists to remove (see CSRdRefl's header). Reading
+// gRdReflTex[pixel].a instead asks the stage that already paid for this answer, once.
 float rdSurfaceRoughness(RdSurface s, float3 rdRayDx, float3 rdRayDy) {
 #ifdef AVER_RT_BINDLESS
-    // THE EFFECTIVE UV and its footprint, same two calls PSRayDriven's own copy makes -- see that
-    // block's own comments for why averRtSurfaceUV/averRtUvGrad are the right pair and why the
-    // gradient rides the shadow-ray footprint rather than a screen-space derivative (undefined on a
-    // ray hit).
+    // THE EFFECTIVE UV and its footprint, same two calls PSRayDriven makes (see that block for why
+    // averRtSurfaceUV/averRtUvGrad are the right pair and why the gradient rides the shadow-ray
+    // footprint, not a screen-space derivative -- undefined on a ray hit).
     const float2 uvS = averRtSurfaceUV(s.mat, s.inst, s.wpos, s.N, s.hitUV);
     float2 uvGx, uvGy;
     averRtUvGrad(s.mat, s.inst, s.N,
@@ -975,16 +802,14 @@ float rdSurfaceRoughness(RdSurface s, float3 rdRayDx, float3 rdRayDy) {
                  gRtVerts[s.i0].uv,  gRtVerts[s.i1].uv,  gRtVerts[s.i2].uv,
                  rdRayDx, rdRayDy, uvGx, uvGy);
 
-    // glTF packs roughness in G, metallic in B -- the same unpack PSRayDriven's own copy does. Only
-    // slot 1 (MetalRough) is sampled: slots 0/2/3/4 (base colour, normal, occlusion, emissive) feed
-    // shading channels this function has no use for.
+    // glTF packs roughness in G, metallic in B, same unpack as PSRayDriven. Only slot 1 (MetalRough) is
+    // sampled -- slots 0/2/3/4 feed shading channels this function has no use for.
     const float4 mapMR      = averRtSampleSlot(s.mat, 1, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
     float2       metalRough = float2(mapMR.g, mapMR.b);
 
-    // THE SECOND LAYER, blended by SLOPE off the GEOMETRIC normal -- same predicate and lerp weight as
-    // PSRayDriven's own copy. Only the texIndex[6] (Layer1MetalRough) branch is transcribed: the
-    // sibling texIndex[5]/texIndex[7] branches blend mapBase/normalTS, neither of which this function
-    // returns.
+    // SECOND LAYER, blended by SLOPE off the geometric normal -- same predicate/weight as PSRayDriven.
+    // Only texIndex[6] (Layer1MetalRough) is transcribed; sibling texIndex[5]/[7] blend mapBase/normalTS,
+    // neither returned here.
     if (s.mat.flags & AVER_MAT_SLOPE_BLEND) {
         const float flat01 = saturate(abs(s.N.z));
         const float lw = 1.0 - smoothstep(s.mat.slopeBlendLo, s.mat.slopeBlendHi, flat01);
@@ -1005,30 +830,24 @@ float rdSurfaceRoughness(RdSurface s, float3 rdRayDx, float3 rdRayDy) {
 #endif
 }
 
-// How far a view ray travels INSIDE a volume before something stops it, in centimetres --
-// averVolumeTransmittance needs a path length, and a blended surface has no idea how thick it is.
-// The old fluid shader guessed with `depthCm / max(abs(V.z), 0.15)` from a CONSTANT floor height
-// (FluidShaders.hpp), right only on a box's TOP face; on a side face at pitch 0 the clamp gave an
-// ~8.7m path, so a pool's side came out fully opaque and bright (the PTTest pit's blown-out white
-// slab). A ray doesn't have to guess; it measures.
+// How far a view ray travels INSIDE a volume before something stops it, in cm -- averVolumeTransmittance
+// needs a path length and a blended surface doesn't know its own thickness. The old fluid shader guessed
+// `depthCm / max(abs(V.z), 0.15)` from a constant floor height (FluidShaders.hpp), right only on a box's
+// top face; on a side face at pitch 0 the clamp gave an ~8.7m path, blowing the PTTest pit's side out
+// white. This measures instead of guessing.
 //
-// COMMITS EVERY CANDIDATE EXCEPT A FAILED CUTOUT, which is what FORCE_OPAQUE used to do here and
-// why it stood: translucent instances sit as FORCE_NON_OPAQUE, so ordinary traversal would stop AT
-// a candidate uncommitted. averRtProceedSolid commits any non-alpha-masked candidate on sight, so
-// this ray still answers "what is the first thing along it, of any kind" -- with the one refinement
-// that a hole in a cutout material is no longer a thing.
+// COMMITS EVERY CANDIDATE EXCEPT A FAILED CUTOUT (what FORCE_OPAQUE did here): translucent instances are
+// FORCE_NON_OPAQUE, so ordinary traversal would stop AT an uncommitted candidate; averRtProceedSolid
+// commits any non-alpha-masked one, so "first thing along the ray" still works, minus cutout holes.
 //
-// BOTH LANES, because both can end the path: the volume's own BACK FACE, or an opaque object inside
-// it (a rock, the pool floor). Nearest-of-the-two makes absorption respond to real geometry instead
-// of an authored box height.
+// BOTH LANES: either the volume's own back face or an opaque object inside it (rock, pool floor) can end
+// the path -- nearest-of-two responds to real geometry, not an authored box height.
 //
-// Returns 0 when nothing is hit; averVolumeTransmittance reads that as "no path through the medium"
-// and answers with full transmission -- an unbounded volume should absorb nothing until given a
-// boundary, not absorb infinitely.
-// Is a real backdrop bound? A null-filled Texture2D reports zero dimensions -- the only signal
-// available in-shader, avoiding a spare cbuffer component for something the descriptor already
-// tells us. Tested, not assumed: forcing the null case (MSAA on) and confirming glass falls back
-// instead of going black is part of this feature's verification.
+// Returns 0 when nothing is hit; averVolumeTransmittance reads that as full transmission (an unbounded
+// volume shouldn't absorb infinitely).
+// Is a real backdrop bound? A null-filled Texture2D reports zero dimensions -- the only in-shader signal,
+// avoiding a spare cbuffer component for what the descriptor already tells us. Tested (forcing MSAA's
+// null case, confirming glass falls back instead of going black), not assumed.
 bool averBlendBackdropValid(out float2 invSize) {
     uint w = 0, h = 0;
     gBlendBackdrop.GetDimensions(w, h);
@@ -1041,18 +860,16 @@ bool averBlendBackdropValid(out float2 invSize) {
 // final = specular + diffuse*alpha + dst*T*(1-alpha). Hardware premultiplied blend gives
 // final = src.rgb + dst*(1-src.a); setting src.a = alpha and solving:
 //     src.rgb = specular + diffuse*alpha + bg * (1 - alpha) * (T - 1)
-// THE LAST TERM IS THE TRICK: (T-1) is negative, subtracting exactly the light the medium absorbed
-// per channel -- what one blend alpha can't express. Hardware still adds the REAL destination after.
-// T==1 makes the correction exactly zero (bit-for-bit identity, what the no-absorption regression
-// check leans on). STACKED TRANSLUCENCY DEGRADES GENTLY: `bg` is the scene copied BEFORE any
-// translucent draw (stale for a second layer, used only in the correction, base composite still
-// blends against the true `dst`) -- replacing the background outright would let a nearer pane erase
-// a farther one, and glass over water makes that not hypothetical.
-// Falls back to the scalar composite when no backdrop is bound -- the honest answer, not black.
-// WHERE THE BACKGROUND IS READ FROM, once the surface bends it. Absorption decides what COLOUR
-// survives the medium; refraction decides where it comes FROM -- gIor's first reader (uploaded and
-// unread since it was added). Returns the UV to sample the backdrop at; gGiParams.y is the mode,
-// .z strength, .w edge fade (see Settings::refractionMode).
+// THE LAST TERM IS THE TRICK: (T-1) is negative, subtracting exactly the light the medium absorbed per
+// channel -- what one blend alpha can't express; hardware still adds the REAL destination after. T==1
+// zeroes the correction exactly (bit-for-bit identity; the no-absorption regression check leans on it).
+// STACKED TRANSLUCENCY DEGRADES GENTLY: `bg` is the scene copied BEFORE any translucent draw (stale for a
+// second layer, used only in the correction, base composite still blends against the true `dst`) --
+// replacing it outright would let a nearer pane erase a farther one (glass over water). Falls back to
+// the scalar composite when no backdrop is bound.
+// WHERE THE BACKGROUND IS READ FROM, once the surface bends it. Absorption decides COLOUR; refraction
+// decides where it comes FROM -- gIor's first reader (uploaded, unread until now). Returns the UV to
+// sample the backdrop at; gGiParams.y is the mode, .z strength, .w edge fade (Settings::refractionMode).
 float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
                                float2 invSize, float2 screenPos, out bool tir) {
     tir = false;
@@ -1062,12 +879,11 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
 
     // WHICH WAY THE LIGHT IS CROSSING decides everything below. eta = index LEFT / index ENTERED:
     // air->medium is 1/n, medium->air is n -- reversed, TIR becomes unreachable (needs eta > 1).
-    // GATED ON gCameraMedium, NOT s.backFace -- already cost this engine once. material_prelude.hlsl's
-    // post-mortem: a TIR override gated on backFace "turned every pane of glass into a dark slab at
-    // 41 degrees off normal", since backFace is also true for a two-sided pane's FAR surface seen
-    // from outside (where Snell forbids TIR), indistinguishable from a pixel shader at the time.
-    // gCameraMedium.x is now computed CPU-side against the volume's bounds, which a pixel can't
-    // recover; glass is twosided=1 and never a medium by that test, so it can't reach this branch.
+    // GATED ON gCameraMedium, NOT s.backFace -- already cost this engine once (material_prelude.hlsl's
+    // post-mortem: a TIR override gated on backFace turned every glass pane into a dark slab at 41
+    // degrees off normal, since backFace is also true for a two-sided pane's far surface seen from
+    // outside, where Snell forbids TIR and a pixel shader can't tell the difference). gCameraMedium.x is
+    // computed CPU-side against the volume's bounds instead; glass (twosided=1) never reaches this branch.
     const float  ior      = max(gIor, 1.0001);
     const bool   eyeInside = gCameraMedium.x > 0.5;
     const float  eta      = eyeInside ? ior : (1.0 / ior);
@@ -1083,15 +899,15 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
         R = reflect(-s.V, s.N);
     }
 
-    // Where the bent ray leaves the medium: one thickness along the BENT path, not the straight one
-    // -- why this needs ray-measured thickness rather than an authored constant.
+    // Where the bent ray leaves the medium: one thickness along the BENT path, not the straight one --
+    // why this needs ray-measured thickness, not an authored constant.
     float3 target = wpos + R * max(thicknessCm, 0.0);
 
 #if AVER_RT
-    // RAY-TRACED: follow the bent ray to what it ACTUALLY reaches and project THAT, unlike the
-    // screen-space mode below which can only offset within the image already captured. Still reads
-    // colour from the backdrop rather than shading the hit (a second full material eval on the
-    // frame's most expensive pass) -- an off-screen/occluded hit falls back to whatever's there.
+    // RAY-TRACED: follow the bent ray to what it ACTUALLY reaches and project that, unlike the
+    // screen-space mode which can only offset within the already-captured image. Still reads colour from
+    // the backdrop rather than shading the hit (a second full material eval on the priciest pass) -- an
+    // off-screen/occluded hit falls back to whatever's there.
     if (mode >= 2u) {
         RayDesc rr;
         rr.Origin = target;
@@ -1110,29 +926,26 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
     if (clip.w <= 1e-4) return uv0;               // behind the eye: nothing sensible to sample
     const float2 ndc = clip.xy / clip.w;
 
-    // NDC -> THE VIEWPORT RECT, NOT [0,1] OF THE WHOLE TARGET -- the bug that made refraction look
-    // like a wrecked image, not a bent one. The editor docks the 3D view in a SUB-RECT, so NDC maps
-    // to gSceneViewportCur while uv0 (screenPos*invSize) is a full-target UV; plain ndc*0.5+0.5 mixes
-    // the spaces, an affine error that walks the pane's image off-screen near the right edge -- the
-    // black block in the glass rail.
-    // MEASURED by forcing target = wpos (answer HAD to be uv0 exactly): 100% of the rail's pixels
-    // still landed >60px away, proving this was the projection, not refraction (an 8cm pane can't
-    // bend 60px). The file already knew: rtReprojectHistory and three other sites do this conversion
-    // correctly, one warning the plain form "lands every reprojection on the wrong texel" --
-    // refraction was written later and missed it.
+    // NDC -> THE VIEWPORT RECT, NOT [0,1] OF THE WHOLE TARGET -- the bug that made refraction look like
+    // a wrecked image, not a bent one. The editor docks the 3D view in a SUB-RECT (gSceneViewportCur)
+    // while uv0 is a full-target UV; plain ndc*0.5+0.5 mixes the spaces, walking the image off-screen
+    // near the right edge (the black block in the glass rail). MEASURED by forcing target = wpos
+    // (answer had to be uv0 exactly): 100% of the rail's pixels still landed >60px away, proving this was
+    // the projection, not refraction (an 8cm pane can't bend 60px) -- rtReprojectHistory and three other
+    // sites already did this conversion correctly, one warning the plain form "lands every reprojection
+    // on the wrong texel"; refraction was written later and missed it.
     //
-    // A ZERO-WIDTH RECT means no viewport was reported this frame -- sample straight through, the
-    // same fallback used for TIR and a target behind the eye.
+    // A ZERO-WIDTH RECT means no viewport was reported this frame -- sample straight through, same
+    // fallback as TIR and a target behind the eye.
     if (gSceneViewportCur.z <= 0.0 || gSceneViewportCur.w <= 0.0) return uv0;
     const float2 pxR = gSceneViewportCur.xy +
                        float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewportCur.zw;
     float2 uvR = pxR * invSize;
 
-    // THE EDGE FADE, not cosmetic: an offset walking off-screen samples nothing meaningful, and one
-    // onto a foreground object shows that object through the glass. Fades to zero near the border
-    // instead of a hard wrong pixel.
-    // FADED AGAINST THE VIEWPORT RECT, NOT THE TARGET: outside the 3D view the backdrop holds
-    // whatever the rest of the frame is -- "still on the part the camera drew" is the real test.
+    // THE EDGE FADE, not cosmetic: an offset walking off-screen samples nothing meaningful, and one onto
+    // a foreground object shows that object through the glass -- fades to zero near the border instead.
+    // FADED AGAINST THE VIEWPORT RECT, NOT THE TARGET: outside the 3D view the backdrop holds whatever
+    // the rest of the frame is -- the real test is "still on the part the camera drew".
     const float fadePx = max(gGiParams.w, 0.0);
     float edge = 1.0;
     if (fadePx > 0.0) {
@@ -1150,27 +963,24 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     if (!averBlendBackdropValid(invSize))
         return averBlendedOutputVolume(s, diffuse, specular, T);
 
-    // TWO SAMPLES, AND THE SECOND IS WHAT MAKES THE CORRECTION CANCEL. The HARDWARE adds
-    // dst*(1-alpha) after this returns; a correction only works if it subtracts EXACTLY that, at uv0.
+    // TWO SAMPLES, AND THE SECOND IS WHAT MAKES THE CORRECTION CANCEL. Hardware adds dst*(1-alpha)
+    // after this returns; the correction must subtract EXACTLY that, at uv0.
     //
     // The single-sample version subtracted the REFRACTED sample instead, so nothing cancelled and the
-    // residue (dst - bgRefracted) went NEGATIVE wherever the bent ray landed on something BRIGHTER
-    // than what's really behind -- a negative channel through the tonemap reads as a hue, not dark.
-    // That's what the magenta blocks in the pool were. MEASURED: 41773 magenta pixels at the
-    // 45-degree pool camera with refraction on, 0 with --refraction 0, 0 after this fix.
+    // residue (dst - bgRefracted) went NEGATIVE wherever the bent ray landed on something BRIGHTER than
+    // what's really behind -- reading as a hue through the tonemap, not dark. That's what the magenta
+    // blocks in the pool were. MEASURED: 41773 magenta pixels at the 45-degree pool camera with
+    // refraction on, 0 with --refraction 0, 0 after this fix.
     //
-    // The algebra, with a == alpha:
+    // The algebra, with a == alpha (dst IS bgStraight, so the last two terms collapse):
     //     final = specular + diffuse*a + (bgRefr*T - bgStraight)*(1-a) + dst*(1-a)
-    //   and dst IS bgStraight, so the last two collapse and leave
-    //     final = specular + diffuse*a + bgRefr*T*(1-a)
-    //   the bent background, absorbed over the path, behind a Fresnel-weighted surface. Refraction
-    //   OFF makes bgRefr == bgStraight, collapsing to bg*(T-1)*(1-a) (bit-identical to before); T==1
-    //   leaves (bgRefr - bgStraight)*(1-a) -- pure bending, so refraction with no volume isn't
-    //   silently wrong any more.
+    //           = specular + diffuse*a + bgRefr*T*(1-a)
+    //   Refraction OFF: bgRefr == bgStraight, collapsing to bg*(T-1)*(1-a) (bit-identical to before);
+    //   T==1: (bgRefr - bgStraight)*(1-a), pure bending -- no longer silently wrong with no volume.
     //
-    // dst == bgStraight only for the FIRST translucent surface over a pixel; a second one behind
-    // glass composites against a backdrop not yet containing the first -- the known cost of capturing
-    // the backdrop once per frame. Bounded to that overlap, unlike the misregistration above.
+    // dst == bgStraight only for the FIRST translucent surface over a pixel; a second one behind glass
+    // composites against a backdrop not yet containing the first (backdrop captured once per frame) --
+    // bounded to that overlap, unlike the misregistration above.
     bool tir = false;
     const float2 uvR   = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos, tir);
     const float2 uv0   = screenPos * invSize;
@@ -1179,16 +989,14 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     const float  alpha = saturate(s.alpha);
 
     // TIR IS NOT A WINDOW WITH A DIFFERENT UV -- treating it as one made it black. Past the critical
-    // angle nothing transmits, so everything the eye gets is REFLECTED; the window form's (1-alpha)
-    // background weight, with alpha pushed toward 1 by view Fresnel at TIR's grazing angles, was
-    // multiplying the mirror by roughly zero. MEASURED underwater at 25 degrees: mirrored region
-    // read 0.59 mean against the 18.8 of the pit wall it should show -- dark because cancelled, not
-    // because the pool is dark.
+    // angle everything is REFLECTED; the window form's (1-alpha) background weight, with alpha pushed
+    // toward 1 by grazing-angle Fresnel, multiplied the mirror by roughly zero. MEASURED underwater at
+    // 25 degrees: mirrored region read 0.59 mean against the 18.8 of the pit wall it should show -- dark
+    // from cancellation, not a dark pool.
     //
-    // alpha=1 is correct HERE, unlike material_prelude.hlsl's post-mortem case: that slammed alpha
-    // to 1 on a PANE seen from outside (where Snell forbids TIR) with no reflected image, leaving a
-    // dark slab. This fires only when gCameraMedium says the eye is inside a single-sided volume,
-    // handing back the reflected scene as the surface's radiance.
+    // alpha=1 is correct HERE, unlike material_prelude.hlsl's post-mortem case (a PANE seen from outside,
+    // where Snell forbids TIR, with no reflected image -> dark slab): this fires only when gCameraMedium
+    // says the eye is inside a single-sided volume, handing back the reflected scene as radiance.
     if (tir) return float4(specular + bgR * T, 1.0);
 
     return float4(specular + diffuse * alpha + (bgR * T - bg0) * (1.0 - alpha), alpha);
@@ -1196,9 +1004,9 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
 
 float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
     RayDesc r;
-    // SAME bias as the reflection ray, same reason: starting exactly on the shaded surface re-hits
-    // it at t~0. Pushed along the VIEW direction, not N: this ray heads INTO the surface, and
-    // offsetting along the normal would push it out of the volume being measured.
+    // SAME bias as the reflection ray, same reason (avoid re-hitting the origin surface at t~0). Pushed
+    // along the VIEW direction, not N: this ray heads INTO the surface, so an N offset would push it out
+    // of the volume being measured.
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
     r.Origin    = wpos + viewDir * bias;
     r.Direction = viewDir;
@@ -1206,9 +1014,8 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
     r.TMax      = 100000.0;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // BOTH LANES, and every candidate committed on sight EXCEPT a failed cutout: this measures the
-    // distance to the far side of a medium, so a pane is a real boundary here. averRtProceedSolid
-    // commits any non-alpha-masked candidate, which preserves exactly what FORCE_OPAQUE did.
+    // BOTH LANES, every candidate committed on sight EXCEPT a failed cutout: measures distance to the
+    // far side of a medium, so a pane is a real boundary here (averRtProceedSolid preserves FORCE_OPAQUE).
     q.TraceRayInline(gScene, RAY_FLAG_NONE,
                      AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT, r);
     averRtProceedSolid(q);
@@ -1217,11 +1024,11 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
 }
 
 // Reprojects wpos through LAST frame's camera to sample the reflection history. False when unusable:
-// off-screen, behind last frame's near plane, a recorded miss (stored.a <= 0), or a disocclusion --
-// same test as rtReprojectHistory, against the reflection's own depth channel.
-// A MISS IS NEVER REPROJECTED, the one real difference from the shadow case: sky-by-direction is
-// cheap and highly VIEW dependent, so a stale miss would show the wrong patch of sky through a still
-// surface. A real hit depends on the surface and a mostly-static light, not viewing angle.
+// off-screen, behind last frame's near plane, a recorded miss (stored.a <= 0), or a disocclusion -- same
+// test as rtReprojectHistory, against the reflection's own depth channel.
+// A MISS IS NEVER REPROJECTED (the one difference from the shadow case): sky-by-direction is cheap and
+// highly VIEW dependent, so a stale miss would show the wrong patch of sky through a still surface. A
+// real hit depends on the surface and a mostly-static light, not viewing angle.
 bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
@@ -1246,35 +1053,35 @@ bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float
     return true;
 }
 
-// The SPATIAL denoiser for REFLECTIONS -- there was none before: reprojected/blended in time but
-// never filtered in space, harmless while the ray was a deterministic mirror but not once
-// rtReflection widens into a lobe (shipping the lobe alone trades wrong-but-clean for right-but-noisy).
+// The SPATIAL denoiser for REFLECTIONS -- there was none before (reprojected/blended in time but never
+// filtered in space; harmless for a deterministic mirror, not once rtReflection widens into a lobe;
+// shipping the lobe alone would trade wrong-but-clean for right-but-noisy).
 //
 // STRUCTURE IS rtShadowSpatial's (reprojected gather centre, plane-distance rejection -- read that
 // first). Differs in three ways:
-//  1. RADIUS FROM ROUGHNESS, not a host constant: a fixed width either blurs a mirror or
-//     under-filters a rough surface. Roughness 0 returns centre untouched, no texel loaded.
-//  2. A MISSED NEIGHBOUR IS SKIPPED, not counted black: gRtReflHist's miss sentinel is a NEGATIVE
-//     alpha, and averaging it in would drag every reflected edge toward black.
-//  3. NO LUMINANCE WEIGHT: SVGF's colour-similarity term needs a per-pixel VARIANCE estimate this
-//     engine doesn't track (history is (rgb, depth), no second moment); without variance a luminance
-//     weight preserves exactly the noise it's meant to remove. Geometry weights only, for now.
-// The AVER_GBUFFER_HISTORY crease term in the tap loop is copied from rtShadowSpatial verbatim.
-// `N` is a new parameter for that crease term only -- rtReflectionTemporal's own normal, unchanged.
+//  1. RADIUS FROM ROUGHNESS, not a host constant: a fixed width either blurs a mirror or under-filters
+//     a rough surface. Roughness 0 returns centre untouched, no texel loaded.
+//  2. A MISSED NEIGHBOUR IS SKIPPED, not counted black: gRtReflHist's miss sentinel is a NEGATIVE alpha,
+//     and averaging it in would drag every reflected edge toward black.
+//  3. NO LUMINANCE WEIGHT: SVGF's colour-similarity term needs a per-pixel VARIANCE this engine doesn't
+//     track (history is rgb+depth, no second moment); without it a luminance weight would preserve
+//     exactly the noise it's meant to remove. Geometry weights only, for now.
+// The AVER_GBUFFER_HISTORY crease term is copied from rtShadowSpatial verbatim. `N` is new, for that
+// term only -- rtReflectionTemporal's own normal, unchanged.
 float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, float curDepth,
                            float rough, float dzdx, float dzdy) {
     // Radius tracks the lobe (tan(cone)=rough^2 grows quadratically, this grows linearly --
-    // deliberately conservative: too wide smears detail, too narrow just leaves noise for the
-    // temporal history). Capped at 3 (7x7 gather): cost is quadratic in radius.
+    // deliberately conservative: too wide smears detail, too narrow leaves noise for the temporal
+    // history). Capped at 3 (7x7 gather): cost is quadratic in radius.
     const int radius = (int)clamp(floor(rough * 6.0), 0.0, 3.0);
     if (radius <= 0 || gRtHistParams.y < 0.75) return centre;
 
     float texW, texH;
     gRtReflHist.GetDimensions(texW, texH);
 
-    // Gather around where this pixel WAS last frame (gRtReflHist is last frame's). Same arithmetic
-    // as rtReprojectHistory/rtShadowSpatial, including their two landmines: last frame's VIEWPORT
-    // rect not [0,1], and floor not round.
+    // Gather around where this pixel WAS last frame (gRtReflHist is last frame's). Same arithmetic as
+    // rtReprojectHistory/rtShadowSpatial, including their two landmines: last frame's VIEWPORT rect not
+    // [0,1], and floor not round.
     float2 centrePx = pixel;
     const float4 pclip = mul(float4(wpos, 1.0), gPrevViewProj);
     if (pclip.w > 1e-4) {
@@ -1285,9 +1092,9 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
     }
     const int2 base = int2(floor(centrePx));
 
-    // A GAUSSIAN falloff, where rtShadowSpatial uses a flat box: box filters ring in frequency
-    // response, visible as square-edged plateaus around a highlight. sigma = radius/2 keeps the
-    // kernel's support near the requested radius, widening the blur smoothly.
+    // A GAUSSIAN falloff, where rtShadowSpatial uses a flat box: box filters ring in frequency response,
+    // visible as square-edged plateaus around a highlight. sigma = radius/2 keeps the kernel's support
+    // near the requested radius.
     const float sigma2 = max((float)radius * 0.5, 0.5);
     const float inv2s2 = 1.0 / (2.0 * sigma2 * sigma2);
 
@@ -1305,8 +1112,8 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
             if (abs(st.a - predicted) > tol) continue;
 #if AVER_GBUFFER_HISTORY
             // THE CREASE TERM -- copied from rtShadowSpatial's identical block (see there for the
-            // reasoning and cos(60 deg)). ASSUMES gGBufNormalHist matches gRtReflHist's resolution,
-            // same assumption made at gRtShadowHist -- both histories share the scene render target.
+            // reasoning and cos(60 deg)). ASSUMES gGBufNormalHist matches gRtReflHist's resolution, as
+            // gRtShadowHist does -- all three share the scene render target.
             const float3 nb = gGBufNormalHist.Load(int3(t, 0)).xyz * 2.0 - 1.0;
             if (dot(N, nb) < 0.5) continue;
 #endif
@@ -1318,75 +1125,69 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
     return acc / wsum;
 }
 
-// Tiled/temporal wrapper around rtReflection(), mirroring rtShadowTemporal's structure/tile schedule
-// so shadow and reflection rays amortise on the same cadence. Called ONLY after the caller gates on
+// Tiled/temporal wrapper around rtReflection(), mirroring rtShadowTemporal's structure/tile schedule so
+// shadow and reflection rays amortise on the same cadence. Called ONLY after the caller gates on
 // roughness (s.rough <= 0.5 in PSMainVoxi) -- not re-checked here.
-// `hit`: true for a real reflection colour (fresh or reused from history; haveHist is already
-// conditioned on a real hit, never a miss), false when the caller should fall back to sky.
+// `hit`: true for a real reflection colour (fresh or history-reused -- haveHist is already conditioned
+// on a real hit, never a miss), false when the caller should fall back to sky.
 //
-// SUB-STAGE SPLIT C (Settings::rayDrivenReflSplit): `doSpatial` lets CSRdRefl (Register, R1) call this
-// for the ray/history half alone and leave rtReflectionSpatial's dense 7x7 history gather to
-// CSRdReflFilter (Filter, R2) in its own pass -- the register-heavy trace and the bandwidth-heavy
-// filter no longer share one thread. false ONLY from CSRdRefl's own AVER_RD_REFL_SPLIT branch; every
-// other caller goes through the rtReflectionTemporal() wrapper just below, which always asks for both.
+// SUB-STAGE SPLIT C (Settings::rayDrivenReflSplit): `doSpatial` lets CSRdRefl (R1) call this for the
+// ray/history half alone and leave rtReflectionSpatial's dense 7x7 gather to CSRdReflFilter (R2) --
+// register-heavy trace and bandwidth-heavy filter no longer share a thread. false ONLY from CSRdRefl's
+// AVER_RD_REFL_SPLIT branch; every other caller goes through rtReflectionTemporal() below, always both.
 float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
                               float dzdx, float dzdy, bool doSpatial, out bool hit) {
     // ---- THE MIRROR CUTOFF: ONE predicate, three consumers ----
-    // Below AVER_REFL_MIRROR_ROUGH a surface is a mirror throughout: no jitter, no temporal history,
-    // no spatial filter. tan(cone)=rough^2, so at 0.1 the ray is displaced one part in a hundred of
-    // its own length -- under a pixel, with no variance for a filter to remove.
+    // Below AVER_REFL_MIRROR_ROUGH a surface is a mirror throughout: no jitter, no temporal history, no
+    // spatial filter. tan(cone)=rough^2, so at 0.1 the ray is displaced one part in a hundred of its own
+    // length -- under a pixel, with no variance for a filter to remove.
     //
-    // A CORRECTNESS FIX, NOT A TUNING KNOB: the first version gated the temporal blend on
-    // `rough > 0.0` while claiming a smooth surface "still takes the fresh value outright" -- those
-    // disagree for every near-mirror (glass at 0.05), both getting an 85%-history blend that can't
-    // reduce a variance already at zero and can only add lag, smearing glass behind a moving camera.
+    // A CORRECTNESS FIX, NOT A TUNING KNOB: an earlier version gated the temporal blend on `rough > 0.0`
+    // while claiming a smooth surface "still takes the fresh value outright" -- those disagreed for
+    // every near-mirror (glass at 0.05), getting an 85%-history blend that can't reduce a variance
+    // already at zero and can only add lag, smearing glass behind a moving camera.
     //
     // Deriving all three behaviours from ONE value is the point: a jittered-but-unfiltered lobe is
-    // noise, a filtered-but-unjittered ray is blur -- they must agree, which only works reading the
-    // same number.
+    // noise, a filtered-but-unjittered ray is blur -- they must agree, which only works reading the same
+    // number.
     const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
 
-    // NO HISTORY TEXTURE: the lobe stays closed too -- widening it with nothing to converge into
-    // would trade a biased-but-stable reflection for one that flickers every frame. rough=0 reduces
+    // NO HISTORY TEXTURE: the lobe stays closed too -- widening it with nothing to converge into would
+    // trade a biased-but-stable reflection for one that flickers every frame. rough=0 reduces
     // rtReflection to the exact mirror ray it traced before this change.
     if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, R, L, pixel, 0.0, 0.0, hit);
 
     const float4 curClip = mul(float4(wpos, 1.0), gViewProj);
     const uint frameIdx  = (uint)gRtHistParams.z;
-    // Per-frame rotation turning one ray per frame into a converging lobe estimate. A pure per-frame
-    // count, never wall-clock, so a capture at frame N is reproducible; the golden-angle multiplier
-    // keeps successive rotations from landing near each other the way a fixed increment would.
+    // Per-frame rotation turning one ray per frame into a converging lobe estimate. Pure per-frame
+    // count, never wall-clock (reproducible capture); golden-angle multiplier keeps successive
+    // rotations from landing near each other the way a fixed increment would.
     const float frameJitter = (float)frameIdx * 2.39996323;
     const uint tileBits = (uint)gRtHistParams.w;
 
     if (tileBits == 0u) {
-        // THE SHIPPED PATH: rtPixelsPerRayTileForQuality returns 1 at every tier, so this always
-        // runs. Used to trace/write/return with NO temporal blend -- correct for a deterministic
-        // mirror, wrong once the lobe opened. Blend added HERE, only where variance was introduced:
-        // rough=0 still takes the fresh value outright, unchanged for glass, chrome and water.
+        // THE SHIPPED PATH: rtPixelsPerRayTileForQuality returns 1 at every tier, so this always runs.
+        // Used to trace/write/return with NO temporal blend -- correct for a mirror, wrong once the
+        // lobe opened. Blend added HERE, only where variance was introduced: rough=0 still takes the
+        // fresh value outright, unchanged for glass, chrome and water.
 
-        // ---- T3 (Settings::rtReflectionHalfRate, console voxi.rtReflectionHalfRate) -- DECIDED
-        // BEFORE THE TRACE, the same shape as T2's own comment (voxi_rt.hlsli's
-        // rtSkyOcclusionTemporal) ----
+        // ---- T3 (Settings::rtReflectionHalfRate, console voxi.rtReflectionHalfRate) -- DECIDED BEFORE
+        // THE TRACE, same shape as T2 (voxi_rt.hlsli's rtSkyOcclusionTemporal) ----
         //
-        // Gated on lobeRough > 0.0 up front: a MIRROR (lobeRough == 0, tanCone == 0 inside
-        // rtReflection) always retraces, because a reprojected mirror reflection is wrong the instant
-        // the camera moves -- there is no lobe variance for a stand-in history to be trading against,
-        // only a wrong answer.
+        // Gated on lobeRough > 0.0 up front: a MIRROR (lobeRough == 0, tanCone == 0 inside rtReflection)
+        // always retraces (a reprojected mirror reflection is wrong the instant the camera moves -- no
+        // lobe variance to trade against, only a wrong answer).
         //
-        // THE REPROJECTION CALL BELOW IS GATED ON THE BIT, UNLIKE T2's: T2 hoisted its own
-        // rtReprojectAo call unconditionally because that function already ran every frame regardless
-        // of whether the trace hit anything. This one does not -- today it only runs AFTER a
-        // successful trace (`if (lobeRough > 0.0 && curHit)`, in the `else` branch below), so hoisting
-        // it here unconditionally would add a reprojection lookup to every rough pixel whether or not
-        // this bit is even set. Gating it behind the bit keeps this branch's cost identical to today's
-        // whenever the bit is clear, at the price of one possible SECOND rtReprojectReflection call
-        // below on the rare pixel whose tile is skip-eligible but whose history has just gone invalid
-        // (a fresh disocclusion): a texture lookup, not a ray, and the non-skip path already pays for
-        // one of these every frame it runs anyway.
+        // THE REPROJECTION CALL BELOW IS GATED ON THE BIT, UNLIKE T2's: T2's rtReprojectAo already ran
+        // every frame regardless of a hit; this one only runs after a successful trace (`if (lobeRough >
+        // 0.0 && curHit)`, the `else` branch below), so hoisting it unconditionally would cost every
+        // rough pixel whether or not the bit is set. Gating it keeps the clear-bit cost identical to
+        // today's, at the price of one possible SECOND rtReprojectReflection call on a skip-eligible
+        // pixel whose history just went invalid (a texture lookup, not a ray; the non-skip path already
+        // pays this every frame).
         //
-        // Tile math is T2's, verbatim: an 8x8, viewport-relative tile (one staged compute thread
-        // group), parity alternating by gRtHistParams.z so a tile that skips this frame traces next.
+        // Tile math is T2's, verbatim: an 8x8, viewport-relative tile (one staged compute thread group),
+        // parity alternating by gRtHistParams.z so a tile that skips this frame traces next.
         bool   skipTrace = false;
         float3 skipCol   = 0.0;
         if ((rtGiShadowBits() & 4u) != 0u && lobeRough > 0.0) {
@@ -1401,9 +1202,8 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
         bool   curHit;
         float3 col;
         if (skipTrace) {
-            // Exactly what the tiled branch's own "not my turn" case (below, the tileBits != 0u
-            // path) already does: reuse the reprojected history outright, no ray this frame. The
-            // unchanged history write and spatial filter, further down, take it from here.
+            // Same as the tiled branch's "not my turn" case below (the tileBits != 0u path): reuse the
+            // reprojected history outright, no ray this frame.
             col    = skipCol;
             curHit = true;
         } else {
@@ -1424,27 +1224,23 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
         }
 
         // WRITE THE RAW TEMPORAL VALUE, NEVER FILTERED -- same rule as rtShadowTemporal's history
-        // write. Feeding a filtered value back makes the spatial pass a compounding IIR filter,
-        // the reflection slowly dissolving.
+        // write, else the spatial pass becomes a compounding IIR filter, the reflection slowly
+        // dissolving.
         //
-        // W6/M5: GATED ON gAverHistoryWrite, ON BY DEFAULT (D3 decision) -- see this file's own
-        // gAverHistoryWrite/averDrawIsTranslucent comment, above the #if AVER_RT region this function
-        // lives in, for the flag's definition, and PSMainVoxi below for where a blended fragment
-        // clears it. Before this gate, a blended (glass/water) replay fragment overwrote this texel
-        // with the PANE's own reflection, the same class of double write this task's C9 finding
-        // names for the RT shadow/AO histories (voxi_rt.hlsli) and the ReSTIR GI histories
-        // (voxi_restir.hlsli). voxi.legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the
-        // old unconditional write, byte-identical, for A/B.
+        // W6/M5: GATED ON gAverHistoryWrite (on by default, D3) -- see gAverHistoryWrite/
+        // averDrawIsTranslucent above and PSMainVoxi below. Before this gate, a blended (glass/water)
+        // replay fragment overwrote this texel with the PANE's own reflection (the same double-write
+        // class this task's C9 finding names for the RT shadow/AO histories (voxi_rt.hlsli) and the
+        // ReSTIR GI histories (voxi_restir.hlsli)). voxi.legacyBlendedHistoryWrite
+        // (gAmbientParams.z bit 32) restores the old unconditional write, byte-identical, for A/B.
         //
-        // CLAMPED BEFORE IT IS STORED, not only where the caller composes the answer. rtReflection
-        // returns reflAlbedo * (direct + ambient) with nothing bounding it (PSRayDriven's own "ONLY
-        // UNBOUNDED TERM" comment), and before this line the raw value went into the history: next
-        // frame's reprojection takes it back at 85% weight and rtReflectionSpatial gathers it into a
-        // 7x7 neighbourhood, so one runaway ray -- a spike, a negative ambient undershoot, a NaN --
-        // stayed on screen for many frames and spread. clamp(), not min(), for the reason the callers'
-        // own clamp gives (a negative radiance is a recorded incident class here; clamp also maps NaN
-        // to a bound on this hardware). The spatial centre below uses the same bounded value, so the
-        // split CSRdReflFilter (which reads this texel back) and the unsplit path agree.
+        // CLAMPED BEFORE IT IS STORED, not only where composed: rtReflection returns reflAlbedo *
+        // (direct + ambient) with nothing bounding it (PSRayDriven's own "ONLY UNBOUNDED TERM" comment),
+        // and the raw value feeds next frame's 85%-weight reprojection and a 7x7 spatial gather, so one
+        // runaway ray (spike, negative-ambient undershoot, NaN) would stay on screen for many frames and
+        // spread. clamp(), not min() (a negative radiance is a recorded incident class; clamp also maps
+        // NaN to a bound here). The spatial centre below uses this same bounded value, so the split
+        // CSRdReflFilter (which reads this texel back) and the unsplit path agree.
         col = clamp(col, 0.0, AVER_VOX_MAXRAD);
         if (gAverHistoryWrite)
             gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
@@ -1469,8 +1265,8 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
     bool curHit;
     if (myTurn || !haveHist) {
         col = rtReflection(wpos, N, R, L, pixel, lobeRough, frameJitter, curHit);
-        // Same adaptive weight as rtShadowTemporal. Only blends a HIT with history: a fresh miss
-        // stays a miss (caller's sky fallback handles it) rather than dragged toward a stale colour.
+        // Same adaptive weight as rtShadowTemporal. Only blends a HIT with history: a fresh miss stays
+        // a miss (caller's sky fallback handles it) rather than dragged toward a stale colour.
         if (curHit && haveHist) {
             const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
             const float t = saturate(length(velocityPx) / budget);
@@ -1484,11 +1280,8 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
     }
 
     hit = curHit;
-    // Raw, not filtered -- see the untiled branch's own note on why feeding the spatial result back
-    // into the history makes it a compounding filter.
-    //
-    // W6/M5: same gate, same reason, as the untiled branch's own copy of this write above -- and the
-    // same clamp before it, for the same reason.
+    // Raw, not filtered (see the untiled branch's note above). W6/M5: same gate, same clamp, same
+    // reason as the untiled branch's copy above.
     col = clamp(col, 0.0, AVER_VOX_MAXRAD);
     if (gAverHistoryWrite)
         gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
@@ -1499,24 +1292,23 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
     }
 }
 
-// The wrapper every caller but CSRdRefl's own split branch uses -- always asks for the spatial gather,
-// so PSRayDriven's single pass, PSMainVoxi and CSRdRefl's own unsplit path stay byte-for-byte the same
-// call they made before rtReflectionTemporalEx existed.
+// The wrapper every caller but CSRdRefl's split branch uses -- always asks for the spatial gather, so
+// PSRayDriven, PSMainVoxi and CSRdRefl's unsplit path stay byte-for-byte the same call as before
+// rtReflectionTemporalEx existed.
 float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
                             float dzdx, float dzdy, out bool hit) {
     return rtReflectionTemporalEx(wpos, N, R, L, pixel, rough, dzdx, dzdy, true, hit);
 }
 
-// THE "NO DATA" SENTINEL FOR A PIXEL THE REFLECTION GATE ROUTED AWAY FROM TRACING THIS FRAME.
-// Every caller traces only where `rough <= 0.75` (and RT reflections are on), and rtReflectionTemporalEx
-// is the only writer of gRtReflHistOut -- so a pixel that failed the gate used to leave its texel
-// holding whatever it last traced, however many frames ago. Roughness is resampled every frame from a
-// footprint-chosen mip (and can be animated), so a pixel can flip across 0.75. When it requalified,
-// rtReprojectReflection found a positive depth that passed its tolerance, and blended that old colour
-// in at up to 85% weight as though it were last frame's. The same miss sentinel rtReflectionTemporalEx
-// already writes makes both the reprojection and rtReflectionSpatial's neighbour gather skip it.
-// Guarded exactly as that function's own writes are: only while the history pair is bound, and only
-// for a fragment allowed to write history (PSMainVoxi's blended replay is not).
+// THE "NO DATA" SENTINEL FOR A PIXEL THE REFLECTION GATE ROUTED AWAY FROM TRACING THIS FRAME. Every
+// caller traces only where `rough <= 0.75` (and RT reflections are on), and rtReflectionTemporalEx is
+// the only writer of gRtReflHistOut -- so a pixel that failed the gate used to leave its texel holding a
+// stale trace from however many frames ago. Roughness is resampled every frame from a footprint-chosen
+// mip (and can be animated), so it can flip across 0.75 frame to frame, and when it did,
+// rtReprojectReflection found a positive depth that passed its tolerance and blended that stale colour
+// back in at up to 85% weight. The same miss sentinel rtReflectionTemporalEx writes makes reprojection
+// and rtReflectionSpatial skip it. Guarded the same way as that function's writes: history pair bound,
+// and history-write allowed (not PSMainVoxi's blended replay).
 void rtReflectionHistoryVacate(float2 pixel) {
     if (gRtHistParams.x >= 0.5 && gAverHistoryWrite)
         gRtReflHistOut[uint2(pixel)] = float4(0.0, 0.0, 0.0, -1.0);
@@ -1570,14 +1362,14 @@ float shadowFactor(float3 wpos, float3 N, float ndl) {
 }
 
 // Sun visibility for LIGHT INJECTION, from the GI-only shadow map. A SEPARATE FUNCTION from
-// shadowFactor: that asks "is this PIXEL in shadow" by camera distance, correct on-screen but wrong
-// for a voxel, which exists wherever the (camera-independent) GI volume is. Feeding voxels through
-// the cascades forced fitCascades to union its last cascade with the whole GI volume (~14x the area,
-// every draw). One box over the volume answers directly: no cascade, no camera distance, no fade.
+// shadowFactor: that asks "is this PIXEL in shadow" by camera distance, correct on-screen but wrong for
+// a voxel that exists wherever the camera-independent GI volume is. Feeding voxels through the cascades
+// forced fitCascades to union its last cascade with the whole GI volume (~14x the area, every draw); one
+// box over the volume answers directly instead: no cascade, no camera distance, no fade.
 float giShadowFactor(float3 wpos, float3 N, float ndl) {
-    // Unusable map: fully lit. The volume is still injected, just without sun occlusion -- the same
-    // degradation shadowFactor performs when the atlas is missing, and the reason giShadowTex_ is a
-    // soft dependency rather than an init() failure.
+    // Unusable map: fully lit (still injected, just without sun occlusion) -- same degradation
+    // shadowFactor performs when the atlas is missing; giShadowTex_ is a soft dependency, not an
+    // init() failure.
     if (gGiShadowParams.y < 0.5) return 1.0;
 
     float slope = saturate(1.0 - ndl);
@@ -1586,8 +1378,8 @@ float giShadowFactor(float3 wpos, float3 N, float ndl) {
     float4 lp = mul(float4(p0, 1.0), gGiShadowViewProj);
     float3 p = lp.xyz / lp.w;
     float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    // OUTSIDE THE BOX IS LIT, NOT SHADOWED. The box covers the whole GI volume by construction, so
-    // landing outside it means the voxel is outside the volume too and its radiance is never read.
+    // OUTSIDE THE BOX IS LIT, NOT SHADOWED: the box covers the whole GI volume by construction, so
+    // outside it means the voxel is outside the volume too and its radiance is never read.
     if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0 || p.z < 0.0) return 1.0;
 
     // No atlas quadrant to inset into: this map is one box filling the whole texture.
@@ -1599,43 +1391,38 @@ float giShadowFactor(float3 wpos, float3 N, float ndl) {
     return s / 9.0;
 }
 
-// Per-dispatch constants for CSClear/CSResolve/CSMip (b3: b0/b1 are taken by the graphics root
-// signature). 32 B total, packed gSrcMip@0, gBoxLo@4 (12 B), gBoxHi@16 (12 B), _boxPad@28 -- mirrored
-// byte-for-byte by aver::voxi::GiDispatchConstants (GiDispatchBounds.hpp), which static_asserts its own
-// size against this layout so the two cannot drift apart silently. gSrcMip is CSMip's source-level
-// index, unused by CSClear/CSResolve (always mip 0). gBoxLo/gBoxHi is a half-open voxel-space box
-// [gBoxLo,gBoxHi) in the DESTINATION mip's own coordinate space; the C++ caller (VoxiRenderer, not this
-// file) computes and uploads the box for whichever level a given dispatch targets before every one of
-// the three kernels' Dispatch calls -- see aver-voxi-cbuffer-three-mirrors.md and the W3 spec for why
-// this lives in its own cbuffer rather than growing VoxiFrame.
+// Per-dispatch constants for CSClear/CSResolve/CSMip (b3: b0/b1 taken by the graphics root signature).
+// 32 B: gSrcMip@0, gBoxLo@4 (12B), gBoxHi@16 (12B), _boxPad@28 -- mirrored byte-for-byte by
+// aver::voxi::GiDispatchConstants (GiDispatchBounds.hpp, static_asserts its size against this layout so
+// the two cannot drift apart silently).
+// gSrcMip is CSMip's source-level index, unused by CSClear/CSResolve (always mip 0). gBoxLo/gBoxHi is a
+// half-open voxel-space box in the DESTINATION mip's coordinate space, uploaded by VoxiRenderer per
+// dispatch. See aver-voxi-cbuffer-three-mirrors.md and the W3 spec for why its own cbuffer, not VoxiFrame.
 cbuffer MipCB : register(b3) { uint gSrcMip; uint3 gBoxLo; uint3 gBoxHi; uint _boxPad; };
 
 #include "voxi_cone.hlsli"
 
-// ---- CSAirVis: bakes gAirVisOut from gVoxelTex's own occupancy (see gAirVis/gAirVisOut's own header
-// comment, above, for what this volume is and why it exists) ----
+// ---- CSAirVis: bakes gAirVisOut from gVoxelTex's own occupancy (see gAirVis/gAirVisOut's header,
+// above, for what this volume is) ----
 //
-// PLACED HERE, AFTER voxi_cone.hlsli, on purpose: it reuses voxelUVW/insideVolume rather than
-// reimplementing world<->volume-space conversion a third time, so it must sit textually after that
-// file's #include the same way this file's own PSMainVoxi/PSRayDriven do. UNCONDITIONAL -- not inside
-// #if AVER_RT -- because the air-vis volume backs cone-traced GI (PSMainVoxi, no ray tracing needed)
-// just as much as ray-driven shading, and gVoxelTex/gVoxelSamp/cbuffer VoxiFrame it reads are all
-// already unconditional themselves (declared above the first #if AVER_RT guard opens).
+// PLACED HERE, AFTER voxi_cone.hlsli: reuses voxelUVW/insideVolume rather than reimplementing world<->
+// volume-space conversion a third time, so it must sit textually after that file's #include the same
+// way this file's PSMainVoxi/PSRayDriven do. UNCONDITIONAL -- not inside #if AVER_RT -- because it backs
+// cone-traced GI (no ray tracing needed) as much as ray-driven shading, and its resources are already
+// unconditional.
 //
-// COMPILED WITH THE FULL giLayout(), the SAME descriptor table and VoxiFrame (b4) binding as
-// CSRdVisibility/CSRdShadow/CSRdGi/CSRdSkyOcc/CSRdRefl (further down this file) -- NOT the tiny MipCB
-// (b3) layout CSClear/CSResolve/CSMip use (just above), which has no VoxiFrame to read gVoxelOrigin/
-// gVoxelParams from. (VoxiRenderer.cpp's own dispatch chooses that root signature; this file has no
-// syntax for "layout," only the resource declarations both layouts happen to share.)
+// COMPILED WITH THE FULL giLayout(), the same descriptor table/VoxiFrame (b4) binding as
+// CSRdVisibility/CSRdShadow/CSRdGi/CSRdSkyOcc/CSRdRefl -- NOT the tiny MipCB (b3) layout
+// CSClear/CSResolve/CSMip use above, which has no VoxiFrame to read gVoxelOrigin/gVoxelParams from.
+// (VoxiRenderer.cpp's dispatch chooses that root signature; this file has no syntax for "layout," only
+// the resource declarations both layouts happen to share.)
 //
 // SCHEDULED AS A ROUND-ROBIN, NOT PER VOXEL REBUILD: every frame VoxiRenderer::prePass dispatches ONE
-// slab of z-layers, the half-open cell box [gBoxLo, gBoxHi) in MipCB (b3, the same root-constant block
-// the three voxel kernels above read, declared by this pipeline's layout too), so the whole volume
-// refreshes every few frames at a flat, small cost. A full box is dispatched once when the volume is
-// created. MEASURED, the reason: a full 48^3 pass cost ~10 ms, and the voxel volume rebuilds often
-// under camera motion, while sky visibility only changes when geometry does. Nothing is accumulated
-// across frames -- a cell is simply recomputed from the current voxels -- so a still scene writes the
-// same value every refresh and nothing can flicker.
+// slab of z-layers (the half-open box [gBoxLo, gBoxHi) in MipCB), so the whole volume refreshes every
+// few frames at flat, small cost; a full box dispatches once at creation. MEASURED: a full 48^3 pass
+// cost ~10 ms, and the voxel volume rebuilds often under camera motion while sky visibility only
+// changes with geometry. Nothing accumulates across frames -- a cell is simply recomputed from the
+// current voxels -- so a still scene can't flicker.
 #define AVER_AIRVIS_RES 32            // gAirVis/gAirVisOut's own resolution (~1.8 m cells over a 56 m GI volume)
 #define AVER_AIRVIS_DIRS 16           // directions marched per cell, tiling the upper hemisphere
 #define AVER_AIRVIS_MIN_ELEV_DEG 3.0  // Fibonacci hemisphere floor: nothing marches near the horizon
@@ -1653,34 +1440,32 @@ void CSAirVis(uint3 tid : SV_DispatchThreadID) {
     const float3 uvwCell = (float3(id) + 0.5) / (float)AVER_AIRVIS_RES;
     const float3 p = gVoxelOrigin.xyz + uvwCell / gVoxelOrigin.w;
 
-    // One voxel of the GI RADIANCE volume, world units -- what CSAirVis is marching THROUGH, and a
-    // different grid from the fixed-48 one it is WRITING (gVoxelParams.x is the GI volume's own,
-    // tier-dependent resolution; see QualityLadder.hpp). Same formula traceCone uses (voxi_cone.hlsli).
+    // One voxel of the GI RADIANCE volume, world units -- what this marches THROUGH, a different grid
+    // from the fixed-48 one it WRITES (gVoxelParams.x is the GI volume's own tier-dependent resolution;
+    // QualityLadder.hpp). Same formula as traceCone (voxi_cone.hlsli).
     const float voxelWorld = 1.0 / (gVoxelOrigin.w * gVoxelParams.x);
 
-    // Half-angle from the direction count, same "tile the hemisphere with N cones" derivation
-    // coneTracedIndirect uses (voxi_cone.hlsli): 2*pi(1-cosHalf) = 2*pi/N covers the hemisphere.
+    // Half-angle from direction count, same "tile the hemisphere with N cones" derivation as
+    // coneTracedIndirect: 2*pi(1-cosHalf) = 2*pi/N covers the hemisphere.
     const float cosHalf = saturate(1.0 - 1.0 / (float)AVER_AIRVIS_DIRS);
     const float halfAngleTan = sqrt(max(1.0 - cosHalf * cosHalf, 1e-6)) / max(cosHalf, 1e-6);
     const float sinMinElev = sin(radians(AVER_AIRVIS_MIN_ELEV_DEG));
 
     float Tsum = 0.0;
-    // A DETERMINISTIC FIBONACCI HEMISPHERE, not a random/blue-noise set: z stratified evenly over
-    // [sin(minElev), 1] (equal-area per step, since dz is proportional to solid angle) and azimuth
-    // stepped by the golden angle (2.39996323, the SAME constant coneTracedIndirect's own ring uses)
-    // so successive directions don't clump. No frame index anywhere in this function -- the volume is
-    // rebaked, not re-jittered, so it carries no temporal signal to flash on camera motion.
+    // A DETERMINISTIC FIBONACCI HEMISPHERE, not random/blue-noise: z stratified evenly over
+    // [sin(minElev), 1] (equal-area per step) and azimuth stepped by the golden angle (2.39996323, same
+    // constant coneTracedIndirect's ring uses) so directions don't clump. No frame index anywhere: the
+    // volume is rebaked, not re-jittered, so it carries no temporal signal to flash on camera motion.
     [loop] for (uint dirIdx = 0; dirIdx < AVER_AIRVIS_DIRS; ++dirIdx) {
         const float z = sinMinElev + (1.0 - sinMinElev) * ((float)dirIdx + 0.5) / (float)AVER_AIRVIS_DIRS;
         const float r = sqrt(saturate(1.0 - z * z));
         const float phi = 2.39996323 * (float)dirIdx;
         const float3 d = float3(r * cos(phi), r * sin(phi), z);
 
-        // Widening cone through the volume, same shape as traceCone (voxi_cone.hlsli) but reading
-        // OCCUPANCY (alpha, CSResolve's fragment-covered fraction, box-filtered into coarser mips by
-        // CSMip) instead of radiance, and starting HALF a voxel out rather than traceCone's two --
-        // this marches from a volume CELL CENTRE, not a lit surface point, so there is no coplanar
-        // voxel to avoid self-hitting.
+        // Widening cone through the volume, same shape as traceCone but reading OCCUPANCY (alpha,
+        // CSResolve's fragment-covered fraction, box-filtered into coarser mips by CSMip) instead of
+        // radiance, starting HALF a voxel out rather than traceCone's two -- marching from a cell
+        // CENTRE, not a lit surface point, so there's no coplanar voxel to self-hit.
         float T = 1.0;
         float dist = voxelWorld * 0.5;
         [loop] for (uint step = 0; step < AVER_AIRVIS_MAX_STEPS; ++step) {
@@ -1691,8 +1476,8 @@ void CSAirVis(uint3 tid : SV_DispatchThreadID) {
             const float mip = log2(footprint / voxelWorld);
             const float occupancy = gVoxelTex.SampleLevel(gVoxelSamp, uvwGi, mip).a;
             // A ONE-VOXEL-THICK ROOF, averaged into a coarse mip alongside open neighbours, reads as
-            // barely-there occupancy (CSMip's box filter dilutes it 8x per level) -- OCC_GAIN pushes a
-            // thin-but-real occluder back toward fully blocking rather than letting mip climb erase it.
+            // barely-there occupancy (CSMip's box filter dilutes it 8x/level) -- OCC_GAIN pushes a
+            // thin-but-real occluder back toward fully blocking.
             T *= 1.0 - saturate(occupancy * AVER_AIRVIS_OCC_GAIN);
             dist += footprint;
         }
@@ -1704,16 +1489,15 @@ void CSAirVis(uint3 tid : SV_DispatchThreadID) {
 
 // ---- SHADE-PASS READ: how much of the sky the air between the camera and wpos can actually see ----
 //
-// Called from voxi.hlsl's own PSMainVoxi/PSRayDriven fog call sites, further down this file, and
-// nowhere in shared_prelude.hlsl -- water.hlsl, scene.hlsl and every other averApplyFog(Ex) caller
-// keep passing airVis == 1.0 (that function's own wrapper, shared_prelude.hlsl) and stay unaffected.
+// Called from PSMainVoxi/PSRayDriven's fog sites only -- water.hlsl, scene.hlsl and every other
+// averApplyFog(Ex) caller keep passing airVis == 1.0 and stay unaffected.
 //
-// DETERMINISTIC, LIKE CSAirVis ABOVE: 8 FIXED points, no jitter, no per-pixel history -- see
-// gAirVis/gAirVisOut's own header comment, further up this file, for why a temporally-accumulated
-// per-pixel signal was tried here first (surface AO) and reverted for flashing open on camera motion.
+// DETERMINISTIC, LIKE CSAirVis ABOVE: 8 FIXED points, no jitter, no per-pixel history (see
+// gAirVis/gAirVisOut's header for why a temporally-accumulated per-pixel signal was tried here first
+// (surface AO) and reverted for flashing open on camera motion).
 float voxiAirVisibility(float3 wpos) {
-    // Voxel GI off, or the volume doesn't exist yet: today's behaviour, unoccluded air. Matches the
-    // `gVoxelParams.w > 0.5` idiom this file already uses everywhere else for the same question.
+    // Voxel GI off, or the volume doesn't exist yet: unoccluded air (matches the `gVoxelParams.w >
+    // 0.5` idiom used everywhere else in this file for the same question).
     if (gVoxelParams.w <= 0.5) return 1.0;
     uint dimX, dimY, dimZ;
     gAirVis.GetDimensions(dimX, dimY, dimZ);
@@ -1725,16 +1509,14 @@ float voxiAirVisibility(float3 wpos) {
     if (segLen <= 1e-4) return 1.0;
     const float3 dir = (wpos - camPos) / segLen;
 
-    // The sampled sub-segment STARTS at the fog's own start distance, not at the camera: fog before
-    // that distance contributes nothing at all (averFogFactor's `len <= start` early-out,
-    // shared_prelude.hlsl), so a sample there would pull the average toward the near-camera answer
-    // (usually open) for a surface that is entirely inside the fogged range.
+    // The sampled sub-segment STARTS at the fog's own start distance, not the camera: fog before that
+    // distance contributes nothing (averFogFactor's `len <= start` early-out), so a sample there would
+    // pull the average toward the near-camera (usually open) answer.
     const float start = min(gFogParams.z, segLen);
     const float span = segLen - start;
 
-    // Height-fog density weighting, mirroring averFogFactor's own exponential (shared_prelude.hlsl):
-    // a sample deep under the fog should outvote one near its ceiling, or the volume's answer at the
-    // top of a tall atrium would wash out the occluded answer down at street level.
+    // Height-fog density weighting, mirroring averFogFactor's exponential: a sample deep under the fog
+    // should outvote one near its ceiling, or a tall atrium's top would wash out street-level occlusion.
     const float fogK = gFogParams.x;
     const float fogHeight = gFogParams.y;
 
@@ -1743,7 +1525,7 @@ float voxiAirVisibility(float3 wpos) {
         const float t = start + (((float)i + 0.5) / 8.0) * span;
         const float3 p = camPos + dir * t;
         const float3 uvw = voxelUVW(p);
-        // Outside the volume counts as open sky, same rule CSAirVis's own march uses.
+        // Outside the volume counts as open sky, same rule CSAirVis's march uses.
         const float v = insideVolume(uvw) ? gAirVis.SampleLevel(gVoxelSamp, uvw, 0.0) : 1.0;
         const float w = fogK <= 1e-8 ? 1.0 : exp(-(p.z - fogHeight) * fogK);
         wSum += w;
@@ -1753,20 +1535,18 @@ float voxiAirVisibility(float3 wpos) {
 }
 
 // ================= additive G-buffer: velocity, view-space depth, normal+roughness =================
-// Gated on AVER_GBUFFER, following AVER_RT's convention: a compile-time define (never a runtime
-// branch), off by default, so PSMainVoxi's/PSRayDriven's ORIGINAL variants fall through unchanged --
-// THE FEATURE IS ADDITIVE: with the define off the frame must be bit-identical, checked by the
-// render gate oracle (18 gates x 9 configurations).
+// Gated on AVER_GBUFFER, following AVER_RT's convention: compile-time define, off by default, so
+// PSMainVoxi's/PSRayDriven's ORIGINAL variants fall through unchanged. ADDITIVE: with the define off
+// the frame must be bit-identical (checked by the render gate oracle, 18 gates x 9 configurations).
 //
-// WHY THIS EXISTS: nothing produces motion vectors and there's no G-buffer -- PSMainVoxi returns one
-// SV_TARGET, normal/roughness/albedo living only in shader registers. That single gap blocks the
-// vendored FidelityFX denoiser (third_party/fidelityfx-denoiser/README.md), FSR 2/3, TAA and
-// screen-space reflections at once, and is WHY temporal reprojection is wrong for moving geometry:
-// rtReprojectHistory and siblings transform THIS frame's wpos through LAST frame's camera, only
-// valid for a surface that didn't move.
+// WHY THIS EXISTS: no motion vectors, no G-buffer -- PSMainVoxi returns one SV_TARGET, normal/
+// roughness/albedo living only in shader registers. Blocks the vendored FidelityFX denoiser
+// (third_party/fidelityfx-denoiser/README.md), FSR 2/3, TAA and screen-space reflections at once, and is
+// why temporal reprojection is wrong for moving geometry (rtReprojectHistory and siblings transform
+// THIS frame's wpos through LAST frame's camera, valid only for a surface that didn't move).
 //
-// THIS SLICE ONLY WRITES THE TARGETS -- wiring a consumer (FFX denoiser, FSR3, TAA) is later work,
-// out of scope on purpose: unread-but-written is this codebase's recurring shape, deliberately here.
+// THIS SLICE ONLY WRITES THE TARGETS -- wiring a consumer (FFX denoiser, FSR3, TAA) is later work, out
+// of scope on purpose: unread-but-written is this codebase's recurring shape, deliberately here.
 //
 // ---- HOW TO DECODE EACH CHANNEL, so encode and decode don't drift apart ----
 //   SV_TARGET1 velocity:        RG16F. Texels/frame, DESTINATION (this frame's) minus SOURCE (last
@@ -1789,25 +1569,22 @@ struct GBufferOut {
 };
 
 // Packs a world-space unit normal and roughness into the RGB10A2 convention above. Shared by
-// PSMainVoxi and PSRayDriven (both its sky-hit and sky-miss branches, further down this same file)
-// so the encode is written once, not risking divergence.
+// PSMainVoxi and PSRayDriven (both its sky-hit and sky-miss branches) so the encode is written once,
+// not risking divergence.
 //
-// THIS IS NRD'S NORMAL_ENCODING_R10G10B10A2_UNORM LAYOUT, TRANSCRIBED BYTE-EXACT FROM
+// NRD'S NORMAL_ENCODING_R10G10B10A2_UNORM LAYOUT, transcribed byte-exact from
 // _NRD_EncodeNormalRoughness101010 (third_party/nrd/Shaders/NRD.hlsli) -- NOT the naive
-// N*0.5+0.5-with-roughness-in-w scheme this function used to compute, which is NRD's #else layout
-// for encodings 0/3 and is WRONG for the format this texture actually uses. Confined-vendoring
-// terms keep NRD's headers out of modules/render.voxi, so the maths is transcribed here rather than
-// included, the same pattern the YCoCg pair in voxi_restir.hlsli already follows; the matching
-// decode is transcribed a second time in sandbox/shaders/gbuffer_debug.hlsl for the debug view, and
-// a third time (for a CPU-side round-trip test, no GPU needed since it's pure arithmetic) in
-// tests/render.nrd/src/NrdNormalRoughnessEncodingTest.cpp.
+// N*0.5+0.5-with-roughness-in-w scheme this used to compute (NRD's #else layout for encodings 0/3,
+// wrong for this format). Confined-vendoring keeps NRD's headers out of this module, so the maths is
+// transcribed here (same pattern as the YCoCg pair in voxi_restir.hlsli); the decode is transcribed
+// again in sandbox/shaders/gbuffer_debug.hlsl and a third time (a CPU-side round-trip test, no GPU
+// needed since it's pure arithmetic) in tests/render.nrd/src/NrdNormalRoughnessEncodingTest.cpp.
 //
 // THE LAYOUT: an improved-octahedral encode folds N into x/y (L1-normalize, then a fold that always
-// lands both channels in [0,1] -- see the two lines below, or work the algebra: r.x = 0.5 +
-// 0.5*(n.x+n.y) and |n.x+n.y| <= |n.x|+|n.y|+|n.z| = 1 after the L1-normalize, so r.x can never
-// leave [0,1], and the same argument covers r.y). z carries roughness's MAGNITUDE with the SIGN OF
-// n.z riding on z's own sign -- which is why roughness is clamped away from exactly 0 below: a zero
-// magnitude has no sign to carry n.z's, and the decoder recovers that sign from `t < 0`.
+// lands both channels in [0,1]: r.x = 0.5 + 0.5*(n.x+n.y) and |n.x+n.y| <= 1 after L1-normalize). z
+// carries roughness's MAGNITUDE with the SIGN OF n.z riding on z's own sign -- why roughness is
+// clamped away from exactly 0: a zero magnitude has no sign to carry, and the decoder recovers it
+// from `t < 0`.
 float4 averPackNormalRoughness(float3 N, float roughness) {
     N /= abs(N.x) + abs(N.y) + abs(N.z);
 
@@ -1816,100 +1593,87 @@ float4 averPackNormalRoughness(float3 N, float roughness) {
     r.x = N.x * 0.5 + r.y;
     r.y -= N.x * 0.5;
 
-    // Can't be exactly 0, or it erases n.z's sign bit -- NRD's own comment on the line this
-    // transcribes, and the reason a caller passing an unclamped/zero roughness still gets a
-    // decodable normal back.
+    // Can't be exactly 0, or it erases n.z's sign bit (NRD's own comment on the line this transcribes) --
+    // why a caller passing an unclamped/zero roughness still gets a decodable normal back.
     roughness = max(saturate(roughness), 1.5 / 512.0);
     const float s = N.z < 0.0 ? -roughness : roughness;
     r.z = s * 0.5 + 0.5;
 
-    // w: NRD's materialID/3 slot. This engine has no material-ID concept, so always 0 -- see the
-    // G-buffer's own header comment above and RHI.hpp's gBufferNormalRoughnessTexture for why a
-    // reader must not mistake this for roughness.
+    // w: NRD's materialID/3 slot. No material-ID concept here, so always 0 (see G-buffer header above
+    // and RHI.hpp's gBufferNormalRoughnessTexture -- not roughness).
     return float4(r, 0.0);
 }
 
 // Screen-space motion for the velocity channel: `wpos` reprojected through THIS frame's camera minus
-// the SAME wpos through LAST frame's, in the SCENE VIEWPORT RECT (same landmine as
-// rtReprojectHistory: the editor docks the 3D view in a sub-rect, so plain ndc*0.5+0.5 is wrong).
+// the SAME wpos through LAST frame's, in the SCENE VIEWPORT RECT (same landmine as rtReprojectHistory:
+// plain ndc*0.5+0.5 is wrong once the editor docks the 3D view in a sub-rect).
 //
-// STATIC-GEOMETRY ONLY, A STATED DELIBERATE GAP: using `wpos` in both projections is correct only if
-// the surface didn't move. A moving instance needs its OWN previous-frame transform (previous
-// `gWorld` for raster, previous `RtInstance.objectToWorld` for ray-driven), and NEITHER EXISTS YET.
-// Consequence: correct motion for a stationary object under a moving camera, ZERO motion for an
-// object that is itself animating -- SILENTLY. Fix: thread a previous-transform through RtInstance
-// (or the per-draw cbuffer) and reproject through it instead of `wpos` twice.
+// STATIC-GEOMETRY ONLY, A DELIBERATE GAP: using `wpos` in both projections is correct only if the
+// surface didn't move. A moving instance needs its OWN previous-frame transform (previous `gWorld` for
+// raster, previous `RtInstance.objectToWorld` for ray-driven), and NEITHER EXISTS YET -- so a moving
+// object gets ZERO motion, SILENTLY. Fix: thread a previous-transform through RtInstance (or the
+// per-draw cbuffer) and reproject through it instead of `wpos` twice.
 float2 averGBufferVelocity(float3 wpos) {
     const float4 curClip  = mul(float4(wpos, 1.0), gViewProj);
     const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
     // Either transform can put this point behind its own near plane -- prevClip routinely does (first
     // frame, or anything that just entered the frustum). Zero is "no motion known", same fallback as
-    // rtReprojectHistory's velocityPx -- the least wrong answer when the maths is undefined, rather
-    // than an Inf/NaN divide.
+    // rtReprojectHistory's velocityPx -- the least wrong answer when the maths is undefined, rather than
+    // an Inf/NaN divide.
     if (curClip.w <= 1e-4 || prevClip.w <= 1e-4) return float2(0.0, 0.0);
 
     const float2 curNdc  = curClip.xy  / curClip.w;
     const float2 prevNdc = prevClip.xy / prevClip.w;
-    // B2 (F6): THIS frame's clip position (curClip, above, built from gViewProj) has to land in THIS
-    // frame's viewport rect, not last frame's -- the cbuffer's own field comments pair gViewProj with
-    // gSceneViewportCur and gPrevViewProj with gSceneViewport (see the VoxiFrame struct at the top of
-    // this file), and the editor can resize/redock the 3D view between frames, so the two rects are
-    // not interchangeable even when they happen to agree most frames. THIS WAS WRONG: curPx used to
-    // map through gSceneViewport (last frame's rect) exactly like prevPx does, four lines below --
-    // paired with the CURRENT clip position it should never have shared prevPx's rect at all. Falls
-    // back to gSceneViewport when the device had no current rect yet this frame (gSceneViewportCur.w
-    // == 0 is that field's own documented sentinel, set at VoxiRenderer.cpp's beginShadowHistory)
-    // rather than mapping into a zero-sized rect and dividing by zero.
+    // B2 (F6): THIS frame's clip position (curClip, from gViewProj) must land in THIS frame's viewport
+    // rect, not last frame's (gViewProj pairs with gSceneViewportCur, gPrevViewProj with
+    // gSceneViewport -- see the VoxiFrame struct top of file; the editor can redock the 3D view between
+    // frames). THIS WAS WRONG: curPx used to map through gSceneViewport (last frame's rect) like prevPx
+    // does below, paired with the CURRENT clip position it should never have shared prevPx's rect at
+    // all. Falls back to gSceneViewport when the device had no current rect yet this frame
+    // (gSceneViewportCur.w == 0 is that field's documented sentinel, set at VoxiRenderer.cpp's
+    // beginShadowHistory) rather than dividing by zero.
     const float4 curRect = gSceneViewportCur.w > 0.0 ? gSceneViewportCur : gSceneViewport;
     const float2 curPx  = curRect.xy +
                           float2(curNdc.x * 0.5 + 0.5, 0.5 - curNdc.y * 0.5) * curRect.zw;
     const float2 prevPx = gSceneViewport.xy +
                           float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5) * gSceneViewport.zw;
-    // DESTINATION (curPx) minus SOURCE (prevPx) -- see header and UpscalerNeeds::MotionVectors
-    // (RHIResources.hpp) for why that order is the contract a consumer can assume.
+    // DESTINATION (curPx) minus SOURCE (prevPx) -- the contract UpscalerNeeds::MotionVectors
+    // (RHIResources.hpp) documents.
     return curPx - prevPx;
 }
 
 // One expansion point for PSMainVoxi's several `return` statements, so the three extra channels stay
-// identical everywhere instead of by hand per site. gbufVelocity/gbufViewZ/gbufNormalRough are
-// computed once, after `s` is built -- this macro only assembles values that already exist.
+// identical everywhere instead of by hand per site. Only assembles values already computed once, after
+// `s` is built (gbufVelocity/gbufViewZ/gbufNormalRough).
 #define AVER_GBUF_RETURN(colorExpr) \
     { GBufferOut aver_gbuf_o; aver_gbuf_o.col = (colorExpr); aver_gbuf_o.velocity = gbufVelocity; \
       aver_gbuf_o.viewZ = gbufViewZ; aver_gbuf_o.normalRoughness = gbufNormalRough; return aver_gbuf_o; }
 #else
-// Disabled: PSMainVoxi's own `return` sites expand to a plain return, exactly what stood at each site
-// before this feature existed -- see the #if branch above for what they become when it is on.
+// Disabled: expands to a plain return, exactly what stood at each site before this feature existed.
 #define AVER_GBUF_RETURN(colorExpr) return (colorExpr)
 #endif
 
 // ---- B1: DOES A COLOUR ALREADY MARK THIS PIXEL'S DIFFUSE CHANNEL AS POISONED? ----
 //
-// giRestirIndirect (voxi_restir.hlsli) paints one of SEVEN sentinel colours over its own return
-// value -- never the real indirect diffuse -- whenever gGiRestirParams.w > 0.5 and one of its own
-// guards fired THIS frame (see that function's own POISON DEBUG VIEW comment for the legend and the
-// precedence among those seven). PSMainVoxi/PSRayDriven below add an EIGHTH colour, VIOLET, for a
-// DIFFERENT guard entirely -- the ray-traced SPECULAR term's own ceiling clamp (F5) -- and it is
-// computed and applied in THIS file, not inside giRestirIndirect, so it cannot sit inside that
-// function's own if/else-if precedence ladder and cannot silently pre-empt one of its seven returns.
+// giRestirIndirect (voxi_restir.hlsli) paints one of SEVEN sentinel colours over its return value --
+// never the real indirect diffuse -- whenever gGiRestirParams.w > 0.5 and one of its own guards fired
+// this frame (see that function's POISON DEBUG VIEW comment for the legend/precedence). PSMainVoxi/
+// PSRayDriven add an EIGHTH, VIOLET, for a different guard -- the ray-traced SPECULAR term's ceiling
+// clamp (F5) -- computed in THIS file so it can't sit inside giRestirIndirect's own precedence ladder or
+// pre-empt one of its seven returns.
 //
-// It CAN still collide at the pixel level: both markers are gated by the SAME flag
-// (gGiRestirParams.w), and a pixel's diffuse and specular channels are independent, so nothing stops
-// both guards firing together. THE PRECEDENCE CHOSEN: a giRestirIndirect colour on the diffuse
-// channel always wins over violet. Rationale -- those seven already carry their OWN internal
-// precedence (a non-finite guard always outranks a mere ceiling hit, per that function's own
-// comment), so they are the more carefully arbitrated signal and diffuse corruption/ceiling is the
-// established diagnostic this view exists for; violet is new and narrower (specular only), and
+// It CAN still collide at the pixel level (same gate, independent channels). PRECEDENCE: a
+// giRestirIndirect colour on diffuse always wins over violet -- the seven already carry their own
+// internal precedence (a non-finite guard always outranks a mere ceiling hit, per that function's own
+// comment) and are the established diagnostic; violet is newer and narrower (specular only), so
 // overwriting an existing colour with it would destroy information the seven already spent effort
-// ranking. Each PSMainVoxi/PSRayDriven call site below reads this back as `giDiffusePoisoned`.
+// ranking. Each call site below reads this back as `giDiffusePoisoned`.
 //
-// EXACT EQUALITY IS SAFE AND DELIBERATE, not a fragile float compare: every one of the seven colours
-// below is built from the literals 0.0/0.5/1.0 alone, each exactly representable in IEEE754, and none
-// is a value real shaded radiance can produce by coincidence -- the whole reason they were chosen as
-// "unmistakable, scene-lighting-cannot-produce-this" sentinels in giRestirIndirect's own words.
-// Comparing for exact equality is the same design already at work there, applied by the reader
-// instead of the writer. Only meaningful right after a giRestirIndirect call (giMode 0's
-// coneTracedIndirect never produces one of these by construction), so every call site below only
-// tests it there.
+// EXACT EQUALITY IS SAFE AND DELIBERATE, not a fragile float compare: all seven colours are built from
+// 0.0/0.5/1.0 alone (exact in IEEE754), and none is a value real shaded radiance can produce by
+// coincidence -- the same "unmistakable, scene-lighting-cannot-produce-this" design giRestirIndirect
+// uses, applied by the reader. Only meaningful right after a giRestirIndirect call (giMode 0's
+// coneTracedIndirect never produces one by construction).
 bool aver_IsGiRestirPoisonColour(float3 c) {
     return (c.r == 1.0 && c.g == 0.0 && c.b == 1.0)    // magenta: store-time reservoir guard
         || (c.r == 0.0 && c.g == 1.0 && c.b == 1.0)    // cyan: candidate-radiance clamp guard
@@ -1926,69 +1690,55 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
 // ---- [earlydepthstencil] IS LOAD-BEARING, NOT AN OPTIMISATION ----
 //
 // This shader WRITES UAVs (gAoHistOut u4, gAoHitDistOut u5, via rtSkyOcclusionTemporal) and calls
-// clip(). Both of those individually defeat hardware early-Z, so without this attribute D3D12 moves
-// the depth test AFTER the shader: a fragment that is hidden behind a nearer surface still runs,
-// still traces its hemisphere, and still lands its store. Those stores are plain RWTexture2D --
-// not ROV, not atomic -- so which fragment owns a texel is decided by DRAW ORDER, not by depth.
-// The scene pass rasterises with CullMode::None (VoxiRenderer.cpp, `scene.cull`) and PTTest ships
-// with its depth prepass off, so in an enclosed scene the last writer is routinely a surface BEHIND
-// the wall, whose hemisphere is open to the sky and whose fresh trace is 1.0. The visible fragment
-// then reads that poisoned texel back at history weight 0.97 and renders a fully-lit floor.
+// clip(), both of which defeat hardware early-Z, so without this attribute D3D12 moves the depth test
+// AFTER the shader: a hidden fragment still runs, traces, and stores. Those stores are plain
+// RWTexture2D (not ROV/atomic), so texel ownership is decided by DRAW ORDER, not depth. The scene pass
+// rasterises with CullMode::None (VoxiRenderer.cpp, `scene.cull`) and no depth prepass (PTTest), so the
+// last writer in an enclosed scene is routinely a surface BEHIND the wall with an open hemisphere (fresh
+// trace 1.0), and the visible fragment reads that poisoned texel back at 0.97 history weight, rendering
+// a fully-lit floor.
 //
-// MEASURED, PTTest NewSponza, fog off, fixed exposure, against a converged path-traced reference
-// corrected for the PT view's own 1.06x horizontal stretch (without that correction 43% of the
-// apparent error is misalignment and none of these numbers mean anything):
+// MEASURED, PTTest NewSponza, fog off, fixed exposure, vs a converged path-traced reference (PT view's
+// 1.06x stretch corrected; uncorrected, 43% of the apparent error is misalignment): raw trace is CORRECT
+// and identical on both primary-visibility paths (raster 1.50, ray-driven 1.51 -- MAD 0.05 between the
+// two fields, truth 1.32); let the accumulator run and the same quantity reads 4.62 on ray-driven (a
+// fullscreen pass, one invocation per pixel) vs 132.76 here -- an 88x lift, entirely manufactured
+// downstream. WITH this attribute: occlusion 132.76 -> 21.27 (gradient returns: 21.27 shadowed vs 59.78
+// open, was saturated flat); shaded image 6.43 -> 3.77 MAD from truth; raster-vs-ray-driven PARITY
+// 6.05 -> 0.98. JungleRuins, a second and much more open scene, moves the other way for the same reason
+// and also improves: 14.06 -> 12.93.
 //
-//   the RAW trace is identical on both primary-visibility paths and it is CORRECT --
-//   raster 1.50, ray-driven 1.51 (MAD 0.05 between the two fields) against a truth of 1.32.
-//   Let the accumulator run and the same quantity reads 4.62 on ray-driven (a fullscreen pass, one
-//   invocation per pixel) and 132.76 here. An 88x lift, entirely manufactured downstream.
+// THE DEPTH PREPASS: an earlier "why not use it instead" was measured on a BROKEN prepass
+// (--depth-prepass regressed MAD 6.43 -> 21.66, parity -> 20.82, bit-identical NRD on/off -- nothing was
+// shading). Cause: with the device on mesh shaders (RENDER.MESHSHADERS 1), prepassed draws got the
+// ORDINARY Less/depth-write pipeline, rejecting the prepass's equal depth and discarding the colour pass
+// (47x cheaper for it). Fixed in D3D12Device/VulkanDevice::drawMesh (a prepassed draw now takes the
+// input-assembler path its depth was written through). Expected to be the stronger form of this fix once
+// verified -- one shaded fragment/pixel, so the AO history is written only by the visible surface, and
+// ~8x cheaper (47.51ms scene draws measured without it) -- NOT YET MEASURED FIXED.
 //
-//   with this attribute:  occlusion 132.76 -> 21.27 and the gradient comes back (21.27 shadowed vs
-//   59.78 open, where before it was saturated flat); the shaded image moves 6.43 -> 3.77 MAD from
-//   truth, and raster-vs-ray-driven PARITY moves 6.05 -> 0.98. JungleRuins, a second and much more
-//   open scene, moves the other way for the same reason and also improves: 14.06 -> 12.93.
-//
-// THE DEPTH PREPASS -- THE "WHY NOT" THAT STOOD HERE WAS MEASURED ON A BROKEN PREPASS. It recorded
-// --depth-prepass regressing the image (MAD 6.43 -> 21.66, parity -> 20.82) with bit-identical
-// results NRD on and off, and concluded the prepass was not the fix. The cause was not the prepass:
-// with the device on mesh shaders (RENDER.MESHSHADERS 1) the backends handed every prepassed draw the
-// ORDINARY mesh-shader pipeline -- Less, depth write on -- which rejected the equal depth the prepass
-// had just written, so the colour pass was almost entirely discarded (and 47x cheaper for it). The
-// "bit-identical NRD on and off" was the tell: nothing was shading. Fixed in D3D12Device/VulkanDevice::
-// drawMesh (a prepassed draw now takes the input-assembler path its depth was written through).
-// With that fixed, the prepass is expected to be the stronger form of THIS change -- one shaded
-// fragment per pixel, so the AO history is written only by the visible surface -- and roughly 8x
-// cheaper on the raster path (47.51ms scene draws measured without it). NOT YET MEASURED FIXED.
-//
-// THE clip() INTERACTION -- THIS PARAGRAPH USED TO SAY IT WAS SAFE, AND IT WAS WRONG.
-//
-// It claimed the only clip() here was the translucent ONE-LAYER selection below and that "there is
-// no alpha-cutout discard here; the cutout lives in PSDepthPrepass". That was checked by searching
-// THIS FILE ONLY. averEvalMaterial (called below) comes from the material prelude, and
-// material_prelude.hlsl does `if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);`.
-// Under forced early depth the depth WRITE happens before this shader runs, so that clip discards the
-// colour of a cut-out texel but not its depth: every hole in a leaf or a fence wrote opaque depth and
-// hid whatever was drawn behind it afterwards. "Verified by capture on both scenes; neither lost
-// geometry" was true and did not test it -- a whole-image comparison cannot see a few percent of
-// foliage pixels. Found by adversarial review, not by a capture.
-//
-// HOW IT IS HANDLED NOW: an alpha-masked draw never reaches this shader with depth write on. Either
-// the frame-wide depth prepass already wrote its depth (PSDepthPrepass does not force early depth and
-// clips before it writes), or the colour walk writes that one draw's depth first through
-// IDevice::drawMeshDepthOnly -- and in both cases the colour draw then uses the LessEqual/NO-WRITE
-// twin, which leaves early depth nothing to write. See GameRender.cpp's colour loop for the residuals
-// (cluster-dispatched geometry, material graphs driving opacity; skinned and soft-body meshes ARE
-// covered, via their posed handle).
-//
-// The translucent ONE-LAYER clip is still harmless for the reason originally given: the blended PSO
-// sharing this shader sets depth.write = false (VoxiRenderer.cpp), so there is no depth to leak.
+// THE clip() INTERACTION -- an earlier version of this comment claimed safety here and was WRONG. It
+// claimed "there is no alpha-cutout discard here; the cutout lives in PSDepthPrepass", checked only by
+// searching this file for clip(); it missed material_prelude.hlsl's alpha-cutout clip
+// (`AVER_MAT_ALPHA_MASK`) inside averEvalMaterial. Under forced early depth, the depth WRITE happens
+// before the shader runs, so that clip discarded a cutout texel's colour but not its depth -- every
+// leaf/fence hole wrote opaque depth and hid what was behind it. "Verified by capture on both scenes;
+// neither lost geometry" was true and did not test it -- a whole-image comparison can't see a few
+// percent of foliage pixels; found by adversarial review instead.
+// FIXED: an alpha-masked draw never reaches this shader with depth write on -- either the frame-wide
+// depth prepass already wrote it (PSDepthPrepass does not force early depth and clips before it
+// writes), or the colour walk writes that draw's depth first via IDevice::drawMeshDepthOnly, and either
+// way the colour draw uses the LessEqual/NO-WRITE twin, leaving early depth nothing to write (see
+// GameRender.cpp's colour loop for residuals -- cluster-dispatched geometry, material graphs driving
+// opacity; skinned and soft-body meshes ARE covered, via their posed handle). The translucent ONE-LAYER
+// clip stays harmless for the reason originally given: that PSO sets depth.write = false
+// (VoxiRenderer.cpp), so there's no depth to leak.
 //
 // TEMPORAL VALIDATION, because this feeds an accumulated term and still frames cannot judge one:
-// matched-pose A/B (--cam-translate 3 --cam-wobble 8 40 --cam-wobble-stop 100, 103 vs 220 frames)
-// puts settle-time sensitivity at MAD 0.43 with the attribute against 0.62 without -- it REDUCES
-// temporal dependence. High-frequency energy rises 0.39 -> 0.46, which is the occlusion field
-// regaining real structure rather than sitting saturated.
+// matched-pose A/B (--cam-translate 3 --cam-wobble 8 40 --cam-wobble-stop 100, 103 vs 220 frames) puts
+// settle-time sensitivity at MAD 0.43 with the attribute vs 0.62 without -- REDUCES temporal dependence.
+// High-frequency energy rises 0.39 -> 0.46: the occlusion field regaining real structure, not sitting
+// saturated.
 #if AVER_GBUFFER
 [earlydepthstencil]
 GBufferOut PSMainVoxi(VSOut i) {
@@ -2000,99 +1750,78 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     // ---- W6/M5: DOES THIS FRAGMENT'S HISTORY WRITE BELONG TO IT? ----
     //
-    // blendedFragment is true only when BOTH are true: the backend actually replayed translucent
-    // draws blended THIS frame (gAmbientParams.w bit 32 -- D3D12 only, C10; the bit is simply clear
-    // on every other backend, so this reduces to always-false there with no second #if needed), AND
-    // this specific fragment's own material is translucent (averDrawIsTranslucent, above the #if
-    // AVER_RT region this file opens further down -- see that function's own comment for why it
-    // checks both AVER_MAT_ALPHA_BLEND and gTransmission).
+    // blendedFragment is true only when BOTH hold: the backend replayed translucent draws blended THIS
+    // frame (gAmbientParams.w bit 32 -- D3D12 only, C10; clear on every other backend, so this reduces
+    // to always-false there with no second #if needed), AND this fragment's material is translucent
+    // (averDrawIsTranslucent, above the #if AVER_RT region below; checks AVER_MAT_ALPHA_BLEND and
+    // gTransmission).
     //
     // gAverHistoryWrite is the gate everything downstream reads: false only when this fragment is a
     // blended replay AND the legacy override (gAmbientParams.z bit 32, voxi.legacyBlendedHistoryWrite)
-    // is NOT forcing the old unconditional behaviour back on. Computed HERE, unconditionally (this
-    // line runs whether or not AVER_RT is compiled in), because the flag has to be correct before ANY
-    // of this function's own history writes are reached -- and the FIRST of them is not the diffuse-GI
-    // block further down, it is rtShadowTemporal, called within a few lines of this one to build
-    // sunVis, which writes gRtShadowHistOut on the very path this fragment's shading starts with.
-    // Setting the flag at this function's own top, before that first call, is what makes every later
-    // gate (reflection, GI diffuse, RT shadow/AO history) see the right value without each of them
-    // needing to recompute it.
+    // isn't forcing the old unconditional write back on. Computed HERE, unconditionally (runs whether
+    // or not AVER_RT is compiled in), because it must be correct before this function's FIRST history
+    // write -- rtShadowTemporal, called a few lines below to build sunVis, writes gRtShadowHistOut
+    // immediately. Setting it at the top lets every later gate
+    // (reflection, GI diffuse, RT shadow/AO history) see the right value without recomputing it.
     const bool blendedFragment = ((uint)gAmbientParams.w & 32u) != 0u && averDrawIsTranslucent();
     gAverHistoryWrite = !blendedFragment || ((uint)gAmbientParams.z & 32u) != 0u;
 
     float3 L = normalize(gLightDir.xyz);
     float ndl = saturate(dot(N, L));
 #if AVER_RT
-    // View-space depth/gradient taken HERE, at the top where control flow is uniform, and carried
-    // down to the roughness-gated reflection block: a derivative inside divergent flow is undefined
-    // in HLSL (the same landmine rtShadow's dpx/dpy step around) and would present as
-    // adapter-specific corruption.
+    // View-space depth/gradient taken HERE, where control flow is uniform, and carried down to the
+    // roughness-gated reflection block: a derivative inside divergent flow is undefined in HLSL (the
+    // same landmine rtShadow's dpx/dpy step around) and would present as adapter-specific corruption.
     const float rtViewZ = mul(float4(i.wpos, 1.0), gViewProj).w;
     const float rtDzdx  = ddx(rtViewZ);
     const float rtDzdy  = ddy(rtViewZ);
-    // M6: rtShadowTemporal's own shadow-ray footprint, HOISTED HERE for the SAME reason as rtDzdx/
-    // rtDzdy above -- it no longer has a uniform caller. rtShadowSpatial COULD once afford its own ddx
-    // because the call below ran whenever gShadowParams.z was set, a per-FRAME flag; the rdReuse branch
-    // just below now sits in front of that call, and rdReuse is PER-PIXEL (a decal a centimetre off its
-    // floor takes it, one a metre off does not, and the two can share a quad). Taking ddx(i.wpos)/
-    // ddy(i.wpos) from inside that divergent branch would be exactly the undefined derivative the
-    // paragraph above warns about, so it is taken here instead, while control flow is still uniform,
-    // and carried down as plain float3 arguments -- rtShadowTemporal already took dpx/dpy that way, so
-    // nothing about its call changes except where the derivative itself is taken.
+    // M6: rtShadowTemporal's shadow-ray footprint, hoisted here for the same reason: the rdReuse branch
+    // below is now PER-PIXEL (a decal a cm off its floor takes it, one a metre off doesn't, and the two
+    // can share a quad), so taking ddx/ddy(i.wpos) inside it would be undefined. Taken here instead and
+    // carried down as plain float3 arguments.
     const float3 rtDpx = ddx(i.wpos);
     const float3 rtDpy = ddy(i.wpos);
 
     // ---- M6: REUSE THE STAGED RAY-DRIVEN LIGHTING FOR A TRANSLUCENT PIXEL ON AN OPAQUE SURFACE ----
-    // gGiShadowParams.w bit 16 (see that field's own cbuffer comment for the full contract): the staged
-    // passes (CSRdShadow/CSRdGi/CSRdSkyOcc/CSRdRefl) already lit this pixel once, for the opaque
-    // surface underneath, before this blended-replay fragment ever ran -- reading their answer back is
-    // strictly cheaper than this fragment tracing the same rays again for what is, to within a
-    // centimetre, the same point. Four gates here, each closing one way that would be wrong:
-    //   blendedFragment                 -- an opaque fragment already computes its own lighting; only
-    //                                       a blended-replay fragment (glass/water/a decal) is a
-    //                                       candidate at all.
-    //   bit 16 set                      -- the staged textures hold THIS frame's answers and the
-    //                                       owner's setting is on; on every other frame they are stale
-    //                                       or never written.
-    //   gShadowParams.z > 0.5           -- ray tracing is actually active this frame, the same gate
-    //                                       the non-reuse rtShadowTemporal call below already uses.
-    //   !(gAttenuationDistance > 0.0)   -- a VOLUME surface (glass, water) still needs its OWN
-    //                                       lighting: it refracts and attenuates through its own
-    //                                       medium, which the opaque surface underneath never did.
-    //                                       VoxiRenderer::blendedDrawReadsBackdrop keeps re-capturing
-    //                                       the backdrop for exactly this case. Read off the per-draw
-    //                                       material constant, not s.attenuationDistance
-    //                                       (averEvalMaterial hasn't run yet at this point -- sunVis
-    //                                       feeds into it through `sun` below).
-    //   gMaterialGraphId == 0           -- a material GRAPH can drive attenuation per pixel, which the
-    //                                       constant above cannot see; graph materials keep their own
-    //                                       lighting, the same rule blendedDrawReadsBackdrop applies.
-    // The last gate -- proving this pixel actually SITS ON that opaque surface -- needs gRdSunVisTex's
-    // own texel and rtViewZ above, so it is folded into the depth test below rather than duplicated here.
+    // gGiShadowParams.w bit 16 (see that field's cbuffer comment): the staged passes already lit this
+    // pixel once for the opaque surface underneath, before this blended fragment ran -- reusing that
+    // is strictly cheaper than retracing for the same point. Four gates:
+    //   blendedFragment                 -- only a blended-replay fragment (glass/water/decal) qualifies.
+    //   bit 16 set                      -- staged textures hold THIS frame's answers and the setting
+    //                                       is on; otherwise they're stale/unwritten.
+    //   gShadowParams.z > 0.5           -- ray tracing active this frame (same gate the non-reuse call
+    //                                       below uses).
+    //   !(gAttenuationDistance > 0.0)   -- a VOLUME surface (glass, water) needs its OWN lighting
+    //                                       (refracts/attenuates through its own medium); read off the
+    //                                       per-draw constant since averEvalMaterial hasn't run yet.
+    //                                       VoxiRenderer::blendedDrawReadsBackdrop re-captures the
+    //                                       backdrop for exactly this case.
+    //   gMaterialGraphId == 0           -- a material GRAPH can drive attenuation per pixel invisibly
+    //                                       to the constant above, so graph materials keep their own
+    //                                       (same rule blendedDrawReadsBackdrop applies).
+    // The last gate -- proving this pixel SITS ON that opaque surface -- needs gRdSunVisTex's texel and
+    // rtViewZ, so it's folded into the depth test below instead.
     const bool rdReuseCandidate = blendedFragment
                                 && (rtGiShadowBits() & 16u) != 0u
                                 && gShadowParams.z > 0.5
                                 && !(gAttenuationDistance > 0.0)
                                 && gMaterialGraphId == 0u;
     // THE DEPTH PROOF. gRdSunVisTex's alpha is no longer a constant 1.0 -- CSRdShadow now writes the
-    // opaque surface's own linear view depth there (see that texture's declaration comment), 0.0 where
-    // Stage S found no surface at all. A translucent decal a centimetre or two above its floor reads a
-    // near-identical view depth to the floor Stage S/G/O/R already lit for the SAME pixel; anything
-    // further off (a real gap, a different surface, a floating pane) fails the test, and this fragment
-    // falls back to tracing its own rays exactly as it did before this bit existed. One fetch, read
-    // once here and reused below for both the depth test and (on a match) the shadow visibility itself
-    // -- rgb and alpha of the SAME texel, not two loads.
+    // opaque surface's linear view depth there (see that texture's declaration comment), 0.0 where
+    // Stage S found no surface. A decal a cm or two above its floor reads a near-identical view depth
+    // to the floor Stage S/G/O/R already lit for the SAME pixel; anything further off fails the test
+    // and falls back to tracing its own rays. One fetch, reused below for both the depth test and (on a
+    // match) the shadow visibility itself.
     const float4 rdSunVisTexel = rdReuseCandidate ? gRdSunVisTex[uint2(i.pos.xy)] : float4(0.0, 0.0, 0.0, 0.0);
     // Tolerance: 1 cm flat plus 0.4% of depth. gRdSunVisTex is RGBA16F, whose mantissa alone steps
     // roughly 2 cm at 30 m -- a tighter flat term would reject a true match to the texture's own
     // storage error, not to a real gap between surfaces.
     const bool rdReusePx = rdReuseCandidate && rdSunVisTexel.a > 0.0
                          && abs(rdSunVisTexel.a - rtViewZ) <= 1.0 + 0.004 * rtViewZ;
-    // QUAD-UNIFORM, NOT PER PIXEL: rtShadowTemporal and rtSkyOcclusionTemporal take screen-space
-    // derivatives internally (rtShadowSpatial / rtAoSpatial, voxi_rt.hlsli), which are undefined unless
-    // all four pixels of a 2x2 quad take the same branch. So a quad reuses only when all four of its
-    // pixels pass; one straddling a decal's edge traces as a whole, as it did before. The quad reads run
-    // here, in uniform control flow, before any branch on the result.
+    // QUAD-UNIFORM, NOT PER PIXEL: rtShadowTemporal/rtSkyOcclusionTemporal take screen-space
+    // derivatives internally, undefined unless all four pixels of a 2x2 quad take the same branch --
+    // so a quad reuses only when all four pass; one straddling a decal's edge traces as a whole. The
+    // quad reads run here, in uniform control flow, before any branch on the result.
     const uint rdReuseBit = rdReusePx ? 1u : 0u;
     const bool rdReuse = (rdReuseBit & QuadReadAcrossX(rdReuseBit) & QuadReadAcrossY(rdReuseBit) &
                           QuadReadAcrossDiagonal(rdReuseBit)) != 0u;
@@ -2183,30 +1912,23 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     AverVertex vtx = averVertexOf(i);
 
     // ---- A single-sided BLENDED surface draws ONE layer, not every face it owns ----
-    // THE SCENE PIPELINE DOES NOT CULL (`scene.cull = CullMode::None`, VoxiRenderer.cpp:3133), so a
-    // closed volume rasterises all faces; opaque hides this behind the depth test, but a blended draw
-    // writes no depth and every surviving face's alpha multiplies. A water box came out ~4 coats
-    // thick: MEASURED, alpha 0.02 darkened the pit from (50.7,51.4,49.2) to (36.6,41.9,46.1).
+    // The scene pipeline does not cull (`scene.cull = CullMode::None`, VoxiRenderer.cpp:3133), so a
+    // closed volume rasterises all faces; a blended draw writes no depth, so every surviving face's
+    // alpha multiplies. MEASURED: a water box came out ~4 coats thick, alpha 0.02 darkening the pit
+    // from (50.7,51.4,49.2) to (36.6,41.9,46.1).
     //
-    // GATED ON THE AUTHORED `twosided` FLAG (parseable since the format existed, never read until
-    // now): M_Glass sets it (glass is routinely CULL none, walked around), so a pane keeps
-    // compositing both faces; water sets twosided=0 and gets one layer. Author decides.
+    // GATED ON THE AUTHORED `twosided` FLAG: M_Glass sets it (walked around, keeps both faces), water
+    // leaves it 0 (one layer). Author decides. BLENDED ONLY: opaque already gets correct single-layer
+    // results from the depth test.
     //
-    // BLENDED ONLY: opaque already gets correct single-layer results from the depth test, and
-    // single-sided opaque content (a floor seen from below) has always relied on CullMode::None.
+    // dot(N,V), not SV_IsFrontFace: reuses averVertexOf's own backFace, not a second notion that could
+    // disagree with the normal flip beside it.
     //
-    // dot(N,V), not SV_IsFrontFace: reuses averVertexOf's own backFace rather than a second notion
-    // that could disagree with the normal flip beside it.
-    //
-    // INVERTED WHEN THE EYE IS INSIDE THE VOLUME, not switched off -- the whole reason this is safe.
-    // Inside a closed volume every face is backFace, so the plain discard deleted the surface
-    // outright (swimming under the pool showed no water, just concrete). One layer from below still
-    // means keeping back faces and dropping front ones -- the same rule read from the other side.
-    //
-    // gCameraMedium.x is a bounding-SPHERE test, loose (a shallow pool's sphere bulges above its
-    // surface). Inverting rather than disabling makes that safe: a false positive on the deck drops
-    // the near face and keeps the far one, still ONE layer. Disabling the discard would resurrect
-    // the four-coats bug. Do not "simplify" this into an early-out.
+    // INVERTED WHEN THE EYE IS INSIDE THE VOLUME, not switched off: inside a closed volume every face
+    // is backFace, so a plain discard deleted the surface outright (swimming under the pool showed no
+    // water). gCameraMedium.x is a loose bounding-SPHERE test; inverting rather than disabling keeps a
+    // false positive safe (drops the near face, keeps the far one, still ONE layer) -- disabling would
+    // resurrect the four-coats bug. Do not "simplify" this into an early-out.
     const bool eyeInside = gCameraMedium.x > 0.5;
     if ((gMaterialFlags & AVER_MAT_ALPHA_BLEND) && !(gMaterialFlags & AVER_MAT_TWO_SIDED) &&
         (eyeInside ? !vtx.backFace : vtx.backFace))
@@ -2216,9 +1938,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
-    // CAUSTICS go INTO THE SUN TERM: they're concentrated sunlight, not their own glow, so scaling
-    // the sun means a caustic can't appear in shadow (sunVis already zero there) -- the obvious tell
-    // of a caustic implementation done wrong.
+    // CAUSTICS go INTO THE SUN TERM: concentrated sunlight, not their own glow, so scaling the sun
+    // means a caustic can't appear in shadow (sunVis already zero there) -- the obvious tell of a
+    // caustic implementation done wrong.
     // OPAQUE ONLY: the water's own top face sits at the box's max.z and would light itself otherwise.
     if (!(gMaterialFlags & AVER_MAT_ALPHA_BLEND))
         sun.visibility *= 1.0 + averCausticFocus(vtx.wpos);
@@ -2242,28 +1964,22 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     bool giPoisonSpecCeilHit = false;
     ind4.ambient      = averSkyIrradiance(averShadingNormal(s));
     ind4.ambientScale = gAmbient.r;
-    // TRACED SKY VISIBILITY WHEN THE TIER PAYS FOR IT, the cone gather's own estimate otherwise.
-    // gAmbientParams.x is already 0 on any frame without an acceleration structure (VoxiRenderer
-    // gates it on rtActive_), so this needs no second RUNTIME test -- but it does need a
-    // COMPILE-TIME one: rtSkyOcclusion lives inside this file's `#if AVER_RT` region because it
-    // names gScene, and this line does not. Without the guard every non-RT entry point in the file
-    // (VSShadow, PSVoxel, CSResolve, ...) fails on an undeclared identifier -- which is exactly what
-    // happened, and cost a build that reported OK because HLSL compiles at RUNTIME here.
+    // TRACED SKY VISIBILITY WHEN THE TIER PAYS FOR IT, the cone gather's estimate otherwise.
+    // gAmbientParams.x is already 0 without an acceleration structure (VoxiRenderer gates it on
+    // rtActive_), but still needs a COMPILE-TIME guard: rtSkyOcclusion names gScene and lives inside
+    // `#if AVER_RT`. Without the guard every non-RT entry point in the file (VSShadow, PSVoxel,
+    // CSResolve, ...) fails on an undeclared identifier -- which happened, and a build reported OK
+    // because HLSL compiles at RUNTIME here.
 #if AVER_RT
     ind4.occlusion    = gAmbientParams.x > 0.5
-                      // true: THIS pass writes the G-buffer REBLUR_DIFFUSE_OCCLUSION reprojects
-                      // against, so its denoised answer is about this frame's geometry. See
-                      // rtSkyOcclusionTemporal's own header for the measurement, and for why the
-                      // ray-driven twin below passes false.
+                      // true: this pass writes the G-buffer REBLUR_DIFFUSE_OCCLUSION reprojects
+                      // against (see rtSkyOcclusionTemporal's header; the ray-driven twin passes false).
                       //
-                      // M6: Stage O's own answer, when this fragment is reusing staged lighting AND
-                      // CSRdSkyOcc actually ran for THIS estimator -- CSRdSkyOcc's own condition
-                      // (gGiRestirParams.x > 0.5 || gVoxelParams.w <= 0.5: ReSTIR supplies diffuse, or
-                      // there is no voxel GI at all -- see that stage's own header) mirrored here
-                      // exactly, the same way PSRayDriven's own AVER_RD_SPLIT read of gRdAoTex does. In
-                      // CONE-GI mode CSRdSkyOcc never wrote this pixel's texel (occlusion rides the
-                      // cone gather's own accumulator instead), so this falls through to the SAME
-                      // rtSkyOcclusionTemporal call every other fragment makes.
+                      // M6: Stage O's own answer, when reusing staged lighting AND CSRdSkyOcc ran for
+                      // THIS estimator (mirrors CSRdSkyOcc's own condition -- ReSTIR supplies diffuse,
+                      // or no voxel GI -- the same way PSRayDriven's AVER_RD_SPLIT read of gRdAoTex
+                      // does). In CONE-GI mode CSRdSkyOcc never wrote this texel (occlusion rides the
+                      // cone accumulator instead), so this falls through to the same call.
                       ? ((rdReuse && (gGiRestirParams.x > 0.5 || gVoxelParams.w <= 0.5))
                          ? gRdAoTex[uint2(i.pos.xy)].r
                          : rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao,
@@ -2272,24 +1988,20 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #else
     ind4.occlusion    = ao;
 #endif
-    // F4 (R1): ind4.diffuse is set HERE, after ind4.occlusion exists, not beside ind4.ambient above --
-    // the sky-ownership subtraction below needs the occlusion this receiver actually traced/gathered
-    // THIS frame, and moving the assignment down is cheaper than caching ao a second time.
+    // F4 (R1): set HERE, after ind4.occlusion exists (not beside ind4.ambient above), since the
+    // sky-ownership subtraction needs this frame's traced/gathered occlusion and caching ao twice is
+    // wasted work.
     //
-    // ONE OWNER FOR THE SKY, at giMode 1: giRestirIndirect's own traced miss already gave this pixel
-    // its sky (see gAmbientParams.z's cbuffer comment, R1). Adding ind4.ambient on top of `ind` counted
-    // it twice -- exactly the FmsEms/kD identity material_prelude.hlsl's averIndirectTerms computes
-    // (diffAmbient = (FmsEms + kD) * ambient, diffBounce = kD * ind4.diffuse, both summed): subtracting
-    // g * A (A = ambient * scale * occlusion * matAO, g = gVoxelParams.y) from `ind` here turns
-    // diffBounce's kD * ind4.diffuse into kD * (est - g * A), which combines with diffAmbient's
-    // (FmsEms + kD) * A to read kD * est + FmsEms * A + (1 - g) * kD * A -- the sky counted exactly
-    // once, through giRestirIndirect's own traced visibility, with FmsEms still keeping its full
-    // irradiance (ind4.ambient itself is not zeroed -- see PSRayDriven's own "ONE OWNER FOR THE
-    // ENVIRONMENT" comment below for why zeroing it measured worse: it throws away the multi-scatter
-    // compensation FmsEms multiplies). Skipped whenever `ind` is a poison colour (subtracting from a
-    // sentinel would corrupt the very debug view it exists to show) or `ind` never came from
-    // giRestirIndirect at all (restirSuppliedDiffuse false: the cone gather's `ind` was never
-    // double-counted, so there is nothing here to remove).
+    // ONE OWNER FOR THE SKY, at giMode 1: giRestirIndirect's traced miss already gave this pixel its
+    // sky (see gAmbientParams.z's cbuffer comment, R1); adding ind4.ambient on top of `ind`
+    // double-counts it. Given diffAmbient = (FmsEms+kD)*A and diffBounce = kD*ind4.diffuse
+    // (material_prelude.hlsl's averIndirectTerms), subtracting g*A (A = ambient*scale*occlusion*matAO,
+    // g = gVoxelParams.y) from `ind` here leaves the total kD*est + FmsEms*A + (1-g)*kD*A -- sky
+    // counted once, FmsEms keeping its full irradiance (not zeroed: see PSRayDriven's "ONE OWNER FOR
+    // THE ENVIRONMENT" for why zeroing measured worse -- it throws away FmsEms's multi-scatter
+    // compensation).
+    // Skipped when `ind` is a poison colour (would corrupt the debug view) or never came from
+    // giRestirIndirect (restirSuppliedDiffuse false: nothing to remove).
     ind4.diffuse      = ind;
     if (restirSuppliedDiffuse && !giDiffusePoisoned && ((uint)gAmbientParams.z & 2u) == 0u)
         ind4.diffuse = ind - ind4.ambient * ind4.ambientScale * ind4.occlusion * s.occlusion * gVoxelParams.y;
@@ -2297,31 +2009,27 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // Ray traced when the acceleration structure and geometry table both exist; preferred over the
     // cone trace unconditionally since the cone is bounded by the voxel volume and this is not.
     //
-    // WHY 0.75, NOT 1.0 (see rtReflection's own comment for the aperture/lobe history): past ~0.75
-    // rough the lobe is wide enough that one ray is estimating a near-hemispherical integral neither
-    // filter can close (spatial kernel saturates at radius 3; temporal history rejects itself once
-    // the camera moves). What that rough a surface reflects is close to its surroundings' average --
-    // what the cone trace/sky term below already return. 0.75 is where the ray stops being the
-    // better answer, not where it stops being affordable.
+    // WHY 0.75, NOT 1.0 (see rtReflection's aperture/lobe history): past ~0.75 rough the lobe is wide
+    // enough that one ray estimates a near-hemispherical integral neither filter can close (spatial
+    // kernel saturates at radius 3; temporal history rejects itself under motion) -- what that rough a
+    // surface reflects is close to its surroundings' average, which the cone/sky term below already
+    // returns. 0.75 is where the ray stops being the better answer, not where it stops being affordable.
     //
-    // The fade is only a seam-hider across the last quarter (0 at 0.5 rough, 1 at 0.75): nothing
-    // pops crossing the cutoff, everything below 0.5 is the traced answer at full strength.
+    // The fade is only a seam-hider across the last quarter (0 at 0.5 rough, 1 at 0.75): nothing pops
+    // crossing the cutoff, everything below 0.5 is the traced answer at full strength.
     const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75;
     if (!rtReflTraced) rtReflectionHistoryVacate(i.pos.xy);   // see that function: no stale history
     if (rtReflTraced) {
-        // M6: Stage R's own answer, when this fragment is reusing staged lighting AND CSRdRefl actually
-        // traced a reflection for THIS pixel this frame -- rdReflTexel.a > 0.5 is CSRdRefl's OWN
-        // decision, carried in alpha (see gRdReflTex's own header, "THE STAGE'S OWN DECISION"), not
-        // re-derived here from s.rough a second time. A SMOOTH DECAL ON A SURFACE CSRdRefl DID NOT
-        // TRACE (the staged pass's own roughness test can disagree pixel-for-pixel with this one, e.g.
-        // the surface below is rougher than 0.75) still falls through to its own ray below, exactly as
-        // it always has.
+        // M6: Stage R's own answer, when reusing staged lighting AND CSRdRefl actually traced for THIS
+        // pixel -- rdReflTexel.a > 0.5 is CSRdRefl's OWN decision (gRdReflTex's "THE STAGE'S OWN
+        // DECISION"), not re-derived from s.rough. A smooth decal on a surface CSRdRefl did NOT trace
+        // (its roughness test can disagree pixel-for-pixel, e.g. the surface below is rougher than
+        // 0.75) still falls through to its own ray below.
         const float4 rdReflTexel = rdReuse ? gRdReflTex[uint2(i.pos.xy)] : float4(0.0, 0.0, 0.0, 0.0);
         if (rdReuse && rdReflTexel.a > 0.5) {
-            // B1 (F5): CSRdRefl's own PRE-clamp ceiling test, carried in alpha -- see PSRayDriven's
-            // identical AVER_RD_SPLIT read (search "CSRdRefl's own PRE-clamp ceiling test") for why
-            // this is not recomputed from rdReflTexel.rgb, which is already clamped and half-float
-            // rounded.
+            // B1 (F5): CSRdRefl's own PRE-clamp ceiling test, carried in alpha -- not recomputed from
+            // rdReflTexel.rgb, which is already clamped and half-float rounded (see PSRayDriven's
+            // identical AVER_RD_SPLIT read).
             giPoisonSpecCeilHit = rdReflTexel.a > 1.5;
             ind4.specular = rdReflTexel.rgb;
         } else {
@@ -2329,28 +2037,23 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, s.rough,
                                                rtDzdx, rtDzdy, specHit);
             // ONE skyColor(R), NOT TWO, AND NOT ALWAYS ONE: both lerp operands want the same value, and
-            // skyColor is a 32-step atmosphere march (too expensive to trust DXC to CSE), so it's named
-            // once and guarded below.
-            // WHEN THE MARCH IS PURE WASTE: smoothstep(0.5,0.75,rough) is EXACTLY 0 at/below 0.5, so a
-            // hit reduces the lerp to `refl` and the marched sky is multiplied by zero -- water, glass,
-            // chrome, wet stone. MEASURED on PTTest pool: blended replay 18.9 -> 15.9ms, whole frame
-            // 44.86 -> 41.78ms, nothing on screen changing.
-            // STILL ONE CALL: an earlier split into two skyColor(R) branches cost 13% (8.15 -> 9.26ms) --
-            // a divergent wave executes both sides, so branching around the march ran it twice instead.
+            // skyColor is a 32-step march too expensive to trust DXC to CSE, so it's named once, guarded
+            // below. smoothstep(0.5,0.75,rough) is EXACTLY 0 at/below 0.5, so a hit skips the march
+            // entirely for water/glass/chrome/wet stone. MEASURED on PTTest pool: blended replay
+            // 18.9 -> 15.9ms, whole frame 44.86 -> 41.78ms, nothing on screen changing. STILL ONE CALL:
+            // an earlier two-branch split cost 13% (8.15 -> 9.26ms) -- a divergent wave ran both sides.
             const float skyW = smoothstep(0.5, 0.75, s.rough);
             float3 skyR = float3(0.0, 0.0, 0.0);
             if (!specHit || skyW > 0.0) skyR = skyColor(R);
-            // The raster twin of the clamp documented at PSRayDriven's own copy of this line. Change
-            // one, change both -- the two primary-visibility paths must agree about how much radiance a
-            // reflection may return, or they disagree about the brightness of the same surface.
+            // The raster twin of the clamp at PSRayDriven's copy of this line. Change one, change both:
+            // the two primary-visibility paths must agree how much radiance a reflection may return.
             //
             // B1 (F5): PRE-clamp value tested against the SAME ceiling the clamp below enforces, so a
-            // pinned pixel can be told apart from one that was always going to land under it. `>=`, not a
-            // negated `<` -- NaN compares false either way in HLSL, so `any(specRaw >= AVER_VOX_MAXRAD)`
-            // is false for a NaN component (this guard is about a FINITE value being too large, not about
-            // corruption -- there is no non-finite guard on this term today, and clamp()'s own
-            // min(max(x,lo),hi) already floors a NaN component to 0.0 by this codebase's documented
-            // comparison semantics, so a NaN here goes quiet rather than pinned OR painted).
+            // pinned pixel is told apart from one that would have landed under it anyway. `>=`, not a
+            // negated `<`: NaN compares false either way in HLSL, so this guard is about a FINITE value
+            // too large, not corruption (there is no non-finite guard on this term today) --
+            // clamp()'s min(max(x,lo),hi) already floors a NaN to 0.0, so a NaN here goes quiet
+            // rather than pinned or painted.
             const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
             giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
             ind4.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
@@ -2364,11 +2067,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // runaway of its own).
         // SKY IS SKIPPED WHERE THE CONE ALREADY SAW A WALL: HLSL doesn't short-circuit a multiply, so
         // skyColor(R)*(1-sceneSpec.a) ran the full 32-step march even fully occluded -- the common
-        // rough>0.75 case (concrete, cloth, stone) paying for a value it then multiplied away.
-        // SAME SHAPE/FIX AS averFogInscatter'S THRESHOLD ("scene draw 8.9ms -> 1.3ms, 85% of the
-        // scene pass"): a [0,1] coverage scaling bounded radiance can be skipped under one 8-bit step
-        // with no banding. 0.004, NOT 0.01, because this weight multiplies a sky far brighter than
-        // the fog reference -- at 0.004 the dropped term is at most 0.4% of a sky sample.
+        // rough>0.75 case (concrete, cloth, stone) paying for a value then multiplied away. Same
+        // shape/fix as averFogInscatter's threshold (scene draw 8.9ms -> 1.3ms, 85% of the scene
+        // pass): a [0,1]-scaled bounded
+        // radiance can be skipped under one 8-bit step with no banding. 0.004 not 0.01, since this
+        // weight multiplies a sky far brighter than the fog reference (dropped term <= 0.4% there).
         const float skyWeight = 1.0 - sceneSpec.a;
         ind4.specular       = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
         if (skyWeight > 0.004) ind4.specular += skyColor(R) * skyWeight;
@@ -2377,24 +2080,23 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     }
 
     // ---- TRANSLUCENT MATERIALS TAKE A SEPARATE, EARLY-RETURNING PATH ----
-    // Gated on the flag, not averOpacity(s) < 1: alpha is an authored number that can legally
-    // disagree with which PIPELINE/blend-state the draw runs under (a blended twin at alpha 1, or
-    // vice versa). AVER_MAT_ALPHA_BLEND is set exactly when routed to the blended PSOs
-    // (scenePipeline(), VoxiRenderer.cpp) -- the actual decider of PremultipliedAlpha vs. straight
-    // composite. Reading the wrong signal packs the wrong kind of output silently: every value stays
-    // a plausible colour, just wrong by however translucent the surface is that frame.
+    // Gated on the flag, not averOpacity(s) < 1: alpha is an authored number that can legally disagree
+    // with which PIPELINE/blend-state the draw runs under (a blended twin at alpha 1, or vice versa).
+    // AVER_MAT_ALPHA_BLEND is set exactly when routed to the blended PSOs (scenePipeline()) -- the
+    // actual decider of PremultipliedAlpha vs. straight composite. Reading the wrong signal packs the
+    // wrong kind of output silently: every value stays a plausible colour, just wrong by however
+    // translucent the surface is that frame.
     if (gMaterialFlags & AVER_MAT_ALPHA_BLEND) {
-        // averShadeSplit is averShadeDirect + averShadeIndirect's IDENTICAL arithmetic (PbrShaders.cpp),
-        // kept as two registers instead of summed -- a blended draw gets the same energy an opaque
-        // one would, apportioned between "coverage-weighted" and "always full strength" before alpha.
+        // averShadeSplit is averShadeDirect + averShadeIndirect's IDENTICAL arithmetic, kept as two
+        // registers instead of summed -- a blended draw gets the same energy an opaque one would,
+        // apportioned between "coverage-weighted" and "always full strength" before alpha.
         float3 dif, spc;
         averShadeSplit(s, sun, ind4, dif, spc);
 #if AVER_RT && AVER_RD_LAMPS
-        // LOCAL LIGHTS (lamps) on a pane, apportioned into the two buckets as the sun's direct term just
-        // was (rdLocalLightsShadeSplit). Shadowed only where this fragment reuses the staged surface under
-        // it (rdReuse above -- the same depth proof, so the lamps' visibility there is this pixel's too);
-        // anywhere else UNSHADOWED, since a pane has no lamp history of its own and must never write the
-        // opaque surfaces' one (u19).
+        // LOCAL LIGHTS (lamps) on a pane, apportioned as the sun's direct term just was
+        // (rdLocalLightsShadeSplit). Shadowed only where this fragment reuses the staged surface under
+        // it (rdReuse, same depth proof); UNSHADOWED elsewhere, since a pane has no lamp history of its
+        // own and must never write the opaque surfaces' one (u19).
         if (rdLocalLightCount() > 0u) {
             float lampVis = 1.0;
             if (rdReuse) lampVis = rdLocalVisFiltered(uint2(i.pos.xy));
@@ -2402,73 +2104,64 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         }
 #endif
         // rgb = specular + diffuse*alpha, a = alpha (averBlendedOutput's contract) -- straight alpha
-        // would multiply `spc` too, so a pane at 0.2 opacity showed its reflection at a fifth
-        // strength. sceneBlendedPso_'s PremultipliedAlpha blend state expects it packed this way.
-        // THE VOLUME, where one is authored. gAttenuationDistance <= 0 is the off state every
-        // material had before, so this compiles to a compare nobody takes for ordinary glass --
-        // averBlendedOutputVolume reduces to averBlendedOutput exactly at T=1 either way.
-        // MEASURED WITH A RAY, not an authored height: see averVolumeThickness for why a fragment
-        // can't know its own thickness (the guessed formula made the PTTest pool a bright opaque
-        // slab). Behind AVER_RT: without a ray there's no structure to measure against, so the
-        // surface keeps today's volumeless composite instead of a fabricated thickness.
+        // would multiply `spc` too, showing a 0.2-opacity pane's reflection at a fifth strength.
+        // sceneBlendedPso_'s PremultipliedAlpha blend state expects it packed this way.
+        // THE VOLUME, where one is authored: gAttenuationDistance <= 0 is the off state every material
+        // had before (averBlendedOutputVolume reduces to averBlendedOutput exactly at T=1).
+        // MEASURED WITH A RAY, not an authored height: see averVolumeThickness (the guessed formula
+        // made the PTTest pool a bright opaque slab). Behind AVER_RT: without a ray, keeps today's
+        // volumeless composite instead of a fabricated thickness.
         float4 outc;
 #if AVER_RT
-        // FRONT FACES ONLY -- a correctness gate, not an optimisation. averVolumeThickness traces
-        // ALONG THE VIEW DIRECTION and takes the nearest hit (the medium's exit), correct only when
-        // the shaded point is where the ray ENTERS. A BACK face starts where the ray LEAVES, so it
-        // measures the distance to whatever's behind the glass (the floor, metres away) instead of
-        // the pane's few centimetres. M_Glass authors twosided=1 (walked around), so its back face
-        // was absorbing over the scene's depth -- why an 8cm pane read like a metre of bottle glass.
+        // FRONT FACES ONLY -- a correctness gate, not an optimisation. averVolumeThickness traces ALONG
+        // THE VIEW DIRECTION and takes the nearest hit (the medium's exit), correct only when the
+        // shaded point is where the ray ENTERS. A BACK face measures to whatever's behind the glass
+        // instead of the pane's few cm -- M_Glass authors twosided=1, so its back face was absorbing
+        // over the scene's depth (why an 8cm pane read like a metre of bottle glass).
         //
         // s.backFace, NOT SV_IsFrontFace -- A BUG I SHIPPED: SV_IsFrontFace is winding-dependent;
-        // s.backFace is `dot(N,V)<0` (averVertexOf), the actual question of whether the ray is
-        // entering. The fluid box winds opposite the cube, so the winding test called the pool's
-        // visible top a BACK face and silently switched water absorption off -- despite this file
-        // already stating the rule ("dot(N,V), not SV_IsFrontFace") a few hundred lines up.
-        //
-        // Absorbing once, on entry, is also physically right: a pane's thickness is crossed once.
-        // FROM THE SURFACE, NOT THE CBUFFER: a material GRAPH can drive attenuationColor/Distance
-        // per pixel; reading gAttenuationColor would silently discard whatever the graph decided.
+        // s.backFace is `dot(N,V)<0`, the real question of whether the ray is entering. The fluid box
+        // winds opposite the cube, so the winding test called the pool's visible top a BACK face and
+        // silently switched water absorption off -- despite this file already stating the rule a few
+        // hundred lines up. Absorbing once, on entry, is also physically right.
+        // FROM THE SURFACE, NOT THE CBUFFER: a material GRAPH can drive attenuationColor/Distance per
+        // pixel; reading gAttenuationColor would silently discard whatever the graph decided.
         if (s.attenuationDistance > 0.0 && !s.backFace) {
-            // Measured ONCE, used twice: absorption needs it for Beer-Lambert, refraction needs it
-            // for how far the bent path travels -- a second trace would give the same answer.
+            // Measured ONCE, used twice: absorption needs it for Beer-Lambert, refraction for how far
+            // the bent path travels.
             const float volThick = averVolumeThickness(i.wpos, N, -s.V);
             const float3 volT = averVolumeTransmittance(
                 s.attenuationColor, s.attenuationDistance, volThick);
-            // THE BACKDROP PATH: what lets attenuationColor's HUE reach the picture at all --
-            // averBlendedOutputVolume's fallback can only darken absorbed channels, never tint the
-            // background (one blend alpha is one number). i.pos.xy is the screen coord the copy uses.
+            // THE BACKDROP PATH: lets attenuationColor's HUE reach the picture -- averBlendedOutputVolume's
+            // fallback can only darken absorbed channels, never tint the background (one blend alpha is
+            // one number). i.pos.xy is the screen coord the copy uses.
         outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy, i.wpos, volThick);
         } else
 #endif
         outc = averBlendedOutput(s, dif, spc);
 
         // ---- THE FOG DECISION ----
-        // Fogged HERE, deliberately not following WaterShaders.hpp's PSWater precedent, which skips
-        // averApplyFog because water's colour is already a Fresnel-blended palette standing in for
-        // the atmosphere itself -- fogging it again would double-apply air to a surface meant to
-        // read as air. Glass isn't that: `dif`/`spc` are ordinary unfogged PBR terms.
+        // Fogged HERE, unlike WaterShaders.hpp's PSWater which skips averApplyFog because water's
+        // colour is already a Fresnel-blended stand-in for the atmosphere -- fogging it again would
+        // double-apply air to a surface meant to read as air. Glass isn't that: `dif`/`spc` are
+        // ordinary unfogged PBR terms.
         //
-        // WHAT'S ALREADY FOGGED AND MUST NOT BE TOUCHED: the scene behind the pane. Those pixels went
-        // through their own averApplyFog(radiance, theirWpos), and PremultipliedAlpha's blend
-        // (dst_new = outc.rgb + dst.rgb*(1-alpha)) carries dst through untouched -- this code never
-        // reads dst, so only `outc.rgb` (this pane's own new light) gets fogged below.
+        // WHAT'S ALREADY FOGGED AND MUST NOT BE TOUCHED: the scene behind the pane (its own
+        // averApplyFog already ran; PremultipliedAlpha's blend, dst_new = outc.rgb + dst.rgb*(1-alpha),
+        // carries `dst` through untouched, and this code never reads dst) -- only `outc.rgb` (this
+        // pane's own new light) is fogged below.
         //
-        // FOGGING THE PACKED SUM, NOT dif/spc SEPARATELY: the atmosphere in front of the glass is the
-        // same distance for both lobes, so both want identical attenuation/inscatter. averApplyFog is
-        // affine (color*T + inscatter) but NOT distributive over the alpha-weighted split -- fogging
-        // dif and spc separately then combining as spc_fogged + dif_fogged*alpha would add the
-        // inscatter term TWICE for one slab of air, the same double-counting the water comment warns
-        // about. Fogging `outc.rgb` once is symmetric with the opaque branch's single fog call below.
-        // Alpha is coverage, not radiance, and is untouched by fog either way.
+        // FOGGING THE PACKED SUM, NOT dif/spc SEPARATELY: both lobes cross the same atmosphere, and
+        // averApplyFog is affine (color*T + inscatter) but not distributive over the alpha split --
+        // fogging separately then combining would add the inscatter term twice for one slab of air,
+        // the same double-counting the water comment above warns about. Alpha (coverage) is untouched
+        // by fog either way.
         //
-        // OCCLUSION-AWARE: airVis computed once, from i.wpos, same as the opaque branch below -- see
-        // voxiAirVisibility's own header comment, above, and gAirVis/gAirVisOut's, further up this
-        // file, for why this is a world-space volume lookup and not the surface's own AO.
+        // OCCLUSION-AWARE: airVis computed once from i.wpos, same as the opaque branch below (see
+        // voxiAirVisibility/gAirVis's headers for why this is a world-space volume lookup, not AO).
         outc.rgb = averApplyFogAirVis(outc.rgb, i.wpos, true, voxiAirVisibility(i.wpos));
-        // B1 (F5): applied LAST, after fog, so the marker is the true final colour and cannot be
-        // fogged or blended away -- see aver_IsGiRestirPoisonColour's own comment for why a
-        // giRestirIndirect colour on the diffuse channel (giDiffusePoisoned) outranks this one.
+        // B1 (F5): applied LAST, after fog, so the marker can't be fogged or blended away -- see
+        // aver_IsGiRestirPoisonColour for why a giRestirIndirect diffuse colour outranks this one.
         if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
             outc.rgb = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
         AVER_GBUF_RETURN(outc);
@@ -2477,32 +2170,31 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 radiance = 0.0;
     radiance = averShadeDirect(radiance, s, sun);
 #if AVER_RT && AVER_RD_LAMPS
-    // LOCAL LIGHTS (lamps) on an opaque surface: this fragment resolves and accumulates their visibility
-    // itself (rdLocalLightsVisibility, the same pixel centre and texel as rtShadowTemporal's history, the
-    // same gAverHistoryWrite gate) and shades them beside the sun. vtx.N, not the raw N the sun's shadow
-    // ray takes: the normal FACING THE EYE, as the ray-driven paths' face-the-ray flip gives theirs, so a
-    // two-sided surface's visible side is the one that takes a lamp's light and shadow ray. A constant
-    // test ahead of the reprojection's derivatives, as rdLocalLightsVisibility requires.
+    // LOCAL LIGHTS (lamps) on an opaque surface: resolves/accumulates their visibility itself
+    // (rdLocalLightsVisibility, same pixel centre/texel/history gate as the sun's) and shades beside
+    // the sun. vtx.N, not raw N: the normal FACING THE EYE, as the ray-driven paths' face-the-ray flip
+    // gives theirs, so a two-sided surface's visible side takes the lamp's light and shadow ray. A
+    // constant test ahead of the reprojection's derivatives, as rdLocalLightsVisibility requires.
     if (rdLocalLightCount() > 0u)
         radiance += rdLocalLightsShade(s, i.wpos,
                                        rdLocalLightsVisibility(i.wpos, vtx.N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
     radiance = averShadeIndirect(radiance, s, ind4);
-    // OCCLUSION-AWARE: see the blended branch's identical comment, above.
+    // OCCLUSION-AWARE: see the blended branch's identical comment above.
     radiance = averApplyFogAirVis(radiance, i.wpos, true, voxiAirVisibility(i.wpos));
-    // B1 (F5): same override, same precedence, as the translucent branch's copy above.
+    // B1 (F5): same override/precedence as the translucent branch's copy above.
     if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
         radiance = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
     AVER_GBUF_RETURN(float4(radiance, averOpacity(s)));
 }
 
 // ================= ray-driven primary visibility (experimental) =================
-// THE ONLY THING THIS REPLACES IS "WHAT DID THIS PIXEL SEE" -- everything after the first hit is
-// the same work PSMainVoxi does (sun shadow, sky ambient, fog), since the rasteriser never did that.
+// THE ONLY THING THIS REPLACES IS "WHAT DID THIS PIXEL SEE" -- everything after the first hit is the
+// same work PSMainVoxi does (sun shadow, sky ambient, fog), since the rasteriser never did that.
 //
-// WHAT IT GIVES UP: hardware early-Z. A rasterised fragment discovered hidden is discarded before
-// its shader runs; a ray pays the whole traversal to learn the same thing. The trade this mode
-// exists to measure; the number to beat is in Settings::rtRenderMode.
+// WHAT IT GIVES UP: hardware early-Z. A rasterised fragment discovered hidden is discarded before its
+// shader runs; a ray pays the whole traversal to learn the same thing (the trade this mode exists to
+// measure; see Settings::rtRenderMode).
 //
 // TEXTURED -- a correction record: this comment claimed the opposite long after it stopped being
 // true. Under AVER_RT_BINDLESS a hit samples base colour, metal-rough, normal, occlusion, emissive
@@ -2517,19 +2209,18 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 // A blended (glass) draw never reaches PSRayDriven, but not because it's missing from the TLAS --
 // it's there, routed into the TRANSLUCENT LANE (kRtMaskTranslucent, FORCE_NON_OPAQUE) so a shadow
 // ray can attenuate through it. What excludes it from THIS pass is the MASK: the primary ray here
-// traces AVER_RT_MASK_OPAQUE only, so widening the mask would start hitting glass with no TLAS change.
-// Glass is drawn only where raster mode draws it: D3D12Device::endFrame's blended-mesh flush, through
-// VSMain+PSMainVoxi's premultiplied-alpha PSO, after this pass's scenePass() and the deferred sky --
-// depth test, blend equation, vertex math and shading are IDENTICAL code paths regardless of which
-// pass answered primary visibility for what's behind the pane; none of it reads rtRenderMode.
+// traces AVER_RT_MASK_OPAQUE only, so widening the mask would start hitting glass with no TLAS
+// change. Glass is drawn only where raster mode draws it (D3D12Device::endFrame's blended-mesh
+// flush through VSMain+PSMainVoxi's premultiplied-alpha PSO, after this pass's scenePass()) -- depth
+// test, blend equation, vertex math and shading are IDENTICAL code paths either way; none of it
+// reads rtRenderMode.
 //
-// WHAT DOES DIVERGE: what a translucent surface reveals, the picture already painted by whichever
-// pass drew primary visibility. This pass's hit shading is a simpler material response than
-// PSMainVoxi's -- maps ARE sampled (base colour, metal-rough, normal, occlusion, emissive, second
-// layer), but no material GRAPH runs, normal-map perturbation is compiled out, and a stochastic
-// path-traced bounce stands in for the voxel cone trace. These approximations, accepted for an
-// opaque surface, stopped being invisible once glass could put that surface behind a window --
-// see this pass's environment-specular block below for the one piece of that gap this change closes
+// WHAT DOES DIVERGE: what a translucent surface reveals. This pass's hit shading is a simpler material
+// response than PSMainVoxi's -- maps ARE sampled (base colour, metal-rough, normal, occlusion,
+// emissive, second layer), but no material GRAPH runs, normal-map perturbation is compiled out, and a
+// stochastic path-traced bounce stands in for the voxel cone trace. These
+// approximations, fine for an opaque surface, stopped being invisible once glass put that surface
+// behind a window -- see the environment-specular block below for the one piece this change closes
 // (voxel-cone GI instead of flat sky) and why the rest is untouched.
 //
 // BEHIND AVER_RT because RayQuery is: this entry point only compiles into the SM 6.5 variant, and
@@ -2542,17 +2233,16 @@ struct RayDrivenOut {
 
 // ---- PSRayDriven's VIEW-DEBUG COLOUR HELPERS (vmode 2-5, ViewDebug in VoxiRenderer.hpp) ----------
 //
-// Small, self-contained, and kept next to the one entry point that calls them (PSMainVoxi never
-// reads gViewParams.x past 1.0/Unlit). NO DERIVATIVES (ddx/ddy/fwidth) ANYWHERE BELOW: PSRayDriven
-// can return before these run (the sky-miss branches, above every trace), so any derivative here
-// would read whatever neighbouring lane last computed -- undefined at best, a hang at worst on some
-// drivers. Every input is a scalar/vector already in hand at the call site instead.
+// Small, self-contained, kept next to the one entry point that calls them (PSMainVoxi never reads
+// gViewParams.x past 1.0/Unlit). NO DERIVATIVES (ddx/ddy/fwidth) ANYWHERE BELOW: PSRayDriven can
+// return before these run (the sky-miss branches, above every trace), so a derivative here would read
+// whatever neighbouring lane last computed -- undefined at best, a hang at worst on some drivers.
+// Every input is a scalar/vector already in hand at the call site instead.
 
 // A well-mixing 32-bit integer hash (Chris Wellons' "lowbias32", a small PCG/Wang-family mix): three
-// xorshift/multiply rounds are enough that adjacent instance/material/triangle indices -- exactly
-// what RtInstance/RtMaterial arrays and CommittedPrimitiveIndex hand this file, packed tightly by a
-// mesh importer or a material list authored in order -- land on unrelated hues instead of a smooth,
-// misleadingly-gradient-like ramp.
+// xorshift/multiply rounds are enough that adjacent instance/material/triangle indices (packed tightly
+// by an importer or authoring order) land on unrelated hues instead of a misleadingly gradient-like
+// ramp.
 uint viewDebugHash(uint x) {
     x ^= x >> 16u;
     x *= 0x7feb352du;
@@ -2657,19 +2347,15 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     RayDrivenOut o;
 #endif
 
-    // W6/M5: EXPLICITLY TRUE, NOT LEFT TO THE STATIC'S OWN DEFAULT. A blended (glass/water) draw
-    // never reaches this entry point at all -- see this function's own header comment, "WHAT A
-    // TRANSLUCENT SURFACE SHARES WITH THIS PASS": the primary ray here traces AVER_RT_MASK_OPAQUE
-    // only, and glass is routed into the translucent lane and drawn by PSMainVoxi's own blended
-    // replay instead. So PSRayDriven has no blendedFragment computation of its own and never needs
-    // one; setting the flag explicitly here, rather than computing a test that could only ever read
-    // false, says that plainly instead of leaving a reader to prove the negative from this function's
-    // absence of one. Every history write below (the sky-miss surface-history sentinel just below,
-    // and the AO hit-distance write further down) is therefore always live for this pass.
+    // W6/M5: EXPLICITLY TRUE, not left to the static's default. A blended (glass/water) draw never
+    // reaches this entry point (primary ray traces AVER_RT_MASK_OPAQUE only; glass is drawn by
+    // PSMainVoxi's blended replay instead -- see this function's header). Every history write below
+    // (the sky-miss surface-history sentinel just below, and the AO hit-distance write further down)
+    // is therefore always live for this pass.
     gAverHistoryWrite = true;
 
-    // The same NDC-to-world-ray reconstruction PSVoxelDebug does, through averViewRayDir, so the
-    // primary ray and the debug raymarch cannot disagree about where a pixel looks.
+    // Same NDC-to-world-ray reconstruction as PSVoxelDebug, through averViewRayDir, so the primary ray
+    // and the debug raymarch agree on where a pixel looks.
     float3 dir = averViewRayDir(i.ndc);
 
     RayDesc r;
@@ -2678,31 +2364,28 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     r.TMin      = 0.0;
     r.TMax      = 1.0e7;
 
-    // gViewParams.x as a small integer mode -- see that field's own cbuffer comment, above, for the
-    // full 0-5 legend. Read once, here, before either trace branch below: BOTH branches' own miss
-    // handling needs it (a debug view paints its own flat non-surface colour instead of the sky), not
-    // only the hit-pixel colour override near this function's return, further down.
+    // gViewParams.x as a small integer mode (see that field's cbuffer comment for the 0-5 legend).
+    // Read once, before either trace branch: both branches' own miss handling needs it (a debug view
+    // paints its own flat non-surface colour instead of the sky), not only the hit-pixel colour
+    // override near this function's return, further down.
     const uint vmode = (uint)(gViewParams.x + 0.5);
 
 #if AVER_RD_SPLIT
-    // STAGE B: read CSRdVisibility's record instead of tracing. Everything from here to the miss
-    // check below mirrors the #else branch's shape; the two must be kept in step by hand since a
-    // preprocessor switch, not a shared statement, is what makes the default (AVER_RD_SPLIT 0) compile
-    // byte-for-byte unchanged -- see rdSurfaceFromRecord's own header, declared alongside gRdVisBuf/
-    // gRdSunVisTex above, for the reconstruction itself.
+    // STAGE B: read CSRdVisibility's record instead of tracing. Mirrors the #else branch's shape by
+    // hand (no shared statement), so AVER_RD_SPLIT 0 compiles byte-for-byte unchanged -- see
+    // rdSurfaceFromRecord's header for the reconstruction.
     const uint  rdPitch = rdRowPitch();
-    const uint2 rdPixel = uint2(i.pos.xy);   // truncates the pixel centre to its integer pixel, the
-                                              // same convention CSRdVisibility indexes the buffer by
+    const uint2 rdPixel = uint2(i.pos.xy);   // truncates to the integer pixel, CSRdVisibility's own
+                                              // buffer-indexing convention
     const uint4 rdRec   = gRdVisBuf[rdPixel.y * rdPitch + rdPixel.x];
 
     if (rdRec.x == 0xFFFFFFFFu) {
-        // THE SAME MISS HANDLING AS THE #else BRANCH'S OWN COPY BELOW -- see that copy for why each
-        // field is set the way it is. Duplicated rather than shared for the reason given above.
-        // vmode >= 2 (a ray-hit/triangle debug view): paint one flat, obviously-not-a-surface colour
+        // Same miss handling as the #else branch's copy below (duplicated, not shared, per above).
+        // vmode >= 2 (ray-hit/triangle debug view): paint one flat, obviously-not-a-surface colour
         // instead of the sky, so a miss reads as "no hit" rather than looking like real geometry did
-        // hit and happened to sample sky-blue. An explicit if/else, not a ternary, so this branch
-        // actually skips the atmosphere march below (see the #else branch's copy of this comment for
-        // what that march costs) instead of leaving the compiler free to evaluate both sides.
+        // hit and happened to sample sky-blue. Explicit if/else, not a ternary, so this branch
+        // actually skips the atmosphere march below instead of leaving the compiler free to evaluate
+        // both sides.
         if (vmode >= 2u) {
             o.col = float4(0.02, 0.02, 0.04, 1.0);
         } else {
@@ -2728,40 +2411,32 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     RtMaterial mat = rdS.mat;
     const float hitT = rdS.hitT;
     float3 wpos    = rdS.wpos;
-    // vmode 2/5's instance/triangle ids: CSRdVisibility packs q.CommittedInstanceID() into rdRec.x
-    // and q.CommittedPrimitiveIndex() into rdRec.y verbatim (see that stage's own gRdVisBuf write,
-    // further down this file) -- the array index IS the instance id, RtInstance has no id field of
-    // its own to read instead.
+    // vmode 2/5's instance/triangle ids: CSRdVisibility packs q.CommittedInstanceID() into rdRec.x and
+    // q.CommittedPrimitiveIndex() into rdRec.y verbatim -- the array index IS the instance id,
+    // RtInstance has no id field of its own to read instead.
     const uint rdInstanceIndex = rdRec.x;
     const uint rdPrimIndex     = rdRec.y;
 #else
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Opaque lane. THE ONE RAY USING THE NARROW LANE: AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL -- it
-    // starts inside the viewer's own head, so it is the one traversal that must not see
-    // AVER_RT_MASK_OWNER_HIDDEN. Every other opaque query in this file asks for _ALL.
+    // starts inside the viewer's own head, so it must not see AVER_RT_MASK_OWNER_HIDDEN. Every other
+    // opaque query in this file asks for _ALL.
     //
-    // THIS IS PRIMARY VISIBILITY, so it is the ray the cutout matters most on: whatever it commits
-    // is literally what you see. FORCE_OPAQUE here made every leaf card a solid rectangle while the
-    // raster path clipped the same material correctly -- and since ray-driven is the standing
-    // default, the wrong one was the one on screen.
+    // THIS IS PRIMARY VISIBILITY, so the cutout matters most here: whatever it commits is literally
+    // what you see. FORCE_OPAQUE made every leaf card a solid rectangle while raster clipped correctly
+    // -- and since ray-driven is the standing default, the wrong one was the one on screen.
     q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
     averRtProceedSolid(q);
 
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
-        // A miss is the sky at the far plane. Depth 1, not 0: this projection isn't reversed, so 0
-        // would put the sky in front of everything.
-        // skyColorFull, NOT skyColor -- a whole-screen atmosphere march difference. This colour is
-        // thrown away whenever a sky dome draws: the deferred dome (D3D12Device.cpp, gated on
-        // skyEnabled_ && !frameSuppressed_) is an OPAQUE fullscreen triangle with DepthFunc EQUAL
-        // against the 1.0 written below, so it overwrites every one of these pixels. The dome is the
-        // richer sky (clouds, atmosphere, sun disc); this write is only the no-dome placeholder.
-        // Paying for a per-pixel march to produce a value unconditionally overwritten is the most
-        // expensive way to compute nothing -- MEASURED at up to 41% of a frame once skyColor started
-        // honouring the physical model.
-        // WHAT CHANGES: nothing, with a sky enabled (every normal frame, overwritten either way).
-        // With the sky DISABLED, the background is the authored gradient, not a marched atmosphere.
-        // vmode >= 2 (a ray-hit/triangle debug view): same flat non-surface colour and same
-        // march-skipping if/else as the #if AVER_RD_SPLIT branch's identical miss check, above.
+        // A miss is the sky at the far plane. Depth 1, not 0 (this projection isn't reversed).
+        // skyColorFull, NOT skyColor: thrown away whenever a sky dome draws (the deferred dome,
+        // D3D12Device.cpp, gated on skyEnabled_ && !frameSuppressed_, is an OPAQUE fullscreen triangle,
+        // DepthFunc EQUAL against the 1.0 written below, overwriting every one of these pixels) -- this
+        // write is only the no-dome placeholder. MEASURED: paying for the
+        // per-pixel march unconditionally overwritten cost up to 41% of a frame once skyColor started
+        // honouring the physical model. With the sky disabled, this IS the background instead.
+        // vmode >= 2: same flat non-surface colour/march-skipping as the #if AVER_RD_SPLIT branch above.
         if (vmode >= 2u) {
             o.col = float4(0.02, 0.02, 0.04, 1.0);
         } else {
@@ -2770,28 +2445,28 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         o.depth = 1.0;
 #if AVER_GBUFFER
         // No real surface for a miss, so no true velocity or normal. Velocity 0 (matches
-        // averGBufferVelocity's own near-plane fallback); viewZ 1e7 (a sentinel past real geometry,
-        // matching this ray's own TMax); normal -dir so renormalising gives a unit vector, not a NaN
-        // from normalize(0,0,0). NOT A SKY MASK SUBSTITUTE: a consumer excluding sky pixels should
-        // use viewZ's far-plane sentinel, not claim anything from this normal.
+        // averGBufferVelocity's near-plane fallback); viewZ 1e7 (sentinel past real geometry, matching
+        // this ray's TMax); normal -dir so renormalising gives a unit vector, not a NaN from
+        // normalize(0,0,0). NOT A SKY MASK SUBSTITUTE: a consumer excluding sky pixels should use
+        // viewZ's far-plane sentinel, not this normal.
         o.velocity        = float2(0.0, 0.0);
         o.viewZ            = 1.0e7;
         o.normalRoughness  = averPackNormalRoughness(-dir, 1.0);
 #endif
-        // A SKY MISS HAS NO SURFACE FOR NEXT FRAME TO REPROJECT EITHER -- write the same 0-packed-
-        // normal sentinel RAB_GetGBufferSurface tests for, rather than leaving THIS pixel's slot
-        // holding whatever it held the last time this pixel WAS a surface (the camera panned away,
-        // say). Only when the pair is actually bound this frame; see giRestirIndirect's own write
-        // for the sentinel's exact contract. The position channel doesn't need writing too -- the
-        // normal channel's 0 alone is what RAB_GetGBufferSurface tests before it ever reads position.
+        // A SKY MISS HAS NO SURFACE FOR NEXT FRAME TO REPROJECT EITHER -- write the same 0-packed-normal
+        // sentinel RAB_GetGBufferSurface tests for, rather than leaving this pixel's slot holding a
+        // stale surface from before the camera panned away (only when the pair is bound this frame;
+        // see giRestirIndirect's write for the sentinel's contract). Position doesn't need writing too
+        // -- the normal channel's 0 alone is what RAB_GetGBufferSurface tests before it ever reads
+        // position.
         if (gGiRestirParams.x > 0.5)
             gGiSurfNrmHistOut[uint2(i.pos.xy)] = float2(0.0, asfloat(0u));
         return o;
     }
 
     // Surface reconstruction: same barycentric interpolation and ROTATION-ONLY normal transform as
-    // rtReflection (see there for why no inverse transpose) -- must agree, or a surface would shade
-    // differently seen directly vs. in a mirror.
+    // rtReflection (why no inverse transpose) -- must agree or a surface shades differently direct
+    // vs. in a mirror.
     RtInstance inst = gRtInstances[q.CommittedInstanceID()];
     uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
     uint i0  = inst.firstVertex + gRtIndices[tri + 0];
@@ -2804,74 +2479,65 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 N    = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
     if (dot(N, dir) > 0.0) N = -N;   // face the ray, so a back-facing hit is not lit from behind
 
-    // UV, same barycentric pattern as `nObj` above -- RtVertex has always carried it, unread until
-    // now. NOT sampled here (no texture array yet for it). WHOEVER ADDS THAT SAMPLE: this is a RAY
-    // HIT, not a rasterised fragment -- ddx/ddy on it is undefined in HLSL (the same landmine
-    // rtShadow's dpx/dpy step around), so the sample MUST be SampleLevel or SampleGrad, never plain
-    // Sample(). Mip 0 costs minification aliasing at glancing angles/distance; a future SampleGrad
-    // would want a footprint like rdRayDx/rdRayDy below, recomputed here since UV precedes wpos/hitT.
+    // UV, same barycentric pattern as `nObj` above; not sampled here yet (no texture array for it).
+    // WHOEVER SAMPLES THIS: it's a RAY HIT, not a rasterised fragment -- ddx/ddy is undefined here
+    // (same landmine rtShadow's dpx/dpy step around), so use SampleLevel or SampleGrad, never plain
+    // Sample().
     float2 hitUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
 
-    // The hit's own material, keyed by RtInstance::materialIndex (see that field's own comment for
-    // what it used to be and why repurposing it cost nothing). This is what makes the constants
-    // below real instead of guessed -- see the comment just above where they are used.
+    // The hit's own material, keyed by RtInstance::materialIndex (repurposed at no cost -- see that
+    // field's own comment) -- what makes the constants below real instead of guessed.
     RtMaterial mat = gRtMaterials[inst.materialIndex];
 
     const float hitT = q.CommittedRayT();
     float3 wpos = gCamPos.xyz + dir * hitT;
-    // vmode 2/5's instance/triangle ids -- same pair the #if AVER_RD_SPLIT branch above pulls out of
-    // its visibility record, read directly off this branch's own live RayQuery instead.
+    // vmode 2/5's instance/triangle ids -- same pair the #if AVER_RD_SPLIT branch pulls from its
+    // visibility record, read here directly off the live RayQuery.
     const uint rdInstanceIndex = q.CommittedInstanceID();
     const uint rdPrimIndex     = q.CommittedPrimitiveIndex();
 #endif
     float3 L    = normalize(gLightDir.xyz);
 
     // ---- THE SHADOW-RAY FOOTPRINT: A RAY DIFFERENTIAL, NOT A SCREEN-SPACE DERIVATIVE ----
-    // What stood here passed float3(0,0,0) for dpx/dpy -- a point sample, citing rtReflection's own
-    // inner shadow call as precedent (correct THERE: a reflected hit's neighbours can land on
-    // triangles metres apart, so ddx/ddy is undefined and meaningless). MEASURED (speckle audit): a
-    // dense fine speckle on PTTest's pit far wall, ray-driven only, tied to nothing but this call --
-    // a zero footprint fires every sample from the same origin, aliasing a sub-pixel shadow boundary
-    // (a grazing self-shadow) into speckle instead of a true area fraction. PSMainVoxi never shows
-    // it because its ddx(i.wpos)/ddy(i.wpos) footprint is real.
+    // A zero footprint (point sample, citing rtReflection's inner shadow call as precedent) MEASURED as
+    // dense fine speckle on PTTest's pit far wall: aliasing a sub-pixel grazing self-shadow into
+    // speckle instead of a true area fraction (PSMainVoxi never shows it -- its ddx/ddy footprint is
+    // real).
     //
     // UNLIKE THE REFLECTED CASE, a primary ray's DIRECTION is a smooth analytic function of its pixel
-    // (`dir`, from i.ndc via averViewRayDir), so it can be evaluated for the NEIGHBOUR pixel directly --
-    // no ddx/ddy, well-defined in any control flow. This is a RAY DIFFERENTIAL (Igehy 1999, the same
-    // idea a ray-cone texture-LOD scheme uses): reconstruct the neighbour's primary-ray direction and
-    // see how far it diverged by `hitT` -- a function of the CAMERA and pixel grid, never of what
-    // either ray hit, unlike ddx(wpos) across a silhouette which would return a metres-wide gap.
+    // (`dir`, via averViewRayDir), so it can be evaluated for the NEIGHBOUR pixel directly -- no
+    // ddx/ddy needed. This is a RAY DIFFERENTIAL (Igehy 1999): reconstruct the neighbour's primary-ray
+    // direction and see how far it diverged by `hitT` -- a function of the CAMERA/pixel grid, never of
+    // what either ray hit, unlike ddx(wpos) across a silhouette.
     //
-    // The differential is a tiny difference of two directions, so it is only as clean as they are:
-    // averViewRayDir builds them camera-relative, with nothing eye-sized to cancel however far the
-    // camera is from the world origin.
+    // ONLY AS CLEAN AS THE TWO DIRECTIONS: averViewRayDir builds them camera-relative, with nothing
+    // eye-sized to cancel however far the camera sits from the world origin.
     //
     // NOTE THE PUNCTUATION: this shader lives inside a C++ raw string literal, so close-paren
-    // double-quote ENDS IT. An earlier draft closed a quote right after a bracket here and produced
-    // forty lines of C++ syntax errors. Keep brackets and quotes apart in this file.
+    // double-quote ENDS IT -- an earlier draft broke this and cost forty lines of C++ syntax errors.
+    // Keep brackets and quotes apart in this file.
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
     float3 dirDx = averViewRayDir(i.ndc + float2(ndcPixelStep.x, 0.0));
     float3 dirDy = averViewRayDir(i.ndc + float2(0.0, ndcPixelStep.y));
-    // World-space displacement to the neighbour ray, at the SAME distance this ray travelled --
-    // "pixel angular size times hit distance" -- widening with range, shrinking near the camera.
+    // World-space displacement to the neighbour ray, at the SAME distance this ray travelled -- pixel
+    // angular size times hit distance, widening with range.
     const float3 rdRayDx = (dirDx - dir) * hitT;
     const float3 rdRayDy = (dirDy - dir) * hitT;
-    // Flattened onto the hit's tangent plane before use as dpx/dpy: rtShadow jitters the ray ORIGIN
-    // by these then offsets along N, and an un-flattened footprint could push that origin off-surface,
-    // reopening the grazing-angle acne N*bias exists to close. PSMainVoxi's ddx/ddy(wpos) are real
-    // surface points already and skip this; this reconstruction isn't, so it's projected onto N.
+    // Flattened onto the hit's tangent plane before use as dpx/dpy: rtShadow jitters the ray ORIGIN by
+    // these then offsets along N, and an un-flattened footprint could push it off-surface, reopening
+    // the grazing-angle acne N*bias exists to close. PSMainVoxi's ddx/ddy(wpos) are real surface points
+    // already and skip this; this reconstruction isn't, so it's projected onto N.
     const float3 dpx = rdRayDx - N * dot(rdRayDx, N);
     const float3 dpy = rdRayDy - N * dot(rdRayDy, N);
 
     // THE SHADOW RAY IS THE SAME CALL THE RASTER PATH MAKES, temporal wrapper included -- identical
-    // shadow cost, the timing gap is only primary visibility plus this footprint's matrix multiplies.
+    // shadow cost; the timing gap is only primary visibility plus this footprint's matrix multiplies.
     // Keyed by pixel, same grid as the raster pass, so the history buffer means the same thing here.
 #if AVER_RD_SPLIT
     // STAGE B reads Stage S's already-resolved sun visibility instead of calling rtShadowTemporal
-    // itself -- CSRdShadow ran that same call for this pixel (see its own body, further down this
-    // file). The ablation check is repeated here rather than shared with CSRdShadow's copy, for the
-    // same "no shared statement" reason the trace block above gives.
+    // itself (CSRdShadow ran that same call for this pixel). Ablation check repeated, not shared, for
+    // the same "no shared statement" reason above.
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray
 #else
@@ -2890,36 +2556,31 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // furnace can't catch since it turns the sun off).
     // ---- the bounce loop ----
     // PATH TRACING HERE IS EXTRA RAYS ON THE LOOP ABOVE, not a second renderer: the first hit is
-    // already shaded like rtReflection shades its own hit, and each further bounce repeats that,
-    // carrying a throughput and adding emission toward the previous surface.
-    // COSINE-WEIGHTED so the BRDF's 1/PI and the rendering equation's cosine cancel against the pdf,
-    // leaving a plain albedo multiply -- the /PI mistake rtReflection already paid for, reversed.
+    // already shaded like rtReflection shades its own hit; each further bounce repeats that, carrying
+    // a throughput and adding emission toward the previous surface. COSINE-WEIGHTED so the BRDF's
+    // 1/PI and the rendering equation's cosine cancel against the pdf, leaving a plain albedo multiply.
     // SCREEN-PINNED HASH, no per-frame jitter, matching rtShadow's seeding: the gate oracle compares
-    // nine configs bit-exactly, so a frame counter would make each one a different image. Noise is a
-    // fixed dither, not something that converges -- honest for a first cut; a temporal accumulator
-    // would fix it.
-    // THE ENGINE'S OWN BRDF, not a second one: averShadeDirect is the same Cook-Torrance GGX
-    // PSMainVoxi uses, so a hand-built AverSurface keeps ray and raster images agreeing on material
-    // look. The /PI lives inside it (kdAlbedo/PI) -- the divide rtReflection learned the hard way.
+    // nine configs bit-exactly, so a frame counter would make each one a different image -- noise is a
+    // fixed dither here, not something that converges. THE ENGINE'S OWN BRDF: averShadeDirect is the
+    // same Cook-Torrance GGX PSMainVoxi uses, so a hand-built AverSurface keeps ray and raster
+    // material look agreeing.
     //
-    // THREE CONSTANTS USED TO BE DEFAULTED: reflectance/f90/albedo are per-MATERIAL, but a ray hit
-    // had only RtInstance -- inst.albedo is the raster path's flat per-DRAW colour (neutralised to
-    // white for an AUTHORED material by the raster shader's multiply convention, a separate known
-    // bug), and reflectance/f90 sat at textbook dielectric defaults (0.04/1.0) unconditionally.
-    // `mat`, via the new materialIndex/gRtMaterials pair, is real per-material data -- the whole
-    // reason that pair exists.
+    // THREE CONSTANTS USED TO BE DEFAULTED: reflectance/f90/albedo are per-MATERIAL, but a ray hit had
+    // only RtInstance (inst.albedo is the raster path's flat per-draw colour; reflectance/f90 sat at
+    // textbook dielectric defaults 0.04/1.0). `mat`, via materialIndex/gRtMaterials, is real
+    // per-material data.
     //
-    // METALLIC/ROUGHNESS DELIBERATELY LEFT ON inst.metallic/inst.roughness, NOT mat.metallicFactor/
-    // roughnessFactor, despite the task brief calling the former "already real, per-instance". NOT
-    // ALWAYS TRUE: for an AUTHORED material inst.metallic/roughness carry the same neutralised-to-1.0
-    // placeholder inst.albedo used to (buildAccelerationStructures, VoxiRenderer.cpp, not owned here),
-    // so an authored metal can still render fully rough/metallic regardless of authoring. C++-side
-    // fix (source RtInstance.metallic/roughness from mat.metallicFactor/roughnessFactor at build
-    // time), out of this change's scope. STATED KNOWN GAP, not believed fixed.
+    // METALLIC/ROUGHNESS DELIBERATELY LEFT ON inst.metallic/inst.roughness, NOT
+    // mat.metallicFactor/roughnessFactor, despite the task brief calling the former "already real,
+    // per-instance": NOT ALWAYS RIGHT -- for an AUTHORED material inst.metallic/roughness carry the
+    // same neutralised-to-1.0 placeholder inst.albedo used to (buildAccelerationStructures,
+    // VoxiRenderer.cpp), so an authored metal can render fully rough/metallic regardless of
+    // authoring. C++-side fix (source from mat.*Factor at build time) is out of scope here --
+    // STATED KNOWN GAP, not believed fixed.
     //
-    // WHAT THIS DOES NOT VERIFY: whether gRtMaterials is actually populated with each instance's
-    // real constants for every draw path (authored .ocmat and the built-in SurfaceLook table) rather
-    // than a fallback entry -- C++-side (VoxiRenderer.hpp/.cpp), not confirmable from this file.
+    // ALSO UNVERIFIED: whether gRtMaterials is populated with real per-draw constants (authored
+    // .ocmat and the built-in SurfaceLook table alike, vs. a fallback entry) for every path --
+    // C++-side (VoxiRenderer.hpp/.cpp), not confirmable from this file.
     AverSurface s = (AverSurface)0;
     s.N        = N;
     s.V        = -dir;
@@ -2927,32 +2588,23 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // MULTIPLY THE PER-DRAW VALUE BY THE MATERIAL FACTOR, DO NOT REPLACE IT -- the raster path's
     // model (PbrShaders.cpp: `s.metallic = saturate(gMaterial.x * a.metallic)`); departing from it
     // turned this whole render white.
-    // BOTH TERMS ARE LOAD-BEARING: an AUTHORED (.ocmat) draw has its per-draw colour/metal/rough
-    // NEUTRALISED to 1.0 by the caller, so the material factor carries the value (per-draw alone =
-    // white); an UNAUTHORED draw has no material, so its fallback factors are 1.0 and the per-draw
-    // value carries the colour (factor alone = white). Each is the identity where the other carries
-    // the data -- the product is right in both cases, why the raster path multiplies.
-    // THE BUG THIS REPLACES: reading `mat.baseColorFactor.rgb` alone shaded every unauthored draw
-    // (PTTest's floor, walls, crates, targets) as fallback white while the rasteriser drew them
-    // correctly -- reported as "everything is white".
+    // BOTH TERMS ARE LOAD-BEARING: an AUTHORED draw has its per-draw colour/metal/rough NEUTRALISED to
+    // 1.0 (factor carries the value); an UNAUTHORED draw has fallback factors of 1.0 (per-draw value
+    // carries the colour) -- each is the identity where the other carries data, so the product is
+    // right both ways. THE BUG THIS REPLACES: reading `mat.baseColorFactor.rgb` alone shaded every
+    // unauthored draw (PTTest's floor, walls, crates) as fallback white -- reported "everything is
+    // white".
 #ifdef AVER_RT_BINDLESS
     // THE STOCK MATERIAL AT A RAY HIT: six of eight maps, slope-blended second layer. Composed like
-    // the raster path -- every factor MULTIPLIES its texel rather than replacing it, so a textureless
-    // material reduces to the untextured branch and the paths agree. Fallbacks are averSampleMaps'
-    // own identity values, so an unbound slot costs one compare.
+    // the raster path -- every factor MULTIPLIES its texel, so a textureless material reduces to the
+    // untextured branch and the paths agree. Fallbacks are averSampleMaps' identity values.
     //
-    // "ALL EIGHT MAPS" AND "NORMAL-MAPPED SHADING NORMAL" IS WHAT THIS COMMENT USED TO SAY, and both
-    // halves were wrong. Slots 2 and 7 (normal, layer-1 normal) are sampled below and then DISCARDED:
-    // the only reader is averRtPerturbNormal, behind `#define AVER_RT_NORMAL_MAPPING 0` further down.
-    // So this path has no normal mapping at all, and a reader trusting the sentence above would look
-    // for a bug in the tangent frame that never runs.
-    //
-    // The samples themselves are almost certainly free -- averRtSampleSlot is pure, so DXC dead-code
-    // eliminates a result nothing reads -- which is why this is corrected rather than deleted. The
-    // define is 0 because turning it on made ElectricDreams terrain WORSE by a measurement recorded
-    // at that define; settling that needs a flat surface with a known-good normal map judged against
-    // the path tracer (which gained working normal mapping with a derived tangent frame), not a
-    // deletion here.
+    // NO NORMAL MAPPING HERE: this comment used to say "all eight maps" and "normal-mapped shading
+    // normal" -- both wrong. Slots 2/7 are sampled below and then DISCARDED: their only reader,
+    // averRtPerturbNormal, is behind `#define AVER_RT_NORMAL_MAPPING 0` further down (DXC dead-code
+    // eliminates the unread samples, which is why this is corrected rather than deleted). The define
+    // is 0 because turning it on measurably made ElectricDreams terrain WORSE; see that #if for the
+    // numbers and the leading suspect.
     // THE EFFECTIVE UV, nothing like the mesh's own UV for a world-aligned material.
     const float2 uvS = averRtSurfaceUV(mat, inst, wpos, N, hitUV);
     // ...and the footprint one pixel covers in that same UV space, from the ray differentials this
@@ -2968,16 +2620,15 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 mapNrm   = averRtSampleSlot(mat, 2, uvS, uvGx, uvGy, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
     float  mapOcc   = averRtSampleSlot(mat, 3, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).r;
     // WHITE, NOT BLACK, like every slot above: s.emissive = mat.emissiveFactor * mapEmis multiplies,
-    // so an unbound emissive map must be the identity. The black fallback this used to have made
-    // every emissiveFactor-only material (a lamp bulb with no emissive texture) render no glow.
+    // so an unbound map must be the identity. Black made every emissiveFactor-only material (a lamp
+    // bulb with no texture) render no glow.
     float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).rgb;
     // glTF packs occlusion in R, roughness in G, metallic in B -- the same unpack averSampleMaps does.
     float2 metalRough = float2(mapMR.g, mapMR.b);
     float3 normalTS   = float3(mapNrm.xy * mat.normalScale, mapNrm.z);
 
-    // THE SECOND LAYER, blended by SLOPE off the GEOMETRIC normal, not the normal-mapped one
-    // (averBlendLayers): "is this a cliff" is a surface property, and a normal map would make the
-    // layer choice flicker with every bump. N here is BEFORE perturbation, same as the raster path.
+    // THE SECOND LAYER, blended by SLOPE off the GEOMETRIC normal, not the normal-mapped one: "is
+    // this a cliff" is a surface property, and a normal map would make the choice flicker per bump.
     if (mat.flags & AVER_MAT_SLOPE_BLEND) {
         const float flat01 = saturate(abs(N.z));
         const float lw = 1.0 - smoothstep(mat.slopeBlendLo, mat.slopeBlendHi, flat01);
@@ -2996,37 +2647,37 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         }
     }
 
-    // NORMAL MAPPING LAST, only when a map is bound: with none, normalTS is identity (0,0,1) and
-    // perturbing is a no-op that still costs a tangent solve.
-    // NORMAL MAPPING IS OFF -- A MEASURED DECISION, not an omission. Mean absolute difference against
-    // the raster path, whole viewport:
+    // NORMAL MAPPING LAST, only when a map is bound (identity normalTS is a no-op costing a tangent
+    // solve otherwise).
+    // OFF -- A MEASURED DECISION. MAD against raster, whole viewport:
     //                              base colour only   + these slots, no normals   + normal mapping
     //   PTTest (authored flats)          32.08                17.23                    18.21
     //   ElectricDreams (terrain)          6.06                 7.48                    17.19
     // Costs a little on authored surfaces, catastrophic on terrain -- worse than no textures at all.
-    // RULED OUT: the frame IS orthonormal (nTS=(0,0,1) reproduces N exactly), the map decodes right
-    // (Z saturated positive), normalScale is 1.0, and it isn't the layer-1 blend (no change alone).
-    // LEADING SUSPECT: the frame is ROTATED WITHIN THE TANGENT PLANE (nTS=(0,0,1)->N only proves T/B
-    // perpendicular to N, not T along +U); or raster doesn't perturb terrain either, in which case
-    // raster is the wrong reference and this needs a flat surface with a known-good normal map.
-    // Flip to 1 to measure; do not ship at 1 until terrain is explained.
+    // RULED OUT: frame orthonormality (nTS=(0,0,1) reproduces N exactly), map decode (Z saturated
+    // positive), normalScale (1.0), layer-1 blend (no change alone). LEADING SUSPECT: tangent frame
+    // rotated WITHIN the tangent plane (nTS=(0,0,1)->N only proves T/B perpendicular to N, not T along
+    // +U); or raster doesn't perturb terrain either, in which case raster is the wrong reference and
+    // this needs a flat surface with a known-good normal map judged against the path tracer (which
+    // gained working normal mapping with a derived tangent frame). Flip to 1 to measure; do not ship
+    // at 1 until terrain is explained.
 #define AVER_RT_NORMAL_MAPPING 0
 #if AVER_RT_NORMAL_MAPPING
     if (mat.texIndex[2] != AVER_TEX_UNBOUND || mat.texIndex[7] != AVER_TEX_UNBOUND) {
         s.N = averRtPerturbNormal(mat, inst, N, normalTS,
                                   gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
                                   gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv);
-        // The perturbed normal must still face the ray (same reason as the geometric flip above): a
-        // normal map can tip a grazing normal past the horizon, shading from behind as a false shadow.
+        // The perturbed normal must still face the ray: a normal map can tip a grazing normal past
+        // the horizon, shading from behind as a false shadow.
         if (dot(s.N, dir) > 0.0) s.N = -s.N;
     }
 #endif
 
     s.albedo    = inst.albedo * mat.baseColorFactor.rgb * mapBase.rgb;
     s.emissive  = mat.emissiveFactor * mapEmis;
-    // THROUGH occlusionStrength, as averBuildSurface does: s.occlusion = lerp(1.0, a.occlusion,
-    // gOcclusionStrength). Full strength (tried first) darkened ElectricDreams terrain from
-    // 111,101,96 to 73,72,76 against a raster reference of 104,102,100 -- moved further from raster.
+    // THROUGH occlusionStrength, as averBuildSurface does. Full strength (tried first) darkened
+    // ElectricDreams terrain from 111,101,96 to 73,72,76 against a raster reference of 104,102,100 --
+    // moved further from raster.
     s.occlusion = lerp(1.0, mapOcc, mat.occlusionStrength);
 #else
     s.albedo   = inst.albedo * mat.baseColorFactor.rgb;
@@ -3035,8 +2686,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.emissive = mat.emissiveFactor;
 #endif
 #ifdef AVER_RT_BINDLESS
-    // metalRough is the SAMPLED pair, unpacked glTF-style: .x roughness (green), .y metallic (blue).
-    // Multiplied onto the factors as averStockAuthored does, so an unbound map contributes 1.0.
+    // metalRough is the SAMPLED pair, glTF-unpacked (.x roughness/green, .y metallic/blue), multiplied
+    // onto the factors as averStockAuthored does, so an unbound map contributes 1.0.
     s.metallic = saturate(inst.metallic  * mat.metallicFactor  * metalRough.y);
     s.rough    = clamp(inst.roughness * mat.roughnessFactor * metalRough.x, 0.045, 1.0);
 #else
@@ -3046,35 +2697,29 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.ndv      = saturate(dot(s.N, s.V));
     s.f90      = mat.f90;
     s.reflectance = mat.reflectance;
-    // HAND-SET: this surface is hand-built, with no material cbuffer to read from (same reason
-    // reflectance is carried above rather than read off gMatReflectance). HLSL doesn't
-    // zero-initialise a struct, so omitting these would feed averDirectTerms garbage off the stack.
-    // A PRIMARY RAY LEAVES THE EYE, so its first hit is always a front face: no refracted ray, no
-    // exit interface, TIR cannot arise -- stated here rather than an uninitialised bool reading false.
+    // HAND-SET: HLSL doesn't zero-initialise a struct, so omitting these feeds averDirectTerms
+    // garbage off the stack. A PRIMARY RAY LEAVES THE EYE, so its first hit is always a front face --
+    // no refracted ray, no exit interface, TIR cannot arise.
     s.backFace  = false;
     s.sssWeight = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceWeight) : 0.0;
     s.sssRadius = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceRadius) : 0.0;
 #ifdef AVER_LAYERED_BSDF
-    // THE COAT NEEDS EXPLICIT LINES: this pass zero-inits then hand-sets every field, so a new field
-    // silently defaults to 0 (the right OFF state) -- which would have looked correct while meaning
-    // "no material has a coat in ray-driven mode". Read from the hit's own material, like the lines
-    // above, since this pass has no material cbuffer.
+    // THE COAT NEEDS EXPLICIT LINES: a new field silently defaults to 0 (the right OFF state) if
+    // omitted here, which would look correct while meaning "no coat in ray-driven mode ever".
     s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
     s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
     s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
 #endif
-    // Identical shape to averBuildSurface's F0 (PbrShaders.cpp: `lerp(gMatReflectance.xxx, s.albedo,
-    // s.metallic)`), mat.reflectance standing in for gMatReflectance -- same value, this pass's own
-    // material buffer instead of the per-draw cbuffer a ray hit has no binding for.
+    // Identical shape to averBuildSurface's F0, mat.reflectance standing in for gMatReflectance (this
+    // pass's own material buffer, no per-draw cbuffer binding here).
     s.F0       = lerp(mat.reflectance.xxx, s.albedo, s.metallic);
     s.F        = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
     // (1 - transmission), as averBuildSurface does (PbrShaders.cpp, kdAlbedo line): light passing
     // THROUGH the substrate can't also scatter back out, or the material invents energy. Kept
     // identical on both paths deliberately -- a rule honoured by raster but not primary rays is the
-    // exact defect shape this tree keeps rediscovering.
-    // A BLENDED pane never arrives here (glass is drawn by PSMainVoxi in both modes), so this fires
-    // only for an OPAQUE material authoring transmission -- why the rule is against the material
-    // field, not the blend mode.
+    // exact defect shape this tree keeps rediscovering. A BLENDED pane never arrives here (glass is
+    // drawn by PSMainVoxi in both modes), so this fires only for an OPAQUE material authoring
+    // transmission -- why the rule is against the material field, not the blend mode.
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
     s.model    = AVER_MODEL_STANDARD;
     s.alpha    = 1.0;
@@ -3087,8 +2732,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
-    // The ray-driven twin of the caustic term above. No blended test here: this pass shades opaque
-    // primary hits only -- translucency is drawn by the blended replay through PSMainVoxi.
+    // The ray-driven twin of the caustic term above. No blended test: this pass shades opaque primary
+    // hits only.
     sun.visibility *= 1.0 + averCausticFocus(wpos);
 
     const uint bounces = (uint)max(gPtBounceParams.x, 1.0);
@@ -3096,8 +2741,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 radiance = averShadeDirect(0.0, s, sun);
 
     // LOCAL LIGHTS (lamps): every lamp in range through the sun's own BRDF (rdLocalLightsShade), diffuse
-    // and specular, times the lamps' accumulated shadow-ray visibility. Inside `radiance` and nowhere
-    // else, so it stays out of the NRD/AO/ind terms below and Unlit (vmode 1), which replaces `radiance`
+    // and specular, times the lamps' accumulated shadow-ray visibility. Inside `radiance` only, so it
+    // stays out of the NRD/AO/ind terms below, and Unlit (vmode 1), which replaces `radiance`
     // wholesale, drops it with the rest of the lighting. The count is a constant-buffer value, so each
     // branch is uniform and costs nothing with no lamps.
 #if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
@@ -3106,128 +2751,95 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     if (rdLocalLightCount() > 0u)
         radiance += rdLocalLightsShade(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)));
 #elif !AVER_RD_SPLIT && AVER_RD_LAMPS
-    // The single pass resolves (and accumulates) it here, on its own hit -- the one call
-    // AVER_RD_SINGLE_PASS_LAMPS=0 (voxi_rt.hlsli) removes from the megakernel. `N` faces the ray, the side
-    // a lamp lights; the pixel centre and texel are the sun history's own (rtShadowTemporal above).
+    // The single pass resolves (and accumulates) it here, on its own hit. `N` faces the ray; the pixel
+    // centre/texel are the sun history's own (rtShadowTemporal above).
     if (rdLocalLightCount() > 0u)
         radiance += rdLocalLightsShade(s, wpos,
                                        rdLocalLightsVisibility(wpos, N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
 
-    // THE ENVIRONMENT THROUGH THE ENGINE'S OWN INDIRECT TERM, not a diffuse-only line. What stood
-    // here (`radiance += s.kdAlbedo * averSkyIrradiance(N) * gAmbient.r`) had two faults, found by
-    // the white furnace:
-    //   - A WHITE METAL RENDERED BLACK (0.003 vs correct 1.000): averShadeIndirect was never called,
-    //     so the environment SPECULAR term (FssEss*ind.specular) didn't exist here at all; a metal's
-    //     kdAlbedo=0 gets nothing from a diffuse-only line, so roughness couldn't matter either.
-    //   - PATH TRACING DOUBLED THE ENERGY (1.000 -> 1.977): this line added the sky once, then the
-    //     bounce loop added it again whenever a ray escaped -- every path escapes on bounce one in
-    //     an open scene, so a bounce-depth sweep came back flat and hid the double-count.
+    // THE ENVIRONMENT THROUGH THE ENGINE'S OWN INDIRECT TERM, not a diffuse-only line. A diffuse-only
+    // line here had two faults, found by the white furnace: a white metal rendered black (0.003 vs
+    // correct 1.000, since averShadeIndirect was never called, so the specular env term didn't exist),
+    // and path tracing doubled the energy (1.000 -> 1.977: this line added the sky once, the bounce
+    // loop added it again on every escape) -- every path escapes on bounce one in an open scene, so a
+    // bounce-depth sweep came back flat and hid the double-count.
     //
-    // ONE OWNER FOR THE ENVIRONMENT: this call. The bounce loop no longer adds sky on escape, only
+    // ONE OWNER FOR THE ENVIRONMENT: this call; the bounce loop no longer adds sky on escape, only
     // surface-to-surface light. Zeroing ind.ambient instead (tried first) measured worse: FmsEms
-    // multiplies IRRADIANCE, so zeroing it threw the compensation away and a white metal fell back
-    // to the single-scatter curve (0.971 at roughness 0.05 to 0.450 at 1.0) -- FmsEms is specular
-    // energy a path-traced bounce doesn't carry.
-    // Also makes the ray path structurally match raster: full unoccluded sky ambient plus bounced
-    // light on top, without subtracting the sky that bounce occludes. Same approximation, same place.
+    // multiplies irradiance, so zeroing it threw the multi-scatter compensation away (white metal fell
+    // to 0.971@rough0.05 -> 0.450@rough1.0) -- FmsEms is specular energy a path-traced bounce doesn't
+    // carry. Also matches raster structurally: full unoccluded sky ambient plus bounced light on top,
+    // without subtracting the sky that bounce occludes -- same approximation, same place.
     float3 R = reflect(dir, N);
     AverIndirect ind;
     ind.ambient      = averSkyIrradiance(N);
     ind.ambientScale = gAmbient.r;
 
     // ---- DIFFUSE INDIRECT: THE CONE TRACE, exactly as PSMainVoxi does it ----
-    // Replaces a ONE-SAMPLE STOCHASTIC BOUNCE THAT COULD NOT CONVERGE -- FROZEN noisy, not merely
-    // noisy: the bounce loop drew its direction from `rtHash(i.pos.xy + ...)`, a PURE FUNCTION OF THE
-    // PIXEL with no frame term (needed for the gate oracle), so every pixel picked one direction and
-    // kept it forever -- a fixed wrong answer, not something a denoiser could average over.
-    // WHAT IT LOOKED LIKE: dense static salt-and-pepper on enclosed surfaces, none in the open (an
-    // escaped ray adds nothing, variance zero; inside a room every ray lands on a different wall,
-    // variance enormous) -- the concrete pit reported "still broken" while the sky nearby was clean.
-    // coneTracedIndirect is what PSMainVoxi has always used: DETERMINISTIC (prefiltered clipmap
-    // march, no variance), and it hands back a real ambient-occlusion factor the bounce loop never
-    // provided (`ind.occlusion = 1.0` below was a stated gap). Makes both paths answer this the same
-    // way -- the point of a mode meant to differ only in HOW THE FIRST SURFACE IS FOUND.
+    // Replaces a one-sample stochastic bounce that FROZE noisy, not merely noisy: its direction came
+    // from a pure function of the pixel with no frame term (needed for the gate oracle), so every
+    // pixel kept one wrong direction forever -- dense static speckle on enclosed surfaces, none in the
+    // open (an escaped ray adds nothing, variance zero; inside a room every ray lands on a different
+    // wall, variance enormous) -- the concrete pit reported "still broken" while the sky nearby was
+    // clean. coneTracedIndirect (what PSMainVoxi always used) is DETERMINISTIC (prefiltered clipmap
+    // march, no variance) and hands back a real AO factor the bounce loop never provided (`ind.occlusion
+    // = 1.0` below was a stated gap), making both paths answer this the same way.
     //
-    // COST, MEASURED RATHER THAN ASSUMED, and it went the other way from the guess: an earlier
-    // version of this comment claimed the cone trace was "cheaper as well as cleaner". It is not --
-    // on PTTest (voxelResolution 512, GI Epic) "Voxi ray-driven primary" went 1.3-1.4ms -> 3.0-4.0ms,
-    // whole frame 4.13ms median -> 8.86ms. A 6-cone gather over a 512^3 clipmap costs more than three
-    // ray-query traversals on hardware with idle ray-query units. Stated because a wrong performance
-    // claim in a comment outlives the person who wrote it.
+    // COST, MEASURED: an earlier version of this comment claimed the cone trace was "cheaper as well as
+    // cleaner". It is not. PTTest (voxelRes 512, GI Epic): ray-driven primary 1.3-1.4ms -> 3.0-4.0ms,
+    // whole frame 4.13ms median -> 8.86ms -- a 6-cone gather over a 512^3 clipmap costs more than three
+    // ray-query traversals with idle ray-query units.
     //
     // STILL THE RIGHT TRADE, for parity not speed: this is the cost PSMainVoxi always paid for the
-    // same term. Ray-driven wasn't cheaper before, it was doing something worse and charging less --
-    // the two paths now cost the same, the only footing on which "is ray-driven faster" is a
-    // question worth asking.
+    // same term -- ray-driven wasn't cheaper before, it was doing something worse and charging less.
     //
-    // WHERE THE COST GOES, AND WHERE IT DOESN'T ANY MORE: this used to say giCones was six,
-    // hardcoded. Already false when written -- Renderer::giConesForQuality (Voxi.cpp) has covered
-    // Off/Medium=6, Low=3, High=9, Epic=13 since commit fbb3aad, wired through gGiParams.x into the
-    // dynamic loop. The ladder already exists and belongs to GI settings. PTTest pins RENDER.GI 4
-    // (Epic, 13 cones), so any cost number there is this pass's worst rung.
+    // WHERE THE COST GOES: this used to say giCones was six, hardcoded -- already false when written.
+    // Renderer::giConesForQuality (Voxi.cpp) has covered Off/Medium=6, Low=3, High=9, Epic=13 since
+    // commit fbb3aad, wired through gGiParams.x into the dynamic loop. PTTest pins RENDER.GI 4 (Epic,
+    // 13 cones), so any cost number here is this pass's worst rung.
     //
-    // BUT THE CONE COUNT IS *NOT* WHERE THE TIME GOES -- MEASURED, not reasoned. Arithmetic predicted
-    // dropping Epic to a lower rung would recover 1.5-2ms of ~3.7ms; it does not. Same camera, only
-    // tier differing:
-    //     Epic, 13 cones -- ray-driven primary 3.7-3.8ms, whole frame 6.498ms
-    //     High,  9 cones -- ray-driven primary 3.5-3.8ms, whole frame 6.066ms
-    // Four fewer cones bought ~0.4ms of 6.5ms. The gather is real but not dominant, and **the 3x gap
-    // against the rasteriser remains unexplained**. Already tested; don't shave cones on this theory.
+    // CONE COUNT IS NOT WHERE THE TIME GOES -- MEASURED: arithmetic predicted dropping Epic to a lower
+    // rung would recover 1.5-2ms of ~3.7ms; it does not. Same camera, dropping Epic (13 cones) to High
+    // (9 cones): Epic 3.7-3.8ms/6.498ms whole frame, High 3.5-3.8ms/6.066ms -- four fewer cones
+    // bought ~0.4ms of 6.5ms. Real but not dominant; **the 3x gap against the rasteriser remains
+    // unexplained**. Already tested; don't shave cones on this theory.
     //
-    // WHAT TO DO INSTEAD -- AND THE MARKER THIS ASKED FOR ALREADY EXISTS. This used to say "there is
-    // NO GPU-timed marker for the raster path's own pixel shading" and call for one to be added. It
-    // is there and always was: D3D12Device::beginGpuSpan("scene draw") opens at the tail of
-    // beginFrame and closes at the top of endFrame, bracketing every drawMesh the raster path issues
-    // -- and "Voxi ray-driven primary" is a CHILD of that same span, so the two are already
-    // like-for-like. Nothing needed adding.
+    // THE MARKER THIS ASKED FOR ALREADY EXISTS: this used to say there is no GPU-timed marker for the
+    // raster path's own pixel shading and call for one to be added. It is there and always was:
+    // D3D12Device::beginGpuSpan("scene draw") brackets every drawMesh the raster path issues, and
+    // "Voxi ray-driven primary" is a CHILD of that same span, so the two are already like-for-like.
     //
-    // THE 0.1ms WAS NOT A MISSING MARKER, IT WAS AN EMPTY SPAN. "scene draw" measured 0.1ms because
-    // no drawMesh ran at all: the path-traced scene view was suppressing the scene and painting the
-    // frame itself, so the "rasteriser" being timed had drawn nothing. D3D12Device.cpp's own
-    // suppression warning documents exactly that run. The fix was never instrumentation, it was
-    // pinning `--pt 0` so the rasteriser is the thing on screen.
-    //
-    // SO THE COMPARISON IS: --gpu-timing twice on ONE scene at ONE resolution with a MOVING camera,
-    // `--rt-render-mode 1 --pt 0` against `--rt-render-mode 0 --pt 0`, reading "scene draw" from
-    // each. Both runs must be checked against the "is painting the scene" log line before either
-    // number is believed -- that line, not the timing, is what says which renderer ran.
-    //
-    // AND THE GAP IS SMALLER THAN THE 3x ABOVE SUGGESTS. This file's own AVER_RD_ABLATE header
-    // records ray-driven primary at ~6.7ms of 14.55ms against raster's 7.82ms on PTTest with RT on
-    // in both -- so what rasterising primary visibility can recover is that GAP, not the whole
-    // "Voxi ray-driven primary" span. That span contains the entire deferred shade (shadow, cones,
-    // reflection, sky-occlusion, both sky marches, fog), and the shadow ray in particular is THE SAME
-    // CALL the raster path makes, as the comment beside it says.
+    // THE GAP IS SMALLER THAN 3x SUGGESTS: this file's AVER_RD_ABLATE header records ray-driven
+    // primary at ~6.7ms of 14.55ms against raster's 7.82ms with RT on in both -- rasterising primary
+    // visibility can only recover that gap, not the whole ray-driven-primary span (which is the entire
+    // deferred shade: shadow, cones, reflection, sky-occlusion, both sky marches, fog). Compare with
+    // `--gpu-timing` on `--rt-render-mode 1 --pt 0` vs `--rt-render-mode 0 --pt 0`, checked against
+    // the "is painting the scene" log line first (a suppressed scene reads "scene draw" ~0.1ms because
+    // nothing drew, not because nothing costs -- D3D12Device.cpp's own suppression warning documents
+    // exactly that run).
     float rdAo  = 1.0;
     ind.diffuse = 0.0;
-    // B1: mirrors PSMainVoxi's own copy (search aver_IsGiRestirPoisonColour) -- true only when the
-    // ReSTIR branch below actually painted one of giRestirIndirect's own seven colours over
-    // ind.diffuse.
+    // B1: mirrors PSMainVoxi's copy (aver_IsGiRestirPoisonColour) -- true only when the ReSTIR branch
+    // below painted one of giRestirIndirect's seven colours over ind.diffuse.
     bool giDiffusePoisoned = false;
-    // F4 (R1): mirrors PSMainVoxi's own restirSuppliedDiffuse -- see that copy's comment (search
-    // gAmbientParams.z's cbuffer entry, R1) for the full identity. True only when the ReSTIR branch
-    // below actually supplied ind.diffuse, which is the only estimator that double-counts this
-    // receiver's own sky.
+    // F4 (R1): mirrors PSMainVoxi's restirSuppliedDiffuse -- true only when the ReSTIR branch supplied
+    // ind.diffuse, the only estimator that double-counts this receiver's own sky.
     bool rdRestirSuppliedDiffuse = false;
     // Mirrors PSMainVoxi's aoGathered: true only once coneTracedIndirect has written rdAo.
     bool rdAoGathered = false;
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     // ablated: no cone gather
 #else
-    // GIMODE'S OWN SWITCH, exactly as PSMainVoxi's copy of this branch: gGiRestirParams.x (never the
-    // raw Settings::giMode -- see giRestirIndirect's own header comment) says whether
-    // VoxiRenderer::giRestirWanted() actually bound t12/u6/u7 this frame, and this whole function
-    // only exists inside `#if AVER_RT` already, so there is no non-RT variant to keep bit-identical
-    // here the way PSMainVoxi's copy has to guard for.
+    // GIMODE'S OWN SWITCH, exactly as PSMainVoxi's copy: gGiRestirParams.x (never the raw
+    // Settings::giMode) says whether giRestirWanted() bound t12/u6/u7 this frame; no non-RT variant to
+    // guard here since this whole function is already `#if AVER_RT`.
     if (gVoxelParams.w > 0.5) {
         if (gGiRestirParams.x > 0.5) {
 #if AVER_RD_SPLIT
             // STAGE B: read CSRdGi's already-resolved diffuse estimate instead of calling
-            // giRestirIndirect itself -- CSRdGi ran that same call for this pixel (see its own body,
-            // further down this file). rdAo is left untouched, at its own initial 1.0: that is exactly
-            // what giRestirIndirect's own `ao` out-param would have set it to too (see that function's
-            // header), so this branch and the #else below leave rdAo in the same state either way.
+            // giRestirIndirect itself. rdAo is left at its initial 1.0 -- exactly what
+            // giRestirIndirect's own `ao` out-param would set it to, so both branches agree.
             ind.diffuse = gRdGiTex[uint2(i.pos.xy)].rgb;
 #else
             ind.diffuse = giRestirIndirect(wpos, N, mul(float4(wpos, 1.0), gViewProj).w,
@@ -3245,58 +2857,44 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // ---- ENVIRONMENT SPECULAR: A REAL MIRROR RAY NOW, GATED THE SAME WAY PSMainVoxi GATES ONE ----
     // Used to always fall through to PSMainVoxi's cone/flat-sky fallback. Found while chasing a
     // translucency bug: a glass pane's blended replay composites over whatever this pass painted, so
-    // an opaque hit under glass in ray-driven mode was a flatter answer than PSMainVoxi's own sharp
-    // mirror ray for a qualifying surface -- not a compositing defect (blend/depth/Fresnel unchanged),
-    // but the "broad, flat sheet" look the glass/reflection audit traced to this branch.
+    // an opaque hit under glass in ray-driven mode was a flatter answer than PSMainVoxi's sharp mirror
+    // ray for a qualifying surface -- not a compositing defect (blend/depth/Fresnel unchanged), but the
+    // "broad, flat sheet" look the glass/reflection audit traced to this branch.
     //
-    // THE OLD COST OBJECTION ("a fourth ray on every pixel") doesn't survive gating identically to
-    // PSMainVoxi (`s.rough <= 0.75`): this pays the SAME ray, on the SAME subset of surfaces, the
-    // rasteriser already prices into the comparison this mode exists to make. Rough surfaces (most of
-    // a scene) still take the cheap cone/sky path unmodified.
+    // THE OLD COST OBJECTION ("a fourth ray every pixel") doesn't survive gating identically to
+    // PSMainVoxi (`s.rough <= 0.75`): same ray, same subset of surfaces the rasteriser already prices
+    // into the comparison this mode exists to make. Rough surfaces (most of a scene) stay on the cheap
+    // cone/sky path.
     //
     // THE GATE IS PSMainVoxi's PREDICATE VERBATIM (`gShadowParams.z > 0.5 && gRtParams.w > 0.5 &&
-    // s.rough <= 0.75`), so the two passes agree on which surfaces earn a mirror ray -- both terms
-    // are already true whenever this pass runs at all (rayDrivenActive() requires rtActive_, which
-    // sets gShadowParams.z; this pass already reads the geometry table unconditionally above). Kept
-    // anyway as the one place either pass is told "no" if the geometry table ever legitimately fails
-    // while the TLAS still exists.
+    // s.rough <= 0.75`), so the two passes agree on which surfaces earn a mirror ray. Both terms are
+    // already true whenever this pass runs at all (rayDrivenActive() requires rtActive_, which sets
+    // gShadowParams.z); kept anyway as the one place either pass is told "no" if the geometry table
+    // ever legitimately fails while the TLAS still exists.
     //
-    // rtReflectionTemporal's dzdx/dzdy reuse the shadow footprint's ray differential rather than
-    // rederiving one: they only predict a REPROJECTED NEIGHBOUR's depth for rtReflectionSpatial's
-    // plane-rejection (a filter-quality term, not one that can misplace a ray), so they skip the
-    // tangent-plane projection dpx/dpy needed. `rdRayDx`/`rdRayDy` (already built for the shadow call)
-    // give the exact displacement wanted; `mul(float4(rdRayDx,0.0), gViewProj).w` reads the
-    // DIRECTIONAL part of the same clip.w PSMainVoxi's ddx(viewZ) approximates -- exact here, one
-    // extra directional matrix multiply, far cheaper than a second ray differential.
+    // rtReflectionTemporal's dzdx/dzdy reuse the shadow footprint's ray differential (`rdRayDx`/
+    // `rdRayDy`) rather than rederiving one: they only predict a REPROJECTED NEIGHBOUR's depth for
+    // rtReflectionSpatial's plane-rejection, so the tangent-plane projection isn't needed --
+    // `mul(float4(rdRayDx,0.0), gViewProj).w` reads the directional part of clip.w exactly, one extra
+    // matrix multiply, cheaper than a second ray differential.
     //
-    // EXPECTED COST, STATED not measured (no build/launch under this task's rule): rtReflectionTemporal
-    // shares its tile schedule with the shadow ray this pass already pays for, so a smooth pixel's
-    // reflection amortises the same way, only where `s.rough <= 0.75` (a minority of most scenes).
-    // Nearest reference: the wave-bound-shadow finding's ~2.0ms for one tile-amortised full-screen
-    // ray-query pass on ElectricDreams at full coverage; gated to a roughness minority, real cost
-    // should land well under that.
-    //
+    // EXPECTED COST, STATED not measured: rtReflectionTemporal shares its tile schedule with the
+    // shadow ray this pass already pays for, gated to a roughness minority. Nearest reference: the
+    // wave-bound-shadow finding's ~2.0ms for one tile-amortised full-screen ray-query pass on
+    // ElectricDreams at full coverage; gated to a minority, real cost should land well under that.
     // B1 (F5): set below, inside this branch only -- see PSMainVoxi's identical copy for why only the
     // RAY-TRACED specular term gets this marker, and aver_IsGiRestirPoisonColour's own comment for
     // the precedence against giDiffusePoisoned above.
     bool giPoisonSpecCeilHit = false;
 #if AVER_RD_SPLIT
     // MILESTONE 3, STAGE B: read CSRdRefl's already-resolved reflection instead of re-deciding
-    // roughness and calling rtReflectionTemporal here -- CSRdRefl ran that same gate and that same
-    // call for this pixel, from its own roughness-only reconstruction (rdSurfaceRoughness, declared
-    // alongside rdSurfaceFromRecord above). THE SPLIT COMPILE MUST CONTAIN NO CALL TO
-    // rtReflectionTemporal -- removing it from this pass is the point (register pressure) -- so this
-    // branch reads a texel instead of tracing.
+    // roughness and calling rtReflectionTemporal here (register pressure -- the split compile must
+    // contain no such call).
     //
-    // THE GATE HERE IS DELIBERATELY MISSING ITS ROUGHNESS TERM: it repeats only
-    // `gShadowParams.z > 0.5 && gRtParams.w > 0.5` (never s.rough <= 0.75) because rdRefl.a already
-    // encodes that CSRdRefl's OWN gate (which does include roughness) passed for this pixel -- see
-    // gRdReflTex's own header comment, "THE STAGE'S OWN DECISION", for why reading that alpha is not
-    // an approximation of the roughness test but IS the roughness test's already-computed answer.
-    // What is repeated here only guards the texture itself: on a frame where the CPU never dispatched
-    // CSRdRefl at all (this same condition false), gRdReflTex may hold a stale or placeholder texel,
-    // exactly the reason CSRdGi's and CSRdSkyOcc's own AVER_RD_SPLIT reads above repeat their own
-    // dispatch conditions the same way.
+    // THE GATE HERE IS DELIBERATELY MISSING ITS ROUGHNESS TERM: rdRefl.a already encodes that
+    // CSRdRefl's OWN gate (which includes roughness) passed for this pixel -- see gRdReflTex's "THE
+    // STAGE'S OWN DECISION". What's repeated here only guards against a frame CSRdRefl never
+    // dispatched (stale/placeholder texel), same reason CSRdGi/CSRdSkyOcc's reads repeat theirs.
     const float4 rdRefl = (gShadowParams.z > 0.5 && gRtParams.w > 0.5)
                          ? gRdReflTex[uint2(i.pos.xy)] : float4(0.0, 0.0, 0.0, 0.0);
     if (rdRefl.a > 0.5) {
@@ -3306,13 +2904,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         giPoisonSpecCeilHit = rdRefl.a > 1.5;
         ind.specular = rdRefl.rgb;
     } else if (gVoxelParams.w > 0.5) {
-        // PSMainVoxi's OWN voxel-cone fallback, for the surfaces PSMainVoxi itself falls back for
-        // (rough > 0.75, or RT unavailable): past that roughness a one-ray estimate can't resolve a
-        // near-hemispherical lobe regardless of which pass is asking. DUPLICATED FROM THE #else
-        // BRANCH'S IDENTICAL COPY below rather than shared across the #endif, for the same "no shared
-        // statement" reason PSRayDriven's own trace block above gives (search "no shared statement")
-        // -- this whole chain must stay easy to prove byte-identical to the pre-milestone-3 shape when
-        // AVER_RD_SPLIT is 0, which a statement straddling this preprocessor boundary would not be.
+        // PSMainVoxi's OWN voxel-cone fallback (rough > 0.75, or RT unavailable): past that roughness
+        // a one-ray estimate can't resolve a near-hemispherical lobe. Duplicated from the #else
+        // branch's identical copy below, not shared across the #endif, for the same "no shared
+        // statement" reason PSRayDriven's trace block gives above.
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SPECCONE
         // ablated: no specular cone. FULLY OPAQUE (alpha 1) rather than empty, so skyWeight below
@@ -3349,11 +2944,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         float3 refl = rtReflectionTemporal(wpos, N, R, L, i.pos.xy, s.rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
 #endif
-        // Same guard as PSMainVoxi's twin (see there for the 13% regression an earlier two-call
-        // version cost): smoothstep(0.5,0.75,rough) is 0 at/below 0.5, so a hit reduces the lerp to
-        // `refl` and the march is multiplied by zero.
-        // THIS ONE IS THE WHOLE SCREEN: PSRayDriven answers primary visibility for every pixel by
-        // default, so every smooth surface was paying a march it then discarded.
+        // Same guard as PSMainVoxi's twin (13% regression there for an earlier two-call version):
+        // smoothstep(0.5,0.75,rough) is 0 at/below 0.5, so a hit skips the march entirely. THIS ONE
+        // IS THE WHOLE SCREEN: PSRayDriven answers primary visibility for every pixel by default.
         const float skyW = smoothstep(0.5, 0.75, s.rough);
         float3 skyR = float3(0.0, 0.0, 0.0);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
@@ -3361,52 +2954,43 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #else
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
 #endif
-        // CLAMPED, AND THIS WAS THE ONLY UNBOUNDED TERM LEFT IN A SHADOWED PIXEL. Its cone-traced
-        // twin eighteen lines below already does min(sceneSpec.rgb * gVoxelParams.y,
-        // AVER_VOX_MAXRAD); the ray branch had no ceiling at all, and rtReflection returns
-        // reflAlbedo * (direct + ambient) with nothing bounding it.
+        // CLAMPED: THIS WAS THE ONLY UNBOUNDED TERM LEFT IN A SHADOWED PIXEL (rtReflection returns
+        // reflAlbedo*(direct+ambient) with nothing bounding it; the cone-traced twin below already does
+        // min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD)). WHY IT SHOWS IN SHADOW: diffAmbient/
+        // diffBounce are both bounded there, and averIndirectTerms' FssEss/specOcc are both bounded by
+        // ~1, so specEnv is the term left standing and inherits this magnitude unchanged -- one
+        // reflection ray escaping a dark interior through a window was the entire pixel. MEASURED:
+        // residual outliers predominantly BRIGHT, 49x more frequent in dim regions than with ray
+        // tracing off.
         //
-        // WHY IT SHOWS IN SHADOW SPECIFICALLY: where the sun does not reach, diffAmbient is
-        // multiplied by the occlusion and goes to zero, and diffBounce is MAXRAD-clamped on both of
-        // its routes. specEnv is the term left standing, and averIndirectTerms' FssEss and specOcc
-        // are both bounded by ~1, so it inherits this magnitude unchanged. One reflection ray
-        // escaping a dark interior through a window was the entire pixel -- which is exactly the
-        // measured shape: the residual outliers are predominantly BRIGHT, and their rate is 49x
-        // higher in dim regions than with ray tracing off.
+        // clamp() not min(), deliberately: min bounds above only, and a NEGATIVE radiance historically
+        // rendered wrong here (BRIGHT, since acesTonemap(-1) used to equal 1.0; it now floors at zero,
+        // color.hlsli since ded8784a, so the same mistake would render confident BLACK instead --
+        // silent, a stronger reason to floor it HERE). The voxel injection's own write already uses
+        // this two-sided form.
         //
-        // clamp() rather than the twin's min(), deliberately. min bounds above only, and this tree
-        // has a recorded incident class where a NEGATIVE radiance rendered wrong -- historically
-        // BRIGHT, because acesTonemap(-1) used to equal 1.0; acesTonemap now floors input at zero
-        // (color.hlsli, since ded8784a) so the same mistake would instead render as confident BLACK,
-        // not white -- silent rather than alarming, which is if anything a stronger reason to floor
-        // it HERE, at the point this value is computed, rather than leave it to whatever the tonemap
-        // happens to do with it. The voxel injection's own write already uses this two-sided form.
-        //
-        // B1 (F5): same PRE-clamp ceiling test as PSMainVoxi's copy -- see there for why `>=` (not a
-        // negated `<`) is the NaN-safe form and why a NaN component here needs no separate guard.
+        // B1 (F5): same PRE-clamp ceiling test as PSMainVoxi's copy (see there for the NaN-safe `>=`).
         const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
         giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
         ind.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
     } else if (gVoxelParams.w > 0.5) {
-        // PSMainVoxi's OWN voxel-cone fallback, for the surfaces PSMainVoxi itself falls back for
-        // (rough > 0.75, or RT unavailable): past that roughness a one-ray estimate can't resolve a
-        // near-hemispherical lobe regardless of which pass is asking.
+        // PSMainVoxi's OWN voxel-cone fallback (rough > 0.75, or RT unavailable): past that roughness
+        // a one-ray estimate can't resolve a near-hemispherical lobe.
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SPECCONE
-        // ablated: no specular cone. FULLY OPAQUE (alpha 1) rather than empty, so skyWeight below
-        // goes to 0 and this mode measures the CONE ALONE -- an alpha of 0 would instead hand the
-        // whole branch to skyColor and measure a march this mode is not trying to price.
+        // ablated: no specular cone. FULLY OPAQUE (alpha 1) rather than empty, so this mode measures
+        // the CONE ALONE (alpha 0 would hand the branch to skyColor instead).
         float4 sceneSpec    = float4(0.0, 0.0, 0.0, 1.0);
 #else
         float4 sceneSpec    = traceCone(wpos, R, specAperture);
 #endif
-        // Same fix as PSMainVoxi's identical branch above: HLSL doesn't short-circuit the multiply,
-        // so skyColor(R)*(1-sceneSpec.a) wastes a 32-step march when occluded. 0.004 threshold, same
-        // reasoning as averFogInscatter's (measured there: "8.9ms -> 1.3ms, 85% of the scene pass").
+        // Same fix as PSMainVoxi's branch above: HLSL doesn't short-circuit, so skyColor(R)*(1-sceneSpec.a)
+        // would waste a 32-step march when occluded. 0.004 threshold, same reasoning as
+        // averFogInscatter's (measured there: 8.9ms -> 1.3ms, 85% of the scene pass).
         const float skyWeight = 1.0 - sceneSpec.a;
         ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
 #if AVER_RD_ABLATE == AVER_RD_ABL_ROUGHSKY
-        // ablated: the rough branch's atmosphere march. Mode 4 covers only the REFLECTION branch's;
+        // ablated: the rough branch's atmosphere march (mode 4 covers only the REFLECTION branch's);
         // this is the call an enclosed scene actually reaches.
 #else
         if (skyWeight > 0.004) ind.specular += skyColor(R) * skyWeight;
@@ -3415,44 +2999,35 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         ind.specular        = skyColor(R);
     }
 #endif
-    // REAL AMBIENT OCCLUSION NOW, from the same cone march as the diffuse term. Used to be a
-    // hardcoded 1.0 ("a traced bounce is its own occlusion" -- true for a converged path tracer, not
-    // for one fixed sample per pixel). Cone trace supplies both now, matching the raster path.
+    // REAL AMBIENT OCCLUSION NOW, from the same cone march as the diffuse term -- used to be a
+    // hardcoded 1.0 ("a traced bounce is its own occlusion", true only for a converged path tracer).
     //
-    // AT EPIC `rdAo` IS COMPUTED AND THEN DISCARDED, and that is deliberate rather than an oversight
-    // left lying around. The line below prefers the traced sky visibility, so the cone gather's own
-    // occlusion goes unused on exactly the tier that pays most for it. It is NOT worth restructuring
-    // coneTracedIndirect to skip: the cones still have to be traced for `ind.diffuse`, so the only
-    // saving available is the per-cone `occ += c.a * w` accumulation -- roughly two FMAs times
-    // thirteen cones, against thirteen cone MARCHES of up to 24 volume samples each. Measured
-    // context: the whole cone gather is 4.05 ms of a 50.16 ms frame, and this is a rounding error
-    // inside that. Threading a `wantAo` flag through a function mirrored in two files (voxi.hlsl and
-    // voxi_gi.hlsli, byte-for-byte) to save it would cost more than it returns.
-    // Same substitution as PSMainVoxi's, and it has to be the same or the two primary-visibility
-    // paths would disagree about how much sky reaches a surface -- they currently agree to 2.23 MAD
-    // and that is worth keeping. Guarded for the same compile-time reason, and kept even though this
-    // pass only exists under ray tracing: a reader should not have to prove that to know this builds.
+    // AT EPIC `rdAo` IS COMPUTED AND THEN DISCARDED, deliberately: the line below prefers traced sky
+    // visibility there, so the cone's own occlusion goes unused on the tier that pays most for it.
+    // NOT worth restructuring to skip: the cones still trace for `ind.diffuse`, so the only saving is
+    // the per-cone `occ += c.a * w` accumulation (~2 FMAs x 13) against 13 marches of up to 24 samples
+    // each. MEASURED: the whole cone gather is 4.05ms of a 50.16ms frame, a rounding error inside that.
+    // Threading a `wantAo` flag through a function mirrored in two files (voxi.hlsl and voxi_gi.hlsli,
+    // byte-for-byte) to save it would cost more than it returns.
+    // Same substitution as PSMainVoxi's, and must be: the two primary-visibility paths currently
+    // agree to 2.23 MAD, worth keeping.
 #if AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     ind.occlusion    = gAmbientParams.x > 0.5
 #if AVER_RD_SPLIT
                      // STAGE B: in the two cases CSRdSkyOcc actually ran for (ReSTIR supplies diffuse,
-                     // or there is no voxel GI at all -- CSRdSkyOcc's own header has the exact gate),
-                     // read its already-resolved answer instead of tracing again. In CONE-GI mode
-                     // CSRdSkyOcc never wrote this pixel's texel (occlusion rides the cone gather's own
-                     // accumulator instead), so this falls through to the SAME rtSkyOcclusionTemporal
-                     // call the non-split branch below makes -- the shade pass, not a dedicated stage,
-                     // is what answers sky occlusion for that estimator.
+                     // or no voxel GI -- see its header), read its resolved answer instead of tracing
+                     // again. In CONE-GI mode CSRdSkyOcc never wrote this texel (occlusion rides the
+                     // cone accumulator instead), so this falls through to the same call below.
                      ? ((gGiRestirParams.x > 0.5 || gVoxelParams.w <= 0.5)
                         ? gRdAoTex[uint2(i.pos.xy)].r
                         : rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo,
                                                  rdAoGathered, false))
 #else
-                     // false: THIS pass runs with the G-buffer OFF -- that is what selects it -- so
-                     // gNrdAo was reprojected against motion vectors and depth this pass never
-                     // wrote, and its answer is not about this frame. Reading it anyway was the
-                     // whole of the washed-out ray-driven shadows: it overrode a correctly traced
-                     // "fully occluded" with ~0.83 "open", and full sky ambient then landed on every
-                     // interior surface. Measured in rtSkyOcclusionTemporal's own header.
+                     // false: this pass runs with the G-buffer OFF, so gNrdAo was reprojected against
+                     // motion vectors/depth this pass never wrote. Reading it anyway was the whole of
+                     // the washed-out ray-driven shadows: it overrode a correctly traced "fully
+                     // occluded" with ~0.83 "open", and full sky ambient then landed on every interior
+                     // surface (measured in rtSkyOcclusionTemporal's header).
                      ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo,
                                               rdAoGathered, false)
 #endif
@@ -3462,9 +3037,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // not the presence of ambient occlusion.
     ind.occlusion    = rdAo;
 #endif
-    // F4 (R1): PSMainVoxi's twin, applied here after ind.occlusion is final and before
-    // averShadeIndirect reads ind -- see ind4's copy above (search "ONE OWNER FOR THE SKY") for the
-    // full identity and why it is a subtraction rather than zeroing ind.ambient.
+    // F4 (R1): PSMainVoxi's twin, applied after ind.occlusion is final and before averShadeIndirect
+    // reads ind -- see ind4's copy above ("ONE OWNER FOR THE SKY") for the full identity.
     if (rdRestirSuppliedDiffuse && !giDiffusePoisoned && ((uint)gAmbientParams.z & 2u) == 0u)
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
@@ -3475,12 +3049,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 throughput = s.kdAlbedo;
     float3 bp = wpos;
     float3 bn = N;
-    // SKIPPED ENTIRELY WHENEVER THE CONE TRACE ALREADY ANSWERED THIS -- a correctness requirement:
-    // both compute the SAME surface-to-surface bounce, so running both would double every interior's
-    // brightness. Left reachable for GI-off and for measuring the estimator, but it is ONE cosine
-    // sample per pixel per bounce from a hash that can't vary by frame, with no history to accumulate
-    // into -- correct but far too undersampled to be an image until it gets per-frame decorrelation
-    // and a history buffer it doesn't have. Until then the cone trace above is the better answer.
+    // SKIPPED ENTIRELY WHENEVER THE CONE TRACE ALREADY ANSWERED THIS (both compute the same
+    // surface-to-surface bounce; running both would double every interior's brightness). Left
+    // reachable for GI-off and for measuring the estimator, but it's one cosine sample/pixel/bounce
+    // from a per-pixel-fixed hash with no history to accumulate into -- correct but far too
+    // undersampled until it gets per-frame decorrelation and a history buffer. Until then the cone
+    // trace above is the better answer.
     const bool rdConeSuppliedDiffuse = gVoxelParams.w > 0.5;
     [loop] for (uint b = 1; b < bounces && !rdConeSuppliedDiffuse; ++b) {
         // A cosine-weighted direction about the surface normal, from the same rtHash the shadow
@@ -3527,12 +3101,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         bp = bp + dirB * qb.CommittedRayT();
         bn = bnWS;
         // The hit's own emission, weighted by the path so far and NOT by this hit's albedo (emitted
-        // light leaves the surface without bouncing off it), so a bounce that lands on a lamp bulb
-        // carries its glow and not only its sunlit reflection. The factor alone, no emissive map.
-        // NOT IN THE SINGLE-PASS COMPILE: that megakernel is at the AMD driver's register limit (see
-        // rtGiShadowBits() in voxi_rt.hlsli), and this loop only runs with GI off anyway. A lamp the
-        // lamp term above already lights directly adds nothing here (rdLocalCarriesEmitters), or the
-        // first bounce would count its light twice -- the same rule as giTraceInitialCandidate's.
+        // light doesn't bounce off the surface it leaves), so a bounce landing on a lamp bulb carries
+        // its glow. The factor alone, no emissive map. NOT IN THE SINGLE-PASS COMPILE: that megakernel
+        // is at the AMD driver's register limit (see rtGiShadowBits() in voxi_rt.hlsli), and this loop
+        // only runs with GI off anyway. A lamp the lamp term above already lights directly adds
+        // nothing here (rdLocalCarriesEmitters), or the first bounce would count its light twice --
+        // same rule as giTraceInitialCandidate's.
 #if !AVER_RD_SINGLE_PASS
         const RtMaterial bmat = gRtMaterials[bi.materialIndex];
         if (!((bmat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()))
@@ -3562,39 +3136,34 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     radiance = averApplyFogAirVis(radiance, wpos, true, voxiAirVisibility(wpos));
 #endif
 
-    // Depth for everything that draws AFTER the scene -- the deferred sky, transparentPass, the
-    // particle pass. Without it they have nothing to test against and sort against a cleared
-    // buffer, which puts smoke in front of walls.
+    // Depth for everything that draws AFTER the scene (deferred sky, transparentPass, particles) --
+    // without it they sort against a cleared buffer, putting smoke in front of walls.
     float4 clip = mul(float4(wpos, 1.0), gViewProj);
     o.depth = clip.w > 1e-6 ? saturate(clip.z / clip.w) : 1.0;
-    // UNLIT SUBSTITUTES THE COLOUR AND NOTHING ELSE. Handled here rather than through
-    // gShadingModel because a ray hit has no per-draw cbuffer -- the raster path carries the mode in
-    // the b1 block PSMainVoxi reads, and this pass never binds it; that asymmetry is why the mode
-    // reached the rasteriser and not the renderer that draws the scene by default.
+    // UNLIT SUBSTITUTES THE COLOUR AND NOTHING ELSE. Handled here, not through gShadingModel, because
+    // a ray hit has no per-draw cbuffer to carry the mode in (the raster path carries it in the b1
+    // block PSMainVoxi reads; this pass never binds it).
     //
-    // AN OVERRIDE RATHER THAN AN EARLY RETURN, deliberately: every AVER_GBUFFER channel below still
-    // has to be written, and returning above them would leave velocity, viewZ, normal-roughness and
-    // SV_DEPTH unwritten -- the exact "fills only some outputs" fault the struct's own comment warns
-    // both return sites about. s.albedo is the SAMPLED base colour; shading a base-colour CONSTANT
-    // is what made this mode pure white on every textured mesh.
-    // Unlit is albedo PLUS emissive: it removes the lighting, not the surface's own light, so a lamp
-    // bulb still glows. Same rule as displayColor for the raster Unlit view (averBuildSurface).
+    // AN OVERRIDE RATHER THAN AN EARLY RETURN: every AVER_GBUFFER channel below still has to be
+    // written (the struct's "fills only some outputs" warning) -- returning above them would leave
+    // velocity, viewZ, normal-roughness and SV_DEPTH unwritten. s.albedo is the SAMPLED base colour;
+    // shading a base-colour CONSTANT made this mode pure white on every textured mesh.
+    // Unlit is albedo PLUS emissive: removes the lighting, not the surface's own light, so a lamp
+    // bulb still glows (same rule as displayColor for the raster Unlit view, averBuildSurface).
     o.col   = float4(vmode == 1u ? s.albedo + s.emissive : radiance, 1.0);   // vmode 1 == Unlit (see
                                                                   // gViewParams's own cbuffer comment
                                                                   // for the legend)
-    // B1 (F5): applied LAST, after the unlit substitution just above and after fog/shading upstream,
-    // so this is unconditionally the final colour whenever it fires -- see PSMainVoxi's identical
-    // override for the precedence against giDiffusePoisoned (a giRestirIndirect colour on the diffuse
-    // channel wins), and aver_IsGiRestirPoisonColour's own comment for why. Takes precedence over the
-    // unlit substitution too: giPoisonView is an explicit diagnostic the user turned on by hand, and
-    // it should not go dark just because unlit view is also active.
+    // B1 (F5): applied LAST, after the unlit substitution and fog/shading upstream, so this is
+    // unconditionally the final colour whenever it fires (see PSMainVoxi's identical override for the
+    // precedence against giDiffusePoisoned -- a giRestirIndirect colour on the diffuse channel wins;
+    // aver_IsGiRestirPoisonColour's own comment has why). Takes precedence over unlit too: giPoisonView
+    // is an explicit diagnostic and shouldn't go dark just because unlit is also active.
     if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
         o.col.rgb = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
-    // vmode 2-5 (ViewDebug's ray-hit/triangle views): replace the final colour LAST, after both the
-    // unlit substitution and the GI-poison violet override above, so selecting one of these always
-    // shows exactly that debug encoding -- never silently mixed with either. Every other output
-    // below (G-buffer MRTs, depth, history writes above) is untouched: NRD/history still see valid
-    // geometry, only what lands on screen changes -- see viewDebugColor's own header comment.
+    // vmode 2-5 (ViewDebug's ray-hit/triangle views): replace the final colour LAST, after both
+    // overrides above, so selecting one always shows exactly that debug encoding. Every other output
+    // below (G-buffer MRTs, depth, history writes) is untouched: NRD/history still see valid geometry,
+    // only what's on screen changes (see viewDebugColor's header).
     if (vmode == 6u)
         o.col.rgb = aoView.xxx;
     else if (vmode >= 2u)
@@ -3613,55 +3182,49 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
 // ---- STAGED RAY-DRIVEN COMPUTE STAGES: pixel -> NDC -> primary-ray direction, ONE PLACE ------------
 //
-// Pixel-centre NDC, the exact inverse of the ndc->pixel mapping this file and voxi_rt.hlsli already
-// use everywhere (this file's own rtReprojectReflection; voxi_rt.hlsli's rtReprojectHistory/
-// rtReprojectAo/rtAoSpatial/rtShadowSpatial): px = viewport.xy + float2(ndc.x*0.5+0.5,
-// 0.5-ndc.y*0.5) * viewport.zw. Solved for ndc at this pixel's CENTRE (pixel + 0.5), it equals what
-// VSky/SkyOut (modules/rhi/shaders/shared_prelude.hlsl:967-975) interpolates there: VSky emits
-// o.ndc = uv*2-1 with o.pos = float4(o.ndc, 1, 1), so the rasteriser's own NDC-to-viewport transform
-// is exactly the forward direction of the formula above, and this is its inverse.
+// Pixel-centre NDC, the exact inverse of the ndc->pixel mapping this file and voxi_rt.hlsli use
+// everywhere (this file's rtReprojectReflection; voxi_rt.hlsli's rtReprojectHistory/rtReprojectAo/
+// rtAoSpatial/rtShadowSpatial): px = viewport.xy + float2(ndc.x*0.5+0.5, 0.5-ndc.y*0.5) * viewport.zw.
+// Solved for ndc at the pixel CENTRE, it equals what VSky/SkyOut (modules/rhi/shaders/
+// shared_prelude.hlsl:967-975) interpolates there -- this is that transform's inverse.
 //
 // gSceneViewportCur, NOT gSceneViewport: the latter is LAST frame's rect (paired with gPrevViewProj,
-// for reprojection), and on any frame the docked view is resized or rescaled it would map a stage onto
-// the old pixel grid while Stage B shades the new one. The rect the rasteriser used for i.ndc/i.pos.xy
-// THIS frame is this one. (A shadow-ray FOOTPRINT still needs LAST frame's grid on purpose -- see
-// CSRdShadow's own neighbour-ray step, which keeps gSceneViewport separately and is untouched by this
-// helper.)
+// for reprojection), and on a resize/redock would map a stage onto the old pixel grid while Stage B
+// shades the new one. The rect the rasteriser used for i.ndc/i.pos.xy THIS frame is this one. (A
+// shadow-ray FOOTPRINT still needs LAST frame's grid on purpose -- CSRdShadow keeps gSceneViewport
+// separately.)
 //
-// FACTORED OUT OF CSRdVisibility AND CSRdShadow, which each inlined this exact sequence before this
-// task -- ONE function now, used by all four staged compute stages (CSRdVisibility, CSRdShadow,
-// CSRdGi, CSRdSkyOcc, all further down this file), so a future change to the mapping cannot update
-// three of the four and silently disagree in the fourth. The math is byte-for-byte what each of the
-// first two already computed. `ndc` comes back alongside `dir` because CSRdShadow's own shadow-ray
-// footprint (and PSRayDriven's) needs it for the neighbour-ray reconstruction, not because this
-// function does anything with it itself.
+// FACTORED OUT OF CSRdVisibility AND CSRdShadow (each inlined this before this task) into one
+// function used by all four staged stages (CSRdVisibility, CSRdShadow, CSRdGi, CSRdSkyOcc), so a
+// future mapping change can't update three and disagree in the fourth. The math is byte-for-byte
+// what each of the first two already computed. `ndc` comes back alongside `dir` because the
+// shadow-ray footprint (CSRdShadow's and PSRayDriven's) needs it.
 float3 rdPrimaryRayDir(uint2 pixel, out float2 ndc) {
     const float2 pxC = float2(pixel) + 0.5;
     ndc.x = (pxC.x - gSceneViewportCur.x) / max(gSceneViewportCur.z, 1.0) * 2.0 - 1.0;
     ndc.y = 1.0 - (pxC.y - gSceneViewportCur.y) / max(gSceneViewportCur.w, 1.0) * 2.0;
 
-    // Same NDC-to-world-ray reconstruction as PSRayDriven's own primary ray (and PSVoxelDebug's),
-    // through averViewRayDir.
+    // Same NDC-to-world-ray reconstruction as PSRayDriven's primary ray (and PSVoxelDebug's).
     return averViewRayDir(ndc);
 }
 
 // ---- STAGE A: CSRdVisibility -- trace the primary ray, write the visibility record -----------------
 //
-// The visibility-only half of PSRayDriven's own trace block above (AVER_RD_SPLIT==0 branch): same
-// mask, same cutout handling, same ray. Nothing past a committed hit or a miss is computed here --
-// Stage S (CSRdShadow, immediately below) and Stage B (PSRayDriven's AVER_RD_SPLIT branch, above) do
-// the reconstruction, from this dispatch's own gRdVisBuf write, through rdSurfaceFromRecord.
+// The visibility-only half of PSRayDriven's trace block above (AVER_RD_SPLIT==0 branch): same mask,
+// same cutout handling, same ray. Nothing past a hit/miss is computed here -- Stage S (CSRdShadow)/
+// Stage B (PSRayDriven's AVER_RD_SPLIT branch) reconstruct from this dispatch's gRdVisBuf write,
+// through rdSurfaceFromRecord.
 //
-// D3D12 ONLY FOR NOW, per this feature's own interface contract -- VoxiRenderer decides whether to
-// dispatch this at all (falls back to the single pass otherwise), not this file.
+// D3D12 ONLY FOR NOW -- VoxiRenderer decides whether to dispatch this at all (falls back to the
+// single pass otherwise), not this file.
 [numthreads(8, 8, 1)]
 void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
     // pitch 0 means the record buffer has nowhere well-defined to put this pixel (VoxiRenderer writes
-    // a nonzero pitch only while it actually means to run the staged path this frame) -- bail rather
-    // than guess an index.
+    // a nonzero pitch only while it means to run the staged path this frame) -- bail rather than
+    // guess an index.
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
@@ -3676,8 +3239,8 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     r.TMax      = 1.0e7;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Same lane as PSRayDriven's own primary ray -- see that function's header comment for why
-    // AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL, is right for a primary ray leaving the viewer's own head.
+    // Same lane as PSRayDriven's primary ray (AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL: leaves the
+    // viewer's own head).
     q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
     averRtProceedSolid(q);
 
@@ -3692,9 +3255,9 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
 }
 
 // THE SHADOW-RAY FOOTPRINT, factored out of CSRdShadow so CSRdShadowProbe (below) can build the exact
-// same dpx/dpy a fresh probe ray needs, rather than a third copy of this derivation (PSRayDriven's own
-// "THE SHADOW-RAY FOOTPRINT" comment, and CSRdShadow's copy below it before this factoring, are the
-// other two). gSceneViewport, not Cur -- matches PSRayDriven's own copy of this step exactly.
+// same dpx/dpy a fresh probe ray needs, rather than a third copy (PSRayDriven's copy, and CSRdShadow's
+// own copy before this factoring, are the other two). gSceneViewport, not Cur -- matches PSRayDriven's
+// copy of this step exactly.
 void rdShadowFootprint(float2 ndc, float3 dir, RdSurface s, out float3 dpx, out float3 dpy) {
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
@@ -3713,20 +3276,19 @@ groupshared uint gRdShadowProbeMask;
 
 // ---- STAGE S0: CSRdShadowProbe -- one ray per pixel, reduced to one lit/blocked/mixed mask per tile ---
 //
-// A (Settings::rayDrivenShadowTiles). Dispatched over the SAME (gx, gy) grid as CSRdShadow, immediately
-// before it: one thread GROUP is one 8x8 tile of the viewport (tile = SV_GroupID.xy, matching
-// gRdShadowTiles' own tileIdx layout), and every thread in it traces at most one probe ray -- always
-// ONE ray, never the Epic-tier disc CSRdShadow's own AVER_RD_SHADOW_TILES compile traces per pixel --
-// then the group reduces its 64 answers to one mask. CSRdShadow's tiled compile ORs this tile's mask
-// together with its 3x3 neighbourhood and skips its own ray loop wherever every probe in that
-// neighbourhood agrees: see that compile's own header comment for why 3x3, not this tile alone.
+// A (Settings::rayDrivenShadowTiles). Dispatched over the SAME grid as CSRdShadow, immediately before
+// it: one thread GROUP is one 8x8 tile (tile = SV_GroupID.xy, matching gRdShadowTiles' own tileIdx
+// layout), every thread traces at most ONE probe ray (never the Epic-tier disc CSRdShadow's
+// AVER_RD_SHADOW_TILES compile traces), then the group reduces 64 answers to one mask. CSRdShadow's
+// tiled compile ORs this tile's mask with its 3x3 neighbourhood and skips its ray loop wherever every
+// probe in that neighbourhood agrees (see that compile's header for why 3x3).
 //
-// NO EARLY RETURN ANYWHERE IN THIS FUNCTION, BEFORE OR BETWEEN THE TWO GroupMemoryBarrierWithGroupSync
-// CALLS BELOW: an out-of-viewport thread, a pitch-0 frame, and a sky pixel are all real cases (the
-// viewport is rarely an exact multiple of 8), and a `return` before a barrier every OTHER thread in the
-// group still executes is undefined behaviour, not merely "this thread's own contribution is skipped".
-// Each of those cases instead leaves `bit` at its 0 default and falls through to the same reduction as
-// every other thread -- 0 ORs into the group mask as a no-op, so it costs nothing but a branch.
+// NO EARLY RETURN ANYWHERE IN THIS FUNCTION, before or between the two barrier calls below: an
+// out-of-viewport thread, a pitch-0 frame, and a sky pixel are all real (the viewport is rarely an
+// exact multiple of 8), and a `return` before a barrier every OTHER thread still executes is
+// undefined behaviour, not merely "this thread's own contribution is skipped". Out-of-viewport/
+// pitch-0/sky cases instead leave `bit` at its 0 default and fall through to the same reduction (0
+// ORs in as a no-op, so it costs nothing but a branch).
 [numthreads(8, 8, 1)]
 void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
     uint bit = 0u;   // 0 = this thread has no vote (out of viewport / pitch 0 / sky pixel)
@@ -3748,23 +3310,21 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
             const float3 L = normalize(gLightDir.xyz);
-            // THE SAME JITTER rtShadowTemporal's OWN NON-TILED BRANCH PASSES (voxi_rt.hlsli) for this
-            // exact (gRtHistParams.x, frame index) pair -- this probe ray has to agree with what
-            // CSRdShadow's own fresh trace would have drawn, or a tile's "every probe agrees" verdict
-            // would be classifying a DIFFERENT sample than the one it is standing in for.
+            // THE SAME JITTER rtShadowTemporal's non-tiled branch passes (voxi_rt.hlsli) for this
+            // (gRtHistParams.x, frame index) pair -- this probe has to agree with what CSRdShadow's
+            // fresh trace would have drawn, or a tile's "every probe agrees" verdict classifies the
+            // wrong sample.
             const float jitter = (gRtHistParams.x < 0.5) ? 0.0
                                 : (float)((uint)gRtHistParams.z) * 2.39996323;
             // WHICH OF THE PIXEL'S OWN SAMPLES THE PROBE TRACES -- ROTATED, NOT ALWAYS THE FIRST.
-            // Sample 0 sits at a FIXED radius, sqrt(0.5) of the sun disc, whatever the pixel or frame
-            // (rtDiscSample; the same trap the F1 comment in voxi_rt.hlsli records for the GI and sky
-            // rays). A probe that only ever traced it could not see an occluder covering less than
-            // ~9% of the disc at the ends of a soft penumbra. Every probe in a 3x3-tile neighbourhood
-            // would then agree, and at High/Epic CSRdShadow would skip rays that DO see it,
-            // hardening the edge tile-by-tile. Rotating through samples 0..rays-1 by pixel and frame
-            // puts every radius the real trace uses (0.25 to 0.94 of the disc at 8 rays) into every
-            // tile. The probe is then always one of the real trace's own rays: identical to it at 1
-            // ray, and covering its radii at 4 and 8. The (x + 3y) step keeps neighbours in a row and
-            // in a column on different samples.
+            // Sample 0 sits at a FIXED radius (sqrt(0.5) of the sun disc, rtDiscSample; the same trap
+            // the F1 comment in voxi_rt.hlsli records for the GI and sky rays); always tracing it would
+            // miss an occluder covering < ~9% of the disc at a soft penumbra's edge, and every probe in
+            // a neighbourhood would then agree while High/Epic's real rays DO see it -- hardening the
+            // edge tile-by-tile. Rotating through samples 0..rays-1 by pixel and frame puts every
+            // radius the real trace uses (0.25 to 0.94 of the disc at 8 rays) into every tile, and the
+            // probe is always one of the real trace's own rays: identical to it at 1 ray, and covering
+            // its radii at 4 and 8. The (x + 3y) step keeps row/column neighbours on different samples.
             const uint rays   = (uint)max(gRtParams.y, 1.0);
             const uint kProbe = (pixel.x + 3u * pixel.y + (uint)gRtHistParams.z) % rays;
             const float3 fresh = rtShadowEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter,
@@ -3789,15 +3349,15 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
 
 // ---- STAGE S: CSRdShadow -- reconstruct the surface, resolve the sun shadow -------------------------
 //
-// Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the same
+// Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (same
 // reconstruction Stage B uses), and runs the SAME rtShadowTemporal call PSRayDriven's single pass
-// makes -- same pixel-centre argument, same footprint, same ray count -- so the history buffer
-// rtShadowTemporal reads and writes means the same thing whichever path is running.
+// makes -- same pixel-centre, footprint, ray count -- so the history buffer means the same thing
+// either way.
 //
-// COMPILED AT SM 6.6 (VoxiRenderer), because rtShadowTemporal's reprojection and spatial filter take
-// ddx/ddy of depth and compute shaders only have derivatives from 6.6 on. 8x8 threads make 6.6 form
-// 2x2 quads, the pixel shader's own neighbourhood. As in the single pass, a quad with a lane that
-// returned early (a sky pixel, the viewport's last odd row) has undefined derivatives.
+// COMPILED AT SM 6.6: rtShadowTemporal's reprojection/spatial filter take ddx/ddy of depth, and
+// compute shaders only get derivatives from 6.6 on (8x8 threads form 2x2 quads, the pixel shader's
+// own neighbourhood). As in the single pass, a quad with an early-returned lane (a sky pixel, the
+// viewport's last odd row) has undefined derivatives.
 [numthreads(8, 8, 1)]
 void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
@@ -3810,34 +3370,32 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     const uint4 rec = gRdVisBuf[idx];
     if (rec.x == 0xFFFFFFFFu) {
         // A sky pixel has no surface to shadow-test; Stage B never reads this texel for one either
-        // (its own miss check returns before reaching the sunVis read), but a defined, fully-lit
-        // value here costs nothing and leaves no uninitialised texel behind. Alpha 0.0, NOT a depth --
-        // M6: PSMainVoxi's blended-replay reuse test (gGiShadowParams.w bit 16) reads alpha as this
-        // pixel's linear view depth and treats <= 0 as "no surface here to reuse", a sentinel a real
-        // hit's positive view-space w can never produce.
+        // (its own miss check returns before reaching the sunVis read), but a defined, fully-lit value
+        // costs nothing and leaves no uninitialised texel behind. Alpha 0.0, NOT a depth -- M6:
+        // PSMainVoxi's blended-replay reuse test (gGiShadowParams.w bit 16) treats <= 0 as "no surface
+        // to reuse", a sentinel a real hit's positive view-space w can never produce.
         gRdSunVisTex[pixel] = float4(1.0, 1.0, 1.0, 0.0);
         return;
     }
 
-    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
-    // own header for the derivation. Needed again here (not carried in the record) to rebuild `dir`
-    // for rdSurfaceFromRecord's face-the-ray normal flip and for this shadow ray's own footprint.
+    // Same pixel-centre NDC/primary-ray reconstruction as CSRdVisibility. Needed again here (not
+    // carried in the record) for rdSurfaceFromRecord's face-the-ray flip and this shadow ray's
+    // footprint.
     float2 ndc;
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // THE SAME SHADOW-RAY FOOTPRINT PSRayDriven builds for its own shadow call -- see rdShadowFootprint's
-    // own header for the derivation (factored out, above, so CSRdShadowProbe can build the identical
-    // footprint for its own probe ray without a third copy of this block).
+    // THE SAME SHADOW-RAY FOOTPRINT PSRayDriven builds for its own shadow call (factored out, above,
+    // so CSRdShadowProbe can build the identical footprint without a third copy).
     float3 dpx, dpy;
     rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
     const float3 L = normalize(gLightDir.xyz);
 
-    // W6/M5: EXPLICITLY TRUE -- same reason PSRayDriven's own copy of this line gives (this function's
-    // header comment, just above PSRayDriven): a blended (glass/water) draw never reaches the
-    // ray-driven primary at all, so every history write this call makes is always live for this pass.
+    // W6/M5: EXPLICITLY TRUE -- same reason as PSRayDriven's copy: a blended (glass/water) draw never
+    // reaches the ray-driven primary, so every history write this call makes is always live for this
+    // pass.
     gAverHistoryWrite = true;
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
@@ -3845,14 +3403,11 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 #else
 #if AVER_RD_SHADOW_TILES
     // A3: PROBE-GUIDED SKIP -- OR the 3x3 tile neighbourhood CSRdShadowProbe already classified around
-    // THIS pixel's own tile (tid.xy is viewport-local, so /8 is the tile the primary dispatch grid --
-    // shared with CSRdShadowProbe's own -- already puts this thread in). The mask depends only on
-    // SV_GroupID, not on any per-thread data, so this branch is wave-uniform: every lane in the tile
-    // takes the same side of it. Exactly 2 (every probe in the neighbourhood lit) or exactly 1 (every
-    // probe blocked) skips the ray loop and hands the probes' own verdict straight to the SAME temporal
-    // accumulation, history write and spatial filter every other pixel still runs -- see
-    // rtShadowTemporalEx's own header for why that is safe. Anything else (a probe disagreed, or the
-    // 3x3 OR mixes lit and blocked tiles) falls through to today's unabridged path.
+    // this pixel's tile (tid.xy/8 is the same tile grid CSRdShadowProbe dispatches over; wave-uniform:
+    // depends only on SV_GroupID). Exactly 2 (every probe lit) or 1 (every probe blocked) skips the
+    // ray loop and hands the probes' verdict straight to the same temporal accumulation/history/filter
+    // every other pixel runs (see rtShadowTemporalEx's header for why that is safe). Anything else
+    // (disagreement, or a mixed 3x3 OR) falls through to the unabridged path.
     const uint tilesX = ((uint)gSceneViewportCur.z + 7u) / 8u;
     const uint tilesY = ((uint)gSceneViewportCur.w + 7u) / 8u;
     const uint2 tile  = tid.xy / 8u;
@@ -3865,7 +3420,7 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
         }
     }
     // ONE call with the verdict as a runtime flag, not a ?: between two calls: two call sites would
-    // inline the whole temporal/spatial/trace body twice into a pass that is already register-bound.
+    // inline the whole temporal/spatial/trace body twice into an already register-bound pass.
     const bool   probeAgrees = (m == 2u || m == 1u);
     const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
                                              (uint)max(gRtParams.y, 1.0), probeAgrees,
@@ -3875,10 +3430,10 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
                                            (uint)max(gRtParams.y, 1.0));
 #endif
 #endif
-    // M6: THE PRIMARY SURFACE'S OWN LINEAR VIEW DEPTH, the SAME formula PSMainVoxi's rtViewZ uses
+    // M6: THE PRIMARY SURFACE'S OWN LINEAR VIEW DEPTH, same formula as PSMainVoxi's rtViewZ
     // (mul(wpos, 1, gViewProj).w) -- carried in alpha so a later blended-replay fragment can prove it
-    // sits on THIS surface before reusing `sunVis` below instead of tracing its own (gGiShadowParams.w
-    // bit 16's cbuffer comment and gRdSunVisTex's own declaration comment have the full contract).
+    // sits on THIS surface before reusing `sunVis` instead of tracing (see gGiShadowParams.w bit 16
+    // and gRdSunVisTex's own comments).
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);
 }
@@ -3886,18 +3441,17 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 #if !AVER_RD_SINGLE_PASS
 // ---- STAGE L: CSRdLocalLights -- lamps lit the way the sun is -----------------------------------------
 //
-// Dispatched right after CSRdShadow, and only on a frame VoxiRenderer has lights for (a zero count skips
-// the dispatch, so a scene with no lamps pays nothing). Per pixel: rdLocalLightsVisibility (above, beside
-// gRdLocalOut) for the surface CSRdVisibility found -- one shadow ray toward one lamp, accumulated into
-// gRdLocalOut; Stage B (PSRayDriven's AVER_RD_SPLIT branch) reads that visibility back through
-// rdLocalVisFiltered and shades every lamp with rdLocalLightsShade.
+// Dispatched right after CSRdShadow, only on a frame with lights (zero count skips the dispatch, so a
+// scene with no lamps pays nothing). Per pixel: rdLocalLightsVisibility for the surface
+// CSRdVisibility found -- one shadow ray toward one lamp, accumulated into gRdLocalOut; Stage B
+// (PSRayDriven's AVER_RD_SPLIT branch) reads it back via rdLocalVisFiltered and shades every lamp
+// with rdLocalLightsShade.
 //
-// DERIVATIVES AS IN CSRdShadow (SM 6.6, 8x8 threads = 2x2 quads -- see its own header): the same
-// prologue and early-outs, then rdLocalLightsVisibility, whose rtReprojectTexel takes ddx/ddy of depth
-// for every non-sky pixel before any further data-dependent branch.
+// DERIVATIVES AS IN CSRdShadow (SM 6.6, 8x8 threads = 2x2 quads): rdLocalLightsVisibility's
+// rtReprojectTexel takes ddx/ddy of depth for every non-sky pixel before any data-dependent branch.
 //
-// NOT IN THE SINGLE-PASS COMPILE (AVER_RD_SINGLE_PASS), which has no staged surface record to light:
-// the single-pass PSRayDriven calls rdLocalLightsVisibility on its own hit instead.
+// NOT IN THE SINGLE-PASS COMPILE, which has no staged surface record to light: the single-pass
+// PSRayDriven calls rdLocalLightsVisibility on its own hit instead.
 [numthreads(8, 8, 1)]
 void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
@@ -3907,15 +3461,14 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
 
-    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's own copy of this line gives: no blended draw
-    // reaches a staged pass, so this pass's history write is always live.
+    // W6/M5: EXPLICITLY TRUE -- no blended draw reaches a staged pass, so this history write is
+    // always live.
     gAverHistoryWrite = true;
 
     const uint4 rec = gRdVisBuf[idx];
     if (rec.x == 0xFFFFFFFFu) {
-        // Sky: nothing to light, but every texel of a HISTORY must be written each frame or the
-        // ping-pong hands a two-frames-old value back later. Visibility 1, so a surface that
-        // reprojects onto this texel by a depth-test near-miss starts lit rather than in full shadow.
+        // Sky: nothing to light, but every HISTORY texel must be written each frame or the ping-pong
+        // hands a two-frames-old value back later. Visibility 1, so a near-miss reprojection starts lit.
         if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
@@ -3923,8 +3476,8 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     float2 ndc;
     const float3 dir = rdPrimaryRayDir(pixel, ndc);
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
-    // The pixel centre, as CSRdShadow hands rtShadowTemporal. The visibility itself is Stage B's to read
-    // back from gRdLocalOut, so the return value is not needed here.
+    // The pixel centre, as CSRdShadow hands rtShadowTemporal. Stage B reads the visibility back from
+    // gRdLocalOut, so the return value isn't needed here.
     rdLocalLightsVisibility(s.wpos, s.N, float2(pixel) + 0.5, pixel, true);
 }
 #endif
@@ -3932,23 +3485,19 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
 // ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's own resample to read back
 //
 // B: GI CANDIDATE TRACE/RESAMPLE SPLIT (Settings::rayDrivenGiSplit). Runs giTraceInitialCandidate for
-// every pixel CSRdGi's own (non-split) copy would have traced it for -- same surface reconstruction,
-// same frameJitter, and the SAME f2Path/rho2 giDecodePaths (voxi_restir.hlsli, B2) computes for this
-// pixel there too -- and stores every one of its out params in gRdGiCand (voxi_restir.hlsli, B1).
-// CSRdGi's own AVER_GI_SPLIT=1 compile then reads that record back inside giRestirIndirect instead of
-// tracing again: see that compile's own header, and giRestirIndirect's AVER_GI_SPLIT branch, for why
-// the two agree bit-for-bit (full float precision through the hand-off, no quantisation).
+// every pixel CSRdGi's non-split copy would have traced -- same surface reconstruction, frameJitter,
+// and f2Path/rho2 (giDecodePaths, voxi_restir.hlsli B2) -- storing every out param in gRdGiCand
+// (voxi_restir.hlsli B1). CSRdGi's AVER_GI_SPLIT=1 compile then reads that record back inside
+// giRestirIndirect instead of retracing, agreeing bit-for-bit (full float precision, no
+// quantisation).
 //
-// NON-CHECKERBOARD COMPILE: one thread per pixel, the same (gx, gy) grid and pixel mapping CSRdGi
-// itself dispatches over.
+// NON-CHECKERBOARD COMPILE: one thread per pixel, same grid/mapping CSRdGi dispatches over.
 //
-// AVER_GI_CHECKERBOARD COMPILE (milestone 4): COMPACTED, not the full grid with half its lanes idle --
-// CSRdGi's own checkerboard branch only traces the pixels satisfying (x ^ y ^ parity) & 1 == 0, so this
-// dispatch is issued over ceil(w/2) x h threads instead and reconstructs exactly that half's pixel
-// coordinates from tid, the SAME `parity` bit CSRdGi reads out of gViewParams.w (see that compile's own
-// comment on why it is packed there). gGiCbSkip is forced false for every dispatched thread: unlike
-// CSRdGi, which runs over every pixel and reads gGiCbSkip to decide whether IT traces, this dispatch by
-// construction only ever covers the half that does.
+// AVER_GI_CHECKERBOARD COMPILE (milestone 4): COMPACTED, not the full grid with half idle --
+// CSRdGi's own checkerboard branch only traces pixels satisfying (x ^ y ^ parity) & 1 == 0, so this
+// dispatch is issued over ceil(w/2) x h threads, reconstructing the traced half's coordinates from tid
+// using the same `parity` bit CSRdGi reads from gViewParams.w. gGiCbSkip is forced false here since
+// this dispatch by construction only covers the half that traces.
 [numthreads(8, 8, 1)]
 void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 #if AVER_GI_CHECKERBOARD
@@ -3981,11 +3530,9 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
     const float3 dir = rdPrimaryRayDir(pixel, ndc);
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // NO gAverHistoryWrite HERE, UNLIKE CSRdShadow/CSRdGi's OWN COPIES OF THIS LINE: this dispatch
-    // never calls giRestirIndirect (only giTraceInitialCandidate, whose one shadow ray is a plain
-    // rtShadow call and reads no history), so the flag has nothing to gate in this function. CSRdGi's
-    // own AVER_GI_SPLIT compile still sets it, unconditionally, before ITS call to giRestirIndirect --
-    // see that call site for why.
+    // NO gAverHistoryWrite HERE, unlike CSRdShadow/CSRdGi: this dispatch never calls giRestirIndirect
+    // (only giTraceInitialCandidate, whose shadow ray is a plain rtShadow call reading no history), so
+    // the flag has nothing to gate.
     const uint frameIdx = (uint)gRtHistParams.z;
     const GiPathDecode gd = giDecodePaths(s.wpos, s.N, float2(pixel) + 0.5, frameIdx);
 
@@ -3997,9 +3544,8 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
                                             pos, nrm, rad, nonFinite, gd.f2Path, gd.rho2,
                                             f2LumTraced, f2LumSky, f2Observed);
 
-    // EVERY OUT PARAM PLUS THE BOOL, ALWAYS -- whatever giTraceInitialCandidate returned, so CSRdGi's
-    // own AVER_GI_SPLIT read (voxi_restir.hlsli) has a defined record for every pixel it might read,
-    // not only the ones that produced a usable candidate.
+    // EVERY OUT PARAM PLUS THE BOOL, ALWAYS -- so CSRdGi's AVER_GI_SPLIT read has a defined record for
+    // every pixel it might read, not only the ones that produced a usable candidate.
     RdGiCand cand;
     cand.pos         = pos;
     cand.flags       = (ok ? 1u : 0u) | (nonFinite ? 2u : 0u) | (f2Observed ? 4u : 0u);
@@ -4015,30 +3561,26 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 //
 // MILESTONE 2. Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the
 // same reconstruction Stage S and Stage B use), and runs the SAME giRestirIndirect call PSRayDriven's
-// single pass makes when ReSTIR GI is the active diffuse estimator -- same pixel-centre argument, so
-// the reservoir and surface-history buffers giRestirIndirect reads and writes (gGiReservoirs/
-// gGiSurfPosHist/gGiSurfNrmHist, u6/u7/u8, plus the NRD GI pair u9/t15 and the half-res visibility pair
-// u10/t16) mean the same thing whichever path is running.
+// single pass makes when ReSTIR GI is active -- same pixel-centre, so the reservoir/surface-history
+// buffers (gGiReservoirs/gGiSurfPosHist/gGiSurfNrmHist, u6/u7/u8, NRD GI pair u9/t15, half-res
+// visibility u10/t16) mean the same thing either way.
 //
-// ONLY MEANINGFULLY DISPATCHED WHEN ReSTIR GI IS ACTUALLY THE CHOSEN ESTIMATOR THIS FRAME
-// (VoxiRenderer::recordStagedRayDriven mirrors the same `gVoxelParams.w > 0.5 && gGiRestirParams.x >
-// 0.5` test on the CPU before issuing this dispatch, from the SAME cb_ values uploaded to this shader).
-// The cone-traced branch of PSRayDriven's GI block is UNTOUCHED by this stage and still runs inside
-// Stage B itself: coneTracedIndirect has no per-pixel history of its own to split out this way.
+// ONLY MEANINGFULLY DISPATCHED WHEN ReSTIR GI IS THE CHOSEN ESTIMATOR (VoxiRenderer::
+// recordStagedRayDriven mirrors the same `gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5` test on the
+// CPU before dispatch). The cone-traced branch is UNTOUCHED and still runs inside Stage B:
+// coneTracedIndirect has no per-pixel history to split out.
 //
-// COMPILED AT SM 6.6 (VoxiRenderer), same defines as CSRdShadow. giRestirIndirect and everything it
-// calls (giTraceInitialCandidate, the RAB_* adapter, the vendored RTXDI resampling headers) use no
-// derivative intrinsic themselves -- every texture fetch on a traced hit goes through averRtSampleSlot
-// with an explicit SampleLevel/gradient, never implicit ddx/ddy -- so this stage does not strictly need
-// 6.6 for that reason the way CSRdShadow does; it is dispatched through the same staged pipeline object
-// as the other three stages regardless, so it shares their shader model rather than inventing a fourth.
+// COMPILED AT SM 6.6, same as CSRdShadow, though giRestirIndirect uses no derivative intrinsic itself
+// (every ray-hit texture fetch goes through averRtSampleSlot with an explicit SampleLevel/gradient,
+// never implicit ddx/ddy; that also covers giTraceInitialCandidate, the RAB_* adapter, and the
+// vendored RTXDI resampling headers it calls) -- shares the staged pipeline's shader model rather than
+// inventing a fourth.
 //
-// MILESTONE 4 (voxi.rayDrivenStages == 2): this stage alone is ALSO compiled with AVER_GI_CHECKERBOARD=1
-// -- half-rate ReSTIR GI, tracing a fresh candidate for only the pixel half NRD's REBLUR expects fresh
-// data from this frame (giCbParity below), and leaving REBLUR to reconstruct the other half. The
-// checkerboard skip itself is decided here (gGiCbSkip) but everything it changes lives inside
-// giRestirIndirect (voxi_restir.hlsli, its own AVER_GI_CHECKERBOARD sections) -- this stage's own call
-// below is unchanged either way.
+// MILESTONE 4 (voxi.rayDrivenStages == 2): this stage alone is ALSO compiled with
+// AVER_GI_CHECKERBOARD=1 -- half-rate ReSTIR GI, tracing a fresh candidate only for the pixel half
+// NRD's REBLUR expects fresh data from this frame, leaving REBLUR to reconstruct the other half. The
+// skip is decided here (gGiCbSkip); everything it changes lives inside giRestirIndirect
+// (voxi_restir.hlsli).
 [numthreads(8, 8, 1)]
 void CSRdGi(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
@@ -4050,58 +3592,51 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
 
 #if AVER_GI_CHECKERBOARD
     // HALF-RATE GI'S OWN PARITY, NOT THE ROW PITCH -- read bit 16 of the raw cbuffer field directly
-    // (rdRowPitch() above already masked it away). CONTRACT: NRD's REBLUR, checkerboardMode BLACK, has
-    // data where Sequence::CheckerBoard(pixelPos, frameIndex) == (x ^ y ^ frameIndex) & 1 == 0; `pixel`
-    // here IS pixelPos (this engine's NRD rect is the full render target at origin 0), so tracing
-    // exactly where that expression is 0 is what makes this dispatch's write the half REBLUR expects
-    // fresh data for. `giCbParity` is not this frame's own NRD frameIndex -- prePass (beginShadowHistory)
-    // already ran earlier this frame and denoised LAST frame's write -- it is the frameIndex NEXT
-    // frame's NRD dispatch will use to denoise THIS frame's write, which VoxiRenderer::
-    // recordStagedRayDriven derives and packs into bit 16 for this one dispatch's upload only.
+    // (rdRowPitch() already masked it away). CONTRACT: NRD's REBLUR (checkerboardMode BLACK) has data
+    // where Sequence::CheckerBoard(pixelPos, frameIndex) == (x ^ y ^ frameIndex) & 1 == 0; `pixel` here
+    // IS pixelPos (this engine's NRD rect is the full render target at origin 0), so tracing exactly
+    // there is the half REBLUR expects fresh data for. `giCbParity` is not this frame's own NRD
+    // frameIndex -- prePass (beginShadowHistory) already denoised LAST frame's write -- it is NEXT
+    // frame's NRD frameIndex (denoising THIS frame's write), packed into bit 16 by VoxiRenderer::
+    // recordStagedRayDriven for this one upload.
     const uint giCbParity = ((uint)gViewParams.w >> 16) & 1u;
     gGiCbSkip = ((pixel.x ^ pixel.y ^ giCbParity) & 1u) != 0u;
 #endif
 
     const uint4 rec = gRdVisBuf[idx];
     if (rec.x == 0xFFFFFFFFu) {
-        // A sky pixel has no surface for ReSTIR to bounce a candidate off. Stage B's own miss branch
-        // (PSRayDriven's #if AVER_RD_SPLIT trace block, above) already writes the GI surface-history
-        // sentinel (gGiSurfNrmHistOut) for a miss -- this stage only has to leave its own texel in a
-        // defined state, not whatever the previous frame's HIT left there.
+        // A sky pixel has no surface for ReSTIR to bounce a candidate off. Stage B's miss branch
+        // already writes the GI surface-history sentinel (gGiSurfNrmHistOut) -- this stage only
+        // leaves its own texel defined, not whatever the previous frame's HIT left there.
         gRdGiTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
-    // own header for the derivation.
+    // Same pixel-centre NDC/primary-ray reconstruction as CSRdVisibility.
     float2 ndc;
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's own copy of this line gives (search "a
-    // blended (glass/water) draw never reaches the ray-driven primary"): every history write
+    // W6/M5: EXPLICITLY TRUE -- same reason as CSRdShadow's copy: every history write
     // giRestirIndirect makes below is always live for this pass.
     gAverHistoryWrite = true;
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
-    // ablated: no ReSTIR GI candidate -- matches PSRayDriven's own ablated GI block (a comment, no
-    // assignment: search "ablated: no cone gather"). gRdGiTex is never read back under this ablation
-    // either -- PSRayDriven's own AVER_RD_SPLIT read of it lives INSIDE that same outer ablation guard
-    // (further up this file), so leaving this texel untouched costs nothing.
+    // ablated: no ReSTIR GI candidate (matches PSRayDriven's ablated GI block -- a comment only, no
+    // assignment). gRdGiTex is never read back under this ablation either: PSRayDriven's own
+    // AVER_RD_SPLIT read of it lives inside that same outer ablation guard, so leaving this texel
+    // untouched costs nothing.
 #else
-    // EXACTLY THE ARGUMENTS PSRayDriven'S OWN (non-split) COPY PASSES -- see that call, further up
-    // this file, for why each one is what it is. `ao` is discarded here the same way PSRayDriven
-    // discards `rdAo` for this branch: giRestirIndirect sets it to 1.0 on its first line and never
-    // touches it again (see that function's own header), so Stage B's rdAo stays at its own initial
-    // 1.0 whether it calls giRestirIndirect itself or reads this texture instead.
+    // EXACTLY THE ARGUMENTS PSRayDriven'S non-split COPY PASSES. `ao` is discarded here the same way
+    // PSRayDriven discards `rdAo`: giRestirIndirect sets it to 1.0 on its first line and never touches
+    // it again, so Stage B's rdAo stays at its initial 1.0 either way.
     if (gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5) {
         float ao;
 #if AVER_GI_SPLIT
         // B4: THE SAME ROW-PITCH INDEX CSRdGiTrace WROTE gRdGiCand UNDER -- a `static`, not a
-        // parameter, so giRestirIndirect's signature stays shared with PSMainVoxi/PSRayDriven's own
-        // non-split call sites (voxi_restir.hlsli's own header comment on gGiCandIdx, right beside
-        // gGiCbSkip's identical contract just above).
+        // parameter, so giRestirIndirect's signature stays shared with PSMainVoxi/PSRayDriven's
+        // non-split call sites.
         gGiCandIdx = idx;
 #endif
         const float3 d = giRestirIndirect(s.wpos, s.N, mul(float4(s.wpos, 1.0), gViewProj).w,
@@ -4149,14 +3684,13 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
-    // own header for the derivation.
+    // Same pixel-centre NDC/primary-ray reconstruction as CSRdVisibility.
     float2 ndc;
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's and CSRdGi's own copies of this line give.
+    // W6/M5: EXPLICITLY TRUE -- same reason as CSRdShadow's and CSRdGi's copies.
     gAverHistoryWrite = true;
 
     // HONOURS THE SKY-OCCLUSION ABLATION EXACTLY AS PSRayDriven's OWN #elif AVER_RT && AVER_RD_ABLATE
@@ -4236,18 +3770,15 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    // Same pixel-centre NDC and primary-ray reconstruction as CSRdVisibility -- see rdPrimaryRayDir's
-    // own header for the derivation.
+    // Same pixel-centre NDC/primary-ray reconstruction as CSRdVisibility.
     float2 ndc;
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // THE SAME FOOTPRINT RECONSTRUCTION CSRdShadow BUILDS FOR ITS OWN SHADOW CALL, byte-for-byte --
-    // see that stage's own comment for the derivation. gSceneViewport, not Cur: this is a ray
-    // DIFFERENTIAL (the neighbour pixel's own primary ray), the same quantity PSRayDriven's single
-    // pass and CSRdShadow both reconstruct against LAST frame's grid on purpose, not this stage's own
-    // dispatch rect.
+    // THE SAME FOOTPRINT RECONSTRUCTION CSRdShadow builds, byte-for-byte. gSceneViewport, not Cur:
+    // this is a ray DIFFERENTIAL (the neighbour pixel's own primary ray), reconstructed against LAST
+    // frame's grid on purpose (as PSRayDriven and CSRdShadow do), not this stage's own dispatch rect.
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
     float3 dirDx = averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0));
