@@ -1143,10 +1143,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtReflectionHalfRate = on; }); }});
     t.push_back({"voxi.rtGiHitShadowMap", VarType::Bool, false,
         "The sun visibility at a ReSTIR GI bounce hit comes from the GI-only shadow map instead of a "
-        "shadow ray (the ray still fires where the map cannot answer). OFF by default: measured GI "
-        "trace 3.38 -> 2.68 ms, still image MAD 1.61, about 1% brighter where the map's coarse texels "
-        "let bounce light under column capitals and bases. Staged ray-driven modes only; "
-        "single-pass (voxi.rayDrivenStages 0) always has it off.",
+        "shadow ray (the ray still fires where the map cannot answer). ON by default: measured whole "
+        "frame 11.03 -> 10.41 ms (gallery) and -0.57 ms (court), image MAD 0.18 still / 0.34 moving "
+        "(first measured at MAD 1.61, bounce light under column capitals; that no longer reproduces). "
+        "Staged ray-driven modes only; single-pass (voxi.rayDrivenStages 0) always has it off.",
         []{ return vBool(Renderer::get().settings().rtGiHitShadowMap); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtGiHitShadowMap = on; }); }});
     t.push_back({"voxi.blendedReuseStagedLighting", VarType::Bool, false,

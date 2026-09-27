@@ -543,8 +543,8 @@ GiVisRecon giVisReconstruct(float3 wpos, float3 N, float2 pixel, uint frameIdx) 
 // Repeats giShadowFactor's lookup (voxi.hlsl, defined after this file, so can't be called) but
 // returns -1 where the map can't answer, instead of "fully lit" -- a GI ray can leave the map's box,
 // or the map can be unusable for a frame; the caller then fires the shadow ray it would have fired
-// anyway. MEASURED (NewSponza, staged mode 1): GI trace 3.38 -> 2.68ms, image ~1% brighter where the
-// map's 19cm texels let bounce light under column capitals. See Settings::rtGiHitShadowMap.
+// anyway. MEASURED (NewSponza, staged mode 1): GI trace 3.38 -> 2.68ms; the prototype's ~1% brightening
+// under column capitals (19cm texels) no longer reproduces (MAD 0.18). ON by default; see Settings::rtGiHitShadowMap.
 // gGiShadowTex/gShadowSamp/gGiShadowViewProj/gGiShadowParams declared at the top of voxi.hlsl.
 float giHitShadowMapVisibility(float3 wpos, float3 N, float3 L) {
     if (gGiShadowParams.y < 0.5) return -1.0;

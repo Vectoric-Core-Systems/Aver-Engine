@@ -837,8 +837,10 @@ struct Settings {
     // staged mode 1: GI trace 3.38 -> 2.68 ms (mode 2: 1.65 -> 1.28 ms); still image MAD 1.61, +1.2
     // brighter -- at this volume the map's texels are 19 cm, and it lets a little bounce light through
     // under the column capitals and at the column bases that the ray blocks. A smaller normal offset
-    // did not change that. OFF by default until judged in the editor. Console: voxi.rtGiHitShadowMap.
-    bool rtGiHitShadowMap = false;
+    // did not change that. RE-MEASURED 2026-09-27 (NewSponza, whole frame): gallery 11.03 -> 10.41 ms,
+    // court -0.57 ms; image MAD 0.18 still / 0.34 moving -- the 1.61 no longer reproduces, so ON by
+    // default. Revert: voxi.rtGiHitShadowMap false. Console: voxi.rtGiHitShadowMap.
+    bool rtGiHitShadowMap = true;
 
     // ---- BIT 16: REUSE THE STAGED RAY-DRIVEN LIGHTING FOR A TRANSLUCENT DRAW ON THE SAME SURFACE ----
     // Rides the same cb_.giShadowParams[3]/gGiShadowParams.w row as T1-T4 above but is shaped

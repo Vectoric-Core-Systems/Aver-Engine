@@ -57,7 +57,7 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //
     // w WAS UNUSED; NOW A RUNTIME BIT-FIELD (decode via `(uint)gGiShadowParams.w`, never as a float).
     // Assembled every frame by VoxiRenderer::prePass from four Settings toggles (bits 1/2/4 default ON
-    // since 896c5187, bit 8 default OFF), each an A/B-measured trade against ray-driven cost, not a
+    // since 896c5187, bit 8 since 2026-09-27), each an A/B-measured trade against ray-driven cost, not a
     // correctness fix:
     //   bit 1  Settings::rtSecondaryShadowOpaque -- rtReflection/giTraceInitialCandidate's secondary-hit
     //          sun-shadow ray uses rtShadowOpaque (opaque-including-cutouts lane) instead of rtShadow,
