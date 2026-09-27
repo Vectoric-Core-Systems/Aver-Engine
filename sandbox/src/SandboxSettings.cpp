@@ -21,25 +21,20 @@ void SandboxApp::loadEditorPreferences() {
     // setAutoCompile at construction), the same precedence averSrFromCli_ gives AverSR further down.
     if (!autoCompileFromCli_) autoCompile_ = prefBool("scripting.autoCompile", autoCompile_);
     showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
-    // viewport.showColliders is deliberately NOT restored: the collider overlay is a debugging view,
-    // and remembering it made every level open covered in bounds (and, with bloom, glowing dots)
-    // long after the one session that needed it. It starts off each launch; View > Show Colliders.
-    // Toggled from the Window menu rather than the Preferences panel, so these ride
-    // onShutdown's sync rather than buildEditorPrefs' own save-on-close.
+    // viewport.showColliders is NOT restored on purpose: it's a debug view, and persisting it left
+    // every level opening covered in collider bounds (glowing dots, with bloom). Off each launch
+    // (View > Show Colliders); toggled from the Window menu, so it rides onShutdown's sync, not
+    // buildEditorPrefs' save-on-close.
     showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
     showDetails_        = prefBool ("panels.details",                showDetails_);
     flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
     lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
-    // The three view flags and the snap grid: state the editor already had and already showed,
-    // and the only reason it was lost was that nobody had written these lines.
-    //
-    // THE VIEW FLAGS ARE INTERACTIVE-ONLY, both directions, for the reason the post-process
-    // block above gives at length: they change the IMAGE, --unlit and the Show menu can set
-    // them, and a stored one reaching a --frames run would move all twenty gate probes on one
-    // machine and not another. Snap is not gated -- nothing on the command line touches it and
-    // it cannot alter a pixel. Wireframe is one of these view flags too (it was loaded ungated,
-    // above this block, until --view-mode wireframe exposed that the stored value replaced the
-    // flag's); --view-mode/--unlit given for this run win over both (viewModeFromCli_).
+    // View flags (wireframe/unlit/showStaticMeshes/showAtmosphere) and the snap grid restore prior
+    // state. View flags are gated to interactive runs only: they change the rendered image, so a
+    // stored value reaching a --frames run would shift all twenty gate probes machine to machine
+    // (--view-mode/--unlit on the command line still win, via viewModeFromCli_; wireframe used to
+    // load ungated here until --view-mode wireframe exposed that bug). Snap is ungated: it can't
+    // alter a pixel.
     if (maxFrames_ == 0) {
         if (!viewModeFromCli_) {
             wireframe_    = prefBool("viewport.wireframe",          wireframe_);
@@ -55,34 +50,28 @@ void SandboxApp::loadEditorPreferences() {
     rotSnap_            = prefFloat("snap.rotateStep",                rotSnap_);
     scaleSnap_          = prefFloat("snap.scaleStep",                 scaleSnap_);
 
-    // POST PROCESS IS A PROPERTY OF THE VIEW, NOT OF THE WORLD, which is why these nine live
-    // here and not in the level file: docs/EDITOR.md notes exposure is one histogram over the
-    // whole target, and two people opening the same level should not inherit each other's eyes.
-    // Every one of them was lost on exit before this.
+    // Post process is a property of the VIEW, not the world (docs/EDITOR.md: exposure is one
+    // histogram over the whole target; two people opening the same level shouldn't inherit each
+    // other's eyes), so these nine live here, not in the level file; none of them persisted
+    // before this.
     //
-    // NOT ON A CAPTURE RUN. maxFrames_ != 0 is this file's established test for "not
-    // interactive" and is the same one applyCaptureExposureRule uses, so the two agree by
-    // construction rather than by discipline. docs/STATUS.md puts the reason plainly -- "A post
-    // chain whose default state changed the image would invalidate the whole oracle" -- and a
-    // stored exposure reaching a --frames run would do exactly that: on one machine and not on
-    // another, which is the worst shape a gate failure can take.
+    // Gated off on capture runs (maxFrames_ != 0, same test applyCaptureExposureRule uses): a
+    // stored exposure reaching a --frames run would change the image machine to machine --
+    // docs/STATUS.md: "A post chain whose default state changed the image would invalidate the
+    // whole oracle," the worst shape a gate failure can take.
     //
-    // AND NOT WHEN THE PROJECT STATES THE KEY, which is the second guard on the three fields that
-    // now have one. A project named on the COMMAND LINE is applied in onInit (SandboxApp.cpp:763),
-    // before the first buildUI and therefore before this function has ever run -- so without this
-    // test a stored post.exposure would silently overwrite RENDER.EXPOSURE one frame after
-    // applyProject wrote it, and the key would look inert on every machine whose editor.ini has a
-    // post block in it. The browser path already resolves the other way round (prefs load at the
-    // top of buildUI, the Open click applies the project later in that same frame), so without
-    // this the two ways of opening the same project would disagree about the same file; with it,
-    // both read command line > manifest > my own stored preference.
+    // Also gated when the project states the key -- the second guard, on the three fields that
+    // have one: a project named on the command line applies in onInit (SandboxApp.cpp:763)
+    // before this function first runs, so without this guard a stored post.exposure would
+    // silently overwrite it one frame later. Precedence is command line > manifest > stored
+    // preference, matching the browser-open path.
     if (maxFrames_ == 0) {
-        // ONLY THE FOUR THE PANEL STILL SHOWS PERSIST. The rest of PostSettings (exposureKey,
-        // the speeds, the Min/Max clamps, the histogram cuts, local exposure, adaptationRealism,
-        // meteringCenterWeight, bloom threshold/knee) is tuned in RHI.hpp now, and a stored copy
-        // is exactly what let a dragged-once value (post.exposure's 4.05, +2 stops) outlive every
-        // relaunch and silently override that tuning. A console post.* var can still set any of
-        // them for the session -- see EditorConsole.hpp -- it just is not written back to disk.
+        // Only the four fields the panel still shows persist; the rest of PostSettings (exposureKey,
+        // the speeds, Min/Max clamps, histogram cuts, local exposure, adaptationRealism,
+        // meteringCenterWeight, bloom threshold/knee) is tuned in RHI.hpp now (a stored copy let a
+        // dragged-once post.exposure of 4.05, +2 stops, outlive every relaunch and override that
+        // tuning). A console post.* var can still set any of them for the session (EditorConsole.hpp)
+        // -- it's just not written back to disk.
         if (!postExposureFromCli_ && project_.postExposure < 0.0f)
             post_.exposure       = prefFloat("post.exposure",       post_.exposure);
         if (!postAutoExpFromCli_ && project_.postAutoExposure < 0)
@@ -90,12 +79,10 @@ void SandboxApp::loadEditorPreferences() {
         if (!postBloomFromCli_ && project_.postBloom < 0.0f)
             post_.bloomIntensity = prefFloat("post.bloomIntensity", post_.bloomIntensity);
         post_.nightVision = prefFloat("post.nightVision", post_.nightVision);
-        // ONE-TIME RESET: post.exposure's MEANING changed from a raw linear multiplier to
-        // compensation on top of Eye Adaptation, so a stored 4.05 is not a choice anyone made
-        // against that behaviour -- it is the old bug, preserved. settingsVersion < 2 means this
-        // editor.ini predates the change; take the compiled-in exposure once and let saving below
-        // bump the version so it is never forced again. Same CLI/manifest guard as the load above,
-        // so a run that named its own exposure is never overridden by this.
+        // One-time reset: post.exposure's meaning changed from a raw multiplier to compensation on
+        // Eye Adaptation, so a stored 4.05 is the old bug preserved, not a real choice.
+        // settingsVersion < 2 means this .ini predates the change -- take the compiled-in value once
+        // and let the save below bump the version. Same CLI/manifest guard as the load above.
         if (!postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
             post_.exposure = 1.0f;
     }
@@ -111,35 +98,23 @@ void SandboxApp::loadEditorPreferences() {
 
     if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
         prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
-    // A STORED RENDER SCALE IS APPLIED BEHIND A CRASH COOKIE: applying one below 1 can lose the
-    // GPU device, and a persisted setting that kills the device at startup is a trap with NO WAY
-    // OUT FROM INSIDE THE EDITOR -- one evening was lost to exactly that after the AverSR combo
-    // persisted a 0.67 that then bricked every launch.
-    // WHY A COOKIE AND NOT A HANDLER: Engine::frameStep returns as soon as deviceLost() is true,
-    // BEFORE onUpdate(), so there is no "undo it" hook to hang this on -- only what was already
-    // written to disk survives. The flag goes down BEFORE the risky call and clears thirty frames
-    // later once presenting has demonstrably worked.
-    // The scale resets to 1 rather than merely skipped, so the user sees and can change it.
-    // THE UNDERLYING BUG IS FIXED (setRenderScale now parks and rebuilds at the next beginFrame),
-    // but this stays: it costs one bool, and it's the only rescue for an editor.ini written by a
-    // build that HAD the bug.
-    // optimisation-wave-2, 3.3 A: THE CHOICE (AverSrChoice.hpp), migrated once off the pre-Auto
-    // display.aversr/display.renderScale pair below if display.aversrChoice has never been
-    // written -- see AverSrChoice.hpp's own top comment for why the migration itself is a pure
-    // function tested in isolation (AverSrChoiceTest.cpp) rather than inlined here.
+    // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
+    // device -- a persisted setting that kills the device at startup is a trap with no way out
+    // from inside the editor; one evening was lost after the AverSR combo persisted a 0.67 that
+    // bricked every launch. Engine::frameStep returns as soon as deviceLost() is true, before
+    // onUpdate(), so there's no "undo it" hook -- only what's already on disk survives. The flag
+    // goes down before the risky call and clears 30 frames after presenting has worked; the scale
+    // resets to 1 rather than being silently skipped, so the user sees and can change it. The
+    // underlying bug is fixed (setRenderScale now parks and rebuilds at the next beginFrame), but
+    // this stays as the only rescue for an editor.ini written by a build that had it.
     //
-    // --render-scale ON THE COMMAND LINE WINS OUTRIGHT (this whole block is skipped, the same
-    // guard the pre-Auto render-scale restore used); --aversr LEVEL or --aversr auto wins too
-    // (averSrFromCli_) -- loadEditorPreferences leaves BOTH the render scale and the AverSR choice
-    // alone in either case, matching "the command line wins" everywhere else in this file.
-    // THE WHOLE RESTORE IS AverSR's, so the whole restore is guarded rather than the four members
-    // the compiler happened to name first. display.aversrChoice, display.aversr and
-    // display.renderScalePending are the three keys the AverSR combo owns (saveEditorPreferences
-    // calls them "the three AverSR keys" in as many words), and every branch below either resolves
-    // an aver::sr::Quality or applies one through applyAverSrQuality, which is itself declared
-    // `#if AVER_MODULE_SR`. With the module out there is no level to restore, and the load skips
-    // the same keys the save skips -- symmetric, rather than reading back a preference nothing in
-    // the build can act on.
+    // AverSrChoice (AverSrChoice.hpp) migrates once off the pre-Auto display.aversr/renderScale pair
+    // if display.aversrChoice was never written (migration is a pure function, unit-tested in
+    // AverSrChoiceTest.cpp, not inlined here).
+    // --render-scale or --aversr on the command line skips this whole block (averSrFromCli_),
+    // leaving both the render scale and the AverSR choice alone. display.aversrChoice, .aversr and
+    // .renderScalePending are the three keys the AverSR combo owns (see saveEditorPreferences); the
+    // restore is guarded as a whole under #if AVER_MODULE_SR, symmetric with the save.
 #if AVER_MODULE_SR
     if (prefsDevice_ && renderScaleOverride_ == 1.0f && !averSrFromCli_) {
         const std::string storedChoice = prefString("display.aversrChoice", "");
@@ -154,28 +129,15 @@ void SandboxApp::loadEditorPreferences() {
 
         const bool pending = prefBool("display.renderScalePending", false);
         if (averSrChoice_ == editor::AverSrChoice::Manual) {
-            // A STORED RENDER SCALE IS APPLIED BEHIND A CRASH COOKIE: applying one below 1 can
-            // lose the GPU device, and a persisted setting that kills the device at startup is a
-            // trap with NO WAY OUT FROM INSIDE THE EDITOR -- one evening was lost to exactly that
-            // after the AverSR combo persisted a 0.67 that then bricked every launch.
-            // WHY A COOKIE AND NOT A HANDLER: Engine::frameStep returns as soon as deviceLost() is
-            // true, BEFORE onUpdate(), so there is no "undo it" hook to hang this on -- only what
-            // was already written to disk survives. The flag goes down BEFORE the risky call and
-            // clears thirty frames later once presenting has demonstrably worked.
-            // The scale resets to 1 rather than merely skipped, so the user sees and can change it.
-            // THE UNDERLYING BUG IS FIXED (setRenderScale now parks and rebuilds at the next
-            // beginFrame), but this stays: it costs one bool, and it's the only rescue for an
-            // editor.ini written by a build that HAD the bug. UNCHANGED from before Auto existed
-            // (3.3 A's own "Manual: the existing crash-cookie dance... unchanged" rule) -- this is
-            // the ONLY choice that still restores a raw display.renderScale directly; every named
+            // Crash-cookie mechanism as above (unchanged from before Auto existed). Manual is the
+            // ONLY choice that still restores a raw display.renderScale directly -- every named
             // level below re-derives its own canonical scale through applyAverSrQuality instead.
             const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
             if (stored == 1.0f) {
                 prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
             } else if (pending && !renderScaleCookieArmed_) {
-                // `&& !renderScaleCookieArmed_`: a cookie THIS process armed is not evidence that the
-                // PREVIOUS launch crashed -- see updateAverSrAuto's prefsLoaded_ gate for the frame-1
-                // ordering that once made exactly that misreading happen on every launch.
+                // !renderScaleCookieArmed_: a cookie THIS process armed isn't evidence the previous
+                // launch crashed (see updateAverSrAuto's prefsLoaded_ gate for the frame-1 ordering bug).
                 AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
                               "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
                               "was not the cause; the scale itself is the thing that needs fixing.",
@@ -190,15 +152,12 @@ void SandboxApp::loadEditorPreferences() {
                 prefsDevice_->setRenderScale(stored);
             }
         } else if (pending && !renderScaleCookieArmed_) {
-            // (`&& !renderScaleCookieArmed_`: same reason as the Manual branch above -- a cookie this
-            // process armed itself says nothing about the previous launch.)
-            // A NAMED LEVEL (or a level Auto resolved to in a PRIOR session) DID NOT SURVIVE ITS
-            // OWN LAUNCH -- the same crash this cookie already protects Manual's raw scale from,
-            // for a level applied through applyAverSrQuality instead of a raw setRenderScale.
-            // Force Off for THIS launch (never re-attempt the level that just crashed) rather than
-            // merely resetting a number, since there is no single "the scale" to reset back to 1
-            // the way Manual's own branch does -- and latch it so the Project Settings/Display
-            // surfaces can say why AverSR reads Off when the stored choice says otherwise.
+            // Same !renderScaleCookieArmed_ reasoning as the Manual branch above.
+            // A named level (or one Auto resolved to previously) didn't survive its own launch --
+            // same crash class as Manual's raw scale, but via applyAverSrQuality. Force Off for
+            // this launch (never re-attempt the level that just crashed) rather than reset a
+            // number (there's no single "the scale" to reset here), and latch it so Project
+            // Settings/Display can say why AverSR reads Off.
             averSrCookieTripped_ = true;
             AVER_CRITICAL("[AverSR] the last launch did not survive applying {} -- forcing Off "
                           "for this launch. Choose a level again if that was not the cause.",
@@ -207,15 +166,12 @@ void SandboxApp::loadEditorPreferences() {
             flushEditorPrefs();
             applyAverSrQuality(prefsDevice_, aver::sr::Quality::Off);
         } else if (averSrChoice_ == editor::AverSrChoice::Auto) {
-            // NOTHING HERE: updateAverSrAuto (onUpdate) applies Auto once a project's settings
-            // exist to derive a level from -- this load runs before any project is open, so there
-            // is nothing yet for autoAverSrLevel to read.
+            // Nothing here: updateAverSrAuto (onUpdate) applies Auto once a project exists to derive
+            // a level from; this load runs before any project is open.
         } else {
-            // Off/Quality/Balanced/Performance: applyAverSrQuality re-derives the level's OWN
-            // canonical scale (aver::sr::renderScaleFor) rather than trusting a stored
-            // display.renderScale that may have drifted from it -- restoring the quality is what
-            // should own the scale, the same reasoning the pre-Auto code gave for ordering this
-            // block after the render-scale one.
+            // Off/Quality/Balanced/Performance: applyAverSrQuality re-derives the level's own
+            // canonical scale (aver::sr::renderScaleFor) rather than trusting a possibly-drifted
+            // display.renderScale -- the quality owns the scale.
             const aver::sr::Quality q =
                 static_cast<aver::sr::Quality>(editor::userLevelFor(averSrChoice_));
             if (q != aver::sr::Quality::Off) {
@@ -283,10 +239,10 @@ void SandboxApp::buildEditorPrefs() {
     }
     if (ImGui::CollapsingHeader("Output Log", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Auto-scroll to the newest line", &logAutoScroll_);
-        // THE SAME PERSISTED VARIABLE as the Output Log drawer's own combo, so it has to offer
-        // the same entries. This copy stopped at Warn+ when Error+ and Critical+ were appended
-        // to the other one: choosing Error+ in the drawer left this preview blank, and this
-        // control could then only ever set the filter back to one of the first three.
+        // Same persisted variable as the Output Log drawer's own combo, so it must offer the same
+        // entries -- this copy once lagged behind when Error+/Critical+ were added to the other one:
+        // picking Error+ there left this preview blank, and this combo could then only set the
+        // filter back to one of the first three.
         ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     }
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -302,18 +258,15 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
 
 #if AVER_MODULE_SR
-        // optimisation-wave-2, U2/3.3 A: AverSR now has a per-rung default (every Overall rung
-        // has a level, QualityLadder.hpp's ladder::averSrLevel), so this combo's job changed from
-        // "pick a level" to "pick a SOURCE for the level": Auto follows the SAME CLI > Display
-        // choice > project manifest > ladder chain updateAverSrAuto resolves every frame (and can
-        // move under it -- a scalability button moving the Overall rung, say), the four named
-        // items pin one level outright the way this combo always could, and "Manual scale" is
-        // what dragging the Render Scale slider below sets on its own.
+        // Every Overall rung has an AverSR default (QualityLadder.hpp's ladder::averSrLevel), so
+        // this combo picks a SOURCE for the level, not the level itself: Auto follows the CLI >
+        // Display choice > project manifest > ladder chain that updateAverSrAuto resolves every
+        // frame (and can move under it, e.g. a scalability button moving the Overall rung); the
+        // four named items pin one level outright; "Manual scale" is what the slider below sets.
         //
-        // The Auto item's OWN label is computed fresh every time this window draws (cheap; this
-        // window is not open every frame), not read off averSrQuality_/averSrSource_ directly --
-        // those two reflect whatever averSrChoice_ CURRENTLY is, which might not be Auto, and the
-        // item still has to preview what picking Auto would resolve to right now.
+        // Auto's label is recomputed fresh each draw (cheap; not an every-frame window) rather than
+        // read off averSrQuality_/averSrSource_, which reflect the CURRENT choice, not a preview of
+        // what picking Auto would resolve to.
         std::string autoLabel = "Auto";
 #if AVER_MODULE_VOXI
         if (voxiAttached_) {
@@ -336,15 +289,13 @@ void SandboxApp::buildEditorPrefs() {
                 const char* itemLabel = i == 0 ? autoLabel.c_str() : kAverSrItems[i];
                 if (ImGui::Selectable(itemLabel, sel)) {
                     averSrMigrationNoteArmed_ = false;   // 3.3 A: cleared the moment ANY item is picked
-                    // AN EXPLICIT PICK LIFTS THE CRASH-COOKIE LATCH. The CRITICAL line that sets it
-                    // tells the user to "choose a level again if that was not the cause" -- which
-                    // did nothing while updateAverSrAuto kept forcing Off for the whole session.
+                    // An explicit pick lifts the crash-cookie latch -- the CRITICAL message tells the
+                    // user to "choose a level again", which did nothing while it stayed forced Off.
                     averSrCookieTripped_ = false;
                     averSrChoice_ = static_cast<editor::AverSrChoice>(i);
-                    // Auto and Manual apply NOTHING here: Auto is picked up by updateAverSrAuto
-                    // next frame (it needs vx.settings()/deviceInfo(), not available mid-UI-draw
-                    // the same way applyAverSrQuality below is), and Manual keeps whatever scale
-                    // the slider below is already at, or is about to be dragged to.
+                    // Auto and Manual apply nothing here: Auto is picked up by updateAverSrAuto next
+                    // frame (needs vx.settings()/deviceInfo(), unavailable mid-UI-draw); Manual keeps
+                    // whatever scale the slider below already holds.
                     const int lvl = editor::userLevelFor(averSrChoice_);
                     if (lvl >= 0 && prefsDevice_)
                         applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(lvl));
@@ -370,16 +321,14 @@ void SandboxApp::buildEditorPrefs() {
                 "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
                 aver::sr::qualityName(averSrQuality_));
 #endif
-        // Render scale: the 3D scene's own resolution as a fraction of the window's. 1.0 (right
-        // edge) is the pre-existing behaviour -- the scene renders 1:1 -- and everything below
-        // trades scene sharpness for pixel-bound pass cost. The editor UI itself never moves.
+        // Render scale: the 3D scene's resolution as a fraction of the window's. 1.0 (right edge)
+        // is 1:1; below that trades scene sharpness for pixel-bound pass cost. The UI never moves.
         float rs = prefsDevice_ ? prefsDevice_->renderScale() : 1.0f;
         if (ImGui::SliderFloat("Render Scale", &rs, 0.25f, 1.0f, "%.2f") && prefsDevice_) {
             prefsDevice_->setRenderScale(rs);
 #if AVER_MODULE_SR
-            // 3.3 A: dragging this slider is what "Manual scale" means -- a number no named level
-            // produced. Cleared the migration note too: the slider is as much a deliberate choice
-            // as picking a combo item is.
+            // Dragging this slider is what "Manual scale" means -- a number no named level produced.
+            // Clears the migration note too: it's as deliberate a choice as picking a combo item.
             averSrMigrationNoteArmed_ = false;
             averSrChoice_ = editor::AverSrChoice::Manual;
 #endif
@@ -393,19 +342,16 @@ void SandboxApp::buildEditorPrefs() {
         uiReg_.track("prefs.viewport.showGrid");
         ImGui::Checkbox("Wireframe", &wireframe_);
         uiReg_.track("prefs.viewport.wireframe");
-        // THE OTHER THREE VIEW FLAGS, which sat beside the two above in the Show menu and were
-        // the only ones not remembered -- turn off Atmosphere, close the editor, and it came
-        // back on. Same two-line pattern as Show grid and Wireframe; nothing new was needed.
+        // The other three view flags sat beside the two above in the Show menu but weren't
+        // remembered (e.g. turning off Atmosphere didn't survive a restart). Same pattern as above.
         ImGui::Checkbox("Unlit", &unlit_);
         uiReg_.track("prefs.viewport.unlit");
         ImGui::Checkbox("Show static meshes", &showStaticMeshes_);
         uiReg_.track("prefs.viewport.showStaticMeshes");
         ImGui::Checkbox("Show atmosphere", &showAtmosphere_);
         uiReg_.track("prefs.viewport.showAtmosphere");
-        // THE SAME DIAL AS THE VIEWPORT CHIP, not the raw rate. Two places showing one setting
-        // in two different units is how a person ends up believing they are two settings -- and
-        // this one is the more misleading of the pair, since it is the page you go to when the
-        // chip's number is not what you expected.
+        // Same dial as the viewport chip, not the raw rate -- one setting shown in two units reads
+        // as two settings otherwise, and this is the page you check when the chip's number surprises you.
         {
             f32 dial = flySpeed_ / kCamSpeedUnit;
             if (ImGui::SliderFloat("Fly speed", &dial, 20.0f / kCamSpeedUnit,
@@ -418,10 +364,8 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
         uiReg_.track("prefs.viewport.lookSensitivity");
 
-        // SNAP, WHICH THE TOOLBAR COULD SET AND NOTHING COULD KEEP. The increments live in
-        // moveSnap_/rotSnap_/scaleSnap_ and the toolbar dropdowns write them, but neither the
-        // toggles nor the values were in loadEditorPreferences or saveEditorPreferences -- so a
-        // grid somebody set up for a level was gone the next time they opened the editor.
+        // Snap: the toolbar could set it but nothing kept it -- moveSnap_/rotSnap_/scaleSnap_ and
+        // their toggles weren't in load/saveEditorPreferences, so a grid setup didn't survive a restart.
         ImGui::Separator();
         ImGui::TextDisabled("Snap");
         ImGui::Checkbox("Move", &snapMove_);   uiReg_.track("prefs.snap.move");
@@ -440,16 +384,15 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::DragFloat("##scaleSnap", &scaleSnap_, 0.01f, 0.01f, 10.0f, "%.2f");
         uiReg_.track("prefs.snap.scaleStep");
     }
-    // --scroll-prefs-to-keybinds: a one-shot verification aid: Preferences has grown to six
-    // DefaultOpen sections, more than fit one screen, and there is no human here to scroll. Fires
-    // once (consumes its own flag) so it never fights a person who scrolls the window themselves.
+    // --scroll-prefs-to-keybinds: one-shot verification aid for scripted runs (six DefaultOpen
+    // sections don't fit one screen and there's no human to scroll). Consumes its own flag once,
+    // so it never fights a person who scrolls the window themselves.
     if (ImGui::CollapsingHeader("Derived Data Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled("Baked global illumination, cached beside the project under");
         ImGui::TextDisabled("DerivedDataCache\\GI. Derived data: deleting it costs one rebuild.");
 #if AVER_MODULE_VOXI
-        // IN MB, because a budget in bytes is a number nobody can read at a glance. The floor
-        // is one volume's worth: below that every bake would flush immediately and the buffer
-        // would do nothing at all except add a copy.
+        // In MB, since bytes aren't glanceable. Floor is one volume's worth -- below that every
+        // bake flushes immediately and the buffer adds nothing but an extra copy.
         if (ImGui::SliderFloat("Memory budget", &ddcRamBudgetMb_, 32.0f, 4096.0f, "%.0f MB",
                                ImGuiSliderFlags_Logarithmic))
             voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(ddcRamBudgetMb_) * 1024ull * 1024ull);
@@ -484,16 +427,12 @@ void SandboxApp::buildEditorPrefs() {
 #endif
     }
 
-    // The scroll lands HERE, on the section it names. It used to fire immediately above the
-    // Derived Data Cache header, so --scroll-prefs-to-keybinds put the DDC section at the top of
-    // the window and left Keybinds below the fold -- which is exactly what the flag exists to
-    // avoid, and it went unnoticed because a screenshot of the wrong section still looks like a
-    // screenshot of a section.
+    // Scroll lands HERE, on the section it names. It used to fire above the DDC header instead, so
+    // --scroll-prefs-to-keybinds put DDC at the top and left Keybinds below the fold -- unnoticed,
+    // since a screenshot of the wrong section still looks like a screenshot of a section.
     if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
-    // CALLED WHETHER OR NOT IT IS OPEN, passing which. Collapsing the header mid-capture used to
-    // strand `listening_`: the section stopped being drawn, so the capture loop that clears it
-    // never ran again, and the row still said "Press a chord..." when the header was reopened.
-    // The state belongs to the registry, so the registry is what clears it.
+    // Called whether or not it is open, passing which. Collapsing the header mid-capture used to
+    // strand `listening_` (the row stayed "Press a chord..." on reopen); the registry now owns clearing it.
     const bool keybindsOpen = ImGui::CollapsingHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen);
     keybinds_.drawPreferencesSection(dpi_, keybindsOpen, &uiReg_);
     ImGui::Separator();
@@ -505,16 +444,14 @@ void SandboxApp::buildEditorPrefs() {
 }
 
 // Draws the Project Settings window: a category sidebar beside the selected settings page.
-// Window > World Settings: per-LEVEL settings versus Project Settings' per-project ones -- one
-// project routinely holds a menu level, a gameplay level and a test level needing different rules.
-// EVERY VALUE HERE EDITS SOMETHING THE LEVEL FILE ALREADY CARRIES, no parallel setting: a
-// window-only copy would be the two-sources-of-truth trap the Player Start marker avoids.
+// World Settings are per-LEVEL vs Project Settings' per-project (one project often holds a menu,
+// gameplay and test level needing different rules). Every value here edits the level file
+// directly -- no parallel setting, avoiding the two-sources-of-truth trap the Player Start marker avoids.
 void SandboxApp::buildWorldSettings() {
     if (!showWorldSettings_) return;
 #if !AVER_MODULE_SCENE
-    // WITHOUT THE SCENE MODULE THERE IS NO LEVEL to have settings for -- levelPath_/levelName_
-    // are themselves scene-guarded. Saying so beats hiding the menu entry: a person who opens it
-    // deserves the reason it is empty rather than a menu item that silently does nothing.
+    // Without the scene module there's no level to configure (levelPath_/levelName_ are themselves
+    // scene-guarded); saying so beats silently hiding the menu entry.
     if (ImGui::Begin("World Settings", &showWorldSettings_, ImGuiWindowFlags_NoDocking))
         ImGui::TextDisabled("This build has no scene module, so there is no level to configure.");
     ImGui::End();
@@ -547,9 +484,8 @@ void SandboxApp::buildWorldSettings() {
     ImGui::TextDisabled("Game Mode");
     ImGui::Separator();
     {
-        // BY NAME, because that is what the file stores and what survives a restart: framework
-        // class handles come from aver_fw_class_declare at runtime and are process-local, so a
-        // number written into a level would mean something else next launch.
+        // By name: that's what the file stores and what survives a restart. Framework class handles
+        // from aver_fw_class_declare are process-local, so a number here would mean something else next launch.
         char buf[128];
         const std::string& gm = levelHeader_.gameMode;
         std::snprintf(buf, sizeof buf, "%s", gm.c_str());
@@ -610,9 +546,8 @@ void SandboxApp::buildWorldSettings() {
     if (levelPcgVolumes_.empty()) {
         ImGui::TextDisabled("This level declares no PCGVOLUME, so nothing streams.");
     } else {
-        // ONE ROW PER FIELD, because the radius is per field: a single level-wide "streaming
-        // radius" is exactly the setting this engine deliberately does not have -- one radius
-        // cannot serve a dense ground cover and a sparse canopy at once.
+        // One row per field: radius is per field on purpose -- a single level-wide radius can't
+        // serve a dense ground cover and a sparse canopy at once.
         ImGui::TextDisabled("Radius is per density field, in 16m chunks. Cost is quadratic in it.");
         for (usize i = 0; i < levelPcgVolumes_.size(); ++i) {
             fmt::OcPcgVolume& v = levelPcgVolumes_[i];
@@ -670,13 +605,11 @@ void SandboxApp::buildProjectSettings() {
     if (ImGui::Selectable("Ray Tracing",            settingsPage_==3)) settingsPage_=3;
     if (ImGui::Selectable("Path Tracing",           settingsPage_==4)) settingsPage_=4;
     ImGui::Unindent();
-    // SIBLINGS OF RENDERING, not children of it: neither is drawn by the renderer, and nesting
-    // them under it would say they were.
+    // Siblings of Rendering, not children: neither is drawn by the renderer.
     if (ImGui::Selectable("Physics",                settingsPage_==5)) settingsPage_=5;
     if (ImGui::Selectable("Audio",                  settingsPage_==6)) settingsPage_=6;
-    // THREE CATEGORIES A PROJECT COULD NOT STATE AT ALL until now. Each corresponds to a real
-    // options struct the engine already had and no file could reach: platform::WindowDesc,
-    // the four importers' options, and world::StreamSettings.
+    // Three categories a project couldn't state until now, each a real options struct the engine
+    // already had but no file could reach: platform::WindowDesc, the importers' options, world::StreamSettings.
     if (ImGui::Selectable("Window",                 settingsPage_==7)) settingsPage_=7;
     if (ImGui::Selectable("Import Defaults",        settingsPage_==8)) settingsPage_=8;
     if (ImGui::Selectable("World Streaming",        settingsPage_==9)) settingsPage_=9;
@@ -689,19 +622,14 @@ void SandboxApp::buildProjectSettings() {
         ImGui::TextUnformatted("Description");
         ImGui::Separator();
         if (project_.valid()) {
-            // EDITABLE AT LAST. This page was five ImGui::Text lines, so a project's author,
-            // start map and name could not be changed from the editor at all -- while
-            // saveProjectManifest has always written the whole desc through writeOcproject,
-            // which already owns NAME, AUTHOR, CONTENT and STARTMAP. Only the widgets were
-            // missing; nothing in the format or the save path needed touching.
+            // Editable at last: this page was five ImGui::Text lines, so name/author/start map
+            // couldn't be changed from the editor -- saveProjectManifest already wrote them via
+            // writeOcproject, which owns NAME/AUTHOR/CONTENT/STARTMAP. Only the widgets were missing.
             ImGui::PushItemWidth(-160.0f * dpi_);
             if (editField("Name", project_.name, 96)) projectDirty_ = true;
             uiReg_.track("project.name");
-            // The rename is IN THE MANIFEST ONLY, and the consequences are worth stating rather
-            // than leaving to be discovered: the folder and the .ocproject filename keep the old
-            // name, and project_.name also feeds csharpNamespaceFor(), which decides the
-            // namespace of NEWLY created materials and scripts -- so existing files stay in the
-            // old namespace and new ones land in another.
+            // Rename is manifest-only: folder/filename keep the old name, and project_.name feeds
+            // csharpNamespaceFor(), so new scripts/materials get a namespace existing ones don't.
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Renames the project in the manifest only.\nThe folder and file keep their names, and new scripts get a namespace from this.");
             if (editField("Author", project_.author, 96)) projectDirty_ = true;
@@ -711,13 +639,10 @@ void SandboxApp::buildProjectSettings() {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Relative to the content root, e.g. Maps/Default.ocmap");
 
-            // A COMBO, not free text like Start map above: INPUT.SCHEME names a scheme by
-            // CONTENT-RELATIVE PATH (OcProject.hpp's own comment on the field), and a typo here
-            // fails SILENTLY at runtime -- no context is ever pushed -- rather than refusing to
-            // open the way a bad Start Map at least tries to load and errors. Scanned fresh each
-            // time the combo opens, refreshFoliagePalette's own recursive_directory_iterator
-            // pattern (SandboxViewport.cpp), sized for the same kind of project: a handful of
-            // .ocinput files, never thousands.
+            // A combo, not free text like Start map: INPUT.SCHEME names a scheme by content-relative
+            // path, and a typo here fails SILENTLY at runtime (no context pushed), unlike a bad Start
+            // Map which at least errors. Rescanned each time it opens (same pattern as
+            // refreshFoliagePalette in SandboxViewport.cpp); fine for a handful of .ocinput files.
             {
                 const std::string curLabel = project_.inputScheme.empty() ? "None" : project_.inputScheme;
                 if (ImGui::BeginCombo("Input Scheme", curLabel.c_str())) {
@@ -759,9 +684,8 @@ void SandboxApp::buildProjectSettings() {
             }
             ImGui::PopItemWidth();
 
-            // READ-ONLY ON PURPOSE, both of them. ENGINE is what the project needs at least, not
-            // a preference; and changing CONTENT mid-session would move where every asset
-            // resolves from with nothing re-mounting behind it.
+            // Read-only on purpose: ENGINE is a requirement, not a preference, and changing CONTENT
+            // mid-session would move where every asset resolves from with nothing re-mounting.
             ImGui::Text("Engine      %s %s (this build: %.*s)",
                         project_.engineName.empty() ? "(unset)" : project_.engineName.c_str(),
                         project_.engineMinVersion.empty() ? "" : project_.engineMinVersion.c_str(),
@@ -807,21 +731,12 @@ void SandboxApp::buildProjectSettings() {
     }
     ImGui::EndChild();
 
-    // ---- THE SAVE FOOTER, ON EVERY PAGE ---------------------------------------------------
-    //
-    // It used to live inside the Description page and nowhere else. Every other page sets
-    // projectDirty_ correctly -- gravity, the audio mix, every render knob -- so editing any of
-    // them armed a save whose button was two clicks away on a different page, with nothing on
-    // screen saying so. The most common outcome is the obvious one: the edit is made, the window
-    // is closed, and the change is gone.
-    //
-    // THIS IS NO LONGER THE ONLY WAY TO SAVE, and the comment that used to sit here argued it
-    // should be: a .ocproject is source-controlled, so writing it on every slider drag makes
-    // noise nobody asked for. True, and it still lost -- a settings page that needs a separate
-    // click to mean anything gets edited and closed, and the edit is gone. See
-    // maybeAutosaveProject, which now writes half a second after the last change. The button
-    // remains for anyone who wants to save deliberately, and the dirty mark below still shows
-    // the brief window before the debounce fires.
+    // ---- SAVE FOOTER, ON EVERY PAGE ----
+    // Shared because every page sets projectDirty_ (gravity, audio mix, every render knob), and a
+    // save button on only one page meant edits elsewhere were lost on window close. Writing on
+    // every drag was rejected as noise for a source-controlled .ocproject, but losing edits lost
+    // worse -- see maybeAutosaveProject, which now debounces a write half a second after the last
+    // change. The button stays for a deliberate save; the dirty mark shows the window before it fires.
     if (project_.valid()) {
         ImGui::Separator();
         ImGui::BeginDisabled(!projectDirty_);
@@ -841,9 +756,8 @@ void SandboxApp::buildProjectSettings() {
                 ? "Writes EVERY page into the .ocproject.\nComments and any keys this build does not know are preserved."
                 : "Nothing has changed since the manifest was last read.");
 
-        // REVERT IS RE-READ, not an undo stack. saveProjectManifest's inverse is simply loading
-        // the file again, and a manifest is small enough that re-reading it is exact where a
-        // remembered snapshot would drift the moment a field is added.
+        // Revert re-reads the file rather than keeping an undo stack -- a manifest is small enough
+        // that this stays exact where a remembered snapshot would drift as fields are added.
         ImGui::SameLine();
         ImGui::BeginDisabled(!projectDirty_);
         if (ImGui::Button("Revert", ImVec2(110.0f * dpi_, 0.0f))) {
@@ -890,19 +804,15 @@ void SandboxApp::buildProjectSettings() {
 }
 #endif  // AVER_MODULE_VOXI
 
-// ---- THE FIVE PAGES THAT ARE NOT THE RENDERING PAGE ------------------------------------------
-// Window, Import, Streaming, Physics and Audio were inside the `#if AVER_MODULE_VOXI` above purely
-// because buildRenderingSettings is, and they were written next to it. None of them mentions a
-// voxel: they edit WINDOW.*/IMPORT.*/STREAM.*/PHYSICS.*/AUDIO.* manifest keys, and buildSettings()
-// dispatches to all five from an else-if chain gated on ImGui alone -- so -DAVER_MODULE_VOXI=OFF
-// (which -DAVER_MODULE_PBR=OFF forces too) deleted five definitions while their five calls stayed.
-// The Rendering page reopens the guard below, where it belongs, and buildSettings' own `#else`
-// already says what that page shows without the module.
+// ---- THE FIVE PAGES THAT AREN'T THE RENDERING PAGE ----
+// Window/Import/Streaming/Physics/Audio don't mention a voxel (they edit WINDOW.*/IMPORT.*/
+// STREAM.*/PHYSICS.*/AUDIO.* keys) but used to sit inside `#if AVER_MODULE_VOXI` just because
+// buildRenderingSettings did -- so -DAVER_MODULE_VOXI=OFF (which -DAVER_MODULE_PBR=OFF forces too)
+// deleted their five definitions while buildSettings()'s else-if chain (gated on ImGui alone)
+// still called them. The guard now wraps only the Rendering page, where it belongs.
 //
-// A small helper for the three pages below: an int field that is UNSTATED at -1 rather than
-// zero, which is the convention every RENDER.*/STREAM.* key uses. Without the checkbox there is
-// no way to author "this project does not state a value", and a project that states everything
-// pins defaults it never meant to pin.
+// Helper for the pages below: an int field UNSTATED at -1, not 0 (the RENDER.*/STREAM.* convention).
+// Without the checkbox a project can't author "no value stated" and pins defaults it never meant to.
 bool SandboxApp::settingInt(const char* label, int* v, int lo, int hi, int whenEnabled, const char* tip) {
 #if AVER_WITH_IMGUI
     ImGui::PushID(label);
@@ -924,11 +834,9 @@ bool SandboxApp::settingInt(const char* label, int* v, int lo, int hi, int whenE
 #endif
 }
 
-// ---- Window: how a shipped game presents itself ---------------------------------------------
-//
-// docs/PACKAGING.md named this gap in as many words: ".ocproject cannot describe a shipped game.
-// It has no entry point, no window/resolution defaults, no build id, no icon." The old design
-// put them in a side-car game.json, for which no reader or writer ever existed.
+// ---- Window: how a shipped game presents itself ----
+// docs/PACKAGING.md named the gap: ".ocproject cannot describe a shipped game... no entry point,
+// no window/resolution defaults, no build id, no icon." The old design's side-car game.json never had a reader or writer.
 void SandboxApp::buildWindowSettings() {
 #if AVER_WITH_IMGUI
     ImGui::TextUnformatted("Window");
@@ -1062,11 +970,8 @@ void SandboxApp::buildStreamSettings() {
         ImGui::PopID();
     }
     ImGui::Spacing();
-    // These used to read "RECORDED, NOT YET CONSUMED". They are consumed now -- GameStreaming::enable
-    // seeds every field's ChunkWorldSettings::stream from the manifest -- and the two things a user
-    // still needs told are the ones that would otherwise look like the dial being ignored: the
-    // settings are read when streaming is enabled rather than live, and a PCGVOLUME that states its
-    // own radius beats the project-wide radii.
+    // Consumed now: GameStreaming::enable seeds every field's ChunkWorldSettings::stream from the
+    // manifest. Read when streaming is enabled, not live; a PCGVOLUME's own radius beats these.
     ImGui::TextDisabled("Read when streaming starts, not live: a running world keeps the budgets");
     ImGui::TextDisabled("it opened with. A PCGVOLUME stating its own radius overrides the two");
     ImGui::TextDisabled("radii above for that field; the budgets and lead time always apply.");
@@ -1079,9 +984,8 @@ void SandboxApp::buildPhysicsSettings() {
     ImGui::SameLine(); ImGui::TextDisabled("(Jolt, behind the plain-C seam)");
     ImGui::Separator();
 #if AVER_MODULE_PHYSICS
-    // NOT READY IS A REAL STATE, not an error: a project can be open before anything has called
-    // aver_phys_init. Every setter below would silently no-op, so the page says so instead of
-    // offering controls that do nothing.
+    // Not ready is a real state, not an error: a project can be open before aver_phys_init runs,
+    // and every setter below would silently no-op -- so the page says so instead of offering dead controls.
     const bool ready = aver_phys_ready() != 0;
     if (!ready)
         ImGui::TextDisabled("No physics world yet -- these apply when one is created.");
@@ -1097,9 +1001,8 @@ void SandboxApp::buildPhysicsSettings() {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Engine axes, +Z up. One g down is (0, 0, -980).");
 
-    // SECONDS ON THE WIRE, HERTZ ON SCREEN. The ABI takes a step in seconds; nobody reasons in
-    // 0.0167. The conversion happens here rather than in the format so the file stays the ABI's
-    // own unit.
+    // Seconds on the wire, Hz on screen: the ABI takes a step in seconds (nobody reasons in 0.0167).
+    // Converted here, not in the format, so the file stays in the ABI's own unit.
     f32 hz = project_.fixedStep > 0.0f ? 1.0f / project_.fixedStep : 60.0f;
     if (ImGui::SliderFloat("Tick rate (Hz)", &hz, 20.0f, 240.0f, "%.0f")) {
         project_.fixedStep = 1.0f / hz;
@@ -1131,9 +1034,8 @@ void SandboxApp::buildAudioSettings() {
     ImGui::TextDisabled("Play session or the Sound Editor opens it; the values still stick.");
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
 
-    // ONE PRESENCE FLAG FOR THE WHOLE MIX -- see OcProjectDesc::hasAudioMix. Touching any
-    // slider makes the project state a mix, because a muted bus and an unstated one have to
-    // stay different things.
+    // One presence flag for the whole mix (OcProjectDesc::hasAudioMix): touching any slider states
+    // it, because a muted bus and an unstated one must stay different things.
     bool mixed = false;
     if (ImGui::SliderFloat("Master", &project_.masterVolume, 0.0f, 1.0f, "%.2f")) mixed = true;
     uiReg_.track("project.audio.master");
@@ -1171,27 +1073,21 @@ void SandboxApp::buildRenderingSettings(int page) {
     ImGui::Separator();
 
     Settings s = vx.settings();
-    // Every prerequisite this page's controls grey against, resolved ONCE per frame from the
-    // settings this page itself is about to edit -- see RenderSettingsResolver.hpp's own comment
-    // for why the same question answered four different ways (a setSettings clamp, an ad hoc
-    // BeginDisabled check, a console var's validate(), and nothing at all for a load-time warning)
-    // is the defect this header exists to remove.
+    // Every prerequisite this page greys against, resolved ONCE per frame from these settings --
+    // see RenderSettingsResolver.hpp: the same question used to get answered four different ways
+    // (a clamp, an ad hoc disabled check, a console var, nothing at load time); this removes that.
     const Resolution er = resolve(s, vx.deviceInfo());
     bool changed = false;
-    // Set by an Overall Quality button or one of the three per-group rows below (section 3): which
-    // groups this edit just moved to a rung, so captureRenderSettingsFromUi's call to
-    // captureVoxiSettings (Lane 2) knows to write "follow the tier" (-1) for those groups' knobs
-    // rather than nine explicit pins.
+    // Set by an Overall button or a per-group row below: which groups this edit moved to a rung, so
+    // captureRenderSettingsFromUi/captureVoxiSettings (Lane 2) write "follow the tier" (-1) for them.
     u32 overallFollowMask = 0;
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
 
     if (page == 1) {
-        // ---- OVERALL QUALITY (D2): UE-STYLE ENGINE SCALABILITY PRESET --------------------------
-        // One button moves every group this project has a LADDER for -- Global Illumination, Ray
-        // Tracing, Path Tracing -- to the SAME rung at once (Scalability.hpp). MSAA, AverSR,
-        // shadows and post are deliberately not among them; see that header's own "Groups excluded,
-        // and why" for the full list this comment does not repeat. Placed at the very top of this
-        // page, before even the MSAA radios, the way UE's own Scalability panel leads its settings.
+        // ---- OVERALL QUALITY: UE-style scalability preset ----
+        // One button moves GI/Ray Tracing/Path Tracing to the same rung at once (Scalability.hpp).
+        // MSAA, AverSR, shadows and post are deliberately excluded -- see that header's "Groups
+        // excluded, and why". Placed at the top of the page, like UE's own Scalability panel.
         ImGui::TextUnformatted("Overall Quality");
         {
             const auto qualityButton = [&](const char* label, bool active) {
@@ -1216,17 +1112,15 @@ void SandboxApp::buildRenderingSettings(int page) {
                                       "is only ever built at init, so this takes effect on the\n"
                                       "next project reload, not immediately.");
             }
-            // AMBER "CUSTOM" rather than leaving all four rungs unhighlighted with no explanation:
-            // overallFromSettings reads Custom the moment any available group's knobs have drifted
-            // off the ladder, the groups disagree on a rung, or Path Tracing is above Off.
+            // Amber "Custom" rather than leaving all four rungs unhighlighted: overallFromSettings
+            // reads Custom once any group drifts off the ladder, groups disagree, or PT is above Off.
             if (cur == OverallQuality::Custom) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "Custom");
             }
-            // T-7: EVERY rung above turns Path Tracing OFF (scalabilityRung's own comment, a locked
-            // decision) -- a PT tier above Off always reads Custom and would silently drop to Off
-            // the moment any button above is clicked. Said here, in amber, rather than discovered
-            // by the path-traced view vanishing with no visible cause.
+            // Every rung above turns Path Tracing OFF (scalabilityRung, a locked decision) -- a PT
+            // tier above Off would silently drop to Off on the next click. Said here in amber rather
+            // than discovered by the path-traced view vanishing.
             if (s.pathTracing != Quality::Off)
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                                    "Picking a preset turns Path Tracing off (currently %s).",
@@ -1234,11 +1128,10 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
 
 #if AVER_MODULE_SR
-        // ---- AverSR's OWN default (U2, 3.3 A) -- NOT one of the three groups above -------------
-        // AverSR sits outside Overall/Custom detection on purpose (module boundary,
-        // Scalability.hpp's own header comment): an Overall preset moves GI/RT/PT together and
-        // never touches this. This is the one place a pinned AverSR level that has drifted from
-        // the rung's own default is visible at all.
+        // ---- AverSR's own default -- NOT one of the three groups above ----
+        // AverSR sits outside Overall/Custom detection on purpose (module boundary, Scalability.hpp):
+        // an Overall preset moves GI/RT/PT together but never touches this. The one place a pinned
+        // AverSR level that's drifted from the rung's default is visible.
         {
             const char* rungName = averSrAutoRungName(s, vx.deviceInfo());
             std::string sourceText = averSrSource_ == voxi::AverSrSource::Auto
@@ -1248,9 +1141,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                        : averSrSourceText(averSrSource_));
             ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(averSrQuality_),
                         sourceText.c_str());
-            // "(differs from the <rung> preset's default, <level>)" -- only meaningful once the
-            // resolved level did NOT come from Auto (2.3/10.2's Custom-detection gap: Custom can
-            // hide a pinned-off AverSR, and this is the line that shows it).
+            // Only meaningful once the resolved level did NOT come from Auto -- Custom-detection can
+            // hide a pinned AverSR level, and this line surfaces it.
             if (averSrSource_ != voxi::AverSrSource::Auto) {
                 const u32 rungLevel = voxi::autoAverSrLevel(s, vx.deviceInfo());
                 if (rungLevel != static_cast<u32>(averSrQuality_))
@@ -1258,16 +1150,14 @@ void SandboxApp::buildRenderingSettings(int page) {
                         "(differs from the %s preset's default, %s)", rungName,
                         aver::sr::qualityName(static_cast<aver::sr::Quality>(rungLevel)));
             }
-            // ONE-TIME NOTE (3.3 A): the same "until the user picks any item" flag the Display
-            // combo shows and clears -- shown here too so a person who never opens the Display
-            // page still sees why AverSR turned on.
+            // Same one-time "until any item is picked" flag the Display combo shows -- repeated
+            // here so a person who never opens Display still sees why AverSR turned on.
             if (averSrMigrationNoteArmed_)
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                     "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
                     aver::sr::qualityName(averSrQuality_));
-            // project_.averSr's own live edit state -- captured beside project_.occlusionCull in
-            // captureRenderSettingsFromUi (3.3 A). -1 ("Follow Overall preset") is itself the
-            // explicit default, not "unstated": index 0 in this combo, not a blank/no-selection.
+            // Captured beside project_.occlusionCull in captureRenderSettingsFromUi. -1 ("Follow
+            // Overall preset") is an explicit default, not "unstated" -- index 0, not a blank selection.
             static const char* kProjDefaultItems[] = {"Follow Overall preset", "Off", "Quality",
                                                        "Balanced", "Performance"};
             int projIdx = averSrProjectDefault_ < 0 ? 0 : averSrProjectDefault_ + 1;
@@ -1286,11 +1176,9 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
 #endif
 
-        // The three groups an Overall preset moves together, each as its own Off..Epic row: this
-        // is where a project that reads Custom above actually lives, and "(modified)" flags a
-        // group that is nominally AT the right tier but has a hand-edited knob (groupFollowsLadder,
-        // Scalability.hpp) -- nominally-Epic-but-modified and actually-Custom look identical from
-        // the Overall row alone, and this is the page that tells them apart.
+        // The three groups an Overall preset moves together, each its own Off..Epic row: where a
+        // Custom project actually lives. "(modified)" flags a group at the right tier with a
+        // hand-edited knob (groupFollowsLadder) -- indistinguishable from Custom in the Overall row alone.
         {
             static const ScalabilityGroup kGroups[] = {ScalabilityGroup::GlobalIllumination,
                                                        ScalabilityGroup::RayTracing,
@@ -1299,10 +1187,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                                                     Feature::PathTracing};
             static const char* kGroupLabel[] = {"Global Illumination", "Ray Tracing", "Path Tracing"};
             static const char* kTierNames[] = {"Off", "Low", "Medium", "High", "Epic"};
-            // Writes ONE group's tier and its own derived knobs to a rung -- the per-group
-            // equivalent of applyOverall (Scalability.hpp), which always moves all three together
-            // and so cannot serve a single row here. Mirrors applyOverall's own field list exactly,
-            // group for group.
+            // Per-group equivalent of applyOverall (Scalability.hpp), which always moves all three
+            // together and so can't serve a single row; mirrors its field list exactly, group for group.
             const auto setGroupTier = [](Settings& set, ScalabilityGroup g, Quality t) {
                 switch (g) {
                     case ScalabilityGroup::GlobalIllumination:
@@ -1372,12 +1258,10 @@ void SandboxApp::buildRenderingSettings(int page) {
             if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
             ImGui::EndDisabled();
         }
-        // er.rtRenderMode.effective, not the raw request: what matters here is whether the ray
-        // pass is ACTUALLY the thing finding primary visibility this frame -- it is one fullscreen
-        // triangle with no per-triangle coverage, so it always runs at a single sample regardless
-        // of what is picked above (Settings::rtRenderMode's own "WHAT DEFAULTING TO IT TRADES
-        // AWAY" list). RT Low rasterises (D3), so this note does not apply there even though the
-        // RT tier itself is not Off.
+        // er.rtRenderMode.effective, not the raw request: whether the ray pass is ACTUALLY finding
+        // primary visibility this frame -- one fullscreen triangle, no per-triangle coverage, always
+        // single-sample regardless of the pick above (Settings::rtRenderMode's trade-off list).
+        // RT Low rasterises (D3), so this note doesn't apply there even with RT not Off.
         if (er.rtRenderMode.effective == 1)
             ImGui::TextDisabled("Primary visibility is ray-driven -- the ray pass runs at a single "
                                 "sample regardless of the setting above.");
@@ -1391,11 +1275,10 @@ void SandboxApp::buildRenderingSettings(int page) {
         ImGui::EndDisabled();
 
         ImGui::Separator();
-        // THE LAYERED BSDF LIVES ON THIS PAGE, not its own: it changes what EVERY material-shaded
-        // draw computes, like MSAA or mesh shaders.
-        // IT DOES NOT TAKE EFFECT UNTIL THE PROJECT IS RELOADED, stated on the control: Off
-        // compiles the coat lobe out entirely, and VoxiRenderer builds and latches one shader set
-        // per setting -- a live toggle would double a 20+ PSO matrix at startup for every project.
+        // Layered BSDF lives on this page, not its own: it changes what every material-shaded draw
+        // computes, like MSAA or mesh shaders. Doesn't take effect until reload (stated on the
+        // control): Off compiles the coat lobe out entirely, and VoxiRenderer builds and latches one
+        // shader set per setting, so a live toggle would double a 20+ PSO matrix at startup.
         const Status lst = vx.status(Feature::LayeredBsdf);
         ImGui::TextUnformatted(Renderer::featureName(Feature::LayeredBsdf));
         featureStatusBadge(vx, Feature::LayeredBsdf);
@@ -1411,24 +1294,22 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::SetTooltip("Off is the standard BRDF. Any other setting adds a clear-coat lobe "
                               "over the base for materials that author one -- a material with "
                               "coat weight 0 renders identically either way.");
-        // Compared against what the RENDERER latched, not against the last value this combo
-        // wrote, so it is still shown after the settings window is closed and reopened.
+        // Compared against what the RENDERER latched, not the combo's last value, so this still
+        // shows after the settings window is closed and reopened.
         if ((s.layeredBsdf != Quality::Off) != voxiRenderer_.layeredBsdfActive())
             ImGui::TextWrapped("Takes effect when the project is reloaded; the shaders compiled "
                                "for this session are unchanged.");
 
-        // ---- refraction, and three culling knobs that were CLI-only ------------------------
-        //
-        // All four were live per-frame state with no control anywhere: a flag on the command
-        // line could set them and nothing could record the choice. Each is one manifest key.
+        // ---- Refraction, and three culling knobs that were CLI-only ----
+        // All four were live per-frame state with no control anywhere: a CLI flag could set them
+        // but nothing recorded the choice. Each is now one manifest key.
         ImGui::Separator();
         ImGui::TextUnformatted("Refraction");
         {
-            // BeginCombo/Selectable rather than a plain Combo: only the RAY-TRACED entry has a
-            // prerequisite (RT hardware, RT tier not Off -- er.refractionMode.reason), and a plain
-            // Combo has no way to grey out one entry while leaving Off and Screen-space selectable.
-            // A request already at or below Screen-space never needed a ray tracer and is never
-            // touched by this reason at all (RenderSettingsResolver.hpp's resolve(), refractionMode).
+            // BeginCombo/Selectable, not a plain Combo: only the RAY-TRACED entry has a prerequisite
+            // (RT hardware, RT tier not Off -- er.refractionMode.reason), and a plain Combo can't
+            // grey out one entry while leaving Off/Screen-space selectable. A request at or below
+            // Screen-space never touches this reason (RenderSettingsResolver.hpp resolve(), refractionMode).
             static const char* rms[] = {"Off", "Screen-space", "Ray-traced"};
             if (ImGui::BeginCombo("Mode", rms[s.refractionMode])) {
                 for (int i = 0; i < 3; ++i) {
@@ -1457,27 +1338,22 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::EndDisabled();
         }
 
-        // ---- THE POST CHAIN, THE ONE PART OF THE IMAGE THE FILE COULD NOT HOLD ---------------
-        // Four keys that existed only as command-line flags and as live sliders in the Post
-        // Process panel: set an exposure there, package the game, and the game rendered
-        // rhi::PostSettings' compiled defaults instead -- docs/RUNTIME-DEDUP.md carried that as
-        // "A project cannot author exposure/bloom/tonemap". The stated/unstated idiom is
-        // buildImportSettings' and settingInt's (see settingInt's own comment for why -1 rather
-        // than 0 means unstated, and why a project that states everything pins defaults it never
-        // meant to pin).
+        // ---- THE POST CHAIN: the one part of the image the file couldn't hold ----
+        // Exposure/bloom/tonemap/auto-exposure existed only as CLI flags and live Post Process
+        // sliders: set one there, package the game, and it shipped with rhi::PostSettings'
+        // compiled defaults instead (docs/RUNTIME-DEDUP.md: "a project cannot author
+        // exposure/bloom/tonemap"). Same stated/unstated idiom as buildImportSettings/settingInt
+        // (-1, not 0, means unstated -- 0 would pin a default a fully-stated project never meant to pin).
         //
-        // ON GENERAL, not beside the ReSTIR sliders on the Global Illumination page whose layout
-        // these copy: filing exposure under Global Illumination would repeat precisely the mistake
-        // the "Indirect diffuse" combo's own comment on that page describes -- a control filed
-        // under its implementation instead of its job, reported as "I cannot find that project
-        // setting". Exposure, bloom and the tone curve belong to the camera, like MSAA and the
-        // shading model above them.
+        // On General, not beside the GI page's ReSTIR sliders: filing exposure under Global
+        // Illumination repeats the "Indirect diffuse" combo's mistake -- a control filed under its
+        // implementation instead of its job, reported as "I cannot find that project setting".
+        // These belong to the camera, like MSAA above them.
         //
-        // EVERY CONTROL WRITES THE KEY AND THE LIVE post_ TOGETHER, so the viewport answers the
-        // question the control is actually asking -- what will the shipped game look like -- while
-        // it is being dragged. A LIVE EDIT OUTRANKS A FLAG, which is deliberately the opposite of
-        // load time: applyProject lets --exposure win over the manifest because a flag is the
-        // newest thing the human said, and here the drag is.
+        // Every control writes the key AND the live post_ together, so the viewport shows what's
+        // being dragged. A live edit outranks a flag -- the opposite of load time, where
+        // applyProject lets --exposure win because the flag is the newest thing said -- here, the
+        // drag is.
         ImGui::Separator();
         ImGui::TextUnformatted("Post processing");
         ImGui::TextDisabled("What a PACKAGED GAME renders with. An unticked key is not stated, and");
@@ -1490,14 +1366,13 @@ void SandboxApp::buildRenderingSettings(int page) {
                                        const char* trackName, const char* tip) {
                 ImGui::PushID(id);
                 bool stated = (*key >= 0.0f);
-                // TICKING ADOPTS WHAT THE VIEWPORT IS ALREADY SHOWING, not a hardcoded number:
-                // the reason anyone ticks this box is to record the look they just spent an
-                // afternoon on in the Post Process panel.
+                // Ticking adopts what the viewport already shows, not a hardcoded number -- the
+                // point is to record the look already dialed in via the Post Process panel.
                 f32 v = stated ? *key : *live;
                 if (ImGui::Checkbox("##stated", &stated)) {
-                    // UNTICKING LEAVES THE VIEWPORT ALONE. "Unstated" means the compiled default
-                    // applies on the next open, not that this session's eyes snap back mid-edit --
-                    // which is also how applyProjectRenderSettings reads every other absent key.
+                    // Unticking leaves the viewport alone: "unstated" means the compiled default
+                    // applies next open, not that this session's eyes snap back mid-edit -- same as
+                    // how applyProjectRenderSettings reads every other absent key.
                     *key = stated ? v : -1.0f;
                     if (stated) *live = v;
                     projectDirty_ = true;
@@ -1513,9 +1388,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                     projectDirty_ = true;
                 }
                 ImGui::EndDisabled();
-                // TRACKED BEFORE THE TOOLTIP IS ASKED FOR, the same ordering rule the ReSTIR
-                // history slider above states for IsItemHovered: both read the LAST item
-                // submitted, and a tooltip submits items of its own.
+                // Tracked before the tooltip: IsItemHovered reads the LAST submitted item, and a
+                // tooltip submits its own (same ordering rule as the ReSTIR history slider above).
                 uiReg_.track(trackName);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("%s", tip);
@@ -1537,10 +1411,10 @@ void SandboxApp::buildRenderingSettings(int page) {
                       "PostSettings' 0.06, so every recorded gate image was taken\n"
                       "with no bloom.\n\nRound-trips as RENDER.BLOOM.");
             {
-                // A CHECKBOX RATHER THAN settingInt's 0..1 SLIDER, unlike WINDOW.RESIZABLE and the
-                // IMPORT.* pair that use that helper: this is the same on/off the Post Process
-                // panel already spells as a checkbox (SandboxPanels.cpp:1917), and hand-rolling it
-                // is also what lets the registry track the control before its tooltip runs.
+                // A checkbox, not settingInt's 0..1 slider (unlike WINDOW.RESIZABLE and the IMPORT.*
+                // pair that use that helper): the Post Process panel already spells this on/off as a
+                // checkbox (SandboxPanels.cpp:1917), and hand-rolling it also lets the registry track
+                // the control before its tooltip runs.
                 ImGui::PushID("autoExposure");
                 bool stated = project_.postAutoExposure >= 0;
                 bool on = stated ? project_.postAutoExposure != 0 : post_.autoExposure;
@@ -1569,10 +1443,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                                       "Round-trips as RENDER.AUTOEXPOSURE.");
                 ImGui::PopID();
             }
-            // AMBER, NOT GREYING THE EXPOSURE SLIDER as the Post Process panel does: there the
-            // slider is the live value the adaptation is about to overwrite, here it is a RECORDED
-            // one that is perfectly meaningful to author in either order -- a project that ships
-            // with adaptation off next month still wants its exposure in the file today.
+            // Amber, not greying the slider like the Post Process panel does: there it's the live
+            // value adaptation is about to overwrite; here it's a RECORDED one, meaningful either
+            // order -- a project shipping with adaptation off next month still wants it recorded today.
             if (post_.autoExposure && project_.postExposure >= 0.0f)
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                     "Auto exposure is on, so the adaptation overwrites Exposure every frame. The "
@@ -1580,10 +1453,9 @@ void SandboxApp::buildRenderingSettings(int page) {
             {
                 ImGui::PushID("tonemap");
                 bool stated = project_.postTonemap >= 0;
-                // CLAMPED FROM BOTH SOURCES, because neither one is bounded: the parser stores
-                // whatever integer the file holds (OcProject.cpp's RENDER.TONEMAP) and setTonemap
-                // takes --tonemap's atoi as it comes, so a 5 from either would leave this combo
-                // indexing its item list off the end and showing a blank.
+                // Clamped from both sources, since neither is bounded: the parser stores whatever
+                // integer RENDER.TONEMAP holds (OcProject.cpp) and setTonemap takes --tonemap's atoi
+                // as-is, so a 5 from either would index this combo off the end.
                 int mode = stated ? project_.postTonemap : static_cast<int>(post_.tonemap);
                 if (mode > 2) mode = 2;
                 if (ImGui::Checkbox("##stated", &stated)) {
@@ -1621,10 +1493,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                         "(RHI.hpp:196-216).\n\nRound-trips as RENDER.TONEMAP.");
                 ImGui::PopID();
             }
-            // WHERE THE PRECEDENCE IS ACTUALLY VISIBLE. A flag applies once at startup and the
-            // manifest is applied later, when a project opens, so applyProject deliberately
-            // declines to let these keys overwrite one -- which from this page looks like a
-            // control that saved fine and then did nothing on the next launch. Said here instead.
+            // Where the precedence is actually visible: a flag applies at startup, the manifest
+            // later, and applyProject won't let these keys overwrite one -- which otherwise looks
+            // like a control that saved fine and did nothing next launch.
             if (postExposureFromCli_ || postBloomFromCli_ || postAutoExpFromCli_)
                 ImGui::TextDisabled("A post-process flag was given on this launch; it outranks "
                                     "these keys when a project opens.");
@@ -1657,11 +1528,10 @@ void SandboxApp::buildRenderingSettings(int page) {
             uiReg_.track("project.depthPrepass");
 
             ImGui::Separator();
-            // THE RENDERER THIS PROJECT ASKS FOR. Unlike everything else on this page, changing
-            // it does nothing until the editor is restarted -- the device is created before a
-            // project is open, so the manifest is peeked for this one key before startup (see
-            // main). Saying so on the control is the difference between a setting that looks
-            // broken and one that is understood.
+            // The renderer this project asks for. Unlike everything else here, it does nothing
+            // until restart -- the device is created before a project opens, so main peeks the
+            // manifest for this one key before startup. Said on the control so it reads as
+            // understood, not broken.
             {
                 static const char* kNames[] = {"Engine default", "D3D12", "Vulkan", "D3D11"};
                 static const char* kKeys[]  = {"", "d3d12", "vulkan", "d3d11"};
@@ -1672,11 +1542,10 @@ void SandboxApp::buildRenderingSettings(int page) {
                     projectDirty_ = true;
                 }
                 uiReg_.track("project.backend");
-                // WHAT IS ACTUALLY RUNNING, beside what was asked for. A backend has to be
-                // compiled in to be selectable at all, and the default CMake configuration has
-                // AVER_RHI_VULKAN OFF -- so a project can name Vulkan on a build that cannot
-                // give it one. The RHI already warns in the log when that happens; this puts the
-                // same fact where the choice is made.
+                // What is actually running, beside what was asked for: a backend has to be compiled
+                // in to be selectable at all, and the default CMake config has AVER_RHI_VULKAN OFF,
+                // so a project can name Vulkan on a build that can't give it one. The RHI already
+                // warns in the log when that happens; this puts the same fact where the choice is made.
                 ImGui::SameLine();
                 ImGui::TextDisabled("(now: %s)", runningBackend_.c_str());
                 if (ImGui::IsItemHovered())
@@ -1696,29 +1565,21 @@ void SandboxApp::buildRenderingSettings(int page) {
         const char* qs[] = {"Off","Low","Medium","High","Epic"};
         if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
 
-        // ---- WHICH DIFFUSE GI ESTIMATOR, and it lives on THIS page deliberately ----
-        // It was on the Ray Tracing page, because ReSTIR needs RayQuery and that looked like
-        // the dependency that mattered. It is not. Someone looking for the diffuse GI
-        // algorithm looks under Global Illumination, finds Quality / Voxel grid / Diffuse
-        // cones -- every one of which describes the CONE gather specifically -- and reasonably
-        // concludes cones are the only option there is. Reported as "I cannot find that
-        // project setting", which is the correct bug report for a control filed under its
-        // IMPLEMENTATION instead of its JOB. It sits above the cone knobs because it decides
-        // whether they apply at all.
+        // ---- Which diffuse GI estimator -- lives on THIS page deliberately ----
+        // Used to sit on Ray Tracing -- ReSTIR needs RayQuery, which looked like the dependency
+        // that mattered. It is not. Someone looking for the diffuse GI algorithm looks under Global
+        // Illumination and finds only cone-gather knobs -- a control filed under its implementation
+        // instead of its job, reported as "I cannot find that project setting". Sits above the cone
+        // knobs since it decides whether they apply at all.
         //
-        // giMode round-trips through the .ocproject as RENDER.GIMODE, so a project remembers
-        // the choice; absent from an older manifest it stays -1 and the engine default (cones)
-        // applies, which is what every project written before this key existed meant.
+        // giMode round-trips as RENDER.GIMODE; absent from an older manifest it stays -1 and the
+        // engine default (cones) applies -- what every pre-existing project already meant.
         //
-        // SHOWS er.giMode.EFFECTIVE, NOT THE RAW STORED REQUEST (F-d, Lane 1): giMode is no
-        // longer clamped inside Settings itself, so a project asking for ReSTIR on a device or RT/
-        // GI tier that cannot run it right now still remembers the ask (s.giMode is untouched
-        // below) rather than being silently rewritten to 0 -- see RenderSettingsResolver.hpp's
-        // resolve() for exactly which three things have to agree first. Showing the raw value here
-        // while the renderer quietly ran cones instead would read as a control that does nothing;
-        // showing the effective one means the combo reads Voxel cones until it actually can switch,
-        // and switches back on its own the moment the reason clears, since the stored request was
-        // never touched.
+        // Shows er.giMode.EFFECTIVE, not the raw stored request (F-d, Lane 1): giMode isn't clamped
+        // inside Settings itself, so a request ReSTIR can't run right now is remembered (s.giMode
+        // untouched below) rather than rewritten to 0 -- see RenderSettingsResolver.hpp's resolve()
+        // for which three things have to agree first. Showing the raw value while cones ran instead
+        // would read as dead; the effective one switches back on its own once the reason clears.
         int giAlgo = static_cast<int>(er.giMode.effective);
         if (ImGui::Combo("Indirect diffuse", &giAlgo, "Voxel cones\0ReSTIR (experimental)\0")) {
             s.giMode = static_cast<u32>(giAlgo); changed = true;
@@ -1735,9 +1596,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "EXPERIMENTAL: spatio-temporal resampling. Grainier than the\n"
                               "cone gather unless Denoiser below is on -- which is what the\n"
                               "NRD pass is for, and it needs MSAA 1 to run at all.");
-        // ReSTIR is REQUESTED (the combo above just picked it, or a manifest already had it) but
-        // not EFFECTIVE: named here, in this page's own red-reason idiom, rather than left for the
-        // combo silently reading "Voxel cones" with no explanation of why the choice did not take.
+        // ReSTIR is requested but not effective: named here in the page's red-reason idiom, rather
+        // than left for the combo to silently read "Voxel cones" with no explanation.
         if (s.giMode != 0 && er.giMode.reason != DisableReason::None)
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
                                "   ReSTIR is selected and resumes when %s",
@@ -1780,18 +1640,17 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]",
                                disableReasonText(er.giRestirVisibility.reason));
         } else if (vis == 0) {
-            // AMBER, NOT RED: this is a legal, live choice (unlike the giMode reason line above,
-            // which names a prerequisite the user cannot fix from this combo) -- it is simply the
-            // one choice that reopens a fix this project already shipped. No magnitude is quoted:
-            // R2/R3's pixel size is UNMEASURED (2.10 G).
+            // Amber, not red: a legal, live choice (unlike the giMode reason above, an unfixable
+            // prerequisite) -- just the one choice that reopens a fix already shipped. No magnitude
+            // quoted: R2/R3's pixel size is UNMEASURED (2.10 G).
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                 "No ray restores the pre-fix candidate-hit sky and reuse visibility (legacy bits "
                 "4 and 8): shadowed and enclosed areas read over-bright again -- the washed-out "
                 "look cb4b48df fixed.");
         } else {
-            // The legacy console switches force NoRay for their OWN ray regardless of this combo
-            // (2.8's one precedence rule) -- named here so a switch left on from a by-hand A/B
-            // does not read as this combo silently doing nothing.
+            // Legacy console switches force NoRay for their own ray regardless of this combo
+            // (2.8's precedence rule) -- named here so a switch left on from a by-hand A/B doesn't
+            // read as silent inaction.
             const u32 legacy = editor::consoleLightingLegacySlot();
             if (legacy & 12u) {
                 std::string which = (legacy & 4u) ? "voxi.legacyRestirHitSky" : "";
@@ -1803,18 +1662,15 @@ void SandboxApp::buildRenderingSettings(int page) {
             }
         }
 
-        // ---- INDIRECT LIGHT HISTORY: RTXDI's stparams.maxHistoryLength, RIGHT UNDER THE VISIBILITY
-        // COMBO ABOVE because it is the OTHER dial over the same estimator's own artefact -- how much
-        // weight a previous-frame reservoir may carry into the ReSTIR GI combine. This is what 674ed667
-        // fixed: the camera-motion brightness fade was this value, not the visibility rays above it.
+        // ---- Indirect light history: RTXDI's stparams.maxHistoryLength ----
+        // Right under Visibility because it's the other dial on the same estimator's artefact -- how
+        // much a previous-frame reservoir weighs into the ReSTIR GI combine. This is what 674ed667
+        // fixed: the camera-motion brightness fade was this value, not the visibility rays above.
         //
-        // GATED THE SAME WAY AS ReSTIR VISIBILITY RAYS, DELIBERATELY: er.giRestirMaxHistory mirrors
-        // er.giRestirVisibility's own RequiresRestirGi reason chain (RenderSettingsResolver.hpp) rather
-        // than computing a fresh one, because both controls are inert for the identical reason -- ReSTIR
-        // GI itself is not running. SHOWS er.giRestirMaxHistory.REQUESTED, not the raw s.giRestirMaxHistory,
-        // for giRestirVisibility's own reason directly above: effective always equals requested for this
-        // field, so the two reads are the same value, but requested is the one the resolver actually
-        // computed and is what stays correct if that ever stops being true.
+        // Gated the same way as ReSTIR visibility rays (mirrors er.giRestirVisibility's
+        // RequiresRestirGi chain -- both are inert for the same reason, ReSTIR GI not running).
+        // Shows er.giRestirMaxHistory.REQUESTED, not the raw field: effective equals requested
+        // today, but requested is what stays correct if that ever stops being true.
         const bool histGreyed = greysControl(er.giRestirMaxHistory.reason);
         ImGui::BeginDisabled(histGreyed);
         int hist = static_cast<int>(er.giRestirMaxHistory.requested);
@@ -1823,9 +1679,8 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
         ImGui::EndDisabled();
         uiReg_.track("project.gi.restirHistory");
-        // THE TOOLTIP BINDS TO THE SLIDER, so it is asked for BEFORE the greyed-reason label below:
-        // IsItemHovered reads the LAST item submitted, and with the label submitted first a disabled
-        // control's tooltip would hang off the label instead of the control it explains.
+        // Tooltip binds to the slider, asked for BEFORE the greyed-reason label below: IsItemHovered
+        // reads the LAST submitted item, so asking after the label would hang the tooltip off it.
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("0 (default): each frame's indirect light stands on its own -- no\n"
                               "bright flash when the camera stops. Higher values let a pixel\n"
@@ -1840,20 +1695,15 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.giRestirMaxHistory.reason));
         }
 
-        // THE DENOISER SITS HERE, UNDER THE ESTIMATOR IT FILTERS, because it is only reachable from
-        // this page's own choices: it denoises the ReSTIR radiance above and the sky occlusion the
-        // ray-tracing page turns on, and it is the ONLY thing in the engine that asks for the
-        // G-buffer. Before this checkbox existed the whole pass was reachable only by passing
-        // --gbuffer on a command line, which meant the editor could never see it at all.
+        // The denoiser sits here, under the estimator it filters: it denoises the ReSTIR radiance
+        // above and the ray-tracing page's sky occlusion, and it's the only thing in the engine that
+        // needs the G-buffer. Before this checkbox it was only reachable via --gbuffer on the command line.
         //
-        // GREYED FOR A HARD REASON (er.denoiser.reason, greysControl -- RT hardware/tier, NRD
-        // support, or nothing to denoise); LEFT CLICKABLE FOR THE SOFT ONE (RequiresMsaaOne),
-        // because the same page's own MSAA radios can undo that in one click and the amber line
-        // below already says so -- see the prerequisite table's own "soft reasons only warn
-        // inline" rule (RenderSettingsResolver.hpp). The displayed check state is the EFFECTIVE
-        // value while hard-greyed (s.denoiser is kept, untouched, so a request survives a
-        // temporary hardware loss) and the RAW request otherwise, so the soft MSAA case still
-        // shows what was actually asked for.
+        // Greyed for a hard reason (er.denoiser.reason -- RT hardware/tier, NRD support, nothing to
+        // denoise); left clickable for the soft one (RequiresMsaaOne), since the MSAA radios below
+        // fix that in one click (RenderSettingsResolver.hpp's "soft reasons only warn inline").
+        // Shown state is EFFECTIVE while hard-greyed (s.denoiser untouched, so a request survives a
+        // temporary hardware loss) and the RAW request otherwise.
         const bool denoiserHardGreyed = greysControl(er.denoiser.reason);
         ImGui::BeginDisabled(denoiserHardGreyed);
         bool den = s.denoiser && !denoiserHardGreyed;
@@ -1874,11 +1724,10 @@ void SandboxApp::buildRenderingSettings(int page) {
                                     "but never written, so the pass refuses to run rather than\n"
                                     "filter blanks into a confidently wrong image.\n\n"
                                     "Round-trips as RENDER.DENOISER.");
-        // s.msaa, NOT the device's live sample count: this is the value being edited on this very
-        // page, so the warning appears the moment the two settings disagree rather than only after
-        // Apply -- and it goes away as soon as Anti-aliasing is set to 1, before anything commits.
-        // Kept exactly as the soft reason's own dedicated line: RequiresMsaaOne never greys, so it
-        // needs this rather than the red reason tag above, which fires only for the hard reasons.
+        // s.msaa, not the device's live sample count: it's the value being edited on this page, so
+        // the warning appears the moment the two disagree, before Apply, and clears the moment
+        // Anti-aliasing is set to 1, before anything commits. RequiresMsaaOne never greys, so it
+        // needs this dedicated line rather than the red reason tag above (hard reasons only).
         if (den && static_cast<u32>(s.msaa) != 1u)
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
                                "   Anti-aliasing is %ux -- set it to 1 or the denoiser stays off.",
@@ -1896,12 +1745,10 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "Changing Quality above moves this to match its rung (Off/Low=64,\n"
                                "Medium=128, High=256, Epic=512) unless you pick a value here\n"
                                "yourself, which then overrides the tier's default.");
-        // THE GRID IS ONLY EVER BUILT AT INIT (VoxiRenderer::createVoxelVolume) -- nothing resizes
-        // it afterward, so a Quality change or a hand-picked value above is recorded immediately
-        // but does not reach the GPU volume until the project reloads. voxelResolutionBuilt()
-        // (Lane 3) is the edge that IS actually running; comparing against it, rather than against
-        // whatever this session started with, is what lets this note clear itself the moment a
-        // reload catches up.
+        // The grid is only ever built at init (VoxiRenderer::createVoxelVolume) -- nothing resizes
+        // it live, so a change here is recorded immediately but reaches the GPU volume only on
+        // reload. Compared against voxelResolutionBuilt() (Lane 3, what's actually running), so this
+        // note clears itself once a reload catches up.
         if (s.voxelResolution != voxiRenderer_.voxelResolutionBuilt())
             ImGui::TextWrapped("Takes effect when the project is reloaded; the volume built for "
                                "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
@@ -1909,9 +1756,8 @@ void SandboxApp::buildRenderingSettings(int page) {
         if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
         ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
         ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
-        // THE CONE COUNT, which this renderer's own comment calls the GI setting that actually
-        // costs anything. Tier-derived with an open knob, like every other rung on this ladder:
-        // Low 3, Medium 6, High 9, Epic 13, and picking a Quality above re-derives it.
+        // Cone count: the GI setting that actually costs anything. Tier-derived (Low 3, Medium 6,
+        // High 9, Epic 13); picking a Quality above re-derives it.
         {
             int cones = static_cast<int>(s.giCones);
             if (ImGui::SliderInt("Diffuse cones", &cones, 1, 16)) {
@@ -1923,8 +1769,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                 ImGui::SetTooltip("Cones in the diffuse gather, including the axial one.\n"
                                   "Changing Quality above re-derives this from the tier.");
         }
-        // OCCLUSION-AWARE FOG (Settings::fogOcclusion): lives on this page because it is built from
-        // the GI voxel volume, and greys with the same prerequisite (er.fogOcclusion.reason).
+        // Occlusion-aware fog (Settings::fogOcclusion): lives here since it's built from the GI
+        // voxel volume, and greys with the same prerequisite (er.fogOcclusion.reason).
         {
             const bool fogOccGreyed = greysControl(er.fogOcclusion.reason);
             ImGui::BeginDisabled(fogOccGreyed);
@@ -1947,12 +1793,10 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
         ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
 
-        // LIVE, CONSOLE-VAR-ONLY DEBUG PAINTS, beside the voxel-radiance one above: neither is a
-        // Settings field (consoleGiPoisonViewSlot()'s own comment, EditorConsole.hpp) -- their live
-        // values are raw bool slots reasserted onto the renderer every frame, the same slots `set
-        // voxi.giPoisonView`/`set voxi.giVisPathView` already reach from the console. Reading and
-        // writing the slots directly here means the checkbox and the console command are the same
-        // switch, not two that can disagree.
+        // Live, console-var-only debug paints: neither is a Settings field (EditorConsole.hpp) --
+        // both are raw bool slots reasserted onto the renderer every frame, the same ones `set
+        // voxi.giPoisonView`/`giVisPathView` reach. Reading/writing them directly here means the
+        // checkbox and the console command are the same switch, not two that can disagree.
         {
             bool poisonView = editor::consoleGiPoisonViewSlot();
             if (ImGui::Checkbox("Debug: GI poison view", &poisonView))
@@ -1998,14 +1842,12 @@ void SandboxApp::buildRenderingSettings(int page) {
         const char* qs[] = {"Off","Low","Medium","High","Epic"};
         if (ImGui::Combo("Quality", &q, qs, 5)) { s.rayTracing = static_cast<Quality>(q); changed = true; }
 
-        // INNER GREY, BENEATH THE OUTER ONE ABOVE (st != Status::Ready, hardware-only): everything
-        // from here to this page's own EndDisabled below is inert while the RT TIER itself is Off,
-        // which the outer grey does not cover -- a device WITH ray-tracing hardware and Quality set
-        // to Off has every row below still fully interactive today, sliding rays and filter radii
-        // that do nothing. er.rtSubControls carries exactly that second reason (rtGate,
-        // RenderSettingsResolver.hpp), so this second BeginDisabled greys the sub-rows without
-        // touching the Quality combo above, which must stay choosable regardless -- it is the only
-        // control on this page that can turn the tier back on.
+        // Inner grey beneath the outer one above (st != Ready, hardware-only): everything below is
+        // inert while the RT tier is Off, which the outer grey doesn't cover -- a device with RT
+        // hardware but Quality Off would otherwise leave every row interactive but dead.
+        // er.rtSubControls carries that reason (rtGate, RenderSettingsResolver.hpp); the Quality
+        // combo above stays clickable regardless, since it's the only control here that can turn
+        // the tier back on.
         ImGui::BeginDisabled(greysControl(er.rtSubControls));
 
         ImGui::Spacing();
@@ -2023,9 +1865,8 @@ void SandboxApp::buildRenderingSettings(int page) {
         ImGui::Spacing();
         ImGui::TextUnformatted("Denoiser: temporal amortisation");
         ImGui::Separator();
-        // Tile edge, not raw pixels-per-ray: VoxiRenderer::setPixelsPerRayTile only ever rounds
-        // to a power of two, so offering anything else would just be relabelled after the fact.
-        // Options are powers of two (1,2,4,8,16) so the SQUARE one ray covers is always one too (1..256).
+        // Tile edge, not raw pixels-per-ray: setPixelsPerRayTile only rounds to a power of two, so
+        // offering anything else would be relabelled after the fact. Options: 1,2,4,8,16 (1..256 px/ray).
         const int tiles[] = {1, 2, 4, 8, 16};
         const char* tileLabels[] = {"Off (1x1 -- every pixel, every frame)",
                                     "2x2 (4 pixels/ray)", "4x4 (16 pixels/ray)",
@@ -2042,10 +1883,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "bit identical to having no denoiser; larger tiles trade a real\n"
                                "cut in rays traced for more frames of lag on fast-moving shadows.");
 
-        // A SECOND, INDEPENDENT DENOISER, and the separate heading is the point: these two fail
-        // in opposite directions. The one above reuses THIS pixel across TIME -- converges
-        // beautifully while still, collapses a penumbra the moment the camera moves. The one below
-        // averages NEIGHBOURS within a frame with no history, so motion cannot poison it. They compose; neither substitutes for the other.
+        // A second, independent denoiser -- the separate heading is the point: these two fail in
+        // opposite directions. Above reuses THIS pixel across TIME (converges while still, collapses
+        // under motion); below averages NEIGHBOURS with no history (motion can't poison it). They compose.
         ImGui::Spacing();
         ImGui::TextUnformatted("Denoiser: spatial filter");
         ImGui::Separator();
@@ -2061,14 +1901,11 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "resolves it without paying for more rays. Keeps no history, so\n"
                                "unlike amortisation above it costs nothing in lag under motion.");
 
-        // ---- A THIRD, SEPARATE DENOISER FROM THE TWO ABOVE (Settings::reblurMaxAccumulatedFrameNum,
-        // Voxi.hpp) -- those two filter the ray-traced SUN SHADOW; this one tunes REBLUR_DIFFUSE,
-        // which filters the ReSTIR indirect-diffuse GI estimate behind the "Denoiser (NVIDIA NRD)"
-        // checkbox on the Global Illumination page. It sits here, with this page's other
-        // "Denoiser: ..." rows, rather than there, and reaches NRD through the same s/changed/
-        // vx.setSettings(s) idiom as every other dial on this page -- VoxiRenderer re-issues
-        // nrd::SetDenoiserSettings every time setSettings() runs, so the new value takes effect
-        // next frame with no rebuild (Voxi.hpp's own comment on the field).
+        // ---- A third, separate denoiser (Settings::reblurMaxAccumulatedFrameNum) ----
+        // The two above filter the ray-traced sun shadow; this tunes REBLUR_DIFFUSE, filtering the
+        // ReSTIR indirect-diffuse GI estimate behind GI page's "Denoiser (NVIDIA NRD)" checkbox.
+        // Sits here with this page's other "Denoiser: ..." rows. VoxiRenderer re-issues
+        // nrd::SetDenoiserSettings every setSettings() call, so it takes effect next frame, no rebuild.
         ImGui::Spacing();
         ImGui::TextUnformatted("Denoiser: NRD/REBLUR history depth (indirect diffuse GI)");
         ImGui::Separator();
@@ -2091,12 +1928,10 @@ void SandboxApp::buildRenderingSettings(int page) {
                                   "next project reload rather than round-tripping through .ocproject.");
         }
 
-        // ---- HISTORY RESETS (debug): one button per reset*history console command
-        // (EditorConsole.hpp) -- see each command's own help string there for the bisection order
-        // (GI first, then RT, then NRD) and why AO has no button of its own: requestAoHistoryReset()
-        // shares RT's own validity flag today (no independent one exists), so its button would be a
-        // second way to do exactly what Reset RT history already does. Reset All mirrors
-        // resetallhistory exactly -- GI + RT + NRD, not a redundant fourth AO call.
+        // ---- History resets (debug): one button per reset*history console command ----
+        // Bisection order is GI, then RT, then NRD (EditorConsole.hpp). AO has no button of its own:
+        // requestAoHistoryReset() shares RT's validity flag, so it'd duplicate Reset RT history.
+        // Reset All mirrors resetallhistory: GI + RT + NRD, not a redundant fourth AO call.
         ImGui::Spacing();
         ImGui::TextUnformatted("History resets (debug)");
         ImGui::Separator();
@@ -2128,18 +1963,16 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "bisection -- it clears everything and says nothing about which\n"
                               "buffer was actually poisoned; try one at a time first.");
 
-        // ---- ray-driven rendering (experimental) ----
-        // WHICH THING FINDS THE FIRST SURFACE: everything downstream already runs in one
-        // pixel-shader invocation, so this swaps the one stage still fixed-function.
-        // THE MEASURED BASELINE IS IN THE TOOLTIP ON PURPOSE: this trades hardware early-Z (which
-        // a ray has no equivalent of) for whatever a primary ray costs, and an author deciding
-        // that deserves the number, not a shrug.
+        // ---- Ray-driven rendering (experimental) ----
+        // Which thing finds the first surface: everything downstream already runs in one
+        // pixel-shader invocation, so this swaps the one stage still fixed-function. Measured
+        // baseline is in the tooltip on purpose: trades hardware early-Z (a ray has no equivalent
+        // of it) for a primary ray's cost -- an author deciding that deserves the number, not a shrug.
         ImGui::Spacing();
-        // NO LONGER "(experimental)" -- it is the shipped default from Medium up (D3, this
-        // retune). Low is the one deliberate exception, kept on the rasteriser by explicit product
-        // decision rather than a hardware gap; see ladder::rtRenderMode (QualityLadder.hpp) for
-        // the full reasoning and its own honest accounting of what the evidence for Low does and
-        // does not show.
+        // No longer "(experimental)": shipped default from Medium up (D3, this retune). Low is a
+        // deliberate exception, kept on the rasteriser by product decision, not a hardware gap; see
+        // ladder::rtRenderMode (QualityLadder.hpp) for the full reasoning, including what the
+        // evidence for Low does and does not show.
         ImGui::TextUnformatted("Primary visibility");
         ImGui::SameLine();
         ImGui::TextDisabled("(default at Medium and above; Low rasterises)");
@@ -2160,20 +1993,15 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "material shading is 9.2ms on ElectricDreams at 4x MSAA,\n"
                                "2750x1639; one extra shadow ray costs 1.6ms at the same size.");
 
-        // ---- MILESTONE 1: STAGED RAY-DRIVEN PASSES, AN A/B SWITCH OVER THE COMBO ABOVE'S OWN
-        // INTERNAL SHAPE, RIGHT UNDER IT for the same "read together" reason Indirect light history
-        // sits directly under ReSTIR visibility rays below. GATED THE SAME WAY, DELIBERATELY:
-        // er.rayDrivenStages mirrors er.rtRenderMode's own reason chain (RenderSettingsResolver.hpp)
-        // rather than computing a fresh one, because both controls are inert for the identical
-        // reason -- primary rays are not the active render mode. SHOWS er.rayDrivenStages.REQUESTED,
-        // not the raw s.rayDrivenStages, for giRestirMaxHistory's own reason: effective always equals
-        // requested for this field, but requested is what the resolver actually computed.
+        // ---- Milestone 1: staged ray-driven passes, an A/B over the combo above ----
+        // Right under it for the "read together" reason Indirect light history sits under ReSTIR
+        // visibility rays. Gated the same way, deliberately: er.rayDrivenStages mirrors
+        // er.rtRenderMode's reason chain -- both are inert for the same reason, primary rays not active.
+        // Shows REQUESTED, not the raw field, same reasoning as giRestirMaxHistory above.
         //
-        // MILESTONE 4 adds the combo's third entry, value 2. Unlike Staged it deliberately trades
-        // GI quality for speed rather than staying a same-image comparison against Single pass --
-        // see Voxi.hpp's own comment on Settings::rayDrivenStages for the full reasoning. The combo
-        // index equals the settings value directly (0/1/2), so no separate index<->value mapping is
-        // needed here beyond the string having three entries.
+        // Milestone 4 adds the third entry (value 2): unlike Staged it trades GI quality for speed
+        // rather than staying a same-image comparison against Single pass (Voxi.hpp:
+        // Settings::rayDrivenStages). Combo index equals the settings value directly (0/1/2).
         const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);
         ImGui::BeginDisabled(stagesGreyed);
         int stages = static_cast<int>(er.rayDrivenStages.requested);
@@ -2205,31 +2033,28 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.rayDrivenStages.reason));
         }
 
-        // BOUNCES ARE NOT ON THIS PAGE ANY MORE: they are a PATH TRACING quantity living with
-        // that setting; leaving the slider here, disabled on ray-tracing mode, made the two look
-        // like one feature. See Settings::ptBounces.
+        // Bounces aren't on this page any more: they're a Path Tracing quantity that lives there
+        // now, leaving them here disabled made the two look like one feature. See Settings::ptBounces.
         ImGui::EndDisabled();   // the inner grey opened beside the Quality combo above
         ImGui::EndDisabled();
     }
 
     if (page == 4) {
-        // THIS COMBO IS NOW THE REAL CONTROL: voxi::Settings::pathTracing, round-tripped through
-        // the manifest and exposed to C# scripting. It used to have NO relationship to
-        // modules/render.pt -- Voxi.cpp hard-coded NotImplemented regardless of hardware, so this
-        // clamped to Off on every device, forever. status() now mirrors PathTracer::init()'s
-        // DXR-1.1/SM-6.5/DXC/compute gate field for field, unlocking exactly when the reference
-        // view can run.
-        // THE TIER DRIVES THE ACCUMULATOR RESOLUTION: it used to drive nothing, leaving the view
-        // permanently at 480x270 magnified ~5.7x -- that blow-up, not the sample count, is what
-        // reads as a shimmering mess while the camera moves, since motion restarts accumulation
-        // every frame.
+        // This combo is the real control now: voxi::Settings::pathTracing, round-tripped through
+        // the manifest and exposed to C#. Used to have no relationship to modules/render.pt --
+        // Voxi.cpp hard-coded NotImplemented regardless of hardware, clamping this to Off on every
+        // device, forever. status() now mirrors PathTracer::init()'s DXR-1.1/SM-6.5/
+        // DXC/compute gate field for field, unlocking exactly when the reference view can run.
+        // The tier now drives the accumulator resolution too -- previously fixed at 480x270
+        // magnified ~5.7x, which is what read as a shimmering mess under motion (motion restarts
+        // accumulation every frame), not the sample count.
         const Status st = vx.status(Feature::PathTracing);
         ImGui::TextUnformatted(Renderer::featureName(Feature::PathTracing));
         featureStatusBadge(vx, Feature::PathTracing);
-        // ptSceneViewUnavailable_ is a RUNTIME signal PathTracer::init() itself raised (a DXC
-        // compile failure, say) that the static device caps above did not predict. Disabling on it
-        // too keeps this combo from claiming a quality that isn't running; it is NOT reset to Off
-        // automatically, so a stale non-Off selection can sit here disabled until the user picks Off or reopens the project.
+        // ptSceneViewUnavailable_ is a RUNTIME signal from PathTracer::init() (e.g. a DXC compile
+        // failure) the static device caps above didn't predict; disabling on it too keeps this
+        // combo from claiming a quality that isn't running. Not auto-reset to Off, so a stale
+        // selection can sit here disabled until the user picks Off or reopens the project.
         ImGui::BeginDisabled(st != Status::Ready || ptSceneViewUnavailable_);
         int q = static_cast<int>(s.pathTracing);
         const char* qs[] = {"Off","Low","Medium","High","Epic"};
@@ -2260,15 +2085,12 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "The console's voxi.pathTracing/voxi.scalability reach it too.");
         ImGui::EndDisabled();
 
-        // BOUNCES, WHICH THE MANIFEST HAS ALWAYS CARRIED AND NOTHING EVER SHOWED.
-        // OcProject's RENDER.PTBOUNCES round-trips through save and load, applyProjectRender
-        // pushes it into Settings, and --pt-bounces overrides it -- so the value was
-        // authorable by hand-editing a .ocproject or by a command line, and by no other means.
+        // Bounces: the manifest always carried RENDER.PTBOUNCES (round-tripped by
+        // OcProject/applyProjectRender, overridden by --pt-bounces), but nothing ever showed it --
+        // only hand-editing the file or the CLI could set it.
         //
-        // TIER-DERIVED WITH AN OPEN KNOB, which is this renderer's established shape (see
-        // Settings::ptBounces and ptBouncesForQuality): picking a Quality above re-derives
-        // this, so a hand-set value survives until the tier next changes. Said out loud in the
-        // tooltip rather than left for somebody to discover by losing a setting.
+        // Tier-derived with an open knob (Settings::ptBounces/ptBouncesForQuality): picking a
+        // Quality above re-derives this, so a hand-set value survives until the tier next changes.
         ImGui::BeginDisabled(s.pathTracing == Quality::Off);
         int bounces = static_cast<int>(s.ptBounces);
         if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) {
@@ -2281,10 +2103,10 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::SetTooltip("Light paths after the first hit. Changing Quality above re-derives\n"
                               "this from the tier, so set it after picking one.");
 
-        // A1: the priority between these three used to be two `if`s (unavailable, else active)
-        // with no way to say "suppressed" at all -- the Quality combo would just silently do
-        // nothing while ray-driven painted the scene. choosePtViewTag() is the pure decision
-        // (see PtRenderConflict.hpp for the full priority reasoning); every ImGui call stays here.
+        // A1: priority between these three used to be two `if`s (unavailable, else active) with no
+        // way to say "suppressed" -- the combo would silently do nothing while ray-driven painted
+        // the scene. choosePtViewTag() is the pure decision (PtRenderConflict.hpp); every ImGui
+        // call stays here.
         switch (aver::editor::choosePtViewTag(ptSceneViewUnavailable_,
                                                ptSceneViewSuppressedByRayDriven_,
                                                ptSceneView_ != nullptr)) {
@@ -2293,10 +2115,8 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[unavailable on this device]");
             break;
         case aver::editor::PtViewTag::SuppressedByRayDriven:
-            // SAME COLOUR AS [unavailable on this device] ABOVE, deliberately: both are "this
-            // combo is not doing anything right now", and the existing red is this page's own
-            // idiom for that -- inventing a second colour here would say the two situations
-            // matter differently when, from this control's point of view, they don't.
+            // Same colour as [unavailable] above, deliberately: both mean "this combo isn't doing
+            // anything right now", and a second colour would imply the two situations differ.
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
                                 "[suppressed: ray-driven rendering is drawing]");
@@ -2330,11 +2150,11 @@ void SandboxApp::buildRenderingSettings(int page) {
     ImGui::PopTextWrapPos();
 
     if (changed) {
-        // The requested settings reach the manifest BEFORE setSettings can clamp them -- "live"
-        // inside captureRenderSettingsFromUi's own capture rule means "before this edit", which
-        // only holds while this call runs first. overallFollowMask carries whatever an Overall
-        // Quality button or a per-group row above wrote this same edit (0 otherwise), so the
-        // groups it just moved are captured as "follow the tier" rather than nine explicit pins.
+        // Requested settings reach the manifest BEFORE setSettings can clamp them: "live" inside
+        // captureRenderSettingsFromUi's own capture rule means "before this edit", which only holds
+        // while this call runs first. overallFollowMask carries whatever an Overall button or
+        // per-group row wrote this edit (0 otherwise), so those groups are captured as "follow the
+        // tier", not nine pins.
         captureRenderSettingsFromUi(s, overallFollowMask);
         vx.setSettings(s);
     }
@@ -2343,12 +2163,11 @@ void SandboxApp::buildRenderingSettings(int page) {
 #endif
 #endif
 
-// OUTSIDE `#if AVER_WITH_IMGUI`, matching the declaration, and it has to be BOTH or neither:
-// moving only the declaration left `no-ui` linking against a definition that was never compiled,
-// an LNK2019 raised from maybeAutosavePrefs -- which calls this every quarter second in every
-// configuration. The body makes no ImGui call at all; it only pushes members through
-// setPrefBool/setPrefFloat/setPrefInt.
-// Writes every editor preference back and flushes. Each setter compares before it stores.
+// Outside `#if AVER_WITH_IMGUI`, matching the declaration -- has to be both or neither: moving
+// only the declaration left `no-ui` linking against an uncompiled definition (LNK2019 from
+// maybeAutosavePrefs, called every quarter second in every configuration). No ImGui call here,
+// only setPref* pushes. Writes every editor preference back and flushes; each setter compares
+// before it stores.
 void SandboxApp::saveEditorPreferences() {
     using namespace editor;
     setPrefBool ("contentBrowser.gallery",       cbGallery_);
@@ -2385,15 +2204,13 @@ void SandboxApp::saveEditorPreferences() {
     setPrefFloat("snap.rotateStep",              rotSnap_);
     setPrefFloat("snap.scaleStep",               scaleSnap_);
 
-    // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
-    // CLI exposure back would leave the next interactive session looking at the capture's eyes.
+    // Guarded like the load, same reason: a --frames run writing its CLI exposure back would leave
+    // the next interactive session looking at the capture's eyes.
     //
-    // THE THREE WITH A MANIFEST KEY ARE GUARDED A SECOND TIME, symmetrically with the load: while
-    // the project states RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE, the preference channel for that field
-    // is inert in BOTH directions. Writing it anyway would quietly adopt the project's authored
-    // look as this user's personal default for every project afterwards, and it could not even buy
-    // a persisted Post-panel tweak in exchange -- the load above would decline to restore it, and
-    // applyProject would overwrite it from the manifest on the next open regardless.
+    // The three with a manifest key are guarded a second time, symmetrically with the load: while
+    // the project states RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE, this channel is inert both directions --
+    // writing anyway would adopt the project's look as this user's default everywhere, and buy
+    // nothing, since the load declines to restore it and applyProject overwrites it regardless.
     if (maxFrames_ == 0) {
         if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     post_.exposure);
         if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
@@ -2410,69 +2227,54 @@ void SandboxApp::saveEditorPreferences() {
     else
         setPrefString("contentBrowser.ide", "");   // Automatic
 
-    // GUARDED ON maxFrames_ == 0 LIKE EVERY OTHER CAPTURE-SENSITIVE PREF, and these two were the
-    // ones that were not. The viewport flags above and the post-processing block above them each
-    // carry this guard with a comment explaining it -- "a --frames run that wrote its CLI
-    // exposure back would leave the next interactive session looking at the capture's eyes" --
-    // and display.vsync/display.renderScale sat just below, unguarded.
+    // Guarded on maxFrames_ == 0 like every other capture-sensitive pref -- these two were not.
+    // maybeAutosavePrefs() returns early on maxFrames_, but onShutdown() calls
+    // saveEditorPreferences() unconditionally at the end of every capture/benchmark/gate run, so
+    // `--frames N --render-scale F` or `--no-vsync` wrote its measurement settings into the same
+    // %LOCALAPPDATA%/AverEngine/editor.ini an interactive session reads back -- every capture
+    // harness in scripts/ passes --no-vsync, so vsync had been decided by whichever measurement
+    // ran last.
     //
-    // WHY THAT IS WORSE THAN IT SOUNDS: maybeAutosavePrefs() DOES return early on maxFrames_,
-    // but onShutdown() calls saveEditorPreferences() unconditionally, and onShutdown() runs at
-    // the end of every capture, benchmark and gate invocation. So every `--frames N
-    // --render-scale F` or `--no-vsync` run wrote its measurement settings into the SAME
-    // %LOCALAPPDATA%/AverEngine/editor.ini an interactive session reads back -- and the load at
-    // the top of this file then faithfully restored the capture's settings as if the user had
-    // chosen them. Measured against this session's own history: --no-vsync is passed by every
-    // capture harness in scripts/, so the user's vsync preference has been decided by whichever
-    // measurement ran last.
-    //
-    // The guard belongs here rather than in onShutdown() so that a future third caller cannot
-    // reintroduce it, and so the rule reads identically to its two neighbours.
+    // Guarded here rather than in onShutdown() so a future third caller can't reintroduce it, and
+    // so the rule reads the same as its two neighbours.
     if (maxFrames_ == 0) {
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             setPrefBool("display.vsync", prefsDevice_->vsync());
-        // optimisation-wave-2, 3.3 A: THE THREE AverSR KEYS BELOW ARE SKIPPED OUTRIGHT, not
-        // merely written a neutral value, when the command line drove this session's render scale
-        // or AverSR level. TODAY'S OWN GUARD ENDS AT maxFrames_ == 0, so an interactive `--aversr
-        // quality` run (maxFrames_ IS 0 for an interactive session -- this is not a --frames
-        // capture) used to write itself into editor.ini with no CLI check at all, and the NEXT
-        // ordinary launch inherited a choice nobody made from the Display page. Skipping the write
-        // means a session driven by --render-scale/--aversr never touches any of the three keys,
-        // so whatever a PRIOR interactive session actually chose there survives untouched.
-        // AND SKIPPED ENTIRELY WITH THE MODULE OFF, the mirror of loadEditorPreferences' own
-        // `#if AVER_MODULE_SR`: all three keys are AverSR's, two of them are written FROM
-        // AverSR-only state (averSrChoice_, averSrQuality_), and a build that cannot read them
-        // back has no business overwriting what a build that can wrote there.
+        // The three AverSR keys below are skipped outright, not written a neutral value, when the
+        // command line drove this session's render scale or AverSR level: an interactive `--aversr
+        // quality` run has maxFrames_ == 0 too (it is not a --frames capture), so the outer guard
+        // alone didn't stop it, and it used to write itself with no CLI check, so the NEXT ordinary
+        // launch inherited a choice nobody made from the Display page. Skipping means a prior
+        // session's real choice survives untouched.
+        // Skipped entirely with the module off too, mirroring loadEditorPreferences' own
+        // `#if AVER_MODULE_SR`: two of the three are written from AverSR-only state, and a build
+        // that can't read them back shouldn't overwrite what one that can wrote there.
 #if AVER_MODULE_SR
         if (!averSrFromCli_ && renderScaleOverride_ == 1.0f) {
             setPrefString("display.aversrChoice", editor::averSrChoiceName(averSrChoice_));
             if (prefsDevice_)
-                // THROUGH renderScaleToPersist, not the live device scale directly -- persisting
-                // the live scale for anything but Manual is the exact bug this wave's own
-                // 10.1/3.3-A corrections describe: Auto would persist whatever fraction the rung
-                // it happened to land on THIS session resolved to, and the crash-cookie
-                // render-scale block at load would apply that stale fraction before Auto ever got
-                // a chance to re-derive it.
+                // Through renderScaleToPersist, not the live device scale directly: persisting the
+                // live scale for anything but Manual was the exact bug the plan's 10.1/3.3-A
+                // corrections describe -- Auto would persist whatever fraction this session's rung
+                // resolved to, and the crash-cookie render-scale block at load would apply that
+                // stale fraction before Auto got to re-derive it.
                 setPrefFloat("display.renderScale",
                             editor::renderScaleToPersist(averSrChoice_, prefsDevice_->renderScale()));
-            // THE UPSCALER'S QUALITY MIRROR -- WHICH, BEFORE display.aversrChoice EXISTED, WAS
-            // NEVER PERSISTED AT ALL (the Display page's AverSR combo wrote averSrQuality_ and
-            // applied it to the device; nothing wrote it to a pref and nothing read one back, so
-            // it reset to Off on every launch, and desynced from display.renderScale above once it
-            // was). display.aversrChoice is now the source of truth this mirror only backs up --
-            // kept for at-a-glance reading of a raw editor.ini, and so a build that predates
-            // display.aversrChoice reading the same file back still sees a level, not Off.
-            // setPrefFloat rather than an int helper because there is no int helper -- the prefs
-            // layer is float/bool/string, and every other numeric setting here goes through the
-            // float pair. The enum is four values; a float carries them exactly.
+            // The upscaler's quality mirror: before display.aversrChoice existed this was never
+            // persisted at all (reset to Off every launch, desynced from display.renderScale above
+            // once it wasn't). display.aversrChoice is now the source of truth; this mirror just
+            // backs it up, for at-a-glance reading of a raw editor.ini and so an older build reading
+            // the same file still sees a level, not Off.
+            // setPrefFloat, not an int helper, since none exists -- the prefs layer is float/bool/
+            // string (every other numeric setting here goes through the same float pair), and the
+            // enum's four values fit a float exactly.
             setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
         }
 #endif  // AVER_MODULE_SR
     }
 
-    // THE ONE LINE IN THIS FUNCTION THAT NEEDS THE EDITOR UI. keybinds_ is the chord registry the
-    // ImGui layer owns and is compiled out with it; everything else here is a plain setPref* call,
-    // which is why the function as a whole sits outside the guard.
+    // The one line in this function that needs the editor UI: keybinds_ is the chord registry the
+    // ImGui layer owns. Everything else is a plain setPref* call, so the guard sits only here.
 #if AVER_WITH_IMGUI
     keybinds_.saveToPrefs();
 #endif

@@ -36,33 +36,17 @@ enum class Format : u8 {
     R32Uint,      // the only typed format D3D12 guarantees UAV atomics on
     D32Float,     // depth-stencil view format
     R32Typeless,  // aliased depth: DSV sees D32Float, SRV sees R32Float
-    // Two-channel half-float. Scene-resolution screen-space motion vectors are the first consumer
-    // -- see IDevice::gBufferVelocityTexture in RHI.hpp for the exact units (texels/frame,
-    // destination minus source) -- and the reason this is RG rather than RGBA16F's four channels
-    // truncated to two: a fourth, unused channel would be 2 bytes/pixel of pure padding across
-    // every pixel of a target that already exists only because bandwidth was being counted (see
-    // that feature's own task brief: ~54 MB at 2750x1639 for all three new targets together).
+    // Two-channel half-float; screen-space motion vectors at scene resolution (see IDevice::gBufferVelocityTexture,
+    // texels/frame, destination minus source). RG not RGBA16F: a padding channel would cost
+    // 2 bytes/pixel across a bandwidth-counted target (~54 MB at 2750x1639 for all three new targets).
     RG16F,
-    // 10-10-10-2 unorm. Packs a world-space normal AND a roughness into 4 bytes/pixel -- see
-    // IDevice::gBufferNormalRoughnessTexture for the encoding, and DO NOT restate it here.
-    //
-    // THIS COMMENT USED TO SPELL THE PACKING OUT ("xyz maps [-1,1] to [0,1]; w is roughness, stored
-    // as-is") AND THAT DESCRIPTION IS NOW FALSE. The G-buffer writes NVIDIA NRD's own
-    // R10G10B10A2_UNORM layout, where the normal and the roughness SHARE xyz -- roughness rides in z,
-    // signed by n.z's sign -- and w carries a material id, not roughness. Anyone who trusted the old
-    // sentence would decode a plausible, confidently wrong normal.
-    //
-    // That is not a hypothetical: the engine shipped for months with the naive packing while NRD was
-    // compiled for the real one, and the self-check meant to catch it restated the assumption in prose
-    // instead of testing it, so it asserted the bug away rather than reporting it. The lesson is why
-    // this comment now points at the contract instead of duplicating it -- a format contract with two
-    // descriptions has two chances to drift and no way to notice. NrdNormalRoughnessEncodingTest
-    // round-trips the real thing.
-    //
-    // NOT an RGBA8Unorm: 8 bits per normal component
-    // bands visibly on a smoothly curved surface under directional light, which is exactly the
-    // artifact a G-buffer feeding a denoiser or a temporal filter cannot afford to introduce
-    // upstream of the very passes meant to clean an image up, not add a new defect to it.
+    // 10-10-10-2 unorm: world-space normal + roughness, 4 bytes/pixel. Encoding lives in
+    // IDevice::gBufferNormalRoughnessTexture -- do not restate it here (two descriptions, two
+    // chances to drift, no way to notice). A prior version of this
+    // comment described the wrong layout (roughness in w) and shipped that way for months before
+    // NrdNormalRoughnessEncodingTest caught it; the real layout shares xyz with roughness in z
+    // (signed by n.z's sign), w = material id. NOT RGBA8Unorm: 8 bits/normal component bands
+    // visibly under directional light, which a denoiser/temporal filter can't afford.
     RGB10A2Unorm,
     // Block-compressed, 4x4 texel blocks.
     BC1Unorm,
@@ -72,25 +56,17 @@ enum class Format : u8 {
     BC5Unorm,
     BC7Unorm,
     BC7UnormSrgb,
-    // Single-channel 16-bit, one integer and one normalised. Added for NVIDIA NRD's internal
-    // texture pools (modules/render.nrd): REBLUR stores its per-pixel accumulation counters as
-    // R16_UINT and its normalised hit distances as R16_UNORM, and a pool texture the engine cannot
-    // allocate is a denoiser that cannot run -- NrdLinkTest fails on exactly that, by name.
-    //
-    // APPENDED HERE rather than filed beside R8Unorm where they read better, because appending is
-    // the only edit to an enum that cannot change an existing enumerator's value. Nothing today
-    // stores or transmits a Format as a number (checked), so this is precaution rather than a
-    // constraint -- but the cost of the precaution is a comment, and the cost of being wrong is a
-    // silent format shift in anything that ever starts to.
+    // Single-channel 16-bit (uint / unorm), for NVIDIA NRD's internal pools (modules/render.nrd):
+    // REBLUR stores accumulation counters as R16_UINT and normalised hit distances as R16_UNORM;
+    // NrdLinkTest fails by name if the engine can't allocate them. Appended here rather than filed
+    // near R8Unorm because appending can't change an existing enumerator's value -- nothing stores
+    // a Format as a number today (checked), but a silent shift would be free once something does.
     R16Unorm,
     R16Uint,
-    // R16F: NRD asks for R16_SFLOAT in REBLUR_DIFFUSE's permanent pool (texture 9), and without it
-    // createTexture refused and the whole denoiser fell over -- the same shape of gap R16Unorm and
-    // R16Uint were added to close, found the same way, by a live run rather than by reading.
+    // R16F: NRD's REBLUR_DIFFUSE permanent pool (texture 9) asks for R16_SFLOAT; without it
+    // createTexture refused and the denoiser fell over, the same gap R16Unorm/R16Uint closed.
     R16F,
-    // R8Uint: NRD's REBLUR_DIFFUSE transient pool asks for R8_UINT. Found the same way R16F above
-    // was -- by running it, not by reading the spec -- which is what the pool-allocation warning
-    // naming the NRD format string exists for.
+    // R8Uint: NRD's REBLUR_DIFFUSE transient pool asks for R8_UINT (found by running it, same as R16F).
     R8Uint,
 };
 
@@ -123,18 +99,14 @@ enum class ResourceState : u8 {
     DepthWrite,
     CopySource,
     CopyDest,
-    // A buffer being read by the input assembler. Needed so a compute pass that WRITES vertices can
-    // hand them to a draw: RENDERING.md 7.3 specifies exactly this transition, and it could not be
-    // expressed before.
+    // Input-assembler read state; lets a compute pass that WRITES vertices hand them to a draw
+    // (RENDERING.md 7.3). Could not be expressed before this existed.
     VertexBuffer,
-    // A buffer read as GEOMETRY BY EVERY CONSUMER AT ONCE -- the input assembler, a shader doing
-    // manual vertex fetch, and an acceleration-structure build.
-    //
-    // It is a combined state rather than three separate ones because a skinned vertex buffer is
-    // genuinely read all three ways in a single frame, and there is no point in it between them at
-    // which a transition could be inserted. VertexBuffer alone is what a BLAS build rejects: it
-    // wants NON_PIXEL_SHADER_RESOURCE, and the debug layer is what says so. Being a read state it
-    // cannot also be a UAV, so re-skinning mid-frame must pass back through UnorderedAccess.
+    // Read as geometry by the input assembler, manual vertex fetch, AND an acceleration-structure
+    // build AT ONCE -- combined because a skinned vertex buffer is genuinely read all three ways in
+    // one frame with no seam to insert a transition. VertexBuffer alone is rejected by a BLAS build
+    // (wants NON_PIXEL_SHADER_RESOURCE, per the debug layer). A read state, so re-skinning mid-frame
+    // must pass back through UnorderedAccess.
     GeometryRead,
     // TERMINAL: set at creation, never a valid barrier argument in either direction.
     AccelerationStructure,
@@ -164,15 +136,10 @@ struct TextureDesc {
     u32                initialRowPitch = 0;
 };
 
-// Where a buffer's memory lives.
 // How a texture mip is laid out inside a buffer for copyTextureToBuffer / copyBufferToTexture.
-//
-// NOT NECESSARILY TIGHTLY PACKED, which is the whole reason this exists rather than the caller
-// computing width*height*depth*bpp. D3D12 requires each ROW of a copy footprint to start on a
-// 256-byte boundary, so a 16-wide RGBA16F mip -- 128 bytes of real data per row -- occupies 256.
-// Vulkan has no such rule and reports the tight pitch. A caller that wants tightly packed bytes
-// (a file, a hash) must repack using rowPitch, and one that has tightly packed bytes to upload
-// must expand into it.
+// NOT NECESSARILY TIGHTLY PACKED (the reason this exists instead of width*height*depth*bpp):
+// D3D12 requires each row to start on a 256-byte boundary (a 16-wide RGBA16F mip, 128 real
+// bytes/row, occupies 256); Vulkan reports the tight pitch. Repack via rowPitch either direction.
 struct TextureCopyFootprint {
     u64 totalBytes   = 0;   // what the buffer must be able to hold for this mip
     u32 rowPitch     = 0;   // bytes from one row to the next, INCLUDING any padding
@@ -238,30 +205,18 @@ struct ShaderDesc {
     u32         minShaderModel = 60;
     const char* defines = nullptr;  // semicolon-separated, e.g. "AVER_MS=1;AVER_RT=1"
 
-    // ---- the precompiled path -----------------------------------------------------------------
-    //
-    // ALREADY-COMPILED BYTECODE, in whatever form THIS backend consumes: DXIL for D3D12, SPIR-V for
-    // Vulkan. Set it and `source`/`prelude`/`entry`/`defines`/`minShaderModel` are all ignored --
-    // there is nothing left to compile, nothing to name an entry point in (the name is baked into
-    // the module), and no shader model to request (the bytecode already declares one). `stage` is
-    // still required, because the backend needs to know which kind of pipeline may consume it and
-    // neither DXIL nor SPIR-V is inspected here to find out.
-    //
-    // WHY THIS EXISTS. Every shader in this engine is HLSL text compiled at runtime through DXC,
-    // which is the right default -- it is what makes `--shader-source` reload work and what keeps
-    // one .hlsl file serving both backends. It cannot serve a THIRD-PARTY denoiser, upscaler or
-    // library that ships compiled permutations and no source: NVIDIA NRD (modules/render.nrd) hands
-    // over 159 of them, and until this field existed there was no way to put one into a pipeline.
-    //
-    // THE BYTES ARE COPIED, NOT BORROWED. The caller may free them the moment createShader returns.
-    // Borrowing would be cheaper and is the wrong trade: the handle outlives the call by design, a
-    // dangling pointer here surfaces as a corrupt PSO or a device removal rather than as a crash at
-    // the mistake, and the amounts are small (NRD's entire REBLUR_DIFFUSE_OCCLUSION set is 338 KiB).
-    //
-    // A BACKEND MAY REFUSE. Bytecode is format-specific, so handing DXIL to Vulkan is a caller
-    // error, not a portability question -- it returns an invalid handle and logs, the same degrade
-    // as a shader model the device cannot reach. A caller with both (NRD supplies DXIL and SPIR-V
-    // side by side) picks by asking the device which it is.
+    // ---- the precompiled path ----
+    // Already-compiled bytecode (DXIL for D3D12, SPIR-V for Vulkan). Setting it makes
+    // source/prelude/entry/defines/minShaderModel irrelevant; `stage` is still required so the
+    // backend knows which pipeline kind may consume it (neither bytecode form is inspected to find
+    // out). Runtime HLSL-via-DXC is the right default otherwise -- it drives `--shader-source`
+    // reload and lets one .hlsl serve both backends -- but can't serve NRD (modules/render.nrd),
+    // which ships 159 precompiled shaders with no source. Bytes are COPIED, not borrowed: caller may
+    // free right after createShader returns (sizes are small, e.g. NRD's REBLUR_DIFFUSE_OCCLUSION set
+    // is 338 KiB); a dangling pointer would surface as PSO corruption or device removal, not a clean
+    // crash. A backend refuses a mismatched format (e.g. DXIL handed to Vulkan) with an invalid handle
+    // and a log, same as an unreachable shader model; a caller with both formats (NRD ships DXIL and
+    // SPIR-V side by side) picks by asking the device which one it wants.
     const void* bytecode     = nullptr;
     u64         bytecodeSize = 0;
 
@@ -293,30 +248,24 @@ struct DepthState {
 // Logical constant slots, mapping one-to-one onto b0..b(n-1).
 constexpr u32 kMaxConstantSlots = 5;
 
-// Slots per range. Enforced: counts above this cannot declare a kind. Defined HERE, above
-// PipelineLayout, because that struct sizes its slot-kind arrays with it; BindingSetDesc further
-// down uses the same one.
+// Slots per range; counts above this cannot declare a kind. Defined here (not beside
+// BindingSetDesc) because PipelineLayout also sizes its slot-kind arrays with it.
 //
-// 16 -> 24, optimisation-wave-2 (U1/2.9, contract C2-8, integration cross-lane fix): kVoxiSrvCount
-// (VoxiRenderer.cpp) grew to 17 with the half-resolution ReSTIR visibility history's read slot
-// (t16), one past the old 16-slot ceiling -- BindingSetDesc::srvCount is checked against this
-// constant on every backend (D3D12Device.cpp's createBindingSet, VulkanResourceFactory.cpp's
-// identical check) and would refuse Voxi's own main binding set outright, and
-// VoxiRenderer::giTableKinds' `srv[16] = ...` write would be one past the end of a 16-element
-// C array -- undefined behaviour, not merely a refused set. Every array, loop bound and
-// static_assert sized off this one constant (PipelineLayout/BindingSetDesc's four slot-kind
-// arrays, VulkanCommon.hpp's kVkUavBindingBase and its own slot-state arrays,
-// VulkanResourceFactory.cpp's register-map loops, VulkanRegisterMap.hpp's kMaxRegisterBinds)
-// widens automatically with it -- no other file hardcodes the literal 16 independently (checked
-// by grep). Raised to 24, not merely 17, for headroom: this is the second wave in a row to grow
-// Voxi's SRV table, and the material table (table 1, pbr::kMaterialSrvCount) has its own,
-// independent budget against this same ceiling that this headroom also protects.
+// 16 -> 24 (optimisation-wave-2, U1/2.9, C2-8, integration cross-lane fix): kVoxiSrvCount
+// (VoxiRenderer.cpp) grew to 17 with the half-res ReSTIR visibility history slot (t16), one past
+// the old ceiling -- would have refused Voxi's own binding set (BindingSetDesc::srvCount is checked
+// against this on every backend: D3D12Device.cpp's createBindingSet, VulkanResourceFactory.cpp's
+// identical check) and made `srv[16] = ...` in VoxiRenderer::giTableKinds an out-of-bounds write.
+// Every array/loop/static_assert sized off this constant widens with it automatically (incl.
+// VulkanCommon.hpp's kVkUavBindingBase, VulkanRegisterMap.hpp's kMaxRegisterBinds; checked by grep:
+// no other file hardcodes 16). Raised to 24, not 17, for headroom -- second wave in a row to grow
+// Voxi's SRV table, and pbr::kMaterialSrvCount has its own independent budget against this same
+// ceiling that this headroom also protects.
 constexpr u32 kMaxBindingSlots = 24;
 
-// The binding layout a pipeline declares.
-// Declared ahead of PipelineLayout, which now carries slot kinds; defined in full further down,
-// next to BindingSetDesc, which has always carried them. An opaque enum declaration with a fixed
-// underlying type is a COMPLETE type, so arrays of it are legal here.
+// The binding layout a pipeline declares. Forward-declared here (defined in full further down,
+// beside BindingSetDesc) because PipelineLayout needs it for its slot-kind arrays; an opaque enum
+// with a fixed underlying type is a COMPLETE type, so arrays of it are legal.
 enum class SlotKind : u8;
 
 struct PipelineLayout {
@@ -331,55 +280,33 @@ struct PipelineLayout {
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
 
-    // WHAT KIND OF RESOURCE EACH DECLARED SLOT HOLDS -- the same declaration BindingSetDesc makes,
-    // and it must agree with it slot for slot.
-    //
-    // WHY IT HAS TO BE DECLARED RATHER THAN INFERRED. Vulkan types every binding in a descriptor set
-    // LAYOUT, and a set is only bindable to a pipeline whose layout declares the same types. The
-    // Vulkan backend used to recover the kinds by REFLECTING the shader, which cannot see a slot the
-    // shader does not use: DXC eliminates it, reflection finds nothing, the slot defaults to
-    // Texture2D, and the pipeline then declares SAMPLED_IMAGE where the binding set holds, say, an
-    // acceleration structure. The layer's report is
-    //     "Binding 2 ... is VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE but binding 2 ... trying to bind, is
-    //      VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR"
-    // three steps away from the cause, at the draw. Voxi's t2 TLAS is exactly that slot: declared
-    // for the table, used by only some of the pipelines that share the table.
-    //
-    // D3D12 ignores these -- a root signature's descriptor ranges are typed by class (SRV/UAV), not
-    // by resource dimension -- so this is additive there.
-    //
-    // Leave slotKindsDeclared false and the backend falls back to reflection, which is correct for
-    // any layout whose shaders use every slot they declare. It warns when it has to guess.
-    // Non-zero appends ONE more descriptor table to the root signature, holding this many texture
-    // SRVs in REGISTER SPACE 1 -- its own space so it cannot collide with any t-register the two
-    // ordinary tables above already claim, and appended last so every layout that leaves this at 0
-    // serialises byte-identically to before this field existed. Part of the root-signature cache
-    // key; see sameLayout in the D3D12 backend.
+    // WHAT KIND OF RESOURCE EACH DECLARED SLOT HOLDS -- must agree slot-for-slot with BindingSetDesc's
+    // own declaration (srvKinds/uavKinds below). DECLARED RATHER THAN INFERRED because Vulkan types
+    // every binding in a descriptor set LAYOUT: the backend used to recover kinds by REFLECTING the
+    // shader, which misses a slot the shader doesn't use (DXC eliminates it, so it defaults to
+    // Texture2D) -- Voxi's t2 TLAS is exactly that slot, declared for the table but used by only some
+    // pipelines sharing it, and the resulting Vulkan validation error ("... is
+    // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE but ... trying to bind, is
+    // VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR") names the wrong descriptor type, three steps
+    // from the real cause, at the draw. D3D12 ignores these (root-signature ranges are typed by class,
+    // not dimension), so this is additive there. Leave slotKindsDeclared false to fall back to
+    // reflection (correct when every declared slot is used); the backend warns when it has to guess.
+    // Non-zero appends ONE more descriptor table to the root signature: this many texture SRVs in
+    // its own REGISTER SPACE 1 (so it can't collide with the two ordinary tables' t-registers),
+    // appended last so a layout leaving this at 0 serialises byte-identically to before. Part of
+    // the root-signature cache key; see sameLayout in the D3D12 backend.
     u32 bindlessTextureCount = 0;
 
-    // ---- register spaces ----------------------------------------------------------------------
-    //
-    // WHICH REGISTER SPACE THE CONSTANT SLOTS AND THE STATIC SAMPLERS LIVE IN. Zero for every
-    // pipeline this engine compiles itself, which is what the two defaults mean and why they are
-    // separate fields rather than one: they are set together only by accident.
-    //
-    // WHY THEY EXIST AT ALL. HLSL lets a shader put `b0` and `t0` in different spaces, and a shader
-    // this engine did not compile has already made that choice -- it is baked into the bytecode and
-    // is not negotiable at bind time. NVIDIA NRD (modules/render.nrd) is the first such shader here:
-    // its SRVs and UAVs are in space 0, matching this engine, but its constant buffer and its two
-    // immutable samplers are in SPACE 1. Without these fields a root signature built from this
-    // struct simply cannot describe NRD's shaders, and the pipeline fails to create.
-    //
-    // NOT srvSpace/uavSpace, and that omission is deliberate rather than an oversight. Space 1 is
-    // ALREADY SPOKEN FOR on the SRV side: bindlessTextureCount puts the ray path's texture table
-    // there (see the D3D12 root-signature builder). Adding a movable space for the ordinary SRV/UAV
-    // tables would let a caller collide with it, and nothing needs it -- add them when something
-    // does, with the collision worked out then.
-    //
-    // A NON-ZERO SPACE MOVES ALL kMaxConstantSlots SLOTS, not just the ones a shader uses. A root
-    // signature may declare more than its shader reads, so the unused slots are harmless; but they
-    // are also unbound, and a shader that DID read one would read garbage. That is the same
-    // contract slot 0 already has.
+    // ---- register spaces ----
+    // Register space for the constant slots and the static samplers; 0 for every pipeline this
+    // engine compiles (separate fields only by accident, not design). Exist because HLSL lets a
+    // shader put b0/t0 in different spaces, and a shader this engine didn't compile may already
+    // have made that choice: NVIDIA NRD (modules/render.nrd) has SRVs/UAVs in space 0 but its CBV
+    // and two samplers in space 1 -- without these fields a root signature built here can't describe
+    // NRD's shaders. NOT srvSpace/uavSpace: space 1 is already spoken for on the SRV side
+    // (bindlessTextureCount's ray-path texture table); add a movable SRV/UAV space when something
+    // actually needs one. Non-zero moves ALL kMaxConstantSlots slots, not just the ones used -- the
+    // unused ones go unbound (garbage if read), same contract slot 0 already has.
     u32 constantSpace = 0;
     u32 samplerSpace  = 0;
 
@@ -393,14 +320,10 @@ struct PipelineLayout {
 // How many declarable descriptor tables a layout has, and so the bound on setBindingSet's index.
 constexpr u32 kBindingTableCount = 2;
 
-// The register a layout's SRV declarations run out to, ACROSS BOTH TABLES.
-//
-// NO UAV TWIN, AND THE ABSENCE IS THE POINT. This exists to serve one convention -- the instance
-// buffer binds at the derived register t(declaredSrvCount), so both backends and the shared HLSL
-// have to agree on where a layout's declarations end. Nothing derives a UAV register that way. A
-// declaredUavCount() sat here uncalled for a while purely because it looked symmetric, which reads
-// as evidence of a UAV convention that does not exist; write `l.uavCount + l.uavCount1` at the
-// first site that genuinely needs it, and give it a name then, for the reason it actually has.
+// The register a layout's SRV declarations run out to, across both tables. Serves one convention:
+// the instance buffer binds at t(declaredSrvCount), so both backends and the shared HLSL must agree
+// where declarations end. NO UAV TWIN -- a declaredUavCount() sat here unused purely for symmetry;
+// write `l.uavCount + l.uavCount1` at the first site that actually needs it, not before.
 inline u32 declaredSrvCount(const PipelineLayout& l) { return l.srvCount + l.srvCount1; }
 
 // ---------------------------------------------------------------- vertex layout
@@ -456,12 +379,11 @@ struct GraphicsPipelineDesc {
 
     BlendMode blend = BlendMode::Opaque;
 
-    // Reserves ONE EXTRA root SRV, past every t-register `layout` itself declares (and past the
-    // mesh-shader geometry SRVs too, when `ms` is also set): a per-instance StructuredBuffer that
-    // IRenderContext::drawMeshInstanced binds and the shader indexes with SV_InstanceID. See that
-    // method and kInstanceWorldRegister's comment below for the whole mechanism. Defaulted false so
-    // every EXISTING pipeline gets the exact root signature it already had -- this is additive, not
-    // a reinterpretation of anything `layout` already means.
+    // Reserves ONE EXTRA root SRV past every t-register `layout` declares (and past the mesh-shader
+    // geometry SRVs too, when `ms` is set): a per-instance StructuredBuffer that
+    // IRenderContext::drawMeshInstanced binds, indexed by SV_InstanceID. See that method and the
+    // per-instance register paragraph below for the whole mechanism. Defaulted false so every
+    // existing pipeline keeps the exact root signature it already had.
     bool instanced = false;
 };
 
@@ -483,15 +405,13 @@ enum class SlotKind : u8 {
     // A StructuredBuffer<T> / RWStructuredBuffer<T>. The element stride is given at BIND time
     // rather than declared here, because one slot serves whatever the pass puts in it.
     StructuredBuffer,
-    // A multisampled Texture2D -- SRV slots only, and the view dimension a genuinely multisampled
-    // resource REQUIRES: D3D12 rejects a plain TEXTURE2D SRV over a resource whose SampleDesc.Count
-    // is above 1. createTexture() itself never produces one (every TextureDesc it creates is forced
-    // to 1 sample -- see D3D12ResourceFactory::createTexture), so the only resource that can ever
-    // legally fill a slot declared this way is one a backend adopted from OUTSIDE the ordinary
-    // texture-creation path, the way D3D12Device::sceneDepthTexture() wraps the live scene depth
-    // buffer. modules/occlusion is the one consumer today (its HZB seed pass reads the scene's own,
-    // possibly-multisampled, depth buffer -- see OcclusionCuller.cpp's top comment for why an
-    // ordinary Texture2D read would be invalid there, not merely wrong).
+    // A multisampled Texture2D -- SRV only, and the view dimension a genuinely multisampled resource
+    // REQUIRES (D3D12 rejects a plain TEXTURE2D SRV when SampleDesc.Count > 1). createTexture() never
+    // produces one itself (forced to 1 sample -- D3D12ResourceFactory::createTexture), so only a
+    // backend-adopted resource from OUTSIDE the normal creation path can fill this slot, e.g.
+    // D3D12Device::sceneDepthTexture(). modules/occlusion is the one consumer today (its HZB seed
+    // pass reads the scene's own possibly-multisampled depth buffer -- see OcclusionCuller.cpp's top
+    // comment for why an ordinary Texture2D read would be invalid there, not merely wrong).
     Texture2DMS,
 };
 
@@ -515,12 +435,11 @@ constexpr u32 kAllSubresources = 0xFFFFFFFFu;
 // Triangles per mesh-shader thread group. The shader's own [numthreads] must agree.
 constexpr u32 kMeshShaderTrisPerGroup = 64;
 
-// Clusters per amplification-shader thread group, for a cluster-culling mesh-shader pipeline
-// dispatched with dispatchMeshClusters(). The shader's own [numthreads] must agree. Kept separate
-// from kMeshShaderTrisPerGroup: that one sizes a group of TRIANGLES inside a mesh shader that reads
-// one flat index buffer; this one sizes a group of CLUSTERS inside the amplification shader ahead
-// of it, where each thread does one cluster's local LOD-cut test (ownError/parentError vs budget,
-// frustum, cone) and DispatchMesh()'s the survivors -- unrelated units, unrelated shaders.
+// Clusters per amplification-shader thread group for dispatchMeshClusters(); the shader's own
+// [numthreads] must agree. Separate from kMeshShaderTrisPerGroup: that sizes a group of TRIANGLES
+// in a mesh shader reading one flat index buffer, this sizes a group of CLUSTERS in the
+// amplification shader ahead of it (each thread does one cluster's LOD-cut test -- ownError/
+// parentError vs budget, frustum, cone -- and DispatchMesh()'s the survivors); unrelated units.
 constexpr u32 kClusterAmplificationGroupSize = 32;
 
 // ---------------------------------------------------------------- reserved registers
@@ -542,16 +461,14 @@ static_assert(kFeatureFrameConstantRegister < kMaxConstantSlots,
 static_assert(kMeshGeometryConstantRegister >= kMaxConstantSlots,
               "the backend's mesh geometry constants must sit above every declarable slot");
 
-// Reserved for GraphicsPipelineDesc::instanced == true, and declared in the CALLER's own shader (not
-// the shared prelude -- unlike PerObject, not every consumer wants this, so it is opt-in per pipeline
-// rather than universal): a StructuredBuffer<float4x4> of per-instance world matrices, one draw's
-// worth of transforms, indexed with SV_InstanceID. Its t-register is t(declaredSrvCount(layout)),
-// or t(declaredSrvCount(layout) + 2) when the SAME pipeline is also a mesh-shader one (`ms` set),
-// since dispatchMeshFor's own vertex/index SRVs already claim declaredSrvCount and +1 in that case.
-// A caller compiling its instanced shader must pass the SAME NUMBER as a #define -- see
-// VoxiShaders.hpp's VSShadowInstanced and VoxiRenderer.cpp's AVER_INSTANCE_SRV for the pattern; the
-// backend has no way to push a register number INTO already-compiled HLSL text, so this is computed
-// identically on both sides from the same layout rather than shared any other way.
+// Reserved for GraphicsPipelineDesc::instanced == true, declared in the CALLER's own shader (not the
+// shared prelude -- opt-in per pipeline, unlike PerObject): a StructuredBuffer<float4x4> of one
+// draw's per-instance world matrices, indexed by SV_InstanceID. Its t-register is
+// t(declaredSrvCount(layout)), or +2 when the same pipeline is also mesh-shader (`ms` set, since
+// dispatchMeshFor's vertex/index SRVs claim declaredSrvCount and +1). The caller's instanced shader
+// must pass the SAME NUMBER as a #define -- see VoxiShaders.hpp's VSShadowInstanced /
+// VoxiRenderer.cpp's AVER_INSTANCE_SRV -- since the backend can't push a register number into
+// already-compiled HLSL text.
 
 // ---------------------------------------------------------------- acceleration structures
 
@@ -560,30 +477,21 @@ struct TlasInstance {
     f32         world[16];   // ENGINE: row-major/row-vector, cm, +Z up; do not pre-transpose.
     u32         mask = 0xFF;
     BlasHandle  blas = 0;
-    // The caller's own id for this instance, readable from a hit as HLSL's CommittedInstanceID().
-    //
-    // THE ONLY WAY A HIT CAN SAY WHAT IT HIT. Everything a shader needs after an intersection --
-    // which mesh, where its vertices start, which material -- is looked up from this. Without it,
-    // ray tracing can answer "is something there" and nothing else, which is why shadows were all
-    // the engine could do with it.
-    //
-    // Do NOT use CommittedInstanceIndex() for that job. It is a position in the built structure,
-    // and buildTlas SKIPS instances naming an invalid acceleration structure, so one failure
-    // silently shifts every later index by one and every subsequent lookup reads its neighbour's
-    // geometry. This field survives that compaction; the index does not.
-    //
-    // 24 BITS: DXR declares it as a bitfield, so a larger value is rejected rather than truncated.
+    // The caller's own id for this instance, read from a hit via HLSL's CommittedInstanceID(). THE
+    // ONLY WAY A HIT CAN SAY WHAT IT HIT -- mesh, vertex start, material are all looked up from this;
+    // without it ray tracing can only answer "is something there" (why shadows were all it could do).
+    // Do NOT use CommittedInstanceIndex(): buildTlas SKIPS instances naming an invalid acceleration
+    // structure, so one failure silently shifts every later index and its lookups read the wrong geometry --
+    // this field survives that compaction, the index does not. 24 BITS: DXR's bitfield rejects a
+    // larger value rather than truncating it.
     u32         instanceId = 0;
 
-    // Per-instance behaviour, as TlasInstanceFlags below.
-    //
-    // AT THE INSTANCE, NOT THE GEOMETRY, and that choice is the reason a translucent surface can cast
-    // a shadow at all here. createBlas hardcodes D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE (and Vulkan's
-    // VK_GEOMETRY_OPAQUE_BIT_KHR) on every geometry it builds, which tells the hardware it may skip
-    // any-hit entirely -- so a Proceed() loop would never be handed a candidate to inspect. The
-    // instance-level ForceNonOpaque flag OVERRIDES that geometry flag for this instance only, which
-    // means opaque geometry keeps the fast path untouched and only the panes that need interception
-    // pay for it. Changing createBlas instead would have made every mesh in the scene non-opaque.
+    // Per-instance behaviour, as TlasInstanceFlags below. AT THE INSTANCE, NOT THE GEOMETRY -- the
+    // reason a translucent surface can cast a shadow at all: createBlas hardcodes OPAQUE on every
+    // geometry it builds (D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE / VK_GEOMETRY_OPAQUE_BIT_KHR), so the
+    // hardware may skip any-hit entirely unless ForceNonOpaque overrides it per instance -- keeping
+    // the fast path untouched for opaque geometry, paid only by the panes that need interception.
+    // Changing createBlas instead would have made every mesh in the scene non-opaque.
     u32         flags = 0;
 };
 
@@ -594,9 +502,8 @@ enum TlasInstanceFlags : u32 {
     TlasInstanceFlag_TriangleCullDisable = 1u << 0,
     TlasInstanceFlag_TriangleFrontCcw    = 1u << 1,
     // Makes every hit on this instance a CANDIDATE rather than a commit, so an inline RayQuery's
-    // Proceed() loop can look at the material and decide. This is what a tinted, attenuated shadow
-    // needs: the ray must be able to pass THROUGH a pane, multiplying transmittance as it goes,
-    // instead of stopping at the first triangle.
+    // Proceed() loop can inspect the material and decide -- what a tinted, attenuated shadow needs:
+    // the ray passes THROUGH a pane, multiplying transmittance, instead of stopping at the first hit.
     TlasInstanceFlag_ForceOpaque         = 1u << 2,
     TlasInstanceFlag_ForceNonOpaque      = 1u << 3,
 };
@@ -617,28 +524,23 @@ public:
     virtual PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) = 0;
     virtual PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) = 0;
     // ---- the ray path's bindless texture table ----
-    //
-    // A FIXED-SIZE ARRAY OF TEXTURE SRVs a shader may index by a value it COMPUTED, rather than by
-    // a register the pipeline bound. This is the one exception to the "explicit descriptor tables,
-    // NOT bindless" rule at the top of this file, and it is deliberately not an extension of
-    // BindingSetDesc: that path hard-refuses anything past kMaxBindingSlots (24) and every raster
-    // pipeline in the engine depends on it staying exactly as small and explicit as it is.
-    //
-    // WHY IT EXISTS. A ray hit has no "current draw", so there is no per-material descriptor table
-    // to bind -- one fullscreen pass shades every material in the scene. The raster path keeps its
-    // per-draw tables, which are cheaper and work on the FL 11_0 floor; only shaders gated behind
-    // DeviceCaps::rtBindlessTextures (DXR 1.1, hence always binding tier 3) may use this.
-    //
-    // FIXED capacity, not unbounded: a fixed range serialises under root signature version 1.0 and
-    // needs no VARIABLE_DESCRIPTOR_COUNT on Vulkan. Slots past what a scene fills stay null, which
-    // is why a sampler reading an unwritten slot gets zeros rather than undefined memory.
+    // A FIXED-SIZE ARRAY OF TEXTURE SRVs a shader indexes by a COMPUTED value, not a bound register
+    // -- the one exception to the "explicit descriptor tables, NOT bindless" rule at the top of this
+    // file. Deliberately not an extension of BindingSetDesc, which hard-refuses past kMaxBindingSlots
+    // (24) and every raster pipeline depends on staying that small and explicit. Exists because a ray
+    // hit has no "current draw" to bind a per-material table for -- one fullscreen pass shades every
+    // material in the scene; the raster path keeps its cheaper per-draw tables, which work on the
+    // FL 11_0 floor. Only shaders gated on
+    // DeviceCaps::rtBindlessTextures (DXR 1.1, binding tier 3) may use this. FIXED capacity, not
+    // unbounded: serialises under root signature v1.0, needs no VARIABLE_DESCRIPTOR_COUNT on Vulkan;
+    // slots past what a scene fills stay null, so an unwritten slot reads zeros, not undefined memory.
     virtual BindlessTableHandle createBindlessTextureTable(u32 capacity) = 0;
     virtual void destroyBindlessTextureTable(BindlessTableHandle h) = 0;
 
-    // Writes one texture into one slot. RETURNS FALSE AND LOGS rather than writing out of range --
-    // an index past the table is how this engine has already hung a GPU once (a view sized for less
-    // than the buffer behind it), and a bad index here is read by a shader with no bounds check at
-    // all. The caller is expected to record kUnboundTexture for a refused slot, not to ignore this.
+    // Writes one texture into one slot. RETURNS FALSE AND LOGS rather than writing out of range -- a
+    // bad index here is read by a shader with no bounds check at all, and this engine has already
+    // hung a GPU once on exactly that shape of bug (a view sized for less than the buffer behind it).
+    // Caller should record kUnboundTexture on refusal.
     virtual bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) = 0;
 
     // The capacity the table was created with, or 0 for an invalid handle.
@@ -658,67 +560,47 @@ public:
     virtual void destroyPipeline(PipelineHandle h) = 0;
     virtual void destroyBindingSet(BindingSetHandle h) = 0;
 
-    // Releases an acceleration structure. Normally reached through IDevice::destroyMesh, which
-    // destroys whatever it built from the mesh it is freeing -- a BLAS left behind would keep
-    // pointing ray tracing at that mesh's freed vertex and index memory.
-    //
-    // NOT PURE, unlike its siblings above, and deliberately: tests/render.ui and
-    // tests/render.actorpreview each implement this interface with a MockFactory, and a new `= 0`
-    // would break both for a method neither has any use for. A backend that grew acceleration
-    // structures without growing a way to release them is a bug in that backend, not here.
+    // Releases an acceleration structure. Normally reached via IDevice::destroyMesh, which destroys
+    // whatever it built from the freed mesh -- a leftover BLAS would keep ray tracing pointed at
+    // freed vertex/index memory. NOT PURE, unlike its siblings above: tests/render.ui and
+    // tests/render.actorpreview implement this interface with a MockFactory that has no use for it,
+    // and a new `= 0` would break both. A backend that grows acceleration structures without a way
+    // to release them is a bug in that backend, not here.
     virtual void destroyBlas(BlasHandle h) { (void)h; }
 
-    // The mesh a BLAS was built from, or 0 if it is dead or was never built.
-    //
-    // EXISTS SO A CACHE CAN SELF-HEAL. VoxiRenderer memoises MeshHandle -> BlasHandle, and after a
-    // mesh is destroyed that entry names a structure over freed memory. Asking the factory what a
-    // BLAS is actually for lets the cache notice on its own, rather than needing every caller of
-    // destroyMesh to remember to tell it -- which is the "one missed site" shape this codebase has
-    // been bitten by before.
+    // The mesh a BLAS was built from, or 0 if dead or never built. EXISTS SO A CACHE CAN SELF-HEAL:
+    // VoxiRenderer memoises MeshHandle -> BlasHandle, and after a mesh is destroyed that entry names
+    // freed memory. Asking the factory what a BLAS is for lets the cache notice on its own, instead
+    // of needing every destroyMesh caller to remember to tell it -- the "one missed site" shape this
+    // codebase has been bitten by before.
     virtual MeshHandle blasMesh(BlasHandle h) const { (void)h; return 0; }
 
-    // A structure already BUILT from this mesh, or 0 if there is none yet -- the reverse of
-    // blasMesh, and the thing that stops two features paying for the same geometry twice.
-    //
-    // createBlas ALLOCATES; it does not deduplicate, so every caller that asks gets its own pair of
-    // buffers. That was invisible while one feature ray-traced, and stopped being invisible when a
-    // second did: VoxiRenderer and PathTracer each keep a MeshHandle -> BlasHandle map of their own,
-    // so a scene both of them touch built, sized and kept TWO bottom-level structures per mesh.
-    // MEASURED on Sponza: 220 meshes, 154.3 ms of allocation at load, and double the resident BLAS
-    // memory, for structures that describe byte-identical geometry.
-    //
-    // A BLAS IS A PURE FUNCTION OF ITS MESH, which is what makes sharing correct rather than merely
-    // cheaper: the build hardcodes OPAQUE and takes only the vertex/index buffers, and everything
-    // per-use -- transform, material, and whether the instance is non-opaque -- is applied at TLAS
-    // build time. So there is no per-consumer state in one to disagree about.
-    //
-    // BUILT, NOT MERELY ALLOCATED, and that qualifier is the contract. A handle whose structure has
-    // been created but not yet built points at uninitialised memory, and a second feature reusing it
-    // would trace garbage or race the first feature's build over the same scratch buffer. Returning
-    // only built structures means the caller can use one as-is; a caller that gets 0 creates and
-    // builds its own, exactly as before.
-    //
-    // OWNERSHIP DOES NOT CHANGE HANDS: a shared structure belongs to the MESH, and destroyMesh ->
-    // destroyBlasForMesh already frees every structure for a mesh. A caller that reuses a handle it
-    // did not create must therefore not destroy it.
+    // A structure already BUILT from this mesh, or 0 if none yet -- the reverse of blasMesh, so two
+    // features stop paying for the same geometry twice. createBlas ALLOCATES, it does not dedupe:
+    // VoxiRenderer and PathTracer each kept their own MeshHandle -> BlasHandle map, so a shared scene
+    // built TWO bottom-level structures per mesh (MEASURED on Sponza: 220 meshes, 154.3 ms extra
+    // allocation at load, double resident BLAS memory, for byte-identical geometry). Sharing is
+    // correct, not just cheaper: A BLAS IS A PURE FUNCTION OF ITS MESH -- the build hardcodes OPAQUE
+    // and takes only the vertex/index buffers, with everything per-use (transform, material,
+    // non-opaque) applied at TLAS build time instead. BUILT, NOT MERELY ALLOCATED is the contract: a
+    // created-but-unbuilt handle points at uninitialised memory and a reuser would race the build or
+    // trace garbage; a caller getting 0 creates and builds its own, as before. OWNERSHIP STAYS WITH
+    // THE MESH -- destroyMesh -> destroyBlasForMesh frees every structure for it, so a reused handle
+    // must not be destroyed by whoever reused it.
     virtual BlasHandle blasForMesh(MeshHandle mesh) const { (void)mesh; return 0; }
 
     // Populates a binding set. Slots left unset are null-filled.
     virtual void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip = kAllMips) = 0;
     virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
-    // Returns an SRV slot to the null-filled state it had when the set was created.
-    //
-    // EXISTS BECAUSE A BOUND DESCRIPTOR OUTLIVES ITS TEXTURE, AND THAT IS A GPU CRASH RATHER THAN A
-    // WRONG PIXEL. Once a slot has been pointed at a texture, destroying that texture does not
-    // unbind it: the descriptor keeps naming memory the factory has retired and will free. A shader
-    // that then samples the slot faults, and a fault in a shader removes the device -- the window
-    // dies with no message beyond "the GPU stopped responding".
-    //
-    // The case this was written for is a target that comes and goes across a resize. D3D12Device's
-    // resize() releases the post-process targets and does NOT recreate them in the same call, so
-    // anything holding one of their handles sees it go to 0 for a frame or more. `if (h) setSrv(...)`
-    // is the natural-looking guard and it is exactly wrong: it skips the update and leaves the dead
-    // descriptor in place. Call this instead when the handle a slot tracks becomes 0.
+    // Returns an SRV slot to the null-filled state it had when the set was created. EXISTS BECAUSE A
+    // BOUND DESCRIPTOR OUTLIVES ITS TEXTURE, A GPU CRASH RATHER THAN A WRONG PIXEL: destroying a
+    // texture doesn't unbind the slot, so a
+    // shader sampling it faults and takes the device down with it ("the GPU stopped responding", no
+    // other message). Written for a target that comes and goes across resize -- D3D12Device's
+    // resize() releases post-process targets without recreating them in the same call, so a held
+    // handle reads 0 for a frame or more. `if (h) setSrv(...)` looks like the right guard and is
+    // exactly wrong: it skips the update and leaves the dead descriptor in place. Call this instead
+    // when the handle a slot tracks becomes 0.
     virtual void clearSrv(BindingSetHandle set, u32 slot) = 0;
     // Puts a TLAS in an SRV slot.
     virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
@@ -737,9 +619,8 @@ public:
     virtual bool readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset = 0) = 0;
 
     // Fills `out` with the layout IRenderContext::copyTextureToBuffer / copyBufferToTexture use for
-    // one mip of `t`. False when the handle is bad, the mip is past the chain, the format's byte
-    // size is not known, or this backend has not implemented the pair -- which is also the check a
-    // caller should make BEFORE issuing either copy.
+    // one mip of `t`. False for a bad handle, a mip past the chain, an unknown format byte size, or
+    // an unimplemented backend -- also the check a caller should make BEFORE issuing either copy.
     virtual bool textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const {
         (void)t; (void)mip; (void)out;
         return false;
@@ -775,9 +656,9 @@ public:
     // Binds a set to one of the pipeline's declared tables.
     virtual void setBindingSet(BindingSetHandle set, u32 table = 0) = 0;
 
-    // Binds the ray path's bindless texture table for the pipelines that declared one
-    // (PipelineLayout::bindlessTextureCount). A no-op on a pipeline that did not, so a caller does
-    // not have to know which variant is bound. Sticky, like setBindingSet.
+    // Binds the ray path's bindless texture table (PipelineLayout::bindlessTextureCount). A no-op on
+    // a pipeline that declared none, so a caller need not know which variant is bound. Sticky, like
+    // setBindingSet.
     virtual void setBindlessTable(BindlessTableHandle table) = 0;
     // Root constants at a logical slot. Always overwrites the whole declared block.
     virtual void setConstants(u32 slot, const void* data, u32 dwords) = 0;
@@ -794,27 +675,18 @@ public:
     // Draws one backend-owned mesh through the mesh-shader path.
     virtual void dispatchMeshFor(MeshHandle mesh) = 0;
 
-    // Draws `instanceCount` copies of one backend-owned mesh in a SINGLE call, with per-instance
-    // world transforms read from a StructuredBuffer the shader indexes with SV_InstanceID -- see
-    // kInstanceWorldRegister's comment above GraphicsPipelineDesc::instanced for the whole mechanism.
-    // `worlds` is `instanceCount` row-major 4x4 matrices back to back (ENGINE convention: cm, +Z up,
-    // do not pre-transpose -- the same layout drawMesh's caller already writes into PerObject via
-    // setConstants(kObjectConstantRegister, ...)); COPIED, so the caller may reuse its buffer
-    // immediately. The bound pipeline must have been built with GraphicsPipelineDesc::instanced =
-    // true, exactly as dispatchMeshFor requires a mesh-shader pipeline.
-    //
-    // This is deliberately narrower than a full per-instance PerObject block (world plus base
-    // colour, material, shading model, emissive): the depth-only shadow pass is this mechanism's
-    // first caller and reads nothing else per instance -- see VoxiRenderer::shadowPass. The
-    // SRV-indexed-by-SV_InstanceID SHAPE generalises to any other per-instance payload a future
-    // caller wants; widen the element type and the shader that reads it then, not this entry point.
-    //
-    // NOT PURE, same reasoning as dispatchMeshClusters below: adding a new virtual here must not
-    // break an existing IRenderContext that never asked for instancing. The default below is a
-    // correct, unaccelerated fallback -- one setConstants + drawMesh per instance, exactly what a
-    // caller would otherwise write by hand -- so MockContext and any other override keep compiling
-    // and behaving correctly, unmodified, the moment this method exists; only D3D12RenderContext
-    // turns it into an actual DrawIndexedInstanced with an instance count above 1.
+    // Draws `instanceCount` copies of one backend-owned mesh in a SINGLE call, per-instance world
+    // transforms read from a StructuredBuffer indexed by SV_InstanceID (see the per-instance
+    // register paragraph above GraphicsPipelineDesc::instanced). `worlds` is `instanceCount`
+    // row-major 4x4 matrices back to back (ENGINE convention: cm, +Z up, no pre-transpose, same as
+    // PerObject); COPIED, so the caller may reuse its buffer immediately. Requires
+    // GraphicsPipelineDesc::instanced = true. Narrower than a full PerObject block (world plus base
+    // colour, material, shading model, emissive) on purpose: the depth-only shadow pass is the first
+    // caller and needs nothing else per instance (VoxiRenderer::shadowPass). The SRV-indexed-by-
+    // SV_InstanceID shape generalises to any other per-instance payload a future caller wants -- widen
+    // the element type and the shader reading it then, not this entry point. NOT PURE: the default is
+    // an unaccelerated fallback (setConstants + drawMesh per instance) so overrides keep working; only
+    // D3D12RenderContext uses a real DrawIndexedInstanced.
     virtual void drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) {
         f32 consts[kObjectConstantDwords] = {};
         for (u32 i = 0; i < instanceCount; ++i) {
@@ -827,71 +699,43 @@ public:
     virtual void dispatch(u32 gx, u32 gy, u32 gz) = 0;
 
     // Dispatches an amplification+mesh-shader pipeline over `clusterCount` clusters -- one
-    // amplification-shader thread per cluster, in groups of kClusterAmplificationGroupSize -- for a
-    // per-cluster LOD cut. `mesh`, if non-zero and alive, has its plain vertex buffer bound the same
-    // way dispatchMeshFor binds one: every cluster's MeshletVertices are GLOBAL indices into that
-    // SAME buffer (FORMAT_SPECS 5.7 -- every LOD level shares LOD 0's vertex array), so the mesh
-    // shader still needs it to resolve a cluster's vertices to positions. The cluster arrays
-    // themselves (MeshletDesc/Bounds/Vertices/Triangles) are NOT resolved here: unlike a MeshHandle's
-    // vertex/index pair, a cluster CUT has no single backend-owned source, so the caller binds them
-    // explicitly first (setBindingSet/setSrvBuffer), exactly as any other feature binds its own data
-    // ahead of a draw or dispatch call.
-    //
-    // Deliberately a SEPARATE entry point from dispatchMeshFor(MeshHandle), not an overload of it:
-    // dispatchMeshFor dispatches by TRIANGLE COUNT over one flat, immutable index buffer and knows
-    // nothing about clusters. Giving it a second, cluster-shaped meaning would make one function
-    // answer two different questions depending on which pipeline happened to be bound -- exactly the
-    // kind of silent double-duty this codebase has been bitten by before.
-    //
-    // NOT PURE: adding it here must not break every existing IRenderContext (MockContext in
-    // tests/render.ui and tests/render.actorpreview implement this interface and have no use for a
-    // cluster-culling path). A backend that grows cluster support without growing this override is a
-    // bug in that backend, not here -- see IResourceFactory::destroyBlas for the identical reasoning.
+    // amplification-shader thread per cluster (groups of kClusterAmplificationGroupSize) for a
+    // per-cluster LOD cut. `mesh`, if alive, has its plain vertex buffer bound like dispatchMeshFor:
+    // MeshletVertices are GLOBAL indices into that SAME buffer (FORMAT_SPECS 5.7 -- every LOD level
+    // shares LOD 0's vertex array). The cluster arrays (MeshletDesc/Bounds/Vertices/Triangles) are NOT
+    // resolved here -- a cluster CUT has no single backend-owned source, so the caller binds them
+    // first (setBindingSet/setSrvBuffer). SEPARATE from dispatchMeshFor(MeshHandle), not an overload:
+    // that dispatches by TRIANGLE COUNT over a flat index buffer and knows nothing about clusters; a
+    // second, cluster-shaped meaning on the same function would be the silent double-duty this
+    // codebase has been bitten by before. NOT PURE, same reasoning as
+    // IResourceFactory::destroyBlas: MockContext has no use for cluster culling, so a new `= 0`
+    // would break it.
     virtual void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) { (void)mesh; (void)clusterCount; }
 
-    // Copies whole bytes between buffers. Both must already be in CopySource / CopyDest.
-    // Copies a range between buffers. The offsets are what let several sources be CONCATENATED
-    // into one destination -- which is how a set of separate meshes becomes the single flat table
-    // a shader can index after a ray hit. Without them this could only ever copy a whole buffer to
-    // the start of another.
+    // Copies a range between buffers; both must already be in CopySource / CopyDest. The offsets
+    // let several sources be CONCATENATED into one destination -- how separate meshes become the
+    // single flat table a shader indexes after a ray hit. Without them this could only copy a whole
+    // buffer to the start of another.
     virtual void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
                             u64 dstOffset = 0, u64 srcOffset = 0) = 0;
 
-    // Copies the WHOLE of one texture into another. Both must already be in CopySource / CopyDest,
-    // exactly as copyBuffer requires of its two buffers.
-    //
-    // WHY THIS EXISTS, because "copy a texture" sounds too obvious to need a reason: until now the
-    // RHI could copy buffers and not textures, so anything rendered into a target was gone the
-    // moment the next frame reused that target. That is not an inconvenience, it is a hard block on
-    // a whole class of feature -- an asset thumbnail, a cached reflection, a UI element painted once
-    // and reused -- because a render target is transient by construction and there was NO WAY to
-    // move its pixels somewhere that outlives it. The content browser wanted rendered thumbnails and
-    // could not have them for exactly this reason.
-    //
-    // WHOLE-RESOURCE, NOT A REGION, and deliberately so: a region copy needs matching subresource
-    // indices, offsets and extents on both sides, which is four more ways to be wrong for a
-    // capability nothing has asked for yet. The two textures must agree on dimension, size, format
-    // and mip count -- checked by the backends, which log and do nothing rather than record a copy
-    // the debug layer would reject.
+    // Copies the WHOLE of one texture into another; same CopySource/CopyDest precondition as
+    // copyBuffer. Exists because the RHI could copy buffers but not textures, so a rendered target
+    // was gone once the next frame reused it -- blocking asset thumbnails, cached reflections, a
+    // reused UI element; the content browser wanted rendered thumbnails and could not have them for
+    // exactly this reason. WHOLE-RESOURCE, NOT A REGION: a region copy needs matching subresource
+    // indices/offsets/extents, more ways to be wrong for a capability nothing has asked for. The two
+    // textures must agree on dimension, size, format and mip count -- checked by the backends, which
+    // log and no-op rather than record a rejected copy.
     virtual void copyTexture(TextureHandle dst, TextureHandle src) = 0;
 
-    // Copies ONE MIP of a texture into a buffer, and back.
-    //
-    // WHY THESE EXIST. Until they did, this RHI could move bytes texture-to-texture and
-    // buffer-to-buffer, but had no way at all to get a texture's contents to the CPU or to put CPU
-    // bytes into an existing texture -- createTexture's initialData was the only route in, and there
-    // was no route out. Anything wanting to bake, cache or verify a rendered volume had to either
-    // reach past the RHI into a backend (which D3D12Device::selfTest does, for 2D only) or make its
-    // output a structured buffer instead of a texture (which PcgVolume does, for that reason).
-    // Voxi's GI derived-data cache needs a Tex3D mip chain both ways, and neither workaround fits.
-    //
+    // Copies ONE MIP of a texture into a buffer, and back. WHY: the RHI could move bytes
+    // texture-to-texture and buffer-to-buffer, but had no route to the CPU or from it
+    // (createTexture's initialData was in-only) -- reaching past the RHI into a backend (D3D12Device
+    // ::selfTest, 2D only) or using a structured buffer instead (PcgVolume) were the only workarounds.
+    // Voxi's GI derived-data cache needs a Tex3D mip chain both ways, and neither fits.
     // THE BUFFER LAYOUT IS THE BACKEND'S, NOT TIGHTLY PACKED -- ask textureCopyFootprint first and
-    // repack. See TextureCopyFootprint for why that is not an implementation detail worth hiding.
-    //
-    // NOT PURE, same reasoning as drawMeshInstanced: adding a virtual here must not break an
-    // IRenderContext that never asked for it. The default is an honest no-op that logs nothing and
-    // copies nothing; a caller checks textureCopyFootprint first, which returns false on a backend
-    // that has not implemented the pair.
+    // repack. NOT PURE, same reasoning as drawMeshInstanced: the default no-ops.
     virtual void copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
         (void)dst; (void)dstOffset; (void)src; (void)mip;
     }
@@ -933,26 +777,19 @@ public:
     virtual void popMarker() {}
 };
 
-// This engine's SCOPED_GPU_STAT: opens a pushMarker region at construction and closes it (via
-// popMarker) at destruction, so a timing scope over a pass is one line at the top of its block and
-// cannot be left open by an early return -- the exact failure mode a hand-written pushMarker/
-// popMarker pair invites the moment the function it brackets grows a second exit. VoxiRenderer::
-// buildAccelerationStructures had exactly one such exit (an early return for "nothing to build this
-// frame") BEFORE this existed, and its popMarker() had to be repeated by hand at that exit as well as
-// at the bottom of the function -- correct only because someone remembered both times. A forgotten
-// one is not cosmetic: it leaves the backend's tsOpen_ stack (D3D12Device.cpp) off by one for the
-// rest of the run, so every span opened afterward inherits a parent that never closes and the frame's
-// own top-level bracket ends up permanently nested one level too deep.
-//
-// PURE RAII, NOT A "MAYBE" ONE: pushMarker/popMarker are declared with inert default bodies above
-// precisely so a backend that has not wired up GPU timing (or a MockContext in a test) can still
-// take this class -- it costs two virtual calls that no-op, not a missing feature.
-//
-// DOES DOUBLE DUTY ON PURPOSE, same as the pushMarker/popMarker pair it wraps: on D3D12 this opens
-// both a PIX/RenderDoc debug-event region AND a GPU timestamp span nested under whatever is already
-// open (see D3D12RenderContext::pushMarker). One call, one scope, one mechanism -- there is
-// deliberately no separate "just the marker" or "just the timing" variant to keep two systems in
-// sync by hand.
+// This engine's SCOPED_GPU_STAT: opens a pushMarker region at construction, closes it via popMarker
+// at destruction, so a timing scope is one line and can't be left open by an early return -- the
+// failure mode a hand-written push/pop pair invites once its function grows a second exit.
+// VoxiRenderer::buildAccelerationStructures had exactly one such exit (an early return for "nothing
+// to build this frame") before this existed, needing popMarker() repeated by hand at both places; a
+// forgotten one leaves the backend's tsOpen_ stack (D3D12Device.cpp) off by one for the rest of the
+// run, so every span opened afterward inherits a parent that never closes and the frame's own
+// top-level bracket ends up permanently nested one level too deep. PURE RAII: pushMarker/popMarker
+// have inert
+// default bodies (above) so a backend without GPU timing, or a MockContext, still takes this class
+// for free. DOES DOUBLE DUTY ON PURPOSE: on D3D12 this opens both a PIX/RenderDoc region AND a
+// nested GPU timestamp span in one call (D3D12RenderContext::pushMarker) -- no separate variant to
+// keep in sync by hand.
 class ScopedGpuStat {
 public:
     ScopedGpuStat(IRenderContext& ctx, const char* label) : ctx_(ctx) { ctx_.pushMarker(label); }
@@ -975,27 +812,18 @@ public:
     // Starts a frame's scene submission, so a feature can replay geometry into its own passes.
     virtual void beginScene() {}
     // One scene draw with its whole per-draw shading state. `drawConstants` is BORROWED.
-    //
-    // `blended` marks a TRANSLUCENT draw -- one the backend is about to capture for its own sorted,
-    // blend-enabled replay rather than send down the opaque path (see IDevice::setDrawBlended). It
-    // is offered here rather than withheld because THE RIGHT ANSWER DIFFERS PER FEATURE, and only
-    // the feature knows it:
-    //
-    //   - A RASTER feature should ignore it. Voxelising a pane of glass makes it block indirect
-    //     light; putting it in the sun-shadow cascade makes it cast a solid black shadow; putting it
-    //     in the ray-tracing acceleration structure makes every reflection of it opaque. All three
-    //     are worse than the surface being absent, which is why VoxiRenderer drops these.
-    //   - A PATH TRACER must NOT ignore it. A dielectric is the one thing a path tracer models
-    //     properly -- Fresnel-weighted reflection and refraction with real total internal reflection
-    //     -- and a path tracer that cannot see the glass in the scene it is tracing is not a
-    //     reference for anything. PtSceneView takes these and marks the instance dielectric.
-    //
-    // WITHHOLDING IT WAS THE FIRST DESIGN AND IT WAS WRONG. Blended draws originally returned from
-    // drawMesh BEFORE this loop, which excluded them from every feature at once -- correct for the
-    // three raster consumers above and silently fatal for the path tracer, which then traced a scene
-    // with the glass simply missing. One flag, each feature deciding, is the fix.
-    //
-    // DEFAULTED so an override that does not name the parameter behaves exactly as it did.
+    // `blended` marks a TRANSLUCENT draw the backend is about to capture for sorted, blend-enabled
+    // replay instead of the opaque path (IDevice::setDrawBlended). Offered rather than withheld
+    // because THE RIGHT ANSWER DIFFERS PER FEATURE:
+    //   - RASTER should ignore it -- voxelising blocks indirect light, the shadow cascade casts a
+    //     solid black shadow, the RT acceleration structure makes every reflection opaque; all worse
+    //     than the surface being absent, so VoxiRenderer drops these.
+    //   - A PATH TRACER must NOT ignore it -- a dielectric is the one thing it models properly
+    //     (Fresnel reflection/refraction, real TIR), so PtSceneView takes these and marks the
+    //     instance dielectric.
+    // Withholding it was the first design and was wrong (blended draws returned from drawMesh before
+    // this loop, silently dropping glass from the path tracer's scene); one flag, each feature
+    // deciding, is the fix. DEFAULTED so an override that doesn't name the parameter behaves as before.
     virtual void submitDraw(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                             f32 metallic, f32 roughness, BindingSetHandle drawBinding,
                             const void* drawConstants, u32 drawConstantBytes,
@@ -1010,114 +838,79 @@ public:
     // Whether the scene must be drawn with this feature's pipelines.
     virtual bool           overridesScenePipeline() const { return false; }
     // The pipeline to draw the scene with. `depthPrepassed` is true for an instance whose depth THIS
-    // SAME FRAME's depthPrepassPipeline() already wrote, via a separate depth-only draw earlier in
-    // the frame -- see D3D12Device::drawMesh's own comment for the whole mechanism (who sets it, and
-    // why it is auto-consumed rather than sticky). DEFAULTED so every pre-existing caller and every
-    // OTHER override compiles and behaves exactly as before: a feature that never looks at the third
-    // argument returns the identical pipeline it always did, prepass or not.
-    //
-    // `blended` asks for the SAME shading through an alpha-blend blend state with depth-write off --
-    // the pipeline a translucent material needs. It is never combined with `depthPrepassed`: a
-    // blended draw writes no depth, so there is nothing for a prepass to have written, and
-    // IDevice::drawMesh never routes one down the prepass path (see setDrawBlended). Returning 0 for
-    // it is a legitimate answer meaning "this feature has no blended variant"; the backend then
-    // DROPS the draw rather than silently drawing it opaque, because an opaque pane of glass is a
-    // worse failure than a missing one and a great deal harder to attribute.
+    // SAME FRAME's depthPrepassPipeline() already wrote via a separate depth-only draw earlier in the
+    // frame (see D3D12Device::drawMesh for who sets it and why it's auto-consumed, not sticky).
+    // DEFAULTED so ignoring the third argument returns the same pipeline as before. `blended` asks
+    // for the SAME shading via alpha-blend with depth-write off; never combined with `depthPrepassed`
+    // (a blended draw writes no depth -- setDrawBlended). Returning 0 legitimately means "no blended
+    // variant": the backend DROPS the draw rather than drawing it opaque, worse and harder to
+    // attribute than a missing surface.
     virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false,
                                          bool blended = false) const {
         (void)meshShaders; (void)wireframe; (void)depthPrepassed; (void)blended; return 0;
     }
 
-    // The bindless texture table the pipelines returned above expect to have bound, or 0 for a
-    // feature whose pipelines declare none.
-    //
-    // WHY THE BACKEND HAS TO ASK. A blended draw is CAPTURED and replayed by the device, after the
-    // deferred sky -- see scenePipeline's own comment. The feature is not on the stack at that
-    // moment, so it cannot bind anything itself, and the device does not own the table. It asks,
-    // exactly as it already asks for the pipeline. Returning 0 is answered by setBindlessTable
-    // being a no-op on a pipeline that declared no range, so a feature that has no table and a
-    // pipeline that wants none cost one virtual call between them.
+    // The bindless texture table the pipelines above expect bound, or 0 for pipelines that declare
+    // none. The backend has to ask because a blended draw is CAPTURED and replayed by the device
+    // after the deferred sky, when the feature is no longer on the stack to bind anything itself and
+    // the device doesn't own the table -- it asks, same as it asks for the pipeline. Returning 0
+    // costs one no-op virtual call, since setBindlessTable no-ops on a pipeline that declared none.
     virtual BindlessTableHandle sceneBindlessTable() const { return 0; }
-    // The DEPTH-ONLY pipeline for a same-frame depth prepass. A caller pairs this with
-    // scenePipeline(..., depthPrepassed=true) for the SAME instance later in the frame: this one
-    // writes depth (test=Less, write=true, matching scenePipeline()'s own default depth state
-    // exactly), the other only TESTS it (LessEqual, write=false) and skips shading wherever the two
-    // disagree. THE VERTEX TRANSFORM MUST BE BIT-IDENTICAL BETWEEN THE TWO -- an implementation
-    // should build this from the SAME compiled vertex shader scenePipeline() uses, not a hand-copied
-    // one, or the depth values the two passes produce will not agree and the EQUAL-ish test above
-    // will drop or duplicate pixels. 0 (the default) means this feature offers no prepass, which is
-    // the correct answer for every feature except one that implements this: IDevice::
-    // drawMeshDepthPrepass is then a no-op, and nothing calls scenePipeline with depthPrepassed=true.
+    // The DEPTH-ONLY pipeline for a same-frame depth prepass, paired with scenePipeline(...,
+    // depthPrepassed=true) for the SAME instance later: this one writes depth (test=Less, write=true,
+    // matching scenePipeline()'s own default depth state), the other only tests it (LessEqual,
+    // write=false). THE VERTEX TRANSFORM MUST BE BIT-IDENTICAL between the two -- build both from the
+    // SAME compiled vertex shader, or the depth values disagree and drop/duplicate pixels. 0 (default)
+    // means no prepass: IDevice::drawMeshDepthPrepass is then a no-op and scenePipeline is never
+    // called with depthPrepassed=true.
     virtual PipelineHandle depthPrepassPipeline() const { return 0; }
     // Bindings and constants the feature's scene shaders need, applied to every scene draw.
     virtual BindingSetHandle sceneBindingSet() const { return 0; }
     virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }
 
-    // Whether a BLENDED draw whose material constants are `materialConstants`/`bytes` actually
-    // SAMPLES the pre-draw backdrop the backend captures for it (IDevice::sceneColorBackdropTexture)
-    // -- a decal never does, a refractive/attenuating surface does. The backend uses this to skip the
-    // capture (a full-target MSAA resolve) for draws that cannot read it. DEFAULTED true: an unknown
-    // feature, or a caller that passes no constants to check, keeps today's always-capture behaviour.
+    // Whether a BLENDED draw (material constants `materialConstants`/`bytes`) actually SAMPLES the
+    // pre-draw backdrop the backend captures for it (IDevice::sceneColorBackdropTexture) -- a decal
+    // never does, a refractive/attenuating surface does. Lets the backend skip the capture (a
+    // full-target MSAA resolve) for draws that can't read it. DEFAULTED true: an unknown feature, or
+    // a caller with no constants to check, keeps today's always-capture behaviour.
     virtual bool blendedDrawReadsBackdrop(const void* materialConstants, u32 bytes) const {
         (void)materialConstants; (void)bytes; return true;
     }
 
-    // Whether this feature draws the scene GEOMETRY itself, so the device's own drawMesh path
-    // should stand aside. Says nothing about the rest of the frame -- see suppressesWholeFrame.
-    //
-    // ONLY THE FIRST CLAIMANT IN REGISTRATION ORDER PAINTS (D3D12Device/VulkanDevice::beginFrame,
-    // which returns at it). Two features answering true is therefore a real configuration, not an
-    // impossible one, and it is silently decided by the order the host happened to register them in.
-    // That cost a whole raster-versus-ray-driven performance comparison: PtSceneView answered true
-    // unconditionally, so turning ray-driven OFF did not fall back to the rasteriser at all -- it
-    // handed the frame to the path tracer, whose fullscreen blit then measured as "the raster path"
-    // at 0.1ms while every drawMesh() was being dropped. The backends now LOG the collision and name
-    // the winner; a feature that cannot paint this frame should answer false rather than rely on
-    // losing the race.
+    // Whether this feature draws the scene GEOMETRY itself, so drawMesh stands aside. Says nothing
+    // about the rest of the frame -- see suppressesWholeFrame. ONLY THE FIRST CLAIMANT IN
+    // REGISTRATION ORDER PAINTS (D3D12Device/VulkanDevice::beginFrame, which returns at it); two
+    // features answering true is a real, silently-decided configuration. That once cost a
+    // raster-vs-ray-driven comparison: PtSceneView answered true unconditionally, so turning
+    // ray-driven OFF handed the frame to the path tracer instead of the rasteriser, and its 0.1 ms
+    // blit measured as "the raster path" while drawMesh() was dropped. The backends now LOG the
+    // collision and name the winner; a feature that cannot paint this frame should answer false
+    // rather than rely on losing the race.
     virtual bool suppressesScene() const { return false; }
 
-    // Whether the suppression above extends to EVERYTHING ELSE IN THE FRAME: the sky pass, the
-    // line draws, the transparent pass.
-    //
-    // THE TWO USED TO BE ONE PREDICATE, AND CONFLATING THEM COST THE SKY. There are genuinely two
-    // different things a feature can mean by "I am drawing the scene":
-    //
-    //   1. "THE FRAME IS MINE" -- a debug visualisation or a research view that paints every pixel
-    //      from its own model and would be corrupted by anything else drawing into it. Nothing else
-    //      should run. This is the default, so a feature that says nothing keeps the old behaviour.
-    //
-    //   2. "THE FIRST SURFACE IS MINE" -- ray-driven primary visibility. It replaces the RASTER,
-    //      and nothing more: the frame still has a sky above it, still has editor gizmos in it,
-    //      still has particles in front of it. Suppressing those as well left the ray-driven
-    //      viewport with no clouds, no physical atmosphere, no sun disc and no gizmos -- and the
-    //      cloud loss is not subtle, it is the whole sky.
-    //
-    // A feature in case 2 overrides this to false. Defaulting to suppressesScene() means every
-    // existing feature behaves exactly as it did.
+    // Whether the suppression above extends to EVERYTHING ELSE: sky, line draws, the transparent
+    // pass. Conflating this with suppressesScene once cost the sky -- two different meanings:
+    //   1. "THE FRAME IS MINE" -- a debug view painting every pixel; nothing else should run
+    //      (the default).
+    //   2. "THE FIRST SURFACE IS MINE" -- ray-driven primary visibility, replacing only the RASTER;
+    //      sky, gizmos and particles must still draw (suppressing them once left the ray-driven
+    //      viewport with no clouds, no atmosphere, no sun disc and no gizmos).
+    // A feature in case 2 overrides this to false.
     virtual bool suppressesWholeFrame() const { return suppressesScene(); }
 
     // Draws the replacement scene, after the colour target is bound.
     virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
 
-    // Draws depth-tested, blended geometry into the SCENE colour target, after every opaque drawMesh
-    // call this frame AND after the deferred sky -- see D3D12Device::endFrame's own comment for
-    // exactly where this sits and why (particles DECIDED 4's own investigation moved it here, from an
-    // original position BEFORE the sky, after finding that ordering silently erased any particle not
-    // also backed by an opaque occluder -- the sky's own opaque, depth-EQUAL-clear fill overwrote it).
-    // THE ENGINE'S FIRST DEPTH-TESTED TRANSPARENT PASS, and the seam particles (smoke, dust, rain,
-    // sparks -- anything that must sit IN the scene, tested against real occluders, rather than pasted
-    // over it the way overlayPass is) will use. A SEAM, not a special case: nothing about "particle"
-    // appears anywhere near this declaration, and any feature may implement it.
-    //
-    // The scene colour AND depth targets are already bound, and the viewport/scissor already set to
-    // the scene rect -- the same contract overlayPass documents for the backbuffer. What is NOT preset
-    // is the pipeline: draw here with a pipeline of your own (ctx.setPipeline), because the standard
-    // opaque scene pipeline is exactly that -- opaque -- and has no blend state that would do anything
-    // useful. Depth-test that pipeline WITH depth-write OFF; see D3D12Device::endFrame's comment at the
-    // call site for what depth-write ON would break, and why.
-    //
-    // DEFAULTED TO A NO-OP, so every feature this engine ships today -- none of which override it --
-    // draws nothing here and the frame is exactly what it always was.
+    // Draws depth-tested, blended geometry into the SCENE colour target, after opaque drawMesh AND
+    // the deferred sky (see D3D12Device::endFrame) -- moved here (DECIDED 4's own investigation) from
+    // an original position BEFORE the sky, after finding that ordering erased any particle not backed
+    // by an opaque occluder (the sky's own opaque, depth-EQUAL-clear fill overwrote it). THE ENGINE'S
+    // FIRST DEPTH-TESTED TRANSPARENT PASS -- for particles (smoke, dust, rain, sparks) and anything
+    // that must sit IN the scene against real occluders, unlike overlayPass's paste-over. A SEAM, not
+    // a special case: any feature may implement it. Scene colour/depth and viewport/scissor are
+    // already set (same contract as overlayPass); the PIPELINE is NOT preset -- use your own with
+    // depth-write OFF (see D3D12Device::endFrame for what depth-write ON would break). DEFAULTED TO A
+    // NO-OP; no shipped feature overrides it.
     virtual void transparentPass(IRenderContext& ctx) { (void)ctx; }
 
     // Draws onto the BACKBUFFER after the camera post chain, before the editor's own UI. The
@@ -1135,30 +928,25 @@ public:
 
 // ---------------------------------------------------------------- upscaling
 // Scene-resolution colour in, present-resolution colour out. See docs/AVERSR.md for the full design
-// (naming, module boundaries, quality tiers) -- this is the seam that design names AverSR: the
-// INTERFACE lives here, beside IRenderFeature, in the generic RHI; every actual implementation
-// (Aver's own spatial resample, a vendored FSR, a DLSS slot that stays empty on this hardware)
-// lives in a module that links Aver.RHI and is never linked BY it, so a renderer holds an
-// IUpscaler* that may be null and calls it if it is not, exactly as it holds registered render
-// features today -- without this module ever knowing any of them exist.
+// -- this is the seam design names AverSR. The INTERFACE lives here, beside IRenderFeature; every
+// implementation (Aver's own spatial resample, a vendored FSR, an empty DLSS slot) lives in a module
+// that links Aver.RHI and is never linked BY it, so a renderer holds a nullable IUpscaler* and calls
+// it if set, the same way it holds registered render features, without this module knowing any exist.
 
-// What an upscaler reads besides the scene colour target. A caller (the post chain) queries this
-// ONCE, ahead of the scene pass, so it knows whether to pay for a motion-vector target or a
-// jittered projection matrix at all -- work only a temporal upscaler will ever read. Same idiom as
-// ResourceBind above: an implementation ORs together whatever it actually consumes.
+// What an upscaler reads besides the scene colour target. Queried ONCE by the post chain ahead of
+// the scene pass, so it knows whether to pay for a motion-vector target or jittered projection
+// matrix at all -- work only a temporal upscaler will ever read. Same idiom as ResourceBind: an
+// implementation ORs together what it consumes.
 enum class UpscalerNeeds : u32 {
     None          = 0,
     // Scene-resolution depth, same frame, same format as the scene's own depth buffer.
     Depth         = 1u << 0,
-    // Scene-resolution, screen-space motion in texels/frame (RG; destination texel minus source
-    // texel). UPDATE, now that a producer exists where none did before: IDevice::
-    // gBufferVelocityTexture() (RHI.hpp) writes exactly this quantity, in exactly this layout --
-    // but ONLY while IDevice::setGBufferEnabled(true) is in effect, which defaults to OFF, so an
-    // upscaler asking for this flag against an unmodified build still gets nothing, precisely as
-    // before this existed. Turning the G-buffer on and copying its velocity texture into
-    // UpscalerInput::motionVectors below is deliberately NOT done here -- that wiring is the next
-    // step, not this one (see docs/rendering/DENOISING.md) -- so FSR2/3 and DLSS still cannot be
-    // driven by this flag today even though the data they would need can now be produced.
+    // Scene-resolution, screen-space motion in texels/frame (RG; destination minus source texel).
+    // A producer now exists -- IDevice::gBufferVelocityTexture() (RHI.hpp) writes exactly this, but
+    // ONLY while setGBufferEnabled(true) (default OFF), so this flag still yields nothing on an
+    // unmodified build. Wiring it into UpscalerInput::motionVectors below is NOT done here -- the
+    // next step, not this one (docs/rendering/DENOISING.md) -- so FSR2/3 and DLSS still can't be
+    // driven by this flag even though the data could now be produced.
     MotionVectors = 1u << 1,
     // The sub-pixel offset THIS frame's scene was rendered with, so a temporal accumulator can
     // un-jitter a sample before blending it into history. Nothing jitters the camera today either.
@@ -1187,36 +975,32 @@ struct UpscalerInput {
     TextureHandle history       = 0;     // valid only if needs() has UpscalerNeeds::History
 };
 
-// The seam itself, declared the way IRenderFeature just above is: a couple of pure virtuals for
-// identity and the one thing every implementation must do, defaulted hooks for everything a simple
-// implementation can ignore. That split is what lets a plain spatial resample, a future vendored
-// FSR2/3, and a DLSS slot that stays empty on this hardware all compile against the SAME interface,
-// with nothing here changing when any of them arrives -- see docs/AVERSR.md for why the empty slot
-// is deliberate (no source to integrate, and hardware/licence this repo cannot use regardless).
+// The seam itself, declared like IRenderFeature above: a couple of pure virtuals for identity and
+// the one thing every implementation must do, defaulted hooks for what a simple one can ignore --
+// letting a plain spatial resample, a future FSR2/3, and an empty DLSS slot all compile against the
+// SAME interface with nothing here changing when any arrives (see docs/AVERSR.md for why the empty
+// slot is deliberate: no source to integrate, and hardware/licence this repo can't use regardless).
 class IUpscaler {
 public:
     virtual ~IUpscaler() = default;
     virtual const char* name() const = 0;
 
-    // Declared ONCE, not re-queried per frame: an implementation's input needs are a property of
-    // what algorithm it is, not of any particular frame, so the renderer can decide before the
-    // scene pass even runs whether to produce motion vectors or a jitter offset at all. A plain
-    // spatial resample returns None -- it reads nothing but the scene colour.
+    // Declared ONCE, not re-queried per frame: input needs are a property of the algorithm, not the
+    // frame, so the renderer can decide before the scene pass runs whether to produce motion vectors
+    // or a jitter offset. A plain spatial resample returns None (reads only scene colour).
     virtual UpscalerNeeds needs() const { return UpscalerNeeds::None; }
 
-    // True for an upscaler that accumulates state across frames -- reprojected history, an
-    // exponential moving average -- and so needs it thrown away on a cut: a camera teleport, a
-    // level load, a change of render scale. False (the default) means reset() is never called,
-    // because there is nothing to throw away.
+    // True for an upscaler that accumulates state across frames (reprojected history, an EMA) and
+    // needs it thrown away on a cut -- camera teleport, level load, render-scale change. False (the
+    // default): reset() is never called, since there's nothing to throw away.
     virtual bool isTemporal() const { return false; }
     virtual void reset() {}
 
     // Scene-resolution colour in `in.color`, present-resolution colour out at `outTarget`. `ctx` is
-    // the SAME command-recording context the rest of the frame draws with. The CALLER has already
-    // bound `outTarget` as the sole render target and already set the viewport and scissor to
-    // (0, 0, in.dstWidth, in.dstHeight) -- the identical contract IRenderFeature::overlayPass above
-    // already uses for the backbuffer it is handed. An implementation only records its own pipeline
-    // bind and draw; it does not transition `outTarget` before or after.
+    // the SAME context the rest of the frame draws with. The CALLER has already bound `outTarget` as
+    // the sole render target with viewport/scissor at (0, 0, in.dstWidth, in.dstHeight) -- the same
+    // contract IRenderFeature::overlayPass uses for the backbuffer. An implementation only records
+    // its own pipeline bind and draw; it does not transition `outTarget` before or after.
     virtual void execute(IRenderContext& ctx, const UpscalerInput& in, TextureHandle outTarget) = 0;
 };
 

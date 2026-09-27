@@ -1,6 +1,6 @@
 // Editor: the Content Browser -- navigation, file operations, references, gallery, import.
-// Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
-// verbatim; the class itself is declared in SandboxApp.hpp.
+// Split out of the 29,952-line SandboxApp.cpp (2026-09-16) by moving method bodies verbatim;
+// the class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
 #if AVER_MODULE_PBR
@@ -10,11 +10,10 @@
 namespace aver {
 
 // Converts a glTF/GLB into one .ocmesh per mesh (+ .ocskel/.ocanim if skinned) into destDir.
-// Free function, not a member: two callers share no SandboxApp -- Content Browser Import
-// (SandboxApp::importModel) and --import-gltf (createApplication, before any SandboxApp exists). The
-// loop is pure modules/formats calls.
-// Returns false with *outWhy only on a hard parse failure; a clean parse writing nothing new returns
-// true with an all-zero summary -- callers decide if that counts as failure.
+// Free function, not a member: shared by Content Browser Import (importModel) and --import-gltf
+// (createApplication, before any SandboxApp exists) -- the loop is pure modules/formats calls.
+// Returns false with *outWhy only on a hard parse failure; a clean parse writing nothing new still
+// returns true with an all-zero summary -- callers decide if that counts as failure.
 bool importGltfToDir(const std::string& src, const std::string& destDir, const std::string& contentDir,
                      bool overwrite, GltfImportSummary& out, std::string* outWhy) {
     std::error_code dirEc;
@@ -33,18 +32,12 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
     const std::string stem = std::filesystem::path(src).stem().string();
 
 #if AVER_MODULE_PBR
-    // MATERIALS AND THEIR TEXTURES, BEFORE the meshes below are written: cookImportedMaterials
-    // rewrites each mesh's materialSlots to the cooked stems, and that has to land before saveOcMesh
-    // serialises a mesh below or the .ocmesh would keep naming a material that was never written
-    // under that name -- the exact ordering AverAssetC's cookAndRewriteSlots already commits to, and
-    // for the same reason (see cookImportedMaterials's own header comment).
-    //
-    // A NO-OP WHEN contentDir IS EMPTY: importModel always passes the project's own content
-    // directory, but --import-gltf can be given none at all (the launcher-less case), and the cook
-    // already reports what it is leaving behind rather than losing it silently.
-    //
-    // maxTexture 0: no cap. Nothing in the editor's Import UI offers one yet, so this matches
-    // AverAssetC's own default when --max-texture is not given.
+    // Must run BEFORE the meshes below are written: cookImportedMaterials rewrites each mesh's
+    // materialSlots to the cooked stems, and that has to land before saveOcMesh serialises a mesh
+    // or the .ocmesh would name a material never written under that name (same ordering as
+    // AverAssetC's cookAndRewriteSlots; see its own header comment). No-op when contentDir is empty
+    // (--import-gltf's launcher-less case, since importModel always passes one) -- the cook reports
+    // what it skips rather than losing it silently. maxTexture 0 = no cap, matching AverAssetC's default.
     if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
         std::vector<std::string> matWarn;
         std::string matErr;
@@ -65,10 +58,9 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
     }
 #endif
 
-    // Parallel to res.meshes: the stem each one was written under, or empty when it was skipped
-    // (invalid, or a file of that name already existed). The scene level below names these, rather
-    // than re-deriving the naming rule -- a second copy of it only has to disagree once to write a
-    // level full of paths that resolve to nothing.
+    // Parallel to res.meshes: stem each mesh was written under, or empty if skipped (invalid, or name
+    // taken). The scene level below reuses these rather than re-deriving the naming rule, since two
+    // copies of it need only disagree once to write paths that resolve to nothing.
     std::vector<std::string> stems(res.meshes.size());
     for (usize i = 0; i < res.meshes.size(); ++i) {
         fmt::OcMeshData& m = res.meshes[i];
@@ -81,9 +73,8 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
 
         std::string outFile = destDir + "\\" + base + ".ocmesh";
         if (std::filesystem::exists(outFile, ec)) {
-            // THE PER-OUTPUT SKIP, MADE OVERWRITE-AWARE. The true output name is only known here, at
-            // the point it is computed, which is why `overwrite` reaches this far rather than the
-            // caller deleting a guess at what the import would write.
+            // Overwrite-aware skip: the true output name is only known here, which is why `overwrite`
+            // reaches this far rather than the caller deleting a guess at what import would write.
             if (overwrite) {
                 editor::moveToRecycleBin(outFile);
                 AVER_INFO("[Import] '{}.ocmesh' already existed - replaced", base);
@@ -99,15 +90,12 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         ++out.meshesWritten;
     }
 
-    // THE SCENE, which this path used to throw away. The importer no longer welds a node's
-    // translation into its vertices -- that is what put every imported mesh's pivot metres from
-    // itself -- so without writing the placements down, a multi-part model imported through the
-    // editor's own Import button would arrive as a heap of correctly-centred pieces with no record
-    // of how they fit together. AverAssetC learned this at the same time; this is the same feature
-    // on the path the editor actually uses.
-    //
-    // ONLY WHEN IT IS A SCENE. A single-mesh file gets no level: one PLACE record is not worth a
-    // file, and the Content Browser would gain a stray .ocworld beside every chair somebody imports.
+    // Writes placements as a scene (only when there's more than one; a single PLACE record isn't
+    // worth a file). Needed because the importer no longer welds node translations into vertices --
+    // that used to put every imported mesh's pivot metres from itself -- so without this, a
+    // multi-part import would land as correctly-centred pieces with no record of how they fit
+    // together (AverAssetC learned this at the same time; same feature on the path the editor
+    // actually uses).
     if (res.placements.size() > 1) {
         fmt::OcWorldData w;
         w.name = stem;
@@ -115,8 +103,8 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
             if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
             if (stems[usize(p.meshIndex)].empty()) continue;
             fmt::OcWorldPlacement op;
-            // Beside the meshes, so the reference is relative to the level's own folder the same way
-            // every other PLACE in a hand-authored level is relative to the content root.
+            // Relative to the level's own folder, the same way every other hand-authored PLACE is
+            // relative to the content root.
             op.asset = stems[usize(p.meshIndex)] + ".ocmesh";
             op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
             w.placements.push_back(std::move(op));
@@ -136,9 +124,9 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         }
     }
 
-    // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could
-    // produce a skeleton and a clip that nothing ever wrote and no project could ever contain --
-    // and loadOcSkel/loadOcAnim had no caller in the engine's history.
+    // Writes the rig: previously res.skeletons/animations were dropped on the floor -- nothing ever
+    // wrote them and no project could contain them -- so loadOcSkel/loadOcAnim had no caller in the
+    // engine's history.
     for (usize i = 0; i < res.skeletons.size(); ++i) {
         std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
                          ? res.skeletonNames[i] : stem;
@@ -246,11 +234,10 @@ const editor::IdeInfo& SandboxApp::cbIde() const {
 void SandboxApp::cbOpenEntry(const std::string& full, bool isDir) {
     if (isDir) { cbNavigate(full); return; }
     const std::string ext = lowerExt(std::filesystem::path(full));
-    // A LEVEL OPENS IN THE EDITOR, which is the obvious meaning of double-clicking one and was
-    // not what happened: no AssetEditor factory is registered for .ocworld/.ocmap, so activation
-    // fell all the way through to openWithShell() and the level opened in Notepad -- despite the
-    // Content Browser giving it a "Level" icon and colour of its own two hundred lines below.
-    // Deferred through requestOpenLevel because this function has no Engine& to load with.
+    // A level opens in the editor: without this special case it fell through to openWithShell() and
+    // opened in Notepad (no AssetEditor factory is registered for .ocworld/.ocmap) -- despite the
+    // Content Browser giving it its own "Level" icon and colour ~200 lines below. Deferred through
+    // requestOpenLevel since this function has no Engine& to load with.
     if (editor::isLevelPath(full)) {
 #if AVER_MODULE_SCENE
         if (requestOpenLevel(full, "opened from the Content Browser"))
@@ -258,11 +245,8 @@ void SandboxApp::cbOpenEntry(const std::string& full, bool isDir) {
         else
             cbStatus_ = openLevelError_;
 #else
-        // requestOpenLevel and openLevelError_ (SandboxApp.hpp) are declared under AVER_MODULE_SCENE:
-        // a level's only purpose is instantiating placements into scene::World, which this
-        // configuration does not have. Falling through to openWithShell() would just reintroduce
-        // the Notepad bug the comment above describes, so this says plainly why nothing opened
-        // instead of pretending the double-click did something.
+        // requestOpenLevel/openLevelError_ need AVER_MODULE_SCENE (levels only instantiate into
+        // scene::World). Falling through to openWithShell() would reintroduce the Notepad bug above.
         cbStatus_ = "This build has no Scene module, so levels cannot be opened";
 #endif
         return;
@@ -298,9 +282,8 @@ std::filesystem::path SandboxApp::cbFreeAssetPath(const char* stem, const char* 
     return {};
 }
 
-// The tail every successful create runs: refresh the folder cache, SELECT the new file, open its
-// editor. The selection was the missing part -- cbCreateSoundGraph opened the tab but left the
-// browser's highlight on whatever was there before.
+// The tail every successful create runs: refresh the folder cache, select the new file, open its
+// editor (selection was the missing part; cbCreateSoundGraph used to leave the highlight stale).
 void SandboxApp::cbAdoptNewAsset(const std::filesystem::path& target, bool openEditor) {
     cbInvalidate(cbSelectedDir_);
     cbSelectedFile_ = target.string();
@@ -308,20 +291,14 @@ void SandboxApp::cbAdoptNewAsset(const std::filesystem::path& target, bool openE
     cbStatus_ = "Created " + target.filename().string();
 }
 
-// Writes a new material SOURCE file -- a [AverMaterial] C# class -- into the selected folder.
-//
-// fmt::newMaterialScript has been implemented and covered by MaterialTest for a long time with
-// ZERO production callers; docs/EDITOR.md said so outright ("There is no New Material menu item,
-// although fmt::newMaterialScript exists and will write the whole file"). This is that menu item.
-//
-// NO EDITOR IS OPENED, unlike its .ocgraph/.ocbt/.ocsnd siblings. A material's .cs is compiled to
-// an .ocmat by Compile C#, and the only editor that claims a .cs is the ACTOR editor, which
-// parses for an [AverActor] class this file does not have. Selecting it in the browser and
-// leaving it to the IDE is the honest outcome; opening a tab that cannot show it is not.
-//
-// Guarded: the starter is a pbr::MaterialDesc, and fmt::newMaterialScript (MaterialScript.hpp)
-// pulls in aver/pbr/Material.hpp through OcMat.hpp -- neither reachable with AVER_MODULE_PBR off.
-// A material with no pbr::MaterialDesc to describe it is not a starting point, it is nothing.
+// Writes a new material SOURCE file -- an [AverMaterial] C# class -- into the selected folder.
+// fmt::newMaterialScript existed, covered by MaterialTest, with zero production callers until this
+// menu item -- docs/EDITOR.md said so outright ("There is no New Material menu item, although
+// fmt::newMaterialScript exists and will write the whole file"). No editor is opened: the .cs
+// compiles to .ocmat via Compile C#, and the only editor that claims a .cs is the Actor editor,
+// which needs an [AverActor] class this file lacks. Guarded by AVER_MODULE_PBR: the starter
+// pbr::MaterialDesc pulls in aver/pbr/Material.hpp via OcMat.hpp (MaterialScript.hpp), unreachable
+// otherwise.
 #if AVER_MODULE_PBR
 void SandboxApp::cbCreateMaterial() {
     const std::filesystem::path target = cbFreeAssetPath("NewMaterial", ".cs");
@@ -331,9 +308,8 @@ void SandboxApp::cbCreateMaterial() {
     // newMaterialScript strips it again for the class name.
     const std::string stem  = target.stem().string();
     const std::string bound = stem.rfind("M_", 0) == 0 ? stem : "M_" + stem;
-    // Through csharpNamespaceFor, because a project name is a FOLDER name and may contain
-    // spaces -- pasting one straight after `namespace ` is how "My Game" produced C# that
-    // could not compile.
+    // Through csharpNamespaceFor: a project name is a folder name and may contain spaces --
+    // pasting one straight after `namespace ` ("My Game") produced C# that could not compile.
     const std::string ns    = (project_.valid() && !project_.name.empty())
                                   ? editor::csharpNamespaceFor(project_.name) + ".Materials"
                                   : std::string("Materials");
@@ -388,30 +364,21 @@ void SandboxApp::cbCreateParticleEffect() {
 #endif
 
 #if AVER_WITH_IMGUI
-// Writes a starter .ocfoliage -- one foliage type -- and opens it. Same shape as
-// cbCreateParticleEffect immediately above, for the same reason its own comment gives: a format
-// with a working editor tab that, until now, nothing could bring into existence from inside the
-// editor at all.
-//
-// UNCONDITIONAL, unlike cbCreateParticleEffect: editor::foliageStarterType and
-// fmt::saveOcFoliage are both reachable with every module configuration -- see OcFoliage.hpp's
-// own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
+// Writes a starter .ocfoliage (one foliage type) and opens it. Same shape as cbCreateParticleEffect
+// above, but unconditional: editor::foliageStarterType/fmt::saveOcFoliage are reachable in every
+// module configuration (see OcFoliage.hpp on why foliage needs neither Aver.Scene nor Aver.Landscape).
 void SandboxApp::cbCreateFoliageType() {
     const std::filesystem::path target = cbFreeAssetPath("NewFoliageType", ".ocfoliage");
     if (target.empty()) return;
     fmt::OcFoliageData starter = editor::foliageStarterType();
 #if AVER_MODULE_SCENE
-    // JUDGMENT CALL: default the starter's mesh to one already loaded in the level, when one is
-    // available, rather than leaving the format's own placeholder (Meshes/cube.ocmesh, which most
-    // projects never actually have on disk). meshPathById_ is exactly "meshes this project has
-    // already resolved into the scene" -- see its own declaration comment -- so a type created
-    // this way is paintable IMMEDIATELY, which is the whole point of offering this button from an
-    // empty-palette panel in the first place; one created against a path that resolves to nothing
-    // is not, until its author fixes meshPath by hand first. Lowest path wins for determinism --
-    // "whichever the unordered_map iterates first" would make this starter non-reproducible for
-    // no reason. The trade: the chosen mesh may not be what the author actually meant to scatter.
-    // That is acceptable because it is a STARTING POINT, not a guess confident enough to skip
-    // opening the tab this still opens -- the author can repoint meshPath from there in one edit.
+    // Judgment call: defaults the starter's mesh to one already loaded in the level (rather than
+    // the format's own placeholder, Meshes/cube.ocmesh, which most projects don't have on disk).
+    // meshPathById_ is exactly the meshes already resolved into the scene, so a type created this
+    // way is paintable immediately -- the point of this button. Lowest path wins for determinism
+    // (not "whichever the unordered_map iterates first"); the trade is the chosen mesh may not be
+    // what the author meant to scatter, acceptable since it's a starting point -- meshPath can be
+    // repointed from the tab this still opens.
     if (!meshPathById_.empty()) {
         std::string best;
         for (const auto& kv : meshPathById_)
@@ -434,11 +401,10 @@ void SandboxApp::cbCreateFoliageType() {
 #endif
 }
 
-// Writes a starter .ocinput -- an Input Scheme -- and opens it. Same shape as cbCreateFoliageType
-// immediately above: editor::inputSchemeStarterData() and fmt::writeOcinput are both reachable with
-// every module configuration (see OcInput.hpp's own "NO ENGINE DEPENDENCY, DELIBERATELY"), so this
-// is unconditional too. TEXT, through fmt::writeOcinput rather than a POD save* wrapper -- OcInput
-// has none; writeNewFile refuses to touch an existing file, matching cbCreateNodeGraph below.
+// Writes a starter .ocinput (Input Scheme) and opens it. Unconditional, like cbCreateFoliageType
+// above (see OcInput.hpp's "NO ENGINE DEPENDENCY, DELIBERATELY"). Text via fmt::writeOcinput --
+// OcInput has no POD save* wrapper; writeNewFile refuses to touch an existing file, matching
+// cbCreateNodeGraph below.
 void SandboxApp::cbCreateInputScheme() {
     const std::filesystem::path target = cbFreeAssetPath("NewInputScheme", ".ocinput");
     if (target.empty()) return;
@@ -453,10 +419,9 @@ void SandboxApp::cbCreateInputScheme() {
     cbAdoptNewAsset(target);
 }
 
-// Writes a starter .ocgraph -- an Aver Node visual-scripting graph -- and opens it.
-// The bytes come from editor::graphStarterText rather than being built here, so a test can parse
-// exactly what this writes; it is TEXT, not an OcGraphData through fmt::saveOcgraph, because the
-// C++ struct doesn't model the CLASS record. writeNewFile refuses to touch an existing file.
+// Writes a starter .ocgraph (Aver Node visual-scripting graph) and opens it. Bytes come from
+// editor::graphStarterText so a test can parse exactly what this writes; text, not fmt::saveOcgraph,
+// because the C++ OcGraphData struct doesn't model the CLASS record. writeNewFile refuses to overwrite.
 void SandboxApp::cbCreateNodeGraph() {
     const std::filesystem::path target = cbFreeAssetPath("NewGraph", ".ocgraph");
     if (target.empty()) return;
@@ -505,10 +470,9 @@ std::string SandboxApp::cbImportBlockedReason(const std::string& dir) const {
 }
 
 // Renames a file or folder and follows the rename in the selection and the history.
-// The ONE drag payload a Content Browser item sends: everything selected, unfiltered, and every
-// drop target filters what it can use (see the viewport drop target for why there is only one).
-// A drag starting outside the selection carries just that item, because grabbing an unselected
-// file and dragging it is unambiguously about that file.
+// The one drag payload a Content Browser item sends: everything selected, unfiltered (see the
+// viewport drop target for why there's only one). A drag starting outside the selection carries
+// just that item, since grabbing an unselected file is unambiguously about that file.
 std::string SandboxApp::cbMoveDragPayloadFor(const std::string& dragged) const {
     if (!cbIsSelected(dragged) || cbSelection_.size() <= 1) return dragged;
     std::string blob;
@@ -535,12 +499,9 @@ std::string SandboxApp::cbMoveDragPayloadFor(const std::string& dragged) const {
 }
 
 // A drop target on a folder, offered only when the drop would mean something.
-//
-// PEEKS BEFORE IT OPENS, the idiom drawOutlinerDropTarget uses to refuse a reparent that would
-// make a cycle: a target that must be rejected is better never LIT than lit and then refused,
-// because the highlight is the promise. Declines three cases -- the folder the items already live
-// in (a no-op), a dragged folder onto itself, and a dragged folder onto its own descendant, which
-// would move a directory inside itself.
+// Peeks before it opens (same idiom as drawOutlinerDropTarget, to refuse a cycle-making reparent
+// before ever lighting up): declines the folder items already live in, a folder dragged onto
+// itself, and a folder dragged onto its own descendant.
 void SandboxApp::cbFolderDropTarget(const std::string& folderPath) {
     const ImGuiPayload* peek = ImGui::GetDragDropPayload();
     if (!peek || !peek->IsDataType(kCbMoveDragDropType) || !peek->Data) return;
@@ -562,10 +523,9 @@ void SandboxApp::cbFolderDropTarget(const std::string& folderPath) {
     if (!ImGui::BeginDragDropTarget()) return;
     if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload(kCbMoveDragDropType)) {
         if (pl->Data) {
-            // LATCHED, NOT ACTED ON. A modal cannot open from inside a drag -- ImGui is mid
-            // gesture and the popup would fight it -- so this records the request and
-            // cbFileOpModals opens the prompt on a later frame, outside every child window. The
-            // same shape as cbWantRename_ and outlinerDeleteRequest_.
+            // Latched, not acted on: a modal can't open mid-drag (ImGui gesture vs popup), so this
+            // records the request and cbFileOpModals opens it next frame. Same shape as
+            // cbWantRename_ and outlinerDeleteRequest_.
             cbMoveSources_ = editor::splitDropPayload(std::string(static_cast<const char*>(pl->Data)));
             cbMoveDest_ = folderPath;
             cbWantMoveOrCopy_ = true;
@@ -574,12 +534,9 @@ void SandboxApp::cbFolderDropTarget(const std::string& folderPath) {
     ImGui::EndDragDropTarget();
 }
 
-// Drops any dragged path that lives inside another dragged FOLDER.
-//
-// WHY: a directory rename or copy carries its contents with it, so a selection holding both a
-// folder and something inside it would move the child TWICE -- once with its parent, then again
-// from a path that no longer exists, reporting a failure for an operation that in fact succeeded.
-// Filtering first is cheaper and clearer than teaching the loop to forgive it.
+// Drops any dragged path that lives inside another dragged folder. A directory move/copy carries
+// its contents, so a selection with both would move the child twice -- once with its parent, then
+// again from a path that no longer exists, reporting a false failure.
 std::vector<std::string> SandboxApp::cbPruneNested(const std::vector<std::string>& in) const {
     std::vector<std::string> out;
     for (const std::string& p : in) {
@@ -628,9 +585,8 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
     }
     std::filesystem::rename(s, d, ec);
     if (ec) { cbStatus_ = "Move failed: " + ec.message(); return false; }
-    // BOTH FOLDERS, which is the one thing no existing helper has to do: rename, duplicate and
-    // create all stay put, so they invalidate one listing. A move empties one and fills another,
-    // and forgetting the source leaves a ghost tile behind that opens nothing.
+    // Both folders invalidated: unlike rename/duplicate/create (which stay put), a move empties one
+    // and fills another -- forgetting the source leaves a ghost tile that opens nothing.
     cbInvalidate(s.parent_path().string());
     cbInvalidate(destDir);
     // The same bookkeeping cbRenameEntry does, for the same reason: here the path IS the identity.
@@ -641,39 +597,28 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
     return true;
 }
 
-// Content-relative, forward-slashed: the form a level's PLACE record and content_'s meshes both
-// key on. Returns the input unchanged when it is not under the content root, which simply means no
-// level can be naming it.
-// ---- WHO REFERENCES THIS ASSET ------------------------------------------------------------
-//
-// THE FOOT-GUN THIS CLOSES: every reference in this project is a CONTENT-RELATIVE PATH, and
-// ObjectIds are fnv1a64 of exactly that string (GameContent.cpp). So deleting a mesh six
-// entities use, or renaming one, silently breaks every reference to it -- and the delete confirm
-// said only "It goes to the recycle bin, so it can be restored", which is true and answers a
-// different question than the one an author needs answered.
-//
-// A SCAN, NOT AN INDEX, and that is a deliberate limit rather than a first draft of something
-// better. A real asset registry -- built at project load, kept current by the content watcher,
-// queried in constant time -- is the right answer and is a subsystem. This runs over the text
-// assets on demand, once, when someone is about to destroy something. A project with thousands
-// of files pays a directory walk at the moment it is about to lose data, which is the one moment
-// that trade is obviously correct.
-//
-// TEXT FORMATS ONLY, and it says which. .ocworld/.ocmap (MESH/MATERIAL), .ocmat (TEX, GRAPHREF),
-// .ocgraph (mesh=, material=, effect=, path=), .ocproject (STARTMAP and friends). A binary
-// .ocmesh cannot name another asset, so there is nothing to find in one. WHAT THIS CANNOT SEE:
-// a reference constructed at runtime in C# from a computed string, and a reference held only as
-// a hashed ObjectId with the original path nowhere on disk. Both are real and both are why this
-// reports "found N" rather than "there are exactly N".
+// Content-relative, forward-slashed: the form a level's PLACE record and content_'s meshes key on.
+// Returns the input unchanged when it is not under the content root (no level can be naming it).
+// Who references this asset -- closes a foot-gun: every reference is a content-relative path, and
+// ObjectIds are fnv1a64 of exactly that string (GameContent.cpp), so deleting or renaming an asset
+// silently breaks every reference to it -- and the delete confirm said only "It goes to the recycle
+// bin, so it can be restored", true but answering a different question than the one an author needs
+// answered. A scan, not an index (deliberate limit): a real registry -- built at project load, kept
+// current by the content watcher -- would be a subsystem; this walks the text assets on demand,
+// once, when something is about to be destroyed, which is the one moment a directory walk over
+// thousands of files is obviously the right trade. Text formats only: .ocworld/.ocmap (MESH/MATERIAL),
+// .ocmat (TEX, GRAPHREF), .ocgraph (mesh=, material=, effect=, path=), .ocproject (STARTMAP and
+// friends); a binary .ocmesh names nothing. Cannot see a reference built at runtime from a computed
+// string, or one held only as a hashed ObjectId with no path on disk -- so this reports "found N",
+// not "there are exactly N".
 std::vector<std::string> SandboxApp::cbFindReferencesTo(const std::string& absPath) const {
     std::vector<std::string> out;
     if (!project_.valid()) return out;
     const std::string needle = cbRelativeToContent(absPath);
     if (needle.empty() || needle == absPath) return out;   // outside the content root
 
-    // Compared case-insensitively, and with both separators, because these paths are authored by
-    // hand as often as by a tool: a .ocgraph written by a person may say Meshes\Cube.ocmesh where
-    // the browser reports Meshes/Cube.ocmesh, and a miss there reads as "nothing references it".
+    // Compared case-insensitively and with both separators: a hand-authored .ocgraph may say
+    // Meshes\Cube.ocmesh where the browser reports Meshes/Cube.ocmesh; a miss reads as no references.
     const std::string want = editor::normaliseForRefScan(needle);
 
     std::error_code ec;
@@ -688,11 +633,10 @@ std::vector<std::string> SandboxApp::cbFindReferencesTo(const std::string& absPa
             ext != ".ocgraph" && ext != ".ocproject") continue;
         std::string text;
         if (!readFileText(p, text)) continue;
-        // ANCHORED, not a bare find(). `Meshes/Cube.ocmesh` is a SUBSTRING of
-        // `PropMeshes/Cube.ocmesh` and of `Sub/Meshes/Cube.ocmesh`, both of which name a
-        // DIFFERENT file -- so a plain substring test reported referrers of an unrelated asset.
-        // Merely noisy for a warning; actively destructive for anything that REWRITES what this
-        // finds, which is why the boundary rule now lives in a tested header. See AssetRefScan.hpp.
+        // Anchored, not a bare find(): `Meshes/Cube.ocmesh` is a substring of `PropMeshes/Cube.ocmesh`
+        // and `Sub/Meshes/Cube.ocmesh`, both a different file -- a plain substring test reported
+        // referrers of an unrelated asset. Noisy for a warning, destructive for a rewrite; the
+        // boundary rule lives in a tested header (AssetRefScan.hpp).
         const std::string hay = editor::normaliseForRefScan(text);
         if (editor::referencesAsset(hay, want)) out.push_back(cbRelativeToContent(p));
     }
@@ -709,10 +653,8 @@ SandboxApp::RefRewriteReport SandboxApp::cbRewriteReferences(const std::string& 
     if (oldRel.empty() || newRel.empty() || oldRel == oldAbs || newRel == newAbs) return rep;
     if (oldRel == newRel) return rep;
 
-    // SCANNED FOR THE OLD PATH, which is also the same set of files the warning listed -- so what
-    // the dialog promised is exactly what gets edited. The rename has already happened on disk by
-    // the time this runs, and the referrers are precisely the files that still name where the
-    // asset used to be.
+    // Scans for the old path -- the same set of files the warning listed, so what the dialog
+    // promised is exactly what gets edited. The rename has already happened on disk by this point.
     for (const std::string& refRel : cbFindReferencesTo(oldAbs)) {
         const std::string abs = project_.contentDir() + "\\" + refRel;
         std::string text;
@@ -739,11 +681,9 @@ std::string SandboxApp::cbRelativeToContent(const std::string& abs) const {
 }
 
 // Run after a copy or a move, whichever way it went.
-//
-// A MESH RELOAD IS NEEDED FOR BOTH, which is easy to get wrong by assuming only a move matters.
-// content_'s meshes are keyed by fnv1a64 of the content-relative path, so a COPY creates a NEW id that
-// nothing has registered -- its tile would draw the type glyph and dragging it into the level
-// would find no mesh. A move invalidates the old id the same way.
+// A mesh reload is needed for BOTH, easy to miss by assuming only a move matters: content_'s
+// meshes are keyed by fnv1a64 of the content-relative path, so a copy creates a new unregistered id
+// (tile draws the type glyph, drag finds no mesh); a move invalidates the old id the same way.
 void SandboxApp::cbAfterMoveOrCopy(const std::vector<std::string>& srcs) {
     for (const std::string& sp : srcs) {
         const std::string ext = lowerExt(std::filesystem::path(sp));
@@ -774,15 +714,11 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
     for (std::string& sp : cbSelection_) if (sp == from) sp = dst.string();
     cbRewriteHistory(from, dst.string());
 
-    // THE SAME ID INVALIDATION A MOVE CAUSES, and rename was the one path that did not say so.
-    // cbAfterMoveOrCopy sets this for move and copy with the reason spelled out: content_'s meshes
-    // are keyed by fnv1a64 of the content-relative PATH, so changing the path retires the old id and
-    // creates one nothing has registered. A rename does exactly that -- it IS a move within a
-    // folder -- yet reloaded nothing, so the renamed mesh kept drawing under its old id until the
-    // next project open, and a fresh drag of it found no mesh at all.
-    //
-    // Directories included, for cbAfterMoveOrCopy's reason: renaming a folder changes the
-    // relative path of every asset beneath it.
+    // The same id invalidation a move causes (rename IS a move within a folder): content_'s meshes
+    // are keyed by fnv1a64 of the content-relative path, so renaming retires the old id and creates
+    // one nothing has registered -- previously this reloaded nothing, so the renamed mesh kept drawing
+    // under its old id until the next project open, and a fresh drag of it found no mesh at all.
+    // Directories included: renaming one changes every path beneath it.
     {
         const std::string ext = lowerExt(dst);
         std::error_code dec;
@@ -790,10 +726,8 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
             wantMeshReload_ = true;
     }
 
-    // SAYS WHAT IT DID AND WHAT IT COULD NOT, which is the difference between this being useful
-    // and being a claim. A partial failure is reported rather than folded into the success line:
-    // this is N separate writes and is not transactional, so "3 of 4" is a state the author has
-    // to be able to see.
+    // Reports partial failure separately from success: N separate writes, not transactional, so
+    // "3 of 4" is a state the author needs to see.
     if (!repointRefs) {
         cbStatus_ = "Renamed to " + newName;
     } else if (rep.filesFailed) {
@@ -901,10 +835,8 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
     }
     if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
     if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); cbStatus_ = "Path copied"; }
-    // FIND REFERENCES, on demand rather than only when you are about to destroy something.
-    // The scan existed already but could only be reached from the delete and rename confirms --
-    // so the one moment you could ask "what uses this?" was the moment you had already decided to
-    // remove it. Asking beforehand is the ordinary question.
+    // Find References on demand: the scan already existed but could only be reached from the
+    // delete/rename confirms, so "what uses this?" was askable only after deciding to remove it.
     if (!isDir && ImGui::MenuItem("Find References")) {
         refPanelAsset_ = full;
         refPanelResults_ = cbFindReferencesTo(full);
@@ -972,11 +904,9 @@ void SandboxApp::drawContentBrowser() {
         if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
         ImGui::EndDisabled();
         ImGui::Separator();
-        // THESE FOUR IGNORE THE SELECTED FOLDER, and say so rather than letting "+ Add" in
-        // Content\Meshes imply "add here". Scripts always land in the project's Scripts folder
-        // and C++ always lands in modules\; each modal states its destination, but the menu is
-        // where the expectation is set. The C++ pair additionally needs no project at all --
-        // they write into the ENGINE tree -- so they stay enabled when the C# pair is not.
+        // These four ignore the selected folder (says so, rather than letting "+ Add" imply "add
+        // here"): scripts land in the project's Scripts folder, C++ in modules\. The C++ pair needs
+        // no project -- it writes into the engine tree -- so it stays enabled when the C# pair isn't.
         ImGui::TextDisabled("  Written to a fixed location, not this folder");
         ImGui::BeginDisabled(!project_.valid());
         if (ImGui::MenuItem("New C# Script...")) tools_.openNewCsScript();
@@ -992,13 +922,10 @@ void SandboxApp::drawContentBrowser() {
         if (ImGui::MenuItem("New C++ Class..."))  tools_.openNewCppClass();
         uiReg_.track("cb.add.cppClass");
         ImGui::Separator();
-        // A SOUND GRAPH HAS TO BE CREATABLE FROM HERE OR ITS EDITOR IS UNREACHABLE: .ocsnd is the
-        // first format the editor can edit but nothing can produce, the "built through every
-        // layer, read by nothing" defect again.
-        // THE SAME ARGUMENT APPLIES TO .ocgraph AND .ocbt, longer: both have a working editor tab
-        // and an icon, but until now neither could be BROUGHT INTO EXISTENCE by the editor at all
-        // -- a whole visual-scripting and behaviour-tree system reachable only by a file the
-        // editor could not make.
+        // A sound graph must be creatable from here or its editor is unreachable: .ocsnd was the
+        // first format the editor could edit but nothing could produce -- the "built through every
+        // layer, read by nothing" defect again. Same argument for .ocgraph and .ocbt: both had a
+        // working editor tab and icon but no way to be brought into existence.
         ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
         if (ImGui::MenuItem("New Aver Node Graph")) cbCreateNodeGraph();
         uiReg_.track("cb.add.nodeGraph");
@@ -1015,9 +942,8 @@ void SandboxApp::drawContentBrowser() {
         if (ImGui::MenuItem("New Input Scheme"))    cbCreateInputScheme();
         uiReg_.track("cb.add.inputScheme");
 #if AVER_MODULE_PBR
-        // cbCreateMaterial no longer exists with the material system compiled out -- see its own
-        // guard above -- so the menu entry that reaches it goes with it rather than naming a
-        // function this configuration never declared.
+        // cbCreateMaterial doesn't exist with the material system compiled out (see its guard
+        // above), so this menu entry is guarded the same way.
         if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
         uiReg_.track("cb.add.material");
 #endif
@@ -1052,9 +978,8 @@ void SandboxApp::drawContentBrowser() {
                                                : "Search this folder...",
                                  cbFilter_, sizeof(cbFilter_));
         ImGui::SameLine();
-        // OFF BY DEFAULT, so the box keeps meaning what it has always meant until someone asks
-        // for more. The hint text changes with it, because a search that quietly covered more
-        // than the folder you are looking at would be the more confusing default.
+        // Off by default: the search box keeps meaning what it always meant until asked for more.
+        // Hint text changes with it, since silently searching more than the visible folder confuses.
         ImGui::Checkbox("Subfolders", &cbSearchDeep_);
         uiReg_.track("contentBrowser.searchDeep");
 
@@ -1172,11 +1097,9 @@ void SandboxApp::cbFileOpModals() {
 
     if (cbWantMoveOrCopy_) { ImGui::OpenPopup("cbMoveOrCopy"); cbWantMoveOrCopy_ = false; }
 
-    // COPY HERE / MOVE HERE / CANCEL, which is what a drop onto a folder asks in Unreal and in
-    // every file manager. Deliberately NOT a silent move: a drag is easy to do by accident, and
-    // the difference between copying and moving an asset is the difference between a duplicate
-    // and a broken reference. Asking costs one click and removes a whole class of "where did my
-    // file go".
+    // Copy Here / Move Here / Cancel, same as Unreal and every file manager. Deliberately not a
+    // silent move: a drag is easy to do by accident, and copy vs move is the difference between a
+    // duplicate and a broken reference.
     if (ImGui::BeginPopupModal("cbMoveOrCopy", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         const std::vector<std::string> srcs = cbPruneNested(cbMoveSources_);
         ImGui::TextDisabled("To  %s", std::filesystem::path(cbMoveDest_).filename().string().c_str());
@@ -1189,20 +1112,18 @@ void SandboxApp::cbFileOpModals() {
         if (srcs.size() > kShow)
             ImGui::TextDisabled("   ...and %d more", static_cast<int>(srcs.size() - kShow));
 
-        // WHAT A MOVE WOULD COST, checked in memory only. A level stores a placement's asset as a
-        // content-relative PATH and hashes that string for the id, so moving a mesh a level places
-        // leaves that placement pointing at nothing -- it simply stops drawing, with no error. The
-        // engine cannot cheaply rewrite every level in the project, so it says so instead of
-        // pretending. A COPY needs none of this: the original stays put.
+        // What a move would cost, checked in memory only: a level hashes a placement's asset by its
+        // content-relative path, so moving a placed mesh leaves it pointing at nothing (stops drawing,
+        // no error). Rewriting every level in the project isn't cheap, so this says so instead of
+        // pretending. Copy needs none of this: the original stays put.
         int referenced = 0;
 #if AVER_MODULE_SCENE
         {
             scene::World& w = scene::World::instance();
             for (const std::string& sp : srcs) {
-                // The id IS the hash of the content-relative path -- see loadProjectMeshes, which
-                // registers every mesh under exactly this. Hashing here rather than looking up a
-                // reverse map keeps the two in step by construction: if the keying ever changes,
-                // this breaks loudly at the same line rather than quietly disagreeing.
+                // The id is the hash of the content-relative path (see loadProjectMeshes, which
+                // registers every mesh under exactly this). Hashing here rather than a reverse map
+                // keeps the two in step: if the keying changes, this breaks loudly, not silently.
                 const u64 id = fnv1a64(std::string_view(cbRelativeToContent(sp)));
                 if (content_.meshFor(id) == 0) continue;
                 const u32 n = w.count();
@@ -1255,16 +1176,13 @@ void SandboxApp::cbFileOpModals() {
         const bool valid = cbRenameBuf_[0] != '\0' && !std::strpbrk(cbRenameBuf_, "\\/:*?\"<>|");
         if (!valid && cbRenameBuf_[0] != '\0') ImGui::TextColored(ImVec4(0.95f,0.5f,0.45f,1), "That name is not a legal filename.");
 
-        // RENAMING BREAKS EVERY REFERENCE, and this is the worse half of the defect the delete
-        // confirm just gained a warning for. An ObjectId is fnv1a64 of the content-relative
-        // PATH, so a rename changes the asset's id while every file naming the old path keeps
-        // naming it -- and cbRenameEntry is a std::filesystem::rename plus selection
-        // bookkeeping. Nothing scanned, nothing rewritten, nothing said.
-        //
-        // WARNS, DOES NOT REWRITE. Fixing the referrers means editing other people's files from
-        // inside a rename dialog: a write path that wants its own change, its own undo story and
-        // its own test. Telling someone what they are about to break is the honest half that can
-        // land now; doing it in silence is the part that had to stop.
+        // Renaming breaks every reference -- the worse half of the defect the delete confirm just
+        // gained a warning for: an ObjectId is fnv1a64 of the content-relative path, so a rename
+        // changes the asset's id while every file naming the old path keeps naming it, and
+        // cbRenameEntry used to be just a filesystem rename plus selection bookkeeping -- nothing
+        // scanned, nothing rewritten, nothing said. Warns, does not rewrite: fixing referrers means
+        // editing other people's files from inside a rename dialog, which wants its own
+        // change/undo/test -- the honest half that can land now.
         if (!cbContextIsDir_) {
             if (ImGui::IsWindowAppearing()) cbRenameRefs_ = cbFindReferencesTo(cbContextPath_);
             if (!cbRenameRefs_.empty()) {
@@ -1276,15 +1194,13 @@ void SandboxApp::cbFileOpModals() {
                 for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbRenameRefs_[i].c_str());
                 if (cbRenameRefs_.size() > shown)
                     ImGui::TextDisabled("   ...and %zu more", cbRenameRefs_.size() - shown);
-                // THE OPT-IN, replacing "renaming will not update them". Default ON because
-                // repointing is what an author wants nearly every time; a checkbox rather than
-                // unconditional because this EDITS OTHER PEOPLE'S FILES, and a tool that does
-                // that with no way to decline is one people stop trusting.
+                // Opt-in (replacing "renaming will not update them"), default ON: repointing is what
+                // an author wants nearly every time, but it edits other people's files, and a tool
+                // that does that with no way to decline is one people stop trusting.
                 ImGui::Checkbox("Update them to the new name", &cbRenameRepoint_);
                 if (cbRenameRepoint_) {
-                    // WHAT IT STILL CANNOT FIX, said here rather than discovered later. These are
-                    // real reference kinds no text rewrite can reach, and staying quiet about
-                    // them would turn an honest tool into a false promise.
+                    // What it still can't fix, said here rather than discovered later: real
+                    // reference kinds no text rewrite can reach.
                     ImGui::TextDisabled("Rewrites path references in .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject.");
                     ImGui::TextDisabled("Cannot fix: ids stored as a hash with no path (.ocmat {guid:...},");
                     ImGui::TextDisabled("save games), C# that builds a path in code, or binary asset tables.");
@@ -1311,12 +1227,9 @@ void SandboxApp::cbFileOpModals() {
     }
 
     if (ImGui::BeginPopupModal("cbDelete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        // MULTI-DELETE: when the right-clicked/active item is part of a larger selection, Delete
-        // acts on the WHOLE selection, the same way Move/Copy already does -- cbPruneNested for the
-        // same reason cbFileOpModals' own move/copy path uses it (a folder in the selection would
-        // otherwise also try to delete its own children a second time, from a path that no longer
-        // exists by then). A single selection (or a right-click outside it) yields exactly the one
-        // path cbContextPath_ already named, so this reduces to today's behaviour unchanged.
+        // Multi-delete: when the active item is part of a larger selection, Delete acts on the
+        // whole selection like Move/Copy, pruned with cbPruneNested (else a folder in the selection
+        // would try to delete its own children a second time). A lone selection reduces to just cbContextPath_.
         const std::vector<std::string> targets =
             (cbSelection_.size() > 1 && cbIsSelected(cbContextPath_))
                 ? cbPruneNested(cbSelection_) : std::vector<std::string>{cbContextPath_};
@@ -1336,11 +1249,9 @@ void SandboxApp::cbFileOpModals() {
         }
         ImGui::TextDisabled("It goes to the recycle bin, so it can be restored.");
 
-        // WHAT WILL BREAK, named before the deletion rather than discovered after it. Scanned
-        // once when the modal opens (IsWindowAppearing), not per frame -- it walks the content
-        // tree, and doing that every frame while a modal sits open would be absurd. Aggregated
-        // across every target in the selection, not just cbContextPath_, so the warning covers the
-        // whole batch that Delete is about to touch.
+        // What will break, named before deletion rather than after: scanned once on
+        // IsWindowAppearing, not per frame (walks the content tree), and aggregated across every
+        // target in the selection, not just cbContextPath_.
         if (ImGui::IsWindowAppearing()) {
             cbDeleteRefs_.clear();
             for (const std::string& t : targets) {
@@ -1422,13 +1333,11 @@ void SandboxApp::drawBreadcrumb(const std::string& dir) {
     ImGui::PopStyleVar();
 }
 
-// Which family a .ocgraph presents as in the Content Browser -- Material, Gameplay or Unknown,
-// per GraphAssetPresentation.hpp -- read from its DOMAIN record and cached against the file's
-// mtime exactly like fileIconTile()'s .cs classification above. A read failure (the file
-// vanished between the directory scan and here, or is not a graph this build can parse at all)
-// reads as Gameplay: the SAME safe default an absent DOMAIN record gets, not Unknown, because a
-// transient I/O failure saying "not mine" would be worse than it saying "ordinary graph" for one
-// cache cycle.
+// Which family a .ocgraph presents as -- Material, Gameplay or Unknown (GraphAssetPresentation.hpp)
+// -- read from its DOMAIN record, cached against the file's mtime like fileIconTile()'s .cs
+// classification above. A read failure (the file vanished since the scan, or isn't parseable at
+// all) reads as Gameplay, not Unknown: the same safe default an absent DOMAIN record gets, since a
+// transient I/O failure claiming "not mine" would be worse than "ordinary graph" for one cache cycle.
 editor::GraphAssetFamily SandboxApp::graphAssetFamilyFor(const std::string& path) {
     std::error_code ec;
     const auto mtime = std::filesystem::last_write_time(path, ec);
@@ -1469,9 +1378,8 @@ const DirListing& SandboxApp::dirListing(const std::string& dir) {
                 // type's name whether or not the grid drew art for it.
                 ent.kind = -1;
                 if (assetKindFor(lext)) {
-                    // Stored as the table index so DirEntry stays a plain value type -- a raw
-                    // pointer into a function-local static would work today and is exactly the
-                    // sort of thing that stops working when the table moves.
+                    // Stored as the table index so DirEntry stays a plain value type: a raw pointer
+                    // into a function-local static works today but breaks if the table ever moves.
                     ent.kind = 1;
                     ent.kindExt = lext;
                 }
@@ -1511,18 +1419,16 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
     }
 }
 
-// `graphFamily` matters ONLY for ext == ".ocgraph" and defaults to Gameplay -- the ordinary
-// "Graph" row in the table below -- so every call site that has no domain to offer (the
-// existence check in dirListing(), any other extension) gets EXACTLY today's behaviour.
-// Material and Unknown are handled before the table lookup because the table is keyed by
-// extension alone and a linear search over it can return only one row per key: it cannot hold
-// three different ".ocgraph" presentations.
+// `graphFamily` matters only for ext == ".ocgraph" and defaults to Gameplay (the ordinary "Graph"
+// row below), so callers with no domain to offer (the existence check in dirListing(), any other
+// extension) get today's behaviour unchanged. Material/Unknown are handled before the table lookup
+// since the table is keyed by extension alone -- one row per key, so it can't hold three different
+// ".ocgraph" presentations.
  const SandboxApp::AssetKind* SandboxApp::assetKindFor(const std::string& ext,
                                       editor::GraphAssetFamily graphFamily) {
     if (ext == ".ocgraph") {
-        // Material's own icon+tint from the table below (ICON_TUNE, Unreal's Material green):
-        // a material graph IS a material as far as anyone browsing Content is concerned, not a
-        // link-icon graph that happens to be green.
+        // Material's own icon+tint (ICON_TUNE, Unreal's Material green): a material graph IS a
+        // material to anyone browsing Content, not a link-icon graph that happens to be green.
         if (graphFamily == editor::GraphAssetFamily::Material) {
             static const AssetKind kMaterialGraph{ICON_TUNE, IM_COL32(64, 192, 64, 255),
                                                    "Material Graph"};
@@ -1536,14 +1442,12 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
             return &kUnknownGraph;
         }
     }
-    // COLOURED THE WAY UNREAL COLOURS ITS CONTENT BROWSER, because that coding is already known.
-    // Where this engine has a type Unreal also has, the colour is Unreal's own
+    // Coloured the way Unreal colours its Content Browser, since that coding is already known
     // (FAssetTypeActions_*::GetTypeColor):
     //     Static Mesh cyan, Skeletal Mesh/Skeleton pink, Animation lime, Material green,
     //     Texture red, Sound blue, World amber, Blueprint blue.
-    // Where it does not (F#, C#, HLSL, navmesh, behaviour trees), the colour sits in the nearest
-    // Unreal family rather than invented. A SKINNED .ocmesh takes pink rather than cyan
-    // (cardAccent()).
+    // Where this engine has no Unreal equivalent (F#, C#, HLSL, navmesh, behaviour trees), colour
+    // sits in the nearest Unreal family. A skinned .ocmesh takes pink, not cyan (cardAccent()).
     static const struct { const char* ext; AssetKind k; } kTable[] = {
         {".ocmesh",     {ICON_TERRAIN,    IM_COL32(  0, 255, 255, 255), "Static Mesh"}},
         {".ocworld",    {ICON_TERRAIN,    IM_COL32(255, 156,   0, 255), "Level"}},
@@ -1553,9 +1457,9 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocmat",      {ICON_TUNE,       IM_COL32( 64, 192,  64, 255), "Material"}},
         {".ocparticle", {ICON_ADD,        IM_COL32(  0, 200, 180, 255), "Particles"}},
         {".ocfoliage",  {ICON_TERRAIN,    IM_COL32( 60, 200,  90, 255), "Foliage Type"}},
-        // No Unreal equivalent (its Enhanced Input plugin ships its own asset icon this engine has
-        // no license to copy) -- ICON_SETTINGS because binding a key IS a settings choice, the same
-        // reading .fsproj/.csproj already give that icon two rows down, coloured apart from them.
+        // No Unreal equivalent (its Enhanced Input plugin's icon isn't licensed to copy):
+        // ICON_SETTINGS since binding a key is a settings choice, same as .fsproj/.csproj below,
+        // though coloured apart from them.
         {".ocinput",    {ICON_SETTINGS,   IM_COL32(230, 200,  60, 255), "Input Scheme"}},
         {".ocsnd",      {ICON_WAVE,       IM_COL32(  0, 175, 255, 255), "Sound Graph"}},
         {".ocaudio",    {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
@@ -1606,18 +1510,17 @@ bool SandboxApp::isSkinnedMeshEntry(const DirEntry& e) const {
     for (char& c : rel) if (c == '\\') c = '/';
     return skinnedMeshIds_.count(fnv1a64(std::string_view(rel))) != 0;
 #else
-    // skinnedMeshIds_ (SandboxApp.hpp) is declared under AVER_MODULE_SCENE: it is filled by
-    // loadProjectMeshes as it places meshes into the scene, so with the module off nothing was
-    // ever recorded to ask about. Every entry reads as a plain static mesh instead of guessing.
+    // skinnedMeshIds_ needs AVER_MODULE_SCENE (filled by loadProjectMeshes as it places meshes),
+    // so with the module off nothing was ever recorded; every entry reads as a plain static mesh.
     (void)e;
     return false;
 #endif
 }
 
 // The colour of one card's type bar. Null-safe over every entry a listing can contain.
-// `skinned` is the one thing the extension alone cannot answer: a skeletal mesh here is a .ocmesh
-// with skin weights, not a separate file type, so it's Unreal's Static Mesh cyan until something
-// reads kOcMeshHasSkin out of the header -- which loadProjectMeshes already did (skinnedMeshIds_).
+// `skinned` is the one thing the extension alone can't answer: a skeletal mesh is a .ocmesh with
+// skin weights, not a separate file type -- loadProjectMeshes already read kOcMeshHasSkin out of
+// the header for this (skinnedMeshIds_).
  ImU32 SandboxApp::cardAccent(const std::string& ext, bool isDir, bool skinned,
                          editor::GraphAssetFamily graphFamily) {
     if (isDir) return IM_COL32(150, 156, 166, 255);          // neutral: a folder has no type
@@ -1723,10 +1626,9 @@ void SandboxApp::drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir,
         else                  folderGlyph(dl, centre, s, IM_COL32(232, 187, 92, 255));
         return;
     }
-    // The asset sheet's one "graph" tile is Gameplay's picture -- there is no separate Material
-    // Graph or Unknown Graph art -- so a non-Gameplay .ocgraph skips it rather than showing a
-    // Material-green type bar behind an icon that still reads as a plain blue graph. Falls to
-    // the domain-aware typed glyph below instead.
+    // The asset sheet's one "graph" tile is Gameplay's picture (no separate Material/Unknown Graph
+    // art), so a non-Gameplay .ocgraph skips it rather than pairing a Material-green bar with a
+    // plain blue graph icon -- falls to the domain-aware typed glyph below instead.
     const bool skipGenericGraphSprite =
         kindExt == ".ocgraph" && graphFamily != editor::GraphAssetFamily::Gameplay;
     if (!skipGenericGraphSprite && tile >= kAssetTileBase && assetIconsUiId_) {
@@ -1763,20 +1665,16 @@ void SandboxApp::drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir,
 }
 
 // ---- Content Browser multi-selection ---------------------------------------------------------
-//
-// cbSelectedFile_ REMAINS THE ACTIVE ONE and keeps every meaning it had: it is what the footer
-// names, what Enter opens, what F2 renames and what a shift-range measures from. cbSelection_ is
-// the set, and it always CONTAINS cbSelectedFile_ when anything is selected. Keeping both is what
-// lets the single-item actions stay single-item without a special case at each of them -- rename
-// and duplicate mean nothing for eleven files at once.
+// cbSelectedFile_ remains THE active one: what the footer names, what Enter opens, what F2 renames,
+// what a shift-range measures from. cbSelection_ is the set and always contains cbSelectedFile_
+// when anything is selected, so single-item actions (rename, duplicate) need no special case.
 bool SandboxApp::cbIsSelected(const std::string& path) const {
     return std::find(cbSelection_.begin(), cbSelection_.end(), path) != cbSelection_.end();
 }
 
 // Applies one click to the selection, with the modifier rules every file browser has trained
 // people to expect: plain replaces, Ctrl toggles one, Shift takes the range from the active item.
-//
-// THE RANGE IS OVER `shown`, NOT THE FOLDER, deliberately: `shown` is what the search box left on
+// The range is over `shown`, not the folder, deliberately: `shown` is what the search box left on
 // screen, and shift-selecting across a filter would grab files the person cannot see.
 void SandboxApp::cbClickSelect(const std::vector<const DirEntry*>& shown, int index) {
     if (index < 0 || index >= static_cast<int>(shown.size())) return;
@@ -1825,12 +1723,9 @@ void SandboxApp::cbSelectAll(const std::vector<const DirEntry*>& shown) {
 void SandboxApp::cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clear(); }
 
 // What the drag preview says: the one name, or how many are coming.
-//
-// The payload it counts is cbMoveDragPayloadFor's: NEWLINE-SEPARATED paths, one per line (a path
-// cannot contain a newline on any filesystem this runs on), the whole selection, unfiltered. There
-// is no separate "placeable assets only" payload any more -- ImGui carries one payload per drag, so
-// each drop target filters what it can use (the viewport keeps .ocmesh/.ocparticle and skips the
-// rest, so a selection of eleven files where two are .txt still places the nine).
+// Counts cbMoveDragPayloadFor's payload: newline-separated paths (a path can't contain one), the
+// whole selection, unfiltered. No separate "placeable assets only" payload -- ImGui carries one
+// payload per drag, so each drop target filters what it can use (viewport keeps .ocmesh/.ocparticle).
  std::string SandboxApp::cbDragLabel(const std::string& name, const std::string& blob) {
     const usize n = static_cast<usize>(std::count(blob.begin(), blob.end(), '\n')) + 1;
     return n <= 1 ? name : std::to_string(n) + " assets";
@@ -1862,16 +1757,11 @@ void SandboxApp::cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clea
     return name;
 }
 
-// THE REVISION-CONTROL CORNER MARK, shared by the gallery and the list so one status cannot be a
-// dot in one view and something else in the other.
-//
-// A DARK BACKING RING, not a bare dot. The mark lands on whatever the card is showing -- a pale
-// rendered thumbnail, a dark empty card, a coloured type plate -- and a flat dot disappears into
-// roughly half of those. The ring gives it an edge against all of them for one extra circle.
-//
-// COLOUR IS NOT THE ONLY CARRIER: a conflict gets a second ring as well as the loudest hue, and
-// every mark has a tooltip naming the status in words (see the call sites). Six statuses told apart
-// by hue alone would be unreadable for a good share of the people using this editor.
+// The revision-control corner mark, shared by the gallery and the list (one status can't be a dot
+// in one view and something else in the other). A dark backing ring, not a bare dot: it lands on a
+// pale thumbnail, dark empty card, or coloured type plate, where a flat dot would disappear into
+// half of those. Colour isn't the only carrier: a conflict also gets a second ring, and every mark
+// has a tooltip naming the status in words -- six statuses by hue alone would be unreadable for many users.
 static void rcStatusDot(ImDrawList* dl, ImVec2 c, f32 r, ImU32 col, bool conflicted) {
     dl->AddCircleFilled(c, r + 1.0f, IM_COL32(14, 15, 18, 200));
     dl->AddCircleFilled(c, r, col);
@@ -1900,9 +1790,9 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 if (col) ImGui::SameLine(0.0f, pad);
                 ImGui::PushID(idx);
                 const ImVec2 o = ImGui::GetCursorScreenPos();
-                // TRANSPARENT, and drawn over: ImGui::Selectable paints its highlight into the
-                // draw list at the moment it is called, so the card fill emitted afterwards would
-                // bury it. The widget stays for hit-testing, keyboard nav, drag source and context menu; selection/hover are painted with the card.
+                // Transparent, drawn over: Selectable paints its highlight immediately, so a card
+                // fill emitted after would bury it. Kept for hit-testing/nav/drag/context menu only;
+                // selection/hover are painted with the card instead.
                 ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(0, 0, 0, 0));
                 ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
                 ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(0, 0, 0, 0));
@@ -1920,24 +1810,20 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 }
                 ImGui::PopStyleColor(3);
                 const bool hot = ImGui::IsItemHovered();
-                // WHAT GIT SAYS ABOUT THIS ENTRY, read from the latch SandboxShell.cpp's
-                // revisionControlTick() maintains. A lookup in a sorted vector, never a process:
-                // this runs once per visible card per frame, and the one thing it must not do is
-                // ask git anything. Empty answer = git has nothing to say, which for a tracked
-                // file means it matches HEAD and the index.
+                // What git says about this entry, read from the latch SandboxShell.cpp's
+                // revisionControlTick() maintains -- a sorted-vector lookup, never a process (runs
+                // once per visible card per frame, and must never itself ask git anything). Empty =
+                // git has nothing to say (matches HEAD and the index).
                 editor::FileStatus rcSt = editor::FileStatus::Unmodified;
                 const bool rcHas = rcMarkFor(e.full, e.isDir, rcSt);
-                // EVERY ENTRY IS DRAGGABLE, folders included. This used to be gated on "placeable
-                // in the viewport", which is the right question for the VIEWPORT and the wrong one
-                // for the browser: a folder could not be dragged at all, and a selection holding
-                // one silently left it behind.
-                //
-                // ONE PAYLOAD, THE WHOLE SELECTION. "Two payloads on one drag" does not exist in
-                // ImGui: a second SetDragDropPayload overwrites the first one's TYPE (cond 0 is
-                // ImGuiCond_Always), so the asset payload set here for the viewport was replaced
-                // by the move payload a line later, and every drop on the viewport did nothing.
-                // Each target now takes this one payload and keeps what it understands: the
-                // viewport places the .ocmesh/.ocparticle files in it, a folder moves all of it.
+                // Every entry is draggable, folders included: gating on "placeable in the viewport"
+                // was right for the viewport but wrong for the browser (a folder couldn't be
+                // dragged, silently dropped from a selection). One payload, the whole selection:
+                // ImGui has no "two payloads on one drag" -- a second SetDragDropPayload overwrites
+                // the first's type, so the old asset payload was replaced by the move payload and
+                // every viewport drop did nothing. Each target now takes this one payload and keeps
+                // what it understands: the viewport places .ocmesh/.ocparticle from it, a folder
+                // moves all of it.
                 if (ImGui::BeginDragDropSource()) {
                     const std::string moveBlob = cbMoveDragPayloadFor(e.full);
                     ImGui::SetDragDropPayload(kCbMoveDragDropType, moveBlob.c_str(), moveBlob.size() + 1);
@@ -1950,10 +1836,8 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // to that widget's rect -- the full card -- rather than to whatever is drawn next.
                 if (e.isDir) cbFolderDropTarget(e.full);
                 if (ImGui::IsItemHovered()) {
-                    // THE STATUS IN WORDS, beside the name. The dot below is a glance; this is the
-                    // answer, and it is what makes the mark usable without telling six colours
-                    // apart. A FOLDER'S mark is a summary of what is under it, so it says so
-                    // rather than reading as a claim about the folder itself.
+                    // The status in words, beside the name: the dot is a glance, this is the answer
+                    // (a folder's mark summarises what's under it, not a claim about the folder itself).
                     if (rcHas)
                         ImGui::SetTooltip("%s\ngit: %s%s", e.name.c_str(),
                                           e.isDir ? "something under here is " : "",
@@ -1963,9 +1847,9 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 }
                 cbItemContextMenu(e.full, e.name, e.isDir);
                 // ---- the card ----
-                // Unreal's tile, in three pieces that make it readable at a glance: a panel so the
-                // grid reads as objects, a PREVIEW square, and a bar along its bottom edge in the
-                // type's colour. The name sits on a slightly darker strip, stopping long names from looking like they belong to the tile beneath.
+                // Unreal's tile in three pieces: a panel so the grid reads as objects, a preview
+                // square, and a bar along the bottom edge in the type's colour; the name sits on a
+                // slightly darker strip so long names don't look like they belong to the tile beneath.
                 const f32 round  = 3.0f * dpi_;
                 const f32 barH   = ImMax(2.0f, 3.0f * dpi_);
                 const f32 prevH  = tile - barH;                 // the preview square, above the bar
@@ -1991,11 +1875,10 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 const ImVec2 iconCentre(o.x + cellW*0.5f, o.y + prevH*0.5f);
                 bool drewThumb = false;
 #if AVER_MODULE_SCENE
-                // A REAL RENDERED THUMBNAIL, for mesh assets only, and only inside the clipper's
-                // visible range, so a folder of thousands never queues more than a screenful.
-                // content_'s meshes are looked up, never loaded: loadProjectMeshes() already uploads
-                // every .ocmesh on project open, so a miss means "not loaded" (reload), not a
-                // synchronous read that would stall the frame.
+                // A real rendered thumbnail, mesh assets only, inside the clipper's visible range
+                // (a folder of thousands never queues more than a screenful). content_'s meshes are
+                // looked up, never loaded -- loadProjectMeshes() already uploads every .ocmesh on
+                // project open, so a miss means "not loaded" (reload), not a stalling synchronous read.
                 if (!e.isDir && e.kindExt == ".ocmesh" && thumbnails_.ready()) {
                     const std::string content = project_.contentDir();
                     std::error_code relEc;
@@ -2003,9 +1886,8 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                                       : std::filesystem::relative(e.path, content, relEc).string();
                     if (!content.empty() && !relEc && !rel.empty()) {
                         for (char& c : rel) if (c == '\\') c = '/';
-                        // The SAME id space content_'s meshes/index already key on -- see
-                        // loadProjectMeshes()'s own comment -- so a mesh this browser can already
-                        // place in the level is exactly the set this can thumbnail.
+                        // The same id space content_'s meshes/index key on (see loadProjectMeshes()):
+                        // a mesh this browser can already place is exactly the set this can thumbnail.
                         const u64 meshId = fnv1a64(std::string_view(rel));
                         if (const rhi::MeshHandle meshHandle = content_.meshFor(meshId)) {
                             u32 thumbMaterial = 0;
@@ -2018,9 +1900,8 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
 #endif
                             thumbnails_.request(meshId, meshHandle, thumbMaterial);
                             if (const u64 tex = thumbnails_.textureId(meshId)) {
-                                // Whole-texture, square: kThumbnailPx is fixed on both axes, so
-                                // this is blitTile with one tile of one. Nearly fills the preview
-                                // square: a rendered thumbnail is the content, not a badge on top of it.
+                                // Whole-texture, square (kThumbnailPx is fixed on both axes): blitTile
+                                // with one tile of one, nearly filling the preview -- the content, not a badge.
                                 blitTile(dl, tex, iconCentre, prevH*0.92f, 1.0f, 0, 1);
                                 drewThumb = true;
                             }
@@ -2028,11 +1909,11 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                     }
                 }
 #endif
-                // A REAL DECODED THUMBNAIL, for texture files -- the CPU-side twin of the mesh
-                // branch above. There is nothing to render, so ThumbnailCache decodes and downscales
-                // the image itself instead of driving the preview (see its own header for why it
-                // still shares entries_/the budget/eviction with the mesh path), which is also why
-                // this needs no AVER_MODULE_SCENE guard: it never touches content_'s meshes.
+                // A real decoded thumbnail, texture files -- the CPU-side twin of the mesh branch
+                // above: there's nothing to render, so ThumbnailCache decodes/downscales the image
+                // itself instead of driving the preview (shares entries_/budget/eviction with the
+                // mesh path; see its own header). Needs no AVER_MODULE_SCENE guard: it never touches
+                // content_'s meshes.
                 if (!drewThumb && !e.isDir && thumbnails_.ready() && isTextureSource(e.full)) {
                     thumbnails_.requestTexture(e.full);
                     if (const u64 tex = thumbnails_.textureIdForPath(e.full)) {
@@ -2055,24 +1936,16 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                             label.c_str(), nullptr, wrap, &clip);
 
                 // ---- the revision-control mark ----
-                //
-                // TOP-LEFT, AND SIZED SO IT CANNOT REACH THE ICON. drawEntryIcon fits its glyph in
-                // a prevH*0.58 box about the preview's centre, so the icon's left edge sits about
-                // 0.21*cellW in from the card. The dot's outer edge is 2 dp + 2r, which stays
-                // short of that at BOTH ends of the zoom slider's 56..168 dp range -- that is what
-                // the 0.075 factor and the 7 dp cap are between them for, and the cap is the half
-                // that binds (above roughly 93 dp a proportional dot would start to grow into the
-                // icon). Drawn LAST so nothing painted afterwards can bury it, the same reason the
-                // card is painted over the Selectable rather than under it.
-                //
-                // THE 3 dp FLOOR IS A GUARD, NOT A SIZE THE SLIDER CAN REACH: cbTileSize_ is also
-                // read straight out of editor.ini (contentBrowser.tileSize), which nothing clamps
-                // to the slider's range, and a dot derived from a stored tile size of 10 would be
-                // one pixel. At every size the slider itself offers, the proportional value wins.
-                //
-                // It does overlap the top-left corner of a RENDERED THUMBNAIL, which is the one
-                // place it cannot be kept clear. That corner is the letterboxed background of a
-                // centred render, not part of the asset.
+                // Top-left, sized so it can't reach the icon: drawEntryIcon's glyph sits in a
+                // prevH*0.58 box centred on the preview, so its left edge is ~0.21*cellW in from the
+                // card. The dot's outer edge (2dp + 2r) stays short of that across the zoom slider's
+                // 56..168dp range via the 0.075 factor and 7dp cap (binds above ~93dp). Drawn last
+                // so nothing painted after buries it, same as the card over Selectable. The 3dp floor
+                // guards against cbTileSize_ read straight from editor.ini (contentBrowser.tileSize)
+                // with no clamp to the slider's range (a stored size of 10 would give a one-pixel
+                // dot) -- at every size the slider itself offers, the proportional value wins.
+                // Overlaps a rendered thumbnail's top-left corner (the one unavoidable spot): that
+                // corner is letterboxed background, not part of the asset.
                 if (rcHas) {
                     const f32 dotR = ImMin(ImMax(cellW * 0.075f, 3.0f * dpi_), 7.0f * dpi_);
                     const f32 inset = 2.0f * dpi_ + dotR;
@@ -2086,17 +1959,12 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
     clipper.End();
 }
 
-// Collects every FILE at or under `dir` whose name matches the search box.
-//
-// POINTERS INTO dirCache_ ARE SAFE HERE, and that is worth stating because it is the kind of
-// thing that is fine until it silently is not. dirCache_ is a std::unordered_map, whose mapped
-// values are node-allocated: inserting more folders during this walk rehashes the map but does
-// NOT move the DirListing objects, so pointers into their entry vectors stay valid. And a folder
-// already listed this frame is returned from cache untouched (dirListing's 20-frame stamp), so
-// no vector this walk has already taken pointers into can be rebuilt underneath it.
-//
-// FILES ONLY. A matching FOLDER in the results would be a row that navigates rather than opens,
-// mixed in with rows that open -- two different meanings for one gesture.
+// Collects every FILE at or under `dir` whose name matches the search box. Pointers into dirCache_
+// are safe here: it's a std::unordered_map with node-allocated values, so inserting folders during
+// this walk rehashes the map but doesn't move the DirListing objects -- pointers into their entry
+// vectors stay valid (a folder already listed this frame returns from cache untouched, per
+// dirListing's 20-frame stamp). Files only: a matching folder would be a row that navigates rather
+// than opens, mixed with rows that open -- two different meanings for one gesture.
 void SandboxApp::cbGatherDeepMatches(const std::string& dir, std::vector<const DirEntry*>& out, int depth) {
     // A depth cap rather than a visited set: the content tree is a tree, and the one thing that
     // could make it not one is a directory symlink, which this bounds instead of chasing.
@@ -2118,12 +1986,9 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
     std::vector<const DirEntry*> shown;
     shown.reserve(listing.entries.size());
     if (cbFilter_[0] != '\0' && cbSearchDeep_) {
-        // SEARCHING SUBFOLDERS TOO. The box only ever looked at the open folder, so finding an
-        // asset meant already knowing which folder it was in -- which is the thing you use a
-        // search box because you do not know.
-        //
-        // ONLY WHILE A FILTER IS TYPED: with an empty box this would flatten the whole tree into
-        // one folder view and lose the hierarchy the browser is for.
+        // Searching subfolders too: previously the box only looked at the open folder, so finding
+        // an asset meant already knowing which folder it was in. Only while a filter is typed: an
+        // empty box would flatten the whole tree into one folder view and lose the hierarchy.
         cbGatherDeepMatches(dir, shown, 0);
     } else {
         for (const DirEntry& e : listing.entries)
@@ -2135,9 +2000,9 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
                                                     : "(nothing here matches the search)");
         return;
     }
-    // WHAT CTRL+A SELECTS, captured here because the key handler runs outside this function and
-    // `shown` is what the search box actually left visible -- selecting files a person has filtered
-    // away would be a surprise the moment they clear the box.
+    // What Ctrl+A selects, captured here since the key handler runs outside this function:
+    // `shown` is what the search box left visible -- selecting filtered-away files would surprise
+    // the moment the box is cleared.
     cbShownPaths_.clear();
     cbShownPaths_.reserve(shown.size());
     for (const DirEntry* p : shown) cbShownPaths_.push_back(p->full);
@@ -2174,9 +2039,8 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             if (rcHas && ImGui::IsItemHovered())
                 ImGui::SetTooltip("git: %s%s", e.isDir ? "something under here is " : "",
                                   editor::statusName(rcSt));
-            // ONE PAYLOAD, THE WHOLE SELECTION -- see the gallery's note: folders drag too, and a
-            // second SetDragDropPayload would overwrite the first, which is exactly how viewport
-            // drops broke. The viewport keeps the placeable files from this payload itself.
+            // One payload, the whole selection (see the gallery's note): folders drag too, and a
+            // second SetDragDropPayload would overwrite the first -- exactly how viewport drops broke.
             if (ImGui::BeginDragDropSource()) {
                 const std::string moveBlob = cbMoveDragPayloadFor(e.full);
                 ImGui::SetDragDropPayload(kCbMoveDragDropType, moveBlob.c_str(), moveBlob.size() + 1);
@@ -2186,18 +2050,13 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             if (e.isDir) cbFolderDropTarget(e.full);
             cbItemContextMenu(e.full, e.name, e.isDir);
             // ---- the revision-control mark ----
-            //
-            // RIGHT-ALIGNED IN THE ROW, NOT ON THE ICON, which is the opposite of the gallery's
-            // answer because the row is the opposite shape. A list icon is about one text line
-            // across, so a corner badge would cover a quarter of the picture it is meant to
-            // annotate -- the rule that keeps the gallery's dot clear of the tile icon bites
-            // hardest exactly where the icon is smallest. The row's trailing edge is free space a
-            // list has and a card does not, and there is no gutter to use instead: the leading
-            // Dummy is the icon's own box and the glyph fills it.
-            //
-            // THE TRADE, stated rather than hidden: a name long enough to reach the drawer's right
-            // edge runs under the dot, which is drawn over it. The alternative was reserving a
-            // column's worth of width from every row for a mark most rows do not have.
+            // Right-aligned in the row, not on the icon (opposite of the gallery, since the row is
+            // the opposite shape): a list icon is about one text line across, so a corner badge
+            // would cover a quarter of it. The row's trailing edge is free space a list has and a
+            // card doesn't; the leading Dummy is the icon's own box and the glyph fills it. The
+            // trade, stated rather than hidden: a long name reaching the drawer's edge runs under
+            // the dot -- the alternative was reserving a column's width from every row for a mark
+            // most rows lack.
             if (rcHas) {
                 const f32 dotR = ImMin(ImMax(h * 0.20f, 3.0f * dpi_), 6.0f * dpi_);
                 rcStatusDot(dl, ImVec2(rowRight - dotR - 2.0f * dpi_, o.y + h * 0.5f), dotR,
@@ -2210,17 +2069,15 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
 }
 
 // Draws the Import modal: a source path and the destination folder.
-// A MODAL, and it has to be one: "Browse..." calls openFileDialog, a native Win32 dialog that
-// blocks this thread and moves OS focus away. A plain BeginPopup does not survive that reliably
-// (imgui.h:850/2725); BeginPopupModal "cannot be closed by user" (imgui.h:855), so it's still there
-// when the dialog returns.
-// ProjectBrowser.cpp's own openFileDialog-from-popup is a BeginPopupModal too, not precedent for a
-// plain popup. Renamed "Import Asset" to match its new title bar text.
+// Must be a modal: "Browse..." calls openFileDialog, a native Win32 dialog that blocks this thread
+// and moves OS focus away. A plain BeginPopup doesn't survive that reliably (imgui.h:850/2725);
+// BeginPopupModal "cannot be closed by user" (imgui.h:855), so it's still there when the dialog
+// returns. ProjectBrowser.cpp's own openFileDialog-from-popup is a BeginPopupModal too, not
+// precedent for a plain popup.
 void SandboxApp::drawImportModal() {
     if (!ImGui::BeginPopupModal("Import Asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-    // The Overwrite checkbox's own state, local to this modal rather than a member: it means
-    // nothing once the modal is closed, and IsWindowAppearing() below resets it for the next open
-    // the same way cbRenameRepoint_'s sibling checkboxes elsewhere in this file reset THEIR scans.
+    // The Overwrite checkbox's own state, local rather than a member (means nothing once closed);
+    // IsWindowAppearing() resets it for the next open, like cbRenameRepoint_'s sibling checkboxes.
     static bool s_overwrite = false;
     if (ImGui::IsWindowAppearing()) s_overwrite = false;
     ImGui::TextUnformatted("Import an asset into the selected folder.");
@@ -2259,12 +2116,11 @@ void SandboxApp::drawImportModal() {
         ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "Into: %s - %s", dest.c_str(), blocked.c_str());
     }
 
-    // REIMPORT / OVERWRITE. importAsset's own collision check (and, for a model, importGltfToDir's
-    // per-mesh one) look at the file this import would actually BECOME, which is not the source's
-    // own name for anything that gets converted rather than copied -- so this predicts the same
-    // name they will, only to decide whether the checkbox below is worth showing. It is a HINT, not
-    // the enforcement: the real decision for each file a multi-part model can produce is made where
-    // that file's true name is computed (importGltfToDir's own loop), not here.
+    // Reimport/overwrite: importAsset's collision check (and importGltfToDir's per-mesh one for a
+    // model) looks at the file this import would actually become, not the source's own name. This
+    // predicts the same name only to decide whether the checkbox below is worth showing -- a hint,
+    // not the enforcement, which happens where each file's true name is computed (importGltfToDir's
+    // own loop).
     bool wouldCollide = false;
     if (blocked.empty() && importPath_[0] != '\0') {
         std::error_code cec;
@@ -2308,14 +2164,11 @@ void SandboxApp::drawImportModal() {
 // Imports one asset into destDir: models and audio are converted, everything else is copied.
 // UI-side: calls cbIsEditable/cbInvalidate/importModel/importAudio, all the content browser's.
 // Its one non-browser caller (--import's deferred handshake in onInit) is guarded instead.
-// One-line outcomes go to a NOTIFICATION as well as to whatever panel-local status line they
-// already had, and the difference matters: cbStatus_ is the Content Browser's footer, visible
-// only while that drawer is open, and an import can be started by a drag from Explorer with
-// the drawer shut. Several of these messages said "see the Output Log" -- naming a panel they
-// gave the user no way to open, which is what the offerLog action fixes.
-//
-// Named for the shape rather than the caller: it started as import-only and is now also the
-// navmesh bake and the GI cache flush.
+// One-line outcomes also go to a NOTIFICATION: cbStatus_ is the Content Browser's footer, visible
+// only while that drawer is open, but an import can be started by a drag from Explorer with the
+// drawer shut. Several messages said "see the Output Log" while naming a panel the user had no way
+// to open; offerLog fixes that. Named for the shape, not the caller: started as import-only, now
+// also the navmesh bake and GI cache flush.
 void SandboxApp::notifyOutcome(editor::NotifySeverity sev, std::string title, std::string body,
                   bool offerLog) {
     editor::Notification n;
@@ -2357,11 +2210,10 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
     const std::string name = std::filesystem::path(src).filename().string();
     const std::string dest = destDir + "\\" + name;
     if (std::filesystem::exists(dest, ec)) {
-        // OVERWRITE, when the Import dialog offered it and the user chose it. This is the check that matches what the
-        // source's OWN name would collide with -- meaningful for a plain copy, where `dest` IS the
-        // final output; a converted model or audio file rarely collides here at all (the source
-        // itself is never copied), so its own overwrite handling sits deeper, at the point each
-        // converted file's true name is computed (importGltfToDir's loop, importAudio's own check).
+        // Overwrite, when the Import dialog offered it: this check matches the source's own name,
+        // meaningful for a plain copy where `dest` IS the final output. A converted model/audio
+        // file rarely collides here (the source itself is never copied); its overwrite handling
+        // sits deeper (importGltfToDir's loop, importAudio's own check).
         if (overwrite) {
             cbDeleteEntry(dest);
         } else {
@@ -2386,9 +2238,8 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
               return; }
     AVER_INFO("[Import] imported '{}' into {}", name, destDir);
     cbStatus_ = "Imported " + name;
-    // Content-relative, not absolute: the full path is unreadable at this width and the
-    // reader already knows which project is open. cbRelativeToContent falls back to the
-    // absolute path when there is no project, which is the only case where it helps.
+    // Content-relative, not absolute: unreadable at this width, and the reader already knows
+    // which project is open. cbRelativeToContent falls back to absolute only when there is no project.
     notifyOutcome(editor::NotifySeverity::Success, "Imported " + name,
                  "into " + importDestLabel(destDir));
     cbInvalidate(destDir);
@@ -2416,9 +2267,8 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir,
     const std::string out = destDir + "\\" + outName;
     std::error_code ec;
     if (std::filesystem::exists(out, ec)) {
-        // OVERWRITE: the same choice importAsset's own top check honours -- see its comment. This
-        // is the checkpoint that actually matters for audio, since the true output name
-        // (outName, an .ocaudio) is never what importAsset's own dest check compares against.
+        // Overwrite: same choice importAsset's top check honours (see its comment) -- the checkpoint
+        // that matters for audio, since outName (.ocaudio) is never what that check compares against.
         if (overwrite) {
             cbDeleteEntry(out);
         } else {
@@ -2488,16 +2338,13 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
     wantMeshReload_ = true;
 }
 
-// Imports every path a drag from outside the editor dropped, into the Content Browser's CURRENT
+// Imports every path a drag from outside the editor dropped, into the Content Browser's current
 // folder -- one call per path through importAsset, the same funnel the Import... dialog and a
-// browser-internal drag both already go through, so a drop gets the exact same format dispatch,
-// overwrite handling and notifications as any other import.
-//
-// FOLDERS ARE SKIPPED WITH A NOTE rather than imported recursively: nothing here decides how a
-// dropped directory's contents should be laid out under the destination, and silently flattening
-// it would surprise whoever dropped it. UNSUPPORTED EXTENSIONS ARE NOT FILTERED HERE EITHER --
-// importAsset already decides what it can do with a file (convert, copy, or refuse), and a second
-// opinion here could only disagree with it.
+// browser-internal drag go through, so a drop gets identical dispatch/overwrite/notifications.
+// Folders are skipped with a note rather than imported recursively: nothing here decides how a
+// dropped directory's contents should be laid out, and silently flattening it would surprise.
+// Unsupported extensions aren't filtered here either -- importAsset already decides what it can
+// do with a file (convert, copy, or refuse).
 void SandboxApp::importDroppedFiles(const std::vector<std::string>& paths) {
     const std::string destDir = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
     for (const std::string& p : paths) {

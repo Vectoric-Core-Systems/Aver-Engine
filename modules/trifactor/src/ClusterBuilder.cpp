@@ -2,84 +2,57 @@
 //
 // ============================================================================================
 // Trifactor slice 0: cluster formation and the crack-free LOD DAG. CPU only -- no RHI, no scene,
-// no GPU. That is deliberate: this is the part that can be tested headlessly, and everything the
-// GPU eventually does depends on it being right first. See docs/VIRTUALIZED_GEOMETRY.md §7.
+// no GPU by design: this is the part that can be tested headlessly, and the GPU work depends on it
+// being right first. See docs/VIRTUALIZED_GEOMETRY.md §7.
 //
-// A note on how this file came to be, because it bears on how much to trust it. It was written
-// blind, against meshoptimizer's documented public API, at a point when third_party/meshoptimizer
-// did not exist -- so for a while the algorithm here was an argument rather than a measurement.
-// meshoptimizer v1.2 has since been vendored and this file compiles and passes TrifactorTest's 42
-// checks (LOD-0 coverage, the 64/124 limits, >= 2 levels, error monotonicity, MLET round-trip
-// determinism, meshlet-free compatibility, and two degenerate inputs). The reasoning below about
-// the crack-free invariant is therefore now backed by a run, not only by the argument.
+// Written before third_party/meshoptimizer was vendored, so early reasoning here was argument, not
+// measurement; now backed (meshoptimizer v1.2 vendored) by TrifactorTest's 42 checks (LOD-0
+// coverage, 64/124 limits, >=2 levels, error monotonicity, MLET round-trip determinism,
+// meshlet-free compatibility, two degenerate inputs). Three things that blind authoring got wrong:
 //
-// Two things the blind authoring cost, both since fixed and re-verified against TrifactorTest,
-// not just argued:
+//   1. Grouping now calls meshopt_partitionClusters (meshoptimizer.h:852) instead of a hand-rolled
+//      greedy region-grow -- see groupClusters for what changes (DAG topology) and what does not
+//      (crack-freeness, error-monotonicity).
 //
-//   1. Grouping used to be a hand-rolled greedy region-grow over a shared-vertex adjacency graph,
-//      written that way because meshoptimizer's own meshopt_partitionClusters could not be seen at
-//      the time. It now calls that function (meshoptimizer.h:852) instead -- see groupClusters'
-//      own comment for what that changes (a different DAG topology) and what it does not (crack-
-//      freeness, error-monotonicity).
+//   2. meshopt_simplify paid setup cost proportional to the WHOLE MESH's vertex count on every group
+//      at every level; meshopt_SimplifySparse skips it. Measured ~98% of a synthetic 498K-triangle
+//      mesh's buildLodHierarchy time (see buildLodHierarchy) -- explains previously-reported
+//      13m35s/8m40s cook times. Vertex identity is unchanged: simplify still gets the SAME global
+//      mesh.positions/vertexCount, and meshoptimizer remaps sparse-internal indices back to global
+//      ids before returning (verified in simplifier.cpp). The one real effect: `result_error`
+//      becomes relative to the group's own subset extent, not the whole mesh's (meshoptimizer.h:471)
+//      -- groupExtentScale and the call-site rescale correct for that before it reaches
+//      toScreenErrorThreshold.
 //
-//   2. Every meshopt_simplify call used to pay setup cost proportional to the WHOLE MESH's vertex
-//      count on every group at every level, regardless of how few vertices the group's own merged
-//      buffer actually referenced -- meshopt_SimplifySparse existed for exactly this and was never
-//      set. Measured this session (see the call site in buildLodHierarchy) as ~98% of a synthetic
-//      498K-triangle mesh's total buildLodHierarchy time, and a fully sufficient explanation for the
-//      13m35s/8m40s real cook times a prior profiling pass reported. Fixed by setting the flag.
-//      IMPORTANT: this does NOT touch the vertex-buffer-identity argument below -- the flag only
-//      skips setup work sized to vertex_count; the actual simplify call still receives the SAME
-//      global mesh.positions/vertexCount as before, and meshoptimizer remaps its sparse-internal
-//      indices back to global ids before returning them (verified by reading simplifier.cpp), so
-//      every "global vertex id" propagated by this file is exactly as global as it always was. The
-//      one real side effect is that meshopt_simplify's returned `result_error` becomes relative to
-//      the group's own subset extent instead of the whole mesh's (meshoptimizer.h:471's own doc)
-//      -- groupExtentScale (above appendGlobalTriangles) and the rescale at the call site correct
-//      for that before the error goes anywhere near worldExtentScale/toScreenErrorThreshold.
-//
-//   3. meshopt_SimplifyLockBorder was set unconditionally on every group at every level, which is
-//      correct for a solid mesh but flattens a foliage mesh's ladder to nearly nothing (a fir sapling
-//      is thousands of separate leaf cards, each almost entirely boundary edge -- see
-//      buildLodHierarchy's own comment, and the shell/open-edge measurement further down this file,
-//      for the numbers). Fixed not by removing the flag (that measurably breaks five solid meshes --
-//      same comment) but by ROUTING it per group: computeShellIds classifies the source mesh into
-//      connected shells below; buildClusters (task step 5) splits LOD-0 triangles into a small-shell
-//      stream (built directly, one cluster per shell) and a large-shell stream (the ordinary
-//      meshopt_buildMeshlets path, order-preserving so a zero-small-shell mesh's output is untouched);
-//      groupClusters (task step 6) partitions each stream separately so a group never mixes them; and
-//      buildLodHierarchy's meshopt_simplify call (task step 7) drops LockBorder only for a group made
-//      entirely of small-shell lineage, a fact PendingGroup carries forward every level (task step 8)
-//      so it does not silently stop being true above level 1. See Cluster::smallShellLineage's own
-//      comment (ClusterBuilder.hpp) for the field this all turns on, and the meshopt_simplify call
-//      site below for the corpus numbers this routing actually achieved.
+//   3. meshopt_SimplifyLockBorder was unconditional, correct for solid meshes but flattening a
+//      foliage mesh's ladder to nearly nothing (thousands of leaf cards, almost entirely boundary
+//      edge -- numbers at buildLodHierarchy). Fixed by ROUTING per group instead of removing the flag
+//      (removal breaks five solid meshes): computeShellIds classifies the mesh into connected
+//      shells; buildClusters (step 5) splits LOD-0 triangles into a small-shell stream (direct, one
+//      cluster per shell) and a large-shell stream (ordinary meshopt_buildMeshlets, order-preserving);
+//      groupClusters (step 6) partitions each stream separately so a group never mixes them;
+//      buildLodHierarchy (step 7) drops LockBorder only for a group entirely small-shell lineage,
+//      which PendingGroup carries forward every level (step 8). See Cluster::smallShellLineage
+//      (ClusterBuilder.hpp) and the meshopt_simplify call site for the corpus numbers.
 // ============================================================================================
 //
-// ---- The crack-free invariant, and how this file actually holds it ---------------------------
+// ---- The crack-free invariant, and how this file holds it -------------------------------------
 //
-// meshopt_simplify is documented to never move or synthesize vertex positions: an edge collapse
-// remaps some vertex indices onto others that already exist in the input vertex buffer, and leaves
-// the vertex buffer itself untouched. That is the property this whole file leans on. Every call
-// into meshoptimizer below -- at LOD 0 and at every coarser level -- passes the SAME `mesh.positions`
-// array and the SAME vertex count; no function here ever builds a per-group or per-cluster local
-// vertex buffer. A "global vertex id" (an index into `mesh.positions`) therefore names the exact
-// same point in space at every LOD level, forever. Two clusters -- at the same level or different
-// levels -- that reference the same global vertex id are, by construction, touching at a point that
-// has never moved. That is what makes the boundary-locking below sufficient rather than merely
-// intended.
+// meshopt_simplify never moves or synthesizes vertex positions: a collapse remaps indices onto
+// others already in the input vertex buffer, leaving the buffer untouched. Every meshoptimizer call
+// below -- LOD 0 and every coarser level -- passes the SAME mesh.positions array and vertex count,
+// never a per-group or per-cluster local buffer. So a "global vertex id" names the same point in
+// space at every level, forever, and two clusters sharing one are touching at a point that has never
+// moved -- what makes the boundary-locking below sufficient.
 //
-// meshopt_SimplifyLockBorder locks any edge that is used by exactly one triangle IN THE INDEX
-// BUFFER IT IS GIVEN. The group-simplification step below always builds ONE merged index buffer for
-// the whole group (see appendGlobalTriangles / the loop in buildLodHierarchy) before calling
-// meshopt_simplify on it once. An edge between two clusters INSIDE the group is used by two
-// triangles that are BOTH present in that merged buffer, so LockBorder does not lock it, and it can
-// be simplified away -- interior detail is removed. An edge on the group's true outside is used by
-// only one triangle in that buffer (its other side belongs to a cluster outside the group, which is
-// therefore outside this buffer entirely), so LockBorder does lock it -- the group's outer boundary
-// is preserved exactly, vertex-for-vertex. This is the "lock the GROUP's boundary, not each
-// cluster's" distinction the task calls out: if this file instead called meshopt_simplify once per
-// individual cluster with only that cluster's own triangles, every shared edge would look
-// single-use from inside that call and get locked, and nothing would ever simplify.
+// meshopt_SimplifyLockBorder locks any edge used by exactly one triangle IN THE BUFFER IT IS GIVEN.
+// Group simplification builds ONE merged index buffer per group (appendGlobalTriangles / the loop in
+// buildLodHierarchy) before calling meshopt_simplify once: an edge between two clusters INSIDE the
+// group is used by two triangles both in that buffer, so LockBorder does not lock it and interior
+// detail simplifies away; an edge on the group's true outside is single-use in that buffer (its
+// other side is outside the group entirely), so LockBorder locks it and the boundary is preserved
+// exactly. This is "lock the GROUP's boundary, not each cluster's": simplifying per individual
+// cluster would make every shared edge look single-use and lock everything.
 
 #include "aver/trifactor/ClusterBuilder.hpp"
 #include "aver/core/Log.hpp"
@@ -101,43 +74,28 @@ namespace {
 
 // ---- Conservative snorm8 cone quantization -----------------------------------------------------
 //
-// The cone (apex, axis, cutoff) is a backface-style culler: a cluster can be skipped once the
-// viewer is far enough around the back of its normal cone that NONE of its triangles can face the
-// camera. The actual runtime test (aver::trifactor::coneCull / the GPU port in RHIShaders.cpp's
-// clusterConeCull, both PORTED from third_party/meshoptimizer/src/meshoptimizer.h's own documented
-// formula and empirically verified against real meshopt output in
-// tests/trifactor/src/ClusterSelectTest.cpp) culls iff `dot(dirToApexFromEye, axis) >= cutoff` --
-// which means the cull region GROWS toward "every direction" as cutoff falls toward -1, and SHRINKS
-// toward "no direction" as cutoff rises toward +1. So +1.0f is "never cull" and -1.0f is "cull from
-// everywhere" -- SEE ClusterSelect.hpp's file header for the full, separately-verified account. (An
-// earlier version of this function had this backwards -- treated cutoff -1 as the conservative
-// "never cull" end -- which is what made every degenerate-cone and every hemisphere-exceeding
-// cluster get backface-culled from EVERY direction instead of none; see the commit that added this
-// paragraph for the write-up.)
+// The cone (apex, axis, cutoff) is a backface-style culler: skip a cluster once the viewer is far
+// enough around the back of its normal cone that NONE of its triangles can face the camera. The
+// runtime test (aver::trifactor::coneCull / the GPU port clusterConeCull, both PORTED from
+// meshoptimizer.h's documented formula, verified in ClusterSelectTest.cpp) culls iff
+// `dot(dirToApexFromEye, axis) >= cutoff`: +1.0f is "never cull", -1.0f "cull from everywhere"
+// (ClusterSelect.hpp's file header). An earlier version had this backwards, backface-culling every
+// degenerate/hemisphere-exceeding cluster from EVERY direction instead of none (see the commit that
+// fixed it for the write-up).
 //
-// Quantizing axis/cutoff to i8 snorm necessarily perturbs both, and the failure mode of perturbing
-// WRONG is asymmetric and much worse in one direction: if the stored cone ends up LARGER (covers
-// more view directions) than the true cull cone, the culler discards clusters that were actually
-// visible -- geometry popping in and out, or (at the extreme this bug produced) a whole mesh
-// vanishing -- and by the time anyone traces that back to a rounding direction in this function it
-// looks like an occlusion bug or a depth bug, not a quantization bug. A cull region that is too
-// SMALL only costs a little overdraw. So every rounding decision below is pushed toward shrinking
-// the stored cull region, i.e. toward cutoff = +1, never toward -1:
+// Quantizing axis/cutoff to i8 snorm perturbs both, and perturbing WRONG is asymmetric: a cone too
+// LARGE discards clusters that were actually visible (popping, or a whole mesh vanishing) and reads
+// like an occlusion/depth bug, not a quantization one; too SMALL only costs overdraw. So every
+// rounding below is pushed toward shrinking the cull region (cutoff -> +1), never toward -1:
 //
-//   1. axis is quantized to the nearest snorm8 direction, like any vector quantization -- but that
-//      necessarily rotates the stored axis away from the true axis by some angle thetaErr. A cull
-//      cone of half-angle acos(cutoff) around the ROTATED axis is a subset of the true cull cone
-//      around the true axis only if its own half-angle shrinks by at least thetaErr first (triangle
-//      inequality on the sphere: any direction within the shrunk cone of the rotated axis is within
-//      the ORIGINAL half-angle of the true axis). So cutoff is TIGHTENED (half-angle decreased, i.e.
-//      the cos value moved toward +1) by thetaErr BEFORE quantizing it.
-//   2. cutoff is then quantized by CEILING toward +1, never rounding to nearest, because any
-//      residual quantization error on top of the already-tightened value must also fall on the
-//      "smaller cull region" side.
-//   3. the result is clamped into the representable range, and the case where thetaErr alone
-//      consumes the entire true half-angle (the axis rotated further than the cone's own margin, so
-//      no half-angle is left to shrink) is stored as +127 -- the conservative "never cull" sentinel,
-//      symmetric with -127 rather than the asymmetric -128 some snorm8 conventions reserve.
+//   1. axis quantizes to the nearest snorm8 direction, rotating it from the true axis by some angle
+//      thetaErr; cutoff is TIGHTENED by thetaErr BEFORE quantizing (triangle inequality on the
+//      sphere) so the rotated cone stays a subset of the true one.
+//   2. cutoff is then quantized by CEILING toward +1, never rounded to nearest, so residual error
+//      also falls on the "smaller cull region" side.
+//   3. clamped into range; if thetaErr alone consumes the whole true half-angle, store +127 -- the
+//      "never cull" sentinel, symmetric with -127 rather than the asymmetric -128 some snorm8
+//      conventions reserve.
 struct QuantizedCone {
     i8 axis[3];
     i8 cutoff;
@@ -158,9 +116,8 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
 
     const Vec3 a = rawAxis.getSafeNormal();
     if (a.sizeSquared() < 0.5f) {
-        // Degenerate/zero axis (e.g. a near-planar-both-ways cluster): no direction is safe to cull
-        // on. Store the "never cull" cone rather than guess one. +127, not -127: see this function's
-        // own header comment, point 3.
+        // Degenerate/zero axis (e.g. near-planar-both-ways cluster): no direction is safe to cull on,
+        // so store "never cull" rather than guess. +127, not -127: see header comment, point 3.
         q.axis[0] = 0; q.axis[1] = 0; q.axis[2] = 127;
         q.cutoff  = 127;
         return q;
@@ -172,8 +129,8 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
     const Vec3 qaNorm = Vec3{qx / 127.0f, qy / 127.0f, qz / 127.0f}.getSafeNormal();
 
     if (qaNorm.sizeSquared() < 0.5f) {
-        // Quantization collapsed the axis toward zero -- maximally conservative: cull nothing. +127,
-        // not -127: see this function's own header comment, point 3.
+        // Quantization collapsed the axis toward zero -- cull nothing. +127, not -127: header
+        // comment, point 3.
         q.axis[0] = qx; q.axis[1] = qy; q.axis[2] = qz;
         q.cutoff  = 127;
         return q;
@@ -181,10 +138,9 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
 
     const f32 thetaErr = std::acos(std::clamp(dot(a, qaNorm), -1.0f, 1.0f));
     const f32 trueHalfAngle = std::acos(std::clamp(cutoff, -1.0f, 1.0f));
-    // Shrink, not widen: see this function's own header comment, point 1. thetaErr can exceed
-    // trueHalfAngle outright (a tight true cone paired with a large axis-quantization error) -- that
-    // is exactly the "no safe margin left" case point 3 describes, handled the same way the
-    // degenerate-axis branches above are: store the sentinel rather than a negative half-angle.
+    // Shrink, not widen: header comment, point 1. thetaErr can exceed trueHalfAngle outright (tight
+    // cone + large axis error) -- the "no safe margin" case from point 3, handled like the
+    // degenerate-axis branches above: store the sentinel rather than a negative half-angle.
     const f32 shrunkHalfAngle = trueHalfAngle - thetaErr;
     const f32 shrunkCutoff = (shrunkHalfAngle <= 0.0f) ? 1.0f : std::cos(shrunkHalfAngle);
 
@@ -195,23 +151,14 @@ QuantizedCone quantizeConeConservative(const Vec3& rawAxis, f32 cutoff) {
 
 // ---- sphere-of-spheres merge (Stage 4, ClusterGroupNode::sphereCenter/sphereRadius) ------------
 //
-// Grows (center, radius) -- initialised to the FIRST child's own sphere by the call site below, then
-// merged with every subsequent one -- to also fully contain a second sphere (c2, r2): the standard
-// "smallest sphere enclosing two spheres" construction. If one sphere already lies entirely inside
-// the other, the smaller merge is a no-op (the containing sphere is returned unchanged); otherwise
-// the new sphere sits on the segment joining the two centres, sized to touch the FAR side of each
-// input sphere exactly, which is what makes the result provably contain both inputs in full rather
-// than merely their centres.
+// Grows (center, radius) -- seeded with the FIRST child's own sphere -- to also fully contain (c2,
+// r2): the standard "smallest sphere enclosing two spheres" construction. One sphere already inside
+// the other makes the merge a no-op; otherwise the new sphere sits on the segment joining the two
+// centres, touching the FAR side of each input, so it provably contains both in full.
 //
-// THIS IS NOT the minimal bounding sphere of an arbitrary point set -- that needs Welzl's algorithm
-// or an equivalent, and ClusterGroupNode::sphereCenter's own comment does not ask for minimality,
-// only for CONTAINMENT (a traversal that culls on a bound that is merely "bigger than it strictly
-// needed to be" costs a little overdraw; one that culls on a bound that is too SMALL drops geometry
-// that was actually visible -- see that comment for the full asymmetry argument). A group has at
-// most kMaxGroupSize (8) children to fold in here, so this is at most seven sequential two-sphere
-// merges, and the containment property this function guarantees at each step composes: if sphere A
-// contains X and sphere B (A merged with Y) contains A and Y in full, B contains X, Y and A's own
-// prior contents in full too.
+// NOT the minimal bounding sphere of a point set (needs Welzl's algorithm); ClusterGroupNode::
+// sphereCenter requires only CONTAINMENT (too big costs overdraw, too SMALL drops visible geometry).
+// At most kMaxGroupSize-1 (7) sequential two-sphere merges; containment composes across them.
 void mergeSphere(Vec3& center, f32& radius, const Vec3& c2, f32 r2) {
     const Vec3 diff = c2 - center;
     const f32 d = diff.size();
@@ -219,51 +166,35 @@ void mergeSphere(Vec3& center, f32& radius, const Vec3& c2, f32 r2) {
     if (d + radius <= r2) { center = c2; radius = r2; return; }      // this sphere lies inside c2's
 
     const f32 newRadius = (d + radius + r2) * 0.5f;
-    // Move from `center` toward `c2` by (newRadius - radius). d > 1e-8f is guaranteed here: a d at or
-    // near zero with differing radii would already have been caught by one of the two early-outs
-    // above (whichever radius is larger swallows the other), so reaching this line with a
-    // near-degenerate `diff` means the radii were also near-equal, and no move is needed either way --
-    // the guard exists to keep the divide well-defined, not to change the result in that case.
+    // Move `center` toward `c2` by (newRadius - radius). d > 1e-8f is guaranteed: a near-zero d with
+    // differing radii would already have hit one of the two early-outs above, so reaching here with
+    // near-degenerate `diff` means the radii were near-equal too and no move is needed -- the guard
+    // just keeps the divide well-defined.
     if (d > 1e-8f) center = center + diff * ((newRadius - radius) / d);
     radius = newRadius;
 }
 
 // ---- connected-shell classification (task steps 3-4) -------------------------------------------
 //
-// WHY THIS EXISTS. meshopt_SimplifyLockBorder (see the file-level comment above) locks any edge used
-// by exactly one triangle in the buffer it is handed. On a SOLID mesh -- one shell -- an edge on the
-// group's true outside really is single-use in that buffer, so LockBorder correctly holds the group
-// boundary and interior detail still simplifies away underneath it. A FOLIAGE mesh is hundreds of
-// DISCONNECTED shells, one sheet per leaf/needle card, so almost every edge looks single-use from
-// inside any buffer that only contains some of those shells, and nothing collapses: measured over the
-// demo corpus with meshopt_SimplifyLockBorder unconditionally set (before this classification
-// existed), fir_sapling's coarsest level was 393,157 triangles out of 433,021 at LOD 0 -- a 1.1x
-// ladder on a mesh that should reduce by orders of magnitude. Dropping the flag entirely fixes that
-// (13,121x) but breaks five solid, single-shell meshes the flag was protecting correctly (see the
-// commit this file's header names). The fix has to be PER SHELL: keep LockBorder for groups made of
-// shells too big to ever fit in one meshlet (a group boundary can genuinely cut through such a shell,
-// so the crack-free guarantee still needs it), drop it for groups made entirely of shells too small
-// to ever be split by a group boundary in the first place (see LodDag::isSmallShell's own comment for
-// why "fits in one meshlet" is the exact, provable line).
+// WHY: meshopt_SimplifyLockBorder locks any edge used by exactly one triangle in its buffer. On a
+// SOLID (one-shell) mesh that correctly holds the boundary; a FOLIAGE mesh is hundreds of
+// DISCONNECTED shells (one sheet per leaf/needle card), so almost every edge looks single-use and
+// nothing collapses: LockBorder unconditional measured fir_sapling's coarsest at 393,157 of 433,021
+// LOD-0 triangles (1.1x ladder). Dropping the flag fixes that (13,121x) but breaks five solid,
+// single-shell meshes (file header). Fix must be PER SHELL: keep LockBorder for shells too big to fit
+// one meshlet (a group boundary can genuinely cut through one), drop it for shells too small to ever
+// be split by a group boundary (LodDag::isSmallShell).
 //
-// THIS SECTION COMPUTES WHICH IS WHICH; NOTHING YET ACTS ON IT. buildClusters records the result
-// (Cluster::shellId, LodDag::smallShells) but still builds every LOD-0 cluster through
-// meshopt_buildMeshlets over the whole mesh unconditionally, and buildLodHierarchy's meshopt_simplify
-// call still sets LockBorder unconditionally too -- see Cluster::shellId's STAGE STATUS comment
-// (ClusterBuilder.hpp) for why: this task's own step 1 asked for the five previously-regressed
-// meshes to be confirmed single-shell before any routing got built on that assumption, and one of the
-// five (rock_moss_set_02) is not -- it is seven independently-large shells. Every one of the seven
-// clears the "large" bar by itself, so the routing this task describes would still be safe for this
-// particular mesh, but the premise the task's design leans on is not universally what it was assumed
-// to be, and per the task's own instruction that finding that out is worth more than shipping routing
-// built on it, the routing (steps 5-8) stops here for this stage.
+// THIS SECTION ONLY COMPUTES WHICH IS WHICH; buildClusters/buildLodHierarchy still run unconditionally
+// (Cluster::shellId's STAGE STATUS comment): step 1 found one of the five previously-regressed meshes
+// (rock_moss_set_02) is NOT single-shell -- seven independently-large shells, each still clearing the
+// "large" bar so routing would be safe for it, but the premise was not universally true as assumed.
+// Routing (steps 5-8) stops here for this stage.
 
-// Union-find over `count` elements, path-halved on find(), union by attaching the second root to the
-// first (no rank/size heuristic). `count` here is at most a mesh's vertex count -- a few hundred
-// thousand at the outside for this engine's demo corpus -- and this runs ONCE per mesh, at LOD-0
-// build time, not per level or per group; a plain compressing find is more than fast enough, and
-// every line of it is auditable, which matters more for a correctness-load-bearing routine than
-// shaving a one-off pass.
+// Union-find over `count` elements, path-halved on find(), no rank/size heuristic. `count` is at
+// most a mesh's vertex count (a few hundred thousand at the outside) and this runs ONCE per mesh, at
+// LOD-0 build time, not per level or per group -- a plain compressing find is fast enough, and
+// simplicity matters more than shaving a one-off pass.
 struct UnionFind {
     std::vector<u32> parent;
     explicit UnionFind(usize count) : parent(count) {
@@ -283,31 +214,16 @@ struct UnionFind {
     }
 };
 
-// THE NUMBER THE SHELL THEORY WAS FIRST MISREAD AS NEEDING, and the one this function answers instead.
+// Answers a more useful question than computeShellIds: not "how many shells" but what FRACTION of
+// edges are open (LockBorder has no notion of "shell", only single-use-triangle edges). A leaf card
+// is four perimeter edges around two triangles, almost entirely boundary even in a large component; a
+// rock is a closed solid, almost nothing boundary, so LockBorder costs it nothing.
 //
-// computeShellIds above answers "how many connected components", and an early pass over the whole demo
-// corpus was misread as proving the shell-routing design could not work: "every one of the 33 meshes
-// reports ZERO small shells, so a rule keyed on small shells never fires." That reading was wrong -- a
-// shell listing and a ladder listing were compared side by side without checking the rows still lined
-// up after a filter shifted one of them -- and the corrected re-run is what steps 5-8 (buildClusters'
-// routing, buildLodHierarchy's meshopt_simplify call) are actually built on; see Cluster::shellId's
-// comment in the header for the corrected measurement in full, and this file's own header for the
-// routing's own numbers.
-//
-// The MECHANISM below answers a related but different, and genuinely more useful, question: not
-// "how many shells" but "what predicts whether LockBorder freezes a mesh". meshopt_SimplifyLockBorder
-// locks an edge
-// used by exactly ONE triangle in the buffer it is given -- it has no notion of "shell" at all. So
-// what predicts whether the flag freezes a mesh is not how many pieces the mesh is in, it is what
-// FRACTION of its edges are open. A leaf card is a thin sheet: four perimeter edges around two
-// triangles, so it is almost entirely boundary even when welded into a large connected component.
-// A rock is a closed solid: every edge shared by two triangles, so almost nothing is boundary and
-// LockBorder costs it nothing.
-//
-// Edges are canonicalised through the SAME meshopt_generatePositionRemap that computeShellIds uses,
-// for the same reason: two triangles meeting across a UV seam share a POSITION but not an index, and
-// counting raw indices would call that shared edge two open edges instead of one closed one --
-// inflating exactly the statistic this exists to measure, and by most on the assets that matter.
+// Edges are canonicalised through the SAME meshopt_generatePositionRemap computeShellIds uses: a UV
+// seam shares a POSITION but not an index, and counting raw indices would call that edge open twice
+// instead of closed once, inflating this statistic most on the assets that matter. (An early corpus
+// pass misread this as "zero small shells everywhere" from a row-alignment bug -- see
+// Cluster::shellId's comment for the corrected numbers steps 5-8 are built on.)
 f32 openEdgeFraction(const fmt::OcMeshData& mesh, u64& outOpen, u64& outTotal) {
     outOpen = outTotal = 0;
     const usize vertexCount = mesh.positions.size() / 3;
@@ -333,27 +249,22 @@ f32 openEdgeFraction(const fmt::OcMeshData& mesh, u64& outOpen, u64& outTotal) {
     return outTotal ? static_cast<f32>(outOpen) / static_cast<f32>(outTotal) : 0.0f;
 }
 
-// Per-vertex shell id (dense, 0..shellCount-1) and, per shell, whether it is SMALL -- task step 4:
-// fits inside kMaxClusterVertices/kMaxClusterTriangles, counted over the vertices/triangles the
-// shell's geometry actually references (see the loop below for why "actually references" and not
-// "unioned into" is what gets counted).
+// Per-vertex shell id (dense, 0..shellCount-1) and, per shell, whether SMALL -- step 4: fits inside
+// kMaxClusterVertices/kMaxClusterTriangles, counted over vertices/triangles the shell actually
+// references (see the loop below for why, not "unioned into").
 struct ShellIds {
     std::vector<u32> vertexShell;   // vertexShell[v] -- dense shell id of source-mesh vertex v
     std::vector<u8>  isSmall;       // isSmall[s] -- true iff shell s is small (see LodDag::smallShells)
 };
 
 // Union-find over triangle edges, THEN union every vertex v with remap[v] from
-// meshopt_generatePositionRemap. That second union is the load-bearing part, not a tidy-up: without
-// it, a UV seam -- two triangles that share a POSITION through DUPLICATED (not shared) vertex
-// indices, which every real asset with a UV island boundary has -- would look disconnected under
-// triangle-edge unioning alone and split into two shells, and this function would then tell the
-// routing below it is safe to drop LockBorder on what is genuinely one continuous surface.
-// meshopt_generatePositionRemap is the exact same position-coincidence hashing meshopt_simplify's own
-// LockBorder decision is built on (both hash the raw vertex_positions bytes -- compare
-// indexgenerator.cpp's meshopt_generatePositionRemap against simplifier.cpp's border classification),
-// so the shells this function computes are never NARROWER than meshoptimizer's own notion of
-// "connected" -- see this file's header comment for why that direction of error, and not the other
-// one, is the safe one to risk.
+// meshopt_generatePositionRemap -- load-bearing, not a tidy-up: without it, a UV seam (triangles
+// sharing a POSITION through DUPLICATED, not shared, indices) looks disconnected under edge-unioning
+// alone, wrongly telling the routing below it is safe to drop LockBorder on one continuous surface.
+// This is the same position-coincidence hashing meshopt_simplify's own LockBorder decision uses
+// (indexgenerator.cpp vs. simplifier.cpp's border classification, both hash raw vertex_positions
+// bytes), so shells here are never NARROWER than meshoptimizer's "connected" (file header: the safe
+// error direction).
 ShellIds computeShellIds(const fmt::OcMeshData& mesh) {
     const usize vertexCount = mesh.positions.size() / 3;
 
@@ -382,10 +293,9 @@ ShellIds computeShellIds(const fmt::OcMeshData& mesh) {
         out.vertexShell[v] = rootToShell[root];
     }
 
-    // "Small" is counted over vertices/triangles the shell's geometry ACTUALLY references, not every
-    // position that happened to union into it: nothing in this codebase produces an unreferenced
-    // stray position, but nothing guarantees a source asset never will, and such a position must not
-    // make an otherwise-tiny shell look large (or, worse, hide a genuinely-oversized shell as small).
+    // "Small" is counted over vertices/triangles the shell ACTUALLY references, not every position
+    // unioned into it: nothing here produces an unreferenced stray position, but nothing guarantees a
+    // source asset never will, and such a position must not misclassify the shell's size either way.
     std::vector<u8> referenced(vertexCount, 0);
     for (u32 idx : mesh.indices) referenced[idx] = 1;
 
@@ -408,21 +318,18 @@ ShellIds computeShellIds(const fmt::OcMeshData& mesh) {
 constexpr u32 kTargetGroupSize = 6;
 constexpr u32 kMaxGroupSize    = 8;
 
-// meshopt_partitionClusters guarantees actual partition sizes of target..target+target/3
-// (meshoptimizer.h:850) -- for kTargetGroupSize=6 that is exactly 6..8, which is where
-// kMaxGroupSize=8 came from in the first place. Not a coincidence to re-derive at every call site;
-// asserted once here so a change to kTargetGroupSize that silently breaks the "8 is the hard cap"
-// assumption fails to compile instead of quietly producing an oversized group.
+// meshopt_partitionClusters guarantees partition sizes of target..target+target/3 (meshoptimizer.h:
+// 850) -- for kTargetGroupSize=6 that is exactly 6..8, which is where kMaxGroupSize=8 came from.
+// Asserted once here so a change to kTargetGroupSize that breaks the "8 is the hard cap" assumption
+// fails to compile instead of quietly producing an oversized group.
 static_assert(kTargetGroupSize + kTargetGroupSize / 3 == kMaxGroupSize,
               "kMaxGroupSize documents meshopt_partitionClusters' own target..target+target/3 bound "
               "for kTargetGroupSize -- keep them in sync");
 
-// Runs ONE meshopt_partitionClusters call over exactly the clusters named by `ids`, using `positions`
-// (a buffer already indexed the same way `clusterIndices` is -- groupClusters below is the only
-// caller, and builds that pairing two different ways: global mesh-vertex ids for the large-shell
-// bucket, locally-compacted ids for the small-shell bucket) as the spatial-proximity input. Factored
-// out of groupClusters (task step 6) so the two-bucket split there can call this once per bucket
-// without duplicating the meshopt_partitionClusters call shape or its degenerate-size special cases.
+// Runs ONE meshopt_partitionClusters call over the clusters named by `ids`, using `positions`
+// (indexed like `clusterIndices` -- groupClusters, the only caller, builds that pairing two ways:
+// global ids for the large-shell bucket, locally-compacted ids for the small-shell one). Factored out
+// so groupClusters' two-bucket split can call this once per bucket.
 std::vector<std::vector<u32>> partitionClusterIds(const std::vector<u32>& ids,
                                                     const std::vector<u32>& clusterIndices,
                                                     const std::vector<u32>& clusterIndexCounts,
@@ -444,40 +351,24 @@ std::vector<std::vector<u32>> partitionClusterIds(const std::vector<u32>& ids,
 }
 
 // Groups clusters for joint simplification via meshopt_partitionClusters (meshoptimizer.h:852),
-// which solves exactly this problem -- it was not available when this file was first written (see
-// the file-level comment) and is used here now that meshoptimizer is vendored.
+// available now that meshoptimizer is vendored (file header).
 //
-// WHY THIS IS SAFE, and what it changes. The correctness mechanism this whole file leans on --
-// meshopt_SimplifyLockBorder on ONE merged index buffer per group (see appendGlobalTriangles's call
-// site in buildLodHierarchy and the file-level comment) -- depends only on which triangles end up
-// in the SAME group, not on how the grouping decision was made. meshopt_partitionClusters is a
-// different algorithm from the hand-rolled greedy region-grow this replaced (a proper agglomerative
-// merge over a flat-array adjacency graph, plus a spatial-proximity fallback pass for otherwise
-// unconnected clusters, per its own source) and DOES produce a measurably different partition on the
-// same input -- verified this session (a 1854-LOD-0-cluster case grouped into 337 groups by the old
-// code and 289 by this one). That changes the DAG's topology (which clusters coarsen together, level
-// count, per-cluster geometry) but not its correctness: crack-freeness and error-monotonicity are
-// both enforced independently of grouping choice (LockBorder on the merged buffer; the explicit
-// max() in buildLodHierarchy's error propagation, respectively) -- confirmed by re-running
-// TrifactorTest's full invariant suite (LOD-0 coverage, cluster limits, error monotonicity,
-// acyclicity, MLET round-trip, the skinned-mesh regression) after this swap, not just argued.
+// WHY SAFE: crack-freeness comes from LockBorder on ONE merged index buffer per group
+// (appendGlobalTriangles; file-level comment) and depends only on which triangles land in the SAME
+// group, not on how grouping was decided. Measurably different partition than the greedy region-grow
+// it replaced (a 1854-cluster case: 337 groups old, 289 new) -- changes DAG topology but not
+// correctness, confirmed by rerunning TrifactorTest's full invariant suite (including the
+// skinned-mesh regression) after the swap.
 //
-// TASK STEP 6: TWO SEPARATE meshopt_partitionClusters CALLS, one per small/large-shell-lineage
-// bucket (Cluster::smallShellLineage), NEVER one call over the concatenation of both. The reason is
-// the same spatial-proximity fallback the paragraph above just credited: meshopt_partitionClusters
-// (and, upstream of it, meshopt_buildMeshlets -- see buildDirectCluster's comment) will merge
-// otherwise-unrelated geometry once real adjacency runs out, picking the closest candidate
-// IRRESPECTIVE of what it is (third_party/meshoptimizer/src/clusterizer.cpp's own comment on this).
-// A single call over both buckets would therefore be free to place a large-shell cluster in an
-// otherwise-all-small-shell group -- and task step 7's routing decides LockBorder per GROUP, so that
-// one misplaced cluster would silently take its whole group through the flag-dropped path, right back
-// into the crack this feature exists to prevent. Partitioning each bucket separately makes that
-// impossible BY CONSTRUCTION: meshopt_partitionClusters never sees the other bucket's clusters at all,
-// so it cannot place one of them into a group it has no way to know exists.
+// TASK STEP 6: TWO SEPARATE calls, one per small/large-shell-lineage bucket, NEVER one over both
+// concatenated. meshopt_partitionClusters (and meshopt_buildMeshlets) merges otherwise-unrelated
+// geometry once adjacency runs out, picking the closest candidate IRRESPECTIVE of what it is
+// (clusterizer.cpp) -- one call could place a large-shell cluster into an all-small-shell group, and
+// step 7 decides LockBorder per GROUP, reopening the crack this prevents. Separate calls rule that
+// out BY CONSTRUCTION.
 //
-// `mesh` is needed here (the old hand-rolled grouper did not take it) because
-// meshopt_partitionClusters' spatial-fallback pass wants vertex positions, not just the shared-vertex
-// topology dag.clusters[].vertices already carries.
+// `mesh` is needed (the old grouper did not take it) for the spatial fallback's vertex positions, not
+// just the topology dag.clusters[].vertices already carries.
 std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector<u32>& levelClusterIds,
                                              const fmt::OcMeshData& mesh) {
     if (levelClusterIds.empty()) return {};
@@ -490,8 +381,8 @@ std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector
 
     std::vector<std::vector<u32>> groups;
 
-    // Large-shell bucket: unchanged from before this routing existed -- clusterIndices are GLOBAL
-    // vertex ids straight into `mesh.positions`, exactly as the single-bucket call used to build them.
+    // Large-shell bucket: clusterIndices are GLOBAL vertex ids straight into `mesh.positions`, as
+    // before this routing existed.
     if (!largeIds.empty()) {
         const u32 n = static_cast<u32>(largeIds.size());
         std::vector<u32> clusterIndices;
@@ -508,14 +399,10 @@ std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector
         groups.insert(groups.end(), largeGroups.begin(), largeGroups.end());
     }
 
-    // Small-shell bucket: positions are COMPACTED to exactly the vertices this bucket's clusters
-    // reference, and clusterIndices are remapped to that compacted, LOCAL index space, rather than
-    // passing `mesh.positions`/the whole mesh's vertexCount a second time. This is the scratch-cost
-    // bound task step 6 asks for: meshopt_partitionClusters takes a vertex buffer sized to
-    // `vertexCount`, and with two calls per level instead of one, passing the full mesh both times
-    // would pay that O(whole-mesh-vertex-count) cost TWICE at every level for a bucket whose own
-    // clusters, on the meshes this feature exists for (fir_sapling: 48,991 small shells), reference a
-    // tiny fraction of the mesh's actual vertices.
+    // Small-shell bucket: positions COMPACTED to the vertices this bucket references, clusterIndices
+    // remapped to that LOCAL space -- meshopt_partitionClusters' cost scales with `vertexCount`, and
+    // passing the full mesh here too would pay that cost TWICE per level for clusters (fir_sapling:
+    // 48,991 small shells) referencing only a tiny fraction of it.
     if (!smallIds.empty()) {
         const u32 n = static_cast<u32>(smallIds.size());
         std::vector<u32> uniqueVerts;
@@ -560,18 +447,12 @@ void appendGlobalTriangles(const Cluster& c, std::vector<u32>& out) {
     }
 }
 
-// The world-extent scale (meshopt_simplifyScale's own units, see meshoptimizer.h:606) of exactly the
-// DISTINCT global vertices `mergedIndices` references -- i.e. one group's own subset, not the whole
-// mesh. This is what buildLodHierarchy's meshopt_simplify call below now measures its "relative"
-// error against once meshopt_SimplifySparse is set (its doc: "error becomes relative to subset
-// extents", meshoptimizer.h:471), because meshopt_SimplifySparse's internal sparse_remap collapses
-// the effective vertex set to exactly this same distinct-referenced-vertex set before computing the
-// scale (verified by reading simplifier.cpp: buildSparseRemap at line 242 produces the identical set
-// this function recomputes, and rescalePositions at line 549 takes its min/max over exactly that set
-// -- a bounding-box extent, so recomputing it from an unordered copy of the same positions is exact,
-// not approximate). A caller needs this to convert that per-group-relative result_error back into
-// the whole-mesh-relative units Cluster::error is documented to hold (ClusterBuilder.hpp) -- see the
-// call site.
+// The world-extent scale (meshopt_simplifyScale units, meshoptimizer.h:606) of the DISTINCT global
+// vertices `mergedIndices` references -- one group's subset, not the whole mesh. This is what
+// meshopt_simplify's "relative" error is measured against once SimplifySparse is set
+// (meshoptimizer.h:471), since its internal sparse_remap collapses to this same set before computing
+// scale (verified in simplifier.cpp: buildSparseRemap:242, rescalePositions:549), so recomputing it
+// here is exact. Lets the call site rescale result_error to the whole-mesh units Cluster::error holds.
 f32 groupExtentScale(const fmt::OcMeshData& mesh, const std::vector<u32>& mergedIndices) {
     std::vector<u32> unique(mergedIndices);
     std::sort(unique.begin(), unique.end());
@@ -588,10 +469,9 @@ f32 groupExtentScale(const fmt::OcMeshData& mesh, const std::vector<u32>& merged
 }
 
 // Runs meshopt_buildMeshlets + meshopt_computeMeshletBounds over `indices` (a plain global index
-// buffer) and appends the resulting clusters to `dag` at `level`, returning their new ids. Shared by
-// buildClusters (level 0, the source index buffer) and buildLodHierarchy (level k+1, a
-// post-simplification buffer) -- both pass the SAME mesh.positions/vertexCount, which is what keeps
-// vertex identity global across every level (see the file-level comment).
+// buffer), appending the resulting clusters to `dag` at `level`. Shared by buildClusters (level 0)
+// and buildLodHierarchy (level k+1) -- both pass the SAME mesh.positions/vertexCount, keeping vertex
+// identity global across every level (file-level comment).
 std::vector<u32> splitIntoClusters(const fmt::OcMeshData& mesh, const std::vector<u32>& indices,
                                     u32 level, LodDag& dag) {
     std::vector<u32> newIds;
@@ -645,36 +525,20 @@ std::vector<u32> splitIntoClusters(const fmt::OcMeshData& mesh, const std::vecto
 }
 
 // TASK STEP 5, the small-shell half of the routing. Builds ONE cluster directly from a single small
-// shell's own triangles -- `shellVertices` (global vertex ids, in first-seen order) and
-// `localTriangles` (indices into `shellVertices`, the on-disk MLET shape) -- WITHOUT going through
-// meshopt_buildMeshlets at all.
+// shell's own triangles (`shellVertices` global ids, `localTriangles` indices into them) WITHOUT
+// meshopt_buildMeshlets: a small shell (LodDag::isSmallShell) is DEFINED as fitting one meshlet's
+// limits, so its partitioning search has nothing to decide, and paying for it per shell across tens
+// of thousands (fir_sapling: 48,991) is pure overhead.
 //
-// WHY NOT JUST CALL splitIntoClusters ON THE SHELL'S OWN TRIANGLES, which would also work and would
-// reuse more code: a small shell (LodDag::isSmallShell) is DEFINED as fitting inside one meshlet's
-// kMaxClusterVertices/kMaxClusterTriangles limits, so meshopt_buildMeshlets' partitioning search --
-// scoring candidate triangles, growing a meshlet, deciding when to start a new one -- has nothing to
-// decide: the answer is always "everything in one meshlet". Paying for that search on what will always
-// be a single-meshlet answer, once per small shell, across meshes with tens of thousands of them
-// (fir_sapling: 48,991), is pure overhead with no output it could ever change.
+// THE REAL REASON IS SAFETY: concatenating several small shells into one buffer for
+// meshopt_buildMeshlets would let it merge DIFFERENT shells into one meshlet once adjacency runs out
+// (no notion of "shell" -- same fallback groupClusters describes), breaking shellId's "exact for a
+// small-shell cluster" guarantee that step 8's lineage propagation trusts. One cluster per shell
+// makes that true BY CONSTRUCTION.
 //
-// THE OTHER REASON IS NOT PERFORMANCE, IT IS SAFETY, and it is the one that actually matters. If this
-// function instead concatenated several small shells' triangles into one buffer and called
-// meshopt_buildMeshlets on THAT (the way splitIntoClusters is used for the large-shell stream),
-// nothing would stop meshopt_buildMeshlets from putting two DIFFERENT small shells' triangles in the
-// same meshlet -- it has no notion of "shell" and, per groupClusters' comment on
-// meshopt_partitionClusters' identical fallback, actively will once an individual shell's own
-// adjacency runs out. A cluster is not a group, so this would not by itself put LockBorder at risk --
-// but it WOULD break shellId's "exact for a small-shell cluster" guarantee (Cluster::shellId's own
-// comment), which task step 8's lineage propagation is built on trusting without re-deriving. Building
-// one cluster per shell, from exactly that shell's own triangles and nothing else, makes "this
-// cluster's geometry belongs to exactly one shell" true BY CONSTRUCTION rather than by an argument
-// about what meshopt_buildMeshlets happens to do today.
-//
-// Bounds/cone are computed IDENTICALLY to splitIntoClusters -- same meshopt_computeMeshletBounds call
-// shape (global vertex ids + local triangle indices + the WHOLE mesh's position buffer and vertex
-// count, never a local copy of either) and the same quantizeConeConservative rounding -- because the
-// cone culler downstream has no idea whether a cluster came from meshopt_buildMeshlets or from here,
-// and a cheaper or different bounds computation on this path would silently make it get culled wrong.
+// Bounds/cone computed IDENTICALLY to splitIntoClusters (same meshopt_computeMeshletBounds shape,
+// whole-mesh buffer, never a local copy) since the cone culler downstream cannot tell which path
+// produced a cluster, and a cheaper bounds computation here would silently miscull it.
 u32 buildDirectCluster(const fmt::OcMeshData& mesh, std::vector<u32> shellVertices,
                         std::vector<u8> localTriangles, u32 shellId, LodDag& dag) {
     const usize vertexCount = mesh.positions.size() / 3;
@@ -733,10 +597,9 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
     dag = LodDag{};
 
     // Task steps 2-4: classify `mesh` into connected shells and record the result on the DAG. One log
-    // line per cooked mesh (RelodTool surfaces it for free) rather than nothing: a future asset change
-    // that silently made one of the five previously-regressed meshes (see this file's header comment)
-    // multi-shell, or turned a currently-large shell small, would be exactly the kind of thing that
-    // reopens this feature's safety argument, and this is the cheapest possible tripwire for it.
+    // line per cooked mesh (RelodTool surfaces it for free): a future asset change silently making one
+    // of the five previously-regressed meshes (file header) multi-shell, or shrinking a large shell to
+    // small, would reopen this feature's safety argument -- this is the cheapest tripwire for it.
     const ShellIds shellIds = computeShellIds(mesh);
     dag.smallShells = shellIds.isSmall;
     u32 smallShellCount = 0;
@@ -748,29 +611,22 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
               openEdges, totalEdges, openFrac * 100.0f);
 
     // TASK STEP 5: route LOD-0 triangles by their shell's size, BEFORE any clustering call sees them.
-    // A triangle's shell is its first vertex's shell -- computeShellIds unions all three of a
-    // triangle's vertices into the same shell as its very first step (the triangle-edge union, before
-    // the position-remap union that closes UV seams), so every vertex of a given triangle names the
-    // identical shell and any one of them is a valid representative.
+    // A triangle's shell is its first vertex's shell -- computeShellIds unions all three into one
+    // shell as its first step, so any one vertex is a valid representative.
     //
-    // `largeIndices` is built by walking mesh.indices ONCE, in order, and keeping only the triangles
-    // whose shell is NOT small -- so for a mesh with zero small shells (every one of the five
-    // previously-regressed meshes on the real corpus; see this file's header) not a single triangle is
-    // ever removed, and `largeIndices` ends up holding mesh.indices' exact values in their exact
-    // order. That is the order-preservation guarantee ClusterBuilder.hpp's buildClusters doc comment
-    // promises: splitIntoClusters below then receives a buffer identical to mesh.indices and calls the
-    // SAME meshopt_buildMeshlets this function always called on it, so such a mesh's LOD-0 output is
-    // not merely equivalent to what this function produced before this routing existed -- it is the
-    // identical function call on the identical input, byte for byte.
+    // `largeIndices` walks mesh.indices ONCE, in order, keeping only triangles whose shell is NOT
+    // small -- so a zero-small-shell mesh (the five previously-regressed meshes; file header) leaves
+    // largeIndices byte-identical to mesh.indices, and splitIntoClusters makes the identical
+    // meshopt_buildMeshlets call it always made: the order-preservation guarantee ClusterBuilder.hpp's
+    // buildClusters doc comment promises.
     const usize triangleCount = mesh.indices.size() / 3;
     const u32 shellCount = static_cast<u32>(shellIds.isSmall.size());
     std::vector<u32> largeIndices;
     largeIndices.reserve(mesh.indices.size());
-    // Indexed by shellId; holds a small shell's own triangles (global vertex ids, 3 per triangle, in
-    // mesh order) until buildDirectCluster below consumes them. Stays empty for every LARGE shell, and
-    // for a small shell that (per computeShellIds' own comment on stray unreferenced positions) turns
-    // out to have no triangles of its own -- both cases are skipped by the `continue` in the loop that
-    // consumes this.
+    // Indexed by shellId; holds a small shell's own triangles (global vertex ids, in mesh order) until
+    // buildDirectCluster consumes them. Empty for every LARGE shell and for a small shell with no
+    // triangles of its own (stray unreferenced position, per computeShellIds) -- both skipped by the
+    // `continue` in the consuming loop below.
     std::vector<std::vector<u32>> smallShellTriangles(shellCount);
     for (usize t = 0; t < triangleCount; ++t) {
         const u32 i0 = mesh.indices[t * 3 + 0], i1 = mesh.indices[t * 3 + 1], i2 = mesh.indices[t * 3 + 2];
@@ -793,27 +649,22 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
     const std::vector<u32> largeIds = splitIntoClusters(mesh, largeIndices, /*level=*/0, dag);
     for (u32 id : largeIds) {
         Cluster& c = dag.clusters[id];
-        // A representative, not necessarily this cluster's ONLY shell (meshopt_buildMeshlets may
-        // merge triangles from several distinct LARGE shells into one meshlet) -- see Cluster::shellId's
-        // comment. smallShellLineage is left at its default (false), which is exact here: every
-        // triangle in this cluster came from largeIndices, and largeIndices never holds a small-shell
-        // triangle, so "large" is correct regardless of which specific shell is named.
+        // A representative, not necessarily this cluster's ONLY shell (meshopt_buildMeshlets may merge
+        // several distinct LARGE shells into one meshlet -- Cluster::shellId). smallShellLineage stays
+        // at its default (false), which is exact: every triangle came from largeIndices, which never
+        // holds a small-shell triangle.
         c.shellId = shellIds.vertexShell[c.vertices[c.triangles[0]]];
     }
 
-    // Small-shell stream: one direct cluster PER small shell (buildDirectCluster, above in this file),
-    // in increasing shellId order -- not the arrival order of some hash container -- so that
-    // buildClusters' output is a deterministic function of `mesh` alone, exactly like every other path
-    // through this file.
+    // Small-shell stream: one direct cluster PER small shell, in increasing shellId order (not hash-
+    // container arrival order), so buildClusters' output is a deterministic function of `mesh` alone.
     for (u32 shell = 0; shell < shellCount; ++shell) {
         const std::vector<u32>& triIndices = smallShellTriangles[shell];
         if (triIndices.empty()) continue;
 
         // A small shell has at most kMaxClusterVertices (64) distinct referenced vertices by
-        // definition (LodDag::isSmallShell), so a linear scan to de-duplicate is a handful of
-        // comparisons per triangle, not a complexity concern -- and it keeps this loop free of another
-        // hash container, which matters here specifically: this function's whole output must be
-        // order-independent of anything BUT `mesh` itself (see the paragraph above).
+        // definition, so a linear de-dup scan is cheap and keeps this loop free of another hash
+        // container -- this function's output must depend on nothing but `mesh` itself (see above).
         std::vector<u32> shellVertices;
         std::vector<u8> localTriangles;
         localTriangles.reserve(triIndices.size());
@@ -845,28 +696,20 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
     const usize vertexCount = mesh.positions.size() / 3;
     constexpr u32 kMaxLevels = 32; // safety cap against a non-converging loop, not an expected case
 
-    // Computed ONCE for the whole hierarchy (this is worldExtentScale(mesh) -- the same public
-    // function ConvertTool calls after this returns), and reused below to rescale every group's
-    // meshopt_SimplifySparse-relative error back into the whole-mesh-relative units Cluster::error is
-    // documented to hold. See the meshopt_simplify call site below for why that rescale exists at
-    // all.
+    // Computed ONCE for the whole hierarchy (worldExtentScale(mesh) -- the same public function
+    // ConvertTool calls after this returns), reused below to rescale every group's
+    // meshopt_SimplifySparse-relative error back into the whole-mesh-relative units Cluster::error
+    // holds. See the meshopt_simplify call site for why that rescale exists.
     const f32 meshScale = worldExtentScale(mesh);
 
     // ---- WHERE THE COOK TIME ACTUALLY GOES ----
     //
-    // NOTHING IN THIS MODULE WAS TIMED. Not one chrono/steady_clock/elapsed anywhere in
-    // modules/trifactor -- yet this file's own header quotes "13m35s/8m40s real cook times a prior
-    // profiling pass reported" and "~98% of a synthetic 498K-triangle mesh's total buildLodHierarchy
-    // time". Those numbers are narrated, not produced by any code here, so nobody could reproduce
-    // them and nobody could tell whether an optimisation had helped.
-    //
-    // THIS EXISTS TO DECIDE A QUESTION RATHER THAN TO DECORATE A LOG. The question is whether the
-    // loops this module actually owns -- appendGlobalTriangles' index gather and groupExtentScale's
-    // position copy -- are worth hand-vectorising, or whether they are lost inside meshopt_simplify,
-    // which is vendored, scalar (zero SIMD intrinsics in simplifier.cpp), and not ours to change.
-    // Optimising the wrong one of those is how effort gets spent for no measurable result, so the
-    // breakdown is split three ways and reported as PERCENTAGES, which is the form the decision
-    // needs.
+    // Before this, nothing in this module was timed (no chrono/steady_clock anywhere in
+    // modules/trifactor), yet the file header quotes cook times and a 98% figure nobody could
+    // reproduce. EXISTS TO DECIDE A QUESTION, NOT DECORATE A LOG: whether the loops this module owns
+    // (appendGlobalTriangles' gather, groupExtentScale's copy) are worth hand-vectorising, or are lost
+    // inside vendored, scalar meshopt_simplify (zero SIMD intrinsics in simplifier.cpp). Reported as
+    // PERCENTAGES, the form that decision needs.
     struct PhaseMs { f64 group = 0, gather = 0, simplify = 0, extent = 0, rest = 0; } phase;
     const auto tick = []() { return std::chrono::steady_clock::now(); };
     const auto msSince = [](std::chrono::steady_clock::time_point t0) {
@@ -882,23 +725,16 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
         const auto groups = groupClusters(dag, current, mesh);
         phase.group += msSince(tGroup);
 
-        // Pass 1: simplify every group. Nothing is written to `dag` yet, so if NO group reduced,
-        // this level can be abandoned cleanly -- `level` stays the DAG's topmost (root) level rather
-        // than growing an identical, pointless level + 1 on top of it.
+        // Pass 1: simplify every group. Nothing is written to `dag` yet, so if NO group reduced, this
+        // level is abandoned cleanly -- `level` stays the DAG's topmost level, no pointless level+1.
         struct PendingGroup {
             std::vector<u32> members;
             std::vector<u32> simplifiedIndices;
             f32 resultError = 0.0f;
-            // TASK STEP 8: this group's small-vs-large-shell LINEAGE, carried forward so Pass 2 below
-            // can tag every cluster it creates -- which is what lets groupClusters (task step 6) make
-            // the SAME bucketing decision again at the NEXT level, without ever falling back to
-            // Cluster::shellId (populated at level 0 only; see its own comment for why that would be
-            // unsafe past level 0). True iff EVERY member of this group is itself small-shell lineage
-            // -- see the computation just above the meshopt_simplify call below, which is also what
-            // decides whether this group keeps LockBorder (task step 7). Two-bucket grouping
-            // guarantees a group's members are homogeneous in this field, so "every member" and "any
-            // member" agree in practice; this is computed as "every member" anyway, matching the
-            // task's own wording, rather than trusting that invariant silently.
+            // TASK STEP 8: small-vs-large-shell LINEAGE, carried forward so Pass 2 tags every cluster
+            // it creates, letting groupClusters bucket the same way one level up (Cluster::shellId is
+            // level-0-only). True iff EVERY member is small-shell lineage (also decides LockBorder,
+            // step 7). Two-bucket grouping keeps members homogeneous, so "every"/"any" agree anyway.
             bool allLargeShell = true;
         };
         std::vector<PendingGroup> pending;
@@ -907,12 +743,9 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
         usize levelIndicesIn = 0, levelIndicesOut = 0;
 
         for (const auto& group : groups) {
-            // Sized once instead of letting push_back inside appendGlobalTriangles grow it by
-            // doubling: this loop runs once per group at every level (thousands of times across a
-            // real hierarchy), and with the O(vertex_count) meshopt_simplify cost above gone, this
-            // reallocation churn stopped being invisible. The exact total is known up front -- every
-            // member cluster's triangles all land in this one merged buffer -- so there's nothing
-            // approximate about sizing to it exactly.
+            // Sized once instead of letting push_back grow it by doubling: this runs once per group
+            // at every level (thousands of times per hierarchy), and the exact total is known up
+            // front -- every member's triangles land in this one merged buffer.
             usize mergedTriIndices = 0;
             for (u32 cid : group) mergedTriIndices += dag.clusters[cid].triangles.size();
             std::vector<u32> mergedIndices;
@@ -921,88 +754,54 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             for (u32 cid : group) appendGlobalTriangles(dag.clusters[cid], mergedIndices);
             phase.gather += msSince(tGather);
 
-            // Target: halve the group's triangle count, floored to a whole number of triangles, with
-            // a floor of 2 triangles (6 indices) so a target of zero is never asked for -- UNLESS the
-            // merged group itself has fewer than 6 indices (a single locked-border triangle, which
-            // happens on real assets: coastal_cliff_04's LOD hierarchy hits this), in which case that
-            // floor would ask meshopt_simplify for MORE indices than the group has, tripping its
+            // Target: halve the triangle count, floored to 6 indices so zero is never asked for --
+            // UNLESS the merged group itself has fewer than 6 (coastal_cliff_04: a single
+            // locked-border triangle), where that floor would exceed meshopt_simplify's
             // `target_index_count <= index_count` precondition (asserts/aborts in debug). Clamp to
-            // the group's own size: such a group cannot be reduced further, so the honest target is
-            // "leave it alone", not a floor that overshoots what exists.
+            // the group's own size instead.
             const usize targetIndexCount =
                 std::min(mergedIndices.size(), std::max<usize>(6, (mergedIndices.size() / 2 / 3) * 3));
 
-            // meshopt_SimplifySparse: WITHOUT this flag, meshopt_simplify pays setup cost
-            // (buildPositionRemap's vertex hash table, vertex_kind/quadric/loop buffers, ...)
-            // proportional to `vertexCount` -- the WHOLE MESH's vertex count -- on EVERY group at
-            // EVERY level, even though a group's own merged buffer references only a few hundred of
-            // them at most (kMaxGroupSize*kMaxClusterVertices = 512). Measured this session with an
-            // isolated single-call comparison (one real 578-triangle/338-referenced-vertex group,
-            // simplified repeatedly against a padded vertex buffer of growing total size): the
-            // current-shape call's cost scaled from 0.05ms to 35.08ms as the MESH's vertex count grew
-            // from 1,000 to 1,000,000 for the IDENTICAL group, while meshopt_SimplifySparse held flat
-            // at 0.03-0.04ms throughout -- i.e. this flag alone turns an O(whole-mesh-vertex-count)
-            // cost that is repeated thousands of times across a hierarchy into an O(group-size) cost
-            // paid once per group. See groupExtentScale's comment just above appendGlobalTriangles
-            // for the one thing this flag changes that this call site has to correct for.
-            // TWO THINGS TRIED HERE AND MEASURED AND REVERTED, so nobody spends the day again.
-            // The problem being attacked: this ladder barely reduces foliage. fir_sapling goes
-            // 433,021 triangles at LOD 0 to 393,157 at its COARSEST of 13 levels -- 9% across the
-            // whole hierarchy -- because LockBorder locks any edge used by exactly one triangle, and
-            // a fir sapling is thousands of separate needle cards whose every edge is a border edge.
+            // meshopt_SimplifySparse: without it, setup cost scales with the WHOLE MESH's vertex
+            // count on every group at every level, though a group's merged buffer references at most
+            // a few hundred (kMaxGroupSize*kMaxClusterVertices = 512). Measured (one real
+            // 578-tri/338-vertex group, mesh vertex count 1,000 to 1,000,000): unflagged scaled
+            // 0.05ms -> 35.08ms for the IDENTICAL group; SimplifySparse held flat at 0.03-0.04ms --
+            // an O(whole-mesh) cost paid thousands of times across a hierarchy becomes O(group-size),
+            // paid once per group. groupExtentScale corrects the one thing this flag changes.
             //
-            // meshopt_SimplifyPrune (meshoptimizer.h:474), which removes whole disconnected
-            // components "regardless of the topological restrictions inside components" and is
-            // documented for exactly this shape of mesh: measured with tools/RelodTool over all 33
-            // demo meshes, fir_sapling's coarsest level went 393,157 -> 391,012. Half a percent.
-            // 5.6% summed across every mesh. Not worth changing cook output for.
+            // THREE THINGS TRIED AGAINST FOLIAGE'S BARELY-REDUCING LADDER (fir_sapling: 433,021 tris
+            // at LOD 0 -> 393,157 at its coarsest of 13 levels, 9% total) -- LockBorder locks any edge
+            // used by exactly one triangle, and a fir sapling is thousands of needle cards whose every
+            // edge is a border edge:
+            //   1. meshopt_SimplifyPrune (meshoptimizer.h:474, removes components "regardless of the
+            //      topological restrictions inside components" -- documented for this exact mesh
+            //      shape): fir_sapling 393,157 -> 391,012 (0.5%; 5.6% summed over 33 demo meshes).
+            //      REVERTED.
+            //   2. target_error = FLT_MAX (used elsewhere in this file so a tight bound doesn't
+            //      "silently return far more triangles than requested"): hangs here -- TrifactorTest
+            //      never returns with no error bound to stop the descent. 1e-2 is load-bearing.
+            //      REVERTED.
+            //   3. Dropping LockBorder outright (SimplifySparse, 1e-2 unchanged): fir_sapling
+            //      393,157 -> 33 (13,121x, 13 levels -> 23); pine_sapling_small 315,120 -> 27
+            //      (14,746x); grass_medium_01 24,514 -> 21 (2 levels -> 14); pine_tree_01 274,734 ->
+            //      1,442 (had NO ladder before); corpus coarsest 1,195,431 -> 75,860 (15.8x, 28/33
+            //      meshes improve; 481ee05) -- confirms LockBorder, not 1e-2, was the real ceiling
+            //      (93.7% recovered vs SimplifyPrune's 5.6%). NOT SHIPPABLE: five solid meshes got
+            //      WORSE (dead_tree_trunk 100->142, dead_tree_trunk_02 700->959, rock_07 218->245,
+            //      rock_09 204->249, rock_moss_set_02 325->842) -- LockBorder was doing its real job
+            //      on a truly solid mesh. REVERTED; must ROUTE instead of remove.
             //
-            // target_error = FLT_MAX, which the OTHER meshopt_simplify call in this file uses with
-            // the comment that a tight bound "would silently return far more triangles than
-            // requested": it does not terminate. TrifactorTest hangs inside buildLodHierarchy with
-            // no error bound to stop the descent, so 1e-2 is load-bearing, not incidental.
+            // TASK STEP 7, THE ACTUAL FIX: LockBorder stays ON iff EVERY member is large-shell lineage
+            // (Cluster::smallShellLineage, propagated -- PendingGroup); OFF only for a group ENTIRELY
+            // small-shell -- safe because step 5 keeps a small-shell cluster inside one shell too
+            // small to be split by a group boundary (LodDag::isSmallShell's comment), and step 6
+            // never mixes the two in one group.
+            // target_error stays 1e-2 (FLT_MAX hangs, above); the risk may not transfer to a
+            // small-shell buffer's much smaller scale, but that has not been swept, so it stays put.
             //
-            // AND A THIRD, WHICH WORKED, and is the reason this comment is no longer a dead end.
-            // Dropping LockBorder here (keeping SimplifySparse, keeping target_error at 1e-2) was
-            // measured with tools/RelodTool over the same 33 demo meshes:
-            //
-            //     fir_sapling         393,157 -> 33          (1.1x -> 13,121x, 13 levels -> 23)
-            //     pine_sapling_small  315,120 -> 27          (1.3x -> 14,746x)
-            //     grass_medium_01      24,514 -> 21          (had TWO levels; now 14)
-            //     pine_tree_01        274,734 -> 1,442       (had ONE level -- no ladder at all)
-            //     corpus coarsest   1,195,431 -> 75,860      (15.8x; 28 of 33 meshes improve)
-            //
-            // So the 1e-2 error bound was NEVER the ceiling -- LockBorder was, exactly as the
-            // paragraph above suspected but could not price. For scale, SimplifyPrune recovered
-            // 5.6% across the same corpus; this recovers 93.7%.
-            //
-            // IT IS NOT SHIPPABLE AS A BARE FLAG REMOVAL, and the same measurement shows why: five
-            // meshes got WORSE, all of them solid rather than shelled -- dead_tree_trunk 100 -> 142,
-            // dead_tree_trunk_02 700 -> 959, rock_07 218 -> 245, rock_09 204 -> 249,
-            // rock_moss_set_02 325 -> 842. On a mesh that IS one connected surface, LockBorder is
-            // doing its real job of holding the group boundary, and removing it lets the simplifier
-            // spend its error budget wrecking seams instead of collapsing interiors. The fix has to
-            // ROUTE: keep this call exactly as it is for groups touching a large shell, and take the
-            // flag off only for buffers that provably contain whole isolated shells and nothing
-            // else.
-            //
-            // TASK STEP 7, THE ACTUAL FIX: LockBorder stays ON iff EVERY member of this group is
-            // large-shell lineage (Cluster::smallShellLineage, propagated -- see PendingGroup's own
-            // comment); it comes OFF only for a group made ENTIRELY of small-shell clusters. This is
-            // the routing task steps 5-6 exist to feed: task step 5 guarantees a small-shell cluster's
-            // triangles belong to exactly one shell too small to ever be split across a group boundary
-            // (LodDag::isSmallShell's own comment), and task step 6 guarantees a group never mixes a
-            // small-shell cluster with a large-shell one -- so "all members small-shell" is exactly
-            // the condition under which dropping LockBorder here cannot cut through a boundary that
-            // still needs protecting. target_error stays at 1e-2 for both branches -- see the header
-            // comment two paragraphs up for why raising it to FLT_MAX does not terminate; an isolated
-            // small-shell group's own buffer is orders of magnitude smaller than the whole-mesh buffer
-            // that hang was measured on, so the risk may not transfer, but that has not been swept and
-            // measured here, so the constant is left where it was proven safe rather than guessed at.
-            //
-            // MEASURED, with tools/RelodTool over the same 33 demo meshes the bare-removal numbers
-            // above came from -- this is the routing collecting the win those numbers priced without
-            // breaking what they broke:
+            // MEASURED, same 33-mesh corpus as the bare-removal numbers -- the win those collected,
+            // minus the five-mesh regression:
             //
             //     mesh                  coarsest before -> after routing   (ladder before -> after)
             //     fir_sapling             393,157 -> 1,969                 ( 1.1x  -> 219.9x )
@@ -1010,47 +809,18 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             //     pine_tree_01            274,734 -> 1,791                 ( 1.0x  -> 153.4x ) *
             //     grass_medium_01          24,514 -> 2,661                 ( 1.0x  ->   9.3x )
             //     corpus coarsest       1,195,431 -> 140,489               ( -- summed, all 33 meshes )
+            //     dead_tree_trunk/_02, rock_07/_09, rock_moss_set_02: BYTE-IDENTICAL to before (100,
+            //     700, 218, 204, 325 -- unchanged), confirmed by diffing RelodTool's per-mesh line.
             //
-            //     dead_tree_trunk             100 -> 100    dead_tree_trunk_02   700 -> 700
-            //     rock_07                     218 -> 218    rock_09              204 -> 204
-            //     rock_moss_set_02            325 -> 325
+            // * pine_tree_01's "before" (274,734, 1 level) is SimplifySparse alone; the cooked .ocmesh
+            //   predates that fix and is unrecooked, and the corpus total sums that stale entry on
+            //   both sides for consistency.
             //
-            // Every one of the five previously-regressed meshes is BYTE-IDENTICAL to what it was
-            // before this routing existed -- same triangle count, same level count, same ladder --
-            // confirmed by diffing RelodTool's own per-mesh output line, not by re-deriving it from
-            // the shell counts. That is the routing's whole point delivering: the corpus-wide win
-            // 481ee05 measured by dropping the flag outright, MINUS the five-mesh regression that
-            // measurement also found.
-            //
-            // * pine_tree_01's "before" here is 274,734 (1 lv, 1.0x), the figure meshopt_SimplifySparse
-            //   alone produces (RelodTool's own "was" column, the currently-cooked .ocmesh on disk,
-            //   still reads 274,734/1 level -- this asset predates that fix too and has not been
-            //   recooked); the corpus-coarsest total above sums RelodTool's "was" column for
-            //   consistency with 481ee05's 1,195,431 reference figure, which carries that same stale
-            //   entry on both sides of the comparison.
-            //
-            // 1,195,431 -> 140,489 does not reach 75,860 (the bare-removal figure), and should not.
-            // Sorted by why, over all 33 meshes (RelodTool's per-mesh shells: line, cross-checked
-            // against its own coarsest-level line for every one of them, not eyeballed):
-            //
-            //   - 14 meshes report ZERO small shells and are therefore UNCHANGED TO THE TRIANGLE, on
-            //     top of the five protected meshes above: bark_debris_01, boulder_01,
-            //     dry_branches_medium_01, nettle_plant, pine_roots, rock_face_01, rock_moss_set_01,
-            //     root_cluster_01, root_cluster_02, single_root, stone_01, tree_stump_01,
-            //     tree_stump_02, weed_plant_02. LockBorder is correctly still protecting the only
-            //     shells they have -- there is nothing for this routing to do here, by the same
-            //     construction that protects the five.
-            //   - 3 meshes (grass_medium_02, moss_01, shrub_sorrel_01) are ALL small shells (0 large)
-            //     and get the FULL benefit, every group on the flag-dropped path: grass_medium_02
-            //     5,476 -> 29 (188x), shrub_sorrel_01 1,807 -> 123 (14.7x). moss_01's own move (116 ->
-            //     92) looks modest only because the mesh itself is tiny (204 triangles, 3 levels) with
-            //     little left to remove, not because any group of it kept LockBorder.
-            //   - 11 meshes MIX small and large shells (celandine_01, dandelion_01, fern_02,
-            //     fir_sapling, grass_medium_01, pine_sapling_small, pine_tree_01, shrub_01, shrub_02,
-            //     shrub_03, shrub_04): only the groups that end up entirely small-shell ever lose the
-            //     flag, and every group still touching the large shell keeps it -- exactly as
-            //     designed, and the reason this corpus total sits between the two reference points
-            //     instead of matching either one.
+            // 1,195,431 -> 140,489 sits between 75,860 (bare-removal) and a no-op, by shell mix: 14
+            // meshes have ZERO small shells (unchanged, on top of the five protected), 3 are ALL small
+            // shells (grass_medium_02 5,476->29, 188x; shrub_sorrel_01 1,807->123, 14.7x; moss_01
+            // 116->92, modest only because the mesh is tiny (204 tri, 3 levels), not because any
+            // group of it kept LockBorder), 11 MIX -- only their all-small-shell groups lose the flag.
             bool allLargeShell = true;
             for (u32 cid : group) {
                 if (dag.clusters[cid].smallShellLineage) { allLargeShell = false; break; }
@@ -1075,13 +845,13 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             levelIndicesOut += simplifiedCount;
 
             // meshopt_SimplifySparse makes `resultError` relative to THIS GROUP's own subset extent
-            // (meshoptimizer.h:471's own doc: "error becomes relative to subset extents"), not the
-            // whole mesh's -- rescale it back to whole-mesh-relative units (what every OTHER path
-            // that touches Cluster::error assumes -- worldExtentScale/toScreenErrorThreshold,
-            // ClusterBuilder.hpp's own comment on the field) before it is compared against another
-            // group's error or propagated to a parent. Absolute error is scale-invariant (subset
-            // extent * subset-relative error == mesh extent * mesh-relative error, both being the
-            // same physical distance), so this is an exact unit conversion, not an approximation.
+            // (meshoptimizer.h:471: "error becomes relative to subset extents"), not the whole
+            // mesh's -- rescale to whole-mesh-relative units (what every other path touching
+            // Cluster::error assumes -- worldExtentScale/toScreenErrorThreshold) before comparing
+            // against another group's error or propagating to a parent. Absolute error is
+            // scale-invariant (subset extent * subset-relative error
+            // == mesh extent * mesh-relative error, the same physical distance), so this is an exact
+            // unit conversion, not an approximation.
             const auto tExtent = tick();
             const f32 groupScale = groupExtentScale(mesh, mergedIndices);
             phase.extent += msSince(tExtent);
@@ -1094,59 +864,41 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
 
         // ---- and a level that BARELY reduced is a level not worth storing ----------------------
         //
-        // `anyReduction` asks whether a single triangle went. That is the right test for "is the
-        // simplifier stuck" and the wrong one for "is another level worth its bytes", and on FOLIAGE
-        // the two come apart badly. A leaf card is a disconnected quad, so a plant is thousands of
-        // separate shells that are almost entirely boundary edge and have nothing to collapse; each
-        // level sheds a handful of triangles, never zero. The loop then ran all the way to
-        // kMaxLevels -- whose own comment calls that "a safety cap against a non-converging loop,
-        // not an expected case" -- and stored thirty-odd near-identical copies of the whole mesh.
+        // `anyReduction` is right for "is the simplifier stuck" but wrong for "is another level worth
+        // its bytes": on FOLIAGE a leaf card is a disconnected quad, so a plant is thousands of shells
+        // almost entirely boundary edge, each level shedding a handful of triangles but never zero, so
+        // the loop ran to kMaxLevels storing thirty-odd near-identical copies of the mesh. MEASURED on
+        // Intel's Jungle Ruins: JR_riverforest cooked an 845 MB .ocmesh for 998,981 triangles (~846
+        // bytes/tri vs ~80 for vertex+index streams alone); JR_grass_B used 24 extra levels to remove
+        // 15% of one small mesh (7,842 -> 6,668 tris).
         //
-        // MEASURED, on Intel's Jungle Ruins: JR_riverforest cooked to an 845 MB .ocmesh for 998,981
-        // triangles, about 846 bytes per triangle where the vertex and index streams together
-        // account for roughly 80. JR_grass_B's ladder read "25 level(s), 7842 tris at LOD0 -> 6668
-        // tris at the coarsest": twenty-four extra levels to remove 15% of one small mesh.
-        //
-        // AN EIGHTH IS THE BAR, and it is deliberately generous. A ladder earns its bytes when each
-        // rung is meaningfully cheaper than the one below it; the classic target is half. Requiring
-        // only 12.5% still admits every solid mesh's ladder -- those halve comfortably, and stop
-        // when meshopt genuinely cannot reduce, which `anyReduction` already catches -- while
-        // refusing the case this exists for: a level that costs a full copy of the mesh to save a
-        // rounding error.
-        //
-        // THE LEVEL JUST BUILT IS KEPT. It did reduce, and it is the first rung to fail the test, so
-        // it is the last one that could be worth having; what stops is going round again. Measured
-        // BEFORE Pass 2 and acted on after it, so the decision is about the level as a whole rather
-        // than about whichever group happened to be simplified last.
+        // AN EIGHTH IS THE BAR, deliberately generous (classic ladder target is half): still admits
+        // every solid mesh's ladder while refusing a level that costs a full mesh copy to save a
+        // rounding error. THE LEVEL JUST BUILT IS KEPT (it did reduce, first rung to fail); measured
+        // BEFORE Pass 2, acted on after, so the decision is about the level, not the last group.
         constexpr f32 kMinLevelReduction = 0.125f;
         const bool converged =
             levelIndicesIn > 0 &&
             f32(levelIndicesIn - levelIndicesOut) / f32(levelIndicesIn) < kMinLevelReduction;
 
-        // Pass 2: every group produced SOMETHING usable (even groups that individually did not
-        // reduce still re-split into a valid, if unchanged, next level -- consistent DAG structure
-        // matters more here than trimming one group's non-reduction as a special case).
+        // Pass 2: every group produced SOMETHING usable -- even a non-reducing group re-splits into
+        // a valid, unchanged next level; consistent DAG structure matters more than special-casing it.
         const u32 newLevel = level + 1;
         for (const auto& pg : pending) {
             const std::vector<u32> newIds = splitIntoClusters(mesh, pg.simplifiedIndices, newLevel, dag);
 
-            // Error monotonicity is enforced EXPLICITLY here, not assumed from meshopt_simplify's
-            // result_error: every new cluster's error is the max of (a) this group's own
-            // simplification error and (b) the largest error already recorded on any child it
-            // replaces. (b) alone is what makes it monotone across the DAG edge; (a) is what makes
-            // it reflect the work this level actually did.
+            // Error monotonicity enforced EXPLICITLY, not assumed from result_error: each new
+            // cluster's error is max(this group's own simplification error, largest error already on
+            // any child replaced) -- the former reflects this level's own work, the latter makes it
+            // monotone across the DAG edge.
             f32 childMaxError = 0.0f;
             for (u32 cid : pg.members) childMaxError = std::max(childMaxError, dag.clusters[cid].error);
             const f32 propagatedError = std::max(pg.resultError, childMaxError);
 
             for (u32 parentId : newIds) {
                 dag.clusters[parentId].error = propagatedError;
-                // TASK STEP 8: carry the group's small-vs-large-shell lineage forward onto every
-                // cluster it produced, so groupClusters can bucket THIS level's output correctly when
-                // it runs again one level up -- without this, Cluster::smallShellLineage would stay at
-                // its default (false/large) for every cluster past level 0, which groupClusters would
-                // read as "large-shell" regardless of what actually produced it. See PendingGroup's own
-                // comment for why this field, not a re-derivation from shellId, is what gets read.
+                // TASK STEP 8: carry lineage forward so groupClusters buckets this output correctly
+                // one level up -- without it, smallShellLineage defaults to false/large past level 0.
                 dag.clusters[parentId].smallShellLineage = !pg.allLargeShell;
                 for (u32 childId : pg.members) {
                     dag.clusters[parentId].children.push_back(childId);
@@ -1154,24 +906,19 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
                 }
             }
 
-            // ---- STAGE 4: the streaming topology this SAME pass also has everything it needs to
-            // produce -- both pg.members (the children this group replaced) and newIds (what it
-            // produced) are in scope right here, with the full group geometry, which is exactly what
-            // Cluster::fallbackAncestorId's own comment says this must be decided with rather than
-            // deferred to a runtime that only ever sees one cluster id at a time. Skipped only if
-            // newIds somehow ended up empty (a group's simplification collapsing to nothing has never
-            // been observed on this engine's demo corpus -- see this file's own header table -- and
-            // nothing above this line rules it out for a pathological input; there is no principled
-            // ClusterGroupNode to record for zero output clusters, and pg.members would already fail
-            // validateLodDag's "every non-root cluster has a parent" check in that case, same as
-            // before this stage existed).
+            // ---- STAGE 4: this SAME pass has everything needed for the streaming topology too --
+            // pg.members and newIds are both in scope with full group geometry, which
+            // Cluster::fallbackAncestorId's comment says this must be decided with, not deferred to a
+            // runtime seeing one cluster id at a time. Skipped only if newIds ended up empty (never
+            // observed here, though not proven impossible for a pathological input; there is no
+            // principled group node for zero output clusters, and pg.members would already fail
+            // validateLodDag's parent check anyway).
             if (!newIds.empty()) {
-                // A TRUE sphere-of-spheres over pg.members' OWN, PRE-simplification bounds (mergeSphere,
-                // above in this file) -- never over the group's own (coarser, post-simplification)
-                // clusters, which is the mistake ClusterGroupNode::sphereCenter's own comment
-                // (ClusterBuilder.hpp) spends a paragraph on. Seeded with the first child's own sphere
-                // rather than a degenerate (origin, 0) starting point, so a single-member group's node
-                // gets that child's EXACT sphere back, not an artifact of the seed.
+                // A TRUE sphere-of-spheres over pg.members' OWN, PRE-simplification bounds
+                // (mergeSphere above) -- never the group's own coarser, post-simplification clusters
+                // (the mistake ClusterGroupNode::sphereCenter's comment warns about). Seeded with the
+                // first child's own sphere, not a degenerate (origin, 0), so a single-member group's
+                // node gets that child's EXACT sphere back.
                 Vec3 groupCenter = dag.clusters[pg.members[0]].bounds.sphereCenter;
                 f32  groupRadius = dag.clusters[pg.members[0]].bounds.sphereRadius;
                 for (usize mi = 1; mi < pg.members.size(); ++mi) {
@@ -1184,10 +931,9 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
                 node.level        = newLevel;
                 node.sphereCenter = groupCenter;
                 node.sphereRadius = groupRadius;
-                // CONTIGUOUS by construction (see ClusterGroupNode::ownClusterRange's own comment):
-                // newIds is exactly what the splitIntoClusters call three lines up just appended to
-                // dag.clusters, back to back, so [newIds.front(), newIds.front()+newIds.size()) names
-                // precisely this group's own output and nothing else's.
+                // CONTIGUOUS by construction (ClusterGroupNode::ownClusterRange): newIds is exactly
+                // what splitIntoClusters just appended to dag.clusters, back to back, so
+                // [newIds.front(), newIds.front()+newIds.size()) names precisely this group's output.
                 node.ownClusterStart   = newIds.front();
                 node.ownClusterCount   = static_cast<u32>(newIds.size());
                 node.childClusterStart = static_cast<u32>(dag.groupChildren.size());
@@ -1218,9 +964,9 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
         if (converged) break;
     }
 
-    // ONE LINE, ONCE PER COOKED MESH, AS PERCENTAGES -- which is the form the only decision this
-    // supports actually needs: is any loop this module owns worth hand-vectorising, or is it all
-    // inside vendored meshopt_simplify? A breakdown in milliseconds alone would not answer that.
+    // ONE LINE PER COOKED MESH, AS PERCENTAGES: the form the only decision this supports needs -- is
+    // any loop this module owns worth hand-vectorising, or is it all inside vendored meshopt_simplify?
+    // Milliseconds alone would not answer that.
     {
         const f64 whole = msSince(tWhole);
         phase.rest = whole - (phase.group + phase.gather + phase.simplify + phase.extent);
@@ -1307,13 +1053,12 @@ ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag) 
                                                         std::to_string(parentId) + " with smaller error " +
                                                         std::to_string(p.error));
 
-            // Acyclic proof: every DAG edge is added by buildLodHierarchy going from level k to
-            // level k+1 (see splitIntoClusters's call sites -- there are exactly two, buildClusters
-            // at level 0 and buildLodHierarchy at level+1, and only the latter ever records an
-            // edge). `level` is therefore a topological order by construction; checking that every
-            // edge strictly increases under it, as done here, is a complete and sufficient
-            // acyclicity proof (a graph with a total order that strictly increases along every edge
-            // cannot contain a cycle) -- not a shortcut for a DFS that was skipped.
+            // Acyclic proof: every DAG edge is added by buildLodHierarchy going level k to k+1
+            // (splitIntoClusters has exactly two call sites -- buildClusters at level 0, this one --
+            // and only this one records an edge), so `level` is a topological order by
+            // construction. Checking every edge strictly increases under it is a complete acyclicity
+            // proof (a total order strictly increasing along every edge cannot cycle), not a
+            // shortcut for a skipped DFS.
             if (p.level <= c.level)
                 report.fail("acyclic", "cluster " + std::to_string(c.id) + " (level " + std::to_string(c.level) +
                                             ") has parent " + std::to_string(parentId) + " at level " +
@@ -1331,16 +1076,13 @@ ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag) 
     return report;
 }
 
-// Containment tolerance for validateClusterHierarchy's sphere check, below. mergeSphere's arithmetic
-// is exact in the mathematical sense (no truncation, just floating-point rounding across at most
-// kMaxGroupSize-1 (7) sequential merges), so this only needs to absorb accumulated f32 rounding, not
-// a real algorithmic slop -- but a fixed epsilon like the 1e-6f error-monotonicity checks elsewhere
-// in this file use would be wrong at this function's scale: those compare meshopt's own
-// mesh-relative error units (near [0,1]), while sphere radii/centres here are in the SAME absolute
-// world units (cm) real assets ship in, which can be centimetres for a small prop or thousands of
-// centimetres for a landscape chunk. Scaling the tolerance to the sphere's own radius keeps this
-// correct at both ends: never so tight that ordinary f32 rounding on a large sphere false-flags, and
-// never so loose that it would paper over a real containment bug on a tiny one.
+// Containment tolerance for validateClusterHierarchy's sphere check. mergeSphere's arithmetic is
+// exact (only f32 rounding across at most 7 sequential merges), so this only absorbs accumulated
+// rounding -- but a FIXED epsilon like this file's 1e-6f error checks would be wrong here: those
+// compare mesh-relative error (near [0,1]), while sphere radii/centres are absolute world units (cm),
+// centimetres to thousands. Scaling to the sphere's own radius stays correct at both ends: never so
+// tight that f32 rounding on a large sphere false-flags, never so loose it hides a real bug on a
+// tiny one.
 constexpr f32 kContainmentEpsilonRel = 1e-4f;
 constexpr f32 kContainmentEpsilonAbs = 1e-3f;
 
@@ -1376,8 +1118,7 @@ bool validateClusterHierarchy(const LodDag& dag, std::string* why) {
         }
     }
 
-    // ---- every group node's sphere GENUINELY CONTAINS every child cluster's own sphere, checked
-    // NUMERICALLY -- and every range a node carries is in bounds for what it indexes into ----------
+    // ---- every group node's sphere GENUINELY CONTAINS every child's sphere; every range is in bounds
     for (const ClusterGroupNode& g : dag.groupNodes) {
         if (u64(g.ownClusterStart) + g.ownClusterCount > dag.clusters.size()) {
             if (why) *why = "group " + std::to_string(g.id) + "'s ownClusterRange runs past " +
@@ -1436,9 +1177,7 @@ bool validateClusterHierarchy(const LodDag& dag, std::string* why) {
         }
     }
 
-    // ---- and the converse: every cluster's ownerGroupId is valid FOR ITS OWN LEVEL -- fmt::kInvalidClusterId
-    // at level 0 (never produced by a group -- see Cluster::ownerGroupId's own comment), a real group
-    // id at THAT cluster's own level for level >= 1 ----------------------------------------------
+    // ---- converse: ownerGroupId is valid for its level -- kInvalidClusterId at level 0, a real group id at level >= 1
     for (const Cluster& c : dag.clusters) {
         if (c.level == 0) {
             if (c.ownerGroupId != fmt::kInvalidClusterId) {
@@ -1571,25 +1310,20 @@ bool validateClusterErrorBounds(const LodDag& dag, const std::vector<ClusterErro
 
 namespace {
 
-// Global cluster id (dag.clusters index) -> the on-disk, LEVEL-LOCAL index every OcMeshMeshlet
-// reference (fallbackAncestorId) and OcMeshClusterGroup range (ownClusterRange, and every value
-// ClusterGroupChildren[] holds) uses. Valid because a level's cluster ids are a CONTIGUOUS,
-// increasing range by construction -- see ClusterGroupNode::ownClusterRange's own comment
-// (ClusterBuilder.hpp) for why: every cluster at a given level is pushed to dag.clusters back to
-// back (either by buildClusters for level 0, or by one splitIntoClusters call per group in
-// buildLodHierarchy's Pass 2 for level >= 1), so dag.levels[level] as a WHOLE is exactly
-// [dag.levels[level].front(), dag.levels[level].front() + dag.levels[level].size()).
+// Global cluster id -> the on-disk, LEVEL-LOCAL index OcMeshMeshlet's fallbackAncestorId and
+// OcMeshClusterGroup's ownClusterRange/ClusterGroupChildren[] use. Valid because a level's cluster
+// ids are a CONTIGUOUS range by construction (ClusterGroupNode::ownClusterRange): every cluster at a
+// level is pushed to dag.clusters back to back (buildClusters at level 0, buildLodHierarchy's Pass 2
+// per level above), so dag.levels[level] is exactly [front(), front() + size()).
 u32 toLevelLocalIndex(const LodDag& dag, u32 globalClusterId) {
     const u32 level = dag.clusters[globalClusterId].level;
     return globalClusterId - dag.levels[level].front();
 }
 
-// Per-level ClusterGroupNode::id bookkeeping, the group-side counterpart to dag.levels above --
-// LodDag has no `groupLevels` array the way it has `levels`, so this is built with one pass over
-// dag.groupNodes (cheap: at most a few thousand groups even on this engine's largest demo mesh,
-// computed once per packLodDag call, not per level). Group ids are contiguous within a level for the
-// identical reason cluster ids are: buildLodHierarchy's Pass 2 pushes one ClusterGroupNode per group,
-// in order, for a WHOLE level before the outer loop ever advances to the next one.
+// Per-level ClusterGroupNode::id bookkeeping, the group-side counterpart to dag.levels -- built with
+// one pass over dag.groupNodes (cheap: a few thousand groups at most). Group ids are contiguous
+// within a level for the same reason cluster ids are: Pass 2 pushes one node per group, in order, for
+// a WHOLE level before advancing.
 struct GroupLevelIndex {
     std::vector<u32> firstId;   // per level; fmt::kInvalidClusterId if that level has no group nodes
     std::vector<u32> count;     // per level; 0 if none
@@ -1611,16 +1345,12 @@ u32 toGroupLocalIndex(const LodDag& dag, const GroupLevelIndex& groupIdx, u32 gl
     return globalGroupId - groupIdx.firstId[level];
 }
 
-// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape. LIFTED FROM
-// tests/formats/src/ConvertTool.cpp's own toMeshlets (see packLodDag's doc comment in
-// ClusterBuilder.hpp for why this now lives here instead) -- byte-for-byte the same conversion for
-// every field this stage does not touch, so the corpus numbers this task measured with the old
-// ConvertTool-private copy still apply to this one. `errorBounds` is
-// computeClusterErrorBounds(dag, scale)'s output, indexed by Cluster::id exactly like dag.clusters --
-// this is where ownError/parentError cross from Trifactor's Cluster into Formats' OcMeshMeshlet, same
-// as it always was. `groupIdx` is indexGroupsByLevel(dag)'s output, needed only to translate
-// ownerGroupId (fallbackAncestorId translates through toLevelLocalIndex alone, since it names a
-// CLUSTER, not a group).
+// Converts one LOD level of a DAG into the on-disk OcMeshMeshlet shape. LIFTED FROM ConvertTool.cpp's
+// own toMeshlets (packLodDag's doc comment in ClusterBuilder.hpp), byte-for-byte the same conversion,
+// so corpus numbers measured against the old copy still apply here. `errorBounds` is
+// computeClusterErrorBounds(dag, scale)'s output, indexed by Cluster::id -- where
+// ownError/parentError cross into Formats' OcMeshMeshlet. `groupIdx` translates ownerGroupId only
+// (fallbackAncestorId names a CLUSTER, so it goes through toLevelLocalIndex alone).
 std::vector<fmt::OcMeshMeshlet> toMeshlets(const LodDag& dag, u32 level,
                                             const std::vector<ClusterErrorBounds>& errorBounds,
                                             const GroupLevelIndex& groupIdx) {
@@ -1713,9 +1443,9 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
     }
 
     // Same scale computation ConvertTool's addMeshlets always made, now made once here instead of by
-    // every caller that wants to pack a DAG -- worldExtentScale reads mesh.positions/vertexCount only,
-    // never mesh.indices/submeshes/materialSlots/joints/weights, which is what lets a caller (RelodTool's
-    // write path) hand this a full copy of an original mesh and trust every OTHER stream stays untouched.
+    // every caller. worldExtentScale reads mesh.positions/vertexCount only, never
+    // indices/submeshes/materialSlots/joints/weights, so a caller (RelodTool's write path) can hand
+    // this a full mesh copy and trust every OTHER stream stays untouched.
     const f32 scale = worldExtentScale(mesh);
 
     std::string monoWhy;
@@ -1724,10 +1454,9 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
         return false;
     }
 
-    // ownError/parentError -- computed once for the whole DAG, then validated BEFORE anything is
-    // packed: a violation here is exactly the "holes in the mesh" failure mode the local cut test
-    // cannot detect on its own, so it must fail the cook loudly rather than reach a file. Same
-    // ordering addMeshlets always used.
+    // ownError/parentError computed once for the whole DAG, validated BEFORE anything is packed: a
+    // violation here is the "holes in the mesh" failure mode the local cut test cannot detect on its
+    // own, so it must fail the cook loudly rather than reach a file. Same ordering addMeshlets used.
     const std::vector<ClusterErrorBounds> errorBounds = computeClusterErrorBounds(dag, scale);
     std::string boundsWhy;
     if (!validateClusterErrorBounds(dag, errorBounds, &boundsWhy)) {
@@ -1735,10 +1464,9 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
         return false;
     }
 
-    // STAGE 4: the streaming topology's own correctness argument, re-checked here for the identical
-    // reason validateClusterErrorBounds is checked above rather than trusted from whichever caller
-    // built `dag` -- a broken fallbackAncestorId or a group sphere that does not genuinely contain its
-    // children must not reach mesh.coarserLods any more than a broken error bound may.
+    // STAGE 4: the streaming topology's correctness re-checked here for the same reason
+    // validateClusterErrorBounds is checked above rather than trusted from the caller -- a broken
+    // fallbackAncestorId or non-containing group sphere must not reach mesh.coarserLods either.
     std::string hierarchyWhy;
     if (!validateClusterHierarchy(dag, &hierarchyWhy)) {
         if (why) *why = "cluster hierarchy invalid: " + hierarchyWhy;
@@ -1754,19 +1482,17 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
         lod.indices  = toIndices(dag, level);
         lod.meshlets = toMeshlets(dag, level, errorBounds, groupIdx);
         toGroupNodes(dag, level, groupIdx, lod.groupNodes, lod.groupChildren);
-        // Every cluster newly created at this level shares the SAME propagatedError (buildLodHierarchy
-        // assigns it once per group, to every cluster the group's re-split produced), so max() over
-        // the level is defensive rather than strictly necessary -- it stays correct even if a future
-        // change to buildLodHierarchy ever let that stop being true.
+        // Every cluster newly created at this level shares the SAME propagatedError (assigned once
+        // per group), so max() over the level is defensive, not strictly necessary -- stays correct
+        // if a future buildLodHierarchy change ever lets that stop being true.
         f32 rawError = 0.0f;
         for (u32 cid : dag.levels[level]) rawError = std::max(rawError, dag.clusters[cid].error);
         lod.screenErrorThreshold = toScreenErrorThreshold(rawError, scale);
         mesh.coarserLods.push_back(std::move(lod));
     }
 
-    // PART B: stamp which builder cooked this ladder. Only reached once everything above has
-    // succeeded, matching mesh.meshlets/coarserLods themselves only being reachable on success -- a
-    // failed pack leaves builderVersion exactly as it found it, same as every other stream.
+    // PART B: stamp which builder cooked this ladder. Only reached once everything above succeeded --
+    // a failed pack leaves builderVersion exactly as it found it, same as every other stream.
     mesh.builderVersion = kBuilderVersion;
     return true;
 }
@@ -1784,14 +1510,12 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     for (const u32 i : mesh.indices)
         if (i >= vcount) return fail("an index points past the end of the vertex buffer");
 
-    // ONE SIMPLIFICATION PER SUBMESH, never one across the whole buffer. mesh.submeshes partitions
-    // `indices` into per-material ranges that Runtime/src/GameContent.cpp's buildMeshParts cuts
-    // verbatim, one draw per material. meshopt_simplify sees positions only, so one pass over the
-    // whole buffer shuffled triangles between those ranges and shrank the buffer under an unchanged
-    // table: buildMeshParts dropped the ranges that now overshot, gave up on splitting, and drew the
-    // whole mesh under slot 0 -- NewSponza's curtains, cloth plus a metal_door primitive in one mesh,
-    // went dark and glossy under the metal after --lod 0.25. Simplifying each range on its own
-    // keeps every triangle in its own material; the table is rewritten below to match.
+    // ONE SIMPLIFICATION PER SUBMESH, never across the whole buffer: meshopt_simplify sees positions
+    // only, so simplifying in one pass shuffled triangles between mesh.submeshes' per-material ranges
+    // under an unchanged table -- buildMeshParts (Runtime/src/GameContent.cpp, one draw per material)
+    // dropped the overshooting ranges and drew the whole mesh under slot 0 (NewSponza's
+    // curtains+cloth+metal_door mesh went dark/glossy after --lod 0.25). Simplifying each range on
+    // its own keeps every triangle in its material; table rewritten below to match.
     if (mesh.submeshes.size() > 1) {
         std::string partWhy;
         if (!fmt::submeshesPartitionIndices(mesh, &partWhy)) {
@@ -1800,9 +1524,9 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         }
     }
 
-    // No table, or one submesh (drawn whole whatever its range says -- see fmt::
-    // submeshesPartitionIndices), means nothing to keep apart: the whole buffer is one range, exactly
-    // the old behaviour, and a lone submesh is rewritten below to cover the result.
+    // No table, or one submesh (drawn whole regardless of its range -- fmt::submeshesPartitionIndices)
+    // means nothing to keep apart: the whole buffer is one range, the old behaviour; a lone submesh
+    // is rewritten below to cover the result.
     struct Range { usize start, count; };
     std::vector<Range> ranges;
     if (mesh.submeshes.size() <= 1) {
@@ -1812,13 +1536,11 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         for (const fmt::OcMeshSubmesh& s : mesh.submeshes) ranges.push_back({s.indexStart, s.indexCount});
     }
 
-    // MATERIAL BORDERS ARE LOCKED, or separate simplification cracks the mesh open along them. Where
-    // two submeshes meet (trim welded to cloth, two fabric panels sewn together), each range sees
-    // that seam as its own open border and would collapse it on its own schedule,
-    // so the two sides stop sharing vertices. Every vertex whose POSITION is used by more than one
-    // range is locked -- by position, through the same meshopt_generatePositionRemap
-    // computeShellIds uses, because glTF primitives never share vertex ids, only positions. A true
-    // open border (one range only) stays free to simplify, as it always was.
+    // MATERIAL BORDERS ARE LOCKED, or separate simplification cracks the mesh open where two
+    // submeshes meet: each range would see that seam as its own open border and collapse it on its
+    // own schedule. Every vertex whose POSITION (not index -- glTF primitives never share those) is
+    // used by more than one range is locked, via the same meshopt_generatePositionRemap
+    // computeShellIds uses. A true open border (one range only) stays free to simplify.
     std::vector<u8> lock;
     if (ranges.size() > 1) {
         std::vector<u32> posRemap(vcount);
@@ -1877,10 +1599,10 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         return fail("the simplifier could not get near the requested ratio");
     const usize got = out.size();
 
-    // The reduced index buffer still addresses the ORIGINAL vertex array, so most of those vertices
-    // are now unreferenced. Compact, or the file keeps every vertex of the source mesh and the whole
-    // point -- less data -- is lost while the triangle count alone goes down. Whole-mesh is safe
-    // here: it renumbers vertices and never moves a triangle between submesh ranges.
+    // The reduced index buffer still addresses the ORIGINAL vertex array, so most vertices are now
+    // unreferenced. Compact, or the file keeps every source vertex while only the triangle count goes
+    // down. Whole-mesh compaction is safe: it renumbers vertices and never moves a triangle between
+    // submesh ranges.
     std::vector<u32> remap(vcount);
     const usize newVerts = meshopt_optimizeVertexFetchRemap(remap.data(), out.data(), got, vcount);
 
@@ -1895,18 +1617,14 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         meshopt_remapVertexBuffer(uv.data(), mesh.uvs.data(), vcount, sizeof(f32) * 2, remap.data());
     }
 
-    // THE SKIN STREAMS, and forgetting them made this function unusable on any rigged asset.
-    // positions/normals/uvs were remapped and resized to newVerts while joints/weights kept the OLD
-    // vertex count, so OcMeshData::hasSkin() -- which requires both to be exactly v*4 for the NEW v --
-    // went false, valid() failed, and writeOcMesh refused to save the mesh at all. The visible
-    // symptom was a successful "simplified to 50%" line followed by "mesh has no vertices, no
-    // indices, or mismatched attribute counts", which points at everything except the real cause.
-    //
-    // No blending is needed and none would be correct. meshopt_optimizeVertexFetchRemap does not
-    // merge vertices -- meshopt_simplify already did that, by rewriting the INDEX buffer -- it only
-    // compacts away the vertices no surviving triangle references. Every destination vertex
-    // therefore comes from exactly one source vertex, so its influences carry across unchanged.
-    // Averaging weights here would corrupt a rig that the remap reproduces exactly.
+    // THE SKIN STREAMS: forgetting them made this unusable on any rigged asset -- positions/normals/
+    // uvs remapped to newVerts while joints/weights kept the OLD count, so hasSkin() (both must be
+    // exactly v*4 for the NEW v) went false, valid() failed, and writeOcMesh refused to save -- the
+    // symptom was a misleading "simplified" line followed by "mesh has no vertices, no indices, or
+    // mismatched attribute counts", pointing at everything except the real cause. No blending needed:
+    // meshopt_optimizeVertexFetchRemap only compacts away vertices no surviving triangle references,
+    // so each destination vertex has exactly one source and its
+    // influences carry across unchanged; averaging weights would corrupt the rig.
     std::vector<u16> jnt;
     std::vector<f32> wgt;
     if (mesh.hasSkin()) {
@@ -1934,11 +1652,9 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     mesh.computeBounds();    // positions changed; writeOcMesh recomputes this too, but an in-memory
                               // caller that reads boundsMin/Max before saving deserves a live value
 
-    // Each range was reassembled in table order, so its new place is known exactly. baseVertex /
-    // vertexCount become the importers' own "the whole vertex buffer" form (0, newVerts): indices
-    // stay global, and after compaction any narrower vertex span a table carried (mergeAll writes
-    // one per merged piece) no longer describes anything, and the old count would name vertices
-    // that no longer exist.
+    // Each range was reassembled in table order, so its new place is known exactly. baseVertex/
+    // vertexCount become the importers' "whole vertex buffer" form (0, newVerts): after compaction
+    // any narrower vertex span a table carried no longer describes anything real.
     for (usize i = 0; i < mesh.submeshes.size(); ++i) {
         mesh.submeshes[i].indexStart  = newIndexStart[i];
         mesh.submeshes[i].indexCount  = newIndexCount[i];

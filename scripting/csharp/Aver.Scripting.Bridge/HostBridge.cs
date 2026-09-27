@@ -11,10 +11,8 @@ using System.Text;
 
 using Aver.Framework;
 using Aver.Graph;
-// Assets.ObjectIdOf -- the ONE managed spelling of the engine's fnv1a64. This file used to carry a
-// private copy of the algorithm, which is the thing an asset id must never have two of: Hash.hpp's
-// own comment says it "must match the C# side's spelling in Aver.Scene/Native.cs", and a third
-// spelling here made that sentence untrue.
+// Assets.ObjectIdOf is the ONE managed spelling of the engine's fnv1a64 -- do not add a second
+// copy here; Hash.hpp requires this match the "C# side's spelling" it names in Aver.Scene/Native.cs.
 using Aver.Scene;
 
 namespace Aver.Scripting.Bridge;
@@ -88,51 +86,33 @@ public static class HostBridge
     // is (see DeclareGraphClasses, below) --------------------------------------------------------
 
     // One declared graph class: which file to (re)compile a fresh GraphHost from, per instance, and
-    // whether that graph wants ticking at all (declares an OnStart or OnTick ENTRY). Deliberately NOT
-    // a compiled Graph/delegate cache -- see DispBind's own comment for why every spawned instance
-    // reloads and recompiles the file fresh, exactly the same "each GraphHost gets its own compile"
-    // shape the drone and every other GraphHost caller already has.
+    // whether it wants ticking (OnStart/OnTick ENTRY). Deliberately NOT a cached Graph/delegate --
+    // see DispBind's own comment: every instance reloads/recompiles fresh, like every other GraphHost caller.
     private sealed class GraphClassInfo
     {
         public required string Path;
         public required string Name;
         public required bool Ticks;
 
-        // Raw text of the CLASS record's `view=` attribute (see Graph.ClassView), or null when the
-        // record omitted it. Applied in DispBind, once per spawned instance, to the ancestor's
-        // CameraViewMode -- meaningless (and simply unused) when this class's native ancestor is not
-        // AverCharacter.
+        // Raw text of the CLASS record's `view=` attribute (Graph.ClassView), or null if omitted.
+        // Applied in DispBind to the ancestor's CameraViewMode; unused when the native ancestor isn't AverCharacter.
         public string? View;
 
-        // The class graph's COMPONENT TREE, parsed ONCE here at registration and replayed per
-        // spawned instance in DispBind. Empty for a class that declares no COMP records, which is
-        // every class that predates them.
-        //
-        // Kept here rather than re-read from the GraphHost each bind for a reason worth stating: the
-        // host is reloaded and recompiled from disk per instance (see DispBind's own comment on why),
-        // so reaching through it for this would tie the component tree to that per-instance reparse.
-        // A component tree is a property of the CLASS -- every instance gets the same one -- so it is
-        // read where the class is declared.
+        // The class graph's COMPONENT TREE, parsed ONCE at registration and replayed per spawned
+        // instance in DispBind. Empty for a class with no COMP records. Kept here rather than re-read
+        // from the GraphHost each bind: a component tree is a property of the CLASS, not the instance.
         public required List<GraphComponent> Components;
     }
 
-    // Walks the NATIVE parent chain from `className` (via aver_fw_class_parent, not this graph's OWN
-    // declared-parent string) until it finds a name registered in s_classes, or runs out of chain.
-    // Native rather than a precomputed field on GraphClassInfo, and resolved at BIND time rather than
-    // DECLARE time, because a graph's parent may itself be another graph class not yet declared when
-    // DeclareGraphClasses processes this file (declare order is file-path-sorted, not
-    // parent-before-child) -- exactly the same "resolved by name, not by declare order" contract
-    // aver_fw_class_seal's own flatten() already relies on. By bind time every class -- C# or graph --
-    // that will ever exist this session has been declared and sealed, so the walk cannot dead-end on
-    // an ordering accident.
-    //
-    // THIS IS THE MECHANISM THAT MAKES "CLASS AN_Player Character" PRODUCE A REAL, DRIVABLE CHARACTER:
-    // a graph class carries no C# type of its own, so without this, CharacterMoveForGraph's
-    // Actors.Get(entity) would always resolve null for a graph-declared entity, exactly as it did
-    // before this change (see this method's own probe evidence in the out-of-box design notes). One
-    // C# ancestor at most is constructed -- the NEAREST one -- mirroring single inheritance: a graph
-    // parented to a graph parented to "Character" still finds Character, not some closer non-C# link
-    // in between.
+    // Walks the NATIVE parent chain (aver_fw_class_parent, not this graph's own declared-parent
+    // string) until it finds a name in s_classes, or the chain ends. Resolved at BIND time, not
+    // DECLARE time, since a graph's parent may itself be an as-yet-undeclared graph class (declare
+    // order is file-path-sorted, not parent-before-child) -- matches aver_fw_class_seal's own
+    // "resolved by name" flatten() contract; by bind time every class, C# or graph, has been
+    // declared and sealed, so the walk cannot dead-end on an ordering accident. THE MECHANISM
+    // behind "CLASS AN_Player Character" producing a drivable character: without it,
+    // CharacterMoveForGraph's Actors.Get(entity) resolves null for a graph-declared entity. At
+    // most ONE ancestor is constructed -- the NEAREST -- single inheritance.
     private static Type? FindNativeAncestorType(string className)
     {
         var visited = new HashSet<int>();
@@ -147,15 +127,12 @@ public static class HostBridge
         return null;
     }
 
-    // Declared graph classes, keyed by fnv1a64 of the class name -- the SAME hash native spawn hands
-    // bind(), and the SAME table shape as s_classes just above (a disjoint key space: a class name is
-    // registered as EITHER a C# actor class OR a graph class, never both, since aver_fw_class_declare
-    // is one flat registry by name).
+    // Declared graph classes, keyed by fnv1a64 of the class name (the SAME hash bind() gets); same
+    // table shape as s_classes above, disjoint key space (a class is EITHER a C# actor class or a graph class, never both).
     private static readonly Dictionary<long, GraphClassInfo> s_graphClasses = new();
 
-    // One graph-class INSTANCE: its own GraphHost (so its VAR storage is independent of every other
-    // instance of the same class -- see GraphVarStore's own "two hosts, two stores" comment) and
-    // whether it wants automatic per-frame ticking.
+    // One graph-class INSTANCE: its own GraphHost (independent VAR storage per instance -- see
+    // GraphVarStore's "two hosts, two stores" comment) and whether it ticks automatically per frame.
     private sealed class GraphInstanceLive
     {
         public required GraphHost Host;
@@ -163,25 +140,14 @@ public static class HostBridge
     }
 
     // Every LIVE graph-class instance, keyed by entity -- populated by DispBind, dropped by
-    // DispUnbind. Walked once a frame by GraphTickBoundInstances (see its own comment for why that
-    // walk is UNGATED on aver_fw_play_state(), unlike the C# actor tick buckets above). Deliberately a
-    // SEPARATE table from s_graphs (below): s_graphs is the drone/MCP-harness "a caller manages this
-    // entity's graph by hand" table, ticked only when that caller explicitly calls GraphTick: mixing a
-    // class-spawned instance into it would either double-tick it (once here, once by
-    // GraphTickBoundInstances) or require every existing s_graphs caller to start filtering out
-    // entities it never bound itself.
+    // DispUnbind, walked once a frame by GraphTickBoundInstances (UNGATED, unlike the C# actor tick
+    // buckets above -- its own comment). Deliberately separate from s_graphs (below), the drone/
+    // MCP-harness "manage this entity's graph by hand" table: mixing a class-spawned instance in would double-tick it or force filtering.
     private static readonly Dictionary<int, GraphInstanceLive> s_graphInstances = new();
 
-    // ---- GAP 3: FireEvent's entity-to-GraphHost router ------------------------------------------
-    //
-    // (entity, eventName) pairs this process has already logged a "no live graph" / "no such event"
-    // refusal for, so an OnTick-driven FireEvent aimed at a permanently-dead target warns exactly
-    // ONCE rather than flooding the log every single frame thereafter -- a real hazard the design
-    // phase for this slice named explicitly (a stray FireEvent on an OnTick chain, aimed at a target
-    // that will never exist, is exactly the shape a level author is most likely to actually author by
-    // mistake). Cleared per-entity in DispUnbind: an entity id can be REUSED by a later spawn within
-    // the same session, and a fresh occupant of that id deserves its own first warning, not silence
-    // inherited from whatever used to live there.
+    // ---- GAP 3: FireEvent's entity-to-GraphHost router: (entity, eventName) pairs already warned
+    // "no live graph"/"no such event" for, so a permanently-dead FireEvent target warns ONCE, not
+    // every frame -- cleared in DispUnbind since a reused id deserves its own first warning. --------
     private static readonly HashSet<(int Entity, string EventName)> s_fireWarnedOnce = new();
 
     /// <summary>One discovered [AverHud]: its instance, its display name, and the Draw it promised.</summary>
@@ -246,10 +212,9 @@ public static class HostBridge
             s_context ??= new ScriptLoadContext(
                 AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly) ?? AssemblyLoadContext.Default);
 
-            // Registered BEFORE the enumeration below: a script's private dependency is resolved lazily, at
-            // the first call into the code that needs it, and OnStart runs inside that enumeration. An F#
-            // script assembly sorts ahead of its own FSharp.Core.dll, so a probe list filled afterwards
-            // would be empty at exactly the moment it is needed.
+            // Registered BEFORE the enumeration below: a dependency resolves lazily at first use, and
+            // OnStart runs inside the enumeration. An F# assembly sorts ahead of its own FSharp.Core.dll,
+            // so a probe list filled afterward would be empty exactly when needed.
             s_context.AddProbeDirectory(dir);
 
             foreach (string path in Directory.GetFiles(dir, "*.dll").OrderBy(p => p, StringComparer.Ordinal))
@@ -424,13 +389,12 @@ public static class HostBridge
 
     // ------------------------------------------------------------------ input scheme
 
-    /// <summary>Configures rebindable input for the current project: opens the settings store
-    /// rebinds are saved to/loaded from, then loads (or, with an empty path, unloads) the
-    /// project's .ocinput scheme as a pushed <see cref="InputScheme"/> context. The standalone
-    /// runtime calls it once, right after <see cref="DeclareGraphClasses"/> (GameApp.cpp); the editor
-    /// calls it at every Play start (SandboxPlay.cpp), since a saved .ocinput edit only takes effect
-    /// on a fresh load. Returns the scheme's action count
-    /// (0 with an empty scheme path, meaning "unloaded"), or -1 if the scheme failed to parse.</summary>
+    /// <summary>Configures rebindable input for the current project: opens the settings store rebinds
+    /// save to/load from, then loads (or with an empty path, unloads) the project's .ocinput scheme as
+    /// a pushed <see cref="InputScheme"/> context. The runtime calls it once after
+    /// <see cref="DeclareGraphClasses"/> (GameApp.cpp); the editor calls it at every Play start
+    /// (SandboxPlay.cpp) since a saved edit only takes effect on a fresh load. Returns the scheme's
+    /// action count (0 = unloaded), or -1 if it failed to parse.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int ConfigureInput(IntPtr utf8SchemePath, IntPtr utf8SettingsPath)
     {
@@ -467,10 +431,9 @@ public static class HostBridge
 
     // ------------------------------------------------------------------ graph hosting
 
-    // One GraphHost per driven entity. GraphHost.Load compiles the .ocgraph EXACTLY ONCE (see its
-    // own doc comment) and its default PositionSink already P/Invokes straight into
-    // aver_scene_set_vec against CLocal.position, so a loaded graph drives a real native entity the
-    // moment GraphTick is called -- nothing else in this file needs to know where the numbers go.
+    // One GraphHost per driven entity. GraphHost.Load compiles the .ocgraph EXACTLY ONCE (own doc
+    // comment); its default PositionSink P/Invokes straight into aver_scene_set_vec against
+    // CLocal.position, so GraphTick alone drives the entity -- nothing else here needs to know where the numbers go.
     private static readonly Dictionary<int, GraphHost> s_graphs = new();
 
     /// <summary>Loads and compiles the .ocgraph at <paramref name="utf8Path"/>, binding it to
@@ -502,12 +465,10 @@ public static class HostBridge
         }
     }
 
-    /// <summary>Ticks the graph bound to <paramref name="entity"/>, if any -- a silent no-op
-    /// otherwise, so the native caller does not have to track which entities are graph-driven
-    /// separately from the ones that are not. A tick that throws unloads the graph rather than
-    /// retrying it every frame; RUNTIME ERRORS are not swallowed at the GraphHost.Tick level (see
-    /// its own doc comment) but a per-entity bridge cannot let one bad graph take the whole
-    /// Update() loop down, so it stops here instead.</summary>
+    /// <summary>Ticks the graph bound to <paramref name="entity"/>, if any -- a silent no-op otherwise.
+    /// A tick that throws unloads the graph rather than retrying it every frame: RUNTIME ERRORS are not
+    /// swallowed at the GraphHost.Tick level (own doc comment), but this per-entity bridge cannot let
+    /// one bad graph take the whole Update() loop down.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void GraphTick(int entity, float timeSeconds)
     {
@@ -533,20 +494,14 @@ public static class HostBridge
     }
 
     /// <summary>Raises <paramref name="utf8EventName"/> on whatever graph is bound to
-    /// <paramref name="entity"/>. Returns 1 if a handler ran, 0 otherwise.
-    ///
-    /// THE NATIVE ENTRY TO THE EVENT ROUTER, and deliberately nothing more than that: it unwraps a
-    /// UTF-8 pointer and hands both arguments to <see cref="FireEventRouter"/> -- the SAME closure
-    /// a FireEvent node's compiled IL reaches through GraphEvents.Router. One router, so a footstep
-    /// fired by an animation notify resolves its target exactly as one fired by a graph does
-    /// (s_graphInstances first, then s_graphs), logs on the same once-per-pair rule, and cannot
-    /// drift from it.
-    ///
-    /// It does NOT go through GraphEvents.FireEventForGraph, whose depth guard counts nesting on
-    /// one call stack. A notify is a fresh stack from the native tick, at depth zero by
-    /// construction; anything the handler fires onward enters that guard normally at the node that
-    /// fires it. Routing through it here would have spent one of the eight allowed levels on the
-    /// call that cannot recurse.</summary>
+    /// <paramref name="entity"/>. Returns 1 if a handler ran, 0 otherwise. THE NATIVE ENTRY TO THE
+    /// EVENT ROUTER: unwraps the UTF-8 pointer and hands both arguments to
+    /// <see cref="FireEventRouter"/> -- the SAME closure a FireEvent node's compiled IL reaches
+    /// through GraphEvents.Router, so a notify resolves its target exactly as a graph-fired event
+    /// does, on the same once-per-pair log rule. Does NOT go through GraphEvents.FireEventForGraph:
+    /// its depth guard counts nesting on one call stack, and a notify is a fresh stack at depth
+    /// zero -- routing through it would spend one of the eight allowed recursion levels on a call
+    /// that cannot itself recurse.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int GraphFire(int entity, IntPtr utf8EventName)
     {
@@ -558,9 +513,8 @@ public static class HostBridge
         }
         catch (Exception ex)
         {
-            // NEVER THROWS ACROSS THE ABI. An exception escaping an UnmanagedCallersOnly frame
-            // tears the process down with no usable diagnostic, and this one is called from inside
-            // an animation tick that has no idea it is talking to managed code.
+            // NEVER THROWS ACROSS THE ABI: an exception escaping an UnmanagedCallersOnly frame tears
+            // the process down with no diagnostic, and this is called from an animation tick with no idea it's talking to managed code.
             Emit((int)Log.Level.Error, $"[Graph] entity {entity}: fire threw: {Describe(ex)}");
             return 0;
         }
@@ -569,21 +523,14 @@ public static class HostBridge
     /// <summary>Parses and validates .ocgraph TEXT and reports the first thing wrong with it.
     /// Returns 0 when the graph is valid, 1 when it is not (with <paramref name="buffer"/> filled),
     /// and -1 on a bad argument. Nothing is loaded, compiled, spawned or ticked -- this reads text.
-    ///
-    /// WHY THIS EXPORT EXISTS. Graph.Validate() and OcGraphParser between them carry about thirty
-    /// carefully-worded errors that name the offending node and say what to do -- "Node 'x' is a
-    /// Param node but has no param= attribute naming which parameter it reads", and so on -- and
-    /// THE EDITOR NEVER CALLED ANY OF THEM. It could not: the checks are C# and the editor is C++,
-    /// with no channel between them for this. An author's first sight of any of these messages was
-    /// the engine log at project open, long after the mistake, if they thought to look.
-    ///
-    /// TEXT IN, NOT A PATH. The editor validates the graph currently ON THE CANVAS, including
-    /// unsaved edits; a path would validate the last saved version and quietly disagree with what
-    /// the author is looking at.
-    ///
-    /// OPTIONAL ON THE HOST SIDE (ScriptHost binds it with the same graceful-degradation rule as
-    /// GraphFire), so a bridge built before this existed still boots and the editor simply reports
-    /// that validation is unavailable.</summary>
+    /// WHY THIS EXPORT EXISTS: Graph.Validate()/OcGraphParser carry ~30 specific, actionable errors
+    /// naming the offending node (e.g. "Node 'x' is a Param node but has no param= attribute naming
+    /// which parameter it reads"), but the editor (C++) had no channel to reach them (C#) -- an
+    /// author's first sight was the engine log at project open, long after the mistake. TEXT IN,
+    /// NOT A PATH: the editor validates the graph ON THE CANVAS including unsaved edits; a path
+    /// would validate the last saved version and disagree with what the author is looking at.
+    /// OPTIONAL on the host side (same graceful-degradation rule as GraphFire), so an older bridge
+    /// still boots and the editor just reports validation unavailable.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static unsafe int GraphValidate(IntPtr utf8Text, byte* buffer, int capacity)
     {
@@ -607,10 +554,8 @@ public static class HostBridge
         }
         catch (Exception ex)
         {
-            // NEVER THROWS ACROSS THE ABI, for GraphFire's reason: an exception escaping an
-            // UnmanagedCallersOnly frame tears the process down with no usable diagnostic. Reported
-            // as "not valid" with the exception described, which is true and actionable -- a graph
-            // whose validation crashed is not one to trust.
+            // NEVER THROWS ACROSS THE ABI (GraphFire's reason, above). Reported as "not valid" with
+            // the exception described -- true and actionable: a graph whose validation crashed is not trustworthy.
             try
             {
                 byte[] utf8 = System.Text.Encoding.UTF8.GetBytes($"validation threw: {Describe(ex)}");
@@ -624,14 +569,11 @@ public static class HostBridge
     }
 
     /// <summary>Turns per-node execution recording on or off. The editor arms it ONCE at startup and
-    /// leaves it armed: the record call is a static bool test when off, which is cheaper than tracking
-    /// graph-tab lifetimes to switch it. A packaged game has no editor and never calls this at all, so
-    /// the cost on the hot path of every exec node of every live instance stays at that one test.
-    ///
-    /// (An earlier version said the editor calls this "when a graph tab opens or closes". It does not,
-    /// and the arming site in SandboxApp says so -- this was the third copy of that same wrong claim.)
-    ///
-    /// Returns 1 when the request was applied, 0 if the framework could not be reached.</summary>
+    /// leaves it armed: the record call is a static bool test when off, cheaper than tracking graph-tab
+    /// lifetimes to switch it. A packaged game never calls this, so the hot-path cost per exec node of
+    /// every live instance stays at that one test. (NOT "when a graph tab opens/closes" -- SandboxApp's
+    /// arming site says otherwise; this was the third copy of that wrong claim.) Returns 1 when
+    /// applied, 0 if the framework could not be reached.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int GraphSetHitRecording(int on)
     {
@@ -650,15 +592,11 @@ public static class HostBridge
 
     /// <summary>Writes the nodes of `utf8GraphName` that ran within `maxAgeSeconds` into
     /// <paramref name="buffer"/> as "nodeId:age;nodeId:age", UTF-8 and NUL-terminated. Returns the
-    /// byte count written, or 0.
-    ///
-    /// AGES, NOT TIMESTAMPS, because the two sides do not share a clock -- the managed side counts
-    /// from its own Stopwatch and the editor from ImGui's frame time, and handing over a raw
-    /// timestamp would make the editor subtract two unrelated origins.
-    ///
-    /// BY GRAPH NAME, not by entity: the canvas shows a CLASS, and any instance running a node should
-    /// light that node. It is also the only key available -- a compiled graph's arguments come from
-    /// its own PARAM list, so there is no entity to name at the instrumentation point.</summary>
+    /// byte count written, or 0. AGES, NOT TIMESTAMPS: the two sides do not share a clock (managed
+    /// Stopwatch vs. ImGui frame time), so a raw timestamp would make the editor subtract two
+    /// unrelated origins. BY GRAPH NAME, not entity: the canvas shows a CLASS and any running
+    /// instance should light its node; it is also the only key available, since a compiled graph's
+    /// arguments come from its own PARAM list with no entity at the instrumentation point.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static unsafe int GraphGetHits(IntPtr utf8GraphName, byte* buffer, int capacity, float maxAgeSeconds)
     {
@@ -673,14 +611,10 @@ public static class HostBridge
             if (joined.Length == 0) return 0;
             byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(joined);
             int n = Math.Min(utf8.Length, capacity - 1);
-            // TRUNCATED AT A SEPARATOR, never mid-entry: a half-written "nodeId:0.1" would parse as a
-            // node id nothing on the canvas matches -- silent, rather than visibly wrong.
-            //
-            // ONLY WHEN IT ACTUALLY DID NOT FIT, and getting that wrong cost a debugging round: the
-            // first version walked back to the last ';' unconditionally, so a payload that fitted
-            // perfectly still lost its final entry. The managed unit tests could not catch it -- they
-            // call CollectNodeHits directly and never cross this boundary -- and the symptom was a
-            // node that provably executed (it printed) never lighting up.
+            // TRUNCATED AT A SEPARATOR, never mid-entry (a half-written "nodeId:0.1" would parse as a
+            // node id nothing matches -- silent, not visibly wrong), and ONLY WHEN IT DID NOT FIT: an
+            // earlier version walked back unconditionally and lost a perfectly-fitting payload's last
+            // entry, invisible to unit tests since they call CollectNodeHits directly, not through this.
             if (n < utf8.Length)
             {
                 while (n > 0 && utf8[n - 1] != (byte)';') --n;
@@ -698,24 +632,17 @@ public static class HostBridge
     }
 
     // ------------------------------------------------------------------ graph classes
-    //
-    // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class,
-    // exactly the way DeclareActorClass registers a C# type -- same aver_fw_class_declare /
-    // set_flags(MANAGED) / seal sequence, same class registry the framework spawns out of. What is
-    // different is WHAT gets bound to a spawned instance: DeclareActorClass's DispBind constructs a
-    // C# AverActor; a graph class's DispBind (see its own comment, below) constructs a fresh GraphHost
-    // per instance instead, bound to that instance's own real entity.
+    // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class, via
+    // the same aver_fw_class_declare / set_flags(MANAGED) / seal sequence DeclareActorClass uses for a
+    // C# type. What differs is what a spawned instance binds to: a C# AverActor for a C# class, or a
+    // fresh GraphHost per instance for a graph class (DispBind, its own comment, below).
 
     /// <summary>Scans <paramref name="utf8ContentDir"/> recursively for *.ocgraph files and declares
-    /// one framework class per file that carries a CLASS record (see OcGraphParser's own comment on
-    /// that record, and Graph.ClassName). Returns the number of classes declared. A file with no
-    /// CLASS record is silently skipped here -- it is not this pass's concern; GameApp's own
-    /// discoverProjectGraphs (native side) is what drives a CLASS-less graph, against a synthetic
-    /// entity, exactly as it always has.
-    ///
-    /// SAFE TO CALL WITH NO GRAPHS, OR NO DIRECTORY AT ALL: returns 0, changes nothing else -- the
-    /// same "empty is a no-op, not an error" contract LoadScripts already has for an empty/missing
-    /// scripts directory.</summary>
+    /// one framework class per file that carries a CLASS record (OcGraphParser, Graph.ClassName).
+    /// Returns the number of classes declared. A file with no CLASS record is skipped here --
+    /// GameApp's own discoverProjectGraphs (native side) drives a CLASS-less graph against a synthetic
+    /// entity, as it always has. SAFE WITH NO GRAPHS OR NO DIRECTORY: returns 0, changes nothing --
+    /// same "empty is a no-op" contract LoadScripts has for a missing scripts directory.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int DeclareGraphClasses(IntPtr utf8ContentDir)
     {
@@ -726,16 +653,12 @@ public static class HostBridge
                 return 0;
 
             int declared = 0;
-            // `pawn=` assignments, applied in a SECOND pass below rather than inline. See Graph.ClassPawn:
-            // aver_fw_class_set_default_pawn resolves the name at SEAL, so a GameMode naming a pawn whose
-            // own class had not been declared yet would resolve to 0 and possess nothing -- and which
-            // graphs suffered that would depend on the filename order this very loop sorts to make
-            // deterministic. Deferring until every class exists removes the ordering question entirely.
+            // `pawn=` assignments, in a SECOND pass below (Graph.ClassPawn): aver_fw_class_set_default_pawn
+            // resolves the name at SEAL, so a GameMode naming a not-yet-declared pawn would
+            // non-deterministically possess nothing. Deferring until every class exists avoids that.
             var pendingRoles = new List<(int Handle, string ClassName, string? Pawn, string? Controller, string Path)>();
-            // Sorted, like LoadScripts' own assembly enumeration: deterministic declare order matters
-            // when two files disagree about the same class name (aver_fw_class_declare is idempotent
-            // by name -- the LAST declare wins), so which one wins must not depend on the filesystem's
-            // own enumeration order.
+            // Sorted, like LoadScripts' own assembly enumeration: aver_fw_class_declare is idempotent by
+            // name (LAST declare wins), so which file wins when two disagree must not depend on filesystem order.
             foreach (string path in Directory.EnumerateFiles(dir, "*.ocgraph", SearchOption.AllDirectories)
                                               .OrderBy(p => p, StringComparer.Ordinal))
             {
@@ -749,9 +672,8 @@ public static class HostBridge
 
                 if (!OcGraphParser.Parse(text, out Aver.Graph.Graph graph, out string? parseErr))
                 {
-                    // Only worth a warning when the file LOOKS like it wanted to declare a class --
-                    // a plain parse failure in an ordinary (non-class) graph is discoverProjectGraphs'
-                    // own concern, and it already reports it when it tries to load the same file.
+                    // Only worth a warning when the file LOOKS like it wanted to declare a class -- an
+                    // ordinary (non-class) parse failure is discoverProjectGraphs' own concern, already reported there.
                     if (text.Contains("\nCLASS ", StringComparison.OrdinalIgnoreCase) ||
                         text.StartsWith("CLASS ", StringComparison.OrdinalIgnoreCase))
                         Emit((int)Log.Level.Warn,
@@ -759,11 +681,9 @@ public static class HostBridge
                     continue;
                 }
 
-                // NOT EVERY .ocgraph IS A GAMEPLAY GRAPH. This loop reaches every one under the
-                // project's content directory, and a material graph's nodes mean nothing to this
-                // compiler -- see Graph.DomainKind. Checked before ClassName rather than after so
-                // that a foreign graph carrying a CLASS record (a material graph named after the
-                // material it shades, say) is skipped rather than declared as an actor class.
+                // NOT EVERY .ocgraph IS A GAMEPLAY GRAPH: this loop reaches every one under the content
+                // directory, and a material graph's nodes mean nothing here (Graph.DomainKind). Checked
+                // before ClassName so a foreign graph carrying a CLASS record is skipped, not declared.
                 if (graph.DomainKind != Aver.Graph.GraphDomain.Gameplay)
                     continue;
 
@@ -796,28 +716,18 @@ public static class HostBridge
                 }
 
                 // Ticks (has an OnStart or OnTick ENTRY) decides whether GraphTickBoundInstances drives
-                // this class's instances every frame -- see that method's own comment for why that walk
-                // is a flat, UNGATED-on-play-state loop rather than a tick-group bucket the way a C#
-                // actor class's Ticks/TickGroup pair would be: a graph-only project (this feature's own
-                // reason to exist) never calls aver_fw_begin_play at all (no C# GameMode to find --
-                // see GameApp.hpp's beginPlayIfGameModeDeclared comment), so aver_fw_play_state() would
-                // stay EDITOR forever and a tick-group-routed instance would never once run OnTick --
-                // exactly the "silently inert in exactly the configuration most likely to be the only
-                // gameplay a project has" trap tickProjectGraphs' own comment already names for the
-                // synthetic-entity path. The SAME reasoning applies here, one layer down the stack.
+                // this class's instances every frame -- a flat, UNGATED walk, not a tick-group bucket
+                // (that method's own comment), because a graph-only project never calls
+                // aver_fw_begin_play (no C# GameMode -- GameApp.hpp's beginPlayIfGameModeDeclared), so
+                // aver_fw_play_state() would stay EDITOR forever and OnTick would never run -- the same
+                // trap tickProjectGraphs names for the synthetic-entity path, one layer down.
                 bool ticks = graph.EntryPoints.Any(e => e.EventName == "OnStart" || e.EventName == "OnTick");
 
-                // TWO FILES CLAIMING ONE CLASS NAME IS SAID OUT LOUD. The declare order above is
-                // sorted so that WHICH file wins is deterministic rather than filesystem-dependent,
-                // but determinism is not the same as visibility: without this, both files logged an
-                // identical-looking "declared class" line, the count said two classes were declared,
-                // and only the alphabetically-last graph ever ran. Nothing distinguished that from
-                // two independent classes declaring successfully, so the symptom -- one graph simply
-                // never executing -- looked like a bug in the graph rather than in the naming.
-                //
-                // A warning rather than a refusal: the last-wins behaviour is aver_fw_class_declare's
-                // own (it is idempotent by name), it is deterministic here, and refusing both would
-                // turn a rename-in-progress into a level that cannot load at all.
+                // TWO FILES CLAIMING ONE CLASS NAME IS SAID OUT LOUD: declare order is sorted so which
+                // file wins is deterministic, but without this warning both logged an identical
+                // "declared class" line and only the last graph ran, indistinguishable from success --
+                // the symptom looked like a bug in the graph. A warning, not a refusal: last-wins is
+                // aver_fw_class_declare's own idempotent-by-name behaviour; refusing both would block a rename-in-progress entirely.
                 long classKey = Assets.ObjectIdOf(graph.ClassName);
                 if (s_graphClasses.TryGetValue(classKey, out GraphClassInfo prior))
                     Emit((int)Log.Level.Warn,
@@ -835,19 +745,15 @@ public static class HostBridge
                      $"[Graph] declared class '{graph.ClassName}' (parent '{parent}'{(ticks ? ", ticks" : "")}) from '{path}'");
             }
 
-            // ---- second pass: `pawn=`, now that every class name above exists ----------------------
-            //
-            // Re-sealing is the documented way to do this, not a workaround: aver_fw_class_set_default_pawn
-            // clears `sealed` itself precisely so the name can be (re)resolved, and spawning auto-seals
-            // anyway. Sealing here rather than leaving it to the spawn means a bad name is reported NOW,
-            // by this loop, instead of becoming a GameMode that silently possesses nothing at begin-play.
+            // ---- second pass: `pawn=`, now that every class name above exists --------------------
+            // Re-sealing is documented, not a workaround: aver_fw_class_set_default_pawn clears
+            // `sealed` so the name resolves, and spawning auto-seals anyway -- sealing here reports a
+            // bad name NOW instead of a GameMode silently possessing nothing.
             foreach (var (handle, className, pawnName, controllerName, path) in pendingRoles)
             {
-                // GameMode ONLY. Everywhere else these are meaningless -- ClassRecord::defaultPawn and
-                // ::playerController are read by aver_fw_begin_play off the GameMode class and nowhere
-                // else -- so saying so is more useful than silently doing nothing. A warning, not a
-                // refusal, matching how `view=` on a non-Character class is tolerated: one misapplied
-                // attribute should not cost a project its class.
+                // GameMode ONLY: ClassRecord::defaultPawn/::playerController are read by aver_fw_begin_play
+                // off the GameMode class and nowhere else, so saying so beats silently doing nothing. A
+                // warning, not a refusal -- matches how `view=` on a non-Character class is tolerated.
                 if ((Fw.aver_fw_class_get_flags(handle) & ClassFlags.GameMode) == 0)
                 {
                     Emit((int)Log.Level.Warn,
@@ -884,12 +790,11 @@ public static class HostBridge
                     continue;
                 }
 
-                // THE HALF-WIRED CASE IS CALLED OUT, because it looks correct and does nothing.
-                // aver_fw_begin_play possesses only when it has BOTH ("if (ctrl && pawn)"), and the
-                // built-in PlayerController is ABSTRACT so it cannot be the fallback -- a GameMode with
-                // a pawn and no controller of its own spawns the pawn, never possesses it, and leaves
-                // GameApp's camera following nothing. That is exactly the failure this attribute pair
-                // was added to end, so it must not be reintroduced silently by naming only one of them.
+                // THE HALF-WIRED CASE IS CALLED OUT because it looks correct and does nothing:
+                // aver_fw_begin_play possesses only with BOTH ("if (ctrl && pawn)"), and the built-in
+                // PlayerController is ABSTRACT so it can't be a fallback -- a pawn with no controller
+                // spawns but is never possessed, leaving GameApp's camera following nothing. This
+                // attribute pair exists to end that failure; don't let it silently return.
                 if (!string.IsNullOrEmpty(pawnName) && string.IsNullOrEmpty(controllerName))
                     Emit((int)Log.Level.Warn,
                          $"[Graph] GameMode '{className}' names a pawn but no controller, so the pawn is "
@@ -911,23 +816,19 @@ public static class HostBridge
         }
     }
 
-    /// <summary>Ticks every LIVE graph-class instance (see s_graphInstances) once. Called every frame
-    /// from BOTH composition roots, UNGATED on aver_fw_play_state() -- see DeclareGraphClasses' own
-    /// comment on `ticks` for exactly why: a graph-only project has no C# GameMode to ever begin a
-    /// play session with, so gating this on PLAYING would make graph-as-class silently inert in the
-    /// one configuration it exists for. A per-instance exception unloads just that instance (drops it
-    /// from s_graphInstances) rather than the whole walk, mirroring GraphTick's own per-entity
-    /// isolation.</summary>
+    /// <summary>Ticks every LIVE graph-class instance (s_graphInstances) once. Called every frame from
+    /// BOTH composition roots, UNGATED on aver_fw_play_state() -- see DeclareGraphClasses' own comment
+    /// on `ticks`: a graph-only project has no C# GameMode to begin play with, so gating on PLAYING
+    /// would make graph-as-class silently inert in the one configuration it exists for. A per-instance
+    /// exception unloads just that instance, mirroring GraphTick's own per-entity isolation.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void GraphTickBoundInstances(float dt)
     {
         if (s_graphInstances.Count == 0) return;
 
-        // A SNAPSHOT, not the live table -- mirrors DispTickAll's own reasoning exactly: an instance
-        // destroyed (DispUnbind) earlier in THIS walk must not be ticked, and one spawned during this
-        // walk should tick next frame, not this one. The ReferenceEquals re-check below additionally
-        // catches an entity id reused by a new spawn within the same tick, the identical hazard
-        // DispTickAll's own comment documents.
+        // A SNAPSHOT, not the live table -- mirrors DispTickAll's own reasoning: an instance destroyed
+        // (DispUnbind) earlier in THIS walk must not be ticked, and one spawned during it ticks next
+        // frame. The ReferenceEquals re-check also catches an entity id reused within the same tick.
         var snapshot = s_graphInstances.ToArray();
         foreach (var kv in snapshot)
         {
@@ -1087,17 +988,13 @@ public static class HostBridge
             // Resolves an Entity back to its live managed instance. Disabled instances resolve to null.
             Actors.Resolver = handle =>
                 s_actorsByEntity.TryGetValue(handle, out ActorLive? live) && !live.Disabled ? live.Instance : null;
-            // GAP 3: installs the FireEvent router -- see GraphEvents.Router's own doc comment for why
-            // this indirection exists at all (Aver.Graph cannot see this file). Mirrors Actors.Resolver
-            // immediately above in shape (a closure over this file's own tables, installed once at
-            // bootstrap) but checks TWO tables, in a deliberate order: s_graphInstances (a class-
-            // spawned instance's own GraphHost -- see the "graph classes" region above) FIRST, then
-            // s_graphs (the drone/MCP-harness/project-graph table -- see the "graph hosting" region).
-            // Collision between the two is structurally impossible for GameApp's own project graphs
-            // (GameApp.discoverProjectGraphs keys s_graphs with strictly NEGATIVE synthetic ids, never
-            // a real entity), but SandboxApp's own graph-driven drone CAN legitimately hold a real,
-            // positive entity id in s_graphs, so the order is still a real, stated choice: a class-
-            // spawned instance's own host wins if an id were ever to appear in both.
+            // GAP 3: installs the FireEvent router (GraphEvents.Router's own comment says why --
+            // Aver.Graph cannot see this file). Mirrors Actors.Resolver in shape, but checks TWO
+            // tables in order: s_graphInstances (a class-spawned instance's own GraphHost -- "graph
+            // classes" region above) FIRST, then s_graphs ("graph hosting" region). Collision is
+            // structurally impossible for GameApp's project graphs (discoverProjectGraphs keys
+            // s_graphs with NEGATIVE synthetic ids), but SandboxApp's drone CAN hold a real positive
+            // id there too, so the order is a real choice: a class-spawned instance's host wins if an id ever appears in both.
             GraphEvents.Router = FireEventRouter;
             InstallGraphVarProvider();
         }
@@ -1141,26 +1038,17 @@ public static class HostBridge
     }
 
     // ================================================================== graph-VAR persistence
-    //
-    // A SEPARATE provider pair from ManagedDispatch above, deliberately: this answers a save, not an
-    // actor lifecycle event, and reuses aver_fw_set_save_provider/aver_fw_set_anim_curve_provider's
-    // OWN shape (framework_abi.h) -- a small, independently-installable trio -- rather than growing
-    // ManagedDispatch's versioned struct for a concern that has nothing to do with bind/tick/endPlay.
-    // Nothing stops the INSTALLER being C# here where every prior "set_provider" call in this engine
-    // happens to be C++-to-C++: the mechanism (a plain cdecl function pointer plus a void* user, with
-    // a null provider answering 0/false) does not care which language calls it, only that ONE
-    // composition root calls it. See modules/save/include/aver/save/SaveWorld.hpp's own comment on
-    // GraphVarCountFn for why the save module needs this seam at all -- GraphVarStore is pure managed
-    // state with no representation in the native scene.
-    //
-    // SCOPED TO GameInstance: an explicit, later user decision -- VARs persist ONLY for entities
-    // whose class is GameInstance or a subclass, not every graph-hosted entity. All three provider
-    // methods below resolve the host through FindPersistedGraphHost (which layers the class-flag
-    // check on top of FindGraphHost), never FindGraphHost directly.
-    // Routed through Fw.aver_fw_set_graph_var_provider (Aver.Framework/Native.cs), NOT a raw
-    // [DllImport("Aver.Framework")] declared in this assembly -- see that declaration's own comment
-    // for why a bridge-local DllImport resolves to the wrong same-name DLL and fails with
-    // EntryPointNotFoundException despite the native export genuinely existing.
+    // A SEPARATE provider pair from ManagedDispatch above: answers a save, reusing
+    // aver_fw_set_save_provider/aver_fw_set_anim_curve_provider's own small, independently-installable
+    // shape (framework_abi.h) rather than growing ManagedDispatch's struct (GraphVarStore is pure
+    // managed state with no native representation -- SaveWorld.hpp's GraphVarCountFn explains why).
+    // The installer being C# here is fine though every prior set_provider call is C++-to-C++: it's
+    // a plain cdecl function pointer + void* user (null provider answers 0/false), so only ONE
+    // composition root calling it matters, not which language. SCOPED TO GameInstance (explicit,
+    // later user decision): VARs persist ONLY for GameInstance-or-subclass entities, via
+    // FindPersistedGraphHost, never FindGraphHost directly. Routed through
+    // Fw.aver_fw_set_graph_var_provider (Aver.Framework/Native.cs), NOT a raw [DllImport] here --
+    // that resolves to the wrong same-name DLL (EntryPointNotFoundException).
     private static unsafe void InstallGraphVarProvider()
     {
         Fw.aver_fw_set_graph_var_provider(
@@ -1171,10 +1059,9 @@ public static class HostBridge
     }
 
     // A VAR's declared PinType, as the AVER_SCENE_KIND_* the save format's OcSaveField.kind carries
-    // (scene_abi.h) -- NOT the same integer as PinType's own ordinal (Float=0,Int=1,Bool=2 there;
-    // F32=0,I32=3,BOOL=4 here), so this is a real translation, not a cast. -1 for Exec, which a VAR
-    // can never declare (OcGraphParser rejects "VAR ... exec" at parse time) and which every caller
-    // below therefore treats as "this provider has a bug", not a normal refusal.
+    // (scene_abi.h) -- NOT PinType's own ordinal (Float=0,Int=1,Bool=2 there; F32=0,I32=3,BOOL=4
+    // here), a real translation. -1 for Exec: a VAR can never declare it (OcGraphParser rejects
+    // "VAR ... exec" at parse time); callers treat -1 as a bug, not a refusal.
     private static int SceneKindOf(PinType t) => t switch
     {
         PinType.Float => 0,   // AVER_SCENE_KIND_F32
@@ -1186,13 +1073,10 @@ public static class HostBridge
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int GraphVarCountProvider(int entity, IntPtr user)
     {
-        // Graph.Variables, not VarStore: the STORE holds only whatever has been written so far
-        // (nothing, on a freshly-bound instance), while Variables is the DECLARED list -- every VAR
-        // this graph has, in file order, whether or not anything has touched it yet. Capture must see
-        // all of them, seeded default or not, or a save silently omits a variable nobody has written
-        // this session. FindPersistedGraphHost, not FindGraphHost: a non-GameInstance entity reports
-        // zero VARs here, so SaveWorld.cpp's captureGraphVars sees "nothing to capture" for it, exactly
-        // as if it had no GraphHost at all.
+        // Graph.Variables, not VarStore: the STORE holds only what's been written, while Variables is
+        // the DECLARED list -- every VAR in file order, touched or not; capture must see all of them
+        // or a save silently omits one. FindPersistedGraphHost: a non-GameInstance entity reports zero,
+        // so SaveWorld.cpp's captureGraphVars sees it as if it had no GraphHost at all.
         return FindPersistedGraphHost(entity)?.Graph?.Variables.Count ?? 0;
     }
 
@@ -1210,16 +1094,14 @@ public static class HostBridge
         if (kind < 0) return 0;   // unreachable in practice -- see SceneKindOf's own comment
 
         // A caller-owned buffer, not a returned pointer: the name lives in MANAGED memory
-        // (GraphVariable.Name), and handing native code a raw pointer into it would be a GC hazard
-        // the moment anything moved -- the same reason every other string in this file crosses the
-        // ABI by value (aver_scene_get_str) or, here for the first time in this direction, by copy.
+        // (GraphVariable.Name), and a raw pointer into it would be a GC hazard the moment anything
+        // moved -- crosses the ABI by copy, not by value like aver_scene_get_str; the first string here to cross this direction.
         byte[] utf8 = Encoding.UTF8.GetBytes(v.Name);
         if (utf8.Length >= nameBufLen)
         {
-            // A VAR name longer than the buffer -- vanishingly unlikely (63 UTF8 bytes is a very
-            // long identifier) but handled rather than overflowing: this ONE var is skipped: entity
-            // '{}': the SaveWorld.cpp code counts how many at() calls actually succeeded against the
-            // count() this call belongs to, so a caller can tell fewer arrived than were promised.
+            // A VAR name longer than the buffer -- vanishingly unlikely (63 UTF8 bytes is a very long
+            // identifier) but handled, not overflowed: this ONE var is skipped; SaveWorld.cpp counts
+            // at() successes against count() so a caller can tell fewer arrived than promised.
             return 0;
         }
         Marshal.Copy(utf8, 0, (IntPtr)nameBuf, utf8.Length);
@@ -1247,17 +1129,13 @@ public static class HostBridge
         string? name = Marshal.PtrToStringUTF8((IntPtr)namePtr);
         if (string.IsNullOrEmpty(name)) return 0;
 
-        // DECLARED, not merely "the store happens to have this key" -- CreateFor seeds every
-        // declared VAR at Load() time, so a name the store does not recognise is a name this
-        // graph never declared, exactly the "field no longer exists" case applyField (C++) treats
-        // as a dropped field rather than a crash. Matched here for the identical reason.
+        // DECLARED, not merely "the store has this key": CreateFor seeds every declared VAR at Load(),
+        // so an unrecognised name is one this graph never declared -- applyField's (C++) "field no longer exists" case, matched here for the same reason.
         GraphVariable? declared = host!.Graph?.Variables.Find(v => v.Name == name);
         if (declared == null) return 0;
 
-        // A KIND MISMATCH IS A DROPPED FIELD, not a crash -- the same rule applyField (SaveWorld.cpp)
-        // already enforces for ordinary component fields, applied here for the identical reason: a
-        // save whose VAR changed declared type between builds must not reinterpret four saved bytes
-        // as the wrong kind.
+        // A KIND MISMATCH IS A DROPPED FIELD, not a crash -- applyField's (SaveWorld.cpp) rule for
+        // component fields: a save whose VAR changed type between builds must not reinterpret four saved bytes as the wrong kind.
         if (SceneKindOf(declared.Type) != kind) return 0;
 
         switch (declared.Type)
@@ -1270,12 +1148,9 @@ public static class HostBridge
         return 1;
     }
 
-    // Declares the five framework base types as lineage roots. Abstract, and never MANAGED. Then
-    // declares "Character" the SAME way a project's own [AverClass] type would (DeclareActorClass,
-    // below) -- it is the one base row that is CONCRETE rather than an anchor, so it goes through the
-    // real actor-class path (Configure, flags, seal, s_classes registration) instead of DeclareBase's
-    // bare declare-and-seal. See AverCharacter's own class comment for why concretising it, rather than
-    // shipping a second empty subclass, is the shape this engine uses.
+    // Declares the five framework base types as lineage roots (abstract, never MANAGED), then declares
+    // "Character" the SAME way a project's [AverClass] type would (DeclareActorClass, below) -- the
+    // one base row that is CONCRETE (see AverCharacter's own class comment for why).
     private static void DeclareBaseClasses()
     {
         DeclareBase("Actor", "", ClassFlags.Abstract);
@@ -1433,13 +1308,12 @@ public static class HostBridge
 
     private static string BaseRegistryName(Type type)
     {
-        // Checked AHEAD of the plain Pawn arm: AverCharacter itself derives AverPawn, so without this a
-        // character subclass (DemoPawn, say) would resolve to the abstract "Pawn" row and never pick up
-        // "Character" 's own archetype/flags. NOT reached by AverCharacter's OWN declaration: its
-        // [AverClass("Character", Parent = "Pawn")] states an explicit, non-"Actor" parent, so
-        // ResolveClassIdentity never calls BaseRegistryName for it at all -- if it did, this arm would
-        // be reflexively true for AverCharacter itself (IsAssignableFrom accepts the exact type) and
-        // Character would parent to Character. See Character.cs's own comment on that attribute.
+        // Checked AHEAD of the plain Pawn arm: AverCharacter derives AverPawn, so without this a
+        // character subclass would resolve to the abstract "Pawn" row, missing Character's own
+        // archetype/flags. NOT reached for AverCharacter's OWN declaration (its explicit non-"Actor"
+        // parent means ResolveClassIdentity never calls this for it) -- if it did, this arm would be
+        // reflexively true (IsAssignableFrom accepts the exact type) and Character would parent to
+        // itself. See Character.cs's own comment.
         if (typeof(AverCharacter).IsAssignableFrom(type)) return "Character";
         if (typeof(AverPawn).IsAssignableFrom(type)) return "Pawn";
         if (typeof(AverPlayerController).IsAssignableFrom(type)) return "PlayerController";
@@ -1460,9 +1334,8 @@ public static class HostBridge
     // The ten entries of AvManagedDispatch. No managed exception may cross back into native code.
 
     // Constructs the managed instance for a spawned entity. Returns 1 when one was bound. Checks
-    // s_classes (a C# actor class) FIRST and s_graphClasses (a CLASS-declaring .ocgraph) on a miss --
-    // the two share one flat aver_fw_class_declare registry by name, so a class-name hash can only
-    // ever match one of the two tables, never both.
+    // s_classes (C# actor class) FIRST, s_graphClasses (CLASS-declaring .ocgraph) on a miss -- they
+    // share one flat aver_fw_class_declare registry by name, so a hash matches at most one table.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int DispBind(long classNameHash, int entity)
     {
@@ -1489,17 +1362,12 @@ public static class HostBridge
 
             if (s_graphClasses.TryGetValue(classNameHash, out GraphClassInfo? ginfo))
             {
-                // A FRESH GraphHost PER SPAWNED INSTANCE, reloaded and recompiled from disk here --
-                // not a shared compiled-Graph cache reused across instances. This is what gives two
-                // instances of the same graph class independent VAR storage: GraphVarStore.CreateFor
-                // is called once per Load() (see GraphHost's own doc comment on "two hosts, two
-                // stores"), so two separate GraphHost objects are the entire mechanism, with nothing
-                // extra needed here to keep them apart. The cost is re-parsing and re-JITing the same
-                // file once per instance; a hot path spawning many instances of one graph class would
-                // want a compiled-Graph cache shared across GraphHosts (mirroring ClassInfo's own
-                // one-declare-many-bind shape) -- a real, named limitation this slice accepts rather
-                // than hides, since the scale visual scripting targets today is tens of instances, not
-                // thousands.
+                // A FRESH GraphHost PER SPAWNED INSTANCE, reloaded/recompiled from disk, not shared --
+                // gives each instance independent VAR storage (GraphVarStore.CreateFor runs once per
+                // Load(), "two hosts, two stores"). Cost: re-parsing/re-JITing per instance; a hot path
+                // spawning many instances would want a compiled-Graph cache shared across GraphHosts
+                // (mirroring ClassInfo's one-declare-many-bind) -- accepted for now since today's scale
+                // is tens of instances, not thousands.
                 var host = new GraphHost();
                 if (!host.Load(ginfo.Path, out string? err))
                 {
@@ -1508,39 +1376,29 @@ public static class HostBridge
                     return 0;
                 }
 
-                // THE COMPONENT TREE, BEFORE ANY OF THIS INSTANCE'S OWN CODE RUNS. Ordering matters
-                // in one direction only, and this is it: OnStart may reasonably look up a component
-                // by name (a muzzle to fire from, a mesh to hide), so every child has to exist before
-                // the graph gets a chance to ask. Nothing here depends on the graph having run.
-                //
-                // Not conditional on play state, and deliberately: aver_fw_spawn_preview binds without
-                // dispatching OnBeginPlay, so a preview-spawned instance runs no graph code at all --
-                // and it is exactly the case where seeing what the actor is MADE of matters most,
-                // because that is the editor placing one.
+                // THE COMPONENT TREE, BEFORE ANY OF THIS INSTANCE'S OWN CODE RUNS: OnStart may look up
+                // a component by name, so every child must exist first. Not conditional on play state:
+                // aver_fw_spawn_preview binds without OnBeginPlay, so a preview instance runs no graph code -- exactly where seeing what the actor is MADE of matters most.
                 if (ginfo.Components.Count > 0)
                     GraphComponentTree.Build(new Entity(entity), ginfo.Components, ginfo.Name);
 
-                // THE OTHER HALF OF THE GRAPH BRANCH, AND THE REASON A GRAPH CLASS CAN NOW END UP
-                // "BOTH TABLES, ONE ENTITY": if this graph's native parent chain reaches a class C#
-                // actually declared (s_classes) -- today, in practice, "Character" -- construct that
-                // C# type too and bind it into s_actorsByEntity exactly as the plain C# branch above
-                // does, so CharacterMoveForGraph's Actors.Get(entity) finds a real AverCharacter with a
-                // capsule and a view, not nothing. Ticks is hardcoded FALSE here, never info.Ticks off
-                // some ClassInfo -- there is no ClassInfo for an on-the-fly ancestor construction, and
-                // deliberately so: the GRAPH owns the tick (GraphTickBoundInstances), and AverCharacter
-                // overrides no OnTick of its own (see FindNativeAncestorType's own comment) -- a
-                // bound-but-never-bucketed instance is exactly enough for DriveFromGraph to reach.
+                // THE OTHER HALF OF THE GRAPH BRANCH, and why a graph class can end up "BOTH TABLES,
+                // ONE ENTITY": if this graph's native parent chain reaches a C#-declared class
+                // (s_classes) -- today, "Character" -- construct that type too and bind it into
+                // s_actorsByEntity like the plain C# branch, so CharacterMoveForGraph's
+                // Actors.Get(entity) finds a real AverCharacter with a capsule and a view, not
+                // nothing. Ticks is hardcoded FALSE (no ClassInfo for an on-the-fly ancestor): the
+                // GRAPH owns the tick, and AverCharacter overrides no OnTick of its own
+                // (FindNativeAncestorType's own comment) -- this bound-but-never-bucketed instance is enough for DriveFromGraph.
                 Type? ancestorType = FindNativeAncestorType(ginfo.Name);
                 if (ancestorType is not null)
                 {
                     var ancestor = (AverActor)Activator.CreateInstance(ancestorType)!;
                     ancestor.Self = new Entity(entity);
 
-                    // view= is the ONLY CLASS attribute that targets a specific ancestor type rather
-                    // than every actor alike (mesh=/material= apply to any class's entity via the
-                    // native component ABI; this one sets a plain C# field that only AverCharacter
-                    // declares). A graph parented to something other than Character simply has no field
-                    // to set here -- `ancestor is AverCharacter` is that check, not an error path.
+                    // view= is the ONLY CLASS attribute targeting a specific ancestor type (mesh=/
+                    // material= apply to any class via the native component ABI; this sets a plain C#
+                    // field only AverCharacter declares) -- `ancestor is AverCharacter` is that check, not an error.
                     if (!string.IsNullOrEmpty(ginfo.View) && ancestor is AverCharacter character)
                     {
                         if (string.Equals(ginfo.View, "firstperson", StringComparison.OrdinalIgnoreCase))
@@ -1600,36 +1458,21 @@ public static class HostBridge
     {
         if (group < 0 || group >= TickGroupCount) return;
 
-        // GROUP 0 USED TO ALSO CALL EnhancedInput.Update() HERE, refreshing every action's value
-        // before the first tick group ran so every actor in the frame agreed on a "was pressed" edge
-        // regardless of tick order. That call is GONE, not just relocated: EnhancedInput.cs is now a
-        // thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h's NAMED
-        // ACTIONS section, minor 5), which read InputState's cur/prev/mouse/prevMouse ON DEMAND --
-        // the SAME bytes aver_fw_input_key already reads -- so there is no separate per-frame copy
-        // left for this dispatcher to roll. The cross-actor-agreement guarantee above still holds; it
-        // now falls out of every actor reading the identical native state instead of a C#-side
-        // snapshot this method used to take once per frame. See EnhancedInput.cs's own top-of-file
-        // comment for the rest of the reasoning.
-        // A SNAPSHOT, not the live list. The walk used to index s_tickBuckets[group] directly, and
-        // DispUnbind REMOVES from that same list (:808) -- so an actor destroying an actor during
-        // OnTick shifted every later element down one, and the next ++i stepped straight over
-        // whichever actor slid into the vacated slot. It lost a whole frame, silently, and only when
-        // something else had just been destroyed, which is exactly the kind of intermittent that
-        // never gets reported as a bug.
-        //
-        // The `i < bucket.Count` guard the old loop carried prevented the out-of-range read at the
-        // end but did nothing about the skip in the middle.
-        //
-        // Copying also preserves the property the old comment claimed: an actor spawned during
-        // OnTick is not in the snapshot, so it ticks next frame rather than this one.
+        // EnhancedInput needs no per-frame snapshot here: that call is gone, not relocated -- it's now
+        // a thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h NAMED
+        // ACTIONS, minor 5), reading InputState's cur/prev/mouse/prevMouse ON DEMAND (EnhancedInput.cs),
+        // the same bytes aver_fw_input_key reads, so every actor agrees on input state regardless of
+        // tick order. A SNAPSHOT, not the live list: DispUnbind removes from s_tickBuckets[group]
+        // mid-walk, so destroying an actor during OnTick would otherwise shift later elements down and
+        // skip whoever slid in -- a silent lost frame (a bounds check alone wouldn't have caught it);
+        // a spawned actor ticks next frame instead.
         ActorLive[] snapshot = s_tickBuckets[group].ToArray();
         foreach (ActorLive live in snapshot)
         {
             if (live.Disabled) continue;
-            // Destroyed earlier in THIS walk. DispUnbind drops it from s_actorsByEntity, so absence
-            // there is the liveness test. Reference equality rather than mere presence, because an
-            // entity id can be reused by a spawn within the same tick and the new actor is not the
-            // one this slot is holding.
+            // Destroyed earlier in THIS walk: DispUnbind drops it from s_actorsByEntity, so absence
+            // is the liveness test. Reference equality, not mere presence -- a reused entity id may
+            // now hold a different actor.
             if (!s_actorsByEntity.TryGetValue(live.Entity, out ActorLive? cur) || !ReferenceEquals(cur, live))
                 continue;
             try { live.Instance.OnTick(dt); }
@@ -1685,13 +1528,11 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnPostLogin", ex); }
     }
 
-    // Drops the instance from the entity map and its tick bucket, then calls its OnUnbound. Also the
-    // teardown edge for a graph-class instance (see DispBind's own comment): a graph class carries
-    // ClassFlags.Managed, so aver_fw_destroy/aver_fw_end_play's sweep call this exactly as they would
-    // for a C# actor -- dropping it from s_graphInstances is what stops GraphTickBoundInstances from
-    // ticking a destroyed entity, and what releases its GraphHost (and, with it, its VAR storage) for
-    // collection. GraphHost has no OnUnbound-equivalent hook to call -- an event-driven graph's only
-    // declared entry points are OnStart/OnTick(/on-demand), none of which mean "I am being destroyed".
+    // Drops the instance from the entity map and tick bucket, then calls OnUnbound. Also the teardown
+    // edge for a graph-class instance (DispBind's own comment): ClassFlags.Managed means
+    // aver_fw_destroy/end_play's sweep calls this as for a C# actor, stopping ticking of a destroyed
+    // entity and releasing its GraphHost/VAR storage (GraphHost's only entry points are
+    // OnStart/OnTick, none meaning "being destroyed", so it has no OnUnbound-equivalent hook to call).
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispUnbind(int entity)
     {
@@ -1704,40 +1545,28 @@ public static class HostBridge
             catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }
         }
 
-        // NOT an "else" and NOT an early return after the block above: DispBind's graph branch can now
-        // populate BOTH s_actorsByEntity (a Character-parented graph's constructed ancestor) AND
-        // s_graphInstances (its own GraphHost) for the SAME entity. This used to be `if (...Remove(...))
-        // { ...; return; }` then unconditionally remove from s_graphInstances -- correct when the two
-        // tables were mutually exclusive, but with both populated for one entity that early return
-        // skipped this line entirely: the GraphHost (and its VAR storage) leaked, and worse,
-        // GraphTickBoundInstances' snapshot walk had no way to know the entity died, so it kept calling
-        // Host.Tick(entity, dt) against a destroyed entity every frame thereafter.
+        // NOT an "else" and NOT an early return after the block above: DispBind's graph branch can
+        // populate BOTH s_actorsByEntity (a Character-parented graph's ancestor) AND s_graphInstances
+        // (its own GraphHost) for the SAME entity. An early return here was correct only while the two
+        // tables were mutually exclusive -- once both held one entity, it leaked the GraphHost (and its
+        // VAR storage) and left GraphTickBoundInstances ticking a destroyed entity forever.
         s_graphInstances.Remove(entity);
 
-        // Drop this entity's own warn-once memory (see s_fireWarnedOnce's own comment) -- an entity id
-        // CAN be reused by a later spawn within the same session, and whatever occupies it next
-        // deserves its own first FireEvent warning, not silence left over from whoever used to live
-        // here. RemoveWhere over a HashSet<(int,string)> has no per-entity index to key off, but this
-        // set only ever holds entries for entities a FireEvent node has actually misfired at, which in
-        // practice is a handful at most -- not a hot path worth a second index.
+        // Drop this entity's warn-once memory (s_fireWarnedOnce's own comment): a reused entity id
+        // deserves its own first FireEvent warning, not inherited silence. RemoveWhere has no
+        // per-entity index, but this set only ever holds a handful of misfired-at entities -- not worth a second index.
         s_fireWarnedOnce.RemoveWhere(pair => pair.Entity == entity);
     }
 
     // GAP 3: FireEvent's router -- installed onto Aver.Graph.GraphEvents.Router by SetupManagedActors
-    // (see that method's own comment for why the installation lives there and why the two tables are
-    // checked in this order). Logs (once per distinct (entity, event) pair -- see s_fireWarnedOnce)
-    // and returns false on refusal; never throws -- GraphEvents.FireEventForGraph is itself called
-    // from inside compiled IL with no surrounding try/catch of its own, so an exception escaping THIS
-    // closure would propagate out of whatever Tick()/Fire() call is currently running, exactly the
-    // same "runtime errors are not swallowed" contract GraphHost's own class comment already documents
-    // for every other node -- this method simply never manufactures one of its own to swallow.
-    // Entity -> live GraphHost, checking BOTH tables a graph can be reached through -- factored out
-    // of FireEventRouter (its own original home) so the graph-VAR save provider below can reach the
-    // identical entity, with no second, possibly-drifting notion of "which host owns this entity".
-    // s_graphInstances first, s_graphs second: a class-spawned instance's own host wins if an id
-    // were ever to appear in both (s_graphs is the drone/MCP-harness "a caller manages this entity's
-    // graph by hand" table and, in ordinary play, never collides with a real spawned entity's id --
-    // see s_graphInstances' own field comment for the fuller account).
+    // (see that method's own comment for why, and the two-table check order). Logs once per distinct
+    // (entity, event) pair; never throws -- GraphEvents.FireEventForGraph runs inside compiled IL with
+    // no try/catch, so an escaping exception would propagate into whatever Tick()/Fire() is running --
+    // the same "runtime errors are not swallowed" contract GraphHost's own class comment documents.
+    // FindGraphHost: Entity -> live GraphHost, checking BOTH tables (factored out of FireEventRouter so
+    // the graph-VAR save provider below can reach the same entity); s_graphInstances first, s_graphs
+    // second so a class-spawned host wins on collision -- s_graphs is the drone/MCP "caller manages
+    // this graph by hand" table and in ordinary play never collides with a real spawned entity's id.
     private static GraphHost? FindGraphHost(int entity)
     {
         if (s_graphInstances.TryGetValue(entity, out GraphInstanceLive? instanceLive))
@@ -1747,14 +1576,11 @@ public static class HostBridge
         return null;
     }
 
-    // GraphVarCountProvider/At/Set below must see ONLY entities whose class is GameInstance or a
-    // subclass -- an explicit, later user decision narrowing what was originally "every entity with
-    // a live GraphHost". Reuses the class-flag check every other class-kind gate in this file already
-    // uses (see the aver_fw_class_get_flags(... & ClassFlags.Managed/GameMode ...) calls elsewhere) --
-    // flags propagate through inheritance at class-declare time, so this also matches a graph class
-    // parented to the built-in "GameInstance" base (DeclareBaseClasses, ClassFlags.GameInstance),
-    // not just a C# AverGameInstance subclass. No new native ABI: aver_fw_class_of/get_flags already
-    // exist. Deliberately NOT used by FireEventRouter -- FireEvent must keep reaching every entity.
+    // GraphVarCountProvider/At/Set must see ONLY GameInstance-or-subclass entities -- an explicit,
+    // later user decision narrowing "every entity with a live GraphHost" (same aver_fw_class_get_flags
+    // check other class-kind gates use; flags propagate through inheritance, so this also matches the
+    // built-in GameInstance base, not just a C# AverGameInstance subclass -- no new ABI needed).
+    // Deliberately NOT used by FireEventRouter, which must reach every entity.
     private static GraphHost? FindPersistedGraphHost(int entity)
     {
         int c = Fw.aver_fw_class_of(entity);
@@ -1769,12 +1595,10 @@ public static class HostBridge
 
         if (host == null)
         {
-            // A C# ACTOR IS THE THIRD KIND OF THING THAT CAN RECEIVE ONE, checked only after both
-            // graph tables miss. The order is not arbitrary: an entity is bound to a graph OR to a
-            // C# actor, never both (DispBind constructs one or the other -- see its own comment), so
-            // this is a fallback rather than a second delivery. Reaching it means the entity is
-            // scripted in C#, and an animation notify aimed at a C# character used to die here with
-            // a "no live graph" warning that named the wrong problem.
+            // A C# ACTOR IS THE THIRD KIND OF THING THAT CAN RECEIVE ONE, checked only after both graph
+            // tables miss. Not arbitrary: an entity binds to a graph OR a C# actor, never both (DispBind
+            // constructs one or the other), so this is a fallback, not a second delivery. An animation
+            // notify aimed at a C# character used to die here with a "no live graph" warning -- the wrong problem named.
             if (s_actorsByEntity.TryGetValue(targetEntity, out ActorLive? live) && !live.Disabled)
             {
                 try
@@ -1783,9 +1607,8 @@ public static class HostBridge
                 }
                 catch (Exception ex)
                 {
-                    // Same treatment as every other actor hook: one bad actor is disabled, the
-                    // caller is told it was not handled, and nothing propagates into compiled IL or
-                    // back across the ABI.
+                    // Same treatment as every other actor hook: one bad actor is disabled, the caller
+                    // is told it was not handled, and nothing propagates into compiled IL or the ABI.
                     DisableActor(live, "OnEvent", ex);
                     return false;
                 }

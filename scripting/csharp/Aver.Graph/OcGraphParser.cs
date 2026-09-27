@@ -1,11 +1,9 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
-// Parser for .ocgraph text format.
-// Comment explains WHY: the format is line-based UTF-8 text matching the OC family pattern.
-// Lines are stripped of trailing semicolons and comments (after '#'). This parser supports
-// both the C++ writer format (string node IDs, dot-notation links, "in"/"out" directions)
-// and the C# format (integer node IDs as strings, space-separated link tokens, "input"/"output").
+// Parser for .ocgraph text format (line-based UTF-8, OC family pattern). Strips trailing ';'
+// and '#' comments. Supports both the C++ writer format (string node IDs, dot-notation links,
+// "in"/"out") and the C# format (int IDs as strings, space-separated tokens, "input"/"output").
 // Unknown records are skipped, not failed.
 
 using System;
@@ -26,9 +24,8 @@ public class OcGraphParser
         graph = new Graph();
         err = null;
         bool sawHeader = false;
-        // Set when a NODE line names the Self type, which is rewritten to `Param entity` on the spot
-        // (see the NODE case). It only tells the post-parse pass whether the `entity` PARAM has to be
-        // declared -- by then no Self node is left to count.
+        // Set when a NODE line names Self (rewritten to `Param entity` on the spot; see the NODE case).
+        // Tells the post-parse pass whether the `entity` PARAM must be declared -- no Self node survives to count.
         bool selfSeen = false;
         var nodes = new Dictionary<string, Node>();
 
@@ -36,18 +33,10 @@ public class OcGraphParser
 
         foreach (var rawLine in lines)
         {
-            // A '#' STARTS A COMMENT ONLY AT THE START OF A LINE, never mid-line.
-            //
-            // This used to strip from the first '#' anywhere, which is what OcWorld does -- and it is
-            // wrong here for a reason this format cannot escape: the very first graph written by the
-            // C++ side had the description "parsed and executed by the C# runtime", and it arrived
-            // as "...by the C". A format whose entire subject matter is C# scripting will meet '#'
-            // inside values constantly: type names, descriptions, node labels.
-            //
-            // The C++ parser already had the right rule (OcGraph.cpp:27 tests only l[0] == '#'), so
-            // this is the two implementations being brought into agreement rather than a new policy.
-            // The cost is that a trailing comment on a record is no longer possible; whole-line
-            // comments, which is what the writer emits, still are.
+            // '#' starts a comment ONLY at the start of a line, never mid-line (unlike OcWorld, which
+            // strips from the first '#' anywhere -- wrong here since C# graph text hits '#' constantly
+            // in descriptions/labels, e.g. "...by the C#" truncating to "...by the C"). Matches the
+            // C++ reader (OcGraph.cpp:27, l[0] == '#'). Cost: no trailing comments, only whole-line ones.
             var line = rawLine.TrimEnd();
             if (line.EndsWith(";")) line = line.Substring(0, line.Length - 1);
             if (line.TrimStart().StartsWith("#")) continue;
@@ -73,15 +62,11 @@ public class OcGraphParser
             }
             else if (key.Equals("DOMAIN", StringComparison.OrdinalIgnoreCase))
             {
-                // DOMAIN <name> -- which language this graph's nodes are written in, so that the
-                // passes which walk every *.ocgraph under a project (HostBridge.DeclareGraphClasses,
-                // GameApp's discoverProjectGraphs) can tell one of ours from a material graph. See
-                // Graph.DomainKind and, for the authoritative account, aver::fmt::OcGraphDomain.
-                //
-                // Refused when it names nothing, matching the C++ reader exactly: absent and
-                // present-but-blank mean opposite things to DomainKind, so a file that says the word
-                // and then says nothing has a defect worth reporting rather than silently becoming a
-                // gameplay graph.
+                // DOMAIN <name> -- which language this graph's nodes are in, so project-wide passes
+                // (HostBridge.DeclareGraphClasses, GameApp.discoverProjectGraphs) can tell ours from a
+                // material graph. See Graph.DomainKind / aver::fmt::OcGraphDomain for the full contract.
+                // Refused when blank (matches C++ reader): absent vs present-but-blank mean opposite
+                // things to DomainKind.
                 if (tokens.Count < 2)
                 {
                     err = "DOMAIN requires a name: DOMAIN gameplay|material";
@@ -104,8 +89,7 @@ public class OcGraphParser
             }
             else if (key.Equals("DESCRIPTION", StringComparison.OrdinalIgnoreCase))
             {
-                // DESCRIPTION <rest of line>
-                // Take everything after "DESCRIPTION" as the description (preserves spaces in multi-word descriptions).
+                // DESCRIPTION <rest of line> -- everything after the keyword, preserving spaces.
                 if (tokens.Count > 1)
                 {
                     int descStart = line.IndexOf("DESCRIPTION", StringComparison.OrdinalIgnoreCase);
@@ -118,23 +102,13 @@ public class OcGraphParser
             }
             else if (key.Equals("PARAM", StringComparison.OrdinalIgnoreCase))
             {
-                // PARAM <name> <type>
-                //
-                // Declares one argument the compiled method accepts, in declaration order. Existing
-                // .ocgraph files have no PARAM records at all, so graph.Parameters stays empty and
-                // GraphCompiler.Compile() produces a zero-argument method exactly as it always has --
-                // this is purely additive. A brand-new record rather than reusing NODE/PIN because a
-                // parameter is not a node: it has no pins of its own to link into, and needs to be known
-                // by name before any node can be validated against it (see AddDefaultPins below, and
-                // Graph.Validate's Param-node checks).
-                //
-                // A NEW record, not an unknown one: the C++ side does not parse PARAM at all today, so
-                // it round-trips PARAM lines as opaque unrecognised records (writeOcgraph preserves them
-                // verbatim, per OcGraph.hpp's documented "unknown records are ignored during parse but
-                // preserved during rewrite" contract) rather than failing on them. That keeps the two
-                // implementations in agreement about every graph that predates this change -- including
-                // the checked-in cross-implementation fixture, which has no PARAM records and is
-                // therefore untouched byte-for-byte by this addition.
+                // PARAM <name> <type> -- one compiled-method argument, in declaration order. Purely
+                // additive: existing files have no PARAM records, so Parameters stays empty and
+                // GraphCompiler.Compile() still emits a zero-arg method. Not a NODE/PIN: a parameter has
+                // no pins and must be known by name before nodes can validate against it (AddDefaultPins
+                // below, Graph.Validate's Param checks). The C++ side round-trips PARAM verbatim as an
+                // unrecognised record, per OcGraph.hpp's "ignored during parse but preserved during
+                // rewrite" contract, so older fixtures (incl. the cross-implementation one) are byte-for-byte untouched.
                 if (tokens.Count < 3)
                 {
                     err = "PARAM requires a name and a type";
@@ -148,10 +122,8 @@ public class OcGraphParser
                     err = $"Unknown parameter type '{paramTypeName}'";
                     return false;
                 }
-                // A PARAM is a DATA argument the compiled method takes; "exec" describes control flow,
-                // which is never something a caller passes IN as a value. Rejected here, at parse
-                // time, rather than left to fail later as a confusing DeclareLocal(typeof(void))
-                // exception three layers into GraphCompiler once something tries to use it.
+                // PARAM is a DATA argument; exec is control flow, never a value a caller passes in.
+                // Rejected here at parse time, not later as a confusing DeclareLocal(typeof(void)) crash deep in GraphCompiler.
                 if (paramType == PinType.Exec)
                 {
                     err = $"PARAM '{paramName}' cannot be declared exec -- PARAM is for data arguments a " +
@@ -164,23 +136,12 @@ public class OcGraphParser
             }
             else if (key.Equals("VAR", StringComparison.OrdinalIgnoreCase))
             {
-                // VAR <name> <type> [default]
-                //
-                // Declares one variable the GRAPH remembers between ticks -- the opposite of PARAM
-                // immediately above: a PARAM is supplied fresh by the CALLER on every invocation; a VAR
-                // is owned by the graph/host and its value survives from one compiled-delegate
-                // invocation to the next, on the SAME GraphHost instance. See GraphVariable's own
-                // comment (Graph.cs) and GraphVarStore's own comment for the full storage/lifetime
-                // contract -- this parser owns only the FORMAT half of that story.
-                //
-                // A NEW record, not an unknown one, for the identical reason PARAM's own comment gives:
-                // the C++ side does not parse VAR at all today, so a VAR line classifies as an unowned
-                // "Other" line in OcGraph.cpp's classifyLine and round-trips verbatim, in place, through
-                // the same whole-file unknown-record preservation PARAM already relies on -- verified by
-                // building and running OcGraphTest.exe's --roundtrip diagnostic against a hand-written
-                // fixture carrying VAR records, not merely by reading the C++ source (see
-                // tests/formats/src/OcGraphTest.cpp's testVarRecordsSurviveRoundTrip for the checked-in
-                // version of that proof).
+                // VAR <name> <type> [default] -- a variable the GRAPH remembers between ticks, opposite
+                // of PARAM: PARAM is supplied fresh per call, VAR is owned by the graph/host and survives
+                // across invocations on the same GraphHost. See GraphVariable/GraphVarStore for the
+                // storage/lifetime contract; this parser owns only the format. Round-trips through the
+                // C++ side's unknown-record preservation (same as PARAM; classifyLine in OcGraph.cpp),
+                // verified by OcGraphTest.cpp's testVarRecordsSurviveRoundTrip (--roundtrip), not just by reading it.
                 if (tokens.Count < 3)
                 {
                     err = "VAR requires a name and a type";
@@ -194,9 +155,8 @@ public class OcGraphParser
                     err = $"Unknown variable type '{varTypeName}'";
                     return false;
                 }
-                // VAR is DATA a graph remembers between ticks, not control flow -- rejected here, at
-                // parse time, for the identical reason PARAM rejects Exec just above (a confusing
-                // runtime failure three layers into GraphCompiler beats a clear one right here).
+                // VAR is data, not control flow -- rejected here for the same reason PARAM rejects Exec
+                // above (a clear failure here beats a confusing one deep in GraphCompiler).
                 if (varType == PinType.Exec)
                 {
                     err = $"VAR '{varName}' cannot be declared exec -- VAR is for data a graph " +
@@ -205,13 +165,10 @@ public class OcGraphParser
                     return false;
                 }
 
-                // TYPED BY THE DECLARED TYPE, NOT BY THE LITERAL'S SHAPE -- the exact lesson PIN's own
-                // default-value parsing paid for already (see that comment, below). UNLIKE PIN's hard
-                // "no default at all" fallback, an unparseable VAR default falls back to the type's own
-                // zero value instead: GraphVarStore.CreateFor needs a concrete Default to seed from
-                // (never null), and a graph author fat-fingering a default is far more likely than the
-                // whole record being garbage -- the graph should still load, just with 0/0f/false for
-                // that one variable.
+                // Typed by the DECLARED type, not the literal's shape (same lesson PIN's default parsing
+                // below paid for). Unlike PIN's hard "no default at all" fallback, an unparseable default
+                // falls back to the type's zero value (GraphVarStore.CreateFor needs a concrete non-null
+                // Default) rather than failing the graph -- a fat-fingered default is more likely than a garbage record.
                 object varDefault = varType switch
                 {
                     PinType.Bool => false,
@@ -227,9 +184,7 @@ public class OcGraphParser
                         varDefault = i;
                     else if (varType == PinType.Float && float.TryParse(defaultStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var f))
                         varDefault = f;
-                    // else: the literal did not parse as the declared type -- keep the zero-value
-                    // fallback already assigned above rather than failing the whole graph over one
-                    // malformed default.
+                    // else: unparsed literal keeps the zero-value fallback above rather than failing the graph.
                 }
 
                 graph.Variables.Add(new GraphVariable { Name = varName, Type = varType, Default = varDefault });
@@ -237,16 +192,11 @@ public class OcGraphParser
             else if (key.Equals("COMP", StringComparison.OrdinalIgnoreCase))
             {
                 // COMP <id> <Kind> [parent=<id>] [pos=x,y,z] [rot=yaw,pitch,roll] [scale=x,y,z] [key=value]...
-                //
-                // One child entity of a spawned class instance. See GraphComponent (Graph.cs) for
-                // what each field means and why the transform is typed here while the C++ reader
-                // keeps the whole line as tokens.
-                //
-                // THE STRUCTURAL RULES ARE NOT RE-CHECKED HERE. Duplicate ids, a parent naming
-                // nothing, and a parent cycle are all refused by modules/formats' reader, which is
-                // the one that runs when the editor opens a file. Repeating them would mean two
-                // implementations of the same rule that can drift; what this side owns is the
-                // meaning of a Kind and the units of a transform.
+                // One child entity of a spawned class instance (see GraphComponent for field meanings,
+                // and why the transform is typed here while the C++ reader keeps the whole line as tokens).
+                // Structural rules (duplicate ids, dangling/cyclic parent) are NOT re-checked here --
+                // modules/formats' reader (used when the editor opens a file) owns that, to avoid two
+                // drifting implementations of the same rule. This side owns Kind's meaning and transform units.
                 if (tokens.Count < 3)
                 {
                     err = "COMP requires an id and a kind: COMP id Kind [key=value]...";
@@ -291,11 +241,9 @@ public class OcGraphParser
             else if (key.Equals("FUNCIN", StringComparison.OrdinalIgnoreCase) ||
                      key.Equals("FUNCOUT", StringComparison.OrdinalIgnoreCase))
             {
-                // FUNCIN <func> <pin> <type> / FUNCOUT <func> <pin> <type> -- one argument or one
-                // return, in declaration order. Two records rather than one with a direction token,
-                // because the ORDER of inputs and the ORDER of outputs are independent lists and a
-                // single interleaved record would make the file say which came first when nothing
-                // depends on that.
+                // FUNCIN/FUNCOUT <func> <pin> <type> -- one argument/return, in declaration order. Two
+                // records, not one with a direction token, since input order and output order are independent
+                // lists and one interleaved record would imply an order between them that nothing depends on.
                 bool isIn = key.Equals("FUNCIN", StringComparison.OrdinalIgnoreCase);
                 if (tokens.Count < 4)
                 {
@@ -305,10 +253,9 @@ public class OcGraphParser
                 var owner = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, tokens[1], StringComparison.OrdinalIgnoreCase));
                 if (owner == null)
                 {
-                    // Declared BEFORE its FUNC is a genuine error, not a forward reference: unlike a
-                    // LINK naming a later NODE, there is no second pass here that could resolve it,
-                    // and silently dropping the argument would produce a function with the wrong
-                    // arity and no report of why.
+                    // Referencing a FUNC before it's declared is a real error, not a forward reference like a
+                    // LINK naming a later NODE: there's no second pass to resolve it, and dropping it silently
+                    // would mis-arity the function with no report of why.
                     err = $"{key.ToUpperInvariant()} names function '{tokens[1]}', which no FUNC record declares above it";
                     return false;
                 }
@@ -319,9 +266,8 @@ public class OcGraphParser
                 }
                 if (ft == PinType.Exec)
                 {
-                    // Exec is not a value. A function's control flow is decided by its `pure` flag,
-                    // which is one place, rather than by an author declaring an exec argument here and
-                    // a `pure` flag there that could disagree.
+                    // Exec is not a value -- a function's control flow is decided by its `pure` flag
+                    // alone, not also by an exec argument here that could disagree with it.
                     err = $"{key.ToUpperInvariant()} '{tokens[2]}' cannot be of type exec -- declare the function impure instead";
                     return false;
                 }
@@ -336,15 +282,10 @@ public class OcGraphParser
             else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
             {
                 // CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson]
-                //
-                // Declares that THIS GRAPH FILE IS A SPAWNABLE ACTOR CLASS -- the Aver Node analogue
-                // of a Blueprint asset carrying a parent class, not a component that references a
-                // graph. See Graph.ClassName's own doc comment for the full "who consumes this and
-                // why" story; this block owns only the FORMAT half.
-                //
-                // A NEW record, not an unknown one, for the identical reason PARAM/VAR's own comments
-                // give (see those, just below/above): the C++ reader has no "Class" case, so it rides
-                // through as an OwnedLineKind::Other line and round-trips verbatim.
+                // Declares this graph file as a SPAWNABLE ACTOR CLASS -- the Aver Node analogue of a
+                // Blueprint asset with a parent class, not a component referencing a graph. See
+                // Graph.ClassName for the full story. Like PARAM/VAR, the C++ reader round-trips it
+                // verbatim as an unrecognised OwnedLineKind::Other line.
                 if (tokens.Count < 2)
                 {
                     err = "CLASS requires a name";
@@ -357,9 +298,8 @@ public class OcGraphParser
                 }
 
                 string className = tokens[1];
-                // Defaults to "Actor" when omitted -- mirrors HostBridge's own BaseRegistryName
-                // default for a plain, component-less AverActor, so `CLASS Foo` alone (no parent
-                // token at all) is a complete, sealable, spawnable declaration.
+                // Defaults to "Actor" when omitted, mirroring HostBridge's BaseRegistryName default,
+                // so `CLASS Foo` alone is a complete, sealable, spawnable declaration.
                 string classParent = "Actor";
                 string? classMesh = null;
                 string? classMaterial = null;
@@ -375,16 +315,13 @@ public class OcGraphParser
                         if (parts.Length != 2) continue;
                         if (parts[0] == "mesh") classMesh = parts[1];
                         else if (parts[0] == "material") classMaterial = parts[1];
-                        // firstperson/thirdperson -- see Graph.ClassView's own doc comment for why
-                        // this exists and who consumes it (HostBridge.DispBind, Character ancestors
-                        // only). Held as the raw string here, same as mesh/material; validated later.
+                        // firstperson/thirdperson; see Graph.ClassView for consumers (HostBridge.DispBind,
+                        // Character ancestors only). Raw string here like mesh/material; validated later.
                         else if (parts[0] == "view") classView = parts[1];
-                        // The GameMode's default pawn CLASS NAME -- see Graph.ClassPawn for why a
-                        // graph GameMode needed a way to say this at all. A class name, not a file
-                        // path: it is resolved against declared classes at seal, not on disk.
+                        // GameMode's default pawn class name (see Graph.ClassPawn); resolved against
+                        // declared classes at seal, not a file path.
                         else if (parts[0] == "pawn") classPawn = parts[1];
-                        // The GameMode's player-controller class. Needed alongside pawn= for either to
-                        // matter -- see Graph.ClassController for why possession requires both.
+                        // GameMode's player-controller class; needs pawn= too since possession requires both (Graph.ClassController).
                         else if (parts[0] == "controller") classController = parts[1];
                         // An unrecognised key=value attribute is ignored rather than failing the
                         // whole graph -- mirrors NODE's own key=value loop, just below.
@@ -420,23 +357,16 @@ public class OcGraphParser
                 string nodeId = tokens[1];  // Store as string to support both int and string IDs
                 string nodeType = tokens[2];
 
-                // SELF IS SUGAR FOR `Param entity`, AND IT IS RESOLVED HERE, AT CONSTRUCTION.
-                // Not afterwards: Node.Type is init-only, so a later pass would have to rebuild the
-                // node and copy every field across -- which silently drops whichever field is added
-                // to Node next. Rewriting the type token before the object exists costs two lines
-                // and cannot go stale that way.
-                //
-                // The PARAM record it needs is declared after the whole file is read (see
-                // Graph.ResolveSelfNodes, called below), because a hand-written file may declare
-                // `PARAM entity int` itself, ABOVE or BELOW its nodes, and Self must reuse that one
-                // rather than adding a second -- two parameters would change the compiled method's
-                // arity and break every caller. selfSeen is what tells that pass a Self was here at
-                // all; the marker on the node is its param= naming "entity".
-                //
-                // Why the node is needed at all: nearly every Scene/Character/Physics/Animation/
-                // Audio node takes an `entity` pin, and PARAM is a top-level record the EDITOR
-                // cannot write -- aver::fmt::OcGraphData models no parameters. So a graph authored
-                // entirely on the canvas could not reach the entity it runs on.
+                // SELF IS SUGAR FOR `Param entity`, resolved HERE at construction: Node.Type is
+                // init-only, so resolving later would mean rebuilding the node and copying every field
+                // across by hand, which would silently drop whichever field is added to Node next. The
+                // PARAM itself is declared after the full file is read (Graph.ResolveSelfNodes, below) --
+                // a hand-written file may already declare `PARAM entity int` above or below its nodes, and
+                // Self must reuse it, not add a second (would change the compiled method's arity). selfSeen
+                // flags that a Self was seen; param="entity" marks the node. Needed because most Scene/
+                // Character/Physics/Animation/Audio nodes take `entity`, and the EDITOR cannot write PARAM
+                // records itself -- aver::fmt::OcGraphData models no parameters, so a canvas-only graph
+                // could not otherwise reach the entity it runs on.
                 bool isSelf = nodeType.Equals("self", StringComparison.OrdinalIgnoreCase);
                 if (isSelf) { nodeType = "Param"; selfSeen = true; }
                 var node = new Node { Id = nodeId, Type = nodeType };
@@ -455,31 +385,20 @@ public class OcGraphParser
                     // For any node, value= provides the constant output for Const nodes or constant data.
                     if (k == "value")
                     {
-                        // PARSED BY THE NODE'S DECLARED TYPE, not by the shape of the literal.
-                        //
-                        // This used to guess -- true/false, then int.TryParse, then float.TryParse --
-                        // and the guess silently produced the WRONG CLR TYPE for a value written the
-                        // wrong-looking way. Both compilers read a ConstFloat's constant with a strict
-                        // `is float f` and fall back to 0 when it does not match, with no warning, so:
+                        // PARSED BY THE NODE'S DECLARED TYPE, not the literal's shape. Used to guess
+                        // (true/false, then int, then float), which silently produced the WRONG CLR
+                        // TYPE -- both compilers read a ConstFloat with a strict `is float f` and fall
+                        // back to 0 with no warning:
                         //
                         //   NODE speed ConstFloat value=100    boxed an int, compiled to 0.0f
                         //   NODE n     ConstInt   value=7.0    boxed a float, compiled to 0
                         //   NODE b     ConstBool  value=1      boxed an int, compiled to false
                         //
-                        // All three silently, in BOTH the PULL and PUSH compilers. A raycast direction,
-                        // a movement speed or a timer duration written without a decimal point simply
-                        // became zero and nothing said so.
-                        //
-                        // It survived because every sample and test in this tree writes float literals
-                        // with an explicit decimal point by convention, so int.TryParse never got the
-                        // chance to win. It was found twice independently -- once while building
-                        // acceptance evidence for graph variables, and once from a throwaway raycast
-                        // probe whose inputs all silently read zero.
-                        //
-                        // The `PIN <node> value out <type> <literal>` path a few hundred lines below
-                        // never had this problem: it branches on the pin's DECLARED type before
-                        // parsing. This is that same rule, applied where the type is equally well
-                        // known -- nodeType is right there.
+                        // Silent in both PULL and PUSH compilers; survived because this tree's samples
+                        // always write floats with a decimal point, so int.TryParse never won. Found
+                        // twice independently (graph-variable acceptance evidence, a raycast probe).
+                        // Mirrors the `PIN <node> value out <type> <literal>` path below, which already
+                        // branches on the pin's declared type before parsing.
                         object? constVal = null;
                         var kind = nodeType.ToLowerInvariant();
                         if (kind == "constbool" || kind == "const_bool")
@@ -498,9 +417,8 @@ public class OcGraphParser
                         }
                         else
                         {
-                            // A value= on any OTHER node type keeps the old shape-based inference. It
-                            // has no declared type to consult, and nothing in the vocabulary reads one
-                            // today -- narrowing it would be a guess in the other direction.
+                            // Any OTHER node type keeps the old shape-based inference: no declared type
+                            // to consult, and nothing in the vocabulary reads one today.
                             if (v.Equals("true", StringComparison.OrdinalIgnoreCase)) constVal = true;
                             else if (v.Equals("false", StringComparison.OrdinalIgnoreCase)) constVal = false;
                             else if (int.TryParse(v, out var intVal)) constVal = intVal;
@@ -531,16 +449,14 @@ public class OcGraphParser
                     {
                         node.FieldName = v;
                     }
-                    // class= names the registered class a "spawn" node creates an instance of (see
-                    // Node.ClassName). Resolved by NAME at invocation time (GraphInterop.SpawnForGraph),
-                    // not baked to a handle here or at compile time -- see that method's own comment.
+                    // class= names the class a "spawn" node instantiates (Node.ClassName); resolved by
+                    // NAME at invocation time (GraphInterop.SpawnForGraph), not baked to a handle earlier.
                     else if (k == "class")
                     {
                         node.ClassName = v;
                     }
-                    // var= names which declared VAR a "getvar"/"setvar" node addresses (see
-                    // Node.VarName). No external table to resolve against -- Graph.Validate() checks it
-                    // directly against Variables, not here.
+                    // var= names the declared VAR a "getvar"/"setvar" node addresses (Node.VarName);
+                    // Graph.Validate() checks it against Variables, not here.
                     else if (k == "var")
                     {
                         node.VarName = v;
@@ -557,25 +473,21 @@ public class OcGraphParser
                     {
                         node.CallTarget = v;
                     }
-                    // name= carries the literal string a "setname" node writes (see Node.NameValue) --
-                    // the value itself, not a lookup key, unlike field=/class=/var= above. Nothing to
-                    // resolve at parse time; GraphCompiler.EmitSetName/EmitExecSetName require it
-                    // non-empty at COMPILE time (an empty name= can never write anything useful, so
-                    // failing loudly then beats a silent no-op rejection at runtime for a reason nobody
-                    // can see -- mirrors class='s own required-at-compile-time treatment for Spawn).
+                    // name= carries the literal string a "setname" node writes (Node.NameValue) -- the
+                    // value itself, not a lookup key, unlike field=/class=/var= above (no String pin
+                    // exists to carry it). GraphCompiler.EmitSetName/EmitExecSetName require it non-empty
+                    // at COMPILE time (fail loudly, not a silent runtime no-op) -- mirrors class= for Spawn.
                     else if (k == "name")
                     {
                         node.NameValue = v;
                     }
-                    // sound= names the audio file a "playsound"/"playsoundat" node plays. Same
-                    // treatment as name=/path= above: the value IS the data, and there is no string
-                    // pin it could arrive on. See Node.SoundPath.
+                    // sound= names the audio file "playsound"/"playsoundat" plays (Node.SoundPath) --
+                    // same "value IS the data" treatment as name=.
                     else if (k == "sound")
                     {
                         node.SoundPath = v;
                     }
-                    // text= is the message a "printstring" node writes. Same treatment as sound=
-                    // above -- the value IS the data, and there is no string pin to carry it.
+                    // text= is the message a "printstring" node writes; same treatment as sound=.
                     else if (k == "text")
                     {
                         node.PrintText = v;
@@ -607,9 +519,8 @@ public class OcGraphParser
                     {
                         node.SkeletonPath = v;
                     }
-                    // clip= names the asset path a "playanimation" node plays (see Node.ClipPath) --
-                    // same treatment as skeleton= immediately above. loop is NOT parsed here -- it is a
-                    // pin value, not a NODE-line attribute; see Node.ClipPath's own comment for why.
+                    // clip= names the asset path "playanimation" plays (Node.ClipPath), same as skeleton=.
+                    // loop is NOT parsed here -- it's a pin value, not a NODE-line attribute.
                     else if (k == "clip")
                     {
                         node.ClipPath = v;
@@ -620,29 +531,23 @@ public class OcGraphParser
                     {
                         node.RigPath = v;
                     }
-                    // event= names which event a "fireevent" node fires on another entity's graph (see
-                    // Node.EventName) -- the value itself (an event name, e.g. "OnHit"), not a lookup
-                    // key, the same "carries data" treatment name=/mesh=/material= already get. Nothing
-                    // to resolve at parse time; GraphCompiler.EmitExecFireEvent requires it non-empty at
-                    // COMPILE time, mirroring class='s own required-at-compile-time treatment for Spawn.
+                    // event= names the event a "fireevent" node fires on another entity's graph
+                    // (Node.EventName), e.g. "OnHit" -- same "carries data" treatment as name=/mesh=;
+                    // GraphCompiler.EmitExecFireEvent requires it non-empty at COMPILE time (like class=).
                     else if (k == "event")
                     {
                         node.EventName = v;
                     }
-                    // path= names the file a "savegame" node writes or a "loadgame" node reads (see
-                    // Node.SavePath) -- the value itself, not a lookup key, the same "carries data"
-                    // treatment name=/mesh=/material=/event= already get. Nothing to resolve at parse
-                    // time; GraphCompiler.EmitExecSaveLoad requires it non-empty at COMPILE time,
-                    // mirroring every other required-at-compile-time attribute above.
+                    // path= names the file "savegame" writes / "loadgame" reads (Node.SavePath) -- same
+                    // treatment; GraphCompiler.EmitExecSaveLoad requires it non-empty at COMPILE time too.
                     else if (k == "path")
                     {
                         node.SavePath = v;
                     }
                     // action= names the declared INPUT ACTION an "inputaction"/"inputactionpressed"/
-                    // "inputactionreleased"/"rebindaction"/"getactionkey" node addresses (see
-                    // Node.ActionName). OPTIONAL on the first three (a plain Int `action` pin remains
-                    // the fallback -- see Node.ActionName's own comment); REQUIRED at COMPILE time on
-                    // the last two, mirroring class=/path='s own required-at-compile-time treatment.
+                    // "inputactionreleased"/"rebindaction"/"getactionkey" node addresses (Node.ActionName).
+                    // OPTIONAL on the first three (a plain Int `action` pin is the fallback); REQUIRED at
+                    // COMPILE time on the last two, like class=/path=.
                     else if (k == "action")
                     {
                         node.ActionName = v;
@@ -653,9 +558,8 @@ public class OcGraphParser
             }
             else if (key.Equals("PIN", StringComparison.OrdinalIgnoreCase))
             {
-                // PIN <nodeId> <name> <in|out|input|output> <type> [default]
-                // Supports both C++ format (in/out) and C# format (input/output)
-                // Default values are parsed from the optional 5th token (6th overall, index 5).
+                // PIN <nodeId> <name> <in|out|input|output> <type> [default] -- supports both C++
+                // (in/out) and C# (input/output). Default value is the optional 5th token (index 5).
                 if (tokens.Count < 4)
                 {
                     err = "PIN requires nodeId, name, and direction (at minimum)";
@@ -698,24 +602,18 @@ public class OcGraphParser
                 };
                 node.Pins.Add(pin);
 
-                // If there's a default value (6th token), parse it and add as ConstantOutput if it's an output pin.
-                // This handles the C++ format where constant values are stored on output pins.
-                // Only do this for output pins (constants are provided on output pins of Const nodes).
+                // 6th token (C++ format): a default value on an output pin, stored as a ConstantOutput.
+                // Output pins only -- constants are provided on output pins of Const nodes.
                 if (tokens.Count > 5 && isOutput)
                 {
                     string valueStr = tokens[5];
 
-                    // TYPED BY THE PIN'S DECLARED TYPE, NOT BY THE LITERAL'S SHAPE.
-                    //
-                    // This used to try int.TryParse before float.TryParse, so a pin declared
-                    // `PIN c1 value out float 5` became an INT constant -- the literal has no
-                    // decimal point, and nothing consulted the `float` sitting right beside it. The
-                    // C++ writer emits exactly that form (num() drops a trailing ".0"), so the very
-                    // first graph written by C++ and run by C# compiled cleanly and evaluated to 0:
-                    // the arithmetic nodes were handed ints where they expected floats.
-                    //
-                    // The format states the type explicitly. Believing the literal instead is
-                    // guessing when the answer is already written down.
+                    // TYPED BY THE PIN'S DECLARED TYPE, NOT THE LITERAL'S SHAPE. Used to try int before
+                    // float, so `PIN c1 value out float 5` became an INT constant (no decimal point) --
+                    // exactly the form the C++ writer emits (num() drops a trailing ".0"), so the first
+                    // C++-written graph run by C# compiled cleanly and evaluated to 0: the arithmetic nodes
+                    // were handed ints where they expected floats. The format states the type explicitly;
+                    // believing the literal instead is guessing when the answer is already written down.
                     object? constVal = null;
                     if (typeName.Equals("bool", StringComparison.OrdinalIgnoreCase))
                     {
@@ -747,9 +645,8 @@ public class OcGraphParser
             }
             else if (key.Equals("LINK", StringComparison.OrdinalIgnoreCase))
             {
-                // Supports two formats:
-                // 1. C++ format: LINK <srcNode>.<srcPin> <tgtNode>.<tgtPin>
-                // 2. C# format: LINK <srcNodeId> <srcPinName> <tgtNodeId> <tgtPinName>
+                // C++ format: LINK <srcNode>.<srcPin> <tgtNode>.<tgtPin>
+                // C# format: LINK <srcNodeId> <srcPinName> <tgtNodeId> <tgtPinName>
                 if (tokens.Count < 2)
                 {
                     err = "LINK requires at least source and target";
@@ -847,17 +744,12 @@ public class OcGraphParser
             else if (key.Equals("ENTRY", StringComparison.OrdinalIgnoreCase))
             {
                 // ENTRY <nodeId> <eventName> -- declares which node begins the PUSH/exec chain for a
-                // named event (e.g. "OnStart", "OnTick"). Purely additive, exactly like PARAM above:
-                // an .ocgraph written before this existed has no ENTRY records, graph.EntryPoints
-                // stays empty, and GraphCompiler.Compile() (the PULL/dataflow-only path) runs exactly
-                // as it always has -- CompileEntryPoint() is a SEPARATE method nothing calls unless a
-                // caller asks for a specific event by name. The node named here can be ANY node type;
-                // ENTRY only says WHERE to start walking the exec graph, not what kind of node is
-                // allowed to start it -- adding a future event (e.g. "OnCollide") is one more ENTRY
-                // record naming a different node, with NO format change, exactly the extensibility
-                // the task asked for. Existence of the node and event-name uniqueness are both
-                // checked by Graph.Validate() below, not here -- the same division PARAM/Param-node
-                // checks already follow.
+                // named event (e.g. "OnStart", "OnTick"). Purely additive, like PARAM: older files have
+                // no ENTRY records, EntryPoints stays empty, and Compile() (PULL/dataflow) is unaffected --
+                // CompileEntryPoint() is separate, called only when a caller asks for a named event. The
+                // node can be ANY type; ENTRY only says where to start walking the exec graph, so a future
+                // event needs no format change. Existence/uniqueness are checked by Graph.Validate() below,
+                // not here -- same division PARAM/Param-node checks already follow.
                 if (tokens.Count < 3)
                 {
                     err = "ENTRY requires a node id and an event name";
@@ -876,11 +768,10 @@ public class OcGraphParser
 
         graph.Nodes = nodes;
 
-        // WHICH NODE STARTS AND ENDS EACH FUNCTION, resolved from the nodes rather than declared in
-        // the FUNC record. A function has exactly one FuncEntry and at most one FuncReturn (Validate
-        // refuses a second of either), so naming them on the FUNC line as well would be a second place
-        // for the file to disagree with itself. Runs BEFORE AddDefaultPins because the entry node's
-        // pins are the function's inputs and it has to know which function it belongs to first.
+        // Which node starts/ends each function, resolved from the nodes rather than declared on FUNC (a
+        // second place to disagree). A function has exactly one FuncEntry and at most one FuncReturn --
+        // Validate refuses a second of either. Runs BEFORE AddDefaultPins since the entry node's pins are
+        // the function's inputs, and it must know which function it belongs to first.
         foreach (var node in graph.Nodes.Values)
         {
             if (string.IsNullOrEmpty(node.FuncOwner)) continue;
@@ -891,23 +782,20 @@ public class OcGraphParser
             else if (t == "funcreturn" && owner.ReturnNodeId == null) owner.ReturnNodeId = node.Id;
         }
 
-        // Self is shorthand for the graph's own entity handle -- rewritten into the `Param entity`
-        // it stands for HERE, between func= ownership (which the refusal below needs) and
-        // AddDefaultPins (which gives the rewritten node its output pin from the parameter's type,
-        // exactly as it would for a hand-written Param node). See Graph.ResolveSelfNodes.
+        // Self is shorthand for the graph's own entity handle, rewritten to `Param entity` here, between
+        // func= ownership resolution (which the refusal below needs) and AddDefaultPins (which gives the
+        // rewritten node its output pin from the parameter's type). See Graph.ResolveSelfNodes.
         if (selfSeen && !graph.ResolveSelfNodes(out var selfErr))
         {
             err = selfErr;
             return false;
         }
 
-        // Default pins for built-in node types if not explicitly declared.
         foreach (var node in graph.Nodes.Values)
         {
             AddDefaultPins(node, graph);
         }
 
-        // Validate the graph.
         if (!graph.Validate(out var validateErr))
         {
             err = validateErr;
@@ -942,10 +830,8 @@ public class OcGraphParser
                 break;
 
             // ---- boolean logic ----------------------------------------------------
-            // THE VOCABULARY HAD NO BOOLEAN OPERATORS AT ALL until these, which is why every
-            // graph in the tree expresses "A and B" as a Branch whose true-exec runs another
-            // Branch. That works and is unreadable, and it cannot express OR or NOT at all
-            // without inverting the whole downstream structure.
+            // No boolean operators existed before these (authors faked "A and B" with nested Branches,
+            // which can't express OR/NOT without inverting the structure).
             case "and":
                 node.Pins.Add(new Pin { Name = "a", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "b", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
@@ -970,8 +856,7 @@ public class OcGraphParser
                 break;
 
             // ---- the rest of the comparisons ---------------------------------------
-            // `compare` is a strict a > b and nothing else, so a >= b needed Compare plus Not,
-            // and equality was not expressible at all.
+            // `compare` was a strict a > b alone, so a >= b needed Compare plus Not; equality didn't exist.
             case "greater":
                 node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "b", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -1094,12 +979,10 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // Print(value) -> then. EXEC PINS BY DEFAULT: writing a line to the log is a side
-            // effect with a definite "when", so it belongs on the chain the way SetVar does and
-            // must never be pulled -- a pulled Print would fire once per reader, or not at all.
-            // Vector maths: loose float components in, loose float components out. NO exec
-            // pins -- these are pure, so they are safe to pull as often as anything asks, the
-            // same reasoning GetFieldVec3 above carries.
+            // Print(value) -> then. Exec pins by default: logging is a side effect with a definite
+            // "when" (like SetVar) -- pulled, it would fire once per reader or not at all.
+            // Vector maths below: loose float components in/out, no exec pins -- pure, safe to pull
+            // freely (cf. GetFieldVec3).
             case "vecadd":
                 node.Pins.Add(new Pin { Name = "ax", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "ay", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -1195,9 +1078,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // The engine API nodes. The four that WRITE (SetVelocity, Teleport, Possess,
-            // Unpossess) carry exec pins because they are side effects with a definite "when";
-            // the readers do not, so they are safe to pull as often as anything asks.
+            // The four WRITE nodes (SetVelocity, Teleport, Possess, Unpossess) carry exec pins as side
+            // effects with a definite "when"; the readers below don't, and are safe to pull freely.
             case "getvelocity":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
@@ -1264,9 +1146,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // SaveGame / LoadGame: no entity pin at all, unlike everything else in this file --
-            // both act on the WHOLE world, not on one thing in it. path= names the file (see
-            // Node.SavePath); nothing else about the shape differs from Possess/Unpossess just above.
+            // SaveGame / LoadGame: no entity pin, unlike everything else here -- both act on the WHOLE
+            // world. path= names the file (Node.SavePath); shape otherwise matches Possess/Unpossess.
             case "savegame":
             case "loadgame":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
@@ -1274,10 +1155,9 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // SaveInputBindings / LoadInputBindings / ResetInputBindings: SaveGame/LoadGame's own
-            // rebindable-input twin -- no entity pin and no attribute at all, same reason: all three
-            // act on EVERY pushed EnhancedInput context, not on one file or one thing in the world.
-            // See GraphCompiler.EmitExecInputBindingOp/IsExecCapableInputBindingOpType.
+            // SaveInputBindings/LoadInputBindings/ResetInputBindings: SaveGame/LoadGame's rebindable-input
+            // twin, same reason -- all three act on EVERY pushed EnhancedInput context, not one thing
+            // (GraphCompiler.EmitExecInputBindingOp/IsExecCapableInputBindingOpType).
             case "saveinputbindings":
             case "loadinputbindings":
             case "resetinputbindings":
@@ -1286,11 +1166,10 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // RebindAction: changes ONE binding of ONE action, so unlike the three above it needs
-            // inputs -- action= names WHICH action (required at compile time, see Node.ActionName),
-            // `slot` picks which of that action's bindings (the same per-action slot counting
-            // GraphInterop.EnhancedInput.SaveBindings already uses), `key` is the new physical
-            // key/button/axis to bind there. See GraphCompiler.EmitExecRebindAction.
+            // RebindAction: changes ONE binding of ONE action, so unlike the three above it needs inputs:
+            // action= names WHICH action (required at compile time, Node.ActionName), `slot` picks the
+            // binding (same per-action counting as GraphInterop.EnhancedInput.SaveBindings), `key` is
+            // the new physical key/button/axis (GraphCompiler.EmitExecRebindAction).
             case "rebindaction":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "slot", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -1299,15 +1178,13 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // GetActionKey / GetPressedKey: InputKey's own pure-data shape (see that case's comment,
-            // below) applied to the rebinding family -- no exec pins, safe to pull from either
-            // compiler since reading a binding or the frame's first pressed key is idempotent.
+            // GetActionKey / GetPressedKey: InputKey's pure-data shape applied to the rebinding family --
+            // no exec pins, safe to pull from either compiler (idempotent reads).
             //
-            // GetActionKey answers "what is bound to action=<Name>'s slot-th binding" -- action= is
-            // REQUIRED at compile time (Node.ActionName; no pin fallback exists here, unlike
-            // InputAction). `key` is -1 when that slot has no binding at all (an unbound action, or a
-            // slot past the last one); `bound` is exactly `key != -1`, computed by the compiler rather
-            // than a second native call -- see GraphCompiler.EmitGetActionKey/EmitPullGetActionKey.
+            // GetActionKey: "what is bound to action=<Name>'s slot-th binding" -- action= is REQUIRED
+            // at compile time (Node.ActionName; no pin fallback, unlike InputAction). `key` is -1 when
+            // unbound; `bound` is exactly `key != -1`, computed rather than a second native call
+            // (GraphCompiler.EmitGetActionKey/EmitPullGetActionKey).
             case "getactionkey":
                 node.Pins.Add(new Pin { Name = "slot", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
@@ -1400,9 +1277,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // Same pin shape as setlocalscale below, deliberately: entity + xyz in, then/success out.
-            // A node that moves a child and a node that resizes one should not need to be learned
-            // twice.
+            // Same pin shape as setlocalscale below, deliberately: a node that moves a child and one
+            // that resizes it shouldn't need to be learned twice.
             case "setlocalposition":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -1413,10 +1289,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // DEGREES, and named yaw/pitch/roll rather than x/y/z on purpose: PinType has no
-            // quaternion, so rotation rides on three floats, and three floats called x/y/z beside a
-            // position node that also takes x/y/z is how an author wires roll into yaw. The names
-            // are the only thing carrying the meaning, so they have to say it.
+            // DEGREES, named yaw/pitch/roll not x/y/z on purpose: PinType has no quaternion, and x/y/z
+            // beside a position node's own x/y/z is how an author wires roll into yaw by mistake.
             case "setlocalrotation":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -1427,9 +1301,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // WORLD TARGET, x/y/z, matching every other "a point in the world" node in the set.
-            // Same pin shape as setlocalposition deliberately -- "move there" and "face there" take
-            // the same three numbers and should not have to be learned twice.
+            // World-target x/y/z, same pin shape as setlocalposition: "move there" and "face there"
+            // take the same three numbers.
             case "lookat":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -1493,10 +1366,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "seconds", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // CreateEntity / FindEntity -- SetName's own name= family. Both take their string from
-            // the NODE line (Node.NameValue, already parsed for SetName), never a pin: PinType has
-            // no String member. CreateEntity is exec (it makes something); FindEntity is a pure
-            // lookup, and "found" is a real answer rather than an error -- see GraphNodeDefs.hpp.
+            // CreateEntity/FindEntity -- SetName's own name= family (Node.NameValue), never a pin.
+            // CreateEntity is exec (it makes something); FindEntity is pure, "found" a real answer, not an error.
             case "createentity":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
@@ -1775,9 +1646,9 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // Joints. Creators mirror addstaticbox/etc above: exec + params in, then + a handle out
-            // (here "joint" rather than "body"). See GraphNodeDefs.hpp's own JOINTS banner for why
-            // bodyB == 0 means the world, and why Hinge/Slider each carry a second (normal) axis.
+            // Joints. Creators mirror addstaticbox/etc: exec + params in, then + a "joint" handle out.
+            // See GraphNodeDefs.hpp's JOINTS banner for why bodyB == 0 means the world, and why
+            // Hinge/Slider each carry a second (normal) axis.
             case "jointfixed":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "bodyA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -1911,8 +1782,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // Tags and visibility. A tag is an int bitmask -- see GraphInterop's own comment for why
-            // that spared this family the compile-time-attribute machinery every string-shaped node needs.
+            // Tags and visibility. A tag is an int bitmask, sparing this family the compile-time-attribute
+            // machinery every string-shaped node needs (GraphInterop).
             case "setvisible":
             case "addtag":
             case "removetag":
@@ -1961,12 +1832,9 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // EXEC IN, EXEC OUT, AND NOTHING ELSE. PrintString's message is a NODE-line attribute
-            // (text=), not a pin -- PinType has no String member -- which is exactly what lets it
-            // answer "did control flow reach here" with nothing wired but the exec chain. Adding a
-            // value pin here would reintroduce the thing that made Print unusable for that question.
-            // Must match GraphNodeDefs.hpp's PrintString row exactly; see this file's own note on
-            // why the palette and the parser have to agree pin for pin.
+            // Exec in, exec out, nothing else. PrintString's message is a NODE-line attribute (text=),
+            // not a pin -- PinType has no String -- which is what lets it answer "did control flow reach
+            // here" with only the exec chain wired. Must match GraphNodeDefs.hpp's PrintString row exactly.
             case "printstring":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
@@ -1991,12 +1859,9 @@ public class OcGraphParser
                 break;
 
             // getfieldvec3/setfieldvec3: GetField/SetField's Vec3 siblings -- a Vec3-kind scene field
-            // (CLocal.position, CLocal.scale, CLight.colour, ...) read or written as three ORDINARY
-            // float pins rather than one new pin TYPE. field= is reused verbatim (same NODE-line
-            // attribute, same generic key=value parsing above -- nothing here is Vec3-specific about
-            // how the attribute survives to GraphCompiler). No exec pins by default on EITHER, mirroring
-            // getfield/setfield exactly, INCLUDING setfieldvec3 (a write) having none -- see
-            // GraphCompiler.EmitSetFieldVec3's own comment for why that is deliberate, not an oversight.
+            // (CLocal.position/scale, CLight.colour, ...) as three ORDINARY float pins, no new pin TYPE.
+            // field= is reused verbatim. No exec pins on either, mirroring getfield/setfield, INCLUDING
+            // setfieldvec3 (a write) having none -- deliberate, see GraphCompiler.EmitSetFieldVec3.
             case "getfieldvec3":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
@@ -2004,15 +1869,12 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // GetForward(entity) -> x,y,z (unit look direction) + eyeX,eyeY,eyeZ (where to fire FROM)
-            // + success. NO exec pins by default, like GetFieldVec3 and for the same reason: it is a
-            // pure, idempotent read of the character's own state, so it is safe to pull as often as
-            // anything asks. The eye position rides along because a direction with no origin cannot
-            // build a ray -- see GraphInterop.LookDirectionForGraph for why both halves are one call.
-            // Jump(entity) -> jumped. EXEC PINS BY DEFAULT, unlike GetForward/GetViewEntity beside it:
-            // jumping is a side effect with a definite "when", so it belongs on the chain the way
-            // CharacterMove and Spawn do, not pulled as data. `jumped` is false when the character was
-            // airborne -- AverCharacter.Jump refuses in mid-air -- which is ordinary, not an error.
+            // GetForward(entity) -> direction xyz + eye xyz (where to fire from) + success. No exec
+            // pins, like GetFieldVec3: a pure, idempotent read, safe to pull freely (eye rides along
+            // because a direction alone can't build a ray -- GraphInterop.LookDirectionForGraph).
+            // Jump(entity) -> jumped. EXEC PINS, unlike GetForward: jumping is a side effect with a
+            // definite "when". `jumped` is false when airborne (AverCharacter.Jump refuses mid-air) --
+            // ordinary, not an error.
             case "jump":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -2020,9 +1882,8 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "jumped", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // GetViewEntity(entity) -> view + success. The CAMERA node a character looks through, which
-            // is what a first-person viewmodel must be parented to -- parent it to the character and it
-            // stays put while the camera pitches around it. Pure read, no exec pins, like GetForward.
+            // GetViewEntity(entity) -> view + success. The CAMERA node a character looks through -- a
+            // first-person viewmodel parents to it to stay put as the camera pitches. Pure, like GetForward.
             case "getviewentity":
             case "get_view_entity":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -2071,22 +1932,16 @@ public class OcGraphParser
                 break;
 
             // ---- flow / exec nodes -------------------------------------------------------------
-            // Pin shapes here MUST match sandbox/src/GraphNodeDefs.hpp's catalog entries for the same
-            // types EXACTLY (same names, same order for the exec-output pins the compiler fans out in
-            // pin order). A node spawned in the editor gets these pins written into the file as real
-            // PIN records -- see GraphNodeDefs.hpp's own header comment on why this table exists and
-            // GraphEditor.cpp's "add node" popup, which copies its pins verbatim -- and once a node
-            // has ANY explicit pins, AddDefaultPins is skipped entirely for it (the early-return just
-            // above this switch). So if this list and that C++ table ever disagree, an editor-authored
-            // graph silently gets one shape and a hand-written or C#-only graph gets another, which is
-            // exactly the "two implementations agree by coincidence" trap OcGraph.hpp's own `outputs`
-            // comment warns about.
+            // Pin shapes here MUST match sandbox/src/GraphNodeDefs.hpp's catalog EXACTLY (same names,
+            // same exec-output order): an editor-spawned node writes explicit PIN records (GraphEditor.cpp's
+            // "add node" popup copies them verbatim) and skips AddDefaultPins entirely (early-return
+            // above), so if the two tables disagree, an editor-authored graph and a hand-written one
+            // silently get different shapes -- the "two implementations agree by coincidence" trap
+            // OcGraph.hpp's `outputs` comment warns about.
             case "branch":
-                // A bool condition and one incoming exec pulse; two outgoing exec pins, exactly one
-                // of which fires. "tookTrue" is OPT-IN OBSERVABILITY, not part of the control-flow
-                // contract -- see GraphCompiler.EmitBranch's own comment for why an exec chain needs
-                // a channel like this to be provable in a test without a live native scene to write
-                // into and read back.
+                // Bool condition, one incoming exec pulse, two outgoing exec pins (exactly one fires).
+                // "tookTrue" is opt-in observability, not part of the control-flow contract -- lets an
+                // exec chain be provable in a test without a live native scene (GraphCompiler.EmitBranch).
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "cond", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "true", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
@@ -2095,11 +1950,9 @@ public class OcGraphParser
                 break;
 
             case "sequence":
-                // Two exec outputs by default ("then0" then "then1", fired in that order); add more
-                // via explicit PIN records to widen it -- the compiler reads however many exec-output
-                // pins the node actually has, in node.Pins order, and needs no special case to do it
-                // (see GraphCompiler.EmitExecFanOut). "fireLog" is opt-in observability, like
-                // branch's "tookTrue".
+                // Two exec outputs by default ("then0"/"then1", fired in order); widen via explicit PIN
+                // records -- the compiler fans out however many exec-output pins exist, in node.Pins
+                // order, no special case (GraphCompiler.EmitExecFanOut). "fireLog" is opt-in observability, like branch's "tookTrue".
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then0", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then1", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
@@ -2107,27 +1960,21 @@ public class OcGraphParser
                 break;
 
             // ---- gated flow control -------------------------------------------------
-            // These three REMEMBER something between activations, which no node here did
-            // before: Branch and Sequence decide from their inputs alone. The state lives in
-            // the same per-instance GraphVarStore a VAR uses, under a reserved name built
-            // from the node id, so two entities running one graph file gate independently --
-            // the property GraphVarStore's own header calls the one most likely to be
-            // silently undone.
+            // These three REMEMBER state between activations (Branch/Sequence decide from inputs
+            // alone). State lives in the per-instance GraphVarStore a VAR uses, under a name keyed to
+            // the node id, so two entities running one graph gate independently -- GraphVarStore's own
+            // header calls this the property most likely to be silently undone.
             case "doonce":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
-                // reset is a BOOL, not an exec input, and that is forced by the compiler rather
-                // than chosen: an activation reaches a node through EmitExecNode, which is not
-                // told WHICH input pin it arrived on, so two exec inputs would be
-                // indistinguishable inside the emitter. Sampling a bool every activation says
-                // the same thing and can actually be implemented. Same reasoning as Gate.
+                // reset is a BOOL, not an exec input: EmitExecNode isn't told WHICH input pin an
+                // activation arrived on, so two exec inputs would be indistinguishable. Same as Gate.
                 node.Pins.Add(new Pin { Name = "reset", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "gate":
-                // `open`/`close` are BOOL inputs rather than exec pins: an exec input can be
-                // driven by many sources here, so three separate exec entries would make
-                // "which one fired" unanswerable inside one activation.
+                // `open`/`close` are BOOL, not exec pins: with many possible sources, three exec
+                // entries would make "which one fired" unanswerable inside one activation.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "open", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "close", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
@@ -2142,10 +1989,9 @@ public class OcGraphParser
                 break;
 
             case "while":
-                // "cond" is re-pulled fresh every pass (see GraphCompiler's PUSH VS PULL comment for
-                // why that rules out the old cached-local approach); "iterations" counts completed
-                // passes and survives to be read after the loop -- both a genuinely useful runtime
-                // value and this node's guard-tripped test's proof that the cap actually bites.
+                // "cond" is re-pulled fresh every pass (rules out a cached-local approach, see
+                // GraphCompiler's PUSH vs PULL comment). "iterations" counts completed passes and
+                // survives after the loop as proof the cap actually bites.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "cond", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "loop", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
@@ -2154,12 +2000,10 @@ public class OcGraphParser
                 break;
 
             case "foreach":
-                // The COUNTED-REPEAT variant, not a per-element iterator: the format has no
-                // array/collection pin type yet (only float/int/bool/exec), so "for each element of a
-                // list" cannot be expressed today. `count` says how many times to run; `index` is the
-                // current pass (0..count-1, readable both inside the loop body and, holding its final
-                // value, after it) -- see GraphCompiler.EmitForEach's own comment for the honest
-                // "left rough for phase 2" note on this.
+                // COUNTED-REPEAT, not per-element: no array/collection pin type exists yet (only
+                // float/int/bool/exec). `count` sets the repeat count; `index` is the current pass
+                // (0..count-1), holding its final value after the loop. See GraphCompiler.EmitForEach
+                // ("left rough for phase 2").
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "count", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "loop", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
@@ -2168,59 +2012,42 @@ public class OcGraphParser
                 break;
 
             case "onstart":
-                // No inputs at all -- an ENTRY record is what makes this node run, once, at the start
-                // of the graph's life. Reads any PARAM it needs (there usually are none for OnStart)
-                // the same way any other node does.
+                // No inputs -- an ENTRY record makes this node run once, at the start of the graph's life.
+                // Reads any PARAM it needs the same way any node does (there usually are none for OnStart).
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "ontick":
-                // Also no inputs of its own -- per-tick data (delta time, in particular) is NOT a
-                // special pin on this node type. It is an ordinary PARAM the graph declares (e.g.
-                // `PARAM deltaTime float`) and reads with a `param` node inside the chain, the exact
-                // same plumbing every dataflow graph already uses for `time`/`entity`. That keeps
-                // "what OnTick receives" a property of the graph's own PARAM list -- inspectable and
-                // extensible with no new node type -- rather than baked into this node's shape.
+                // No inputs of its own -- per-tick data (delta time) is an ordinary PARAM the graph
+                // declares (e.g. `PARAM deltaTime float`) and reads via a `param` node, the same
+                // plumbing as `time`/`entity`, keeping what OnTick receives inspectable/extensible with no new node type.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "customevent":
-                // A USER-NAMED ENTRY POINT. Identical shape to onstart/ontick/onhit -- a bare exec
-                // output and nothing else -- and identical treatment in the compiler, because the
-                // node type has never been what makes an event fire. The top-level `ENTRY <nodeId>
-                // <eventName>` record is, and this node exists so an author can write one whose
-                // event name is theirs rather than one of three the palette happened to ship.
-                //
-                // The name lives on the ENTRY record, not here. A `name=` attribute on the NODE
-                // line is what the EDITOR shows and keeps in sync (GraphEditor writes both), but
-                // nothing at runtime reads it -- CompileEntryPoint matches on the ENTRY record, so
-                // a graph hand-written with only an ENTRY and no `name=` runs exactly the same.
+                // A USER-NAMED ENTRY POINT -- same bare-exec-output shape as onstart/ontick/onhit; the
+                // top-level `ENTRY <nodeId> <eventName>` record is what makes an event fire, not the
+                // node type, so this exists just to let an author pick their own event name. The name
+                // lives on ENTRY, not here: `name=` is only what the EDITOR displays/syncs (GraphEditor
+                // writes both); CompileEntryPoint matches on ENTRY, so a hand-written ENTRY with no `name=` runs the same.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "onhit":
-                // Same bare-trigger shape as onstart/ontick -- one exec-output pin, no inputs -- for
-                // the same reason: this node TYPE is just a labeled starting point an ENTRY record
-                // points at; it carries no data of its own. What makes THIS trigger fire ON DEMAND
-                // (a caller invoking Aver.Graph.GraphHost.Fire, rather than the fixed Tick() cadence
-                // OnStart/OnTick get) lives one layer up, in GraphHost -- nothing about the FORMAT or
-                // this parser treats "onhit" as special versus any other non-OnStart/OnTick ENTRY
-                // event name a project might declare (see ENTRY's own comment, above, for why a new
-                // event name is free at this layer). A payload this event wants to carry (who hit
-                // whom, where, how hard) is an ordinary PARAM the graph declares and reads with a
-                // `param` node, exactly like OnTick's deltaTime -- not a special pin here either.
+                // Same bare-trigger shape as onstart/ontick: the node TYPE is just a labeled start an
+                // ENTRY record points at. What fires it ON DEMAND (GraphHost.Fire, vs OnStart/OnTick's
+                // fixed Tick() cadence) lives in GraphHost, not here -- "onhit" is no more special to
+                // the parser than any other custom ENTRY event name. A payload (who/where/how hard) is
+                // an ordinary PARAM read via `param`, like OnTick's deltaTime.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "param":
             case "getparam":
             {
-                // The output pin's type comes from the referenced PARAM's declared type, not a fixed
-                // type the way every other default-pin case has one. If param= is missing or names a
-                // parameter that was never declared, add no pin at all: Graph.Validate() (run right
-                // after this loop, and again at the start of every Compile()) reports the specific
-                // reason, which is more useful than a generic "no output pin 'value'" from whatever
-                // LINK or OUT record tries to use this node next.
+                // Output type comes from the referenced PARAM, unlike every other case's fixed type. If
+                // param= is missing/undeclared, add no pin: Graph.Validate() (right after this loop, and
+                // again at the start of every Compile()) reports the specific reason.
                 var declaredParam = graph.Parameters.FirstOrDefault(p => p.Name == node.ParamName);
                 if (declaredParam != null)
                     node.Pins.Add(new Pin { Name = "value", Type = declaredParam.Type, IsOutput = true, NodeId = node.Id });
@@ -2228,17 +2055,13 @@ public class OcGraphParser
             }
 
             // ---- Select / InputKey / Raycast -----------------------------------------------------
-            // All three have real DATA outputs (unlike branch/while/foreach, see
-            // GraphCompiler.IsExecOnlyNodeType), so Compile() -- the PULL/dataflow compiler -- never
-            // skips them; they are handled by BOTH compilers. See GraphCompiler.cs's own
-            // EmitSelect/EmitInputKey/EmitRaycast comments for exactly how each one differs between
-            // the two.
+            // All three have real DATA outputs (unlike branch/while/foreach; see IsExecOnlyNodeType),
+            // so Compile() never skips them -- handled by BOTH compilers (GraphCompiler.cs's
+            // EmitSelect/EmitInputKey/EmitRaycast).
 
             case "select":
-                // A pure data node, no exec pins at all -- picks one of two float values by a bool
-                // condition. See GraphCompiler.EmitSelect's own comment for why BOTH ifTrue and
-                // ifFalse are computed regardless of cond in the PULL compiler (not a bug, and not
-                // short-circuiting the way Branch's exec fan-out is).
+                // Pure data, no exec pins -- picks ifTrue/ifFalse by cond. Both are computed regardless
+                // of cond in the PULL compiler (not a bug, not short-circuiting like Branch's exec fan-out).
                 node.Pins.Add(new Pin { Name = "cond", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "ifTrue", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "ifFalse", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -2246,31 +2069,19 @@ public class OcGraphParser
                 break;
 
             case "inputkey":
-                // Also a pure data node, no exec pins: reading polled input state is idempotent (no
-                // side effect), so -- like GetField -- it is safe to pull as often as anything wants,
-                // through either compiler, with no _execLocals caching needed. See
-                // GraphCompiler.EmitInputKey.
-                //
-                // InputAction, below, is this node's newer NAMED sibling -- prefer it for anything a
-                // project wants to REBIND without touching the graph. This node stays for the literal
-                // key code case (and for content authored before InputAction existed) -- see
-                // "InputAction / InputActionPressed / InputActionReleased"'s own comment for the trade.
+                // Pure data, no exec pins: polled input is idempotent, safe to pull freely through
+                // either compiler with no _execLocals caching (GraphCompiler.EmitInputKey). InputAction
+                // below is the newer NAMED, rebindable sibling; this stays for literal key codes and pre-InputAction content.
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "down", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             // ---- edge-triggered input --------------------------------------------------------
-            // THE HALF InputKey CANNOT EXPRESS. `down` answers "is it held", which is the wrong
-            // question for most of what a graph does with a key: jumping, firing a semi-auto,
-            // toggling a light, opening a menu. Held-means-true fires those every frame the key is
-            // down, so a graph author's only recourse was a hand-built DoOnce-and-a-variable
-            // rising-edge detector -- five nodes for a thing the framework ABI has always
-            // answered directly (aver_fw_input_key_pressed / _released, which is what
-            // Input.GetKeyDown/GetKeyUp already wrap for C#).
-            //
-            // Same pin shape as inputkey, and no exec pins for the same reason: the answer is
-            // computed from this frame's and last frame's state, so asking twice within one frame
-            // gives the same answer and there is nothing to cache.
+            // The half InputKey can't express: `down` means "held", the wrong question for jumping,
+            // semi-auto fire, toggles -- held-means-true fires every frame, so authors needed a
+            // hand-built DoOnce+variable edge detector (five nodes) instead of the framework ABI's
+            // direct answer (aver_fw_input_key_pressed/_released, which Input.GetKeyDown/GetKeyUp already wrap).
+            // Same pin shape as inputkey, no exec pins: computed from this frame vs last, nothing to cache.
             case "inputkeypressed":
             case "inputkeyreleased":
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -2278,40 +2089,24 @@ public class OcGraphParser
                 break;
 
             // ---- InputAction / InputActionPressed / InputActionReleased ---------------------------
-            // THE PREFERRED PATH over InputKey/MouseDelta/MoveAxis above, for anything a project wants
-            // REBINDABLE rather than baked to a literal key or a raw device axis: aver_fw_action_*
-            // (framework_abi.h's Named Actions section, minor 5 -- aver_fw_action_register/find/bind/
-            // value2/held/pressed/released) reads whatever mix of keys/mouse a project's own setup code
-            // bound to a name via aver_fw_action_bind, so a graph asks "did the player Jump" once and
-            // never again cares which physical key that project -- or a later rebinding -- happens to
-            // use.
+            // Preferred over InputKey/MouseDelta/MoveAxis for anything REBINDABLE: aver_fw_action_*
+            // (framework_abi.h, Named Actions, minor 5) reads whatever keys/mouse a project bound to a
+            // name via aver_fw_action_bind, so a graph asks "did the player Jump" once, independent of
+            // physical key.
             //
-            // `action` IS AN INT HANDLE, NOT A NAME, and that is a real limitation worth spelling out
-            // rather than leaving implicit. PinType has no String member (Graph.cs's own PinType enum:
-            // Float/Int/Bool/Exec only), and the established "author-chosen string, resolved by NAME at
-            // invocation" mechanism this format already has for exactly this situation -- Spawn's
-            // class=, FireEvent's event=, GetAnimCurve's curve= -- lives on a dedicated Node property
-            // (Graph.cs's ClassName/EventName/CurveName, set from a NODE-line attribute), and adding one
-            // more of those means editing Graph.cs and this parser's key=value attribute loop both --
-            // Graph.cs is a file this slice does not own (see the file's own exclusive-ownership list).
-            // So, like InputKey's own `key` pin above, `action` is a plain Int the graph must already
-            // hold a HANDLE for: the value aver_fw_action_register/_find returned, NOT the string that
-            // was registered.
+            // `action` is an INT HANDLE, not a name -- PinType has no String member, and giving it a
+            // dedicated Node property (like class=/event=/curve=, i.e. Graph.cs's ClassName/EventName/
+            // CurveName) would mean editing Graph.cs, which this slice does not own. It must hold the
+            // handle aver_fw_action_register/_find returned, not the registered string.
             //
-            // UNLIKE a VK_/AVER_FW_KEY_* code, that handle is NOT a stable compile-time constant:
-            // aver_fw_action_register appends to a vector and hands back its 1-based index
-            // (FrameworkAbi.cpp:1245-1253's actionDefs()/aver_fw_action_register, idempotent by name --
-            // FrameworkAbi.cpp:1234-1240's aver_fw_action_find), so the number assigned to "Jump"
-            // depends on how many OTHER actions a project's own code had already registered earlier
-            // that same run. A literal Const int authored into a .ocgraph file today is therefore only
-            // as reliable as that registration order staying fixed -- see GraphCompiler.EmitInputAction's
-            // own comment for the full accounting and what a real name pin would need instead.
+            // That handle is NOT a stable compile-time constant: aver_fw_action_register appends to a
+            // vector and returns its 1-based index (FrameworkAbi.cpp:1245-1253, idempotent by name via
+            // :1234-1240's _find), so a literal Const int is only as reliable as registration order
+            // staying fixed -- see GraphCompiler.EmitInputAction for the full accounting.
             //
-            // Pure data, no exec pins -- like InputKey just above, NOT like MouseDelta/MoveAxis below:
-            // both native calls behind InputAction (aver_fw_action_value2, aver_fw_action_held) are
-            // array-scan reads over actionBindings() with no side effect, the same "cheap enough to
-            // redundantly pull" cost class GetForward's own comment already accepts for a six-output
-            // read -- not a per-call cost that would justify MouseDelta's _execLocals caching shape.
+            // Pure data, no exec pins, like InputKey: both native calls (_value2, _held) are array-scan
+            // reads with no side effect, cheap enough to redundantly pull (same cost class as GetForward's
+            // six-output read).
             case "inputaction":
                 node.Pins.Add(new Pin { Name = "action", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
@@ -2330,14 +2125,10 @@ public class OcGraphParser
                 break;
 
             case "raycast":
-                // UNLIKE Select/InputKey, Raycast DOES get exec pins by default: it is a real (if
-                // read-only) native query, and the PUSH compiler wants to run it exactly once per
-                // exec visit rather than once per pull -- see GraphCompiler.EmitExecRaycast and
-                // IsExecCapableQueryType's own comment for why that matters even without a true side
-                // effect. "then" (not "exec", to avoid reusing the input pin's own name for an
-                // unrelated output pin) is this node's single continuation, fired after the native
-                // call completes -- the same "one exec-out, EmitExecFanOut needs no special case"
-                // shape SetField would have if given exec pins by hand.
+                // UNLIKE Select/InputKey, Raycast gets exec pins by default: a real (read-only) native
+                // query, and the PUSH compiler wants it run exactly once per exec visit, not per pull
+                // (GraphCompiler.EmitExecRaycast, IsExecCapableQueryType). "then" (not "exec", to avoid
+                // reusing the input pin's name) is the single continuation fired after the call completes.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "originX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "originY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -2355,34 +2146,24 @@ public class OcGraphParser
                 break;
 
             // ---- MouseDelta / MoveAxis (continuous input) -----------------------------------------
-            // The gap InputKey does NOT close: InputKey covers digital key state, but look and move --
-            // the two things a first-person controller is made of -- are CONTINUOUS, not a single
-            // this-frame-or-not bit. Both wrap ONE call into Aver.Framework's polled input (see
-            // Aver.Framework.GraphInterop.MouseDeltaForGraph/MoveAxisForGraph's own comments) as a
-            // handful of ordinary float pins, the same "one native call, several scalar pins" shape
-            // GetFieldVec3/Raycast already established -- no new pin TYPE needed here either.
+            // The gap InputKey doesn't close: look and move are CONTINUOUS, not a single frame bit.
+            // Both wrap one call into Aver.Framework's polled input (GraphInterop.MouseDeltaForGraph/
+            // MoveAxisForGraph) as ordinary float pins, the same "one call, several scalar pins" shape
+            // GetFieldVec3/Raycast use.
             //
-            // BOTH get exec pins by default, mirroring Raycast rather than GetFieldVec3/SetFieldVec3
-            // (which get none) -- see GraphCompiler.IsExecCapableMouseDeltaType/
-            // IsExecCapableMoveAxisType's own comments for exactly why: even though neither read has
-            // Raycast's kind of per-call COST (both are memcpy/GetKey-class, the same cost class
-            // GetFieldVec3 itself reads under without caching), this slice's own requirement is that
-            // one frame's input costs exactly one native call regardless of how many output pins a
-            // graph reads, and the PUSH compiler only has one mechanism that guarantees that:
-            // _execLocals caching keyed to a single exec visit, exactly like Raycast's.
+            // Both get exec pins by default, mirroring Raycast rather than GetFieldVec3/SetFieldVec3
+            // (which get none): even though neither call has Raycast's per-call cost, this slice requires
+            // one frame's input to cost exactly one native call regardless of pins read, and only
+            // _execLocals caching (keyed to one exec visit) guarantees that
+            // (IsExecCapableMouseDeltaType/IsExecCapableMoveAxisType).
             //
-            // THE LOW-LEVEL PATH, now that InputAction exists (see that case's own comment, below
-            // InputKeyPressed/InputKeyReleased): these two read the device DIRECTLY, with no name and
-            // no rebinding in between -- exactly right for a raw camera look or a debug probe, and
-            // exactly wrong for anything a project wants a player (or a future rebinding UI) to
-            // reconfigure, where InputAction is the one to reach for instead. Behaviour here is
-            // UNCHANGED by InputAction's addition; existing .ocgraph content wires MouseDelta/MoveAxis
-            // directly and must keep doing exactly what it always did.
+            // The low-level path: reads the device directly, no name, no rebinding -- right for a raw
+            // camera look or debug probe; use InputAction instead when a project wants this rebindable.
+            // Existing content using these directly is unaffected by InputAction's addition.
 
             case "mousedelta":
-                // Zero data inputs -- nothing to read before the call. "then" (not "exec", for the
-                // same reason Raycast's own continuation pin isn't named "exec" either -- see that
-                // case's comment) is this node's single continuation, fired once the read completes.
+                // Zero data inputs. "then" (not "exec", same reason as Raycast's continuation pin) is
+                // the single continuation, fired once the read completes.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "deltaX", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
@@ -2391,9 +2172,8 @@ public class OcGraphParser
                 break;
 
             case "moveaxis":
-                // Same shape as mousedelta above. Z is deliberately NOT a pin: Input.MoveAxis's own Z
-                // component is hardcoded 0 always (Aver.Framework/Input.cs), so a pin that could only
-                // ever read a compile-time-known constant would add noise, not information.
+                // Same shape as mousedelta. Z is deliberately NOT a pin: Input.MoveAxis's Z is hardcoded
+                // 0 always (Aver.Framework/Input.cs) -- a pin reading a known constant would add noise.
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "forward", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
@@ -2401,17 +2181,13 @@ public class OcGraphParser
                 break;
 
             // ---- Spawn ---------------------------------------------------------------------------
-            // SIDE-EFFECTING (creates a new scene entity), so -- UNLIKE getfieldvec3/setfieldvec3
-            // above, which get no exec pins by default -- this DOES get exec pins by default, mirroring
-            // raycast: the README's own spec frames this as "a Spawn(className, x, y, z) exec node",
-            // and GraphCompiler.IsExecCapableSpawnType's own comment explains why it is refused by the
-            // PULL-only compiler ENTIRELY, more strictly than SetField/SetFieldVec3 are -- a stray Spawn
-            // in a no-ENTRY dataflow graph would create a new entity on every single invocation, with no
-            // branch structure available to gate it. class= names which registered class to spawn (the
-            // same generic key=value NODE-line attribute field=/param= already use -- see the NODE
-            // parsing loop above) -- NOT a pin, because a class name is something the graph AUTHOR
-            // chooses at edit time, not something an upstream node computes at runtime, mirroring how
-            // field= is not a pin on GetField/SetField either.
+            // SIDE-EFFECTING (creates a new entity), so it gets exec pins by default, mirroring raycast --
+            // the README's own spec frames this as "a Spawn(className, x, y, z) exec node" -- and is
+            // refused by the PULL-only compiler ENTIRELY (GraphCompiler.IsExecCapableSpawnType), more
+            // strictly than SetField/SetFieldVec3: a stray Spawn in a no-ENTRY dataflow graph would create
+            // a new entity every invocation with no branch structure to gate it. class= names the registered
+            // class (same key=value NODE-line mechanism as field=/param=) -- NOT a pin, since it's an
+            // edit-time author choice, not runtime data, mirroring field= on GetField/SetField.
             case "spawn":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -2422,24 +2198,18 @@ public class OcGraphParser
                 break;
 
             // ---- CharacterMove -----------------------------------------------------------------------
-            // The last Blueprint-parity node: ONE coarse, exec-only wrapper around
-            // AverCharacter.Drive (reached via AverCharacter.DriveFromGraph ->
-            // GraphInterop.CharacterMoveForGraph -- see that method's own comment), matching the
-            // owner's chosen signature exactly: CharacterMove(entity, dt, forward, right, yawDelta,
-            // pitchDelta) -> then, success. UNLIKE Spawn just above, there is NO NODE-line attribute
-            // here at all -- every one of the six inputs is an ordinary pin, because a graph author
-            // computes dt/forward/right/yawDelta/pitchDelta at RUNTIME (a PARAM, a MoveAxis, a
-            // MouseDelta), never chooses them at edit time the way Spawn's class= names a class.
+            // The last Blueprint-parity node: one coarse, exec-only wrapper around AverCharacter.Drive
+            // (via DriveFromGraph -> GraphInterop.CharacterMoveForGraph), matching the owner's chosen
+            // signature exactly: CharacterMove(entity, dt, forward, right, yawDelta, pitchDelta) -> then,
+            // success. Unlike Spawn, NO NODE-line attribute -- all six inputs are ordinary pins since a
+            // graph computes them at RUNTIME (PARAM/MoveAxis/MouseDelta), not chosen at edit time like
+            // Spawn's class=.
             //
-            // SIDE-EFFECTING (moves a real actor, mutates its yaw/pitch/capsule state every call), so
-            // -- like Spawn/SetVar, unlike GetField/SetField -- this gets exec pins BY DEFAULT; see
-            // GraphCompiler.IsExecCapableCharacterMoveType's own comment for why it is refused by the
-            // pure-dataflow (PULL) compiler exactly as strictly as Spawn is.
-            //
-            // "success" is a REAL outcome, never a fake always-true stub: false (with a Log.Warn line,
-            // never a throw, never a silent no-op) when the entity is not a live actor at all, or is a
-            // live actor that is not an AverCharacter -- see GraphInterop.CharacterMoveForGraph's own
-            // comment for the two distinct failure messages.
+            // SIDE-EFFECTING (mutates yaw/pitch/capsule every call), so it gets exec pins BY DEFAULT
+            // like Spawn/SetVar, refused just as strictly by the PULL compiler
+            // (IsExecCapableCharacterMoveType). "success" is a real outcome, never a fake stub: false
+            // (Log.Warn, never a throw) for two distinct cases -- not a live actor at all, or a live actor
+            // that isn't an AverCharacter (GraphInterop.CharacterMoveForGraph).
             case "charactermove":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -2465,12 +2235,10 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // SynapseSteer: a PURE node turning "where am I, where do I want to go" into the
-            // forward/right/yawDelta charactermove above already consumes -- see
-            // GraphInterop.SynapseSteerForGraph's own comment for the full contract. Takes an EXPLICIT
-            // target (targetX/Y/Z), never CSynapseAgent's own: the identical node does direct chase and
-            // path-following (GetSynapseTarget's own output) for that reason. "arrived" and "success"
-            // are deliberately separate outputs -- see GraphNodeDefs.hpp's own comment on why.
+            // SynapseSteer: PURE, turns "where am I / where to go" into the forward/right/yawDelta
+            // CharacterMove consumes (GraphInterop.SynapseSteerForGraph). Takes an EXPLICIT target
+            // (targetX/Y/Z), not CSynapseAgent's own, so one node does both direct chase and
+            // path-following (GetSynapseTarget's output). "arrived"/"success" are separate outputs (GraphNodeDefs.hpp).
             case "synapsesteer":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "dt", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -2499,11 +2267,10 @@ public class OcGraphParser
                 break;
 
             // ---- Audio -------------------------------------------------------------------------------
-            // The graph half of connecting a mixer that was built and then never called. sound= is a
-            // NODE-line attribute (Node.SoundPath), never a pin -- PinType has no String member.
-            // Playing is a SIDE EFFECT, so these carry exec pins and the pure compiler refuses them;
-            // IsSoundPlaying alone is a pure read. "voice" is 0 when there is no audio device, which
-            // is supported rather than an error -- see GraphNodeDefs.hpp's own comment.
+            // The graph half of a mixer that was built and then never called. sound= is a NODE-line
+            // attribute (Node.SoundPath), never a pin -- PinType has no String. Playing is a side effect:
+            // exec pins, refused by the pure compiler; IsSoundPlaying alone is a pure read. "voice" is 0
+            // with no audio device -- supported, not an error (GraphNodeDefs.hpp).
             case "playsound":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "volume", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -2559,22 +2326,16 @@ public class OcGraphParser
                 break;
 
             // ---- FireEvent -------------------------------------------------------------------------
-            // GAP 3: the cross-entity event node. SIDE-EFFECTING (runs ANOTHER entity's whole exec
-            // chain, not merely a scalar write) -- exec pins by default, mirroring Spawn/CharacterMove
-            // rather than SetField, and refused by the pure-dataflow (PULL) compiler entirely, for
-            // the identical "no notion of 'when'" reasoning IsExecCapableSpawnType's own comment
-            // gives, only stronger: firing an event mid-pull would run a stranger's exec chain on
-            // every single invocation with no branch structure to gate it.
+            // GAP 3: the cross-entity event node. SIDE-EFFECTING (runs ANOTHER entity's whole exec chain) --
+            // exec pins by default, mirroring Spawn/CharacterMove, refused entirely by the PULL compiler
+            // for the same "no notion of 'when'" reason IsExecCapableSpawnType gives, only stronger:
+            // firing mid-pull would run a stranger's exec chain every invocation with no gate.
             //
-            // "target" is the entity whose graph should receive the event -- an ordinary int PIN
-            // (computed at runtime: a Spawn's entity output, a VAR, a Raycast's own entity pin),
-            // unlike event=, which is edit-time data (see NODE-line parsing above, Node.EventName) --
-            // exactly the same "pin vs attribute" split Spawn's x/y/z-pins-vs-class=-attribute already
-            // established. "fired" is a REAL outcome, never a hardcoded true: false (with a Log.Warn
-            // naming the entity and event) when the target has no live graph at all, or has one that
-            // never declared this event -- see GraphEvents.FireEventForGraph's own comment for the
-            // full failure-mode table and the reentrancy guard that keeps a self-fire or a mutual-fire
-            // cycle from stack-overflowing the process.
+            // "target" is an ordinary int PIN (runtime-computed), unlike event=, which is edit-time data
+            // (Node.EventName) -- the same pin-vs-attribute split as Spawn's xyz-pins-vs-class=. "fired"
+            // is real, not a hardcoded true: false (Log.Warn) when the target has no live graph, or one
+            // that never declared this event -- see GraphEvents.FireEventForGraph, including the
+            // reentrancy guard against a self-fire or mutual-fire cycle stack-overflowing the process.
             case "fireevent":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "target", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -2583,30 +2344,20 @@ public class OcGraphParser
                 break;
 
             // ---- GetVar / SetVar -------------------------------------------------------------------
-            // Graph-local persistent variables -- see GraphVariable's own comment (Graph.cs) and
-            // GraphVarStore's own comment for the full storage/lifetime story; this is only the pin
-            // shape. var= names which declared VAR the node addresses (see Node.VarName), the same
-            // generic key=value NODE-line attribute mechanism field=/param=/class= already use.
+            // Graph-local persistent variables -- see GraphVariable/GraphVarStore (Graph.cs) for the
+            // storage/lifetime story; this is only the pin shape. var= names the declared VAR (Node.VarName),
+            // the same key=value mechanism as field=/param=/class=.
             //
-            // GetVar: a PURE READ (reading twice is always safe -- no side effect), so, unlike SetVar,
-            // it gets NO exec pins and is reachable from BOTH compilers, exactly like GetField. Only ONE
-            // output pin, 'value', typed to the declared VAR's type -- not a fixed type the way most
-            // other default-pin cases have one, mirroring "param"/"getparam" immediately above. If var=
-            // is missing or names an undeclared variable, add NO pin at all: Graph.Validate() (run right
-            // after this loop, and again at the start of every Compile()/CompileEntryPoint()) reports
-            // the specific reason, more useful than a generic "no output pin 'value'" from whatever
-            // LINK/OUT touches this node next -- the exact same reasoning "param"/"getparam" already
-            // follows.
+            // GetVar: a PURE READ, so unlike SetVar it gets NO exec pins, reachable from BOTH compilers
+            // like GetField. Only ONE output, 'value', typed to the VAR's declared type -- not fixed,
+            // mirroring "param"/"getparam" above. If var= is missing/undeclared, add NO pin: Graph.Validate()
+            // reports the specific reason instead of a generic "no output pin 'value'" downstream.
             // ---- FUNCTIONS -------------------------------------------------------------------------
-            //
-            // All three of these derive their pins from a DECLARATION elsewhere in the file rather than
-            // from a fixed list, which is the same thing Param/GetVar/SetVar already do -- see their
-            // cases above. That is what makes a function's signature a single source of truth: change a
-            // FUNCIN and every call node's pins change with it on the next load, rather than drifting.
-            //
-            // A PURE function has no exec pins anywhere -- entry, return, or call site. An impure one
-            // has them in all three. There is no half-way state, which is the point of declaring purity
-            // once on the FUNC record instead of inferring it three times.
+            // All three derive their pins from a DECLARATION elsewhere (like Param/GetVar/SetVar above),
+            // making a function's signature a single source of truth: change a FUNCIN and every call
+            // node's pins change on next load, rather than drifting. A PURE function has no exec pins
+            // anywhere (entry/return/call); an impure one has them in all three -- no half-way state,
+            // the point of declaring purity once on FUNC instead of inferring it three times.
             case "funcentry":
             {
                 var fn = graph.Functions.FirstOrDefault(f => string.Equals(f.Name, node.FuncOwner, StringComparison.OrdinalIgnoreCase));
@@ -2654,16 +2405,12 @@ public class OcGraphParser
                 break;
             }
 
-            // SetVar: A WRITE IS A SIDE EFFECT (see GraphCompiler.IsExecCapableVarSideEffectType's own
-            // comment), so -- UNLIKE GetField/SetField/GetFieldVec3/SetFieldVec3, which get no exec pins
-            // by default -- this DOES get exec pins BY DEFAULT, mirroring Spawn/Raycast rather than
-            // SetField: SetVar has no legitimate non-exec path at all (there is no "overwriting the same
-            // value twice is harmless" excuse the way SetField's own idempotent field write has), so a
-            // freshly palette-spawned node needs to already be usable, not require an author to hand-add
-            // exec pins before it does anything. 'value' is typed to the declared VAR's type, the same
-            // conditional-add-or-nothing rule as GetVar's own output above -- present only when var=
-            // resolves, so an undeclared-variable graph still gets Graph.Validate()'s specific error
-            // rather than a mistyped default pin masking it.
+            // SetVar: a write is a side effect (IsExecCapableVarSideEffectType), so it gets exec pins BY
+            // DEFAULT, mirroring Spawn/Raycast rather than SetField (or GetField/GetFieldVec3/SetFieldVec3)
+            // -- there's no "idempotent overwrite" excuse SetField has, so a freshly palette-spawned node
+            // must already be usable. 'value' is typed to
+            // the declared VAR's type and added only when var= resolves (like GetVar above), so an
+            // undeclared variable still gets Graph.Validate()'s specific error, not a mistyped default pin.
             case "setvar":
             {
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
@@ -2675,59 +2422,44 @@ public class OcGraphParser
             }
 
             // ---- SetParent / SetViewEntity / SetName -----------------------------------------------
-            // Three one-ABI-call writes -- see GraphCompiler.cs's IsExecCapableSetParentType/
-            // IsExecCapableSetViewEntityType/IsExecCapableSetNameType comments for the full dispatch
-            // story. ALL THREE ARE DISPATCHED SetField-STYLE, DELIBERATELY, NOT Spawn/SetVar-STYLE: no
-            // exec pins by default (so a graph can wire one into a pure dataflow the same way GetField/
-            // SetField already can), and EmitNode's own "setparent"/"setviewentity"/"setname" cases run
-            // them unconditionally on Compile()'s topological pass, exactly like EmitSetField does for
-            // "setfield". That choice rests on the same excuse SetField's own comment already gives:
-            // aver_scene_set_parent/aver_scene_set_name/aver_fw_set_view_entity are all REPUBLISH
-            // operations -- reparenting to the same parent, renaming to the same name, or republishing
-            // the same view entity every single tick is harmless and idempotent, unlike Spawn (which
-            // creates a NEW entity every call) or SetVar (which has no "safe to repeat" excuse at all).
-            // Still fully refused when PULLED as a bare data value with no exec visit inside an
-            // ENTRY-driven graph -- EmitPullOutput's side-effect refusal names all three, exactly like
-            // it already names SetField/SetFieldVec3/Spawn/SetVar -- so "the PULL path must refuse a
-            // write" holds for these too; only Compile()'s own SEPARATE topological compiler gets the
-            // idempotent-overwrite exception SetField already established.
+            // Three one-ABI-call writes, DISPATCHED SetField-STYLE, not Spawn/SetVar-style: no exec pins
+            // by default (wireable into a pure dataflow like GetField/SetField), and EmitNode runs them
+            // unconditionally on Compile()'s topological pass like EmitSetField (see
+            // IsExecCapableSetParentType/SetViewEntityType/SetNameType). Same excuse as SetField:
+            // aver_scene_set_parent/set_name/aver_fw_set_view_entity are REPUBLISH operations, harmless
+            // and idempotent every tick, unlike Spawn (new entity each call) or SetVar (no such excuse).
+            // Still fully refused when PULLED with no exec visit in an ENTRY-driven graph
+            // (EmitPullOutput names all three, like SetField/SetFieldVec3/Spawn/SetVar); only Compile()'s
+            // separate topological compiler gets the idempotent-overwrite exception.
             case "setparent":
                 // aver_scene_set_parent(child, parent) -> success. "child"/"parent" name the ABI's own
-                // parameters directly (scene_abi.h:105) rather than "entity"/"target", so the pins read
-                // the same as the native signature they wrap.
+                // parameters (scene_abi.h:105) rather than "entity"/"target", matching the native signature.
                 node.Pins.Add(new Pin { Name = "child", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "parent", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             case "setviewentity":
-                // aver_fw_set_view_entity(entity) -> void (framework_abi.h:206). NO OUTPUT PIN AT ALL --
-                // deliberately, not an oversight: the ABI returns nothing, so there is no real return
-                // code to surface, and inventing a fake "success" pin here would repeat exactly the
-                // mistake this codebase's own SetField comment says it already fixed once ("the old stub
-                // hardcoded 1 regardless of whether anything happened").
+                // aver_fw_set_view_entity(entity) -> void (framework_abi.h:206). No output pin at all,
+                // deliberately: the ABI returns nothing, and a fake "success" pin would repeat the
+                // exact mistake SetField's own comment says it already fixed (hardcoded 1 regardless).
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 break;
 
             case "setname":
-                // aver_scene_set_name(entity, name) -> success. name= is a NODE-line attribute (see
-                // Node.NameValue), not a pin -- PinType has no String member, so this is the only route
-                // a string reaches this node, the same way class= is the only route Spawn's class name
-                // reaches IT.
+                // aver_scene_set_name(entity, name) -> success. name= is a NODE-line attribute
+                // (Node.NameValue), not a pin -- PinType has no String, same as class= for Spawn.
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             // ---- SetMesh / SetMaterial ---------------------------------------------------------------
-            // Coarse, dedicated nodes wrapping Aver.Framework.Entity.SetMesh/SetMaterial (EntityScene.cs)
-            // through GraphInterop.SetMeshForGraph/SetMaterialForGraph -- NOT a generalised I64-capable
-            // SetField, NOT an exposed asset-path lookup (Assets.ObjectIdOf is a pure local FNV1a64 hash,
-            // no native call, no I/O), and NOT a generic "add a missing component" node: EntityScene's
-            // own EnsureMeshRenderer already does that composition, so the graph node needs nothing new
-            // beyond the string attribute mechanism setname/spawn/getfield already established. Same
-            // SetField-style dispatch as SetParent/SetViewEntity/SetName above -- EnsureMeshRenderer's
-            // own "if already present, do nothing" guard is what makes re-running this every tick
-            // harmless, the identical idempotence excuse SetField's own comment gives.
+            // Wrap Aver.Framework.Entity.SetMesh/SetMaterial (EntityScene.cs) via GraphInterop.SetMeshForGraph/
+            // SetMaterialForGraph -- not a generic I64-capable SetField, not an exposed asset lookup
+            // (Assets.ObjectIdOf is a pure local FNV1a64 hash, no native call, no I/O), not an
+            // "add a missing component" node (EntityScene.EnsureMeshRenderer already does that). Same
+            // SetField-style dispatch as SetParent/SetViewEntity/SetName: EnsureMeshRenderer's own
+            // "already present, do nothing" guard makes re-running this every tick harmless.
             case "setmesh":
                 // mesh= names the asset path (see Node.MeshPath), the same NODE-line-attribute-as-data
                 // mechanism name= established for SetName just above.
@@ -2742,9 +2474,8 @@ public class OcGraphParser
                 break;
 
             // ---- AttachToSocket ----------------------------------------------------------------
-            // TWO entity inputs, which no other Set*-shaped node here has: an attachment is a
-            // relationship between a thing and what it hangs from, and both ends are entities the
-            // graph already holds. socket= names which socket on the parent's rig.
+            // TWO entity inputs, unlike any other Set*-shaped node: an attachment relates two things
+            // the graph already holds. socket= names the socket on the parent's rig.
             case "attachtosocket":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "parent", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -2752,37 +2483,32 @@ public class OcGraphParser
                 break;
 
             // ---- GetAnimCurve ------------------------------------------------------------------
-            // A PURE READ: no exec pins, so it needs no exec emitter and no IsExecCapable predicate.
-            // It is the first node in this group that only asks a question.
+            // A pure read: no exec pins, no exec emitter, no IsExecCapable predicate needed.
             case "getanimcurve":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
             // ---- SetSkeleton / PlayAnimation ----------------------------------------------------
-            // SetMesh/SetMaterial's own animation-family siblings -- same SetField-style dispatch, same
-            // reason (EnsureComponent's own idempotent add-if-absent guard). skeleton=/clip= name the
-            // asset paths (see Node.SkeletonPath/Node.ClipPath); see GraphNodeDefs.hpp's own comment on
-            // this pair for the array-index bone-binding caveat neither node can enforce.
+            // SetMesh/SetMaterial's animation-family siblings -- same SetField-style dispatch, same
+            // idempotent add-if-absent reason. skeleton=/clip= name the asset paths (Node.SkeletonPath/
+            // ClipPath); GraphNodeDefs.hpp notes the array-index bone-binding caveat neither enforces.
             case "setskeleton":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // PlayAnimation gets a THIRD pin -- loop -- that no Set*-shaped node above needs, because
-            // Entity.PlayAnimation itself takes a second scalar argument. A pin, not a NODE-line
-            // attribute, because it is runtime data a graph may compute, not edit-time-only naming --
-            // see Node.ClipPath's own comment.
+            // PlayAnimation gets a THIRD pin, loop, since Entity.PlayAnimation takes a second scalar
+            // argument -- a pin, not a NODE-line attribute, because it's runtime data (Node.ClipPath).
             case "playanimation":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "loop", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
-            // SetControlRig, the third of the family. Shaped like PlayAnimation rather than
-            // SetSkeleton -- a float weight pin beside the entity, for the same reason loop is a pin:
-            // rig= is edit-time naming, weight is runtime data. See GraphNodeDefs.hpp's own comment
-            // for why the component it attaches is reached by NAME and not by a Component enum value.
+            // SetControlRig: shaped like PlayAnimation, not SetSkeleton -- a float weight pin, since
+            // rig= is edit-time naming but weight is runtime data (component reached by NAME, not a
+            // Component enum value -- GraphNodeDefs.hpp).
             case "setcontrolrig":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "weight", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
@@ -2819,13 +2545,10 @@ public class OcGraphParser
         return tokens;
     }
 
-    /// Reads a `x,y,z` attribute value into `into`, leaving any component it cannot read at
-    /// whatever the caller had there. That fallback direction is deliberate: `scale` arrives
-    /// pre-filled with 1,1,1, so a malformed `scale=2,,2` gives 2,1,2 rather than an actor
-    /// collapsed to zero size, and a partially-typed value mid-edit never makes a component vanish.
-    ///
-    /// Fewer than three parts is accepted and fills what is there -- `pos=0,0` is a plausible thing
-    /// to type, and the third axis keeping its default is the least surprising reading of it.
+    /// Reads a `x,y,z` value into `into`, leaving any unparsed component at the caller's existing
+    /// value -- deliberate: `scale` arrives pre-filled 1,1,1, so `scale=2,,2` gives 2,1,2, not a
+    /// collapsed actor, and a partially-typed value mid-edit never vanishes a component. Fewer
+    /// than three parts fills what's there (`pos=0,0` keeps its default z).
     private static void ParseVec3(string text, float[] into)
     {
         string[] parts = text.Split(',');

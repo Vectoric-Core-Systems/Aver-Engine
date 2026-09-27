@@ -1,38 +1,20 @@
 #pragma once
-// The .ocgraph node editor: an ImGui canvas built on GraphEditorGeometry's pure layout / hit-test /
-// link-rule / auto-layout core (see that header for why the split exists) and GraphNodeDefs's node
-// descriptor table (the ONE place a node type is registered -- see that header's own comment).
+// The .ocgraph node editor: an ImGui canvas over GraphEditorGeometry's layout/hit-test/link-rule/
+// auto-layout core and GraphNodeDefs's node descriptor table (the one place a node type is registered).
 //
-// ============================================================================================
-// EXACT HOOK for SandboxApp.cpp -- NOT edited here, that file is owned by another workflow.
-// Three lines, all additive, none of them touch existing code:
+// EXACT HOOK for SandboxApp.cpp -- NOT edited here (owned by another workflow). Three additive lines:
+//   1. SandboxApp.cpp:42-44, with the other editor includes: #include "GraphEditor.hpp"
+//   2. onInit(Engine&), appended AFTER the existing three registerFactory calls (SandboxApp.cpp:
+//      514-516; append not insert -- AssetEditorHost::open() is first-match-wins and none of the
+//      three claim ".ocgraph"): assetEditors_.registerFactory(&editor::makeGraphEditor);
+//   3. applyDpi(f32 dpi) (SandboxApp.cpp:384), right after `dpi_ = dpi;`: editor::setGraphEditorDpi(dpi_);
+//      Needed because AssetEditor::draw(Engine&) takes no dpi (AssetEditorHost::draw takes one itself,
+//      for the fallback window, but never threads it into ed.draw()). Same push-style-setter precedent
+//      as ActorEditor's setActorEditorContentRoot/setActorEditorHooks, not a widened interface.
 //
-//   1. Near the other editor includes (SandboxApp.cpp:42-44, alongside AssetEditor.hpp/
-//      ActorEditor.hpp/AnimEditor.hpp):
-//          #include "GraphEditor.hpp"
-//
-//   2. In onInit(Engine& e), appended AFTER the existing three registerFactory calls
-//      (SandboxApp.cpp:514-516) -- append, not insert ahead of them: AssetEditorHost::open() is
-//      first-match-wins by registration order, and none of the existing three claim ".ocgraph" so
-//      order relative to them does not matter, but appending is the smallest, safest diff:
-//          assetEditors_.registerFactory(&editor::makeGraphEditor);
-//
-//   3. In applyDpi(f32 dpi) (SandboxApp.cpp:384), right after the existing `dpi_ = dpi;` line:
-//          editor::setGraphEditorDpi(dpi_);
-//      This is needed because AssetEditor::draw(Engine&) carries no dpi parameter (confirmed by
-//      reading AssetEditor.hpp -- AssetEditorHost::draw takes `dpi` itself to size the fallback
-//      window, but never threads it into ed.draw()). ActorEditor.hpp already solves the identical
-//      problem for its own app-owned config (content root, toolbar hooks) with a push-style setter
-//      -- setActorEditorContentRoot / setActorEditorHooks -- rather than widening the AssetEditor
-//      interface for one subclass. setGraphEditorDpi follows that exact precedent instead of
-//      inventing a new mechanism.
-//
-// That's it. No Window-menu entry, no dock-layout slot, no bool visibility flag: AssetEditorHost
-// already gives every asset tab docking, a dirty marker (the tab's unsaved-changes dot) and
-// close-with-unsaved-warning for free -- see AssetEditor.hpp's own doc comments. Opening a .ocgraph
-// file (double-click in the Content Browser, or --open-asset on the command line) routes to
-// makeGraphEditor automatically once step 2 lands; nothing else needs to know the extension exists.
-// ============================================================================================
+// Nothing else needed: no Window-menu entry, no dock-layout slot, no bool visibility flag -- AssetEditorHost
+// already gives docking, a dirty marker and close-with-unsaved-warning; opening a .ocgraph (Content
+// Browser or --open-asset) routes to makeGraphEditor once step 2 lands.
 #include "AssetEditor.hpp"
 #include "EditorWidgets.hpp"
 #include "GraphEditorGeometry.hpp"
@@ -48,24 +30,19 @@
 #include <unordered_set>
 #include <vector>
 
-// Forward-declared rather than including ActorPreview.hpp: only one method signature below needs
-// the type, and it takes it by reference. Pulling the preview module's header into this one would
-// make every translation unit that edits a graph depend on the renderer's preview tier for a type
-// none of them name.
+// Forward-declared, not included: only one method below needs PreviewDraw (by reference), and
+// including ActorPreview.hpp would drag the renderer's preview tier into every TU that edits a graph.
 namespace aver::render::preview { struct PreviewDraw; }
 
 namespace aver::editor {
 
-// Forward-declared rather than pulling in GraphNodeDefs.hpp, which would drag the whole node
-// catalog -- ~250 entries and a function-local static vector -- into every translation unit that
-// includes this header. Legal because GraphNodeDomain fixes its underlying type; see its definition
-// in GraphNodeDefs.hpp for what the bits mean.
+// Forward-declared (legal since the enum fixes its underlying type) rather than including
+// GraphNodeDefs.hpp, which would drag the ~250-entry catalog (a function-local static vector) into
+// every including TU.
 enum GraphNodeDomain : std::uint32_t;
 
-// Pushes the app's current DPI scale into the graph editor. See the EXACT HOOK comment above for
-// why this exists instead of a constructor/draw parameter. Read fresh every frame by every open
-// GraphEditor tab (not captured once), so a live DPI change (e.g. dragging the window to a different
-// monitor) takes effect on the next frame without needing every tab to be told individually.
+// Pushes app DPI into the editor (see EXACT HOOK above). Read fresh every frame by every open tab,
+// so a live DPI change (e.g. moving to another monitor) takes effect without notifying tabs individually.
 void setGraphEditorDpi(float dpi);
 
 // The shape the material graph's Viewport tab previews it on. Sphere shows every normal-to-view
@@ -86,151 +63,102 @@ public:
     bool save(std::string* why) override;
     void onFileChanged() override;
 
-    // Restores the canvas/details ("Gap B") split to its default width and persists that -- see
-    // EditorWidgets.hpp's own comment for why THIS tab's split persists a WIDTH (like ActorEditor's
-    // own columns) rather than the fraction most other editors' splits use: the details column is
-    // deliberately a near-constant width, not a proportion of the window. A no-op `#if
-    // AVER_WITH_IMGUI` is off, matching draw()'s own headless branch.
+    // Restores the canvas/details ("Gap B") split to its default width and persists it -- a WIDTH
+    // (like ActorEditor's own columns), not the fraction most editors' splits use (details column is
+    // a near-constant width; see EditorWidgets.hpp). No-op when AVER_WITH_IMGUI is off, matching
+    // draw()'s headless branch.
     void resetLayout() override;
 
     // ---- read access for the details panel and for headless tests ----------------------------------
-    // The real data model -- read-only. Exposed (unlike graph_ itself) so GraphEditorLoadSaveTest can
-    // inspect the result of an attribute edit through the exact same public surface draw()'s details
-    // panel reads from, with no ImGui context required.
+    // Read-only view of graph_, exposed so GraphEditorLoadSaveTest can inspect edits through the same
+    // surface draw()'s details panel uses, with no ImGui context.
     const fmt::OcGraphData& graph() const { return graph_; }
     const std::vector<std::string>& selectedNodes() const { return selectedNodes_; }
 
-    // Forces the Viewport tab to the front on the next draw, exactly as clicking it would.
-    //
-    // Public for the same reason selectNode is (see its comment below): a capture run needs to
-    // prove the component tree DRAWS, and an inner tab is not reachable from the command line any
-    // other way. Display state, so no pushUndo() and no dirty_ -- and one-shot, so a human who
-    // then clicks Event Graph is not fought with every frame afterwards.
+    // Forces the Viewport tab to front on the next draw. Public so a capture run can prove the
+    // component tree draws (an inner tab is unreachable from the command line otherwise). Display
+    // state only (no pushUndo/dirty_); one-shot so it doesn't fight a human who then clicks Event Graph.
     void showViewportTab() { forceViewportTab_ = true; }
 
-    // Selects exactly `nodeId` (clearing any link selection), the same end state a canvas click on
-    // that node reaches -- a no-op if `nodeId` does not name a node currently in the graph. Not an
-    // "edit" (no pushUndo(), no dirty_): selection is display state, not data, exactly like
-    // displayPos_. Public so a caller other than the canvas's own click handling can drive selection
-    // -- SandboxApp's --open-asset/--graph-select test hook uses this to prove the details panel
-    // renders a real, populated node without a human clicking the canvas.
-    // RETURNS WHETHER IT SELECTED ANYTHING, and the return value is not decoration. This is void
-    // no longer because --graph-select logged "selected node 'write'" for a graph with no node
-    // called `write` -- the caller logged success next to a call that could not report failure, so
-    // a capture run "verifying" a details panel proved nothing and said it had. That is the exact
-    // failure mode this repo keeps paying for; a hook that cannot fail cannot verify.
+    // Selects exactly `nodeId` (clearing link selection); no-op if it names no node in the graph.
+    // Display state only (no pushUndo/dirty_). Public so --graph-select can drive selection headlessly.
+    // Returns whether it selected anything -- not decoration: this was void until --graph-select logged
+    // "selected node 'write'" for a graph with no such node, so a capture run "verified" nothing and
+    // said it had. A hook that cannot fail cannot verify.
     bool selectNode(const std::string& nodeId);
 
-    // Selects SEVERAL nodes at once, which selectNode above cannot express -- it replaces the
-    // selection with exactly one. Public for the same reason selectNode is: copy/paste is a
-    // multi-node operation, and a test that can only ever select one node can only test the
-    // single-node case, which is the case with no link remapping in it.
-    //
-    // Ids that name no node are dropped rather than refused; a caller naming a node that has since
-    // been deleted wants the rest of its selection, not nothing.
+    // Selects several nodes at once (selectNode only ever replaces with one) -- needed to test
+    // copy/paste's link remapping. Unknown ids are dropped, not refused: a caller wants the rest of
+    // its selection, not nothing.
     void selectNodes(const std::vector<std::string>& nodeIds);
 
-    // Undo/redo, exposed so a headless test can check that one paste is one undo step rather than
-    // one per node -- the shape of that stack is not observable any other way.
+    // Exposes undo/redo so a headless test can check paste is one undo step, not one per node.
     void undoForTest() { undo(); }
     void redoForTest() { redo(); }
 
     // ---- attribute editing (Gap B) -------------------------------------------------------------------
-    // A selected node's NODE-line key=value attributes -- param=/field=/class= today, anything else
-    // tomorrow. See GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute for
-    // the underlying order-preserving, unknown-survives contract; these two just add the same
-    // pushUndo()/dirty_ bookkeeping every other edit path in this file already has (deleteSelection,
-    // commitLink). PUBLIC, unlike those two, specifically so GraphEditorLoadSaveTest can prove the
-    // save()/C#-compiles round trip without an ImGui context -- draw()'s details panel below calls
-    // these exact same two methods a headless caller would. Both return false (no-op, no undo entry)
-    // if `nodeId` does not name a node currently in the graph. setAttribute ALSO returns false, with no
-    // edit applied, if `value` contains any whitespace: the NODE line is whitespace-tokenised with no
-    // quoting on either the C++ writer or the C# reader side (OcGraph.cpp's writeOcgraph joins
-    // extraTokens with a bare space; OcGraphParser.cs re-splits on whitespace), so a value containing a
-    // space cannot round-trip -- it would silently re-split into extra bare tokens on the next load and
-    // read back truncated to its first word. Refusing here is the same "not an edit" shape
-    // clearAttribute already uses for a no-op target, rather than writing something the very next load
-    // would read back differently.
+    // A selected node's NODE-line key=value attributes (param=/field=/class=/...). See
+    // GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute for the order-
+    // preserving, unknown-survives contract; these add the usual pushUndo()/dirty_ bookkeeping, and are
+    // PUBLIC so GraphEditorLoadSaveTest can drive the save() round trip with no ImGui context -- the
+    // exact two methods draw()'s details panel itself calls. Both
+    // return false (no-op) if `nodeId` is unknown. setAttribute also refuses (false, no edit) a `value`
+    // containing whitespace: the NODE line is whitespace-tokenised with no quoting on either side
+    // (OcGraph.cpp writeOcgraph / OcGraphParser.cs), so a space would silently truncate on next load.
     bool setAttribute(const std::string& nodeId, const std::string& key, const std::string& value);
-    // Clears (deletes) the `key=...` token outright rather than writing `key=` -- see
-    // GraphEditorGeometry.hpp's removeNodeAttribute comment for why. Returns false (no-op, no undo
-    // entry) if the node doesn't exist OR the attribute wasn't set to begin with -- clearing something
-    // already absent is not an edit.
+    // Deletes the `key=...` token outright (see removeNodeAttribute in GraphEditorGeometry.hpp).
+    // Returns false (no-op) if the node doesn't exist or the attribute wasn't set.
     bool clearAttribute(const std::string& nodeId, const std::string& key);
 
     // ---- variable editing (graph-level VAR declarations) -------------------------------------------
-    // THE BUG THIS EXISTS TO CLOSE: dragging SetVar out of the palette produced a `var=` attribute
-    // with no picker, no validation, and no way to declare the variable it named -- so the freshly
-    // spawned node could not compile (Graph.Validate() refuses a SetVar/GetVar naming an undeclared
-    // variable) and the editor gave no sign anything was wrong. These five methods, plus draw()'s
-    // Variables panel and its var= picker (both ImGui, both calling straight into these), are what
-    // give that path somewhere useful to end: declare on the spot, or say exactly what's wrong.
-    //
-    // Same public-surface shape as setAttribute/clearAttribute above, and for the identical reason:
-    // GraphEditorLoadSaveTest exercises these directly, with no ImGui context, so the load/save
-    // contract (byte-identical no-op round trip, an edit landing on disk through the real save() path)
-    // is proven against the exact calls the details panel makes, not a hand-simulated approximation of
-    // them.
+    // Closes a real bug: dragging SetVar from the palette produced a `var=` naming an undeclared
+    // variable, which Graph.Validate() refuses at compile (SetVar or GetVar) with no editor-visible
+    // sign. These five methods (plus draw()'s Variables panel and var= picker) let the author declare
+    // on the spot instead.
+    // Same public-surface shape as setAttribute/clearAttribute, for the same reason: GraphEditorLoadSaveTest
+    // drives the load/save round trip through these exact calls with no ImGui context.
     const std::vector<fmt::OcGraphVariable>& variables() const { return graph_.variables; }
     const std::vector<fmt::OcGraphComponent>& components() const { return graph_.components; }
     const std::string& selectedComponent() const { return selectedComponent_; }
 
-    // Adds one node of `typeId` from the catalog at `canvasPos`, with that type's default pins --
-    // and, for a node in the catalog's "Event" category, the top-level ENTRY record without which
-    // it would never run. Returns the new node's id, or empty when the catalog has no such type.
-    //
-    // LIFTED OUT OF THE PALETTE POPUP, which is why it exists as a method at all: the popup is
-    // reachable only with an ImGui context, so "does adding an On Tick actually produce a graph
-    // that runs" was a question no test could ask. It is the same split this file already draws
-    // for the Variables panel and the component tree -- thin ImGui glue, model in the class.
+    // Adds one node of `typeId` at `canvasPos` with its default pins, plus an ENTRY record if it's
+    // an Event-category node. Returns the new id, or empty if the type is unknown. Lifted out of the
+    // (ImGui-only) palette popup so a headless test can ask "does adding an On Tick actually run" --
+    // same ImGui-glue/model-in-class split as the Variables panel and component tree.
     std::string addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos);
 
     // ---- drag-a-wire-into-empty-space -------------------------------------------------------
-    //
-    // Releasing a link drag on empty canvas opens the palette filtered to node types that could
-    // accept the wire, and connects whichever one is picked. It is the gesture a Blueprint author
-    // uses to create most nodes, and it did nothing here at all until now -- the wire just vanished.
-    //
-    // Modelled as three public methods with no ImGui in them so a headless test can drive the whole
-    // gesture: arm it, ask what the palette would show, pick one, check the link exists.
+    // Releasing a link drag on empty canvas opens the palette filtered to accepting node types and
+    // connects whichever is picked (a Blueprint-style gesture; the wire used to just vanish). Modelled
+    // as three ImGui-free public methods so a test can arm it, query candidates, pick one, check the link.
 
-    // Arms the gesture. `fromPin` is the pin the drag STARTED at; `fromIsOutput` says which end of
-    // the wire that is, which decides whether candidates are searched for a matching INPUT or a
-    // matching OUTPUT.
+    // Arms the gesture. `fromIsOutput` says which end of the wire `fromPin` is, deciding whether
+    // candidates are searched for a matching INPUT or OUTPUT.
     void beginLinkDrop(const std::string& fromNode, const std::string& fromPin, bool fromIsOutput);
     void cancelLinkDrop() { linkDropPending_ = false; }
     bool linkDropPending() const { return linkDropPending_; }
 
-    // Would this node type accept the pending wire? False for every type when nothing is pending,
-    // so a caller can use it unconditionally. Uses the SAME compatibility predicate commitLink
-    // uses (exact match for gameplay, material widening for material graphs), so the palette can
-    // never offer a node whose link would then be refused.
+    // Would this node type accept the pending wire? False for every type when nothing is pending.
+    // Uses the same compatibility predicate commitLink does (exact match for gameplay graphs,
+    // widening for material graphs), so the
+    // palette can never offer a node whose link would then be refused.
     bool linkDropAccepts(const struct GraphNodeDesc& desc) const;   // GraphNodeDefs.hpp
 
     // ---- validation, through the managed validator ------------------------------------------
-    //
-    // Graph.Validate() and OcGraphParser carry about thirty carefully-worded errors that name the
-    // offending node and say what to do, and THE EDITOR NEVER CALLED ANY OF THEM: the checks are C#
-    // and this is C++, with no channel between them for it. An author's first sight of one was the
-    // engine log at project open, if they thought to look.
-    //
-    // Supplied as a hook rather than a direct ScriptHost call so this file keeps its existing
-    // dependencies (Core + Formats + ImGui) and stays drivable from a test with no .NET runtime.
-    // Unset means "no validator": validateNow() then reports unavailable rather than claiming valid.
+    // Graph.Validate()/OcGraphParser carry ~30 named errors the editor never called (C# vs. C++, no
+    // channel between them; an author's first sight was the engine log, if they looked). Supplied as
+    // a hook, not a direct ScriptHost call, so this file keeps its existing dependencies (Core +
+    // Formats + ImGui) and stays testable with no .NET runtime. Unset
+    // means validateNow() reports unavailable rather than claiming valid.
     using ValidateFn = std::function<bool(const std::string& ocgraphText, std::string& err)>;
     void setValidator(ValidateFn fn) { validate_ = std::move(fn); }
     bool validatorInstalled() const { return static_cast<bool>(validate_); }
 
     // ---- execution highlighting --------------------------------------------------------------
-    //
-    // Which nodes of THIS graph ran recently, and how long ago. Supplied as a hook for the same
-    // reason the validator is: it keeps this file's dependencies at Core + Formats + ImGui and leaves
-    // it drivable from a test with no .NET runtime.
-    //
-    // Called at most once a frame, by a graph tab that is actually drawing. The recording it reads
-    // from is armed ONCE when the editor starts (SandboxApp), not per tab: the managed table is keyed
-    // by graph NAME and the record call costs a static bool test when off, which is cheaper than
-    // tracking tab lifetimes to switch it. A packaged game has no editor and never arms it.
+    // Which nodes of THIS graph ran recently, and how long ago. Hook, same reason as the validator.
+    // Called at most once/frame by a drawing tab. Armed ONCE at editor start (SandboxApp), not per
+    // tab: the recording is keyed by graph NAME, and a static bool test when off is cheaper than
+    // tracking tab lifetimes. A packaged game never arms it.
     using NodeHitsFn = std::function<void(const std::string& graphName, f32 maxAgeSeconds,
                                           std::vector<std::pair<std::string, f32>>& out)>;
     void setNodeHitSource(NodeHitsFn fn) { nodeHits_ = std::move(fn); }
@@ -240,36 +168,29 @@ public:
     // a node which stopped running goes dark while you are still looking at it.
     static constexpr f32 kNodeHitFadeSec = 1.5f;
 
-    // Validates what is ON THE CANVAS, unsaved edits and all -- it serialises the live graph rather
-    // than reading the file back, so the answer describes what the author is looking at. True when
-    // valid. On false, `err` is the validator's own message and `offendingNode` is the node it names
-    // if that can be resolved (empty otherwise).
+    // Validates what's ON THE CANVAS (serialises the live graph, not the file) so the answer matches
+    // what the author sees. False: `err` is the validator's message, `offendingNode` its named node if resolved.
     bool validateNow(std::string& err, std::string& offendingNode);
 
-    // The node id a validator message names, or empty. Public and static because it is a HEURISTIC
-    // over prose and therefore the part most worth testing on its own: it reads the first
-    // single-quoted token in the message and returns it ONLY if it is a real node id in `g`. A
-    // message quoting a pin name, an event name or a parameter yields nothing, which is why a wrong
-    // guess cannot highlight an innocent node.
+    // The node id a validator message names, or empty. Public/static because it's a heuristic over
+    // prose worth testing alone: reads the first single-quoted token and returns it only if it names
+    // a real node in `g` -- a pin/event/parameter quote yields nothing, so a wrong guess can't highlight an innocent node.
     static std::string errorNodeId(const std::string& message, const fmt::OcGraphData& g);
 
     // Exactly what save() would write. Public so a test can compare the two.
     std::string serializeForSave() const;
 
-    // Spawns `typeId` at `canvasPos` and wires the pending drop to its first accepting pin.
-    // Returns the new node's id, or empty if the type is unknown. Disarms the gesture either way.
-    // With nothing pending this is exactly addNodeFromCatalog.
+    // Spawns `typeId` at `canvasPos`, wires the pending drop to its first accepting pin, and disarms
+    // the gesture either way. Returns the new id, or empty if unknown. With nothing pending, exactly addNodeFromCatalog.
     std::string spawnAndConnectLinkDrop(const std::string& typeId, Vec2 canvasPos);
 
-    // Which node vocabulary the open graph belongs to, read from its own DOMAIN record -- so it is
-    // the same answer the COMPILER gives for the same file. There is deliberately no second notion
-    // of domain anywhere in the editor: one that disagreed with the compiler would offer a palette
-    // whose nodes then failed to compile, which is worse than offering none.
+    // Which node vocabulary the graph belongs to, read from its own DOMAIN record -- the same answer
+    // the compiler gives. Deliberately the only notion of domain in the editor; a disagreeing one
+    // would offer nodes that then fail to compile.
     GraphNodeDomain openGraphDomain() const;
 
-    // The Viewport tab's content for a MATERIAL graph: one shape (materialPreviewShape_) shaded by
-    // this graph itself. False when there is nothing to draw -- no path yet, or a graph that does
-    // not currently compile.
+    // The Viewport tab's content for a MATERIAL graph: materialPreviewShape_ shaded by this graph.
+    // False when there's nothing to draw (no path yet, or the graph doesn't currently compile).
     bool buildMaterialPreview(Engine& e, render::preview::PreviewDraw& out);
 
     // The whole Viewport tab for a material graph -- the preview shape and its compile state, with
@@ -284,35 +205,28 @@ public:
     MaterialPreviewShape materialPreviewShape_ = MaterialPreviewShape::Sphere;
 
     // ---- functions ----------------------------------------------------------------------------
-    // A .ocgraph holds ONE event graph and any number of named FUNCTIONS. They share a file, a node
-    // id namespace and a canvas coordinate space, but not a canvas: the editor shows exactly one
-    // subgraph at a time, and a wire cannot cross between them (the C# Validate refuses it, because
-    // they compile to separate methods).
+    // A .ocgraph holds ONE event graph plus named FUNCTIONS, sharing a file, node-id namespace and
+    // coordinate space but not a canvas: one subgraph shown at a time, no wire crosses between them
+    // (Validate refuses it -- they compile to separate methods).
 
-    // Which subgraph the canvas is showing. EMPTY MEANS THE EVENT GRAPH -- the same convention
-    // fmt::OcGraphNode's own `func=` attribute uses, where absent means "not in a function". Keeping
-    // one convention across the model and the editor is what stops a "" / "<none>" / null triple.
+    // Which subgraph the canvas shows. Empty means the event graph, the same convention `func=`
+    // uses (absent = not in a function) -- one convention across model and editor, not a "" / "<none>" / null triple.
     const std::string& currentSubgraph() const { return currentSubgraph_; }
     void setCurrentSubgraph(const std::string& funcName);
 
     const std::vector<fmt::OcGraphFunction>& functions() const { return graph_.functions; }
 
-    // Declares a function and lays down the nodes it cannot exist without: a FuncEntry always, and a
-    // FuncReturn as soon as it has an output. Returns the name actually used (uniquified), or empty
-    // if `name` is unusable.
-    //
-    // CREATING THE ENTRY NODE IS NOT A CONVENIENCE. A function with no FuncEntry does not compile --
-    // Validate refuses it by name -- so a "New Function" button that made only the FUNC record would
-    // hand the author a broken graph and no clue which of the three node types fixes it. This is the
-    // same lesson the palette already learned about dropping an On Tick with no ENTRY record.
+    // Declares a function and lays down the nodes it can't exist without: FuncEntry always, FuncReturn
+    // once it has an output. Returns the uniquified name, or empty if unusable. Creating FuncEntry is
+    // not a convenience -- a function with none fails Validate by name, so a "New Function" button
+    // that wrote only the FUNC record would hand back a broken graph with no clue which of the three
+    // node types fixes it (the same On Tick/ENTRY lesson the palette already learned).
     std::string addFunction(const std::string& name);
 
     bool renameFunction(const std::string& oldName, const std::string& newName);
 
-    // Deletes the function AND every node that lives in it, plus the links between them. REFUSES
-    // (false, no edit) while any CallFunc still names it -- the same rule deleteVariable follows, and
-    // for the same reason: a call to a function that no longer exists is a graph that stops compiling
-    // with no visible cause until someone runs the C# compiler.
+    // Deletes the function, its nodes and their links. Refuses (false) while any CallFunc still
+    // names it -- same rule/reason as deleteVariable: an orphaned call fails to compile invisibly.
     bool deleteFunction(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
 
     // Adds or removes one argument / one return. Both rebuild the affected nodes' pins, because a
@@ -326,68 +240,45 @@ public:
     std::string addCallNode(const std::string& funcName, Vec2 canvasPos);
 
     // ---- comment boxes ------------------------------------------------------------------------
-    // A comment box groups nodes visually and says WHY they are wired the way they are. It has no
-    // pins, no links and no effect on what the graph does -- see fmt::OcGraphComment for the format
-    // side. Same public-surface shape as addNodeFromCatalog/deleteSelection above and for the same
-    // reason: the gestures that reach these live behind an ImGui popup, so without a method here
-    // nothing could test that adding a box, moving it and saving actually produces a file that
-    // reloads.
+    // Groups nodes visually and says why they're wired that way, with no pins/links/graph effect
+    // (fmt::OcGraphComment). Same public surface as addNodeFromCatalog/deleteSelection, for the same
+    // reason: the gestures live behind an ImGui popup, so nothing else could test add/move/save/reload.
 
-    // Adds one box spanning the canvas rectangle between `a` and `b` (either corner order), with
-    // `text` as its title. Returns the new comment id. A degenerate rectangle is grown to a usable
-    // minimum rather than refused -- a zero-height box would be invisible AND unclickable, which
-    // is an editor state with no way out except a text edit.
+    // Adds a box spanning `a`..`b` (either corner order) titled `text`; returns its id. A degenerate
+    // rectangle is grown to a usable minimum rather than refused (invisible+unclickable is a dead end).
     std::string addComment(Vec2 a, Vec2 b, const std::string& text);
 
     // ---- framing and layout -------------------------------------------------------------------
-    // THE PROBLEM THESE CLOSE, stated plainly because it had gone unaddressed long enough to be
-    // treated as normal: a real graph opened showing whichever corner of it happened to sit at
-    // canvas (0,0), which for every graph in this repo is a column of Const nodes and nothing else.
-    // The content was never missing -- it was off-screen, at a zoom nobody had chosen, with no
-    // gesture to get to it short of dragging until something appeared.
+    // Closes: graphs used to open showing whatever sat at canvas (0,0) -- for every graph in this
+    // repo, a column of Const nodes and nothing else -- with content off-screen at an unchosen zoom
+    // and no gesture to reach it.
 
-    // The canvas-space bounding box of everything drawn: every node box and every comment box. False
-    // when the graph is empty (nothing to frame, and a caller must not treat {0,0}..{0,0} as content).
-    //
-    // Takes a dpi and recomputes the layouts, for the reason nodesInsideComment does: a node box has
-    // no size without one, and reading whatever the last frame left would make this callable only
-    // from inside a frame.
+    // The canvas-space bounding box of every node and comment box. False when the graph is empty
+    // (caller must not treat {0,0}..{0,0} as content). Takes a dpi and recomputes layouts (same
+    // reason as nodesInsideComment: a node box has no size without one), so this is callable outside a frame.
     bool contentBounds(float dpi, Vec2* outMin, Vec2* outMax);
 
     // Same, restricted to the current selection -- selected nodes, or the selected comment box.
     // False when nothing is selected.
     bool selectionBounds(float dpi, Vec2* outMin, Vec2* outMax);
 
-    // Points the view at the whole graph (frameAll) or at the selection, falling back to the whole
-    // graph when nothing is selected (frameSelection). `viewportPx` is the canvas child's size in
-    // real pixels. No-op on an empty graph rather than jumping to the origin.
-    //
-    // VIEW-ONLY: neither touches graph_ or displayPos_, so neither dirties the file. Framing is
-    // where you are looking, not what the graph says.
+    // Points the view at the whole graph (frameAll) or the selection, falling back to the whole graph
+    // when nothing is selected (frameSelection). `viewportPx` is the canvas child's real-pixel size.
+    // No-op on an empty graph. View-only: touches neither graph_ nor displayPos_, so never dirties.
     void frameAll(Vec2 viewportPx, float dpi);
     void frameSelection(Vec2 viewportPx, float dpi);
 
-    // Re-runs the layered auto-layout over the whole graph and COMMITS the result into graph_, as a
-    // single undoable edit that dirties the file.
-    //
-    // COMMITTING IS THE DIFFERENCE between this and runAutoLayoutIfUnpositioned(), which is display-
-    // only and deliberately so -- it fires on load, and a load followed by a save must stay byte-
-    // identical, so it must never invent position data nobody asked for. This one is a button the
-    // author pressed. They asked. Writing the positions is what makes the tidy graph still tidy the
-    // next time it opens, which is the entire value of pressing it.
-    //
-    // Returns false and changes nothing on an empty graph.
+    // Re-runs the layered auto-layout over the whole graph and COMMITS it into graph_ as one undoable, dirtying
+    // edit. The difference from runAutoLayoutIfUnpositioned(), which is display-only (it fires on
+    // load, and load-then-save must stay byte-identical): this is a button the author pressed, so
+    // writing the positions is the point -- it's what keeps the graph tidy next time it opens.
+    // Returns false, no change, on an empty graph.
     bool applyAutoLayout(float dpi);
 
-    // Adds one box sized to enclose every currently selected node, with a margin. Returns empty and
-    // does nothing when the selection is empty -- this is the C-key gesture, and wrapping nothing in
-    // a box is not a thing an author ever means.
-    //
-    // TAKES A DPI AND RECOMPUTES THE LAYOUTS ITSELF rather than reading whatever draw() left in
-    // layouts_. Node boxes are sized at a DPI, so "how big is this node" has no answer without
-    // one -- and depending on the last frame would make this callable only from inside a frame,
-    // which is exactly the shape that leaves a method untestable. Recomputing is idempotent and
-    // costs one pass over the nodes.
+    // Adds a box enclosing every selected node plus a margin (the C-key gesture). Empty/no-op when
+    // selection is empty. Takes a dpi and recomputes layouts itself rather than reading draw()'s
+    // layouts_ -- a node box has no size without one, and depending on the last frame would make this
+    // callable only inside a frame. Recompute is idempotent, one pass over the nodes.
     std::string addCommentAroundSelection(float dpi);
 
     bool deleteComment(const std::string& id);
@@ -396,25 +287,17 @@ public:
     const std::vector<fmt::OcGraphComment>& comments() const { return graph_.comments; }
     const std::string& selectedComment() const { return selectedComment_; }
 
-    // Every node whose layout box sits ENTIRELY inside the comment. That is what a comment box
-    // "contains", and it is decided by geometry every time it is asked rather than stored: a box
-    // that remembered a membership list would disagree with the screen the moment a node was
-    // dragged out of it, and there would be no way for an author to see which answer was live.
+    // Every node whose layout box sits ENTIRELY inside the comment -- decided by geometry each call,
+    // not stored: a remembered membership list would disagree with the screen after any drag.
     std::vector<std::string> nodesInsideComment(const std::string& id, float dpi);
 
-    // Deletes every selected node and link, along with the links, ENTRY records and OUT records
-    // that name them -- all three would otherwise be dangling references the parser refuses on the
-    // next load. Public for the same reason addNodeFromCatalog is.
+    // Deletes every selected node/link, plus the ENTRY/OUT records naming them -- otherwise dangling
+    // references the parser refuses on next load. Public for the same reason as addNodeFromCatalog.
     void deleteSelection();
 
-    // Removes every link touching a selected node, keeping the nodes. The one graph command that had
-    // no keyboard shortcut and no menu item: before the node context menu existed, disconnecting a
-    // node meant clicking each wire and pressing Delete, one at a time. A method rather than three
-    // lines inside the popup so a headless test can drive it -- the popup itself cannot be reached
-    // from one.
-    //
-    // ONE UNDO STEP for however many wires it removes, which is why it pushes its own undo rather
-    // than leaving that to a caller.
+    // Removes every link touching a selected node, keeping the nodes (previously required clicking
+    // each wire by hand). A method, not popup-inline code, so a headless test can drive it. One undo
+    // step for however many wires -- pushes its own undo rather than leaving that to a caller.
     void breakLinksOnSelection();
 
     // True when at least one link touches a selected node -- what greys out the Break Links item so
@@ -422,32 +305,21 @@ public:
     bool selectionHasLinks() const;
 
     // ---- copy / paste / duplicate ---------------------------------------------------------------
-    //
-    // Absent until now, which for a node editor is the gap you feel first: building the same
-    // three-node pattern five times means dropping fifteen nodes from the palette and re-wiring
-    // fourteen links by hand.
-    //
-    // A PASTE IS EXACTLY A PALETTE DROP OF THE SAME NODES, PLUS THEIR INTERNAL LINKS. That
-    // equivalence is deliberate and is what keeps it from inventing semantics: an Event node pasted
-    // here gets an ENTRY record the same way addNodeFromCatalog gives one to an Event node dropped
-    // from the menu, and a CustomEvent gets a freshly generated unique name the same way. The editor
-    // already permits two OnTick nodes, each with its own ENTRY, so paste is not creating a state the
-    // palette could not.
-    //
-    // ONLY LINKS WITH BOTH ENDS IN THE COPIED SET come along. A link to a node that was not copied
-    // has nothing to point at, and silently re-pointing it at the ORIGINAL would wire the copy into
-    // the thing it was copied from -- the one outcome a duplicate must not have.
+    // A paste is exactly a palette drop of the same nodes plus their internal links -- deliberate,
+    // so it invents no new semantics: a pasted Event node gets an ENTRY record the same way
+    // addNodeFromCatalog does, a CustomEvent gets a fresh unique name the same way, and two OnTicks
+    // are already legal so paste creates no state the palette couldn't. Only links with BOTH ends in
+    // the copied set come along -- re-pointing a dangling link at the original would wire the copy
+    // into what it was copied from.
     void copySelection();
     void pasteClipboard(Vec2 canvasPos);
     void duplicateSelection();
     bool clipboardEmpty() const { return clipNodes_.empty(); }
 
     // ---- component tree edits ---------------------------------------------------------------------
-    // Each pushes undo and sets dirty_, exactly like the variable edits below, and each is PUBLIC
-    // for the same reason those are: every one of them can produce a file the parser then refuses
-    // to open -- a duplicate id, a child orphaned by a delete, a parent cycle made by a reparent --
-    // and the only honest way to know they do not is to drive them headlessly and reload the
-    // result. That is GraphEditorLoadSaveTest, which has no ImGui context at all.
+    // Each pushes undo/sets dirty_ and is PUBLIC, like the variable edits below: each could produce
+    // a file the parser refuses (duplicate id, orphaned child, parent cycle), and the only honest
+    // check is driving them headlessly through GraphEditorLoadSaveTest and reloading the result.
 
     // Adds one component of `kind`, id derived from the kind and made unique, parented to whatever
     // is currently selected. Selects it.
@@ -469,46 +341,34 @@ public:
     // The component's world matrix, walking its parent chain. Identity for an unknown id.
     void componentWorldMatrix(const std::string& id, float out[16]) const;
 
-    // Declares a new variable. No-op (false, no edit) if `name` is empty, contains whitespace (a VAR
-    // name is a bare token on the NODE-line-adjacent VAR line -- same "this format has no quoting"
-    // constraint setAttribute's own value guard already enforces), or a variable named `name` already
-    // exists: Graph.Validate()'s own "Check VAR declarations are unique" block would reject the
-    // duplicate at C# compile time regardless, so refusing here catches it immediately rather than
-    // only once someone tries to compile the saved file. `type` falls back to "float" (the palette's
-    // own GetVar/SetVar default) if it is not one of float/int/bool -- see isValidVarType in the .cpp.
+    // Declares a new variable. No-op (false) if `name` is empty, has whitespace (VAR is a bare token,
+    // same no-quoting constraint as setAttribute's value guard), or already exists (Validate's own
+    // "Check VAR declarations are unique" block would reject it anyway; refusing here catches it
+    // before a compile attempt). `type` falls back to "float" (the palette's own GetVar/SetVar
+    // default) if not float/int/bool -- see isValidVarType in the .cpp.
     bool addVariable(const std::string& name, const std::string& type, const std::string& defaultValue);
 
-    // Renames `oldName` to `newName`, AND rewrites every node's `var=` attribute that currently names
-    // `oldName` to name `newName` instead, in the SAME undo step (one Ctrl+Z undoes the whole rename,
-    // references included) -- see the .cpp for why a rename that leaves stale references is refused
-    // outright rather than silently shipped. No-op (false, no edit) if oldName isn't declared, newName
-    // is empty or contains whitespace, or newName already names a DIFFERENT declared variable (a
-    // same-name "rename" is accepted as a harmless no-op, not a collision). True but a genuine no-op
-    // when newName == oldName.
+    // Renames `oldName` to `newName` AND rewrites every node's `var=` reference, in the SAME undo
+    // step (one Ctrl+Z undoes both -- see .cpp for why a rename leaving stale references is refused
+    // outright). No-op (false) if oldName isn't declared, newName is empty/whitespace, or newName
+    // already names a DIFFERENT variable. True, no-op, when newName == oldName.
     bool renameVariable(const std::string& oldName, const std::string& newName);
 
-    // Changes the declared type of `name` (falls back to "float" like addVariable if `newType` isn't
-    // float/int/bool). Deliberately does NOT touch any node's pins -- see the .cpp for why a resulting
-    // variable/pin type mismatch is left visible (the Variables panel's own mismatch note, computed
-    // fresh every frame from the live pins) rather than silently patched. No-op (false) if `name`
-    // isn't declared. True but a no-op if newType already matches.
+    // Changes the declared type of `name` (falls back to "float" like addVariable). Deliberately
+    // does NOT touch node pins -- a resulting mismatch stays visible via the Variables panel's own
+    // note (computed fresh every frame from the live pins) rather than being silently patched (see
+    // .cpp). False if `name` isn't declared; true no-op if newType matches.
     bool retypeVariable(const std::string& name, const std::string& newType);
 
-    // Changes the declared default (the literal text after the type in `VAR name type default`). No
-    // format validation here -- same division of labour OcGraphParser.cs's own VAR-parsing comment
-    // describes: an unparseable default is not this layer's problem, it falls back to the type's zero
-    // value on the C# side. No-op (false) if `name` isn't declared or `defaultValue` contains
-    // whitespace (same guard as setAttribute's value, and for the identical reason).
+    // Changes the declared default (the text after type in `VAR name type default`). No format
+    // validation -- an unparseable default falls back to the type's zero value on the C# side (see
+    // OcGraphParser.cs). No-op if `name` isn't declared or `defaultValue` has whitespace.
     bool setVariableDefault(const std::string& name, const std::string& defaultValue);
 
-    // Deletes the variable named `name`. REFUSES (false, no edit) if any node's `var=` attribute
-    // still names it -- silently deleting it would leave those nodes referencing a variable that no
-    // longer exists, an uncompilable graph with no editor-visible symptom until someone runs the C#
-    // compiler, which is exactly the "silently orphaned" failure mode the task brief calls worse than
-    // refusing. `outBlockedBy`, if non-null, receives every referencing node id on refusal (untouched
-    // on success) so a caller can name them without re-deriving the search. The refusal is also
-    // surfaced through the same rejection banner mechanism a rejected link connection uses (see
-    // showRejectionBanner below).
+    // Deletes variable `name`. Refuses (false) if any node's `var=` still names it -- silently
+    // orphaning that reference fails to compile with no editor-visible symptom otherwise. `outBlockedBy`,
+    // if non-null, receives the referencing node ids on refusal (untouched on success). Refusal also
+    // surfaces through the same rejection banner a rejected link uses (showRejectionBanner below).
     bool deleteVariable(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
 
 private:
@@ -522,34 +382,23 @@ private:
     std::string loadError_;
     bool dirty_ = false;
 
-    // Display-only node positions. Seeded from graph_'s own node.x/y at load, and overwritten by
-    // auto-layout when every node loaded at (0,0) -- see runAutoLayoutIfUnpositioned() in the .cpp.
-    // Deliberately kept apart from graph_: a load with no further edits, followed immediately by
-    // save(), must stay byte-identical, and auto-layout must not silently invent position data the
-    // user never asked to write. A node's entry here is committed into graph_.nodes[i].x/y only when
-    // the user actually finishes dragging it (see the drag-commit code in the .cpp).
+    // Display-only node positions, seeded from graph_'s node.x/y at load and overwritten by
+    // auto-layout when everything loaded at (0,0) -- see runAutoLayoutIfUnpositioned(). Kept apart
+    // from graph_ so a load-then-save stays byte-identical; committed into graph_.nodes[i].x/y only
+    // when a drag finishes (see the .cpp).
     std::unordered_map<std::string, Vec2> displayPos_;
-    // Whether displayPos_ came from auto-layout rather than the file, and at what DPI it was
-    // computed. Both are needed because node BOXES are sized at the current DPI while auto-layout
-    // spacing is baked in once: compute the spacing at a different DPI from the drawing and every
-    // column overlaps the next, which is what a 300%-DPI display did to the first version of this.
-    // Dragging a window to a monitor with different scaling would do it again, hence the re-run.
+    // Whether displayPos_ came from auto-layout, and at what DPI. Needed because node boxes are
+    // sized at the current DPI while layout spacing is baked in once -- a DPI mismatch overlapped
+    // columns on a 300%-DPI display; moving to a differently-scaled monitor re-triggers the same, hence the re-run.
     bool autoLaidOut_ = false;
     float autoLayoutDpi_ = 0.0f;
 
-    // Pins this editor invented at load because the file did not spell them out, keyed
-    // nodeId \x1f pinName \x1f isOutput. Stripped again before every save.
-    //
-    // WHY THE FILE CAN LACK THEM. The C# runtime derives a node's pin shape from its TYPE
-    // (OcGraphParser.cs's AddDefaultPins), so a graph it wrote records PIN lines only where a pin
-    // carries something extra -- a constant's value, say. Drone.ocgraph has 19 nodes and 7 PIN
-    // records, while its 19 LINKs happily reference pins like orbit_angle.result that appear
-    // nowhere in the file. The C++ reader models only what is written, so the editor saw nodes with
-    // no pins and drew no wires between them.
-    //
-    // Synthesised for DISPLAY ONLY, and that half matters as much. Writing them back would add
-    // forty-odd PIN records the author never wrote, so opening a graph and saving it would balloon
-    // the file -- the same class of silent damage as dropping its comments.
+    // Pins invented at load because the file didn't spell them out, keyed nodeId\x1fpinName\x1fisOutput.
+    // Stripped before every save. The C# runtime derives pin shape from node TYPE (OcGraphParser.cs's
+    // AddDefaultPins), so files only record PIN lines with extra data (e.g. Drone.ocgraph: 19 nodes,
+    // 7 PIN records, 19 LINKs referencing pins that appear nowhere) -- the C++ reader models only
+    // what's written, so links had nothing to draw. Display-only: writing these back would add
+    // forty-odd PIN records the author never wrote and balloon the file.
     std::unordered_set<std::string> synthesizedPins_;
     void synthesizeMissingPins();
     static std::string pinKey(const std::string& nodeId, const std::string& pin, bool isOutput) {
@@ -567,9 +416,9 @@ private:
     void drawComponentTreeNode(const std::string& id, float dpi);
     void drawComponentDetails(float dpi);
     void buildComponentPreview(Engine& e);
-    // Fills `out` with the seed shell for a Fluid component, or returns false when there is nothing
-    // to draw. See the definition for why a preview shows the SEED shell rather than the simulated
-    // surface, and why it uses the component matrix where the runtime path uses identity.
+    // Fills `out` with a Fluid component's seed shell, or false if nothing to draw. See the
+    // definition for why the preview shows the seed shell (not the simulated surface) at the
+    // component matrix, not identity.
     bool buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& c,
                                render::preview::PreviewDraw& out);
 
@@ -589,22 +438,19 @@ private:
     GraphLayoutStyle style_;
     std::vector<GraphNodeLayout> layouts_; // recomputed once at the top of every draw() call
 
-    // The canvas/details ("Gap B") divider's width, in DPI-INDEPENDENT pixels -- ActorEditor's own
-    // convention (ActorEditor.cpp), not SplitPane's fraction: see this header's resetLayout() comment
-    // for why. <= 0 means "not yet seeded from its preference", matching ActorEditor's own
-    // g_leftColW/g_rightColW sentinel. A plain float, not gated on AVER_WITH_IMGUI, so this class
-    // keeps compiling headless (GraphEditorLoadSaveTest) even though only drawEventGraph() and
-    // resetLayout() actually touch it.
+    // The canvas/details ("Gap B") divider width, in DPI-independent pixels (ActorEditor's convention,
+    // not SplitPane's fraction; see resetLayout() above). <= 0 means "not yet seeded", matching
+    // ActorEditor's g_leftColW/g_rightColW. Not gated on AVER_WITH_IMGUI so the class stays headless-
+    // compilable (GraphEditorLoadSaveTest), even though only drawEventGraph() and resetLayout() touch it.
     f32 detailsColW_ = 0.0f;
 
     // ---- selection ------------------------------------------------------------------------------
     std::vector<std::string> selectedNodes_;
     int selectedLink_ = -1;
 
-    // ---- undo (declared here, ahead of the interaction state below, because MoveNodes drag needs
-    // the UndoState type for its lazily-pushed pending snapshot) ------------------------------------
-    // Through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) now -- Sound/BtEditor
-    // migrated to the same template in the same change.
+    // ---- undo (declared ahead of the interaction state below, because MoveNodes drag needs
+    // UndoState for its lazily-pushed pending snapshot) ------------------------------------------
+    // Via the shared SnapshotUndo<State> template (SnapshotUndo.hpp); Sound/BtEditor migrated to it too.
     struct UndoState { fmt::OcGraphData graph; std::unordered_map<std::string, Vec2> displayPos; };
     SnapshotUndo<UndoState> history_;
     void pushUndo();
@@ -619,26 +465,22 @@ private:
     Vec2 dragStartScreen_{};       // canvas-local screen space (relative to the canvas child's origin)
     Vec2 dragStartCanvas_{};
     Vec2 panAnchorPx_{};           // view_.panPx at drag start, for PanCanvas
-    // Right-button DRAG now pans (see draw()'s start-interaction block) but a right-button CLICK must
-    // still open the Add Node popup -- that's existing, muscle-memory behaviour this task was told
-    // explicitly not to remove. The two are indistinguishable at mouse-DOWN, so PanCanvas starts
-    // immediately for a zero-latency drag feel (matching Middle-drag), and this flag marks that THIS
-    // particular PanCanvas run needs a click-vs-drag verdict on release -- Space+Left and Middle never
-    // set it, because neither of them has a competing "click" meaning to fall back to.
+    // Right-button DRAG pans, but a right-button CLICK must still open Add Node (existing behaviour,
+    // kept deliberately). Indistinguishable at mouse-DOWN, so PanCanvas starts immediately (zero-
+    // latency, matching Middle-drag) and this flag marks that release needs a click-vs-drag verdict --
+    // Space+Left and Middle never set it; neither has a competing click meaning.
     bool rightButtonPan_ = false;
     std::unordered_map<std::string, Vec2> moveStart_;      // per-node displayPos_ at drag start
-    bool moveUndoPushed_ = false;   // see .cpp: undo for a move is pushed lazily, only once real
-                                     // movement crosses a small threshold, so a plain click-to-select
-                                     // never pollutes the undo stack with a no-op entry
+    bool moveUndoPushed_ = false;   // undo for a move is pushed lazily (only once movement crosses a
+                                     // threshold), so a click-to-select doesn't pollute the undo stack
     UndoState pendingMoveSnapshot_; // pre-move state, captured at drag start, pushed into history_
                                      // only if moveUndoPushed_ becomes true
     Vec2 boxSelectCurrentCanvas_{};
     std::string linkDragFromNode_, linkDragFromPin_;
     bool linkDragFromIsOutput_ = false;
 
-    // Feedback for a refused connection attempt -- shown for a few seconds rather than nothing, per
-    // the task brief: a node editor that silently ignores a rejected connection is the single most
-    // common complaint about these tools.
+    // Feedback for a refused connection attempt, shown for a few seconds rather than nothing --
+    // silently ignoring a rejected connection is the most common complaint about these tools.
     std::string lastRejectMsg_;
     double lastRejectAtSec_ = -1000.0;
 
@@ -646,34 +488,26 @@ private:
     Vec2 pendingSpawnCanvasPos_{};
 
     // ---- details panel (Gap B: attribute editing) -------------------------------------------------
-    // Which attribute InputText, if any, is mid-edit right now -- "" \x1f key when nothing is active.
-    // Only ONE field can hold ImGui keyboard focus at a time, so a single slot (not a per-row map) is
-    // enough: it exists so setAttribute()/clearAttribute() -- and the pushUndo() inside them -- fire
-    // ONCE per edit SESSION (on IsItemDeactivatedAfterEdit), not once per keystroke, the same
-    // activate/apply-live/deactivate shape SandboxApp.cpp's own transform DragFloat3 fields use for
-    // their own undo boundary. Live keystrokes are held in attrEditBuf_ only; graph_ is untouched until
-    // the field is deactivated.
+    // Which attribute InputText, if any, is mid-edit -- "" \x1f key when none active. One slot is
+    // enough since only one field holds ImGui focus at a time: setAttribute()/clearAttribute() (and
+    // their pushUndo()) fire once per SESSION (IsItemDeactivatedAfterEdit), not per keystroke -- same
+    // shape as SandboxApp's DragFloat3 undo boundary. Keystrokes live in attrEditBuf_ until deactivation.
     std::string attrEditRowKey_;
     char attrEditBuf_[512] = {};
 
-    // ---- Variables panel edit state -- identical activate/apply-live/deactivate shape attrEditRowKey_/
-    // attrEditBuf_ use just above, applied to the panel's name/default text fields (its type field is a
-    // Combo, which has no comparable "live keystroke" state to buffer -- a selection either fires or it
-    // doesn't). Keyed "field\x1fvariableName" (e.g. "varname\x1fscore") rather than by row index: an
-    // edit that deletes or reorders a variable mid-session must not have some OTHER row inherit an
-    // in-flight edit buffer it never asked for.
+    // ---- Variables panel edit state -- same activate/apply-live/deactivate shape as attrEditRowKey_/
+    // attrEditBuf_, for the panel's name/default fields (type is a Combo, no keystroke state needed).
+    // Keyed "field\x1fvariableName", not by row index, so a delete/reorder can't hand the buffer to another row.
     std::string varEditRowKey_;
     char varEditBuf_[256] = {};
 
-    // ---- input-scheme action cache -- the action= attribute picker on InputAction/InputActionPressed/
-    // InputActionReleased/RebindAction/GetActionKey (GraphNodeDefs.hpp). Resolved from the OPEN
-    // GRAPH'S OWN FILE PATH (path_ above) by walking up to the owning .ocproject, reading its
-    // INPUT.SCHEME, and parsing that .ocinput with fmt::loadOcinput -- see refreshSchemeActionsIfNeeded
-    // in the .cpp for the full contract, including why this does NOT go through the framework ABI a
-    // running game uses (this editor has no live C# runtime to ask). THROTTLED, not read every frame:
-    // schemeCacheAtSec_/schemeCacheInited_ gate a re-check to about once a second, and even then a
-    // re-check only re-parses when the scheme file's own write time (schemeFileWriteTime_) has moved,
-    // so editing a dozen action= rows in one session costs one stat() call per second, not one parse.
+    // ---- input-scheme action cache -- backs the action= picker on InputAction/InputActionPressed/
+    // InputActionReleased/RebindAction/GetActionKey. Resolved from path_ by walking up to the owning
+    // .ocproject, reading INPUT.SCHEME, parsing that .ocinput (fmt::loadOcinput) -- see
+    // refreshSchemeActionsIfNeeded in the .cpp for the full contract and why it bypasses the framework
+    // ABI (no live C# runtime here). Throttled to ~1/sec, and only re-parses when
+    // schemeFileWriteTime_ moves, so editing a dozen action= rows in one session costs one stat()
+    // call/sec, not one parse.
     std::vector<std::string> schemeActionNames_;
     bool schemeFileFound_ = false;      // a scheme was resolved AND parsed at the last refresh
     std::string schemeResolvedPath_;    // its absolute path, for the picker's tooltip / warning text
@@ -682,22 +516,20 @@ private:
     bool schemeCacheInited_ = false;    // false until the first refresh, so that one is never throttled
     void refreshSchemeActionsIfNeeded();
 
-    // One-shot: frame the whole graph on the first draw that knows how big the canvas is. Set at
-    // load. NOT done in loadFromDisk itself, because the viewport size is an ImGui fact that does
-    // not exist yet there -- and framing to a guessed size is the same bug as not framing at all.
+    // One-shot: frame the whole graph on the first draw that knows the canvas size. Set at load, not
+    // in loadFromDisk itself -- the viewport size is an ImGui fact that doesn't exist there yet, and
+    // framing to a guessed size is the same bug as not framing.
     bool pendingFrame_ = true;
-    // Raised by the Frame All / Auto-Layout toolbar buttons, honoured by the canvas on the SAME
-    // frame. Separate from pendingFrame_ only so the two reasons stay legible: the toolbar draws
-    // before the canvas child exists, so it does not yet know how big the viewport is, and framing
-    // to a guessed size is the bug this whole block exists to fix.
+    // Raised by the Frame All / Auto-Layout toolbar buttons, honoured by the canvas the SAME frame.
+    // Separate from pendingFrame_ only to keep the two reasons legible (toolbar draws before the
+    // canvas child exists, so it doesn't know the viewport size yet either).
     bool framePendingFromToolbar_ = false;
     // The canvas size the PREVIOUS frame saw, so a resize can be noticed. See the frame block in
     // drawEventGraph.
     Vec2 lastCanvasSizePx_{};
-    // Whether the AUTHOR has chosen this view -- set by pan and zoom, and by nothing else. While it
-    // is false the editor keeps the graph framed; once it is true the view is never moved again
-    // except by an explicit Frame All / F / Home. Dragging a NODE does not set it: moving a thing is
-    // not moving the camera, and a graph you have been tidying should stay framed.
+    // Whether the AUTHOR has chosen this view (set only by pan/zoom). False keeps the graph framed;
+    // true means the view moves only via explicit Frame All / F / Home. Dragging a node does not set
+    // it -- moving a thing is not moving the camera, and a graph being tidied should stay framed.
     bool viewTouched_ = false;
 
     // ---- function state ---------------------------------------------------------------------------
@@ -705,9 +537,8 @@ private:
     std::string funcEditRowKey_;           // in-flight text edit, keyed like varEditRowKey_
     char funcEditBuf_[128] = {};
 
-    // The add-node popup's search box. Cleared and focused every time the popup appears, so a search
-    // is never inherited from the last one -- reopening the menu and finding somebody else's filter
-    // still applied is the failure this avoids.
+    // The add-node popup's search box. Cleared and focused every time the popup opens, so a stale
+    // filter from last time is never still applied.
     char addSearch_[128] = {};
 
     // The copy buffer. Nodes verbatim (ids and all -- they are remapped at paste, not at copy, so the
@@ -717,22 +548,21 @@ private:
     char newFuncPinBuf_[64] = {};
     int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses
     fmt::OcGraphFunction* findFunction(const std::string& name);
-    // Rebuilds the pins of every FuncEntry / FuncReturn / CallFunc that depends on `funcName`, from
-    // that function's current declaration. Called after ANY signature edit -- see the .cpp for why
-    // this is one function rather than three call sites that could drift.
+    // Rebuilds the pins of every FuncEntry/FuncReturn/CallFunc depending on `funcName`, from that
+    // function's current declaration. Called after any signature edit -- one function rather than
+    // three call sites that could drift (see .cpp).
     void resyncFunctionNodePins(const std::string& funcName);
     void drawFunctionsPanel(float dpi);
 
     // ---- comment box state ------------------------------------------------------------------------
-    // Selected and drag targets are held BY ID, never by index, for the same reason varEditRowKey_ is
-    // keyed by variable name: deleting a box mid-session must not hand its selection to whichever box
-    // shuffled into its slot.
+    // Selected/drag targets are held BY ID, never index, same reason as varEditRowKey_: a mid-session
+    // delete must not hand selection to whatever shuffled into that slot.
     std::string selectedComment_;
 
-    // WHAT THE RIGHT BUTTON WENT DOWN ON, recorded at press so the release can pick the right popup.
-    // Right button is ambiguous here: a drag pans and a click opens a menu, and which menu depends on
-    // what was under the cursor when the button went down -- by release the view may have panned away
-    // from it. Empty / -1 means empty canvas, which opens Add Node exactly as before.
+    // What the right button went down on, recorded at press so release can pick the right popup.
+    // Right button is ambiguous: a drag pans, a click opens a menu, and which menu depends on what
+    // was under the cursor at press -- by release the view may have panned away from it. Empty/-1
+    // means empty canvas -> Add Node.
     std::string rightClickNode_;
     int         rightClickLink_ = -1;
 
@@ -747,12 +577,9 @@ private:
     std::string validateErr_;
     std::string validateNode_;
 
-    // Armed by beginLinkDrop, cleared by cancelLinkDrop / spawnAndConnectLinkDrop. The from-pin is
-    // kept here rather than read back from linkDragFromNode_ at use time because the drag state is
-    // reset the instant the button comes up, and the palette is submitted later in the same frame.
-    //
-    // (This comment used to sit five members higher, above validate_/nodeHits_, which it has nothing
-    // to do with -- inserting those two between the comment and its subject orphaned it.)
+    // Armed by beginLinkDrop, cleared by cancelLinkDrop/spawnAndConnectLinkDrop. The from-pin is kept
+    // here rather than read from linkDragFromNode_ at use time, because drag state resets the instant
+    // the button comes up while the palette is submitted later in the same frame.
     bool        linkDropPending_ = false;
     std::string linkDropFromNode_;
     std::string linkDropFromPin_;
@@ -760,11 +587,10 @@ private:
     std::string linkDropFromType_;
     std::string activeComment_;            // the box being moved or resized right now
     Vec2 commentDragStartPos_{}, commentDragStartSize_{};
-    // Nodes captured when a MOVE began, and where each of them started. A comment box drags what it
-    // encloses -- that is most of why an author draws one -- and the membership is frozen AT DRAG
-    // START rather than recomputed per frame: recomputing it would let a node the box slid over
-    // halfway through the drag join the convoy, so the set an author saw when they pressed the mouse
-    // is not the set that moved.
+    // Nodes captured when a MOVE began, and their start positions. A comment box drags what it
+    // encloses -- most of why an author draws one -- with membership frozen AT DRAG START, not
+    // recomputed per frame -- otherwise a node the box slides over mid-drag would join the convoy
+    // it was never inside when the drag began.
     std::unordered_map<std::string, Vec2> commentCapturedStart_;
     bool commentUndoPushed_ = false;       // lazy, exactly like moveUndoPushed_ above
     UndoState pendingCommentSnapshot_;
@@ -775,9 +601,9 @@ private:
     bool commentPopupQueued_ = false;      // one-shot: OpenPopup on the frame after the double-click
     std::string makeUniqueCommentId() const;
     fmt::OcGraphComment* findComment(const std::string& id);
-    // Which box, if any, is under `canvasPt`, and whether the point is on its RESIZE GRIP rather
-    // than its title bar. Only those two strips are hit-testable: the body of a box must stay
-    // click-through, or a box drawn around six nodes would swallow every click meant for them.
+    // Which box, if any, is under `canvasPt`, and whether it's on the RESIZE GRIP vs. title bar --
+    // only those two strips are hit-testable; the body stays click-through or it'd swallow clicks
+    // meant for enclosed nodes.
     std::string commentAtCanvas(Vec2 canvasPt, float dpi, bool* outOnGrip) const;
 
     // ---- helpers (implemented in the .cpp, next to the input handling that uses them) -------------
@@ -788,47 +614,39 @@ private:
     std::string makeUniqueVariableName(const std::string& base) const;
     // An event name no ENTRY record in this graph already uses.
     std::string makeUniqueEventName(const std::string& base) const;
-    // Points the ENTRY record for `nodeId` at `eventName`, inserting one if there is none and
-    // REMOVING it when `eventName` is empty. The one place the NODE line's `name=` attribute and
-    // the top-level ENTRY record are reconciled -- see its definition for why they can disagree
-    // at all, and what it costs when they do.
+    // Points the ENTRY record for `nodeId` at `eventName` (inserting or removing as needed). The
+    // one place the NODE `name=` attribute and the top-level ENTRY record are reconciled -- see its
+    // definition for why they can disagree at all, and what it costs when they do.
     void syncEventEntry(const std::string& nodeId, const std::string& eventName);
-    // Sets lastRejectMsg_/lastRejectAtSec_ and logs -- the shared plumbing behind the on-canvas
-    // rejection banner. reportLinkRejection (below) is one caller; deleteVariable's own refusal is
-    // another, added alongside it rather than growing a second, near-duplicate banner mechanism.
+    // Sets lastRejectMsg_/lastRejectAtSec_ and logs -- shared plumbing behind the rejection banner.
+    // reportLinkRejection and deleteVariable's refusal are its two callers, deleteVariable added
+    // alongside it rather than growing a second, near-duplicate banner mechanism.
     void showRejectionBanner(const std::string& msg);
     void reportLinkRejection(const GraphLinkCheck& check);
     void commitLink(const std::string& srcNode, const std::string& srcPin,
                      const std::string& dstNode, const std::string& dstPin);
 };
 
-// Creates the .ocgraph editor tab, or nullptr for any other extension. Registered via the EXACT
-// HOOK above.
-// The text the Content Browser's "New Aver Node Graph" writes, for a file whose stem is `stem`.
-//
-// WRITTEN AS TEXT, AND THAT IS FORCED. The C++ OcGraphData does not model the CLASS record -- grep
-// modules/formats/src/OcGraph.cpp for "CLASS" and there is nothing. A CLASS line survives an editor
-// save only because GraphEditor::save() goes through writeOcgraph(graph_, originalText_), which
-// passes unrecognised lines through from the text it parsed. fmt::saveOcgraph() writes fresh with no
-// such text, so a starter built as an OcGraphData and saved that way would come out with NO CLASS
-// LINE -- a graph that opens, looks finished, and can never be placed in a level, because a
-// placement names a class rather than a file.
-//
-// Declared here so a test can parse it, the same reason SoundEditor.hpp declares snStarterGraph.
+// The text the Content Browser's "New Aver Node Graph" writes for a file whose stem is `stem`.
+// Written as TEXT, and that is forced: OcGraphData doesn't model the CLASS record (grep
+// modules/formats/src/OcGraph.cpp for "CLASS" -- nothing), which survives only because save() passes
+// unrecognised lines through (writeOcgraph(graph_, originalText_)). fmt::saveOcgraph() writes fresh
+// with none, so a starter built as an OcGraphData would come out with NO CLASS LINE -- unplaceable
+// in a level, because a placement names a class rather than a file. Declared here so a test can
+// parse it, same reason SoundEditor.hpp declares snStarterGraph.
 std::string graphStarterText(const std::string& stem);
 
-// Installs the validator every GraphEditor opened from here on will use. Process-wide, the same
-// shape as setActorEditorContentRoot and for the same reason: the editors are created by a free
-// factory function (makeGraphEditor, below) that takes only a path, so there is nowhere to thread a
-// dependency through per instance. SandboxApp calls this once with a lambda over ScriptHost.
-//
-// An editor already open keeps whatever it was constructed with; call this before opening files.
+// Installs the validator every GraphEditor opened from here on will use, process-wide (same shape/
+// reason as setActorEditorContentRoot: makeGraphEditor takes only a path, nowhere to thread a
+// per-instance dependency). SandboxApp calls this once with a lambda over ScriptHost. Call before
+// opening files -- an editor already open keeps what it has.
 void setGraphValidator(GraphEditor::ValidateFn fn);
 
-// The node-hit source every GraphEditor opened from here on will poll. Same process-wide shape and
-// same reason as setGraphValidator above: the editors come from a free factory taking only a path.
+// The node-hit source every GraphEditor opened from here on will poll -- same process-wide shape
+// and reason as setGraphValidator above.
 void setGraphNodeHitSource(GraphEditor::NodeHitsFn fn);
 
+// Creates the .ocgraph editor tab, or nullptr for any other extension. Registered via the EXACT HOOK above.
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path);
 
 } // namespace aver::editor

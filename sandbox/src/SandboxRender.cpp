@@ -2234,9 +2234,9 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     dev->setUpscaler(averSrQuality_ == aver::sr::Quality::Off ? nullptr : averSrUpscaler_.get());
 }
 
-// Constructs FxaaResolve against `dev`'s resource factory if not already built, then hands it to
-// the device through applyUpscalerSlot() -- the same idempotent shape as ensureAverSrUpscaler, for
-// the same rhi::IUpscaler seam with a different algorithm. Off (edgeAaEnabled_ never set) never calls this.
+// Builds FxaaResolve (once) against dev's resource factory, then hands it to the device via
+// applyUpscalerSlot() -- same idempotent shape as ensureAverSrUpscaler, different algorithm on the
+// same rhi::IUpscaler seam. Never called when edge-AA is off.
 void SandboxApp::ensureEdgeAaUpscaler(rhi::IDevice* dev) {
     if (!dev) return;
     if (!edgeAaUpscaler_) {
@@ -2251,20 +2251,14 @@ void SandboxApp::ensureEdgeAaUpscaler(rhi::IDevice* dev) {
                   "(no resource factory)");
 }
 
-// Logs the [AverSR] brand-tag line plus the one honest caveat: rhi::IDevice has no
-// setUpscaler()/upscaler() hook yet, so nothing on the present path calls
-// SpatialUpscaler::execute(). --render-scale is real; SpatialUpscaler is constructed, correct, and
-// reachable, but its resample pass is not yet what produces the pixels on screen -- still the
-// backend's own bilinear render-scale resize. Closing the gap needs a backend to read
-// device->upscaler() from its own composite/present step (D3D12Device.cpp).
+// Logs the [AverSR] brand-tag line: current render scale, and whether an upscaler was
+// constructed. The backend itself now logs when it actually runs the upscaler on the present path
+// (device->upscaler(), D3D12Device.cpp), so this function no longer needs to carry that caveat.
 void SandboxApp::logAverSrActive(rhi::IDevice* dev) {
     if (!dev) return;
     AVER_INFO("[AverSR] {}: render scale {:.2f}{}", aver::sr::qualityName(averSrQuality_),
               dev->renderScale(),
               averSrUpscaler_ ? "" : " (SpatialUpscaler not constructed -- no resource factory)");
-    // The old warning here said SpatialUpscaler was "constructed but not yet reachable from
-    // the present path -- rhi::IDevice has no upscaler hook". That hook exists now and the
-    // backend logs when it actually runs, so this would have been a lie the moment it fired.
     if (averSrUpscaler_ && averSrQuality_ != aver::sr::Quality::Off)
         AVER_INFO("[AverSR] {} handed to the device; the backend reports when it upscales",
                   averSrUpscaler_->name());
@@ -2272,27 +2266,25 @@ void SandboxApp::logAverSrActive(rhi::IDevice* dev) {
 
 // Applies one AverSR quality level from the render-settings combo: the docs/AVERSR.md
 // render-scale table through the SAME rhi::IDevice::setRenderScale the slider next to it already
-// edits. Off resets the scale to native and drops any constructed upscaler -- bit-identical to never having touched the combo.
+// edits. Off resets the scale to native and drops the upscaler -- bit-identical to never touching the combo.
 void SandboxApp::applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
-    // NAMED, because a render scale of 0.67 turned up at startup that nothing on the command
-    // line, project manifest or editor.ini had asked for, and this is the only code that can
-    // produce that number. If this line prints, this function is the source; if it doesn't and
-    // the scale still moves, the search goes elsewhere. Fires only on an explicit quality change.
+    // NAMED: a startup render scale of 0.67 once appeared with nothing in the CLI/manifest/
+    // editor.ini asking for it, and this is the only code that can produce that number -- if this
+    // fires, this is the source; if it doesn't and the scale still moves, look elsewhere. Fires
+    // only on an explicit quality change.
     AVER_INFO("[AverSR] applyAverSrQuality({}) -> render scale {:.4f}",
               static_cast<int>(q), aver::sr::renderScaleFor(q));
     averSrQuality_ = q;
     if (!dev) return;
     if (q == aver::sr::Quality::Off) {
-        // DETACH BEFORE DESTROY. The device holds a RAW pointer to this upscaler; resetting first
-        // left D3D12Device::upscaler_ dangling and the next frame's composite crashed on freed
-        // memory -- turning AverSR ON then OFF crashed the editor.
-        // THE GUARD ALREADY EXISTED AND HAD NO CALLERS: clearAverSrUpscaler's own comment says
-        // "Detaches before destruction, so the device can never hold a dangling upscaler", and the
-        // teardown path above describes the same bug ("--edge-aa's first --frames run crashed
-        // (SIGSEGV) AT PROCESS EXIT") but fixes it INLINE rather than calling the helper. This, the
-        // only case a user can reach from the UI, was left open.
-        // applyUpscalerSlot rather than setUpscaler(nullptr): the slot resolves to edge-AA if that
-        // is on; clearing it outright would silently switch --edge-aa off as a side effect.
+        // DETACH BEFORE DESTROY: the device holds a raw pointer to the upscaler; reset() before
+        // detaching left D3D12Device::upscaler_ dangling and crashed the next frame's composite
+        // (AverSR on->off crashed the editor; --edge-aa's first --frames run hit the same bug as a
+        // SIGSEGV at process exit, fixed inline there). clearAverSrUpscaler() already guards this
+        // ("detaches before destruction, so the device can never hold a dangling upscaler") but was
+        // never called from here -- the only UI-reachable case, left open until now.
+        // applyUpscalerSlot(), not setUpscaler(nullptr): the slot falls back to
+        // edge-AA if that's on, so clearing outright would silently disable --edge-aa too.
         applyUpscalerSlot(dev);
         averSrUpscaler_.reset();
         dev->setRenderScale(1.0f);
@@ -2303,21 +2295,18 @@ void SandboxApp::applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
     logAverSrActive(dev);
 }
 
-// ---- AverSR's RESOLUTION CHAIN, WHICH NEEDS THE LADDER AND THEREFORE VOXI -------------------
-// Everything above this point is AverSR on its own: a render scale, an upscaler, and the CLI flag
-// that pins one. Everything below resolves WHICH level to apply through voxi::resolveAverSrLevel /
-// voxi::autoAverSrLevel against the Overall rung -- render.voxi's ladder, named in these functions'
-// own signatures (voxi::AverSrSource, voxi::Settings, voxi::DeviceInfo). SR and VOXI are
-// independent options and PBR=OFF forces VOXI=OFF, so an SR-on/VOXI-off tree is real and reached
-// these definitions with no aver/voxi header in sight. Their one caller already asks for both
-// (SandboxApp.cpp's onUpdate, `#if AVER_MODULE_VOXI` around `#if AVER_MODULE_SR`).
+// ---- AverSR's RESOLUTION CHAIN (needs the ladder, therefore Voxi) --------------------------
+// Above: AverSR alone (scale, upscaler, CLI pin). Below: which LEVEL to apply, via
+// voxi::resolveAverSrLevel/autoAverSrLevel against the Overall rung (render.voxi's ladder, named in
+// these signatures: voxi::AverSrSource, voxi::Settings, voxi::DeviceInfo). SR and Voxi are
+// independent (PBR=OFF forces VOXI=OFF too, so an SR-on/VOXI-off build is real, no voxi header in
+// sight here); one caller gates both (SandboxApp.cpp onUpdate, #if AVER_MODULE_VOXI around #if AVER_MODULE_SR).
 #if AVER_MODULE_VOXI
-// Human text for the "(source)" half of every AverSR surface (the mandatory startup log, the
-// Display combo's "Auto (<level> from <source>)" preview, and the Project Settings upscaling
-// line) -- one place so the three descriptions can never drift apart. ForcedOff does not say WHY
-// here (the --edge-aa upscaler-slot conflict and a tripped crash cookie both read as ForcedOff
-// through this enum alone); a caller that needs to tell those apart checks
-// edgeAaEnabled_/averSrCookieTripped_ itself before falling back to this text.
+// Human text for the "(source)" half of every AverSR surface (startup log, the Display combo's
+// "Auto (<level> from <source>)" preview, Project Settings line) -- one place so the three can't
+// drift apart. ForcedOff doesn't say WHY
+// (--edge-aa conflict and a tripped crash cookie both read as ForcedOff here); callers needing that
+// check edgeAaEnabled_/averSrCookieTripped_ before falling back to this text.
 const char* SandboxApp::averSrSourceText(voxi::AverSrSource source) const {
     switch (source) {
         case voxi::AverSrSource::Auto:      return "Auto";
@@ -2329,13 +2318,10 @@ const char* SandboxApp::averSrSourceText(voxi::AverSrSource source) const {
     return "?";
 }
 
-// The rung whose own ladder default autoAverSrLevel (Scalability.hpp) just resolved through --
-// computed again here, deliberately, only for display text: autoAverSrLevel already did the real
-// arithmetic, this only names which rung its answer came from, for the Project Settings upscaling
-// line's "Auto from <rung>" / "(differs from the <rung> preset's default...)" text (3.3 A: "When
-// overallFromSettings reads Custom, name the tier Auto used" -- the higher of the GI/RT tiers,
-// autoAverSrLevel's own Custom branch, mirrored here rather than shared, since that function
-// returns the LEVEL, not the rung's name).
+// (3.3 A) Names the rung autoAverSrLevel (Scalability.hpp) resolved through, for display text only
+// ("Auto from <rung>" / "(differs from the <rung> preset's default...)" wording on the Project
+// Settings line) -- autoAverSrLevel returns the LEVEL, not the name; mirrors its own Custom branch
+// (higher of GI/RT tiers) rather than sharing it.
 const char* SandboxApp::averSrAutoRungName(const voxi::Settings& s, const voxi::DeviceInfo& d) const {
     const voxi::OverallQuality rung = voxi::overallFromSettings(s, d);
     if (rung != voxi::OverallQuality::Custom)
@@ -2345,36 +2331,28 @@ const char* SandboxApp::averSrAutoRungName(const voxi::Settings& s, const voxi::
     return voxi::Renderer::qualityName(static_cast<voxi::Quality>(giTier > rtTier ? giTier : rtTier));
 }
 
-// optimisation-wave-2, U2 (3.3 A): resolves AverSR's level fresh every frame from CLI > the user's
-// own Display choice > the project manifest > the Overall rung's own ladder default
-// (Scalability.hpp's resolveAverSrLevel), and applies it only on an actual change. Called from
-// onUpdate, OUTSIDE beginFrame/endFrame -- see the call site's own comment: applyAverSrQuality ends
-// in setRenderScale, and setRenderScale mid-frame (between beginFrame and endFrame) is exactly the
-// device-loss class aver-render-scale-device-loss documents.
+// optimisation-wave-2, U2 (3.3 A): resolves AverSR's level every frame from CLI > Display choice >
+// project manifest > the Overall rung's ladder default (resolveAverSrLevel), applying only on
+// change. Called from
+// onUpdate, OUTSIDE beginFrame/endFrame: applyAverSrQuality ends in setRenderScale, and doing that
+// mid-frame is the device-loss class aver-render-scale-device-loss documents.
 void SandboxApp::updateAverSrAuto(Engine& e) {
     if (!voxiAttached_) return;
 #if AVER_WITH_IMGUI
-    // NOT BEFORE THE PREFERENCES HAVE LOADED. onUpdate runs BEFORE buildUI, and buildUI is where
-    // loadEditorPreferences first runs (prefsLoaded_). So on frame 1 this used to resolve a level from
-    // the member defaults (Auto), arm display.renderScalePending in the in-memory prefs store and
-    // apply it -- and loadEditorPreferences, later in that SAME frame, read the cookie this function
-    // had just armed as "the last launch did not survive applying Auto", latched
-    // averSrCookieTripped_ and forced AverSR Off. Every launch, whatever the Display choice or the
-    // project's RENDER.AVERSR asked for: the render scale sat at 1.0 no matter what was picked. A
-    // headless run never builds the UI or loads preferences, so there is nothing to wait for there.
+    // NOT BEFORE PREFERENCES LOAD: onUpdate runs before buildUI's loadEditorPreferences. On frame 1,
+    // resolving Auto here armed display.renderScalePending, read back by loadEditorPreferences as
+    // "the last launch did not survive applying Auto" and forced AverSR Off every launch regardless
+    // of Display or the project's RENDER.AVERSR choice; headless never builds UI or loads prefs, so nothing to wait for.
     if (!prefsLoaded_ && !headless_) return;
 #endif
     rhi::IDevice* dev = e.device();
     voxi::Renderer& vxr = voxi::Renderer::get();
 
-    // A PLAIN --render-scale, WITH NO --aversr, ALREADY OWNS THE SCALE OUTRIGHT: onInit applies it
-    // directly (the same "--render-scale wins" precedent loadEditorPreferences' own guard uses),
-    // and resolving/applying a level here would silently walk it back the instant Auto (or a
-    // Display/manifest pick) disagreed with it. --aversr ITSELF (LEVEL or auto) is NOT caught by
-    // this: averSrFromCli_ routes through cliLevel below instead -- onInit's own "--aversr sets
-    // renderScaleOverride_ too, as a side effect, when it is not already pinned" mutation means
-    // renderScaleOverride_ alone cannot tell the two apart, so averSrFromCli_ is the second half of
-    // the same test the load path's own guard already needs.
+    // A plain --render-scale (no --aversr) already owns the scale outright (onInit applies it
+    // directly, the same "--render-scale wins" precedent loadEditorPreferences' guard uses);
+    // resolving a level here would walk it back. --aversr itself (LEVEL or auto) is NOT caught:
+    // onInit also sets renderScaleOverride_ as a side effect when it is not already pinned, so
+    // averSrFromCli_ is needed as the other half of the check.
     const bool explicitRenderScaleOnly = renderScaleOverride_ != 1.0f && !averSrFromCli_;
 
     if (!explicitRenderScaleOnly && averSrChoice_ != editor::AverSrChoice::Manual) {
@@ -2384,9 +2362,9 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
         voxi::AverSrDecision decision =
             voxi::resolveAverSrLevel(cliLevel, userLevel, averSrProjectDefault_, autoLevel);
 
-        // --edge-aa and AverSR share the one upscaler slot, and applyUpscalerSlot lets edge-AA win
-        // (:7976-7980 region) -- only overrides an AUTO resolution: an explicit CLI/user/manifest
-        // pin is still a deliberate ask this flag should not silently swallow.
+        // --edge-aa and AverSR share one upscaler slot; applyUpscalerSlot lets edge-AA win, but
+        // only over an AUTO resolution -- an explicit CLI/user/manifest pin is a deliberate ask
+        // this flag should not silently swallow.
         if (edgeAaEnabled_ && decision.source == voxi::AverSrSource::Auto) {
             decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
             if (!edgeAaAverSrWarnLogged_) {
@@ -2395,19 +2373,18 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
                 edgeAaAverSrWarnLogged_ = true;
             }
         }
-        // A LEVEL THAT JUST TOOK THE DEVICE DOWN IS NEVER SILENTLY RE-ATTEMPTED -- the load path's
-        // own cookie check (loadEditorPreferences) already forced Off and latched this for a level
-        // that did not survive ITS OWN launch; kept forced for the rest of this session, the same
-        // way the load-time latch is never cleared except by a fresh process.
+        // A level that just took the device down is never silently re-attempted: loadEditorPreferences'
+        // own cookie check already forced Off and latched it for a level that didn't survive launch;
+        // stays forced for the session, same as that load-time latch (cleared only by a fresh process).
         if (averSrCookieTripped_) decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
 
         averSrSource_ = decision.source;
         const aver::sr::Quality q = static_cast<aver::sr::Quality>(decision.level);
         if (q != averSrQuality_) {
-            // ARMED BEFORE THE FIRST NON-OFF APPLICATION THIS SESSION (3.3 A): a level Auto
-            // resolves to mid-session can lose the device exactly the way a stored one can at load
-            // -- same cookie, extended to cover it. The existing 30-frame clear (onUpdate, beside
-            // the shader watcher poll) then applies unchanged.
+            // (3.3 A) Armed before the first non-Off application this session: a level Auto
+            // resolves mid-session can lose the device same as one loaded at startup -- same
+            // cookie, extended to cover it; the existing 30-frame clear (onUpdate, beside the
+            // shader watcher poll) applies unchanged.
             if (q != aver::sr::Quality::Off && !averSrArmedNonOffOnce_) {
                 editor::setPrefBool("display.renderScalePending", true);
                 editor::flushEditorPrefs();
@@ -2417,25 +2394,20 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
             applyAverSrQuality(dev, q);
         }
     } else if (!explicitRenderScaleOnly) {
-        // Manual: the Render Scale slider already owns the render scale directly
-        // (prefsDevice_->setRenderScale) -- nothing here to resolve or apply. Resolving through
-        // userLevelFor's -1 sentinel and applying an unrelated named level would fight the user's
-        // own drag every single frame, so this branch only reports the choice, never touches the
-        // device.
+        // Manual: the Render Scale slider owns the scale directly (prefsDevice_->setRenderScale).
+        // Resolving through userLevelFor's -1 sentinel would fight the user's drag every frame, so
+        // this branch only reports the choice and never touches the device.
         averSrSource_ = voxi::AverSrSource::User;
     }
-    // else: explicitRenderScaleOnly -- averSrSource_/averSrQuality_ left exactly as they are
-    // (Off, untouched by anything AverSR-side); the startup log below still fires and reports that
-    // honestly, since a plain --render-scale run is still a non-native capture worth the same warning.
+    // else (explicitRenderScaleOnly): averSrSource_/averSrQuality_ untouched (Off); the startup
+    // log below still fires -- a plain --render-scale run is still a non-native capture worth the warning.
 
-    // THE MANDATORY STARTUP LOG (C2-10), fired once per process, on every run including --frames --
-    // the only warning an ad-hoc --frames capture that forgot --aversr off gets that it is not
-    // measuring native resolution. Scene size is recomputed from the present size and the live
-    // scale (D3D12Device::computeSceneSize's own round-to-nearest formula) rather than read off a
-    // backend-private field: no rhi::IDevice accessor for it exists, and this line only needs to
-    // report it, not derive anything from it. PRESENT SIZE COMES FROM e.window(), NOT dev -- integrator
-    // fix: rhi::IDevice has no width()/height() of its own (only ISwapchain does); e.window() is the
-    // same accessor GameApp::onInit's own copy of this line already uses.
+    // MANDATORY STARTUP LOG (C2-10), fired once per process on every run including --frames -- the
+    // only warning an ad-hoc capture that forgot --aversr off gets that it isn't native resolution.
+    // Scene size is recomputed (D3D12Device::computeSceneSize's round-to-nearest; no IDevice
+    // accessor reads it back, this line only reports it). Present size is e.window(), not dev
+    // (integrator fix) -- IDevice has no width()/height() (only ISwapchain does); same accessor
+    // GameApp::onInit uses.
     if (!averSrStartupLogged_ && dev) {
         const f32 scale = dev->renderScale();
         const u32 pw = e.window() ? e.window()->width()  : 0u;
@@ -2456,55 +2428,37 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
 
 #endif  // AVER_MODULE_SR
 
-// Reconciles ptSceneView_ (the ACTUAL registration) with ptSceneViewWantEnabled_ (what --pt-scene
-// or the settings combo most recently asked for). Idempotent, so free to call every frame.
-// CALLED FROM ONUPDATE() ONLY, never from buildUI()/onRender(): onUpdate() runs BEFORE
-// device_->beginFrame(), the one point nothing is mid-recording. suppressesScene() is read LIVE
-// once per drawMesh() call all through onRender, so mutating features_ mid-loop would let one
-// frame's draws disagree about whether the scene is suppressed. Deferring to the NEXT onUpdate()
-// sidesteps it.
-// addRenderFeature() calls onRenderTargetsChanged() immediately against the device's CURRENT scene
-// targets, so a feature turned on mid-session builds against THIS session's swapchain for free.
-// removeRenderFeature() is a plain vector erase with no waitIdle; the object's own destroy calls
-// retire behind the graphics queue's fence, so releasing GPU objects a frame or two still in
-// flight might be reading is safe.
-// THE ONE GAP NOT CLOSED: PathTracer leaks every TLAS it builds (no destroyTlas in the RHI), so
-// toggling this repeatedly leaks one TLAS per re-arm -- small, bounded, and a pre-existing RHI gap,
-// but real.
+// Reconciles ptSceneView_ (actual registration) with ptSceneViewWantEnabled_ (what --pt-scene or
+// the settings combo last asked for). Idempotent; safe every frame. Called from onUpdate() ONLY,
+// never buildUI()/onRender(): that runs before beginFrame(), the one point nothing is mid-recording,
+// and suppressesScene() is read live per drawMesh() through onRender -- mutating features_ mid-loop
+// would let one frame's draws disagree, so this defers to the next onUpdate(). addRenderFeature()
+// calls onRenderTargetsChanged() immediately against the device's CURRENT scene targets;
+// removeRenderFeature() erases with no waitIdle (destroy calls retire behind the queue's fence, so
+// releasing in-flight GPU objects is safe).
+// OPEN GAP: PathTracer leaks every TLAS it builds (no destroyTlas in the RHI) -- one leak per
+// re-arm; small, bounded, pre-existing.
 void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     if (!dev) return;
 
-    // ---- NOTHING TRACES FOR A VIEWER THAT CANNOT SEE IT ----
-    // The path-traced view and ray-driven primary visibility paint the same pixels, and only one
-    // wins the device's suppressesScene() election -- verifiably: with --rt-render-mode 0 the path
-    // tracer DOES paint (54% different, 7.8ms); in mode 1 the frame is what ray-driven drew.
-    // But PtSceneView::prePass accumulates regardless of who wins, since prePass runs BEFORE the
-    // election. Measured on PTTest: 8 spp for 200 frames, ~9ms each, converging an image that's
-    // thrown away. The honest place to stop it is here, before it exists at all.
-    // AN EXPLICIT --pt-scene IS NOT SILENTLY IGNORED: it is told what happened, because "asked for
-    // the path-traced view, got the ray-driven one with no message" is a class of silence this
-    // file has been bitten by before.
-    // A3: willSuppressSceneThisFrame(), NOT suppressesScene(). This function runs from
-    // onUpdate(), before device_->beginFrame() -- see this function's own header comment above.
-    // suppressesScene() reads rtActive_, which buildAccelerationStructures() (called from
-    // prePass(), inside THIS frame's beginFrame(), AFTER beginScene() has already swapped
-    // drawsPrev_/draws_) has not recomputed for this frame yet -- so suppressesScene() here would
-    // answer LAST frame's question. willSuppressSceneThisFrame() predicts what prePass is about
-    // to make true instead; see its own comment in VoxiRenderer.hpp for the swap it accounts for.
+    // ---- NOTHING TRACES FOR A VIEWER THAT CAN'T SEE IT ----
+    // Path-traced view and ray-driven primary visibility paint the same pixels; only one wins
+    // suppressesScene() (measured: mode 0 -> tracer paints, 54% different, 7.8ms; mode 1 ->
+    // ray-driven's frame). prePass accumulates regardless since it runs BEFORE the election
+    // (PTTest: 8spp x 200 frames, ~9ms, thrown away) -- stopped here, and --pt-scene is told why.
+    // A3: willSuppressSceneThisFrame(), not suppressesScene() -- rtActive_ isn't recomputed for
+    // this frame until beginFrame() runs buildAccelerationStructures, so suppressesScene() would
+    // answer LAST frame's question; this predicts prePass's answer instead (VoxiRenderer.hpp).
 #if AVER_MODULE_VOXI
     const bool rayDrivenPaints = voxiRenderer_.willSuppressSceneThisFrame();
 #else
-    // THE ELECTION HAS ONE FEWER CANDIDATE. voxiRenderer_ is declared `#if AVER_MODULE_VOXI`, and
-    // this function is deliberately not -- the flag and the PT view's registration must keep
-    // working with the module off (see ptSceneViewWantEnabled_'s own comment). Nothing else claims
-    // primary visibility, so the answer is a constant here rather than a call.
+    // One fewer candidate: voxiRenderer_ is `#if AVER_MODULE_VOXI`-only but this function isn't --
+    // the flag and PT view registration must keep working with the module off, so this is a constant.
     const bool rayDrivenPaints = false;
 #endif
     if (rayDrivenPaints && ptSceneViewWantEnabled_) {
-        // A1: named for the Path Tracing page's Quality-combo tag (see PtRenderConflict.hpp's
-        // choosePtViewTag and this function's caller in buildUI()). Set every frame this branch
-        // fires, same as the log-once flag below is CHECKED every frame -- so it stays true for as
-        // long as the suppression does, not just on the first frame it started.
+        // A1: feeds the Path Tracing page's Quality-combo tag (PtRenderConflict.hpp's choosePtViewTag).
+        // Set every frame this branch fires, so it stays true for as long as suppression does.
         ptSceneViewSuppressedByRayDriven_ = true;
         if (!ptSceneViewYieldLogged_) {
             ptSceneViewYieldLogged_ = true;
@@ -2522,17 +2476,11 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     } else if (!rayDrivenPaints) {
         ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
 #if AVER_MODULE_VOXI
-        // N8 FIX, PART 2: THE PT VIEW ACTUALLY COMES BACK -- the promise the INFO/WARN messages
-        // above already made ("--rt-render-mode 0 hands the frame back to it") but that this
-        // branch never kept before this fix: it only ever re-armed the log/suppression flags, so
-        // ptSceneViewWantEnabled_ stayed false forever once ray-driven had suppressed it, even
-        // after ray-driven itself stopped painting. Restored here, ONLY if this yield was actually
-        // the reason the want flag went false (ptSceneViewSuppressedByRayDriven_, read BEFORE the
-        // line below clears it) and the request it suppressed is still live: the Path Tracing tier
-        // is still above Off, or --pt-scene explicitly asked to keep the view regardless of tier.
-        // Guarded on AVER_MODULE_VOXI, like occlusionSuppressingFeatureName()'s own Voxi read a
-        // little above in this file -- this function must still build with the module off, and
-        // voxi::Renderer::get() (a type this read needs) does not exist in that build at all.
+        // N8 fix, part 2: the PT view actually comes back (before, this branch only re-armed the
+        // log/suppression flags, so the want stayed false forever once ray-driven suppressed it).
+        // Restored only if THIS yield caused the loss (checked before clearing the flag below) and
+        // the suppressed request is still live (tier above Off, or --pt-scene asked explicitly).
+        // Guarded on AVER_MODULE_VOXI: must still build with the module off, where Renderer::get() doesn't exist.
         if (ptSceneViewSuppressedByRayDriven_ &&
             (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_))
             ptSceneViewWantEnabled_ = true;
@@ -2541,14 +2489,11 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     }
 
     // ---- A RASTER-ONLY VIEW MODE HAS THE FRAME ----
-    // Wireframe and the G-buffer debug views force rtRenderMode 0 for the frame (onUpdate's view-mode
-    // auto-switch) so the rasteriser draws them -- but rtRenderMode 0 is also what hands the frame to
-    // THIS view, which wins the device's suppressesScene() election over raster. Without this block
-    // the path tracer, not the wireframe, filled the viewport whenever RENDER.PATHTRACING was on.
-    // After the ray-driven block on purpose: that block's release (rtRenderMode just went to 0)
-    // restores the want on the same frame this one withdraws it. Released the same way: the want
-    // comes back only if the view mode was why it went false and the request is still live, and if
-    // ray-driven is painting by then, the hold passes to ray-driven's own flag instead.
+    // Wireframe/G-buffer views force rtRenderMode 0 (onUpdate's auto-switch), but mode 0 also hands
+    // the frame to THIS view, which wins suppressesScene() over raster -- without this block the
+    // tracer, not wireframe, would fill the viewport. After the ray-driven block on purpose (its
+    // release restores the want the same frame this withdraws it); released the same way -- returns
+    // only if the view mode caused the loss and the request is still live, else the hold passes to ray-driven.
     const bool rasterViewMode = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
     if (rasterViewMode) {
         if (ptSceneViewWantEnabled_) ptSceneViewSuppressedByViewMode_ = true;
@@ -2572,28 +2517,24 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     if (ptSceneViewWantEnabled_) {
         ptSceneView_ = std::make_unique<aver::pt::PtSceneView>();
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
-        // THE HOST RESOLVES THE MATERIAL, because the host is the only thing that knows it bound
-        // one -- why Aver.Render.PathTracer can link Aver.RHI and Aver.Core alone.
-        // ownsBindingSet() is the IDENTITY test, not a shape test: a block merely sizeof
-        // (MaterialConstants) is not a material. Size is checked only as corroboration.
-        // AND THE FALLBACK SET MEANS "NOT AUTHORED": fallbackSet_/fallbackConstants_' baseColorFactor
-        // is {1,1,1,1}, so reading it would render every non-authored surface white -- those draws
-        // fall through to the per-draw baseColor instead.
+        // The HOST resolves the material -- only the host knows it bound one, which is why
+        // Aver.Render.PathTracer can link just Aver.RHI and Aver.Core. ownsBindingSet() is the
+        // IDENTITY test (a block merely sizeof(MaterialConstants) is only corroboration, not proof).
+        // The fallback set means "not authored": fallbackSet_/fallbackConstants_' baseColorFactor
+        // is {1,1,1,1}, so reading it would paint every non-authored surface white -- those draws
+        // fall through to per-draw baseColor instead.
         ptSceneView_->setAlbedoResolver(
             [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
                    pt::PtSceneView::ResolvedMaterial& out) -> bool {
                 aver::f32* outAlbedo = out.albedo;
                 if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
                 pbr::MaterialSystem& ms = voxiRenderer_.materials();
-                // THIS EARLY RETURN IS WHY THE VIEW RE-ARMS TWICE ON A STATIC SCENE -- looks like
-                // a tracer bug, is not: until the material system is ready this resolves nothing,
-                // so PtSurface uses the ordinary base colour; when ready() flips, every surface's
-                // reported albedo CHANGES, moving the drawsKey() hash and re-arming the accumulator.
-                // Measured on FirstPerson: two re-arms in the first frames of a static scene,
-                // costing a few frames out of ~204. Used to cost more -- every re-arm also leaked a
-                // TLAS, which PathTracer::addScene no longer does.
-                // NOT FIXED HERE: false currently means both not-ready-yet and not-ours/
-                // un-authored, and distinguishing them is a change to AlbedoResolver's signature.
+                // This early return is why the view re-arms twice on a static scene -- not a tracer
+                // bug: until ready() flips, PtSurface uses the base colour; then every surface's
+                // albedo changes at once, moving drawsKey()'s hash. Measured on FirstPerson: two
+                // re-arms in the first frames, costing a few frames out of ~204 (used to cost more --
+                // each also leaked a TLAS; PathTracer::addScene no longer does). NOT FIXED HERE:
+                // false means both not-ready-yet and not-ours; telling them apart needs an AlbedoResolver signature change.
                 if (!ms.ready()) return false;
                 if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
                 if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
@@ -2603,37 +2544,26 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
                 out.emissive[0] = mc->emissiveFactor[0];
                 out.emissive[1] = mc->emissiveFactor[1];
                 out.emissive[2] = mc->emissiveFactor[2];
-                // THE TRACER SAMPLES TEXTURES NOW, so the answer depends on whether this
-                // material has one, and the two branches mean DIFFERENT THINGS by outAlbedo.
-                //
-                // WITH a texture: hand back the FACTOR and the handle. baseColorFactor is already
-                // linear (packMaterial decoded it), and the tracer multiplies factor x texel --
-                // the same composition voxi.hlsl's textured ray hit makes. Returning
-                // averageBaseColor here instead would be the bug this whole seam is shaped to
-                // prevent: that value is factor x texture MEAN, so the texture would be applied
-                // twice, and the only symptom is a uniformly too-dark scene with nothing logged.
-                //
-                // WITHOUT one: the previous behaviour, unchanged and still necessary. A modern
-                // material puts its look in a TEXTURE and leaves the factor a plain white
-                // multiplier -- every one of the forty materials in the demo project declares
-                // `baseColorFactor 1 1 1 1` -- so a tracer that could not sample and read the
-                // factor alone painted every surface pure white, roughly three times too bright
-                // and completely flat. The mean is what that fallback is for, and it is still
-                // what a device with no bindless support gets.
+                // The tracer samples textures now, so outAlbedo means something DIFFERENT per branch.
+                // WITH a texture: return the FACTOR (already linear) plus the handle -- multiplies
+                // factor x texel, matching voxi.hlsl's textured hit. averageBaseColor here instead
+                // would double-apply the texture (factor x texture MEAN), silently too dark.
+                // WITHOUT one: unchanged, still necessary -- all forty demo materials declare
+                // `baseColorFactor 1 1 1 1` and put their look in a texture, so factor alone painted
+                // every surface pure white, ~3x too bright and flat. The mean is what
+                // averageBaseColor's fallback is for, and still what a no-bindless device gets.
                 if (const auto* tex = ms.textures(set)) {
-                    // textures() reports EFFECTIVE handles, so an unmapped slot is the 1x1
-                    // identity fallback (white / flat normal / (0,255,255,255) metal-rough)
-                    // rather than 0 -- sampling it is a multiply by one, which is correct, and
-                    // costs one fetch on a material that authored no such map.
+                    // textures() reports EFFECTIVE handles: an unmapped slot is the 1x1 identity
+                    // fallback (white / flat normal / (0,255,255,255) metal-rough), not 0 -- a
+                    // correct multiply-by-one, at the cost of one fetch on an unauthored map.
                     const aver::rhi::TextureHandle base =
                         (*tex)[static_cast<aver::usize>(pbr::TextureSlot::BaseColor)];
                     if (base) {
                         out.baseColorTex  = base;
                         out.metalRoughTex = (*tex)[static_cast<aver::usize>(pbr::TextureSlot::MetalRough)];
                         out.normalTex     = (*tex)[static_cast<aver::usize>(pbr::TextureSlot::Normal)];
-                        // FACTORS, not finished values -- the tracer multiplies each by its map.
-                        // baseColorFactor is already linear (packMaterial decoded it); roughness
-                        // and metallic are linear scalars and need no decode.
+                        // Factors, not finished values -- multiplied by their maps. baseColorFactor
+                        // is already linear (packMaterial decoded it); roughness/metallic need no decode.
                         outAlbedo[0] = mc->baseColorFactor[0];
                         outAlbedo[1] = mc->baseColorFactor[1];
                         outAlbedo[2] = mc->baseColorFactor[2];
@@ -2658,9 +2588,9 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
             AVER_ERROR("[PT] scene view unavailable on this device");
             ptSceneView_.reset();
             ptSceneViewUnavailable_ = true;
-            // Don't retry every frame. This does NOT reach back into voxi::Settings::pathTracing
-            // -- syncPtSceneView() has no Voxi dependency (must keep working with AVER_MODULE_VOXI
-            // off) -- so the settings-page combo can be left stale; see its own BeginDisabled for how the UI stays honest anyway.
+            // Don't retry every frame. No reach into voxi::Settings::pathTracing here --
+            // syncPtSceneView() must keep working with AVER_MODULE_VOXI off -- so the settings-page
+            // combo can go stale; its own BeginDisabled keeps the UI honest anyway.
         }
     } else {
         dev->removeRenderFeature(ptSceneView_.get());
@@ -2699,10 +2629,9 @@ bool SandboxApp::occlusionWasVisible(scene::Entity e) const {
 #endif
 
 #if AVER_MODULE_SCENE
-// The exact inverse of averFogFactor's k<=1e-8 branch: that function computes
-// opacity(d) = 1 - exp(-density*d), so this solves the SAME expression backwards for density given
-// a target opacity. Not an approximation: OcWorld.hpp has no fields for fogFalloff/fogStart at
-// all, so k and start are always 0 for anything a level can author.
+// Exact inverse of averFogFactor's k<=1e-8 branch (opacity(d) = 1 - exp(-density*d)): solves that
+// same expression backwards for density given a target opacity. Not an approximation -- OcWorld.hpp
+// has no fogFalloff/fogStart fields at all, so k and start are always 0 for anything a level can author.
  f32 SandboxApp::fogDensityForOpacityAt(f32 distanceCm, f32 targetOpacity) {
     if (distanceCm <= 1.0f) return 0.0f;
     const f32 t = targetOpacity < 0.01f ? 0.01f : (targetOpacity > 0.999f ? 0.999f : targetOpacity);

@@ -8,8 +8,8 @@ Texture2D gMetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_1));
 Texture2D gNormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_2));
 Texture2D gOcclusionMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_3));
 Texture2D gEmissiveMap   : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_4));
-// The SECOND LAYER, blended in by slope under AVER_MAT_SLOPE_BLEND. Same slot-index-is-register
-// rule as above, continuing pbr::TextureSlot's order.
+// Second layer, blended in by slope under AVER_MAT_SLOPE_BLEND. Same slot-is-register rule as
+// above, continuing pbr::TextureSlot's order.
 Texture2D gL1BaseColorMap  : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_5));
 Texture2D gL1MetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_6));
 Texture2D gL1NormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_7));
@@ -35,79 +35,54 @@ cbuffer AverMaterial : register(b2) {
     float  gSlopeBlendLo;
     float  gSlopeBlendHi;
     float  gL1UvScale;
-    // Mirrors MaterialConstants::graphId. 0 means "no graph", which is the arm the generated
-    // averEvalMaterial's `default:` takes -- see pbr::materialGraphHlsl(). Declared here, in the
-    // block every material path already binds, so a graph-shaded draw needs nothing extra bound.
+    // Mirrors MaterialConstants::graphId; 0 means "no graph" (averEvalMaterial's generated
+    // `default:`, see pbr::materialGraphHlsl()). Lives in the block every material path already
+    // binds, so a graph-shaded draw needs nothing extra.
     uint   gMaterialGraphId;
 
-    // Mirrors MaterialConstants::ior/transmission -- see that struct's comment for why the two
-    // fields are not independent, and averBuildSurface below for the one thing gTransmission
-    // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term).
-    //
-    // gIor IS READ, BY REFRACTION -- and this comment has now been wrong in both directions.
-    // It first claimed gIor set the critical angle in averTotalInternalReflection; that override
-    // was removed because it could not fire legitimately from a rasterised back face (see
-    // averBuildSurface's alpha branch for the Snell argument and the measured cost), so the
-    // comment was corrected to "read by nothing" -- and then refraction landed and made THAT
-    // false too, without anyone editing this file. voxi.hlsl's averRefractedBackdropUV reads gIor
-    // directly (`const float ior = max(gIor, 1.0001);`) to bend the refracted backdrop UV, on both
-    // the screen-space and ray-traced paths, whenever Settings::refractionMode is not Off -- which
-    // is the DEFAULT. This prelude is prepended to voxi.hlsl before compilation, so that is the
-    // same global, not a same-named twin. The physically correct consumer is still F0 --
-    // F0 = ((1-n)/(1+n))^2 -- which today is authored SEPARATELY as `reflectance`, so a material
-    // can state an ior and a reflectance that contradict each other (M_Glass.ocmat's own comment
-    // warns about exactly that and keeps them in sync by hand). Deriving one from the other would
-    // change F0 for every material that does not already agree, so it is a decision, not a tidy-up.
-    //
-    // Both are copied into AverAuthored rather than read directly at their use sites, so a material
-    // graph can drive either per pixel. The refraction that consumes gIor lives in voxi.hlsl, not
-    // here -- this file only transports it.
+    // Mirrors MaterialConstants::ior/transmission (this comment has been wrong twice before -- once
+    // claiming gIor drove averTotalInternalReflection's critical angle, once "read by nothing" --
+    // trust the code, not history). gIor is read directly by voxi.hlsl's averRefractedBackdropUV
+    // (`max(gIor, 1.0001)`) to bend the refracted backdrop UV on both the screen-space and
+    // ray-traced paths, whenever refractionMode is not Off (the DEFAULT) -- this prelude is
+    // prepended to voxi.hlsl, so it is the same global. F0 (the physically correct consumer,
+    // F0 = ((1-n)/(1+n))^2) is authored SEPARATELY as `reflectance`, so the two can contradict
+    // each other (M_Glass.ocmat's comment syncs them by hand). gTransmission feeds
+    // AVER_MAT_ALPHA_BLEND's coverage term in averBuildSurface. Both copy into AverAuthored so a
+    // material graph can drive either per pixel.
     float  gIor;
     float  gTransmission;
-    // EXPLICIT PADDING, MIRRORING MaterialConstants::_pad0/_pad1. Not load-bearing for THIS cbuffer
-    // -- HLSL rounds a constant buffer's footprint up to its last 16-byte register regardless of
-    // what is declared in it, so gIor/gTransmission alone would already reserve through byte 96 on
-    // the GPU. It is declared anyway so this block keeps mirroring MaterialConstants field for
-    // field, byte offset for byte offset, which is the whole discipline this comment block is
-    // asking of whoever edits either side next.
-    // These two ARE the bytes _matPad used to declare -- MaterialConstants spent its _pad0/_pad1 on
-    // them, and this block mirrors that struct field for field, byte offset for byte offset. There is
-    // no padding left on either side.
+    // Mirrors MaterialConstants::_pad0/_pad1, since spent on these two fields -- no padding left on
+    // either side. Not load-bearing alone (HLSL rounds a cbuffer to its last 16-byte register
+    // regardless, so gIor/gTransmission alone already reserve to byte 96), kept so this block still
+    // mirrors that struct byte for byte.
     float  gSubsurfaceWeight;
     float  gSubsurfaceRadius;
-    // The coat row. MIRRORS MaterialConstants::coatWeight/coatRoughness/coatF0/_coatPad, in that
-    // order -- the block is 112 bytes and this is the row that took it there.
+    // The coat row. Mirrors coatWeight/coatRoughness/coatF0/_coatPad, in that order -- the row that
+    // takes the block to 112 bytes.
     float  gCoatWeight;
     float  gCoatRoughness;
     float  gCoatF0;
     float  _gCoatPad;
 
-    // MIRRORS MaterialConstants::texIndex, and DECLARED HERE EVEN THOUGH THE RASTER PATH NEVER
-    // READS IT. The C++ struct is uploaded whole to b2, and MaterialGpu.hpp asserts this cbuffer
-    // mirrors it "byte for byte"; a shorter cbuffer would happen to work (the tail is simply never
-    // addressed) while quietly making that assertion false, which is how the next person to add a
-    // field lands it at the wrong offset. One block, one layout, everywhere.
-    //
-    // The raster path resolves its textures through a per-draw descriptor table bound by register,
-    // which is cheaper and works on tier-1 hardware. These indices exist for the ray path, which
-    // shades every material in one pass and has no per-draw table to bind.
+    // Mirrors MaterialConstants::texIndex, kept even though the raster path never reads it:
+    // shortening the cbuffer would silently break MaterialGpu.hpp's byte-for-byte assertion while
+    // still working (the tail just goes unaddressed). Raster resolves textures via a per-draw
+    // descriptor table; these indices exist for the ray path, which has no such table and shades
+    // every material in one pass.
     uint4  gTexIndex0;   // slots 0..3: BaseColor, MetalRough, Normal, Occlusion
     uint4  gTexIndex1;   // slots 4..7: Emissive, Layer1BaseColor, Layer1MetalRough, Layer1Normal
 
-    // Volume absorption, mirroring MaterialConstants::attenuationColor/attenuationDistance -- the
-    // row that took the block from 144 to 160. gAttenuationColor is the transmittance after exactly
-    // gAttenuationDistance CENTIMETRES of the medium; gAttenuationDistance <= 0 means the material
-    // has no volume at all, which is every material authored before this row existed. Read only
-    // through averVolumeTransmittance below.
+    // Volume absorption, mirroring attenuationColor/Distance (row 144->160 bytes). Transmittance
+    // after exactly `attenuationDistance` CENTIMETRES; <= 0 means no volume (every material before
+    // this row). Read only through averVolumeTransmittance below.
     float3 gAttenuationColor;
     float  gAttenuationDistance;
 
-    // Lamp light, mirroring MaterialConstants::lightIntensity/_lightPad -- the row that took the
-    // block from 160 to 176. A multiplier on the light the material's own glow and size physically
-    // cast at 1 metre in the sun's own units, not a brightness by itself (VoxiRenderer::
-    // buildLocalLights does that math); read only by the ray-driven local-light pass (CSRdLocalLights
-    // in VoxiRenderer.cpp), which this prelude does not itself touch -- it only transports the value,
-    // the same split gIor's own comment describes.
+    // Lamp light, mirroring lightIntensity/_lightPad (row 160->176 bytes). Multiplier on the light
+    // the material's glow/size physically casts at 1 m, in the sun's own units (VoxiRenderer::
+    // buildLocalLights does that math), not a brightness itself. Read only by the ray-driven
+    // local-light pass (CSRdLocalLights); this prelude only transports it.
     float  gLightIntensity;
     float3 gLightPad;
 };
@@ -131,10 +106,9 @@ cbuffer AverMaterial : register(b2) {
 #define AVER_MAT_CAST_SHADOW    (1u << 13)
 #define AVER_MAT_SUBSURFACE     (1u << 14)
 #define AVER_MAT_COAT           (1u << 15)
-// MaterialDesc::lightIntensity > 0. Read by the ray-driven local-light pass to decide whether a
-// draw becomes a sphere light (CSRdLocalLights) and by voxi_restir.hlsli to skip a promoted
-// emitter's own emission in GI candidate hits while local lights are active -- see those files for
-// the two consumers; nothing in THIS prelude branches on the bit.
+// MaterialDesc::lightIntensity > 0. Read by the ray-driven local-light pass (promotes a draw to a
+// sphere light, CSRdLocalLights) and by voxi_restir.hlsli (skips a promoted emitter's own emission
+// in GI candidate hits); this prelude itself never branches on the bit.
 #define AVER_MAT_LIGHT          (1u << 16)
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
@@ -146,28 +120,22 @@ float3 fresnelSchlick(float ct, float3 F0, float f90){ return F0 + (f90-F0)*pow(
 
 // ---- volume absorption: Beer-Lambert across a known thickness ----
 //
-// THE ONE IMPLEMENTATION BOTH PATHS CALL. The raster blended branch reads its material from
-// `cbuffer AverMaterial` and PSRayDriven reads its own RtMaterial out of a StructuredBuffer, so
-// this takes the two values as PARAMETERS and reads no global. That is not style: a ray hit has NO
-// material cbuffer bound (see the note further down this file), so a shared helper that reached for
-// gAttenuationColor would silently shade every ray-driven pixel with whatever material the last
-// raster draw happened to leave in b2. That exact mistake has already been made in this tree once.
+// THE ONE IMPLEMENTATION BOTH PATHS CALL, taking attenuationColor/Distance as PARAMETERS rather than
+// reading the globals: PSRayDriven's ray hit has no material cbuffer bound (RtMaterial comes from a
+// StructuredBuffer instead), and reaching for gAttenuationColor would silently shade every
+// ray-driven pixel with whatever material the last raster draw left in b2 -- a mistake made once.
 //
-// attenuationColor is the transmittance after `attenuationDistance` centimetres, so the extinction
-// is -log(colour)/distance and the transmittance over `thicknessCm` is exp(-extinction * thickness).
-// Written as a pow() of the ratio, which is the same function with one fewer transcendental and no
-// intermediate that can overflow:
+// attenuationColor is the transmittance after `attenuationDistance` cm, so extinction is
+// -log(colour)/distance and transmittance over `thicknessCm` is exp(-extinction*thickness), written
+// as the equivalent pow() (one fewer transcendental, no overflowing intermediate):
 //     exp(log(c) * (t / d))  ==  pow(c, t / d)
 //
-// RETURNS float3(1,1,1) -- perfect transmission, i.e. no volume -- for any material that did not
-// author one, which is every material that predates this row. Guarding on distance <= 0 rather than
-// on a flag bit is deliberate: the off state is representable in the data itself, so a
-// zero-initialised material is already correct and no MaterialFlag had to be spent.
+// Returns float3(1,1,1) (no volume) for any material that did not author one; guarded on
+// distance <= 0 rather than a flag bit, since a zero-initialised material is already correct.
 float3 averVolumeTransmittance(float3 attenuationColor, float attenuationDistance, float thicknessCm) {
     if (attenuationDistance <= 0.0) return float3(1.0, 1.0, 1.0);
-    // Negative thickness means the caller could not measure one (a ray that found no exit, a depth
-    // sample behind the near plane); treat it as "no path through the medium" rather than letting a
-    // negative exponent AMPLIFY the light, which is the failure mode that looks like a glowing pool.
+    // Negative thickness (no exit found, or a depth sample behind the near plane) means "no path
+    // through the medium", not a negative exponent that would AMPLIFY the light into a glowing pool.
     const float t = max(thicknessCm, 0.0);
     return pow(max(attenuationColor, 1e-4), t / attenuationDistance);
 }
@@ -192,13 +160,9 @@ struct AverVertex {
     float3 N;    // unit surface normal, world space
     float3 V;    // unit vector towards the camera; EXACTLY zero where there is no camera
     float2 uv;   // surface parameterisation
-    // TRUE WHERE THE GEOMETRIC NORMAL POINTED AWAY AND WAS FLIPPED, i.e. this pixel is the BACK of
-    // the surface -- the eye is inside the volume the front face encloses.
-    //
-    // averVertexOf has always computed this, used it to flip the normal, and then thrown it away.
-    // Keeping it is the entire plumbing cost of total internal reflection: TIR only happens on the
-    // way OUT of the denser medium, so a shader with no way to know which side it is on cannot
-    // express it at all, however good its Fresnel term is.
+    // True where the geometric normal pointed away and was flipped: this pixel is the BACK of the
+    // surface, eye inside the volume the front face encloses. averVertexOf already computes this to
+    // flip the normal; keeping it is the whole plumbing cost of total internal reflection.
     bool backFace;
 };
 
@@ -206,11 +170,9 @@ struct AverVertex {
 struct AverLight {
     float3 direction;   // unit vector TO the light
     float3 radiance;    // linear radiance arriving along `direction`
-    // PER CHANNEL, so a light arriving through a tinted medium keeps that medium's colour.
-    // (0,0,0) = fully occluded, (1,1,1) = fully lit; a scalar assignment promotes, so every
-    // caller that has only a scalar visibility -- the whole raster shadow-map path -- is
-    // unchanged and needed no edit. It is only ever MULTIPLIED into the result below, which is
-    // why widening it costs those callers nothing.
+    // Per channel, so light through a tinted medium keeps that medium's colour. (0,0,0) = fully
+    // occluded, (1,1,1) = fully lit; a scalar promotes, so a caller with only scalar visibility
+    // (the raster shadow-map path) needed no edit -- it is only ever multiplied in below.
     float3 visibility;
 };
 
@@ -229,11 +191,10 @@ AverVertex averVertexOf(VSOut i) {
     v.wpos = i.wpos;
     v.N    = normalize(i.nrmWS);
     v.V    = normalize(gCamPos.xyz - i.wpos);
-    // Two-sided shading, matching plainShadeSurface in rhi::sharedShaderPrelude -- see its comment
-    // for why this is dot(N, V) and not SV_IsFrontFace. It belongs in BOTH preludes because a
-    // material-shaded draw never goes through the plain path, and foliage is exactly what the
-    // material path is for: a one-sheet leaf drawn with culling off shades its back side black
-    // without this.
+    // Two-sided shading, matching plainShadeSurface in rhi::sharedShaderPrelude (see its comment
+    // for why dot(N, V) and not SV_IsFrontFace). Duplicated in both preludes because a
+    // material-shaded draw never goes through the plain path; without it a one-sheet leaf drawn
+    // with culling off shades its back side black.
     v.backFace = dot(v.N, v.V) < 0.0;
     if (v.backFace) v.N = -v.N;
     v.uv   = i.uv;
@@ -249,29 +210,22 @@ struct AverSurface {
     float3 kdAlbedo;     // the diffuse response
     float3 emissive;     // self-emitted radiance
     float  metallic, rough, ndv, f90;
-    // The DIELECTRIC F0 this surface was built from. Carried here rather than read back off
-    // gMatReflectance, because a RAY HIT HAS NO MATERIAL CONSTANT BUFFER BOUND -- PSRayDriven says
-    // exactly that where it defaults this to 0.04 by hand. averShadeIndirect reaching for the
-    // global instead measured a white dielectric at 1.030 on the ray path against 1.000 on the
-    // raster one: with no material bound the global is not 0.04, the diffuse lobe stopped being
-    // charged for the specular reflectance it takes off the top, and the surface read too bright.
+    // The DIELECTRIC F0 this surface was built from. Carried here, not read back off gMatReflectance,
+    // because a RAY HIT HAS NO MATERIAL CBUFFER BOUND (PSRayDriven defaults this to 0.04 by hand);
+    // reaching for the global measured a white dielectric at 1.030 on the ray path vs 1.000 on raster
+    // -- diffuse stopped being charged for the specular reflectance it takes off the top.
     float  reflectance;
-    // Subsurface, both 0 where the material did not ask for it -- which makes averDirectTerms'
-    // subsurface term identically zero rather than merely small. PSRayDriven hand-builds this struct
-    // and must set them too; HLSL does not zero a struct for you.
+    // Subsurface, both 0 where not asked for, so averDirectTerms' term is identically zero.
+    // PSRayDriven hand-builds this struct and must set them -- HLSL does not zero one for you.
     float  sssWeight, sssRadius;
 #ifdef AVER_LAYERED_BSDF
-    // ON THE SURFACE, NOT READ FROM THE CBUFFER AT THE USE SITE, and that is not a style choice.
-    // PSRayDriven (VoxiShaders' ray-driven primary pass) has NO material cbuffer bound -- a ray hit
-    // does not carry one -- so it hand-builds this struct from gRtMaterials instead. A coat term that
-    // reached for gCoatWeight would read whatever the cbuffer last held, i.e. another material's coat,
-    // on every ray-driven pixel. sssWeight/sssRadius above are on the surface for exactly this reason.
+    // On the surface, not read from the cbuffer at the use site, for the same reason as
+    // sssWeight/sssRadius: PSRayDriven has no material cbuffer bound and hand-builds this struct
+    // from gRtMaterials, so reading gCoatWeight would get whatever the cbuffer last held.
     float  coatWeight, coatRough, coatF0;
 #endif
-    // THE VOLUME THIS SURFACE BELONGS TO, carried on the surface rather than read from the material
-    // cbuffer at the point of use. That indirection is the point: a graph may have overridden these
-    // per pixel, and a consumer reading gAttenuationColor directly would silently get the authored
-    // constant back and quietly ignore the graph. Same reason sssWeight/sssRadius sit here.
+    // The volume this surface belongs to, same reason as sssWeight/sssRadius: a graph may have
+    // overridden these per pixel, and reading gAttenuationColor directly would ignore that.
     float3 attenuationColor;
     float  attenuationDistance;
     // Carried through from AverVertex -- see its own comment. Read only by the transmissive branch
@@ -344,23 +298,14 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     float3 B = dp2perp * du1.y + dp1perp * du2.y;
     float m = max(dot(T, T), dot(B, B));
     if (m <= 0.0) {
-        // NO USABLE UV FRAME, WHICH USED TO MEAN "SILENTLY NO NORMAL AT ALL". The frame above comes
-        // from ddx/ddy of the UVs, so a mesh whose UVs are constant across a triangle -- generated
-        // geometry very often has none worth the name -- collapses T and B to zero and this returned
-        // the geometric normal, discarding the perturbation without a word. That is how a material
-        // graph driving Normal can be compiled, registered, dispatched and correct, and still change
-        // absolutely nothing: measured on the pool's fluid shell, graph on versus off was 0 differing
-        // pixels, and every part of the chain except this line looked healthy.
-        //
-        // A WORLD-ANCHORED FRAME, NOT ONE FROM THE POSITION DERIVATIVES. dp1/dp2 are screen-space
-        // quantities, so a frame built from them rotates as the camera does and the ripple would
-        // swim when you turned your head. Picking the world axis least parallel to N gives a frame
-        // that depends only on the surface, so a world-space pattern stays put.
-        //
-        // The tangent DIRECTION is arbitrary here, and that is honest rather than a compromise: a
-        // mesh with no UVs has no authored tangent direction to respect. What matters is that the
-        // frame is orthonormal, continuous over the surface, and stable in world space -- which is
-        // exactly what a world-space ripple or triplanar pattern needs.
+        // NO USABLE UV FRAME (ddx/ddy of constant UVs collapse T and B to zero -- common on
+        // generated geometry). Used to fall back to the geometric normal, silently dropping the
+        // perturbation: a Normal-driven graph could compile, dispatch, and still change nothing
+        // (measured 0 differing pixels, graph on vs off, on the pool's fluid shell). Instead build a
+        // WORLD-ANCHORED frame -- not from dp1/dp2, which are screen-space and would rotate with the
+        // camera and make a pattern swim -- from the world axis least parallel to N. The tangent
+        // direction is arbitrary (no authored one exists without UVs); what matters is that the
+        // frame stays orthonormal, continuous, and stable in world space.
         const float3 up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
         const float3 T2 = normalize(cross(up, N));
         const float3 B2 = cross(N, T2);
@@ -370,12 +315,11 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     return normalize(T * (nTS.x * invmax) + B * (nTS.y * invmax) + N * nTS.z);
 }
 
-// Evaluates the material at one point. The light is used only for the half vector.
-// Blends the second layer over the first by SLOPE, and returns the combined maps.
+// Blends the second layer over the first by SLOPE and returns the combined maps.
 //
-// SLOPE IS TAKEN FROM THE GEOMETRIC NORMAL, deliberately, not from the normal-mapped one: the
-// question is "is this part of the terrain a cliff", which is a property of the surface, and
-// feeding a normal map into it would make the layer choice flicker with every bump in the detail.
+// Slope is taken from the GEOMETRIC normal, deliberately, not the normal-mapped one: the question
+// is "is this part of the terrain a cliff", a property of the surface -- feeding a normal map into
+// it would make the layer choice flicker with every bump in the detail.
 AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
 #ifdef AVER_MATERIAL_SRV
     if (!(gMaterialFlags & AVER_MAT_SLOPE_BLEND)) return m;
@@ -412,15 +356,13 @@ AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
 
 // One material map, sampled at an arbitrary UV rather than the surface's own.
 //
-// THE SLOT IS A SWITCH, NOT AN ARRAY INDEX, because the eight maps are eight separately declared
-// Texture2Ds at eight registers (see the AVER_MATERIAL_SRV block at the top of this file) and HLSL
-// has no way to index that without a resource array the root signature does not describe. The switch
-// is over a value that is CONSTANT for a given generated node, so it costs nothing at runtime: the
-// compiler folds it away entirely.
+// The slot is a SWITCH, not an array index: the eight maps are eight separately declared Texture2Ds
+// at eight registers (see the AVER_MATERIAL_SRV block at the top of this file), and HLSL cannot
+// index that without a resource array the root signature does not describe. `slot` is constant per
+// generated node, so the compiler folds the switch away entirely -- it costs nothing at runtime.
 //
-// Returns white where there is no material table at all, matching averSampleMaps' own #else branch:
-// a graph that samples a map in a build with no material SRVs gets the identity, not a compile
-// error, exactly as the stock path does.
+// Returns white with no material table at all, matching averSampleMaps' own #else branch: a graph
+// sampling a map in a build with no material SRVs gets the identity, not a compile error.
 float4 averSampleSlot(uint slot, float2 uv) {
 #ifdef AVER_MATERIAL_SRV
     switch (slot) {
@@ -481,22 +423,19 @@ float3 averBlendNormals(float3 a, float3 b) {
     return normalize(float3(a.xy + b.xy, a.z * b.z));
 }
 
-// EVERYTHING A MATERIAL AUTHORS, and nothing else. Every remaining field of AverSurface is DERIVED
-// from these by averBuildSurface below: F0 from albedo and metallic, F from F0 and the half vector,
-// kdAlbedo from albedo and metallic, ndv from the shading normal.
+// Everything a material AUTHORS, nothing else. Every remaining AverSurface field is DERIVED from
+// these by averBuildSurface below (F0 from albedo/metallic, F from F0 and the half vector, kdAlbedo
+// from albedo/metallic, ndv from the shading normal).
 //
-// THIS SPLIT IS WHAT LETS A NODE GRAPH DRIVE A MATERIAL WITHOUT RESTATING THE BRDF. A generated
-// averEvalMaterial starts from averStockAuthored(), overwrites only the fields its graph actually
-// drives, and hands the result to averBuildSurface -- so a graph that sets nothing but base colour
-// still gets the right F0, the right energy split and the right alpha clip, and a change to how a
-// surface is DERIVED is made in one place instead of once per generated shader. Without it, every
-// generated material would carry its own copy of the twelve lines below and would silently stop
-// matching the stock path the first time one of them changed.
+// This split is what lets a node graph drive a material without restating the BRDF: a generated
+// averEvalMaterial starts from averStockAuthored(), overwrites only the fields its graph drives, and
+// hands the result to averBuildSurface -- so a graph setting only base colour still gets the right
+// F0, energy split and alpha clip, and a change to how a surface is DERIVED is made once instead of
+// once per generated shader.
 //
-// THESE ARE THE AUTHORED HALVES ONLY -- the per-material factor times the map. The per-DRAW terms
-// (gMaterial, gBaseColor, gEmissive, gShadingModel) stay in averBuildSurface, because they are the
-// renderer's to apply and not the material's to author: a graph overriding them would be overriding
-// the entity's own tint, which is not what an author asking for "red" means.
+// AUTHORED HALVES ONLY -- the per-material factor times the map. The per-DRAW terms (gMaterial,
+// gBaseColor, gEmissive, gShadingModel) stay in averBuildSurface: they are the renderer's to apply,
+// not the material's to author, so a graph overriding them would override the entity's own tint.
 struct AverAuthored {
     float3 baseColor;   // linear; gBaseColorFactor.rgb * the base colour map
     float  opacity;     // gBaseColorFactor.a * the base colour map's alpha
@@ -506,32 +445,23 @@ struct AverAuthored {
     float3 emissive;    // gEmissiveFactor * the map
     float  occlusion;   // the material's OWN occlusion map, before gOcclusionStrength
     float  alphaCutoff; // read only under AVER_MAT_ALPHA_MASK
-    // AUTHORED, NOT READ STRAIGHT OFF THE CBUFFER, and that is the whole point of them living here.
-    // Everything in this struct is a value a material GRAPH may override per pixel; a field the
-    // surface build reads from the constant buffer directly is a field no graph can ever drive.
-    // Subsurface is exactly where per-pixel authoring earns its keep -- a thickness mask driving the
-    // radius is the difference between a uniformly waxy object and one whose thin parts glow.
+    // AUTHORED, NOT READ STRAIGHT OFF THE CBUFFER: a field read from the constant buffer directly is
+    // one no material GRAPH can ever drive. Subsurface earns this the most -- a thickness mask
+    // driving the radius is the difference between a uniformly waxy object and thin parts that glow.
     float  subsurfaceWeight;
     float  subsurfaceRadius;
-    // The dielectric pair, here for the same reason subsurface is: a value read straight off the
-    // constant buffer is a value no material GRAPH can ever drive. Driving transmission from a mask
-    // is how one mesh becomes a window with a frosted band, or a bottle with a label.
+    // Dielectric pair, same reason. Driving transmission from a mask is how one mesh becomes a
+    // window with a frosted band, or a bottle with a label.
     float  ior;
     float  transmission;
-    // THE VOLUME, AUTHORED PER PIXEL RATHER THAN PER MATERIAL. These mirror gAttenuationColor and
-    // gAttenuationDistance, and they are here so a GRAPH can drive them -- which is the whole
-    // difference between "this engine ships a green glass" and "anyone can author one". The tint of
-    // real glass is its iron content and its thickness, and both vary across a pane; a constant
-    // could express neither. attenuationDistance <= 0 still means "no volume", exactly as the
-    // constant did, so every material authored before this existed is unaffected.
+    // THE VOLUME, AUTHORED PER PIXEL. Mirrors gAttenuationColor/Distance, here so a GRAPH can drive
+    // them: real glass's tint is its iron content and thickness, both varying across a pane, which a
+    // constant could express neither of. attenuationDistance <= 0 still means "no volume".
     float3 attenuationColor;
     float  attenuationDistance;
-    // THE COAT TRIPLE IS NOT BEHIND AVER_LAYERED_BSDF, and that is deliberate even though the only
-    // thing that reads it is. Putting it behind the define would make the shape of AverAuthored --
-    // and therefore the generated material-graph HLSL, which assigns into it by field name --
-    // depend on a render setting. A graph compiled for one setting would then fail to compile under
-    // the other, at runtime, on someone else's machine. Three floats a dead-code pass removes when
-    // nothing reads them is the cheaper half of that trade by a wide margin.
+    // NOT BEHIND AVER_LAYERED_BSDF, though only that define reads it: gating it would make
+    // AverAuthored's shape depend on a render setting, so graph-generated HLSL compiled for one
+    // setting could fail to compile under the other. Three dead floats is the cheaper trade.
     float  coatWeight;
     float  coatRoughness;
     float  coatF0;
@@ -553,9 +483,8 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     a.emissive    = gEmissiveFactor * map.emissive;
     a.occlusion   = map.occlusion;
     a.alphaCutoff = gAlphaCutoff;
-    // GATED HERE, ONCE. Below this point nothing re-tests the flag: a graph that drives these pins
-    // writes them after the stock path has run, and it would be wrong for the flag to then veto a
-    // value the author explicitly asked for.
+    // GATED HERE ONCE: nothing below re-tests the flag, so a graph pin written after the stock path
+    // runs is not vetoed by it.
     a.subsurfaceWeight = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceWeight) : 0.0;
     a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
     a.ior              = gIor;
@@ -586,172 +515,99 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.reflectance = gMatReflectance;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
     s.albedo = srgbToLin(gBaseColor.rgb) * a.baseColor;
-    // THE SAMPLED TEXTURE AND THE LINEARISED FACTOR, i.e. exactly s.albedo, because this is what an
-    // unlit surface hands to the backbuffer. Reading gBaseColor alone was two bugs at once, and both
-    // of them render as WHITE rather than as anything that looks like a colour mistake: the draw
-    // loops deliberately neutralise gBaseColor to 1,1,1 for any material that carries its colour in
-    // a texture (see SandboxApp's authored branch and GameRender.cpp), so dropping a.baseColor drops
-    // the entire colour; and skipping srgbToLin hands an sRGB triple to a tonemap that assumes
-    // linear, which is the same round-trip fault the selection outline hit in plainShadeSurface.
-    // s.alpha rather than gBaseColor.a so an unlit surface fades with opacity like every other one.
-    //
-    // PLUS s.emissive: displayColor is what the viewport's Unlit view shows for every scene mesh
-    // (the only setter of AVER_MODEL_UNLIT is setUnlit, and overlay/chrome draws clear it first --
-    // SandboxRender.cpp), and Unlit removes lighting, not a lamp's own glow.
+    // s.albedo, not gBaseColor alone -- that was two bugs, both rendering as WHITE: draw loops
+    // neutralise gBaseColor to 1,1,1 for a material carrying colour in a texture (SandboxApp's
+    // authored branch, GameRender.cpp), dropping a.baseColor drops the whole colour, and skipping
+    // srgbToLin hands an sRGB triple to a linear-expecting tonemap (as plainShadeSurface's selection
+    // outline once did). s.alpha, not gBaseColor.a, so unlit fades with opacity like everything else.
+    // Plus s.emissive, since Unlit (the only user of displayColor -- setUnlit; SandboxRender.cpp
+    // clears it first on overlay/chrome) removes lighting, not a lamp's own glow.
     s.displayColor = float4(s.albedo + s.emissive, s.alpha);
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
-    // TRANSMISSION REMOVES LIGHT FROM THE DIFFUSE LOBE, and until this line it did not.
+    // TRANSMISSION REMOVES LIGHT FROM THE DIFFUSE LOBE (it did not, before this line): light that
+    // passed THROUGH the substrate is the same photons as light scattered back out, so a material
+    // transmitting 92% and diffusely reflecting its full base colour emits energy it never received
+    // -- every other use of transmission here was on s.alpha (coverage) alone.
     //
-    // gTransmission is how much light passes THROUGH the substrate instead of scattering back out of
-    // it. Light that went through cannot also come back as diffuse -- the two are the same photons,
-    // and a material that both transmits 92% and diffusely reflects its full base colour is emitting
-    // energy it never received. Every other use of transmission in this file was on s.alpha
-    // (coverage) alone, so the diffuse lobe kept its full albedo no matter how see-through the author
-    // said the surface was.
+    // MEASURED on PTTest's M_Glass (0.86 0.93 0.88 0.12, transmission 0.92, over the dark pool): the
+    // undimmed diffuse term alone contributed a warm wash five times the size of the reflection
+    // (specular was 4 codes of a 103,124,130 pixel; coverage-only matched the water behind it within
+    // 1-3 codes) -- the "milky, cartoonish glass" this fixes; the reflection, Fresnel, alpha and
+    // blend state were each verified correct first, so it was a diffuse lobe nobody dimmed. (M_Glass
+    // has since moved its tint into attenuationColor; these numbers are the original evidence, not a
+    // value to reproduce.)
     //
-    // MEASURED AGAINST THE MATERIAL AS IT STOOD THEN, and it has changed since: M_Glass now authors
-    // baseColorFactor 0.97 0.98 0.97 0.10, because the flat green tint moved out of the base colour
-    // and into attenuationColor where a path length can act on it. The numbers below are left EXACTLY
-    // as they were taken -- re-writing a measurement to match today's asset turns a record into a
-    // claim -- so read them as evidence for the MECHANISM (an undimmed diffuse lobe dominating the
-    // reflection), not as values to reproduce.
-    //
-    // MEASURED, on PTTest's M_Glass (baseColorFactor 0.86 0.93 0.88 0.12, transmission 0.92) over the
-    // dark pool. Probing one pixel of pane against the water beside it, and bisecting this function's
-    // output to attribute the pale wash:
-    //     full output ......... 103,124,130
-    //     specular removed .....  99,120,125   -> the whole specular term is FOUR codes
-    //     coverage only ........  27,56,84     -> vs 0.88 * water(32,69,94) = 28,61,83. Correct.
-    // so `diffuse * s.alpha` alone contributed (72,64,41) -- a warm wash five times the size of the
-    // reflection, on a pane authored to be 92% transmissive. That is the "milky, cartoonish glass"
-    // this whole exercise started from, and it is not the reflection, the Fresnel, the alpha or the
-    // blend state: all four were verified correct first. It is a diffuse lobe nobody dimmed.
-    //
-    // (1 - gTransmission), matching glTF KHR_materials_transmission, which splits the same budget the
-    // same way. NOT gated on AVER_MAT_ALPHA_BLEND: an opaque material may author transmission too --
-    // it is a substrate property, not a blend mode -- and this must stay one rule rather than a glass
-    // special case. It is a no-op for every material authored before the field existed, because
-    // MaterialDesc::transmission defaults to 0.
+    // (1 - gTransmission), matching glTF KHR_materials_transmission. NOT gated on AVER_MAT_ALPHA_BLEND
+    // -- transmission is a substrate property, not a blend mode -- and a no-op by default (0).
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(a.transmission));
-    // GATED ON THE FLAG, not on the float, so the whole subsurface branch folds away for every
-    // material that does not want it.
     s.attenuationColor    = a.attenuationColor;
     s.attenuationDistance = a.attenuationDistance;
     s.backFace  = v.backFace;
-    // FROM THE AUTHORED STRUCT, not from the cbuffer. Reading gSubsurfaceWeight here instead would
-    // work identically for the stock material and silently ignore every material graph that drove
-    // the pin -- the defect this whole struct exists to prevent.
+    // FROM THE AUTHORED STRUCT, not the cbuffer: reading gSubsurfaceWeight directly would work for
+    // the stock material but silently ignore any graph that drove the pin -- the defect this struct
+    // exists to prevent.
     s.sssWeight = saturate(a.subsurfaceWeight);
     s.sssRadius = saturate(a.subsurfaceRadius);
 #ifdef AVER_LAYERED_BSDF
-    // FROM THE AUTHORED STRUCT, for the reason stated on subsurface a few lines up: reading
-    // gCoatWeight here would work identically for the stock material and silently ignore every
-    // material graph that drove the pin. It read the cbuffer when the lobe first landed, before the
-    // pins existed, which is exactly the defect that comment warns about -- so it is fixed here
-    // rather than left as a second precedent for doing it wrong.
-    //
-    // averStockAuthored already applied AVER_MAT_COAT, so a material with no coat arrives as zero
-    // and every coat term below is identically zero.
+    // FROM THE AUTHORED STRUCT, same reason as subsurface above (it read the cbuffer when the lobe
+    // first landed, before the pins existed; fixed here rather than left as a second wrong precedent).
+    // averStockAuthored already applied AVER_MAT_COAT, so a coat-less material arrives as zero and
+    // every coat term below is identically zero.
     s.coatWeight = saturate(a.coatWeight);
     s.coatRough  = saturate(a.coatRoughness);
     s.coatF0     = saturate(a.coatF0);
 #endif
 
-    // FRESNEL-AWARE ALPHA FOR BLENDED SURFACES. Plain "over" compositing --
-    // dst = src.rgb*alpha + dst.rgb*(1-alpha) -- treats alpha as one UNIFORM attenuation and so
-    // applies it to the specular reflection exactly as hard as to everything else. Real dielectrics
-    // do not attenuate uniformly: the Fresnel term climbs toward 1 at grazing incidence, so a glass
-    // pane goes from nearly invisible face-on to nearly a mirror edge-on, hiding whatever is behind
-    // it. This is not a cosmetic nicety -- without it, a pane authored at a usefully transparent
-    // alpha of ~0.2 would draw ITS OWN REFLECTION at 20% strength, which is too dim to read as a
-    // reflection at all and instead reads as a smudge: the glass looks like dirty plastic, not glass.
+    // FRESNEL-AWARE ALPHA FOR BLENDED SURFACES. Plain "over" (dst = src*alpha + dst*(1-alpha)) treats
+    // alpha as one uniform attenuation, hitting specular as hard as everything else. Real dielectrics
+    // do not: Fresnel climbs toward 1 at grazing incidence, so a pane at a transparent alpha (~0.2)
+    // would draw its own reflection at only 20% strength -- too dim to read, so glass looks like
+    // dirty plastic. Raising alpha toward 1 by the same view-angle Fresnel term this file already
+    // computes fixes it with no second BRDF: at grazing incidence alpha follows the term to 1 and the
+    // draw goes fully opaque there, correctly, since virtually all the light reaching the eye at that
+    // angle IS the reflection; face-on the term sits near s.reflectance (glass ~0.04).
     //
-    // Raising alpha toward 1 by the same view-angle Fresnel term this file already computes fixes it
-    // with no second BRDF: at grazing incidence the term approaches 1, alpha follows it to 1, and the
-    // blended draw becomes fully opaque there -- correctly, because at grazing incidence virtually
-    // all the light reaching the eye from that pixel IS the reflection and there is nothing left to
-    // blend the background into. Face-on, the term sits near s.reflectance (glass is commonly ~0.04)
-    // and alpha stays close to its authored value.
-    //
-    // GATED ON AVER_MAT_ALPHA_BLEND so this is provably a no-op for every material that does not ask
-    // for it: unless the bit is set, execution never enters the branch below, so s.alpha for an
-    // opaque or masked material is exactly the two lines above it always was (gBaseColor.a *
-    // a.opacity, optionally clip()'d) and nothing downstream changes. That is also why the render is
-    // bit-identical for every material authored today and not merely intended to be: Material.cpp
-    // reported Feature::AlphaBlend as Status::NotImplemented until this same change, so nothing ever
-    // shipped a material that both set this bit AND expected a renderer to act on it -- the bit has
-    // only ever been inert storage in content authored so far.
+    // GATED ON AVER_MAT_ALPHA_BLEND: an unaffected material gets exactly the two lines above
+    // (gBaseColor.a * a.opacity, optionally clip()'d), provably bit-identical -- Material.cpp reported
+    // Feature::AlphaBlend as Status::NotImplemented until this change, so nothing shipped a material
+    // expecting a renderer to act on the bit.
     if (gMaterialFlags & AVER_MAT_ALPHA_BLEND) {
-        // TRANSMISSION SETS THE FLOOR FIRST; FRESNEL LIFTS IT SECOND -- and not the other way round.
-        // gTransmission > 0 is an author's statement that this surface is OPTICALLY see-through: a
-        // fact about the substrate that holds regardless of where the camera is standing. That has
-        // to be applied before anything view-dependent touches alpha, so it reads as a FLOOR the
-        // view term then lifts away from, not as one more multiplier competing with it.
+        // TRANSMISSION SETS THE FLOOR FIRST; FRESNEL LIFTS IT SECOND. gTransmission > 0 is a fact
+        // about the substrate regardless of camera position, so it must apply before anything
+        // view-dependent -- a floor the view term then lifts away from. Reversed, a transmissive
+        // pane's grazing brightening would get pulled back down by transmission afterwards, which is
+        // backwards: the Fresnel reflection is real light reaching the eye, and transmission has no
+        // say over light that never entered the substrate.
         //
-        // Doing it in the other order -- Fresnel first, transmission second -- would let a highly
-        // transmissive pane's own grazing-angle brightening get pulled back down by the transmission
-        // term afterwards, which is backwards: the reason real glass reads nearly opaque at a shallow
-        // angle is that the Fresnel reflection is real light actually reaching the eye, and the
-        // substrate's transmission has no say over light that never entered it in the first place.
-        // Transmission describes the SUBSTRATE; Fresnel describes the VIEW ANGLE; the view angle has
-        // to be the last word because it is the last thing standing between the surface and the eye.
-        //
-        // lerp toward (1 - gTransmission) rather than multiplying s.alpha by it: at gTransmission ==
-        // 1 the author has declared the surface fully see-through, and the target of 0 coverage wins
-        // outright regardless of whatever alpha was separately authored -- a transmission of 1 on an
-        // alpha-0.9 pane should not leave it reading 90% solid. At gTransmission == 0 the lerp weight
-        // is zero and s.alpha passes through completely unchanged, which is what keeps this whole
-        // branch a no-op for every material authored before this field existed (their transmission
-        // defaults to 0 -- see MaterialDesc::transmission).
+        // lerp toward (1 - gTransmission), not a multiply: at transmission == 1 the 0-coverage target
+        // wins outright regardless of authored alpha; at 0 the lerp weight is zero and s.alpha passes
+        // through unchanged (a no-op for material predating the field, which defaults to 0).
         float baseAlpha = lerp(s.alpha, 1.0 - a.transmission, saturate(a.transmission));
 
-        // s.F above is evaluated at the HALF VECTOR for the current light's direct specular term, so
-        // it swings with every light in the scene and with l.direction, which is a poor knob for
-        // something that must describe how mirror-like the surface reads to the CAMERA regardless of
-        // lighting. The VIEW-angle Fresnel -- fresnelSchlick at s.ndv, i.e. dot(N, V) -- is what
-        // answers that: it depends on nothing but the surface and the eye, so it is stable across
-        // every light in the draw and across an unlit scene too.
+        // s.F is at the HALF VECTOR for the current light, swinging per light -- a poor knob for how
+        // mirror-like the surface reads to the CAMERA regardless of lighting. View-angle Fresnel
+        // (fresnelSchlick at s.ndv = dot(N,V)) depends only on the surface and the eye.
         float3 viewFresnel = fresnelSchlick(s.ndv, s.F0, s.f90);
-        // Reduced to a scalar by luminance, not by picking a channel: F0 is achromatic for the
-        // dielectrics this exists for (F0 = gMatReflectance.xxx when metallic is 0, so every channel
-        // already agrees), and luminance is the principled reduction for the rarer case of a
-        // translucent, partially metallic surface where F0 is tinted and the channels disagree.
+        // By luminance, not a channel pick: F0 is achromatic here (metallic 0 gives every channel
+        // gMatReflectance), and luminance is the principled reduction for the tinted/metallic case.
         float fresnelLum = dot(viewFresnel, float3(0.2126, 0.7152, 0.0722));
-        // THERE IS NO TOTAL-INTERNAL-REFLECTION OVERRIDE HERE, AND THERE CANNOT BE ONE, which is a
-        // correction: there WAS one, gated on s.backFace, and it turned every pane of glass in the
-        // engine into a dark slab at 41 degrees off normal.
-        //
-        // TIR needs the ray to be INSIDE the denser medium already. The test used backFace as the
-        // proxy for that, and backFace does not mean it. On a two-sided pane -- and glass is
-        // routinely CULL none, because you walk round it -- backFace is true for the far surface of
-        // the pane as seen from OUTSIDE, which is an ordinary air-to-glass view with the normal
-        // flipped to face the eye. It is also true for a genuine inside-the-medium view. The two
-        // are indistinguishable from a pixel shader, and only the second one can total-internally-
-        // reflect.
-        //
-        // SNELL FORBIDS THE FIRST OUTRIGHT, so this is not a tuning question. Light reaching that
-        // far surface got in through the front one, refracting TOWARD the normal on the way:
-        // sin(t_inside) = sin(t_outside)/n, so t_inside maxes out at asin(1/n) -- 41.1 degrees at
-        // n = 1.52 -- which IS the critical angle. The internal angle can equal it and never exceed
-        // it. A parallel-sided pane viewed from outside cannot produce TIR at any view angle.
-        //
-        // WHAT IT COST, measured on PTTest's glass rail at grazing incidence: the pane read
-        // 127,140,141 against a 203,215,215 background -- a dark sheet where a mirror belongs --
-        // and 174,187,188 with the override gone. The override fired from ndv < 0.753, so it
-        // covered most of the viewing hemisphere, and because it slammed alpha to 1 it replaced the
-        // background with whatever the glass's own reflection happened to be. Face-on was
-        // unaffected (195,206,206 either way), which is why this read as "dark patches" appearing
-        // at an angle rather than as glass being wrong everywhere.
-        //
-        // THE REAL TEST LOOKS LIKE modules/fluids/src/WaterShaders.hpp'S, and that one is correct
-        // and untouched: `bool underwater = gCamPos.z < gWaterState.x` asks whether the EYE is
-        // inside the medium, using the one piece of geometry that answers it, and only then applies
-        // the same critical-angle maths. A material has no equivalent -- there is no per-pixel fact
-        // that says which side of a closed surface the camera is on -- so glass gets ordinary view
-        // Fresnel here, and that is the honest answer rather than a plausible-looking wrong one.
+        // NO TOTAL-INTERNAL-REFLECTION OVERRIDE HERE, DELIBERATELY: there WAS one, gated on
+        // s.backFace, and it turned every pane of glass into a dark slab at grazing angles. TIR needs
+        // the ray already INSIDE the denser medium; backFace does not mean that -- on a two-sided
+        // pane (glass is routinely CULL none) it is true both for an ordinary outside view of the far
+        // surface AND for a genuine inside-the-medium view, indistinguishable in a pixel shader. SNELL
+        // FORBIDS THE FIRST OUTRIGHT: light reaching that far surface refracted TOWARD the normal
+        // getting in, so the internal angle maxes at the critical angle (asin(1/n) = 41.1 deg at
+        // n=1.52) and can never exceed it -- a parallel-sided pane viewed from outside cannot TIR at
+        // any angle. MEASURED on PTTest's glass rail at grazing incidence: the override read
+        // 127,140,141 against a 203,215,215 background vs 174,187,188 with it gone (fired from
+        // ndv < 0.753; face-on unaffected, 195,206,206 either way). The correct pattern is
+        // `bool underwater = gCamPos.z < gWaterState.x` in WaterShaders.hpp, which asks whether the
+        // EYE is inside the medium using geometry that actually answers it; a material has no
+        // equivalent, so glass gets ordinary view Fresnel here -- the honest answer.
         s.alpha = lerp(baseAlpha, 1.0, saturate(fresnelLum));
     }
 
@@ -798,46 +654,33 @@ float2 averEnvBRDF(float ndv, float rough) {
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
-// SPECULAR OCCLUSION. Ambient occlusion answers "how much of the HEMISPHERE is blocked", which is
-// the right question for a diffuse lobe gathering from all of it and the wrong one for a specular
-// lobe gathering from a narrow cone about the reflection vector. Feeding raw AO to specular, as
-// this file did, darkens a grazing mirror that can see straight past its own occluder and barely
-// touches a rough surface that genuinely is enclosed.
+// SPECULAR OCCLUSION. AO answers "how much of the HEMISPHERE is blocked" -- right for diffuse, wrong
+// for a specular lobe gathering from a narrow cone: feeding it raw darkens a grazing mirror that can
+// see past its own occluder and barely touches a genuinely enclosed rough surface.
 //
-// Lagarde's form: the exponent collapses toward 1 as roughness rises, so a rough lobe converges
-// on the diffuse answer (AO itself) while a smooth one is progressively freed from it. At ao = 1 it
-// returns 1 for every roughness, which is what keeps the white furnace readable -- an occlusion
-// term that dimmed an unoccluded surface would fail the oracle before any of the energy maths did.
+// Lagarde's form: the exponent collapses toward 1 as roughness rises, so rough converges on plain AO
+// while smooth is freed from it. At ao = 1 it returns 1 for every roughness (the white furnace check).
 float averSpecularOcclusion(float ndv, float ao, float rough) {
-    // NO saturate() INSIDE THE pow. The whole mechanism is that ndv + ao EXCEEDS 1 for a smooth,
-    // face-on surface, so raising it to a small exponent returns something above 1 and the -1 + ao
-    // that follows lands ABOVE plain ao. Clamping the base to 1 makes pow(1, x) == 1 for every
-    // roughness and the function collapses to `ao` exactly -- which is the bug it exists to fix.
-    // Written that way first, and the furnace caught it: the metal row read 1.000 * ao, unchanged.
-    // The base cannot go negative (ao and abs(ndv) are both non-negative), so nothing needs a guard.
+    // NO saturate() inside the pow: ndv+ao EXCEEDS 1 for a smooth face-on surface, so the small
+    // exponent lands ABOVE plain ao. Clamping the base to 1 would collapse the function to `ao`
+    // exactly -- the bug this exists to fix (caught in the furnace: metal read 1.000 * ao, unchanged).
+    // Base cannot go negative (ao, abs(ndv) both non-negative), so no guard is needed.
     return saturate(pow(abs(ndv) + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao);
 }
 
 // ================= shared BRDF terms: ONE copy of the maths, three consumers =================
-// averShadeDirect and averShadeIndirect below are the ORIGINAL accumulating entry points, unchanged
-// in what they compute or in what order they add it -- every renderer that shades an opaque surface
-// through them gets exactly the radiance it always did. averShadeSplit, further down, calls the same
-// two helpers and keeps their outputs in separate registers instead of summing them, which is what a
-// PREMULTIPLIED-ALPHA blended draw needs (see the shading contract at the top of this file and
-// averBlendedOutput's own comment). Splitting happened HERE, at the helper boundary, rather than by
-// writing a second copy of either lobe's arithmetic, so a future change to the BRDF or to the
-// multiscatter compensation is made once and every consumer sees it.
+// averShadeDirect/averShadeIndirect below are the ORIGINAL accumulating entry points, unchanged in
+// what they compute or the order they add it. averShadeSplit calls the same two helpers but keeps
+// their outputs in separate registers instead of summing them, for a PREMULTIPLIED-ALPHA blended
+// draw (see the shading contract at the top of this file and averBlendedOutput) -- splitting at the
+// helper boundary, not by duplicating either lobe's arithmetic, so a future BRDF change is made once.
 
-// Cook-Torrance GGX for one light, returned as its two UNWEIGHTED lobes (before the light's own
-// radiance/NdotL/visibility are multiplied in) plus the NdotL both callers need. Splitting the
-// return here, rather than after the light term is applied, is what lets averShadeDirect reconstruct
-// `(diffuseLobe + specularLobe) * l.radiance * ndl * l.visibility` -- THE EXACT ORIGINAL EXPRESSION,
-// same grouping, same order -- so its output is provably unaffected by this function existing at all.
-// SUBSURFACE IS A FOURTH OUTPUT, NOT PART OF diffuseLobe, and that is the whole reason this
-// signature changed. Both callers multiply diffuseLobe by ndl, and ndl is ZERO exactly where
-// subsurface light is the only thing there is -- past the terminator. Folding the term into the
-// diffuse lobe would therefore multiply the effect by zero precisely where it is the effect.
-// subsurfaceLobe carries its own angular dependence and must NOT be scaled by ndl.
+// Cook-Torrance GGX for one light, returned as its two UNWEIGHTED lobes (before radiance/NdotL/
+// visibility) plus the NdotL both callers need. Splitting the return here, not after the light term
+// is applied, lets averShadeDirect reconstruct the exact original expression, provably unaffected by
+// this function existing. SUBSURFACE IS A FOURTH OUTPUT, not part of diffuseLobe: both callers
+// multiply diffuseLobe by ndl, which is ZERO exactly where subsurface light is the only thing there
+// is (past the terminator), so folding it in would zero the effect where it matters most.
 void averDirectTerms(AverSurface s, AverLight l, out float3 diffuseLobe, out float3 specularLobe,
                      out float3 subsurfaceLobe, out float ndl) {
     float a = s.rough * s.rough;
@@ -845,42 +688,28 @@ void averDirectTerms(AverSurface s, AverLight l, out float3 diffuseLobe, out flo
     float D = distGGX(saturate(dot(s.N, s.H)), a);
     float V = visSmithCorrelated(s.ndv, ndl, a);
     float3 spec = D * V * s.F;
-    // ENERGY LOST TO MASKING, PUT BACK. A single-scatter GGX lobe drops every ray the
-    // microsurface would have bounced a second time, and the loss grows with roughness: a white
-    // metal at roughness 1 returned 45% of the light it received, measured in this engine's own
-    // white furnace before this line existed. The compensation is the standard single-term
-    // approximation and it reuses the split-sum term the indirect path already computes -- see
-    // averIndirectTerms, which corrects the same loss for the environment.
+    // ENERGY LOST TO MASKING, PUT BACK. Single-scatter GGX drops every ray the microsurface would
+    // have bounced again; loss grows with roughness (a white metal at roughness 1 returned 45% of
+    // its light, measured in this engine's furnace). Reuses the split-sum term averIndirectTerms
+    // already computes for the same loss in the environment.
     float2 dfg = averEnvBRDF(s.ndv, s.rough);
-    // Ess -- THE SUM -- NOT dfg.x. dfg.x is only the SCALE half of "F0*scale + bias"; what this
-    // compensation inverts is the single-scatter DIRECTIONAL ALBEDO, which is what the pair sums
-    // to. Using dfg.x alone looks nearly right head-on (0.452 against 0.450 at roughness 1) and
-    // comes apart at grazing incidence: there the fit sends the scale term toward 0.077 while the
-    // sum stays near 0.97, so 1/scale drove the factor to THIRTEEN. Terrain is seen at grazing
-    // angles across most of a frame, and it read about 15% too bright everywhere until this was
-    // tracked down -- bisected to this one line by compiling the three parts of the change out
-    // one at a time.
+    // Ess is THE SUM, not dfg.x (only the SCALE half of "F0*scale + bias"): the single-scatter
+    // DIRECTIONAL ALBEDO this compensation inverts is what the pair sums to. dfg.x alone looks right
+    // head-on (0.452 vs 0.450 at roughness 1) but at grazing incidence the scale term falls to 0.077
+    // while the sum stays near 0.97 -- 1/scale drove the factor to THIRTEEN, and terrain read ~15%
+    // too bright everywhere until bisected to this one line.
     float  Ess = max(dfg.x + dfg.y, 1e-3);
     spec *= 1.0 + s.F0 * (1.0 / Ess - 1.0);
     diffuseLobe  = s.kdAlbedo / PI;
     specularLobe = spec;
 
     // ---- subsurface: wrapped diffuse + view-dependent back-scatter ----
-    //
-    // TWO TERMS, AND ONLY THE EXTRA. The caller already pays kdAlbedo/PI * ndl, so the wrap term
-    // contributes the DIFFERENCE between a wrapped N.L and the plain one; at weight 0 the wrapped
-    // form reduces to (ndl + 0) / 1 == ndl, the difference is exactly 0, and this is bit-identical
-    // to the code before it existed. That identity is why the term is written as a difference
-    // rather than as a replacement lobe.
-    //
-    // The (1+w)^2 denominator is the energy normalisation, not a fudge: widening the lobe without
-    // it hands the surface more light than fell on it, and skin authored at weight 1 would read as
-    // emissive.
-    //
-    // The second term is light that entered the far side and travelled toward the eye, so it is
-    // keyed on dot(V, -L) rather than on the normal -- that is what makes an ear or a leaf light up
-    // when the sun is BEHIND it, which is the whole visual point. Radius sharpens or widens it:
-    // a thin surface transmits a tight forward beam, a thick one a broad wash.
+    // TWO TERMS, ONLY THE EXTRA. The wrap term is the DIFFERENCE between a wrapped N.L and the plain
+    // one (the caller already pays kdAlbedo/PI * ndl); at weight 0 it is exactly 0, bit-identical to
+    // before this existed. (1+w)^2 is energy normalisation -- without it a widened lobe hands the
+    // surface more light than fell on it (skin at weight 1 would read emissive). The second term is
+    // light that entered the far side, keyed on dot(V, -L) rather than the normal -- what makes an
+    // ear or leaf light up with the sun BEHIND it; radius sharpens (thin) or widens (thick) it.
     float sssW = s.sssWeight;
     float ndlWrap = saturate((dot(s.N, l.direction) + sssW) / ((1.0 + sssW) * (1.0 + sssW)));
     float wrapExtra = max(ndlWrap - ndl, 0.0);
@@ -905,13 +734,11 @@ float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
     }
 }
 
-// The four terms averShadeIndirect sums, returned UNSUMMED rather than pre-combined into a
-// diffuse/specular pair: float addition is not associative, and averShadeIndirect's own bit-for-bit
-// output is the one thing this refactor is not allowed to move, so it has to add these four in
-// EXACTLY the sequence it always did rather than in two pre-grouped batches. averShadeSplit, which
-// has no prior output to match, sums the same four terms into its two buckets instead -- see its own
-// comment for why that makes it the one place in this pair that is a documented approximation rather
-// than a provable identity.
+// The four terms averShadeIndirect sums, returned UNSUMMED rather than pre-combined: float addition
+// is not associative and this refactor may not move averShadeIndirect's bit-for-bit output, so it
+// must add these four in EXACTLY the original sequence. averShadeSplit, with no prior output to
+// match, sums the same four terms into its two buckets instead -- see its own comment for why that
+// makes it a documented approximation rather than a provable identity.
 #ifdef AVER_LAYERED_BSDF
 // ================= THE COAT: a second specular layer over everything the base returns =================
 //
@@ -920,19 +747,16 @@ float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
 // through by its own Fresnel, which is the only thing that makes this energy-conserving rather than
 // energy-adding.
 //
-// COMPILED ONLY UNDER AVER_LAYERED_BSDF. A project whose Settings::layeredBsdf is Off gets a shader
-// with none of this in it -- not a branch that evaluates to zero, no register pressure, nothing. That
-// is what makes "costs nothing when off" a fact about the compiled code rather than a hope.
+// COMPILED ONLY UNDER AVER_LAYERED_BSDF: Settings::layeredBsdf Off gets a shader with none of this in
+// it (no branch, no register pressure), so "costs nothing when off" is a fact about the compiled code.
 //
 // ONE FACTOR OF (1 - Fc), NOT TWO, AND IT IS THE WHOLE CORRECTION. The obvious composition attenuates
-// by (1 - Fc(ndv)) twice, once for light entering the coat and once for it leaving. That is right for
-// a transmitted path through a slab and WRONG here: averEnvBRDF already integrates the full
-// hemisphere-to-eye response, so a second factor charges the base twice for the same interface. It was
-// written that way first and tests/render.pbr/src/CoatEnergyTest.cpp caught it -- a furnace plate
-// visibly darker than its background at every roughness -- before any of this reached a GPU.
-//
-// The arithmetic below is mirrored in that test, which also asserts this function exists. If you
-// change the composition here, change it there; the test reads this file and will say so if you do not.
+// by (1 - Fc(ndv)) twice -- once entering the coat, once leaving -- which is right for a transmitted
+// path through a slab and WRONG here: averEnvBRDF already integrates the full hemisphere-to-eye
+// response, so a second factor double-charges the base for the same interface. It was written that
+// way first and tests/render.pbr/src/CoatEnergyTest.cpp caught it (a furnace plate visibly darker
+// than its background at every roughness) before this reached a GPU, and that test mirrors the
+// arithmetic below and asserts this function exists -- change one, change both, or the test will say so.
 void averCoatTerms(AverSurface s, AverIndirect ind, float coatWeight, float coatRough, float coatF0,
                    out float3 coatEnv, out float baseAttenuation) {
     coatEnv = 0.0;
@@ -947,38 +771,30 @@ void averCoatTerms(AverSurface s, AverIndirect ind, float coatWeight, float coat
     // cone and must not be dimmed by a hemisphere-shaped answer.
     coatEnv = cEnv * coatWeight * ind.specular * averSpecularOcclusion(s.ndv, ind.occlusion, coatRough);
 
-    // What the base is allowed to return. fresnelSchlick at the VIEW angle, not the half vector: this
-    // describes how mirror-like the coat is to the CAMERA, which is a property of the surface and the
-    // eye and nothing else -- the same argument averBuildSurface's alpha branch makes for its own use
-    // of a view-angle Fresnel.
-    // .x EXPLICITLY. fresnelSchlick returns float3 for a float3 F0, and a scalar coatF0 promotes to
-    // three identical channels -- so this was assigning a float3 to a float and relying on the
-    // implicit truncation to pick a channel that happens to be right. DXC warns about it, correctly:
-    // the day someone gives the coat a coloured F0, the truncation silently keeps only red. Taking
-    // .x says the coat is a colourless dielectric film, which is what a clear coat is.
+    // What the base is allowed to return: fresnelSchlick at the VIEW angle, not the half vector -- a
+    // property of the surface and the eye alone, the same argument averBuildSurface's alpha branch
+    // makes for its own view-angle Fresnel.
+    // .x EXPLICITLY, not an implicit float3->float truncation: a scalar coatF0 promotes to three
+    // identical channels, so any channel happened to be right before, but DXC warns about it,
+    // correctly -- the day the coat gets a coloured F0 that silently keeps only red. Taking .x states
+    // that the coat is a colourless dielectric film, which is what a clear coat is.
     baseAttenuation = 1.0 - fresnelSchlick(s.ndv, coatF0, 1.0).x * coatWeight;
 }
 #endif   // AVER_LAYERED_BSDF
 
 void averIndirectTerms(AverSurface s, AverIndirect ind,
                        out float3 specEnv, out float3 diffAmbient, out float3 diffBounce) {
-    // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form was
-    // `ind.specular * (F0*dfg.x + dfg.y)` plus a full-strength diffuse term, which is wrong in
-    // two directions at once and this engine's white furnace measured both:
-    //
-    //   - a white METAL kept only 45% of its energy at roughness 1 (97% at 0.05), because the
-    //     light GGX loses to masking was never returned;
-    //   - a DIELECTRIC read 1.5-4.5% too BRIGHT, because the diffuse lobe was handed the whole
-    //     albedo while the specular lobe took its reflectance off the top of the same budget.
-    //
-    // Both are the same omission: the split sum accounts for one bounce off the microsurface and
-    // nothing else, so the energy balance never closes. Ess is what a single bounce returns, Ems
-    // is what it dropped, Favg is the Fresnel averaged over the hemisphere, and Fms*Ems sums every
-    // further bounce. kD is then what is genuinely left for diffuse -- which is what makes the
-    // dielectric stop over-reading, with no separate fudge for it.
-    //
-    // Worked through by hand before it was written and then confirmed in the furnace: every cell
-    // of the 6x3 roughness/metallic grid lands on 1.000 rather than 0.45-1.045.
+    // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form,
+    // `ind.specular * (F0*dfg.x + dfg.y)` plus a full-strength diffuse term, measured wrong in two
+    // directions in this engine's white furnace: a white METAL kept only 45% of its energy at
+    // roughness 1 (97% at 0.05, light GGX loses to masking never returned), and a DIELECTRIC read
+    // 1.5-4.5% too BRIGHT (diffuse handed the whole albedo while specular took its reflectance off
+    // the same budget). Both are the same omission: the split sum accounts for one microsurface
+    // bounce and nothing else. Ess is what a single bounce returns, Ems what it dropped, Favg the
+    // Fresnel averaged over the hemisphere, Fms*Ems every further bounce; kD is what is genuinely
+    // left for diffuse -- which is what stops the dielectric over-reading, with no separate fudge for
+    // it. Confirmed in the furnace: every cell of the 6x3 roughness/metallic grid lands on 1.000
+    // rather than 0.45-1.045.
     float2 dfg    = averEnvBRDF(s.ndv, s.rough);
     float3 FssEss = s.F0 * dfg.x + dfg.y;
     float  Ess    = dfg.x + dfg.y;
@@ -989,18 +805,17 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     // division by zero here would paint NaN across every rough pixel in the frame.
     float3 FmsEms = Ems * FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
 
-    // WHAT THE DIFFUSE LOBE LOSES IS THE DIELECTRIC RELECTANCE, NOT THE BLENDED ONE. The diffuse
-    // lobe belongs to the dielectric substrate -- a metal has none, which is what kdAlbedo's own
-    // (1 - metallic) factor already expresses. Subtracting the METAL-blended FssEss from it as
-    // well charges the substrate for reflectance it never had, and the furnace caught it: taking
-    // the blended term dropped metallic 0.5 from 1.005 to 0.757 while both pure ends stayed at
-    // 1.000. Recomputing the pair against the dielectric F0 restores it to 0.98.
+    // WHAT THE DIFFUSE LOBE LOSES IS THE DIELECTRIC REFLECTANCE, NOT THE BLENDED ONE: the diffuse
+    // lobe belongs to the dielectric substrate (a metal has none, per kdAlbedo's own (1-metallic)
+    // factor), and subtracting the METAL-blended FssEss too charges it for reflectance it never had
+    // -- the furnace caught metallic 0.5 dropping from 1.005 to 0.757 that way, while both pure ends
+    // stayed at 1.000. Recomputing against the dielectric F0 restores it to 0.98.
     //
-    // INTERMEDIATE METALLIC STILL DOES NOT CLOSE, and no arrangement of these terms makes it.
-    // "Half metal" is not a material; it is a blend of PARAMETERS, and the multiple-scatter series
-    // is strongly non-linear in F0 -- a surface at F0 = 0.52 returns much less than the mean of one
-    // at 0.04 and one at 1.0. The physical claim this code makes is at the two ENDS, which now
-    // measure 1.000 across every roughness. The middle is a documented approximation.
+    // INTERMEDIATE METALLIC STILL DOES NOT CLOSE, and no arrangement of these terms makes it: "half
+    // metal" is a blend of PARAMETERS, not a material, and the multiple-scatter series is strongly
+    // non-linear in F0 (F0 = 0.52 returns much less than the mean of 0.04 and 1.0). The physical claim
+    // here is at the two ENDS, which measure 1.000 across every roughness; the middle is a documented
+    // approximation.
     float3 F0d     = s.reflectance.xxx;
     float3 FssEssD = F0d * dfg.x + dfg.y;
     float3 FavgD   = F0d + (1.0 - F0d) / 21.0;
@@ -1020,17 +835,13 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     diffBounce  = kD * ind.diffuse;
 
 #ifdef AVER_LAYERED_BSDF
-    // THE COAT GOES ON LAST, over everything the base just computed, and takes its share out of all
-    // three terms rather than only the specular one. Light stopped at the coat's surface never reaches
-    // the base at all -- not its mirror, not its diffuse, not its bounce -- so attenuating only the
-    // specular would let a coated surface keep more diffuse than an uncoated one, which is energy from
-    // nowhere.
-    //
-    // The multi-scatter block above is untouched and still applies to the base exactly as before; the
-    // coat is layered on after it, not folded into it. A coat's own multi-scatter compensation is
-    // deliberately NOT added: the masking loss it corrects scales with roughness, and a coat's typical
-    // roughness (car paint, 0.05-0.3) makes it small. That is a stated approximation, in the same
-    // style as the intermediate-metallic case this file already documents -- not an oversight.
+    // THE COAT GOES ON LAST, taking its share out of all three terms, not only specular: light
+    // stopped at the coat's surface never reaches the base's mirror, diffuse or bounce, so
+    // attenuating only specular would let a coated surface keep more diffuse than an uncoated one --
+    // energy from nowhere. The multi-scatter block above still applies to the base exactly as before;
+    // the coat layers on after it. A coat's own multi-scatter compensation is deliberately NOT added:
+    // the masking loss it corrects scales with roughness, and a coat's typical roughness (car paint,
+    // 0.05-0.3) makes it small -- a stated approximation, not an oversight.
     if (s.coatWeight > 0.0) {
         float3 coatEnv; float baseAtten;
         averCoatTerms(s, ind, s.coatWeight, s.coatRough, s.coatF0, coatEnv, baseAtten);
@@ -1050,10 +861,9 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
     default: {
         float3 specEnv, diffAmbient, diffBounce;
         averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
-        // Four separate += in the SAME order averIndirectTerms' comment promises, not
-        // `radiance + (specEnv + diffAmbient + diffBounce + s.emissive)`: IEEE 754 addition is not
-        // associative, and re-grouping these four terms is exactly the kind of change that would make
-        // this function's own claim to being untouched false.
+        // Four separate += in the order averIndirectTerms promises, not one grouped sum: IEEE 754
+        // addition is not associative, and re-grouping would make this function's own claim to being
+        // untouched false.
         radiance += specEnv;
         radiance += diffAmbient;
         radiance += diffBounce;
@@ -1066,29 +876,24 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
 // Shades exactly as averShadeDirect + averShadeIndirect together do, but keeps the two lobes apart
 // instead of summing them -- see the shading contract at the top of this file for why a translucent
 // surface needs that: PREMULTIPLIED-ALPHA COMPOSITING WANTS SPECULAR AT FULL STRENGTH AND DIFFUSE
-// WEIGHTED BY COVERAGE, and a single accumulated radiance has already forgotten which photons left the
-// microsurface at the reflection angle and which were diffusely re-emitted by the time it is computed.
+// WEIGHTED BY COVERAGE, and a single accumulated radiance has already forgotten which photons left
+// the microsurface at the reflection angle vs. were diffusely re-emitted by the time it is computed.
 //
-// BOTH averDirectTerms AND averIndirectTerms ARE THE SAME CODE averShadeDirect/averShadeIndirect call
-// -- there is exactly one copy of this BRDF, and an opaque draw run through this function computes
-// the identical lobes from the identical expressions those two do. What is NOT identical, and cannot
-// be while keeping that one copy, is the ORDER the terms are finally added in: the direct lobe's
-// output is the exact original grouping (see averShadeDirect), but the indirect side sums its four
-// terms into two buckets here instead of averShadeIndirect's fixed four-term sequence, and IEEE 754
-// addition is not associative -- summing the same values in a different grouping can move the last
-// bit of the result. That is a genuine, understood approximation, stated here rather than left for
-// someone to find by diffing a furnace capture against this path. It is also why the INVARIANT this
-// file guarantees is stated about averShadeDirect/averShadeIndirect themselves (untouched, calling
-// these same helpers, same grouping, therefore bit-identical to before this change) and not about
-// this function matching them past the last ULP -- the two claims are different, and only the first
-// one is actually provable from the source.
+// Calls the same averDirectTerms/averIndirectTerms as averShadeDirect/averShadeIndirect -- one copy
+// of the BRDF, identical lobes from identical expressions. What is NOT identical is the ORDER terms
+// are finally added: the direct lobe keeps the exact original grouping, but the indirect side sums
+// its four terms into two buckets here instead of averShadeIndirect's fixed four-term sequence, and
+// IEEE 754 addition is not associative, so this can move the last bit of the result. That is a
+// genuine, understood approximation, stated here rather than found by diffing a furnace capture --
+// which is why the bit-identical INVARIANT this file guarantees is stated about
+// averShadeDirect/averShadeIndirect themselves, not about this function matching them past the last
+// ULP; only the first claim is actually provable from the source.
 void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 diffuse, out float3 specular) {
     switch (s.model) {
     case AVER_MODEL_UNLIT:
-        // averShadeDirect contributes nothing on the unlit path (its own switch returns `radiance`
-        // untouched) and averShadeIndirect adds only `s.emissive` -- so an unlit surface has no
-        // specular lobe at all, and its one "diffuse" contribution, in the coverage-weighted sense
-        // averBlendedOutput gives that word, is its authored emissive colour.
+        // averShadeDirect contributes nothing on the unlit path and averShadeIndirect adds only
+        // s.emissive, so an unlit surface has no specular lobe; its one "diffuse" contribution, in
+        // averBlendedOutput's coverage-weighted sense, is its authored emissive colour.
         diffuse  = s.emissive;
         specular = 0.0;
         return;
@@ -1099,9 +904,9 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
         float3 lightTerm = l.radiance * ndl * l.visibility;
         diffuse  = dDiffuse * lightTerm;
         specular = dSpecular * lightTerm;
-        // Subsurface is DIFFUSE for the purposes of this split, and carries no ndl -- see
-        // averDirectTerms. It joins the diffuse bucket so a blended surface composites it with the
-        // coverage the diffuse half gets rather than with the specular half's full strength.
+        // Subsurface is DIFFUSE for this split and carries no ndl (see averDirectTerms), so it joins
+        // the diffuse bucket and composites with the coverage that half gets, not specular's full
+        // strength.
         diffuse += dSubsurface * l.radiance * l.visibility;
 
         float3 specEnv, diffAmbient, diffBounce;
@@ -1115,64 +920,52 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
     }
 }
 
-// Packs a blended surface for a PREMULTIPLIED-ALPHA blend state (rhi::BlendMode::PremultipliedAlpha
-// -- SrcBlend=ONE, DestBlend=INV_SRC_ALPHA), which is the whole fix the shading contract exists for:
-// straight "over" blending would multiply `specular` by s.alpha along with everything else, so a pane
-// authored at a usefully transparent alpha of 0.2 would show its own reflection at 20% strength
-// instead of the full strength a real dielectric reflects at regardless of how much it transmits.
+// Packs a blended surface for a PREMULTIPLIED-ALPHA blend state (rhi::BlendMode::PremultipliedAlpha,
+// SrcBlend=ONE/DestBlend=INV_SRC_ALPHA) -- the whole fix the shading contract exists for: straight
+// "over" blending would multiply `specular` by s.alpha too, so a pane at a transparent alpha of 0.2
+// would show its own reflection at 20% strength instead of full strength regardless of transmission.
 //
 //     rgb = specular + diffuse * s.alpha ;  a = s.alpha
 //
 // diffuse already carries emissive and the ambient/bounce terms (see averShadeSplit), so folding it
-// through s.alpha here is what makes a thin, mostly-transmissive pane emit and diffusely tint
-// proportionally less while its reflection stays full strength -- exactly the asymmetry that made
-// straight-alpha glass read as tinted plastic instead of glass in the first place.
+// through s.alpha is what lets a thin, mostly-transmissive pane emit and tint proportionally less
+// while its reflection stays full strength -- the asymmetry straight-alpha glass was missing, which
+// made it read as tinted plastic instead of glass.
 float4 averBlendedOutput(AverSurface s, float3 diffuse, float3 specular) {
     return float4(specular + diffuse * s.alpha, s.alpha);
 }
 
-// The same composite, for a surface that also has a VOLUME behind it.
+// The same composite, for a surface that also has a VOLUME behind it. `T` is the per-channel
+// transmittance across the path the light actually travelled (averVolumeTransmittance of a measured
+// thickness, not an authored guess).
 //
-// `T` is the per-channel transmittance across the path the light actually travelled through the
-// medium -- averVolumeTransmittance of a measured thickness, not of an authored guess.
+// DERIVATION: blend state is PremultipliedAlpha (out = src + dst*(1-a)), and background light must
+// survive with weight (1-s.alpha)*T instead of (1-s.alpha), giving a = 1 - (1-s.alpha)*Tavg -- the
+// medium only removes light, never adds any. REDUCES EXACTLY to averBlendedOutput with no volume: at
+// T=1 the term is zero and a collapses to s.alpha (bit-identical, keeping every existing blended
+// draw off the gate baselines); at T=0 it goes fully opaque, a column deep enough to swallow
+// everything behind it.
 //
-// THE DERIVATION, since the alpha is not obvious. The blend state is PremultipliedAlpha, so the
-// framebuffer computes out = src + dst * (1 - a). Background light must survive with weight
-// (1 - s.alpha) * T instead of (1 - s.alpha), which fixes the coverage:
-//     a = 1 - (1 - s.alpha) * Tavg
-// and nothing else changes: the medium REMOVES light, it does not add any.
-//
-// IT REDUCES EXACTLY TO THE FUNCTION ABOVE WHEN THERE IS NO VOLUME. At T = 1 the added term is zero
-// and a collapses to s.alpha, so a material that authors no attenuationDistance composites
-// bit-identically to before this existed -- which is what keeps every existing blended draw, glass
-// included, off the gate baselines. At T = 0 it goes fully opaque with full diffuse, which is a
-// column deep enough to swallow everything behind it.
-//
-// ONE LIMITATION, STATED RATHER THAN HIDDEN, and it is the same one the fluid shader documented
-// before it: the hardware blend carries a single SCALAR alpha, so the background can only be
-// attenuated by the AVERAGE transmittance. attenuationColor therefore controls HOW FAST a volume
-// goes opaque with depth -- which is the dominant cue, and the one the old fluid shader could not
-// have at all -- but its HUE does not yet tint what is behind the surface. A volume's own colour
-// comes from its authored base colour meanwhile, exactly as the fluid shader's gFluidBody did.
-//
-// Per-channel removal genuinely needs the background, and there are two ways to get it: a
-// scene-colour SRV (IRenderContext::copyTexture exists and is proven, one caller today), or a
-// per-channel destination blend factor -- INV_SRC_COLOR multiplies dst by (1 - src.rgb) per channel.
-// The second is nearly free but changes the blend state for every blended draw, so neither is a
-// change to make in passing. Both are real follow-ups; neither is a dead end.
+// ONE LIMITATION, same as the old fluid shader's: a single SCALAR hardware alpha can only attenuate
+// the background by the AVERAGE transmittance, so attenuationColor controls HOW FAST a volume goes
+// opaque with depth -- the dominant cue, and one the old fluid shader could not have at all -- but
+// its HUE does not yet tint what is behind it. A volume's own colour still comes from its authored
+// base colour (as gFluidBody did). Per-channel removal needs the background: either a scene-colour
+// SRV (IRenderContext::copyTexture, proven, one caller today), or a per-channel destination blend
+// factor -- INV_SRC_COLOR multiplies dst by (1 - src.rgb) per channel, nearly free but changes the
+// blend state for every blended draw. Both are real follow-ups, neither a change to make in passing.
 float4 averBlendedOutputVolume(AverSurface s, float3 diffuse, float3 specular, float3 T) {
     const float Tavg  = dot(T, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
     const float alpha = saturate(1.0 - (1.0 - s.alpha) * Tavg);
-    // The SAME composite as averBlendedOutput, with the volume-corrected coverage in place of the
-    // surface's own. That is the whole change, and it is deliberately not more than that.
+    // Same composite as averBlendedOutput, with the volume-corrected coverage in place of the
+    // surface's own -- deliberately the whole change, nothing more.
     //
-    // WHAT WAS TRIED AND IS WRONG, recorded so it is not re-attempted: adding an in-scattering term
-    // `diffuse * (1 - s.alpha) * (1 - T)`. It reads plausibly -- the medium fills in as the
-    // background is absorbed -- but (1 - T) is LARGEST in the channel the medium absorbs MOST, so a
-    // green-transmitting glass gains red and blue. It is the complement of the right colour. Measured
-    // on an 8 cm M_Glass pane authored (0.15, 0.85, 0.35) at 4 cm: the pane darkened by (29, 28, 27),
-    // i.e. uniformly, with no green anywhere -- the tint cancelling itself against the term meant to
-    // produce it. glTF's volume is pure ABSORPTION: it has no scattering albedo, so there is nothing
-    // for a correct in-scattering term to be made of.
+    // TRIED AND WRONG, recorded so it is not re-attempted: an in-scattering term
+    // `diffuse * (1 - s.alpha) * (1 - T)`. Plausible (the medium fills in as background is absorbed)
+    // but (1-T) is LARGEST in the channel the medium absorbs MOST, so a green-transmitting glass
+    // gains red and blue -- the complement of the right colour. Measured on an 8 cm M_Glass pane
+    // authored (0.15, 0.85, 0.35) at 4 cm: darkened uniformly by (29, 28, 27), no green anywhere, the
+    // tint cancelling itself against the term meant to produce it. glTF's volume is pure ABSORPTION
+    // (no scattering albedo), so there is nothing for a correct in-scattering term to be made of.
     return float4(specular + diffuse * alpha, alpha);
 }

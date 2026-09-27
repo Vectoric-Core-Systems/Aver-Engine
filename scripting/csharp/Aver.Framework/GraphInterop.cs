@@ -5,47 +5,37 @@
 
 using Aver.Scene;
 using Aver.Scripting;
-// AP: the raw Aver.Physics surface, aliased rather than `using`d unqualified because this file
-// ALREADY has a Body/Physics/Entity in scope -- Aver.Framework's own Vec3-flavoured shims (see
-// Aver.Framework/Physics.cs's file comment). Forces, joints, material, motion type and layers have
-// no shim here at all: Aver.Framework.Body never grew AddForce/SetFriction/SetMotionType/SetLayer
-// (Physics.cs's own comment says why -- that file predates them and is not being widened), so those
-// wrappers below construct an AP.Body/AP.Joint directly over the same int handle instead.
+// AP: raw Aver.Physics, aliased because this file already has its own Body/Physics/Entity shims
+// (Aver.Framework/Physics.cs). Forces, joints, material, motion type and layers have no shim here
+// (Physics.cs never grew AddForce/SetFriction/SetMotionType/SetLayer -- predates them, not being
+// widened), so wrappers below build an AP.Body/AP.Joint over the same int handle.
 using AP = Aver.Physics;
 
 namespace Aver.Framework;
 
-/// <summary>Small wrappers over this assembly's own public gameplay API, reshaped for
-/// System.Reflection.Emit rather than for a C# caller. GraphCompiler (Aver.Graph) emits IL that
-/// calls these methods directly by reflection -- mirroring exactly how it already calls
-/// Aver.Scene.Native's P/Invoke externs for getfield/setfield -- rather than duplicating a second
-/// physics/input P/Invoke surface of its own. restrictedSkipVisibility:true on GraphCompiler's own
-/// DynamicMethod is what lets emitted IL reach an internal method here, the same mechanism that
-/// already lets it call Native's own P/Invoke externs.
+/// <summary>Scalar-signature wrappers over this assembly's public gameplay API, built for
+/// System.Reflection.Emit rather than a C# caller: GraphCompiler (Aver.Graph) emits IL that calls
+/// these directly by reflection, the same way it already calls Aver.Scene.Native's P/Invoke externs
+/// for getfield/setfield, rather than duplicating a second physics/input P/Invoke surface
+/// (restrictedSkipVisibility:true on its DynamicMethod is what lets emitted IL reach an internal
+/// method here).
 ///
-/// WHY A SEPARATE SCALAR-SIGNATURE WRAPPER RATHER THAN CALLING Physics.Raycast DIRECTLY. Hand-emitted
-/// IL cannot cheaply construct a Vec3 (a value type with a non-default constructor call) or unpack a
-/// RaycastHit result (a struct with Body/Point/Normal fields, one of which -- Body -- is itself a
-/// wrapping struct around an int handle) without hand-rolling several more Newobj/Ldfld sequences than
-/// a plain scalar call needs. A method whose entire signature is float-in / bool,int,float-out is
-/// exactly what GraphCompiler's existing "call, then read back" shape (see
-/// EmitSetField/EmitExecSideEffect) already knows how to emit: push the inputs, push the ADDRESS of
-/// each destination local (Ldloca), Call. No new IL pattern is needed for Raycast at all -- it is the
-/// same one-native-call-many-scalars pattern GetField/SetField established, just wider.</summary>
+/// Separate from calling e.g. Physics.Raycast directly because hand-emitted IL cannot cheaply
+/// construct a Vec3 or unpack a struct result (RaycastHit's Body/Point/Normal). A float-in /
+/// bool,int,float-out signature fits GraphCompiler's existing "call, then read back" emit shape
+/// (EmitSetField/EmitExecSideEffect: push inputs, push Ldloca of each output local, Call) -- just
+/// wider than GetField/SetField, no new IL pattern needed.</summary>
 internal static class GraphInterop
 {
-    /// <summary>Casts a ray and reports the first hit as five scalars instead of a RaycastHit struct.
-    /// <paramref name="hit"/> is false (and the rest are 0) when nothing is hit within
-    /// <paramref name="maxDistCm"/> -- mirrors RaycastHit.Hit's own "check this before reading the
-    /// rest" contract, just flattened to the bool/int/float trio GraphCompiler's pin types are built
-    /// from. <paramref name="entity"/> is <see cref="RaycastHit.Entity"/> -- the SCENE entity stamped
-    /// on the hit body or character (see Physics.cs's <c>aver_phys_set_entity</c>), NOT the physics
-    /// Body's raw handle. A hit against something no entity owns (the landscape heightfield, today)
-    /// reports <paramref name="hit"/> true and <paramref name="entity"/> 0 -- check
-    /// <paramref name="hit"/> first, since 0 is a real, distinguishable outcome from a miss, not an
-    /// error. This used to hand back Body.Handle, which meant a graph could learn THAT it hit
-    /// something but never WHAT -- see aver/physics/physics_abi.h's "Entity association" section for
-    /// the native side of this fix.</summary>
+    /// <summary>Casts a ray, reporting the first hit as five scalars instead of a RaycastHit struct.
+    /// <paramref name="hit"/> is false (rest 0) when nothing is hit within <paramref name="maxDistCm"/>,
+    /// mirroring RaycastHit.Hit's own "check this before reading the rest" contract, flattened to scalars.
+    /// <paramref name="entity"/> is <see cref="RaycastHit.Entity"/> -- the scene entity stamped on the
+    /// hit body/character (Physics.cs's <c>aver_phys_set_entity</c>), NOT the physics Body handle. A
+    /// hit against something no entity owns (the landscape heightfield) reports hit=true, entity=0 --
+    /// check <paramref name="hit"/> first, since 0 is a real outcome, not an error. Used to return
+    /// Body.Handle, which told a graph THAT it hit something but never WHAT (see physics_abi.h's
+    /// "Entity association").</summary>
     internal static void RaycastForGraph(
         float originX, float originY, float originZ,
         float dirX, float dirY, float dirZ,
@@ -60,31 +50,21 @@ internal static class GraphInterop
         pointZ = result.Point.Z;
     }
 
-    /// <summary>Reads a Vec3-KIND scene field as three scalars -- the same scalar-in/scalar-out
-    /// reshaping RaycastForGraph applies to Physics.Raycast, applied here to
-    /// EntityScene.GetVec3/SetVec3's underlying P/Invoke pair (Native.cs's aver_scene_get_vec/
-    /// set_vec) so GraphCompiler's hand-emitted IL never has to construct or index a float[] on the
-    /// stack. <paramref name="fieldId"/> is the dense field id GraphCompiler already resolved (and
-    /// kind-checked against FieldKind.Vec3) at COMPILE time via field=/_fieldResolver -- the same
-    /// baked-constant convention GetField/SetField's own fieldId already uses -- NOT a qualified name
-    /// string, so this needs no SceneIds lookup of its own.
+    /// <summary>Reads a Vec3-kind scene field as three scalars, the reshaping RaycastForGraph applies
+    /// to Physics.Raycast applied to EntityScene.GetVec3/SetVec3's P/Invoke pair (Native.cs's
+    /// aver_scene_get_vec/set_vec). <paramref name="fieldId"/> is resolved and kind-checked at COMPILE
+    /// time via field=/_fieldResolver (same baked-constant convention as GetField/SetField) -- NOT a
+    /// qualified name string, so this needs no SceneIds lookup of its own; x/y/z are
+    /// 0 on any rejection (unknown entity, absent component, failed arity check below), mirroring
+    /// aver_scene_get_f32's "0f on rejection" contract.
     ///
-    /// <paramref name="x"/>/<paramref name="y"/>/<paramref name="z"/> are 0,0,0 on any rejection
-    /// (unknown entity, absent component, or -- see the arity guard below -- a field id that is not
-    /// actually arity-3). Mirrors aver_scene_get_f32's own "0f on any rejection" contract rather than
-    /// inventing a "found" pin GetField itself does not have.
-    ///
-    /// THE ARITY GUARD IS NOT REDUNDANT WITH GraphCompiler's COMPILE-TIME KIND CHECK, even though the
-    /// DEFAULT field resolver and this method ultimately query the same live field table and can never
-    /// actually disagree with each other. GraphCompiler accepts an INJECTABLE FieldResolver precisely
-    /// so it can be unit-tested without a live native scene (every kind-check test in this codebase's
-    /// own test suite passes a fake one) -- a fake resolver that claims kind=Vec3 for a fieldId this
-    /// method's REAL native scene disagrees about is exactly the kind of divergence a compile-time-only
-    /// check cannot catch. aver_scene_get_vec copies `arity` floats into whatever buffer it is given
-    /// (SceneAbi.cpp) -- called against a Quat (arity 4) field with this method's fixed 3-float
-    /// scratch, that is a buffer overrun, not a wrong number silently returned. Checking arity==3 here
-    /// too is the same belt-and-suspenders EntityScene.GetVec3/SetVec3 already apply, for the identical
-    /// reason (see that method's own comment).</summary>
+    /// THE ARITY GUARD IS NOT REDUNDANT WITH THE COMPILE-TIME CHECK: GraphCompiler's FieldResolver is
+    /// injectable for unit-testing without a live scene, and a fake resolver claiming kind=Vec3 for a
+    /// fieldId the REAL scene disagrees about is what a compile-time-only check can't catch.
+    /// aver_scene_get_vec copies `arity` floats into whatever buffer it's given (SceneAbi.cpp) --
+    /// against a Quat (arity 4) field with this method's fixed 3-float scratch, that's a buffer
+    /// overrun, not a wrong value. EntityScene.GetVec3/SetVec3 check arity==3 for the same
+    /// reason.</summary>
     internal static void GetFieldVecForGraph(int entity, int fieldId, out float x, out float y, out float z)
     {
         x = y = z = 0f;
@@ -94,12 +74,10 @@ internal static class GraphInterop
         x = o[0]; y = o[1]; z = o[2];
     }
 
-    /// <summary>Writes a Vec3-KIND scene field from three scalars -- the write half of
-    /// GetFieldVecForGraph, see that method's comment for the fieldId/arity-guard reasoning shared by
-    /// both. Returns aver_scene_set_vec's own real return code (true on success, false on ANY
-    /// rejection -- unknown entity, wrong arity, read-only field, or missing component) so it can reach
-    /// a "success" pin exactly the way EmitExecSideEffect already surfaces SetField's own return
-    /// code.</summary>
+    /// <summary>Writes a Vec3-kind scene field from three scalars -- the write half of
+    /// GetFieldVecForGraph (see its comment for the shared fieldId/arity reasoning). Returns
+    /// aver_scene_set_vec's real return code (false on unknown entity, wrong arity, read-only field,
+    /// or missing component), mirroring EmitExecSideEffect's own SetField-return-code convention.</summary>
     internal static bool SetFieldVecForGraph(int entity, int fieldId, float x, float y, float z)
     {
         if (SceneNative.aver_scene_field_arity(fieldId) != 3) return false;
@@ -108,35 +86,25 @@ internal static class GraphInterop
         return SceneNative.aver_scene_set_vec(entity, fieldId, s) != 0;
     }
 
-    /// <summary>Spawns a registered class by NAME at a position, unrotated and unscaled -- the
-    /// scalar-in/scalar-out reshaping RaycastForGraph/GetFieldVecForGraph apply to their own native
-    /// surfaces, applied here to <see cref="Actors"/>.Spawn(ActorClass, Vec3), which already has exactly
-    /// this shape and needs no new native ABI (see FrameworkAbi.cpp's aver_fw_spawn, which Actors.Spawn
-    /// already calls). Hand-emitted IL cannot cheaply construct the ActorClass/Vec3 value types that
-    /// overload wants on the stack, so this takes a class NAME and three floats instead and does the
-    /// construction here, in ordinary C#.
+    /// <summary>Spawns a registered class by NAME at a position, unrotated/unscaled -- the scalar
+    /// reshaping applied to <see cref="Actors"/>.Spawn(ActorClass, Vec3) (no new native ABI; see
+    /// FrameworkAbi.cpp's aver_fw_spawn). Hand-emitted IL can't cheaply construct that overload's
+    /// ActorClass/Vec3, so this takes a name and three floats and builds them here.
     ///
-    /// RESOLVED AT RUNTIME, DELIBERATELY NOT BAKED TO A CLASS HANDLE AT COMPILE TIME THE WAY field=
-    /// bakes a field id (RequireVec3Field / GetField's own fieldId lookup). GetField/SetField can bake
-    /// fieldId at compile time because the scene's field table is a fixed, engine-global set that exists
-    /// before any project loads -- FieldResolver's own doc comment says so explicitly. A project's actor
-    /// classes are NOT: they are declared by that project's own Scripts.dll, at a point in each host's
-    /// boot order (LoadScripts, then graph compilation -- confirmed by reading GameApp.cpp's onInit and
-    /// SandboxApp.cpp's scripts_.init, both of which run LoadScripts before any graph is ever compiled)
-    /// that happens to hold today, but is not something this method or GraphCompiler asserts or depends
-    /// on. Baking the resolved handle into IL at compile time would tie GraphCompiler to that ordering
-    /// holding FOREVER across every current and future host, and would need a second injectable
-    /// resolver abstraction (mirroring FieldResolver) purely to keep this unit-testable without a live
-    /// scripting host -- exactly the complication the README's own "only a compiler case, no new native
-    /// ABI" framing argues against. Resolving here, at INVOCATION time, needs neither: by the time a
-    /// compiled graph's delegate actually runs (a tick, an event), every class the project declares has
-    /// always already been declared, with no host-ordering assumption baked into the compiler at all.
+    /// RESOLVED AT RUNTIME, NOT BAKED AT COMPILE TIME like field= bakes a fieldId: the scene's field
+    /// table is fixed and engine-global before any project loads (FieldResolver's doc comment), but a
+    /// project's actor classes are declared by its own Scripts.dll at a boot-order point (LoadScripts
+    /// before graph compilation -- confirmed via GameApp.cpp's onInit / SandboxApp.cpp's scripts_.init)
+    /// that holds today but isn't asserted anywhere. Baking the handle at compile time would tie the
+    /// compiler to that ordering forever and need a second injectable resolver purely for testability --
+    /// exactly what the README's "only a compiler case, no new native ABI" framing argues against.
+    /// Resolving at invocation time needs neither, since every declared class already exists by the
+    /// time a compiled graph's delegate runs.
     ///
-    /// Returns entity 0 -- the same "silently did nothing" convention aver_fw_spawn's own spawnActor
-    /// already uses for an invalid class handle (FrameworkAbi.cpp: `ClassRecord* r = rec(c); if (!r)
-    /// return 0;`) -- when className names no registered class, rather than throwing: a graph author's
-    /// typo in a class= attribute should read as "nothing spawned" on the entity output pin, the same
-    /// way GetField reads as 0f against an unknown entity rather than throwing mid-tick.</summary>
+    /// Returns entity 0 for an unregistered className (aver_fw_spawn's spawnActor's own "silently did
+    /// nothing" convention, FrameworkAbi.cpp: `if (!r) return 0;`), rather than throwing -- a typo in
+    /// class= should read as "nothing spawned", the way GetField reads 0f against an unknown
+    /// entity.</summary>
     internal static int SpawnForGraph(string className, float x, float y, float z)
     {
         ActorClass c = ActorClass.Find(className);
@@ -145,31 +113,21 @@ internal static class GraphInterop
     }
 
     /// <summary>Reads this frame's mouse delta and wheel as three scalars from ONE call to
-    /// aver_fw_input_mouse -- the LOOK half of continuous input (the other half is
-    /// MoveAxisForGraph, below). Deliberately does NOT go through Input.MouseDeltaX/MouseDeltaY/
-    /// MouseWheel: each of those three PROPERTIES independently calls aver_fw_input_mouse in its own
-    /// getter (Input.cs), so wiring GraphCompiler's emitted IL straight at them -- one call per pin,
-    /// as InputKey's own single-scalar shape would naturally suggest -- would cost three native calls
-    /// for one frame's worth of state instead of one. This wrapper reads the packed {dx,dy,wheel}
-    /// buffer once (reusing Entity.Scratch3, exactly like GetFieldVecForGraph does for
-    /// aver_scene_get_vec) and unpacks all three, mirroring GetFieldVecForGraph's own shape one level
-    /// up: a float[]-taking P/Invoke reshaped into scalar out-params so hand-emitted IL never has to
-    /// allocate or index an array on the stack -- the same "cannot cheaply construct/unpack" problem
-    /// this file's own header comment names for Raycast/Vec3.
+    /// aver_fw_input_mouse -- the LOOK half of continuous input (MoveAxisForGraph below is MOVE).
+    /// Bypasses Input.MouseDeltaX/MouseDeltaY/MouseWheel: each property calls aver_fw_input_mouse
+    /// independently (Input.cs), so wiring IL straight at them would cost three native calls per frame
+    /// instead of one. Reuses Entity.Scratch3 to unpack the packed {dx,dy,wheel} buffer, the same
+    /// float[]-to-scalars reshape GetFieldVecForGraph applies to aver_scene_get_vec.
     ///
-    /// CALLED AT MOST ONCE PER EXEC VISIT ON THE PUSH COMPILER, NOT PER PIN -- and this is a
-    /// DELIBERATE DEPARTURE from GetFieldVec3's own "no _execLocals caching, a Vec3 read is a
-    /// same-cost sibling of GetField's single-float memcpy" precedent (see
-    /// GraphCompiler.EmitPullGetFieldVec3's comment). aver_fw_input_mouse IS exactly that same cost
-    /// class -- FrameworkAbi.cpp's implementation is a three-float struct-field copy, nothing more --
-    /// so cost alone would argue for GetFieldVec3's uncached shape here too. The reason this method is
-    /// instead wired through Raycast's exec-cached shape (see GraphCompiler.EmitExecMouseDelta /
-    /// IsExecCapableMouseDeltaType) is a DIFFERENT, EXPLICIT requirement this slice was built against:
-    /// one frame's mouse state must cost exactly one native call regardless of how many of
-    /// deltaX/deltaY/wheel a graph reads back, not "cheap enough that repeating it doesn't matter."
-    /// Idempotent within a frame either way (aver_fw_input_new_frame() only mutates the underlying
-    /// state once per real engine frame, before any graph runs), so nothing here is UNSAFE to call
-    /// more than once -- only wasteful, which is exactly what the exec-cached shape avoids.</summary>
+    /// CALLED AT MOST ONCE PER EXEC VISIT ON THE PUSH COMPILER, NOT PER PIN -- a deliberate departure
+    /// from GetFieldVec3's uncached "same cost as a memcpy" shape (EmitPullGetFieldVec3). aver_fw_input_mouse
+    /// is that same cost class (a three-float struct copy, FrameworkAbi.cpp), so cost alone wouldn't
+    /// demand caching -- this was built to an explicit requirement instead: one frame's mouse state must
+    /// cost exactly one native call regardless of how many of deltaX/deltaY/wheel a graph reads, not
+    /// "cheap enough that repeating it doesn't matter" (see EmitExecMouseDelta / IsExecCapableMouseDeltaType).
+    /// Idempotent either way
+    /// (aver_fw_input_new_frame mutates state once per engine frame), so calling twice is wasteful,
+    /// never unsafe.</summary>
     internal static void MouseDeltaForGraph(out float deltaX, out float deltaY, out float wheel)
     {
         float[] o = Entity.Scratch3;
@@ -177,139 +135,99 @@ internal static class GraphInterop
         deltaX = o[0]; deltaY = o[1]; wheel = o[2];
     }
 
-    /// <summary>Reads this frame's WASD/arrow movement axis as two scalars -- the MOVE half of
-    /// continuous input, see MouseDeltaForGraph's own comment for the LOOK half and for why both are
-    /// wired through the exec-cached (Raycast-shaped) PUSH-compiler path rather than GetFieldVec3's
-    /// uncached one. Unpacks Input.MoveAxis's X (forward) and Y (right) components; Z is NOT a
-    /// parameter here -- Input.MoveAxis's own doc says Z is hardcoded 0 always (Input.cs), so a third
-    /// out-param that could only ever read a compile-time-known constant would add noise, not
-    /// information, to every graph that uses this node.
+    /// <summary>Reads this frame's WASD/arrow move axis as two scalars -- the MOVE half of continuous
+    /// input (see MouseDeltaForGraph for the LOOK half and why both use the exec-cached, push-compiler path).
+    /// Unpacks Input.MoveAxis's X (forward)/Y (right); Z isn't exposed since MoveAxis's Z is hardcoded
+    /// 0 (Input.cs).
     ///
-    /// Unlike MouseDeltaForGraph's single P/Invoke, Input.MoveAxis itself makes roughly eight separate
-    /// aver_fw_input_key calls (one GetKey per WASD/arrow key) to assemble its Vec3 -- an existing cost
-    /// inherent to MoveAxis's own definition, unchanged by wrapping it for a graph. What THIS wrapper
-    /// guarantees is that those eight calls happen at most ONCE per exec visit (one call to THIS
-    /// method, not one per output pin) rather than doubling to ~16 if a graph reads forward AND right
-    /// independently -- the same "one wrapper call, however many pins" property MouseDeltaForGraph
-    /// gives its own single native call.</summary>
+    /// Input.MoveAxis itself makes ~8 aver_fw_input_key calls (one GetKey per WASD/arrow), unchanged
+    /// by wrapping it. This wrapper guarantees those 8 calls happen at most ONCE per exec visit rather
+    /// than doubling to ~16 if a graph reads forward AND right independently.</summary>
     internal static void MoveAxisForGraph(out float forward, out float right)
     {
         Vec3 v = Input.MoveAxis;
         forward = v.X; right = v.Y;
     }
 
-    /// <summary>SetMesh's own surface: sets the drawn mesh by asset path, adding a mesh renderer if the
-    /// entity has none. NOT a new native ABI and NOT a generalised I64-capable SetField -- this is a
-    /// one-line forward to <see cref="Entity"/>.SetMesh (EntityScene.cs), which already composes
-    /// EnsureMeshRenderer() + Assets.ObjectIdOf(path) + SetInt64 the exact way the C# side of a
-    /// first-person controller would. Constructing an <see cref="Entity"/> from a raw handle needs its
-    /// `internal` constructor (Entity.cs), which this method can call freely -- it lives in the SAME
-    /// assembly, unlike RaycastForGraph/SpawnForGraph's own reshaping of a DIFFERENT surface
-    /// (Aver.Scene.Native / Physics) into scalars. Assets.ObjectIdOf is a PURE LOCAL HASH (FNV1a64 over
-    /// the path's UTF-8 bytes, Aver.Scene/Native.cs) -- no native call, no I/O, no lookup table -- so the
-    /// only native call this method's IL reaches at all is SetInt64's own aver_scene_set_i64. Returns
-    /// SetInt64's real return code (false on an unknown entity or a missing component EnsureMeshRenderer
-    /// somehow failed to add), mirroring GetFieldVecForGraph/SetFieldVecForGraph's own "surface the real
-    /// return code" convention rather than SpawnForGraph's "0 means nothing happened" one -- this method
-    /// already returns a bool, so there is no analogous "invalid sentinel" to invent.</summary>
+    /// <summary>SetMesh's own surface: sets the drawn mesh by asset path, adding a mesh renderer if
+    /// the entity has none. NOT a new native ABI, NOT a generalised I64 SetField -- a one-line forward
+    /// to <see cref="Entity"/>.SetMesh (EntityScene.cs), which composes EnsureMeshRenderer() +
+    /// Assets.ObjectIdOf(path) + SetInt64 -- ObjectIdOf is a pure local FNV1a64 hash (Aver.Scene/Native.cs),
+    /// no native call, no I/O, no lookup table, so the only native call this IL reaches is
+    /// SetInt64's aver_scene_set_i64. Constructing an <see cref="Entity"/> from a raw handle needs its
+    /// `internal` ctor, which this method can call since it lives in the same assembly (unlike
+    /// RaycastForGraph/SpawnForGraph, which reshape a different assembly's surface). Returns SetInt64's
+    /// real return code (false on unknown entity or a component EnsureMeshRenderer failed to add).</summary>
     internal static bool SetMeshForGraph(int entity, string meshPath) => new Entity(entity).SetMesh(meshPath);
 
     /// <summary>SetMaterial's own surface: sets the material by name, adding a mesh renderer if the
-    /// entity has none. Mirrors SetMeshForGraph immediately above exactly -- see that method's comment,
-    /// which applies unchanged here (Entity.SetMaterial composes EnsureMeshRenderer() +
-    /// aver_scene_material(0, name) + SetInt, EntityScene.cs).</summary>
+    /// entity has none. Mirrors SetMeshForGraph above exactly (Entity.SetMaterial composes
+    /// EnsureMeshRenderer() + aver_scene_material(0, name) + SetInt, EntityScene.cs).</summary>
     internal static bool SetMaterialForGraph(int entity, string materialName) => new Entity(entity).SetMaterial(materialName);
 
     /// <summary>AttachToSocket's own surface: hangs <paramref name="entity"/> on a named socket of
-    /// <paramref name="parent"/>'s rig. Wraps <see cref="Entity.AttachToSocket"/>, which is SetParent
-    /// plus a component field -- the same "needs Entity's internal constructor, which only
-    /// Aver.Framework code can call" reason SetMeshForGraph above has for existing at all.
+    /// <paramref name="parent"/>'s rig. Wraps <see cref="Entity.AttachToSocket"/> (SetParent plus a
+    /// component field). IDEMPOTENT, so allowed in the PULL compiler unlike push-only Spawn: attaching
+    /// to the same parent/socket twice is the same state, not two attachments.
     ///
-    /// IDEMPOTENT, so this node is allowed in the PULL compiler alongside SetMesh/SetParent rather
-    /// than being push-only like Spawn: attaching to the same parent and socket twice is the same
-    /// state, not two attachments.
-    ///
-    /// TRUE MEANS THE FIELDS WERE WRITTEN, not that the socket resolved -- the parent's rig may not
-    /// even be loaded yet, and a name that matches nothing leaves the entity where it is. See
-    /// Entity.AttachToSocket's own comment for why that is the chosen failure.</summary>
+    /// TRUE MEANS THE FIELDS WERE WRITTEN, not that the socket resolved -- the parent's rig may not be
+    /// loaded yet, and an unmatched name leaves the entity where it is (Entity.AttachToSocket's own
+    /// comment).</summary>
     internal static bool AttachToSocketForGraph(int entity, int parent, string socket) =>
         new Entity(entity).AttachToSocket(new Entity(parent), socket);
 
     /// <summary>GetAnimCurve's own surface: the value of a named curve on the clip
     /// <paramref name="entity"/> is playing, or 0 when there is no such curve.
     ///
-    /// A SINGLE FLOAT, NOT A (value, found) PAIR, and that is a genuine loss stated rather than
-    /// hidden: a graph node returns through pins, PinType has Float and Bool, and a node CAN carry
-    /// both -- but the emitter would then need two locals and a second output for a distinction a
-    /// graph author almost never branches on. The C# surface keeps TryGetAnimationCurve for the
-    /// callers that do care.</summary>
+    /// A SINGLE FLOAT, NOT A (value, found) PAIR -- a genuine, stated loss: PinType has Float and Bool
+    /// and a node could carry both, but the emitter would need two locals/outputs for a distinction a
+    /// graph author almost never branches on. TryGetAnimationCurve remains for callers that do
+    /// care.</summary>
     internal static float GetAnimCurveForGraph(int entity, string curve) =>
         new Entity(entity).GetAnimationCurve(curve, 0.0f);
 
     /// <summary>SetSkeleton's own surface: binds a skeleton asset by path, adding a CSkeletalMesh
-    /// component if the entity has none. Mirrors SetMeshForGraph's own reasoning exactly -- see that
-    /// method's comment -- wrapping <see cref="Entity.SetSkeleton"/> (Animation.cs) instead, which
-    /// composes AddComponent(Component.SkeletalMesh) + Assets.ObjectIdOf(path) + SetInt64 the same
-    /// three-step shape Entity.SetMesh does.</summary>
+    /// component if the entity has none. Mirrors SetMeshForGraph (wraps
+    /// <see cref="Entity.SetSkeleton"/>, Animation.cs, same AddComponent + ObjectIdOf + SetInt64
+    /// shape).</summary>
     internal static bool SetSkeletonForGraph(int entity, string skeletonAsset) =>
         new Entity(entity).SetSkeleton(skeletonAsset);
 
     /// <summary>PlayAnimation's own surface: plays a clip from the start, adding a CAnimator component
     /// if the entity has none. Wraps <see cref="Entity.PlayAnimation"/> (Animation.cs), which -- unlike
-    /// every other GraphInterop wrapper in this animation group -- writes THREE fields (flags, time,
-    /// clip), not one: loop folds into CAnimator.flags's AnimatorOnce bit, and the playhead is reset to
-    /// 0 so a re-trigger genuinely restarts the clip rather than continuing wherever the last one left
-    /// off. Still idempotent in the sense this node family requires -- calling it twice with the same
-    /// arguments leaves the entity in the same state, not two overlapping plays -- because there is
-    /// only one CAnimator per entity for it to write into.</summary>
+    /// its animation-group siblings -- writes THREE fields (flags, time, clip): loop folds into
+    /// CAnimator.flags's AnimatorOnce bit, and the playhead resets to 0 so a re-trigger restarts the
+    /// clip. Still idempotent: only one CAnimator per entity, so calling twice with the same args
+    /// leaves the same state, not overlapping plays.</summary>
     internal static bool PlayAnimationForGraph(int entity, string clipAsset, bool loop) =>
         new Entity(entity).PlayAnimation(clipAsset, loop);
 
     /// <summary>SetControlRig's own surface: binds an .ocrig by path so the entity's sampled pose is
     /// modified before skinning, adding a CControlRig component if it has none. Wraps
-    /// <see cref="Entity.SetControlRig"/> (Animation.cs).
+    /// <see cref="Entity.SetControlRig"/> (Animation.cs). Unlike its two siblings, this component is
+    /// registered at RUNTIME: returns false, not a throw, in a host that never registered it -- a graph
+    /// authored against a rig is not broken content there, it simply gets no rig.
     ///
-    /// <para>Unlike its two siblings above, the component this attaches is registered at RUNTIME, so
-    /// this returns false in a host that never registered CControlRig -- and false, not a throw, is
-    /// the right answer: a graph authored against a rig is not broken content when it runs somewhere
-    /// the rig system is absent, it simply does not get its rig.</para>
-    ///
-    /// <para>Ordering with SetSkeleton is a real constraint and it is the graph author's to satisfy:
-    /// a rig has nothing to modify until the entity has a skeleton, because the pose it edits is the
-    /// one AnimSystem samples for a skeleton. This node does not enforce that -- attaching in the
-    /// other order is harmless and self-corrects the moment a skeleton arrives, since the rig is
-    /// applied per tick from the component, not once at attach time.</para></summary>
+    /// Ordering with SetSkeleton is a real constraint the graph author must satisfy (a rig has nothing
+    /// to modify until the entity has a skeleton, since that's the pose AnimSystem samples) but this
+    /// method does not enforce it: attaching in the other order self-corrects once a skeleton arrives,
+    /// since the rig applies per tick from the component, not once at attach.</summary>
     internal static bool SetControlRigForGraph(int entity, string rigAsset, float weight) =>
         new Entity(entity).SetControlRig(rigAsset, weight);
 
-    /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
-    /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
-    /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the
-    /// pitch clamp, the view mode and the capsule. NOT a reimplementation of Drive, and NOT a cast or
-    /// a reflection hack around its protection -- see DriveFromGraph's own comment for why a seam
-    /// method is required rather than either.
+    /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call wrapping
+    /// <see cref="AverCharacter"/>.DriveFromGraph -- a forward to the existing `protected`
+    /// Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the pitch clamp, view mode and
+    /// capsule (see DriveFromGraph's own comment for why a seam method, not a reflection hack, is
+    /// needed). <paramref name="entity"/> resolves through <see cref="Actors"/>.Get at invocation
+    /// time, the same runtime lookup a C# caller would use -- mirrors SpawnForGraph's own "resolved at
+    /// invocation, not compile time" reasoning.
     ///
-    /// <paramref name="entity"/> is resolved through <see cref="Actors"/>.Get, the SAME runtime
-    /// entity-to-instance lookup a C# caller would use (Actors.cs), not a baked handle -- mirroring
-    /// SpawnForGraph's own "resolved at invocation time, not compile time" reasoning, just for a
-    /// lookup rather than a class name.
-    ///
-    /// FAILS VISIBLY, NEVER SILENTLY, on either of the two ways this can go wrong -- a real `false`
-    /// on the return value (the node's "success" pin) AND a Log.Warn line, so a controller bound to
-    /// the wrong entity is distinguishable from a broken one, exactly as the task requires:
-    ///   * no live actor is bound to <paramref name="entity"/> at all (dead entity, never spawned as
-    ///     a managed actor, or Actors.Resolver itself not installed in this host) -- Actors.Get
-    ///     returns null;
-    ///   * a live actor IS bound, but it is not an <see cref="AverCharacter"/> (some other actor
-    ///     class entirely) -- the pattern match below fails.
-    /// These are reported as two DIFFERENT messages (not collapsed into one generic "can't move"),
-    /// because they are different authoring mistakes: the first is usually a bad entity id reaching
-    /// the graph, the second is usually a class field/level pointing this node at the wrong actor.
-    ///
-    /// Returns true, with no further reporting, on success -- mirrors
-    /// SetFieldVecForGraph/SetMeshForGraph's own "surface the real return code" convention rather
-    /// than SpawnForGraph's "0 means nothing happened" sentinel, since this method already returns a
-    /// bool with nothing left to invent.</summary>
+    /// FAILS VISIBLY: false AND a Log.Warn line, with two DIFFERENT messages for two different
+    /// mistakes -- no live actor bound at all (dead entity, never spawned, or Actors.Resolver not
+    /// installed) vs. a live actor that isn't an <see cref="AverCharacter"/> (wrong actor pointed
+    /// here). Returns true with no further reporting on success, mirroring
+    /// SetFieldVecForGraph/SetMeshForGraph's "surface the real return code" convention.</summary>
     internal static bool CharacterMoveForGraph(int entity, float dt, float forward, float right, float yawDeltaDeg, float pitchDeltaDeg)
     {
         Entity e = new Entity(entity);
@@ -327,27 +245,18 @@ internal static class GraphInterop
 
     /// <summary>GetForward's own surface: where a character is LOOKING, and where its eyes are.
     ///
-    /// WHY THIS EXISTS AT ALL. <see cref="AverCharacter"/> keeps <c>_yaw</c>/<c>_pitch</c> private and
-    /// publishes the aim only as <see cref="AverCharacter.LookDirection"/>; the rotation it writes to
-    /// the scene is a Quat, and the graph vocabulary's two readers cannot see it -- GetField takes F32
-    /// fields only and GetFieldVec3 requires FieldKindVec3 specifically (see RequireVec3Field). So a
-    /// graph could drive a character's look through CharacterMove and then had no way whatsoever to ask
-    /// which way that look ended up pointing. Rebuilding it graph-side from accumulated mouse deltas
-    /// with Sin/Cos was possible but wrong: it would duplicate state Character.cs already owns,
-    /// including the pitch CLAMP applied in Drive (PitchMin/PitchMax), and any drift between the two
-    /// copies shows up as a shot that does not go where the camera points.
+    /// WHY THIS EXISTS: <see cref="AverCharacter"/> keeps _yaw/_pitch private, publishing the aim only
+    /// as a Quat (<see cref="AverCharacter.LookDirection"/>) the graph vocabulary can't read (GetField
+    /// is F32-only, GetFieldVec3 needs FieldKindVec3, see RequireVec3Field). Rebuilding it graph-side
+    /// from mouse deltas would duplicate Character.cs's own state (Drive's pitch CLAMP, PitchMin/PitchMax)
+    /// and drift.
     ///
-    /// BOTH HALVES, ONE CALL, because a direction alone cannot build a ray. The eye position is the
-    /// origin a first-person shot must start from -- and specifically must start ABOVE the shooter's
-    /// own capsule, or the very first thing the ray hits is the character firing it. test-content's
-    /// AN_Playable sample had to hand-compute a constant origin at z=290 for exactly that reason;
-    /// <see cref="AverCharacter.EyePosition"/> is that number, correct for any character at any
-    /// position, and returning it beside the direction is what lets a graph wire Raycast without
-    /// arithmetic.
+    /// BOTH HALVES, ONE CALL: a direction alone can't build a ray, and the eye must sit ABOVE the
+    /// capsule or the ray hits the character firing it (test-content's AN_Playable hand-computed a
+    /// constant z=290 for that reason; <see cref="AverCharacter.EyePosition"/> is the correct number).
     ///
-    /// Fails the same VISIBLE way CharacterMoveForGraph does, with the same two distinguishable
-    /// messages, and leaves every out-parameter at zero. A zero direction makes Raycast a no-op rather
-    /// than firing somewhere arbitrary, which is the failure a graph author can actually see.</summary>
+    /// Fails the same visible way CharacterMoveForGraph does, leaving every out-parameter at zero -- a
+    /// zero direction makes Raycast a no-op rather than firing somewhere arbitrary.</summary>
     internal static bool LookDirectionForGraph(int entity,
                                               out float dirX, out float dirY, out float dirZ,
                                               out float eyeX, out float eyeY, out float eyeZ)
@@ -374,20 +283,16 @@ internal static class GraphInterop
 
     /// <summary>GetViewEntity's own surface: the CAMERA node a character looks through.
     ///
-    /// WHY A GRAPH NEEDS THIS. Anything that should sit still relative to the CAMERA rather than the
-    /// character -- a first-person weapon above all -- has to be parented to the view node, not to the
-    /// pawn. Parent a gun to the character and it stays put while the camera pitches around it; parent
-    /// it to the view and it moves with the eye, which is what a viewmodel is.
+    /// A first-person weapon must be parented to the view node, not the pawn: parenting to the
+    /// character keeps it fixed while the camera pitches around it; parenting to the view moves it
+    /// with the eye, which is what a viewmodel is. <see cref="AverCharacter"/> creates that node in
+    /// EnsureView() and publishes it only as <see cref="AverCharacter.View"/> -- a graph had SetParent
+    /// and SetMesh but no way to NAME the thing to parent to, the same gap LookDirection had before
+    /// GetForward.
     ///
-    /// <see cref="AverCharacter"/> creates that node in EnsureView() and publishes it only as
-    /// <see cref="AverCharacter.View"/>. A graph had `SetParent` and `SetMesh` and no way to NAME the
-    /// thing to parent to -- the same shape of gap as LookDirection before GetForward: state the
-    /// character already owns that no node could read.
-    ///
-    /// Returns 0 with false when there is no character, or when its view node does not exist yet --
-    /// EnsureView is lazy, so a graph asking on the very first OnStart before CharacterMove has run
-    /// legitimately gets nothing. That is a "try again next tick", not an error, which is why it fails
-    /// quietly here rather than warning every frame the way a wrong-actor-type would.</summary>
+    /// Returns 0/false when there is no character, or its view node doesn't exist yet (EnsureView is
+    /// lazy, so OnStart before CharacterMove legitimately gets nothing) -- a "try again next tick",
+    /// not an error, so this fails quietly rather than warning every frame.</summary>
     internal static bool ViewEntityForGraph(int entity, out int view)
     {
         view = 0;
@@ -408,82 +313,67 @@ internal static class GraphInterop
         return true;
     }
 
-    /// <summary>Jump's own surface: one call into <see cref="AverCharacter.Jump"/>, which refuses in
-    /// mid-air by returning false.
+    /// <summary>Jump's own surface: one call into <see cref="AverCharacter.Jump"/>, which refuses
+    /// mid-air by returning false. THE GROUNDED CHECK IS NOT THIS NODE'S TO MAKE: Jump() already asks
+    /// the physics character whether it's standing on something (Phys.aver_phys_character_grounded)
+    /// and declines if not -- re-testing here would risk disagreeing with that answer, so a graph
+    /// wired straight to a key gets single jumps, no flight, for free.
     ///
-    /// THE GROUNDED CHECK IS NOT THIS NODE'S TO MAKE. Jump() already asks the physics character
-    /// whether it is standing on something (Phys.aver_phys_character_grounded) and declines if not, so
-    /// a graph wiring this straight to a key gets single jumps and no flight for free. Re-testing it
-    /// here would mean a second answer to the same question that could disagree with the first.
-    ///
-    /// THE RETURN IS THE INTERESTING PART, and it is why this reports `jumped` rather than nothing: a
-    /// graph that wants a jump SOUND, an animation, or a counter needs to know whether the jump
-    /// actually happened, and "the key was pressed" is not that. False here means airborne, which is
-    /// ordinary and frequent -- so unlike the wrong-actor case below it is not logged at all. A warning
-    /// every frame the player holds the jump key would be noise, not diagnosis.</summary>
+    /// THE RETURN IS THE INTERESTING PART, and why this reports `jumped` rather than nothing: a jump
+    /// SOUND, animation or counter needs to know whether the jump actually happened, not just that the
+    /// key was pressed. False means airborne, ordinary and frequent, so unlike the wrong-actor case
+    /// below it is not logged -- a warning every frame the key is held would be noise, not
+    /// diagnosis.</summary>
     /// <summary>Print's surface: one log line, labelled with the graph node's own id.
     ///
-    /// THE ONLY WAY A GRAPH COULD OBSERVE ITSELF BEFORE THIS was to route a value all the way to
-    /// an OUT record and read it back off GraphHost's per-tick log -- which works for exactly one
-    /// value per graph, has to reach the graph's own output to exist at all, and says nothing about
-    /// which branch was taken or whether a chain ran. A Blueprint author reaches for Print String
-    /// before anything else, and this vocabulary did not have it.
-    ///
-    /// FLOAT, NOT A STRING, because there is no string PIN TYPE -- PinType is Float, Int, Bool and
-    /// Exec, and inventing one for this would touch the parser, the writer, the editor's pin
-    /// colours and Validate's type check. A number and a name covers what a graph is usually asking.</summary>
+    /// BEFORE THIS, a graph could only observe itself by routing a value all the way to an OUT record
+    /// (which has to reach the graph's own output to exist at all) and reading it back off GraphHost's
+    /// log -- one value per graph, silent about which branch ran or whether a chain ran at all. FLOAT,
+    /// NOT A STRING, because PinType has no string (Float, Int, Bool, Exec only).</summary>
     internal static void PrintForGraph(string label, float value)
     {
         Log.Info($"[Graph] {label} = {value}");
     }
 
-    /// <summary>Print for an INT pin, and it is not a convenience -- it is a correctness fix.
-    /// A float32 has 24 mantissa bits, so above 16777216 it can only hold EVEN integers, and this
-    /// engine's ENTITY HANDLES START AT 16777216. Routing a handle through IntToFloat to reach
-    /// Print silently rounds it to its neighbour, which reads exactly like the engine returning the
-    /// wrong entity. It cost an hour of chasing a framework bug that was never there.</summary>
+    /// <summary>Print for an INT pin -- a correctness fix, not a convenience. A float32 has 24
+    /// mantissa bits, so above 16777216 it holds only EVEN integers, and this engine's ENTITY HANDLES
+    /// START AT 16777216. Routing a handle through IntToFloat to reach Print silently rounds it, which
+    /// reads exactly like the engine returning the wrong entity -- cost an hour chasing a bug that
+    /// wasn't there.</summary>
     internal static void PrintIntForGraph(string label, int value)
     {
         Log.Info($"[Graph] {label} = {value}");
     }
 
-    /// <summary>PrintString: an authored message, with the node id kept as a prefix so two nodes
-    /// carrying the same text are still tellable apart. The one print that needs nothing wired but
-    /// exec, which is what makes it the node for "did control flow reach here".
+    /// <summary>PrintString: an authored message, node id kept as a prefix so two nodes carrying the
+    /// same text stay tellable apart. The one print needing nothing wired but exec -- the node for
+    /// "did control flow reach here".
     ///
-    /// The "[Graph] " prefix is load-bearing beyond tidiness: the editor's on-screen print overlay
-    /// filters the engine log on exactly that prefix (SandboxApp::logSink), so a line without it is
-    /// written to the log and never appears in the viewport.</summary>
+    /// The "[Graph] " prefix is load-bearing: the editor's on-screen print overlay filters the engine
+    /// log on exactly that prefix (SandboxApp::logSink), so a line without it lands in the log and
+    /// never appears in the viewport.</summary>
     internal static void PrintStringForGraph(string label, string text)
     {
         Log.Info($"[Graph] {label}: {text}");
     }
 
     // ---- node-hit recording, for the editor's execution highlighting -----------------------------
+    // Every exec node calls this as it runs, so the editor can show which nodes are executing.
     //
-    // Every exec node calls this as it runs, so the graph editor can show which nodes are actually
-    // executing rather than leaving an author to infer it from prints. Visual scripting had no way at
-    // all to see control flow: you could print a value, and nothing showed you WHICH branch ran.
+    // OFF UNLESS THE EDITOR ASKS: hot path of every exec node of every instance, so off it must cost a
+    // static bool test and nothing else (no alloc, no dict probe, no time read) -- a packaged game
+    // never turns it on. NOT THE LOG CHANNEL: PrintStringForGraph's interpolation + Log.Info under the
+    // core log mutex + a cross-thread filter would make the profiler part of what it profiles if paid
+    // per node per frame.
     //
-    // OFF UNLESS THE EDITOR ASKS. This sits on the hot path of every exec node of every live graph
-    // instance, so with recording off it must cost a static bool test and nothing else -- no
-    // allocation, no dictionary probe, no time read. A packaged game never turns it on.
+    // KEYED BY (GRAPH NAME, NODE ID), both compile-time constants, not entity (the compiled method's
+    // args come from the graph's PARAM list, no "entity is always arg 0" to lean on, and a graph with
+    // no entity PARAM has none to report). Keying by graph name is also what the editor wants: its
+    // canvas shows a CLASS, and any instance running a node should light it.
     //
-    // NOT THE LOG CHANNEL, though that already reaches the editor. PrintStringForGraph is a string
-    // interpolation plus a Log.Info under the core log mutex, then a cross-thread substring filter on
-    // the other side; paying that per exec node per frame per instance would make the profiler part
-    // of what it profiles.
-    //
-    // KEYED BY (GRAPH NAME, NODE ID), BOTH COMPILE-TIME CONSTANTS. Not by entity: the compiled
-    // method's arguments come from the graph's declared PARAM list, so there is no "entity is always
-    // argument 0" to lean on, and a graph that declares no entity PARAM has none to report. Keying by
-    // graph name is also what the editor actually wants -- its canvas shows a CLASS, and any instance
-    // running a node should light that node.
-    //
-    // LAST-HIT TIME, NEVER A COUNTER. A diamond in the exec graph (two branch arms rejoining) makes
-    // the shared node's IL be emitted TWICE at compile time, so a counter would over-report by
-    // construction. "When did this last run" is both the honest measure and the one a fading
-    // highlight needs.
+    // LAST-HIT TIME, NEVER A COUNTER: a diamond in the exec graph (two branch arms rejoining) emits the
+    // shared node's IL twice at compile time, so a counter would over-report -- "when did this last
+    // run" is the honest measure a fading highlight needs.
     private static bool s_recordHits;
     private static readonly Dictionary<string, double> s_nodeHits = new();
     private static readonly System.Diagnostics.Stopwatch s_hitClock = System.Diagnostics.Stopwatch.StartNew();
@@ -536,21 +426,16 @@ internal static class GraphInterop
         return null;
     }
 
-    /// <summary>AverCharacter.Velocity, in cm/s. False (and zeroes) when there is no character or it
-    /// is not simulated -- an unsimulated character HAS no velocity, which is different from having
-    /// one of zero, and the success pin is how a graph can tell those apart.</summary>
     // ---- tags and visibility ---------------------------------------------------------------------
+    // A TAG IS A BITMASK, NOT A STRING: Entity.Tags is a uint over CTags.bits, so an ordinary int pin
+    // carries it directly -- combine masks with a bitwise Or node, test several at once, stash one in
+    // a VAR -- unlike class=/name=/field=/var=, which needed a compile-time NODE attribute since
+    // PinType has no string.
     //
-    // A TAG IS A BITMASK, NOT A STRING, which is why this family needed no new format machinery at
-    // all. Every other string-shaped API (class=, name=, field=, var=) had to invent a compile-time
-    // NODE attribute because PinType has no string; Entity.Tags is a uint over CTags.bits, so an
-    // ordinary int pin carries it and a graph can compute one -- combine two masks with a bitwise Or
-    // node, test several at once, or read a mask out of a VAR.
-    //
-    // int RATHER THAN uint on the pin, because PinType has no unsigned type and inventing one to
-    // carry a bit pattern would be a new pin type for a reinterpretation. `unchecked((uint))` is the
-    // whole of the conversion, and it is exactly what Entity.Tags already does in the other
-    // direction (EntityScene.cs). A mask with the top bit set arrives as a negative int and works.
+    // int RATHER THAN uint: PinType has no unsigned type, and inventing one just to carry a bit
+    // pattern would be a new pin type for one reinterpretation, so `unchecked((uint))` is the whole
+    // conversion (same as Entity.Tags does in reverse, EntityScene.cs). A mask with the top bit set
+    // arrives as a negative int and works.
 
     /// <summary>Shows or hides an entity. False when the handle names nothing alive.</summary>
     internal static bool SetVisibleForGraph(int entity, bool visible)
@@ -593,6 +478,9 @@ internal static class GraphInterop
         return e.IsAlive ? unchecked((int)e.Tags) : 0;
     }
 
+    /// <summary>AverCharacter.Velocity, in cm/s. False (and zeroes) when there is no character or it
+    /// is not simulated -- an unsimulated character HAS no velocity, which is different from having
+    /// one of zero, and the success pin is how a graph can tell those apart.</summary>
     internal static bool VelocityForGraph(int entity, out float x, out float y, out float z)
     {
         x = y = z = 0.0f;
@@ -644,16 +532,14 @@ internal static class GraphInterop
     /// a graph needs to know before it does anything irreversible.</summary>
     internal static bool IsPlayingForGraph() => Game.IsPlaying;
 
-    /// <summary>Game.SaveGame / LoadGame, unchanged -- see their own doc comments for the atomic
-    /// write and the "destroy everything, then restore" load. Nothing wrapped here needs an
-    /// Entity's internal constructor the way SetMesh/SetMaterial do; this is a direct forward,
-    /// exactly like IsPlayingForGraph just above.
+    /// <summary>Game.SaveGame / LoadGame, unchanged -- see their own doc comments for the atomic write
+    /// and the "destroy everything, then restore" load. Direct forwards, needing no Entity ctor
+    /// (unlike SetMesh/SetMaterial), same as IsPlayingForGraph above.
     ///
-    /// LoadGameForGraph CAN DESTROY THE ENTITY CALLING IT. If a "loadgame" node fires from inside
-    /// this very entity's own graph, the world tear-down Game.LoadGame documents runs OnEndPlay on
-    /// that entity mid-exec, same as it would on any other. Not a new hazard this wrapper adds --
-    /// Game.LoadGame already carries it, node or no node -- and Blueprint's own Load Game node has
-    /// the identical footgun, so nothing here tries to guard against it.</summary>
+    /// LOADGAMEFORGRAPH CAN DESTROY THE ENTITY CALLING IT: if a "loadgame" node fires from inside this
+    /// entity's own graph, the world tear-down runs OnEndPlay on it mid-exec like any other. Not a new
+    /// hazard -- Game.LoadGame already carries it, and Blueprint's own Load Game node has the identical
+    /// footgun.</summary>
     internal static bool SaveGameForGraph(string path) => Game.SaveGame(path);
     internal static bool LoadGameForGraph(string path) => Game.LoadGame(path);
 
@@ -694,12 +580,10 @@ internal static class GraphInterop
         return true;
     }
 
-    /// <summary>One of the entity's WORLD axes: 0 forward, 1 right, 2 up. Three nodes share this
-    /// one surface because they differ only in which axis they ask for, and an axis index chosen by
-    /// the emitter is cheaper than three near-identical methods.
-    ///
-    /// Distinct from the existing GetForward node, which reads an AverCharacter's look direction
-    /// including its pitch clamp. This is the transform's own orientation and works on anything.</summary>
+    /// <summary>One of the entity's WORLD axes: 0 forward, 1 right, 2 up. Three nodes share this one
+    /// surface since they differ only in which axis they ask for, cheaper than three near-identical
+    /// methods. Distinct from GetForward, which reads an AverCharacter's look direction including its
+    /// pitch clamp -- this is the transform's own orientation and works on anything.</summary>
     internal static bool EntityAxisForGraph(int entity, int axis, out float x, out float y, out float z)
     {
         Entity e = new Entity(entity);
@@ -721,19 +605,17 @@ internal static class GraphInterop
     }
 
     // ================================================================== audio
-    //
-    // sound= is a PATH, and a NODE-line attribute rather than a pin, for SetName's exact reason:
-    // which file to play is chosen at edit time and PinType has no String member. Load is cached
-    // native-side (the same path returns the same handle without decoding again), so calling these
-    // every time the node runs costs a dictionary probe, not a decode.
+    // sound= is a PATH, a NODE-line attribute rather than a pin, same reason as SetName: chosen at
+    // edit time and PinType has no String. Load is cached native-side (same path -> same handle without
+    // redecoding), so calling these every time the node runs costs a dictionary probe, not a decode.
 
     /// <summary>Turns a graph's raw int pin into a <see cref="Bus"/>, saying so when it is not one.</summary>
     ///
-    /// <remarks>THE ONE PLACE AN OUT-OF-RANGE BUS CAN ARRIVE. Every other caller now names a bus
-    /// through the enum, but a graph pin is an integer a person typed into a node. Native
-    /// <c>busOf</c> folds anything it does not recognise into Sfx and is right to -- but silently, so
-    /// a Set Bus Volume node set to 7 moves the SFX slider and nothing anywhere says why. This does
-    /// not change that behaviour, it just stops it being silent.</remarks>
+    /// <remarks>THE ONE PLACE AN OUT-OF-RANGE BUS CAN ARRIVE: every other caller names a bus through
+    /// the enum, but a graph pin is an integer someone typed into a node. Native <c>busOf</c> folds
+    /// anything unrecognised into Sfx, silently -- a Set Bus Volume node set to 7 moves the SFX slider
+    /// with nothing saying why. This doesn't change that behaviour, it just stops it being
+    /// silent.</remarks>
     private static Bus BusOfPin(int bus, string node)
     {
         if (System.Enum.IsDefined(typeof(Bus), bus)) return (Bus)bus;
@@ -794,12 +676,10 @@ internal static class GraphInterop
     }
 
     // ================================================================== scene identity, by name
-    //
-    // The other two members of SetName's own name= family. SetName reflects STRAIGHT into
-    // Aver.Scene.Native (it is already scalar-shaped: entity + string -> int), but these two need
-    // real wrappers: Entity.Create and Game.Find both return an Entity STRUCT, and hand-emitted IL
-    // cannot cheaply unwrap one -- the same reason every other node in this file has a wrapper
-    // rather than calling the public API directly (see this class's own header comment).
+    // The other two members of SetName's name= family. SetName reflects straight into
+    // Aver.Scene.Native (already scalar-shaped: entity + string -> int), but Entity.Create/Game.Find
+    // both return an Entity STRUCT, which hand-emitted IL can't cheaply unwrap -- the same reason every
+    // wrapper in this file exists at all (see the class header comment).
 
     /// <summary>Entity.Create(name)'s own surface: makes a new entity and reports its handle.
     /// success is false, and entity 0, only when the scene refused to create one at all (it is out
@@ -812,11 +692,10 @@ internal static class GraphInterop
         return entity != 0;
     }
 
-    /// <summary>Game.Find(name)'s own surface: the FIRST live entity with this name, or 0.
-    /// FALSE FOR "NOT FOUND" IS THE POINT -- a miss is an ordinary, expected answer (the thing has
-    /// not spawned yet, or was destroyed), not an error, so a graph can branch on it rather than
-    /// having to compare the handle against 0 itself. Note the scene's own find is a LINEAR SCAN
-    /// over live entities (World::find), so this is not free in a tight loop.</summary>
+    /// <summary>Game.Find(name)'s own surface: the FIRST live entity with this name, or 0. FALSE FOR
+    /// "NOT FOUND" IS THE POINT -- a miss (not spawned yet, or destroyed) is expected, not an error, so
+    /// a graph can branch on it directly. Note World::find is a LINEAR SCAN over live entities, so
+    /// this isn't free in a tight loop.</summary>
     internal static bool FindEntityForGraph(string name, out int entity)
     {
         if (string.IsNullOrEmpty(name)) { entity = 0; return false; }
@@ -833,12 +712,10 @@ internal static class GraphInterop
     internal static float PhysicsFixedStepForGraph() => Physics.FixedStep;
 
     // ================================================================== Synapse
-    //
-    // SynapseSteer computes; GetSynapseTarget reads. The two are deliberately independent of each
-    // other -- see the design doc's own "Steering" section for why SynapseSteer takes an explicit
-    // target rather than reading CSynapseAgent itself: the identical node then does direct chase
-    // (target = a seen enemy's live position) as readily as path-following (target =
-    // GetSynapseTarget's own output), and neither call needs to know which one a caller is doing.
+    // SynapseSteer computes; GetSynapseTarget reads. Deliberately independent (design doc's
+    // "Steering" section): SynapseSteer takes an explicit target rather than reading CSynapseAgent
+    // itself, so the identical node does direct chase (target = a seen enemy's position) as readily as
+    // path-following (target = GetSynapseTarget's output), with neither call knowing which.
 
     /// <summary>GetSynapseTarget's own surface: the entity's CURRENT CSynapseAgent steering target,
     /// as tracked by the native AgentSystem tick (framework_abi.h's aver_fw_synapse_target). FALSE
@@ -852,11 +729,11 @@ internal static class GraphInterop
 
     /// <summary>GetSynapsePerception's own surface: the entity's CURRENT CSynapsePerception sight
     /// state, as tracked by the native PerceptionSystem tick (framework_abi.h's
-    /// aver_fw_synapse_perception). UNLIKE GetSynapseTarget, the return value here does NOT mean
-    /// "can it see something" -- it means "does this entity carry CSynapsePerception at all". A
-    /// perceiving agent that currently cannot see its target is a real, common, meaningful state
-    /// (canSeeTarget = false), not the same as having no perception component (this method returns
-    /// false and every output stays at zero/default only in THAT second case).</summary>
+    /// aver_fw_synapse_perception). UNLIKE GetSynapseTarget, the return
+    /// value here does NOT mean "can it see something" -- it means "does this entity carry
+    /// CSynapsePerception at all". canSeeTarget=false while perceiving is a real, common state,
+    /// distinct from having no perception component (only THAT case returns false with zeroed
+    /// outputs).</summary>
     internal static bool SynapseGetPerceptionForGraph(int entity, out bool canSeeTarget,
                                                        out int lastKnownTarget, out float timeSinceSeen)
     {
@@ -869,26 +746,20 @@ internal static class GraphInterop
         return true;
     }
 
-    /// <summary>SynapseSteer's own surface: "where am I, which way am I facing, where do I want to
-    /// go" turned into the forward/right/yawDelta CharacterMove already knows how to consume (see
-    /// AverCharacter.Drive's own doc comment for their exact contract: forward/right are -1..1 axis
-    /// intent relative to the entity's CURRENT facing, and yawDelta is already a PER-FRAME degree
+    /// <summary>SynapseSteer's own surface: "where am I, which way am I facing, where do I want to go"
+    /// turned into the forward/right/yawDelta CharacterMove already consumes (AverCharacter.Drive's
+    /// contract: forward/right are -1..1 relative to CURRENT facing, yawDelta a PER-FRAME degree
     /// delta, not a rate). PURE MATH -- no native call beyond the position/forward reads
-    /// WorldPositionForGraph/EntityAxisForGraph already use, and no dependency on CSynapseAgent at
-    /// all.
+    /// WorldPositionForGraph/EntityAxisForGraph use, and no CSynapseAgent dependency.
     ///
-    /// right is always 0: this node steers by TURNING toward the target (yawDelta, clamped to
-    /// +-turnRateDegPerSec*dt) rather than by strafing, which is enough for v1 and keeps the two
-    /// tuning knobs (how fast do I turn, how close is close enough) independent of a third. forward
-    /// eases toward 0 as the misalignment grows (cosine of the yaw error, floored at 0) so an agent
-    /// starting up to 180 degrees off its target turns in place first instead of visibly walking
-    /// away before it finishes turning -- see the design doc's own "visible jitter, say so" note for
-    /// why this is a floor on the roughness, not a promise of none.
+    /// right is always 0: turns TOWARD the target (yawDelta clamped to +-turnRateDegPerSec*dt) rather
+    /// than strafing, keeping the two tuning knobs (turn rate, arrive radius) independent of a third.
+    /// forward eases toward 0 as misalignment grows (cosine of yaw error, floored at 0) so an agent up
+    /// to 180 degrees off turns in place first instead of visibly walking away (design doc's "visible
+    /// jitter, say so" note: a floor on roughness, not a promise of none).
     ///
-    /// arrived is true, and forward/right/yawDelta are all left at 0, once the entity is within
-    /// arriveRadiusCm of the target (measured on the ground plane only, matching the 2.5D grid
-    /// Synapse paths across) -- a caller wires that straight into whatever decides "stop calling
-    /// CharacterMove now".</summary>
+    /// arrived is true, with forward/right/yawDelta left at 0, once within arriveRadiusCm of the
+    /// target (ground plane only, matching the 2.5D grid Synapse paths across).</summary>
     internal static bool SynapseSteerForGraph(int entity, float dt, float targetX, float targetY, float targetZ,
                                               float turnRateDegPerSec, float arriveRadiusCm,
                                               out float forward, out float right, out float yawDelta,
@@ -943,18 +814,15 @@ internal static class GraphInterop
         return true;
     }
 
-    /// <summary>Entity.SetLocalPosition: where this entity sits RELATIVE TO ITS PARENT.
+    /// <summary>Entity.SetLocalPosition: where this entity sits RELATIVE TO ITS PARENT. The node set
+    /// had SetParent, SetBodyPosition (world space, physics) and SetLocalScale -- a graph could attach
+    /// and resize a child but not move it (the visible cost: AN_FPCharacter's blaster, parented to the
+    /// camera with no way to push it forward and down, rendered centred on the eye). Not an authoring
+    /// bug -- the node simply did not exist.
     ///
-    /// The node set had SetParent, SetBodyPosition (which is world space, and physics) and
-    /// SetLocalScale -- so a graph could attach a child and resize it, and could not move it. The
-    /// visible cost of that gap was the first-person viewmodel: AN_FPCharacter parents the blaster to
-    /// the camera node and then has no way to push it forward and down, so it renders centred on the
-    /// eye and fills the view. There was nothing wrong with the authoring; the node did not exist.
-    ///
-    /// LOCAL, not world, and that is the whole point of adding it rather than reusing SetBodyPosition:
-    /// a viewmodel has to hold its offset while the camera it hangs from moves and turns every frame,
-    /// which is exactly what a parent-relative transform is for. Writing a world position each tick
-    /// would fight the parent and lag it by a frame.</summary>
+    /// LOCAL, not world, is the point over reusing SetBodyPosition: a viewmodel must hold its offset
+    /// while the camera it hangs from moves AND TURNS every frame; a world position each tick would
+    /// fight the parent and lag it by a frame.</summary>
     internal static bool SetLocalPositionForGraph(int entity, float x, float y, float z)
     {
         Entity e = new Entity(entity);
@@ -971,19 +839,15 @@ internal static class GraphInterop
         return true;
     }
 
-    /// <summary>Entity.SetLocalRotation, in DEGREES, as three float pins.
+    /// <summary>Entity.SetLocalRotation, in DEGREES, as three float pins. The palette could move,
+    /// scale, parent and destroy an entity and could not TURN one, while Entity.SetLocalRotation sat
+    /// fully implemented and unreachable.
     ///
-    /// The palette could move, scale, parent and destroy an entity and could not TURN one. A turret
-    /// tracking a target, an AI facing what it walks toward, a door swinging, a pickup spinning --
-    /// every one of those needed C#, while Entity.SetLocalRotation sat there fully implemented and
-    /// unreachable from a graph.
-    ///
-    /// DEGREES THROUGH A Rot, NOT A RAW QUATERNION, and that is forced rather than chosen: PinType is
-    /// Float, Int, Bool, Exec -- there is no Vec4 or quaternion pin, and no string. Rot is the
-    /// engine's own yaw/pitch/roll type and its ToQuat uses the intrinsic Z-Y-X composition .ocmap's
-    /// PLACE records already use, so a value typed into a graph means the same thing it means in a
-    /// level file. Reusing that conversion rather than writing another is the point: a second
-    /// Euler-to-quaternion with its own axis order would disagree with every placed actor.</summary>
+    /// DEGREES THROUGH A Rot, NOT A RAW QUATERNION, forced rather than chosen: PinType is Float, Int,
+    /// Bool, Exec -- no Vec4/quaternion, no string either. Rot's ToQuat uses the same intrinsic Z-Y-X
+    /// composition .ocmap's PLACE records use, so a value typed into a graph means what it means in a
+    /// level file -- reusing that conversion avoids a second Euler-to-quaternion that would disagree
+    /// with every placed actor.</summary>
     internal static bool SetLocalRotationForGraph(int entity, float yaw, float pitch, float roll)
     {
         Entity e = new Entity(entity);
@@ -993,26 +857,20 @@ internal static class GraphInterop
     }
 
     /// <summary>Turns an entity to face a world point, the single most reached-for rotation in a game.
+    /// YAW AND PITCH ONLY, ROLL ZEROED -- what "look at" means for a turret, character or camera. A
+    /// caller wanting roll uses SetLocalRotation instead.
     ///
-    /// YAW AND PITCH ONLY, ROLL ZEROED, which is what "look at" means for a turret, a character or a
-    /// camera -- rolling toward a target is what a stunt plane does, not what anything aiming does. A
-    /// caller wanting roll sets it with SetLocalRotation instead.
+    /// DERIVED FROM THE DIRECTION in the engine's axis convention (Forward +X, Right +Y, Up +Z): yaw
+    /// is atan2(dy, dx), pitch the rise over horizontal run, NEGATED because Rot's pitch turns about
+    /// +Y (Right) and a right-handed turn about Right tips the nose DOWN -- the wrong sign reads as a
+    /// targeting bug, not a sign error. A TARGET DIRECTLY ABOVE/BELOW leaves no horizontal run, so yaw
+    /// is meaningless (atan2(0,0)=0 would snap to +X): straight up/down is answered, keeping the
+    /// existing yaw.
     ///
-    /// DERIVED FROM THE DIRECTION, in the engine's own axis convention (Forward +X, Right +Y, Up +Z),
-    /// so yaw is atan2(dy, dx) and pitch is the rise against the horizontal run. Pitch is NEGATED
-    /// because Rot's pitch turns about +Y (Right) and a right-handed turn about Right tips the nose
-    /// DOWN -- getting that sign wrong gives a turret that aims neatly at the ground when told to
-    /// track something above it, which looks like a targeting bug rather than a sign error.
-    ///
-    /// A TARGET ON TOP OF THE ENTITY leaves the direction with no horizontal run at all, so yaw is
-    /// meaningless rather than merely imprecise: atan2(0,0) is 0, which would snap the entity to face
-    /// +X for no reason the author can see. Straight up or down is answered instead, keeping the
-    /// yaw it already had.
-    ///
-    /// LOCAL ROTATION, WORLD TARGET: correct for an unparented actor, which is the common case. A
-    /// PARENTED one turns relative to its parent, so a child of a rotating mount will not point where
-    /// this asks -- said plainly because the node's name promises world behaviour and the transform
-    /// it writes is local, exactly the asymmetry SetLocalPosition's own comment above calls out.</summary>
+    /// LOCAL ROTATION, WORLD TARGET: correct for an unparented actor (the common case). A PARENTED one
+    /// turns relative to its parent, so a child of a rotating mount won't point where this asks --
+    /// the node's name promises world behaviour but the transform it writes is local, the same
+    /// asymmetry SetLocalPosition's comment calls out.</summary>
     internal static bool LookAtForGraph(int entity, float targetX, float targetY, float targetZ)
     {
         Entity e = new Entity(entity);
@@ -1057,12 +915,10 @@ internal static class GraphInterop
     }
 
     // ---- physics -------------------------------------------------------------------------------
-    //
-    // A BODY IS NOT AN ENTITY, and keeping them apart is the point of this whole block. A body is a
-    // Jolt handle with a position, a velocity and a shape; an entity is a scene node that may or may
-    // not own one. SetBodyEntity is the bridge, and it matters more than it looks: a body created
-    // from a graph reports NO owner to Raycast until something stamps one on, so a trap the graph
-    // built is invisible to the graph asking what it hit.
+    // A BODY IS NOT AN ENTITY, the point of this whole block: a body is a Jolt handle with position,
+    // velocity and shape; an entity is a scene node that may or may not own one. SetBodyEntity bridges
+    // them -- a body created from a graph reports NO owner to Raycast until stamped, so a trap the
+    // graph built is invisible to a graph asking what it hit.
     //
     // Body handles ride on INT pins, never float -- see PrintInt for what a float does to a handle.
 
@@ -1147,12 +1003,12 @@ internal static class GraphInterop
     internal static bool RaycastAnyForGraph(float ox, float oy, float oz, float dx, float dy, float dz, float maxDist)
         => Physics.RaycastAny(new Vec3(ox, oy, oz), new Vec3(dx, dy, dz), maxDist);
 
-    /// <summary>Physics.SphereCast, shaped like RaycastForGraph above: all results out-parameters,
-    /// one call, so the exec compiler can cache them.
+    /// <summary>Physics.SphereCast, shaped like RaycastForGraph: all results out-parameters, one call,
+    /// cacheable by the exec compiler.
     ///
-    /// THE ENTITY IS ALWAYS ZERO HERE and that is the engine's own documented limit, not an omission:
-    /// the native sweep does not resolve entities. The node therefore reports the BODY, which is
-    /// real, and a graph wanting the owner stamps one on with SetBodyEntity and reads it back.</summary>
+    /// THE ENTITY IS ALWAYS ZERO HERE -- the engine's own documented limit, not an omission: the
+    /// native sweep does not resolve entities. The node reports the BODY instead; a graph wanting the
+    /// owner stamps one on with SetBodyEntity and reads it back.</summary>
     internal static void SphereCastForGraph(
         float ox, float oy, float oz, float dx, float dy, float dz, float maxDist, float radius,
         out bool hit, out int body, out float px, out float py, out float pz)
@@ -1178,15 +1034,15 @@ internal static class GraphInterop
     }
 
     // ---- PHYSICS: FORCES, MATERIAL, MOTION, LAYERS, JOINTS -----------------------------------------
-    // All of these go through AP.Body/AP.Joint/AP.Physics directly (see the AP alias comment at the
-    // top of this file) rather than through Aver.Framework's own Body/Physics shim, which never grew
-    // this surface. Same shape as AddBodyVelocityForGraph/SetBodyEntityForGraph above: construct the
-    // handle wrapper, check IsValid, call through, return bool (or the value, for a read) -- a joint
-    // creator additionally mirrors AddStaticBoxForGraph et al., which do NOT pre-check validity
-    // themselves: the native factory already returns handle 0 (Joint.None) for a dead bodyA, and
-    // bodyB == 0 is not "dead" here at all, it is the documented sentinel for "join to the world"
-    // (see the JOINTS banner in GraphNodeDefs.hpp), so gating on IsValid here would reject the one
-    // case the ABI exists to support.
+    // Goes through AP.Body/AP.Joint/AP.Physics directly (see the AP alias comment at the file top),
+    // since Aver.Framework's own Body/Physics shim never grew this surface. Same shape as
+    // AddBodyVelocityForGraph/SetBodyEntityForGraph: construct the wrapper, check IsValid, call
+    // through, return bool or value.
+    //
+    // Joint creators do NOT pre-check validity like AddStaticBoxForGraph et al. do: the native factory
+    // returns handle 0 (Joint.None) for a dead bodyA, and bodyB == 0 is not "dead" here at all -- it's
+    // the documented sentinel for "join to the world" (JOINTS banner, GraphNodeDefs.hpp) -- gating on
+    // IsValid here would reject the one case the ABI exists to support.
 
     internal static bool AddForceForGraph(int body, float x, float y, float z)
     {
@@ -1373,20 +1229,18 @@ internal static class GraphInterop
     }
 
     // ================================================================== named input actions (rebindable)
-    //
-    // ActionHandleForGraph is how an InputAction/InputActionPressed/InputActionReleased node's OWN
-    // action= attribute (GraphCompiler's EmitInputAction family, contract D) resolves straight to the
-    // native handle aver_fw_action_held/pressed/released/value2 already read -- a graph carrying that
+    // ActionHandleForGraph is how an InputAction/InputActionPressed/InputActionReleased node's own
+    // action= attribute (GraphCompiler's EmitInputAction family, contract D) resolves to the native
+    // handle aver_fw_action_held/pressed/released/value2 already read -- a graph carrying that
     // attribute never constructs an InputAction wrapper at all, so this is a SECOND, independent
     // name->handle cache, not a reuse of InputAction's own s_byHandle (EnhancedInput.cs), which is
-    // keyed by handle and only knows the actions THIS runtime itself declared.
+    // keyed by handle and only knows actions THIS runtime declared.
 
     private static readonly Dictionary<string, int> s_actionHandleByName = new();
 
-    /// <summary>The native handle for a named action, resolving through aver_fw_action_find and
-    /// caching by name. 0 for a name nothing has registered yet -- NEVER CACHED, so a graph asking
-    /// before a scheme or script has registered the action gets the right answer once it finally does,
-    /// rather than being stuck reporting 0 for the rest of the process.</summary>
+    /// <summary>The native handle for a named action, resolving via aver_fw_action_find and caching by
+    /// name. 0 for an unregistered name -- NEVER CACHED, so a graph asking before a scheme or script
+    /// registers the action gets the right answer once it does, rather than being stuck at 0.</summary>
     internal static int ActionHandleForGraph(string actionName)
     {
         if (string.IsNullOrEmpty(actionName)) return 0;
@@ -1401,10 +1255,9 @@ internal static class GraphInterop
     internal static bool SaveInputBindingsForGraph() =>
         EnhancedInput.ContextCount != 0 && EnhancedInput.SaveAllBindings();
 
-    /// <summary>LoadInputBindings' own surface: EnhancedInput.LoadAllBindings(). LoadBindings itself
-    /// has no failure mode beyond a missing/stale key, which it already tolerates silently
-    /// (InputMappingContext.LoadBindings's own comment) -- so the only false case here is nothing
-    /// pushed to load onto at all.</summary>
+    /// <summary>LoadInputBindings' own surface: EnhancedInput.LoadAllBindings(). LoadBindings has no
+    /// failure mode beyond a missing/stale key, tolerated silently (InputMappingContext.LoadBindings's
+    /// own comment) -- so the only false case here is nothing pushed to load onto.</summary>
     internal static bool LoadInputBindingsForGraph()
     {
         if (EnhancedInput.ContextCount == 0) return false;
@@ -1413,9 +1266,8 @@ internal static class GraphInterop
     }
 
     /// <summary>ResetInputBindings' own surface: EnhancedInput.ResetAllBindings(). ResetToDefaults
-    /// cannot itself fail, so this mirrors SaveInputBindingsForGraph/LoadInputBindingsForGraph's own
-    /// "false means nothing to act on" convention rather than inventing a native failure mode
-    /// ResetAllBindings does not have.</summary>
+    /// can't itself fail, so this mirrors Save/LoadInputBindingsForGraph's "false means nothing to act
+    /// on" convention rather than inventing a native failure mode that doesn't exist.</summary>
     internal static bool ResetInputBindingsForGraph()
     {
         if (EnhancedInput.ContextCount == 0) return false;

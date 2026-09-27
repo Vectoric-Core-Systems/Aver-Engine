@@ -3793,29 +3793,23 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     // THE ONE VALUE THIS STAGE NEEDS BEFORE IT CAN EVEN GATE -- see rdSurfaceRoughness's own header.
     const float rough = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
 
-    // W6/M5: EXPLICITLY TRUE -- same reason CSRdShadow's, CSRdGi's and CSRdSkyOcc's own copies of this
-    // line give: a blended (glass/water) draw never reaches the ray-driven primary at all, so every
-    // history write rtReflectionTemporal makes below is always live for this pass.
+    // W6/M5: EXPLICITLY TRUE, same reason CSRdShadow/CSRdGi/CSRdSkyOcc's own copies -- a blended
+    // (glass/water) draw never reaches the ray-driven primary, so every history write below is live.
     gAverHistoryWrite = true;
 
-    // THE GATE IS PSRayDriven's OWN PREDICATE, roughness included -- see that function's "ENVIRONMENT
-    // SPECULAR" comment for why these three terms are the right ones. Unlike Stage S/G/O, this gate
-    // cannot be dropped from the compute stage and left for Stage B to re-apply: Stage B reads this
-    // gate's OUTCOME off gRdReflTex's alpha channel instead of repeating the roughness test itself --
-    // see PSRayDriven's AVER_RD_SPLIT reflection branch, above, and gRdReflTex's own header comment.
+    // THE GATE IS PSRayDriven's OWN PREDICATE (see its "ENVIRONMENT SPECULAR" comment for why these
+    // three terms). Unlike Stage S/G/O this can't be left for Stage B to re-apply: Stage B reads the
+    // OUTCOME off gRdReflTex's alpha instead (PSRayDriven's AVER_RD_SPLIT branch; gRdReflTex's header).
     const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75;
     if (!rtReflTraced) rtReflectionHistoryVacate(float2(pixel) + 0.5);   // see that function
     if (rtReflTraced) {
         const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
         const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
         bool specHit = false;
-        // PENDING iff this is R1 (AVER_RD_REFL_SPLIT) AND a history is actually bound to defer the
-        // gather against -- with none bound rtReflectionTemporalEx's own early-out already skips
-        // rtReflectionSpatial (see that function's own comment), so there is nothing for R2 to add and
-        // R1 composes here exactly as the non-split compile does. FALSE under the refl ablation
-        // (AVER_RD_ABL_REFL/ALL) even when split: this contract's own "no mirror ray" branch just below
-        // has no ray to defer either, so the ablated pixel keeps today's behaviour -- compose in R1, no
-        // pending marker.
+        // PENDING iff R1 (AVER_RD_REFL_SPLIT) AND a history is bound to gather against; with none
+        // bound, rtReflectionTemporalEx's early-out already skips rtReflectionSpatial, so R2 has
+        // nothing to add and R1 composes exactly as the non-split compile does. FALSE under the refl
+        // ablation too -- no ray to defer either way; compose in R1, no pending marker.
 #if AVER_RD_REFL_SPLIT && AVER_RD_ABLATE != AVER_RD_ABL_REFL && AVER_RD_ABLATE != AVER_RD_ABL_ALL
         const bool pending = gRtHistParams.x >= 0.5;
 #else
@@ -3824,10 +3818,9 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
 #if AVER_RD_ABLATE == AVER_RD_ABL_REFL || AVER_RD_ABLATE == AVER_RD_ABL_ALL
         float3 refl = float3(0.0, 0.0, 0.0);   // ablated: no mirror ray -- matches PSRayDriven's own copy
 #elif AVER_RD_REFL_SPLIT
-        // R1's own half of rtReflectionTemporal: doSpatial=false still traces, blends against history
-        // and WRITES gRtReflHistOut exactly as the wrapper below does -- only the dense spatial gather
-        // is skipped, left for CSRdReflFilter to run against this same write. if/else, not `?:` across
-        // the two calls -- same reason rtReflectionTemporalEx's own two returns spell it that way.
+        // R1's half of rtReflectionTemporal: doSpatial=false still traces, blends history and writes
+        // gRtReflHistOut; only the dense spatial gather is skipped, left for CSRdReflFilter. if/else,
+        // not `?:`, for the same reason rtReflectionTemporalEx's own two returns spell it that way.
         float3 refl;
         if (pending) {
             refl = rtReflectionTemporalEx(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
@@ -3840,9 +3833,8 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
         float3 refl = rtReflectionTemporal(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
 #endif
-        // Same guard, same reasoning, as PSRayDriven's own copy -- see that function's "ENVIRONMENT
-        // SPECULAR" comment block for the full account of why this is a lerp against skyW rather than
-        // a hard branch.
+        // Same guard as PSRayDriven's own copy (its "ENVIRONMENT SPECULAR" comment): a lerp against
+        // skyW, not a hard branch.
         const float skyW = smoothstep(0.5, 0.75, rough);
         float3 skyR = float3(0.0, 0.0, 0.0);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
@@ -3851,52 +3843,39 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
 #endif
         if (pending) {
-            // PENDING MARKER, NOT A COMPOSE: CSRdReflFilter finishes this pixel once it has gathered
-            // rtReflectionSpatial against gRtReflHistOut's write just above -- see gRdReflTex's own
-            // header comment for why alpha < -0.5 is unambiguous against the three real outcomes
-            // (0/1/2) a fully-composed pixel ever carries. The alpha carries nothing but that flag --
-            // R2 recomputes roughness itself (rdSurfaceRoughness) rather than reading it back, and gets
-            // its own `refl` off gRtReflHistOut, not off this texel -- `specHit` doesn't need to travel
-            // either, R2 derives the same fact from that other texel's own alpha (see its own comment).
+            // PENDING MARKER, NOT A COMPOSE: CSRdReflFilter finishes this pixel after gathering
+            // rtReflectionSpatial against gRtReflHistOut's write above -- alpha < -0.5 is unambiguous
+            // vs the three composed outcomes (gRdReflTex's header). R2 rebuilds roughness itself
+            // (rdSurfaceRoughness), gets refl off gRtReflHistOut not this texel, and specHit off that
+            // texel's own alpha.
             gRdReflTex[pixel] = float4(skyR, -1.0);
         } else {
-            // CLAMPED, same ceiling PSRayDriven's own copy applies and for the same reason (see that
-            // function's own comment, just above its identical line, for the unbounded-term incident
-            // this guards against) -- clamp() rather than min(), so a NEGATIVE radiance floors to 0
-            // rather than reading through unclamped on the low side.
+            // Same ceiling as PSRayDriven's own copy (see its comment above the identical line for the
+            // unbounded-term incident this guards against). clamp(), not min(): negative radiance floors to 0.
             const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
-            // THE .a CHANNEL IS THE STAGE'S DECISION (gRdReflTex's own header comment) -- nonzero here,
-            // and ONLY here, marks this pixel as one CSRdRefl actually traced. 2.0 rather than 1.0
-            // additionally carries B1 (F5)'s PRE-clamp ceiling test, `>=` for PSMainVoxi's NaN-safe
-            // reason: the clamp below discards specRaw, so Stage B cannot recompute the test from rgb (a
-            // clamped, half-float value) and still agree with the single pass's own test against the
-            // unclamped one.
+            // .a is the stage's decision (gRdReflTex's header): nonzero, ONLY here, marks a pixel
+            // CSRdRefl traced. 2.0 vs 1.0 carries B1(F5)'s PRE-clamp ceiling test (`>=` for
+            // PSMainVoxi's NaN-safety) -- Stage B can't recompute it post-clamp from a half-float rgb.
             gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
                                        any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
         }
     } else {
-        // Roughness (or the outer gate) routed this pixel to Stage B's own cone/sky fallback instead --
-        // 0 in every channel, alpha included, so PSRayDriven's AVER_RD_SPLIT branch takes that fallback
-        // rather than reading a stale or zeroed colour as if it were a traced miss.
+        // Roughness (or the outer gate) routed this pixel to Stage B's cone/sky fallback instead -- all
+        // zero, alpha included, so PSRayDriven's AVER_RD_SPLIT branch takes the fallback, not a stale miss.
         gRdReflTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
     }
 }
 
 // ---- STAGE R2: CSRdReflFilter -- finish a PENDING reflection with the spatial history gather --------
 //
-// R1's other half (Settings::rayDrivenReflSplit, AVER_RD_REFL_SPLIT -- see CSRdRefl's own header,
-// immediately above, for the full split contract). Dispatched over the SAME (gx, gy) grid and the SAME
-// pixel mapping as CSRdRefl, after a C++ UAV barrier on the reflection history texture R1 just wrote
-// (gRtReflHistOut) and before Stage B reads gRdReflTex: every pixel this pass finishes was marked
-// PENDING by R1 a moment ago, on the SAME frame -- there is no cross-frame reasoning here, only a
-// same-frame round trip through gRtReflHistOut for the pixels wide enough to need the spatial gather.
+// R1's other half (Settings::rayDrivenReflSplit / AVER_RD_REFL_SPLIT; see CSRdRefl's header for the
+// split contract), run over the same grid as CSRdRefl after a C++ UAV barrier on gRtReflHistOut and
+// before Stage B reads gRdReflTex -- every pixel here was marked PENDING by R1 this same frame; no
+// cross-frame reasoning, just a same-frame round trip through gRtReflHistOut.
 //
-// COMPILED AT SM 6.6 (VoxiRenderer), same layout and defines as CSRdRefl -- see gRtReflHist/
-// gRtReflHistOut's own declarations (voxi_rt.hlsli, unconditional inside this same #if AVER_RT region)
-// for why nothing here needs its own compile guard. rtReflectionSpatial takes dzdx/dzdy as plain
-// parameters rather than calling ddx/ddy() itself, and neither it nor anything it calls touches
-// gAverHistoryWrite (that flag only gates rtReflectionTemporal(Ex)'s OWN write to gRtReflHistOut, which
-// already happened in R1) -- so, unlike CSRdRefl, this stage has no static to set up before it starts.
+// SM 6.6 (VoxiRenderer), same layout/defines as CSRdRefl; gRtReflHist/gRtReflHistOut (voxi_rt.hlsli)
+// are unconditional here so no compile guard is needed. Takes dzdx/dzdy as params instead of
+// ddx/ddy(), and never touches gAverHistoryWrite (already spent by R1's write) -- no static setup here.
 [numthreads(8, 8, 1)]
 void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
@@ -3906,29 +3885,26 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     if (pitch == 0u) return;
     const uint idx = pixel.y * pitch + pixel.x;
 
-    // NOTHING TO DO for every pixel but a PENDING one: a sky pixel, a roughness-gated-out pixel, and a
-    // pixel R1 already composed in full (no history bound, or the refl ablation) all left one of the
-    // three real alphas here (0, 1 or 2 -- gRdReflTex's own header comment, above) and this stage leaves
-    // them untouched. Only alpha < -0.5, R1's PENDING marker (CSRdRefl's own comment on that write),
-    // means a gather is still owed.
+    // NOTHING TO DO except for a PENDING pixel: a sky pixel, a roughness-gated-out one, or one R1
+    // already composed in full (no history bound, or the refl ablation) all left alpha 0/1/2 here
+    // (gRdReflTex's header) and are left untouched. Only alpha < -0.5, R1's PENDING marker, means a
+    // gather is still owed.
     const float4 t = gRdReflTex[pixel];
     if (t.a > -0.5) return;
     const float3 skyR  = t.rgb;
 
-    // Same pixel-centre NDC/primary-ray/record reconstruction as CSRdRefl -- see rdPrimaryRayDir's own
-    // header for the derivation. gRdVisBuf's record is re-read rather than carried through gRdReflTex:
-    // a PENDING pixel is by construction one CSRdRefl already found a surface for, so this can't itself
-    // turn up a miss.
+    // Same pixel-centre NDC/primary-ray/record reconstruction as CSRdRefl (rdPrimaryRayDir's header).
+    // gRdVisBuf is re-read rather than carried through gRdReflTex: a PENDING pixel, by construction, is
+    // one CSRdRefl already found a surface for, so this can't itself turn up a miss.
     float2 ndc;
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     const uint4 rec = gRdVisBuf[idx];
     RdSurface s = rdSurfaceFromRecord(rec, dir);
 
-    // THE SAME FOOTPRINT RECONSTRUCTION CSRdRefl BUILDS FOR ITS OWN REFLECTION CALL, byte-for-byte --
-    // see that stage's own comment for the derivation. `R` is not rebuilt: rtReflectionSpatial never
-    // reads it, only rtReflection/rtReflectionTemporal(Ex)'s own ray-tracing half does, and that half
-    // already ran, in R1.
+    // Same footprint reconstruction as CSRdRefl's own reflection call (see that stage's comment). `R`
+    // is not rebuilt: only rtReflection/rtReflectionTemporal(Ex)'s ray-tracing half reads it, and that
+    // half already ran, in R1.
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0),
                                        2.0 / max(gSceneViewport.w, 1.0));
     float3 dirDx = averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0));
@@ -3938,35 +3914,28 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
     const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
 
-    // ROUGHNESS AND DEPTH ARE RECOMPUTED, NOT READ BACK. Roughness never reached this stage at all --
-    // the PENDING marker (gRdReflTex's own header comment) is a plain -1.0 flag, nothing else encoded in
-    // it -- so it has no choice but to be rebuilt. Depth reached this stage only through the history's
-    // alpha (curClip.w in half precision, which overflows to inf past 65504 cm and then disables the
-    // filter's depth test outright), so it is rebuilt too rather than trusted through that lossy channel.
-    // R1 had both in full float, so this stage rebuilds them from the same inputs: the same roughness
-    // sample CSRdRefl gated on, and the same mul(wpos, gViewProj).w rtReflectionTemporalEx wrote as
-    // curClip.w.
+    // ROUGHNESS AND DEPTH ARE RECOMPUTED, NOT READ BACK. The PENDING marker (gRdReflTex's header) is
+    // a plain -1.0 flag with nothing else encoded, so roughness must be rebuilt. Depth reached this
+    // stage only through the history alpha (curClip.w in half precision, overflowing to inf past
+    // 65504 cm and then disabling the filter's depth test outright), so it's rebuilt too, from R1's
+    // same roughness sample and the same mul(wpos,gViewProj).w.
     const float rough    = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
     const float curDepth = mul(float4(s.wpos, 1.0), gViewProj).w;
 
-    // SAME MIRROR CUTOFF rtReflectionTemporal(Ex) applies before it ever calls rtReflectionSpatial --
-    // see that function's own "THE MIRROR CUTOFF" comment -- from the same `rough` R1 traced with, so
-    // the filter radius rtReflectionSpatial derives from it agrees.
+    // Same mirror cutoff rtReflectionTemporal(Ex) applies before calling rtReflectionSpatial (see its
+    // "THE MIRROR CUTOFF" comment), from the same `rough` R1 traced with, so the filter radius agrees.
     const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
 
-    // R1's OWN WRITE TO THIS SAME UAV, THIS SAME FRAME: gRtReflHistOut (u3) is normally read as last
-    // frame's history through the gRtReflHist SRV (t7) -- rtReprojectReflection/rtReflectionSpatial's
-    // own gather both read that copy -- but R1 (CSRdRefl's AVER_RD_REFL_SPLIT compile) just wrote THIS
-    // pixel's fresh answer straight into the RWTexture2D itself, and the C++ side barriers R1's write
-    // against this read (recordStagedRayDriven's own comment) before dispatching this stage. Reading it
-    // back here stands in for the `col`/`curHit` rtReflectionTemporalEx would otherwise still be holding
-    // in registers, had R1 not already returned.
+    // R1's OWN WRITE TO THIS UAV, THIS SAME FRAME: gRtReflHistOut (u3) is normally last frame's
+    // history via gRtReflHist SRV (t7) -- rtReprojectReflection/rtReflectionSpatial's own gather read
+    // that copy -- but R1 (AVER_RD_REFL_SPLIT) just wrote THIS pixel's fresh answer straight into the
+    // RWTexture2D, barriered against this read (recordStagedRayDriven). Reading it back stands in for
+    // the `col`/`curHit` rtReflectionTemporalEx would otherwise still hold in registers, had R1 not
+    // already returned.
     //
-    // THE INVARIANT THIS DEPENDS ON: rtReflectionTemporalEx writes gRtReflHistOut[pixel] as
-    // float4(col, curClip.w) on a hit or float4(0,0,0,-1) on a miss, IDENTICALLY in its untiled and
-    // tiled branches (this file, above -- both of that function's own `if (gAverHistoryWrite)` writes).
-    // curClip.w is a positive perspective-divide w for any wpos in front of the camera, so alpha > 0
-    // means hit and alpha <= 0 (exactly -1 on a miss) means miss, with no value written in between.
+    // INVARIANT: rtReflectionTemporalEx writes gRtReflHistOut[pixel] as float4(col, curClip.w) on a
+    // hit, float4(0,0,0,-1) on a miss, identically in its untiled and tiled branches. curClip.w > 0 in
+    // front of the camera, so alpha > 0 means hit, alpha <= 0 (exactly -1) means miss.
     const float4 h = gRtReflHistOut[pixel];
     const bool specHit = h.a > 0.0;
 
@@ -3978,9 +3947,8 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
         refl = float3(0.0, 0.0, 0.0);
     }
 
-    // THE EXACT SAME COMPOSE CSRdRefl's OWN NON-SPLIT TAIL WRITES -- see that block's own comments,
-    // above, for the skyW lerp and the clamp/ceiling-alpha reasoning; repeated verbatim here rather than
-    // factored out so this stage's control flow reads the same as R1's, pixel for pixel.
+    // Exact same compose as CSRdRefl's non-split tail (see its comments for the skyW lerp/clamp
+    // reasoning) -- repeated verbatim, not factored out, so this stage's control flow mirrors R1's.
     const float skyW = smoothstep(0.5, 0.75, rough);
     const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
     gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
@@ -3990,23 +3958,17 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
 
 // ================= depth prepass =================
 // Same-frame depth-only pass paired with VSMain (VoxiRenderer.hpp's depthPrepassPipeline(),
-// D3D12Device::drawMesh) -- same compiled vertex shader as PSMainVoxi's pipelines, so it writes
-// EXACTLY the depth the colour pass would produce for the identical triangle.
+// D3D12Device::drawMesh) -- same compiled vertex shader as PSMainVoxi's, so depth matches exactly.
 //
-// WRITES NO COLOUR (renderTargetCount=0) and reads only enough to answer "does this survive alpha
-// test" -- deliberately short of averEvalMaterial(), which also samples metal-rough/normal/
-// occlusion/emissive for Fresnel/GGX setup a depth-only fragment has no use for; calling it just for
-// s.alpha would cost four texture fetches instead of at most one.
+// Writes no colour (renderTargetCount=0); reads only enough for "does this survive alpha test", short
+// of averEvalMaterial() (unused metal-rough/normal/occlusion/emissive, 4 fetches instead of 1 just for
+// s.alpha). NOT FREE: pays a gMaterialFlags branch plus Sample()+compare if alpha-tested -- buys
+// skipping PSMainVoxi (shadow, up to eight cone traces, history, fog) entirely.
 //
-// STILL NOT FREE: every covered pixel pays a gMaterialFlags branch, and an alpha-tested material
-// pays one Sample() against gBaseColorMap plus a compare. What it buys is skipping PSMainVoxi
-// entirely (shadow lookup, up to eight cone traces, history blending, fog) on every hidden fragment.
-//
-// DOES NOT EVALUATE AVER_MAT_SLOPE_BLEND's second layer: that flag is landscape-only, and the
-// landscape draws through LandscapeRenderer::draw(), never IDevice::drawMesh/drawMeshDepthPrepass
-// (one of this feature's three excluded paths, SandboxApp.cpp). If a non-landscape material is ever
-// authored with both AVER_MAT_SLOPE_BLEND and AVER_MAT_ALPHA_MASK, alpha would be the FIRST layer's
-// alone -- that combination doesn't exist in this tree today.
+// Does NOT evaluate AVER_MAT_SLOPE_BLEND's second layer (landscape-only, never drawMesh/
+// drawMeshDepthPrepass -- landscape draws through LandscapeRenderer::draw(), one of this feature's
+// three excluded paths, SandboxApp.cpp); with AVER_MAT_ALPHA_MASK too, alpha comes from the FIRST
+// layer only -- none exists in this tree today.
 void PSDepthPrepass(VSOut i) {
 #ifdef AVER_MATERIAL_SRV
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) {
@@ -4032,20 +3994,19 @@ float4 VSShadow(VSIn i) : SV_POSITION {
 StructuredBuffer<float4x4> gInstanceWorlds : register(AVER_INST_JOIN(t, AVER_INSTANCE_SRV));
 
 // VSShadow's instanced twin: one DrawIndexedInstanced submits every surviving instance of one mesh
-// in one cascade, instead of shadowPass calling drawMesh() per instance. World transform comes from
-// gInstanceWorlds[instanceID] (VoxiRenderer::shadowPass via drawMeshInstanced), not PerObject's
-// gWorld. Everything else is identical to VSShadow.
+// in one cascade, instead of shadowPass calling drawMesh() per instance. World comes from
+// gInstanceWorlds[instanceID] (VoxiRenderer::shadowPass via drawMeshInstanced), not PerObject's gWorld.
+// Everything else is identical to VSShadow.
 float4 VSShadowInstanced(VSIn i, uint instanceID : SV_InstanceID) : SV_POSITION {
     float4x4 world = gInstanceWorlds[instanceID];
     return mul(mul(float4(i.pos, 1.0), world), gCascadeViewProj[(uint)gShadowDraw.x]);
 }
 #endif
 
-// The same depth-only pair again, for the GI-ONLY shadow map. Identical to VSShadow/
-// VSShadowInstanced except that they transform into gGiShadowViewProj -- one box over the GI
-// volume -- rather than into a cascade selected by gShadowDraw.x. Separate entry points rather than
-// a branch because the matrix is picked at pipeline level, not per draw, and a depth-only vertex
-// shader is far too hot to spend a dynamic index on.
+// The same depth-only pair, for the GI-ONLY shadow map: identical to VSShadow/VSShadowInstanced
+// except transforming into gGiShadowViewProj (one box over the GI volume) instead of a cascade
+// selected by gShadowDraw.x. Separate entry points: the matrix is picked at pipeline level, and a
+// depth-only vertex shader is too hot to spend a dynamic index on.
 float4 VSGiShadow(VSIn i) : SV_POSITION {
     return mul(mul(float4(i.pos, 1.0), gWorld), gGiShadowViewProj);
 }
@@ -4070,9 +4031,8 @@ AverVertex voxelVertexOf(VoxOut i) {
     v.wpos = i.wpos;
     v.N    = normalize(i.nrm);
     v.V    = float3(0, 0, 0);
-    // FALSE, not merely unset: no camera in this pass (V=0 above), so "is the eye inside" has no
-    // answer -- false makes the TIR test below inert, correct for a bake with no viewpoint. HLSL
-    // leaves a struct member uninitialised, so this must be written.
+    // FALSE, not merely unset: no camera here (V=0 above), so "is the eye inside" has no answer --
+    // false keeps the TIR test below inert. HLSL leaves the member uninitialised, so it must be written.
     v.backFace = false;
     v.uv   = i.uv;
     return v;
@@ -4104,13 +4064,12 @@ void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
 }
 
 #if AVER_MS
-// Voxelisation without a geometry shader: the same dominant-axis projection, per primitive.
+// Voxelisation without a geometry shader: same dominant-axis projection, per primitive.
 //
-// nr[k] uses averTransformNormal(v.nrm, gWorld), not a plain mul(float4(nrm,0),gWorld), to match
-// VSVoxel/VSMain/etc -- see 1856da1, which fixed four OTHER call sites of this bug and missed this
-// fifth because MSVoxel compiles only behind AVER_MS, unused at the time. A plain mul is only
-// correct under rotation/uniform scale; wrong here would tint an entire surface's bounce light for
-// as long as the volume holds it, not just flicker one triangle.
+// nr[k] uses averTransformNormal(v.nrm, gWorld), not a plain mul, matching VSVoxel/VSMain (1856da1
+// fixed four other sites, missed this one since MSVoxel then compiled only behind unused AVER_MS) --
+// a plain mul is only correct under rotation/uniform scale; wrong here tints a whole surface's bounce
+// for as long as the volume holds it, not a one-frame flicker.
 [numthreads(AVER_MS_TRIS, 1, 1)]
 [outputtopology("triangle")]
 void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
@@ -4164,77 +4123,55 @@ void PSVoxel(VoxOut i) {
 
     // ---- ONE AXIAL CONE INTO THE PREVIOUS BAKE ------------------------------------------------
     //
-    // This injection had two defects that between them made the volume store an AMBIENT TERM rather
-    // than bounced light, which is what "there's no bounce lighting" actually looks like from the
-    // outside. Both are fixed by the same single cone, so it is traced once and used twice.
+    // One cone (traced once, used twice) fixes two defects that made the volume store an AMBIENT
+    // TERM instead of bounced light:
+    //   1. SKY WAS UNOCCLUDED: sun.visibility gates the sun term, but averSkyIrradiance(N) depends
+    //      only on N, so every voxel got open-sky irradiance regardless of occlusion -- gather ~=
+    //      albedo x constant (MEASURED: GI-only Sponza looked like the albedo texture, no pooling
+    //      near lit surfaces).
+    //   2. NO SECOND BOUNCE: the only readers of gVoxelTex were the mip filter, the forward-pass
+    //      gather and the debug raymarch, so light died after one surface -- most of an arcade's
+    //      light, which comes from its own walls, dark enough to peg eye adaptation at its ceiling.
     //
-    // 1. THE SKY WENT IN UNOCCLUDED. sun.visibility gates the sun term; averSkyIrradiance(N) took
-    //    no visibility term at all, and it cannot compute one -- it is a function of the NORMAL and
-    //    nothing else, with no world position anywhere in it. So a voxel three walls deep inside the
-    //    arcade was handed exactly the same open-sky irradiance as one standing in the courtyard
-    //    with the same normal. The stored volume was therefore dominated by a flat,
-    //    position-independent term, and a gather over it returns albedo x constant. MEASURED before
-    //    this change: isolating the GI's contribution on Sponza gave an image that is essentially a
-    //    copy of the albedo texture -- bright where the plaster is white, dark where the stone is
-    //    dark -- with no pooling near lit surfaces at all.
+    // LEGAL HERE (checked): voxelTex_ stays ShaderResource through voxelizePass's raster draws
+    // (UnorderedAccess only just before the resolve), and bindings_ already carries the full-chain
+    // SRV at t0 -- no new binding/barrier. Mip 0 alone is cleared; the cone's first sample (dist
+    // starts at 2 voxels, 60-deg aperture already wider than 1 voxel there) lands at mip ~1.2, in
+    // the intact previous bake.
     //
-    // 2. THERE WAS NO SECOND BOUNCE. Nothing in this module ever read the volume back into the
-    //    injection; the only readers of gVoxelTex were the mip filter, the forward-pass gather and
-    //    the debug raymarch. Light reflected off exactly one surface and stopped. Indoors that is
-    //    most of the light missing -- an arcade is lit by its own walls -- which is why the scene is
-    //    dark enough that the eye adaptation pegs at its ceiling every frame.
-    //
-    // WHY THIS IS LEGAL HERE, checked rather than assumed: voxelTex_ is in ShaderResource for the
-    // whole of voxelizePass's raster draws (VoxiRenderer.cpp transitions it to UnorderedAccess only
-    // just before the resolve), and bindings_ -- the set this pass binds -- already carries the SRV
-    // over the full mip chain at t0. So this needs no new binding, no new descriptor and no barrier
-    // change. The clear at the top of the pass zeroes mip 0 ONLY, and the cone's first sample lands
-    // at mip ~1.2 (dist starts at two voxels, and a 60-degree aperture is already wider than one
-    // voxel there), so what it reads is the previous bake, still intact in mips 1..N.
-    //
-    // WHAT IT COSTS AND WHY IT CONVERGES: one cone per injected fragment, against the thirteen the
-    // forward gather already runs per pixel. Each rebuild adds gain x (light already in the room),
-    // gain = min(albedo x AVER_VOX_FEEDBACK, AVER_VOX_MAX_BOUNCE_GAIN) < 1 per channel, so the series
-    // is geometric and settles. Albedo < 1 alone does NOT guarantee that once the x3 is applied.
+    // COST/CONVERGENCE: one cone per fragment vs the gather's thirteen. gain = min(albedo x
+    // AVER_VOX_FEEDBACK, AVER_VOX_MAX_BOUNCE_GAIN) < 1/channel keeps the series geometric (albedo < 1
+    // alone does not guarantee that, once the x3 gain applies).
     const float4 room = traceCone(i.wpos, N, AVER_VOX_INJECT_APERTURE);
-    // A cone that terminated on solid geometry saw no sky; one that ran out of volume saw all of it.
-    // traceCone accumulates occlusion in .a and treats leaving the volume as unoccluded, which is
-    // the correct reading of "this voxel is open to the sky" for exactly this purpose.
+    // A cone that terminated on solid geometry saw no sky; one that ran out of volume saw all of it --
+    // traceCone treats "left the volume" as unoccluded in .a, correct for "open to the sky" here.
     //
-    // ...BUT ONLY APPROXIMATELY, AND BADLY INDOORS AT A FINE VOLUME. The volume holds one-voxel shells
-    // of surfaces, and a 60-degree cone a few metres out samples mip 5+, where a shell covers ~2% of
-    // a cell -- so the cone sees through a roof and a voxel deep inside an arcade is handed nearly the
-    // open sky. MEASURED at 512^3 on PTTest's gallery (sun 85.6 deg), painting each visible surface
-    // with its own voxel: sunlit surfaces within 1.3x of the path tracer, shadowed interior ones
-    // 30-350x too bright. Taking the sky term out alone brought the whole frame from 0.55 to 0.011
-    // (path tracer 0.015).
+    // ONLY APPROXIMATE, BAD INDOORS AT A FINE VOLUME: one-voxel shells cover ~2% of a cell at the mip
+    // 5+ a 60-degree cone samples a few metres out, so it sees through a roof. MEASURED (512^3, PTTest
+    // gallery, sun 85.6 deg, each surface painted with its own voxel): sunlit within 1.3x of the path
+    // tracer, shadowed interior 30-350x too bright; sky term alone: 0.55 -> 0.011 (path tracer 0.015).
     const float skyVis = saturate(1.0 - room.a);
-    // SO WHILE ReSTIR GI IS THE ESTIMATOR, THE VOLUME CARRIES NO SKY. That estimator traces the sky's
-    // visibility with real rays -- its candidate's miss, and at Half/Full the candidate hit's own
-    // second ray -- and reads this volume only for SURFACE-bounced light, where the leaked sky above
-    // counted 3-7x over the path tracer. Keyed on gViewParams.z, the SETTING (see its cbuffer
-    // comment for why not gGiRestirParams.x); VoxiRenderer::voxelSkyInjected() is the same test, and
-    // the rebuild gate and the GI cache key both carry it, so switching giMode rebakes rather than
-    // reusing a volume baked under the other rule.
+    // WHILE ReSTIR GI IS THE ESTIMATOR, THE VOLUME CARRIES NO SKY: ReSTIR traces sky visibility with
+    // real rays (candidate miss, plus the hit's own second ray at Half/Full) and reads this volume
+    // only for surface-bounced light -- leaked sky above counted 3-7x over the path tracer. Keyed on
+    // gViewParams.z, the SETTING (see its cbuffer comment for why not gGiRestirParams.x) --
+    // VoxiRenderer::voxelSkyInjected() is the same test; rebuild gate and GI cache key both carry it
+    // too, so switching giMode rebakes rather than reusing.
     //
-    // WHAT STILL READS THE SKY FROM HERE and so loses it under ReSTIR: GI-lit particles (their whole
-    // lighting is this volume), the rough-specular cone fallback, and the cone gather on a frame
-    // ReSTIR is chosen but cannot run (the GI debug view). All were reading the leaked sky above;
-    // indoors they get darker and closer to right, in open shade darker than right.
+    // STILL READS THE SKY FROM HERE: GI-lit particles, the rough-specular cone fallback, and the cone
+    // gather when ReSTIR can't run (GI debug view) -- darker/closer to right indoors, darker than
+    // right in open shade.
     const float skyInject = gViewParams.z > 0.5 ? 0.0 : 1.0;
 
-    // Exitant radiance, not radiosity: the sun term is an irradiance so it takes the 1/PI, the sky
-    // term is already a radiance so it does not, and the feedback term is already exitant radiance
-    // gathered from surfaces that have themselves been through this same shader.
+    // Exitant radiance, not radiosity: the sun term is an irradiance (takes the 1/PI); the sky and
+    // feedback terms are already radiance/exitant (gathered from surfaces run through this shader).
     const float3 bounceGain = min(albedo * AVER_VOX_FEEDBACK, AVER_VOX_MAX_BOUNCE_GAIN);
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility / PI
                                 + averSkyIrradiance(N) * gAmbient.r * skyVis * skyInject)
                     + room.rgb * bounceGain;
-    // A LAMP'S OWN GLOW. Without it an emissive surface injected nothing and could never light a
-    // room through voxel GI. Added after the albedo multiply because emission is light the surface
-    // makes, not light it reflects, and s.emissive is already exitant radiance like the bracket
-    // above. The clamp below is Settings::giRadianceCeiling (default 16), so a lamp brighter than
-    // that injects at the ceiling.
+    // A LAMP'S OWN GLOW: without it, an emissive surface injected nothing and could never light a room
+    // through voxel GI. Added after the albedo multiply (emission is light the surface makes, not
+    // reflects; s.emissive is already exitant radiance). Clamped to Settings::giRadianceCeiling (default 16).
     radiance += s.emissive;
     radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
 
@@ -4248,15 +4185,12 @@ void PSVoxel(VoxOut i) {
     InterlockedAdd(gVoxelAccum[a + uint3(3,0,0)], 1u, prev);   // fragments covering this voxel
 }
 
-// All three kernels below dispatch over their destination mip level's FULL extent -- the group count
-// the C++ side requests never shrinks -- and instead skip work per-thread with this guard, so a thread
-// whose voxel falls outside [gBoxLo,gBoxHi) returns before touching any resource. With bounded dispatch
-// off, the C++ side sets gBoxLo=0 and gBoxHi=(this level's dimension), so the guard only ever rejects
-// threads at or beyond the texture edge -- exactly the threads whose writes D3D12/Vulkan already drop
-// silently out-of-bounds today. Every tier's voxel resolution is a power of two (QualityLadder.hpp), so
-// at mip 0 the dispatch already divides evenly by the 4-wide group and no thread id reaches that edge;
-// deeper mips can, since ceil(mipDim/4)*4 can overshoot mipDim, and this guard is what already made
-// that safe before bounded dispatch existed -- it is not new behaviour, only named and reused here.
+// All three kernels dispatch over their destination mip's FULL extent (the C++ group count never
+// shrinks) and skip per-thread instead: a thread whose voxel falls outside [gBoxLo,gBoxHi) returns
+// before touching any resource. With bounded dispatch off, gBoxLo=0/gBoxHi=(level dim), so the guard
+// only rejects threads at/beyond the edge -- writes D3D12/Vulkan already drop silently out-of-bounds.
+// Not new: deeper mips can overshoot (ceil(mipDim/4)*4 > mipDim; mip 0 never does since resolutions
+// are power-of-two, QualityLadder.hpp) and this guard already made that safe.
 
 // Zeroes the accumulator before injection.
 [numthreads(4,4,4)]

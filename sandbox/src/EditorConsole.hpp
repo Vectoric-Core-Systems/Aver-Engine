@@ -1,28 +1,19 @@
 #pragma once
-// THE console command registry and live-variable registry for the editor's Console drawer tab.
-// Mirrors GraphNodeDefs.hpp's own shape (plain data table + a push_back-per-line builder), because
-// that file is the precedent this one is asked to follow: adding a command or a variable is one
-// call in one of the builder functions below, not a hunt through SandboxApp.cpp's drawing code.
+// Console command registry + live-variable registry for the editor's Console drawer tab. Mirrors
+// GraphNodeDefs.hpp's shape (data table + push_back-per-line builder): adding a command or variable
+// is one call in a builder function below, not a hunt through SandboxApp.cpp. Header-only for the
+// same reason: SandboxApp.cpp is the only TU that includes this and may not touch CMakeLists.txt, so
+// there is nowhere to register a second .cpp. Every function below is `inline`.
 //
-// Header-only, like GraphNodeDefs.hpp, and for the same reason plus one more: SandboxApp.cpp is the
-// only translation unit that includes this, and the build task this file was written for is not
-// permitted to touch CMakeLists.txt, so there is nowhere to register a second .cpp even if one were
-// wanted. Every function below is `inline`.
+// Command table (help/frametime/get/set/vars) and variable table (voxi.*/post.*/rhi.*) share one
+// file deliberately: get/set/vars are commands that exist only to walk the variable table.
 //
-// TWO REGISTRIES, ONE FILE, DELIBERATELY NOT SPLIT: the command table (`help`, `frametime`, `get`,
-// `set`, `vars`) and the variable table (`voxi.*`, `post.*`, `rhi.*`) are two different shapes of
-// data, but `get`/`set`/`vars` are themselves commands that exist only to walk the variable table, so
-// the two are one feature wearing two tables, not two features that happen to share a file.
-//
-// SCOPE: this table only reads/writes aver::voxi::Renderer's process-wide settings, one
-// rhi::IDevice's post-process settings, and (rhi.* -- one entry so far, depthPrepass) a handful of
-// other already-public rhi::IDevice toggles that live OUTSIDE PostSettings -- all already-public
-// surfaces (Voxi.hpp, RHI.hpp). Nothing here adds a member to SandboxApp beyond what SandboxApp.cpp
-// declares for the console panel itself: settings this file cannot reach because they are PRIVATE
-// SandboxApp state with no accessor threaded through voxi::Renderer or rhi::IDevice (occlusion
-// culling, virtualized-geometry LOD selection -- see registerVoxiVars' own comment on why those two
-// are not here) stay out of this table until such an accessor exists, rather than growing a second
-// way for this file to reach into SandboxApp.
+// SCOPE: only reads/writes voxi::Renderer's process-wide settings, one rhi::IDevice's post-process
+// settings, and a few already-public rhi::IDevice toggles outside PostSettings (rhi.depthPrepass so
+// far) -- all already-public surfaces (Voxi.hpp, RHI.hpp). Nothing here adds a member to SandboxApp
+// beyond what SandboxApp.cpp declares for the console panel itself: PRIVATE SandboxApp state with no
+// accessor on voxi::Renderer/rhi::IDevice (occlusion culling, virtualized-geometry LOD selection)
+// stays out -- see registerVoxiVars' comment.
 
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
@@ -53,9 +44,8 @@ namespace aver { class SandboxApp; }
 namespace aver::editor {
 
 namespace detail {
-// Case-insensitive equality, identical in spirit to GraphNodeDefs.hpp's own ciEquals -- both this
-// table's command names and its variable names are looked up without regard to case, and neither
-// file wants to depend on the other for four lines.
+// Case-insensitive equality (mirrors GraphNodeDefs.hpp's own ciEquals; not shared, to avoid a
+// cross-file dependency for four lines). Used for both command names and variable names.
 inline bool ciEquals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -66,11 +56,9 @@ inline bool ciEquals(std::string_view a, std::string_view b) {
     }
     return true;
 }
-// Case-insensitive SUBSTRING test, the other half of ciEquals: completion and the variable browser
-// both need "does this name or description CONTAIN what was typed", not just "is it equal to it" --
-// see this file's own note on the console rework (someone who remembers a word from a description,
-// not a name, should still find the entry). O(n*m); every caller is a UI list of a few dozen entries
-// re-filtered a keystroke at a time, not a hot loop.
+// Case-insensitive substring test: completion and the variable browser need "name or description
+// CONTAINS what was typed", not equality -- a word from a description should still find the entry.
+// O(n*m); callers are UI lists of a few dozen entries re-filtered per keystroke, not a hot loop.
 inline bool ciContains(std::string_view hay, std::string_view needle) {
     if (needle.empty()) return true;
     if (needle.size() > hay.size()) return false;
@@ -92,13 +80,10 @@ inline bool ciContains(std::string_view hay, std::string_view needle) {
 // PART B: the live-variable registry (voxi.*, post.*, rhi.*)
 // =================================================================================================
 
-// A tagged union covering every scalar type a Settings/PostSettings field actually is. `Str` is a
-// fifth case beyond the four the design called for -- added because voxi.status.* and voxi.device.*
-// (read-only diagnostic fields such as Renderer::statusText, which is prose, not a number) are part
-// of "what to expose" in the design and cannot be represented by U32/F32/Bool/Quality at all. It is
-// a plain second field, not folded into the union, because std::string is non-trivial and giving the
-// union a hand-written destructor discriminated on `type` is not worth it for the handful of entries
-// that ever use it.
+// Tagged union of every scalar type a Settings/PostSettings field is. `Str` is a fifth case for
+// read-only diagnostic text (voxi.status.*/voxi.device.*, e.g. Renderer::statusText) that no
+// numeric type can hold; kept as a plain second field rather than folded into the union, since
+// std::string is non-trivial and a hand-written destructor isn't worth it for the few entries using it.
 enum class VarType : u8 { U32, F32, Bool, Quality, Str };
 
 struct VarValue {
@@ -131,8 +116,7 @@ inline std::string qualityDisplayName(u32 raw) { return voxi::Renderer::qualityN
 inline std::string qualityDisplayName(u32 raw) { return std::to_string(raw); }
 #endif
 
-// Formats a VarValue for `get`/`set`/`vars` output. Reuses Renderer::qualityName rather than
-// reinventing a name table, exactly as the design calls for.
+// Formats a VarValue for get/set/vars output; reuses Renderer::qualityName rather than a new name table.
 inline std::string formatValue(const VarValue& v) {
     switch (v.type) {
         case VarType::U32:  return std::to_string(v.as.u);
@@ -146,10 +130,9 @@ inline std::string formatValue(const VarValue& v) {
 
 // ---- string -> VarValue parsing, per type ------------------------------------------------------
 
-// U32: parsed as SIGNED first and a negative literal is reported as itself, never cast-and-wrapped
-// into a huge unsigned number. This is the exact trap SandboxApp.cpp's --rt-rays handling already
-// documents ("the warning... read '4294967291 shadow rays clamped to 32', which describes the cast
-// and not the typo that caused it") -- the console must not reintroduce it for `set`.
+// Parsed as SIGNED first so a negative literal is reported as itself, not wrapped into a huge
+// unsigned number -- the same trap SandboxApp.cpp's --rt-rays handling documents (a wrapped
+// "4294967291 shadow rays clamped to 32" names the cast, not the typo that caused it).
 inline bool parseU32(std::string_view tok, u32& out, std::string& err) {
     const std::string s(tok);
     char* end = nullptr;
@@ -177,8 +160,8 @@ inline bool parseBool(std::string_view tok, bool& out, std::string& err) {
     err = "'" + std::string(tok) + "' is not a bool (true/false, 1/0, on/off)";
     return false;
 }
-// Accepts either spelling: a case-insensitive name (off/low/medium/high/epic) or a bare 0-4, mirroring
-// how --gi already accepts a raw int and a project manifest stores giQuality as one.
+// Accepts a case-insensitive name (off/low/medium/high/epic) or a bare 0-4, mirroring --gi and the
+// manifest's giQuality.
 inline bool parseQuality(std::string_view tok, u32& out, std::string& err) {
     std::string s(tok);
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -194,31 +177,25 @@ inline bool parseQuality(std::string_view tok, u32& out, std::string& err) {
 
 // ---- the batch a `set` line stages into, and commits at most twice ------------------------------
 //
-// WHY THIS IS A LIST OF SETTER CLOSURES, NOT TWO PRE-SEEDED voxi::Settings STRUCTS (the shape the
-// design sketched). Seeding a "dial phase" Settings copy when the batch is BUILT and only calling
-// setSettings on it LATER, after a tier-phase commit may already have run, would hand that second
-// call a copy whose tier fields are the OLD tier -- and setSettings decides "did the tier change"
-// by comparing the incoming struct's tier fields against LIVE settings_ at the time of the call. A
-// stale tier field in the dial-phase copy would read as a second tier change and re-trigger
-// derivation, silently overwriting the very dial values this call exists to protect. Closures let
-// commitBatch build EACH phase's snapshot from Renderer::get().settings() at the moment that phase
-// actually commits -- tier-phase from whatever was live before this line ran, dial-phase from
-// whatever the tier-phase call (if any) just derived -- which is what section 2 of the design
-// actually specifies in its numbered steps, just not in the struct sketch above them.
+// Setter closures, not two pre-seeded voxi::Settings structs: a dial-phase struct seeded when the
+// batch is BUILT would carry stale tier fields once a tier-phase commit ran first, and setSettings
+// detects a tier change by diffing incoming vs LIVE settings_ -- a stale tier field would read as a
+// second tier change and re-derive, silently overwriting the dial values this exists to protect.
+// Closures let commitBatch snapshot Renderer::get().settings() fresh at each phase's own commit --
+// tier-phase from whatever was live before, dial-phase from whatever the tier-phase just derived.
 struct ConsoleBatch {
     std::vector<std::function<void(void*)>> tierSetters;   // void* is a voxi::Settings*; see below
     std::vector<std::function<void(void*)>> dialSetters;
     rhi::PostSettings post;
     bool seededPost = false;
     bool touchedPost = false;
-    // rhi.* vars that are a single immediate IDevice call rather than a field in a struct like `post`
-    // above -- see registerRhiVars' own comment for why there is no seed-then-commit struct for these.
-    // Run at commit, after Voxi and Post, so a line mixing namespaces still applies all-or-nothing.
+    // rhi.* vars are a single immediate IDevice call, not a struct field like `post` -- see
+    // registerRhiVars' comment. Runs at commit, after Voxi and Post, so a mixed-namespace line
+    // still applies all-or-nothing.
     std::vector<std::function<void(rhi::IDevice&)>> deviceSetters;
     rhi::IDevice* device = nullptr;
-    // (dotted name, requested value) pairs, filled by the `set` handler right after each stage()
-    // call -- used only for the post-commit diff report, so every field's "requested" line is
-    // driven by one piece of code regardless of which source (Voxi, Post) it came from.
+    // (dotted name, requested value), filled by `set` after each stage() call -- feeds the
+    // post-commit diff report from one place regardless of source (Voxi, Post).
     std::vector<std::pair<std::string, VarValue>> requested;
 };
 
@@ -242,13 +219,11 @@ inline const ConsoleVar* findVar(std::string_view dotted) {
 }
 
 // =================================================================================================
-// DISCOVERABILITY: tooltips, grouping, and substring search over the table above. Added for the
-// console rework ("make a tool someone can learn FROM rather than one they must already know") --
-// every function here reads ConsoleVar's existing fields, it adds none, because the design brief for
-// this table already produced the raw material (a rich one-line `help` per entry, a `readOnly` flag,
-// a live `read()`) and the gap was never the data, only that nothing besides `get`/`vars` ever showed
-// it. Kept in Part B, beside the table these read, rather than in SandboxApp.cpp: the same reason the
-// table itself lives here and not there (see this file's own header comment).
+// DISCOVERABILITY: tooltips, grouping, and substring search over the table above -- a tool someone
+// can learn FROM rather than one they must already know. Every function here reads ConsoleVar's
+// existing fields (help, readOnly, read()) and adds none; the gap was never the data, only that
+// nothing besides get/vars showed it. Kept beside the table for the same reason
+// the table itself lives here, not in SandboxApp.cpp (see this file's header comment).
 // =================================================================================================
 
 inline const char* varTypeName(VarType t) {
@@ -262,16 +237,12 @@ inline const char* varTypeName(VarType t) {
     return "?";
 }
 
-// Three honesty states a variable's VALUE can be in, named for the ones the table's own comments
-// already call out at length: voxi.giMode and voxi.denoiser read back what is ACTUALLY running
-// (LiveTruth), voxi.layeredBsdf is NOT live until a reload (NotLive) -- rather than a generic "has
-// caveats" flag every entry would need to opt into.
-// Detected from the SAME help text a tooltip already shows in full, by the words those two entries'
-// help strings already use ("ACTUALLY running" on voxi.giMode, "skips itself" on voxi.denoiser, "NOT
-// live" on voxi.layeredBsdf) -- a second field on ConsoleVar that only three entries would ever set is
-// more machinery than re-reading the sentence that already has to exist for the tooltip anyway.
-// "silently refus[ed/es]" is included pre-emptively (this table's own comments already reach for that
-// exact phrase in prose) so a future entry worded the same way is caught without touching this again.
+// Three honesty states a value can be in: voxi.giMode/voxi.denoiser read back what is ACTUALLY
+// running (LiveTruth), voxi.layeredBsdf is NOT live until a reload (NotLive). Detected from the
+// same help-text keywords a tooltip already shows ("ACTUALLY running" on voxi.giMode, "skips itself"
+// on voxi.denoiser, "NOT live" on voxi.layeredBsdf) rather than a new per-entry field only three
+// entries would ever set. "silently refus[ed/es]" is included pre-emptively so a future entry worded
+// the same way is caught without touching this again.
 enum class Honesty : u8 { Normal, LiveTruth, NotLive };
 inline Honesty varHonesty(const ConsoleVar& v) {
     if (v.help.find("NOT live") != std::string::npos) return Honesty::NotLive;
@@ -291,17 +262,12 @@ inline const char* varHonestyTag(Honesty h) {
     }
 }
 
-// The valid range or enum a name's OWN description or validate() already documents, not a second
-// source of truth someone has to remember to update alongside the help string. Bool/Quality have a
-// fixed vocabulary (parseBool/parseQuality already accept exactly this); everything else either has a
-// `validate` closure whose error message already spells the legal set out in words (voxi.msaa,
-// voxi.refractionMode -- calling it with a value no real field would accept is free, validate stages
-// nothing), or a help string ending in a parenthetical containing the word "clamp" (registerVoxiVars
-// and registerPostVars put one on nearly every dial: "(engine clamps to [1,16])", "(no engine
-// clamp)", "(clamped >= 0)"). Returns empty when none of those apply -- voxi.giMode and voxi.denoiser
-// are the two that matters most: varHonesty above already flags both with a fuller explanation of why
-// "valid range" is not even the right question for them (any u32/bool is accepted; what the engine
-// then does with it is the part worth reading).
+// The valid range/enum a name's own description or validate() already documents -- not a second
+// source of truth to keep in sync. Bool/Quality use their fixed vocabulary; others try validate()'s
+// error message (an out-of-range probe is free, it stages nothing) then a help-text parenthetical
+// containing "clamp" ("(engine clamps to [1,16])", "(no engine clamp)", etc). Empty when neither
+// applies -- voxi.giMode/voxi.denoiser, where varHonesty already covers why "valid range" isn't the
+// right question (any u32/bool is accepted; what the engine does with it is what matters).
 inline std::string varRangeHint(const ConsoleVar& v) {
     switch (v.type) {
         case VarType::Bool:    return "true/false, 1/0, on/off";
@@ -324,11 +290,9 @@ inline std::string varRangeHint(const ConsoleVar& v) {
     return v.help.substr(open + 1, close - open - 1);
 }
 
-// Group label for the browsable listing: the first TWO dotted segments when there are three or more
-// ("voxi.status.*" and "voxi.device.*" are each a coherent little table of their own -- see
-// registerVoxiVars' own comment -- so they get their own heading instead of drowning in "voxi.*"'s
-// twenty-odd dials), otherwise just the first segment. Generic on purpose: a future voxi.foo.bar
-// namespace needs no change here, unlike a hand-maintained list of group names would.
+// Group label for the browsable listing: first two dotted segments when there are 3+ (so
+// voxi.status.*/voxi.device.* get their own heading instead of drowning in voxi.*'s ~20 dials),
+// else the first segment. Generic on purpose -- a new voxi.foo.bar namespace needs no change here.
 inline std::string varGroupKey(const std::string& dotted) {
     const std::size_t first = dotted.find('.');
     if (first == std::string::npos) return dotted;
@@ -337,18 +301,14 @@ inline std::string varGroupKey(const std::string& dotted) {
 }
 inline std::string varGroupLabel(const std::string& groupKey) { return groupKey + ".*"; }
 
-// Does this variable answer a search for `query`? Matches the NAME or the DESCRIPTION, substring not
-// prefix -- see WHAT TO BUILD item 2 in the task this exists for: someone who remembers "firefly" but
-// not the exact dotted name of whatever dial it lives on should still find it if the word is in the
-// help text. An empty query matches everything (the unfiltered `vars`/browser state).
+// Substring match (not prefix) over name OR description, so "firefly" finds a dial even when it is
+// not in the dotted name. Empty query matches everything (the unfiltered vars/browser state).
 inline bool varMatchesQuery(const ConsoleVar& v, std::string_view query) {
     return detail::ciContains(v.name, query) || detail::ciContains(v.help, query);
 }
 
-// The one tooltip body every surface shares -- the completion popup, the browser, and the transcript
-// hover all call this SAME function, so the three cannot drift into showing different information for
-// the same name. Multi-line: what it is, its live value right now, its valid range if known, and the
-// live-truth/reload note if it is one of the entries this table's own comments single out for it.
+// One tooltip body shared by the completion popup, browser and transcript hover, so the three
+// cannot drift. Multi-line: what it is, its live value, its valid range, and any [live]/[reload] note.
 inline std::string varTooltipText(const ConsoleVar& v) {
     std::string s = v.name;
     s += "  (";
@@ -370,102 +330,72 @@ inline std::string varTooltipText(const ConsoleVar& v) {
 }
 
 #if AVER_MODULE_VOXI
-// The ReSTIR-GI poison debug view's live source of truth -- SAME SHAPE as
-// consoleOcclusionForceWaitIdleSlot() below (registerOcclusionVars' own comment has the full
-// reasoning): VoxiRenderer::setGiPoisonView is private renderer state with no path through
-// voxi::Renderer::Settings/setSettings, so this table cannot stage it as an ordinary dial the way
-// voxi.denoiser etc. are staged. A raw bool slot this header owns, written by `set voxi.giPoisonView`
-// and reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate (right
-// beside voxiRenderer_.setDebugView(giDebugView_)), is the same "console sets the seed, a per-frame
-// reassert makes it live" idiom occlusion.debugForceWaitIdle already uses.
+// ReSTIR-GI poison debug view's live source of truth (same shape as consoleOcclusionForceWaitIdleSlot()
+// below; registerOcclusionVars' comment has the full reasoning). VoxiRenderer::setGiPoisonView is private
+// renderer state with no path through voxi::Renderer::Settings/setSettings, so it cannot be staged
+// as an ordinary dial. Raw-slot idiom: a bool this header owns, written by `set voxi.giPoisonView`
+// and reasserted onto voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate -- the same
+// "console sets the seed, a per-frame reassert makes it live" shape occlusion.debugForceWaitIdle uses.
 inline bool& consoleGiPoisonViewSlot() { static bool v = false; return v; }
 
-// voxi.debugResetHistoryEveryFrame's live source of truth -- the same raw-slot idiom as
-// consoleGiPoisonViewSlot() directly above. A BISECTION AID for a temporal artifact, never saved:
-// SandboxApp.cpp's onUpdate resets every history named here once a frame, quietly, beside the
-// one-shot reset* commands. Anything that still lags, smears or fades with a history reset every
-// frame is not carried by that history. Bit 1 = ReSTIR GI reservoirs + GI visibility history,
-// 2 = RT shadow/reflection/sky-occlusion history (this also restarts NRD, which beginShadowHistory
-// resets whenever rtHistValid_ is false), 4 = NRD alone.
+// voxi.debugResetHistoryEveryFrame's live source of truth (same raw-slot idiom as
+// consoleGiPoisonViewSlot() above). Bisection aid, never saved: SandboxApp's onUpdate resets every
+// history named here once a frame, so anything that still lags, smears or fades is not carried by
+// that history. Bit 1 = ReSTIR GI reservoirs + GI visibility history, 2 = RT shadow/reflection/
+// sky-occlusion history (also restarts NRD via beginShadowHistory, which resets it whenever
+// rtHistValid_ is false), 4 = NRD alone.
 inline u32& consoleResetHistoryEveryFrameSlot() { static u32 v = 0; return v; }
 
-// The NRD legacy-camera A/B switch's live source of truth -- the SAME raw-slot idiom as
-// consoleGiPoisonViewSlot() directly above and for the identical reason: VoxiRenderer::
-// setNrdLegacyCamera is private renderer state (a toggle on an internal camera-factorisation path,
-// VoxiRenderer::beginShadowHistory) with no path through voxi::Renderer::Settings/setSettings, so
-// this table cannot stage it as an ordinary dial. Written by `set voxi.nrdLegacyCamera` and
-// reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate, right beside
-// the voxiRenderer_.setGiPoisonView(consoleGiPoisonViewSlot()) call this mirrors.
+// NRD legacy-camera A/B switch's live source of truth (same raw-slot idiom as
+// consoleGiPoisonViewSlot() above): VoxiRenderer::setNrdLegacyCamera is private renderer state (a
+// toggle on VoxiRenderer::beginShadowHistory's camera-factorisation path) with no Settings path.
+// Written by `set voxi.nrdLegacyCamera`, reasserted onto voxiRenderer_ each frame from onUpdate.
 inline bool& consoleNrdLegacyCameraSlot() { static bool v = false; return v; }
 
-// The lighting-contrast fix's legacy bitmask (contrast-fix plan, F7) -- the SAME raw-slot idiom as
-// consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot() directly above and for the identical reason:
-// VoxiRenderer::setLightingLegacyBits is private renderer state with no path through
-// voxi::Renderer::Settings/setSettings. ONE u32 here backs FIVE console variables below
-// (voxi.legacyRestirSampleRing etc.), each one flipping a single bit rather than the whole word, so
-// the user can A/B one root cause at a time. Seeded whole from --lighting-legacy for a --frames
-// capture, which has no console to flip five bits by hand; reasserted onto the live voxiRenderer_
-// once a frame from SandboxApp.cpp's onUpdate, right beside the
-// voxiRenderer_.setNrdLegacyCamera(consoleNrdLegacyCameraSlot()) call this mirrors. See
-// VoxiRenderer::setLightingLegacyBits' own header comment for the bit table.
+// Lighting-contrast fix's legacy bitmask (contrast-fix plan F7; same raw-slot idiom as above). ONE
+// u32 backs FIVE console variables below (voxi.legacyRestirSampleRing etc.), each flipping a single
+// bit so one root cause can be A/B'd at a time. Seeded whole from --lighting-legacy for a --frames
+// capture; reasserted each frame from onUpdate. Bit table: VoxiRenderer::setLightingLegacyBits.
 inline u32& consoleLightingLegacySlot() { static u32 v = 0; return v; }
 
-// The three engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME SHAPE as
-// consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot()/consoleLightingLegacySlot() directly above,
-// and for the identical reason: VoxiRenderer::setGiForceRebuild/setGiBoundedDispatch/
-// setGiFreeAccumulator are public methods on the renderer (unlike giPoisonView, which is private), but
-// none of the three round-trips through voxi::Renderer::Settings/setSettings -- so this table still
-// cannot stage them as ordinary dials, only as raw slots reasserted once a frame. Written by their
-// matching `set voxi.gi*` command and reasserted onto the live voxiRenderer_ from SandboxApp.cpp's
-// onUpdate, right beside the voxi.giPoisonView/nrdLegacyCamera reasserts these three mirror -- see
-// each setter's own header comment (VoxiRenderer.hpp) for what changing it actually does.
+// Three engine-optimisation-plan measurement dials (M1-M4/W3/W12; same raw-slot idiom as above).
+// setGiForceRebuild/setGiBoundedDispatch/setGiFreeAccumulator are public (unlike giPoisonView) but
+// none round-trips through Settings/setSettings. Written by their `set voxi.gi*` command, reasserted
+// each frame from onUpdate -- see each setter's own header comment (VoxiRenderer.hpp).
 inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
-// TRUE, because it was measured rather than left as a dial nobody turned. SandboxApp reasserts this
-// slot into VoxiRenderer every frame, so THIS is the editor's real default and the member
-// initialiser in VoxiRenderer.hpp (also true now, for hosts like the Runtime that never call the
-// setter) cannot be it. With it off, every GI rebuild cleared, resolved and mip-filtered the whole
-// 512^3 grid to touch 1.3% of it. See VoxiRenderer.hpp's own comment beside giBoundedDispatch_ for
-// the census line, the 30.64 -> 30.25ms measurement and the pixel-neutrality check.
+// Default TRUE (measured, not a dial nobody turned): this per-frame reassert is the editor's real
+// default; VoxiRenderer.hpp's member initialiser (also true now, for hosts like the Runtime that
+// never call the setter) is a separate default, not this one. Off: every GI rebuild clears, resolves
+// and mip-filters the whole 512^3 grid to touch the ~1.3% it changed (30.64->30.25ms; census line and
+// pixel-neutrality check alongside giBoundedDispatch_ in VoxiRenderer.hpp).
 inline bool& consoleGiBoundedDispatchSlot() { static bool v = true; return v; }
 inline bool& consoleGiFreeAccumulatorSlot() { static bool v = false; return v; }
 
-// optimisation-wave-2's U1 path-debug view (2.10 I) -- the SAME raw-slot idiom as
-// consoleGiPoisonViewSlot() above and for the identical reason: VoxiRenderer::setGiVisPathView is
-// private renderer state with no path through voxi::Renderer::Settings/setSettings. Paints F2's
-// resolved path (traced/reconstructed/half-res/no-ray) directly over indirect diffuse, so a by-hand
-// verification run can see whether U1's Half mode is actually reconstructing or quietly falling back
-// to Full everywhere (2.10 I's own comment on the poison view outranking this one when both are on).
-// Written by `set voxi.giVisPathView` or seeded from --gi-vis-path-view for a --frames capture with
-// no console, and reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate,
-// right beside the voxiRenderer_.setGiPoisonView(consoleGiPoisonViewSlot()) call this mirrors. Default
-// OFF: painting replaces indirect diffuse, so it must never happen just from opening the Console tab.
+// optimisation-wave-2's U1 path-debug view (2.10 I; same raw-slot idiom as consoleGiPoisonViewSlot()
+// above): VoxiRenderer::setGiVisPathView is private, no Settings path. Paints F2's resolved path
+// (traced/reconstructed/half-res/no-ray) over indirect diffuse, so a Half-mode run can be checked by
+// eye for whether it actually reconstructs. Written by `set voxi.giVisPathView` or seeded from
+// --gi-vis-path-view; reasserted each frame from onUpdate. Default OFF: the paint replaces indirect
+// diffuse, so it must never happen just from opening the Console tab.
 inline bool& consoleGiVisPathViewSlot() { static bool v = false; return v; }
 
-// W6/M5's pricing switch (section 4(a) of the optimisation-wave-2 plan) -- SAME raw-slot idiom as
-// consoleGiVisPathViewSlot() directly above: VoxiRenderer::setBlendedGiCone is a public method (like
-// setGiForceRebuild etc.) but, like every renderer setting in this file's raw-slot family, does not
-// round-trip through voxi::Renderer::Settings/setSettings. false (the default) keeps a blended
-// (alpha-blend or transmissive) fragment shading from ReSTIR, the fixed W6 behaviour and today's
-// image; true forces the pre-existing cone-gather fallback on every blended fragment instead, so the
-// "blended replay" span this wave's own M5 measurement reads (D3D12Device.cpp:5073) can be priced with
-// and without ReSTIR's share of it. Written by `set voxi.blendedGiCone` or seeded from --blended-gi
-// restir|cone, and reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate,
-// right beside the voxiRenderer_.setGiVisPathView(consoleGiVisPathViewSlot()) call this mirrors.
+// W6/M5's pricing switch (optimisation-wave-2 4(a); same raw-slot idiom, setBlendedGiCone public but
+// no Settings path). false (default) shades a blended fragment from ReSTIR (W6, today's image); true
+// forces the pre-existing cone-gather fallback so ReSTIR's share of the "blended replay" span
+// (D3D12Device.cpp:5073) can be priced by difference. Written by `set voxi.blendedGiCone` or
+// --blended-gi restir|cone; reasserted each frame from onUpdate.
 inline bool& consoleBlendedGiConeSlot() { static bool v = false; return v; }
 
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
-// tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
-// ConsoleBatch's own comment for why the split is closures rather than two struct copies.
+// tierSetters; everything setSettings derives FROM a tier goes through dialSetters -- see
+// ConsoleBatch's comment for why the split is closures, not two struct copies.
 //
-// TWO RENDER SETTINGS THAT LOOK LIKE THEY BELONG HERE AND ARE DELIBERATELY ABSENT: occlusion culling
-// (SandboxApp::occlusionCullEnabled_) and virtualized-geometry LOD selection
-// (SandboxApp::lodSelectEnabled_, SandboxApp::setLodSelect). Both are toggled live already -- the
-// editor's own Rendering-settings panel flips them every frame -- but as PRIVATE SandboxApp state
-// with no accessor on voxi::Renderer or rhi::IDevice, which is the only surface this table is allowed
-// to reach (see this file's own SCOPE comment). Reaching them would mean either making them public on
-// SandboxApp or adding a per-frame consoleApp() slot mirroring setConsoleDevice() below -- both real
-// options, but both a change to SandboxApp.cpp, which is out of scope for this file. Left out rather
-// than routed around, so the gap is visible instead of quietly worked around with a parallel path.
+// DELIBERATELY ABSENT: occlusion culling and virtualized-geometry LOD selection
+// (SandboxApp::occlusionCullEnabled_/lodSelectEnabled_/setLodSelect). Both are toggled live by the
+// editor's Rendering panel, but as PRIVATE SandboxApp state with no accessor on voxi::Renderer or
+// rhi::IDevice (this file's SCOPE). Reaching them would mean making them public on SandboxApp, or a
+// per-frame consoleApp() slot mirroring setConsoleDevice() below -- both a SandboxApp.cpp change,
+// out of scope here -- left out rather than routed around, so the gap stays visible.
 inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     using voxi::Renderer;
     using voxi::Settings;
@@ -493,10 +423,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vQualityRaw(static_cast<u32>(Renderer::get().settings().globalIllumination)); },
         [](ConsoleBatch& b, VarValue v){ const u32 q=v.as.u; b.tierSetters.push_back([q](void* sp){ static_cast<Settings*>(sp)->globalIllumination = static_cast<Quality>(q); }); }});
     t.push_back({"voxi.rayTracing", VarType::Quality, false,
-        // THE RETUNED LADDER (QualityLadder.hpp): rtShadowRays 1/1/4/8, rtShadowDenoise 2/2/1/1,
-        // rtRenderMode 0/1/1/1 at Low/Medium/High/Epic (rtPixelsPerRayTile stays flat at 1 everywhere).
-        // Low rasterises primary visibility by explicit product decision (D3) -- 0 is not a hardware
-        // gap the way Off's 0 is.
+        // Retuned ladder (QualityLadder.hpp): rtShadowRays 1/1/4/8, rtShadowDenoise 2/2/1/1,
+        // rtRenderMode 0/1/1/1 at Low/Medium/High/Epic (rtPixelsPerRayTile flat at 1). Low rasterises
+        // primary visibility by product decision (D3), not a hardware gap.
         "Ray-traced sun shadow quality tier; changing it derives rtShadowRays (1/1/4/8), "
         "rtPixelsPerRayTile (1 flat), rtShadowDenoise (2/2/1/1) and rtRenderMode (0/1/1/1, Low "
         "rasterises by product decision) at Low/Medium/High/Epic unless set in the same line",
@@ -510,17 +439,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Mesh-shader submission path on/off",
         []{ return vBool(Renderer::get().settings().meshShaders); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.tierSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->meshShaders = on; }); }});
-    // THE UE-STYLE OVERALL QUALITY PRESET (D2, Scalability.hpp), reachable from the console the same
-    // way the Rendering settings page's own Overall row is. STAGED AS A TIER SETTER, not a dial one,
-    // even though applyOverall ALSO writes every one of the three groups' derived knobs directly (not
-    // relying on setSettings' own change-gated derivation at all) -- it belongs with the tier setters
-    // because it must run in the FIRST commitBatch phase: `set voxi.scalability 4 voxi.rtShadowRays 2`
-    // needs the Overall preset applied and committed BEFORE the dial phase re-reads live settings and
-    // stages the explicit rtShadowRays 2 on top of them, or the two would race the same way a UI edit
-    // mixing tier and knob flags in one setSettings call used to (see SandboxApp.cpp's take(), N7).
-    // commitBatch already re-reads voxi::Renderer::get().settings() FRESH right before the dial phase
-    // (this file's own commitBatch comment) -- that existing re-read is what makes the example above
-    // end at rtShadowRays 2, not the ladder's 8, with no change needed here.
+    // UE-style Overall Quality preset (D2, Scalability.hpp), reachable from the console like the
+    // Rendering page's Overall row. Staged as a TIER setter (not dial), even though applyOverall also
+    // writes the derived knobs directly: it must run in the FIRST commitBatch phase, or
+    // `set voxi.scalability 4 voxi.rtShadowRays 2` would race the explicit rtShadowRays 2 the way a
+    // mixed tier/knob setSettings call used to (SandboxApp.cpp's take(), N7). commitBatch's existing
+    // fresh re-read before the dial phase (see its own comment) is what makes the example land on
+    // rtShadowRays 2, not the ladder's 8, with no extra code needed.
     t.push_back({"voxi.scalability", VarType::U32, false,
         "UE-style Overall Quality preset: 1 (Low) .. 4 (Epic) moves Global Illumination, Ray Tracing "
         "and Path Tracing to the same rung at once (Path Tracing always goes to Off -- a locked "
@@ -548,14 +473,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             return true;
         }});
 
-    // ---- read-only: sits beside the tier fields in Settings (same Quality type, same ladder shape)
-    // but is NOT one, and must not be staged like one. Settings::layeredBsdf's own comment says why:
-    // VoxiRenderer builds its raster PSOs once at init from whatever this held at that moment, so a
-    // `set` here would update settings_ and change NOTHING on screen until a project reload rebuilds
-    // the pipelines -- exactly the "lies about what is running" failure voxi.giMode's own honesty
-    // requirement (see below) exists to prevent, just with no live value to read back that would
-    // reveal the lie. Read-only is what keeps `get`/`vars` truthful about it instead: this is the
-    // tier that will apply on next load, not one that is live now.
+    // ---- read-only: sits beside the tier fields (same Quality type) but is NOT one -- must not be
+    // staged like one (Settings::layeredBsdf's own comment has the full reason). VoxiRenderer builds
+    // its raster PSOs once at init from this value, so a `set`
+    // here would update settings_ but change nothing on screen until a project reload -- the same
+    // "lies about what is running" voxi.giMode's honesty exists to prevent, with no live value to
+    // catch it. Read-only keeps get/vars truthful: this is next load's tier, not the live one.
     t.push_back({"voxi.layeredBsdf", VarType::Quality, true,
         "Layered BSDF (clear coat) tier over the base BRDF -- NOT live: pipelines are built from this once at project load, so changing it here takes a reload to have any effect (read-only for that reason)",
         []{ return vQualityRaw(static_cast<u32>(Renderer::get().settings().layeredBsdf)); }, nullptr});
@@ -599,16 +522,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vF32(Renderer::get().settings().giRadianceCeiling); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRadianceCeiling = n; }); }});
     // ---- refraction: how a translucent surface bends what is behind it (Settings::refractionMode's
-    // own comment has the full three-mode writeup). THERE NOW IS AN ENGINE-SIDE RANGE CLAMP (Voxi.cpp,
-    // between the REBLUR clamps and the resolve() call: any value above 2 clamps down to 1) -- this
-    // validate() still refuses out-of-range values up front so a bad `set` reports its OWN mistake
-    // rather than the different number the engine silently substituted, the same reason every other
-    // voxi.* validate in this file exists. What the engine does NOT do is clamp a request of 2
-    // (RayTraced) back down when RT hardware or the RT tier cannot honour it -- that is answered by
-    // resolve() (RenderSettingsResolver.hpp), the same effective-value mechanism voxi.giMode and
-    // voxi.denoiser below already read through: this var still reads the RAW requested field, not the
-    // effective one, since refraction's own UI control (buildRenderingSettings) shows the same
-    // distinction its own way and this table stays consistent with what setSettings actually stores.
+    // comment has the full writeup). Voxi.cpp clamps any request above 2 down to 1; validate() still
+    // refuses it up front so a bad `set` reports its OWN mistake, not the substituted number -- why
+    // every voxi.* validate here exists. The engine does NOT clamp a RayTraced (2) request that RT
+    // hardware/tier cannot honour -- that's resolve() (RenderSettingsResolver.hpp), which giMode and
+    // denoiser read through but this var does not: it reads the RAW requested field, matching what
+    // setSettings stores and how the UI control (buildRenderingSettings) shows the same distinction.
     t.push_back({"voxi.refractionMode", VarType::U32, false,
         "How a translucent surface bends what is behind it: 0 = off (straight sample), 1 = screen-space offset (nearly free, the Medium/Low rung), 2 = ray-traced hit point (costs a ray, the High/Epic rung; resolves back to 1 without RT hardware or with the RT tier Off)",
         []{ return vU32(Renderer::get().settings().refractionMode); },
@@ -637,39 +556,27 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Frames between GI volume revoxelisations (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().giUpdateInterval); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giUpdateInterval = n; }); }});
-    // THE HEADLINE ADDITION THIS FILE EXISTS FOR: the switch between the voxel-cone and RTXDI ReSTIR
-    // GI diffuse-bounce estimators (Settings::giMode's own comment has the full writeup). NOT staged
-    // as a tierSetter even though it reads like one -- setSettings never derives it from a tier, it
-    // only range-checks it (not even that, since the settings-separation pass, see below), so it
-    // belongs with the other dials that setSettings leaves alone unless a caller touches them directly.
-    //
-    // THE READ CLOSURE NO LONGER READS THE RAW STORED FIELD (F-d, the settings-separation pass):
-    // Renderer::setSettings used to hard-clamp giMode back to 0 whenever RayQuery hardware, the RT
-    // tier or the GI tier could not honour it, which is what let a plain `Renderer::get().settings().
-    // giMode` read double as "is it actually running" -- that clamp is gone, so a raw read here would
-    // now show 1 forever once requested, even on a device that refused it. voxi::resolve()
-    // (RenderSettingsResolver.hpp) is the one place that question is still answered, so this reads
-    // resolve(...).giMode.effective instead -- the SAME honesty guarantee as before (`set voxi.giMode 1`
-    // on a device with no RayQuery hardware, or with rayTracing/globalIllumination Off, stages 1,
-    // commits it, and this read reports back 0, wired into commitBatch's "requested vs now" diff same
-    // as always), just computed a different way now that the raw field cannot be trusted to carry it.
+    // The switch between voxel-cone and RTXDI ReSTIR GI diffuse-bounce estimators (Settings::giMode's
+    // comment has the full writeup). NOT a tierSetter despite reading like one -- setSettings never
+    // derives it from a tier, and (since the settings-separation pass) no longer even range-checks
+    // it, so it belongs with the dials setSettings leaves alone.
+    // The read closure no longer reads the raw field (F-d, settings-separation pass): setSettings
+    // used to hard-clamp giMode back to 0 when RayQuery/RT-tier/GI-tier could not honour it, which is
+    // what let a raw read double as "is it actually running"; that clamp is gone, so this now reads
+    // resolve(...).giMode.effective (RenderSettingsResolver.hpp) for the same honesty -- `set
+    // voxi.giMode 1` on unsupported hardware stages/commits 1, and this reads back 0.
     t.push_back({"voxi.giMode", VarType::U32, false,
         "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware, rayTracing != Off and globalIllumination != Off -- resolves back to 0 (the stored request is kept, untouched) when any is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vU32(voxi::resolve(r.settings(), r.deviceInfo()).giMode.effective); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
     // optimisation-wave-2's U1: how much of F2 (candidate-hit sky) and F3 (reuse visibility) -- the
-    // contrast fix's two per-pixel rays, cb4b48df -- giMode 1 pays for at this GI tier. A GI-group
-    // tier-derived DIAL, like voxi.giCones/voxi.voxelResolution above, so it belongs with the other
-    // dials `set voxi.globalIllumination <tier>` re-derives unless set in the same line.
-    //
-    // READS THE RAW STORED FIELD, not resolve()'s effective value, unlike voxi.giMode just above --
-    // Resolution::giRestirVisibility.effective deliberately EQUALS requested always
-    // (RenderSettingsResolver.hpp's own comment on that field explains why: clamping to 0 on a failed
-    // prerequisite would read "No ray (over-bright)" while no ReSTIR runs at all), so reading the raw
-    // field here reports the identical number resolve() would, without the extra resolve() call --
-    // the same "read the raw field, since raw and effective always agree for this one" shape
-    // voxi.refractionMode's own comment documents for the reason its own request/effective can diverge
-    // and why this dial's cannot.
+    // contrast fix's two per-pixel rays, cb4b48df -- giMode 1 pays for at this GI tier. A tier-derived
+    // DIAL like voxi.giCones above, re-derived by `set voxi.globalIllumination <tier>` unless set in
+    // the same line.
+    // Reads the RAW field, not resolve()'s effective value (unlike voxi.giMode above):
+    // Resolution::giRestirVisibility.effective deliberately EQUALS requested always (clamping to 0 on
+    // a failed prerequisite would read "no ray" while no ReSTIR runs at all), so raw and effective
+    // always agree here, unlike voxi.refractionMode's, and reading raw skips the extra resolve() call.
     t.push_back({"voxi.giRestirVisibility", VarType::U32, false,
         "0 no ray (pre-fix, over-bright), 1 reconstructed (no ray), 2 half resolution, 3 full. Only "
         "applies when voxi.giMode resolves to 1. voxi.legacyRestirHitSky / "
@@ -681,14 +588,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 3) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution) or 3 (full) -- values above 3 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
             return true;
         }});
-    // THE TWO DIALS THE FADE BISECTION LEFT STANDING. Everything else it added is gone again,
-    // each removed by its own measurement rather than by taste: the moving-camera reservoir-age cap
-    // and the moving-camera history cap both made the overshoot WORSE, the two reuse-similarity
-    // tolerances measured identical to their defaults, the bias-correction mode changed nothing,
-    // the Jacobian dial changed nothing, and a wave-local boiling filter cost 13% of the settled
-    // image's brightness while leaving the overshoot. See Settings::giRestirMaxHistory (Voxi.hpp)
-    // for the full chain and the numbers behind it. Ordinary dialSetters entries, same shape as
-    // voxi.giRestirVisibility above -- real Settings fields, not console-only overrides.
+    // The two dials the fade bisection left standing -- everything else it tried was removed by its
+    // own measurement: the moving-camera reservoir-age/history caps made the overshoot WORSE, the two
+    // reuse-similarity tolerances matched their defaults, bias-correction and the Jacobian dial changed
+    // nothing, and a wave-local boiling filter cost 13% of settled brightness without fixing the
+    // overshoot. Full chain and numbers: Settings::giRestirMaxHistory (Voxi.hpp). Ordinary dialSetters
+    // entries, real Settings fields like voxi.giRestirVisibility above, not console-only overrides.
     t.push_back({"voxi.giRestirMaxHistory", VarType::U32, false,
         "stparams.maxHistoryLength: how much weight a previous-frame ReSTIR GI reservoir may carry "
         "into the combine. DEFAULT 0, which is the camera-motion fade fix -- 1 was the old value and "
@@ -712,14 +617,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 15) { err = "giRestirSpatialSamples must be 0 (no spatial reuse) through 15 (auto) -- four packed bits is all it has"; return false; }
             return true;
         }});
-    // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
-    // idiom rather than an ordinary dialSetters entry. SEVEN of the eight colours below are giMode 1
-    // (ReSTIR) only: those guards live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never
-    // calls. The eighth, VIOLET, is NOT giMode-gated (B1/F5, added by the build/shader-safety review):
-    // it is painted directly in voxi.hlsl's PSMainVoxi/PSRayDriven over the ray-traced specular
-    // indirect term's own AVER_VOX_MAXRAD ceiling hit, which exists under either diffuse estimator --
-    // see aver_IsGiRestirPoisonColour's own comment (voxi.hlsl, just above PSMainVoxi) for the
-    // precedence between the two families.
+    // NOT a Settings field -- see consoleGiPoisonViewSlot()'s comment for the raw-slot idiom. Seven
+    // of the eight colours below are giMode 1 (ReSTIR) only (voxi_restir.hlsli's giRestirIndirect,
+    // never called by giMode 0). The eighth, VIOLET (B1/F5), is NOT giMode-gated: painted in
+    // voxi.hlsl's PSMainVoxi/PSRayDriven over the ray-traced specular indirect term's own
+    // AVER_VOX_MAXRAD ceiling hit, which exists under either diffuse estimator. Precedence between
+    // the two families: aver_IsGiRestirPoisonColour's comment (voxi.hlsl, above PSMainVoxi).
     t.push_back({"voxi.giPoisonView", VarType::Bool, false,
         "ReSTIR-GI poison debug view: paints an unmistakable colour over any pixel where one of "
         "voxi_restir.hlsli's guards fired THIS frame -- magenta = the store-time reservoir guard (the "
@@ -753,13 +656,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 7) { err = "debugResetHistoryEveryFrame is a mask of 1, 2 and 4 -- 0 to 7"; return false; }
             return true;
         }});
-    // optimisation-wave-2's U1 path-debug view (2.10 I) -- see consoleGiVisPathViewSlot()'s own
-    // comment above for the raw-slot idiom and why. Paints F2's resolved path (yellow = no ray,
-    // green = reconstructed, blue = half-res reconstruction, red = half-res fallback trace, white =
-    // full trace) directly over indirect diffuse, so a Half-mode run can be checked by eye for
-    // whether it is actually reconstructing anywhere instead of quietly tracing every pixel as Full.
-    // Suppressed while voxi.giPoisonView is also on (that view answers a different, higher-priority
-    // question -- corruption, not which visibility path ran -- and paints first).
+    // optimisation-wave-2's U1 path-debug view (2.10 I; see consoleGiVisPathViewSlot()'s comment for
+    // the raw-slot idiom). Colour mapping is in the help string below. Suppressed while
+    // voxi.giPoisonView is also on (it answers a different, higher-priority question -- corruption,
+    // not which visibility path ran -- and paints first).
     t.push_back({"voxi.giVisPathView", VarType::Bool, false,
         "U1 path-debug view: paints F2's resolved visibility path over indirect diffuse -- yellow = "
         "no ray (mode 0 or a legacy bit), green = reconstructed (voxel cone), blue = half-resolution "
@@ -772,11 +672,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiVisPathViewSlot() = on; });
         }});
-    // NOT a Settings field, SAME SHAPE as voxi.giPoisonView directly above and for the identical
-    // reason -- see consoleNrdLegacyCameraSlot()'s own comment. [live]: toggling this resets NRD's
-    // history on the very next frame (VoxiRenderer::setNrdLegacyCamera's own comment has the
-    // mechanism), which is what lets an A/B comparison be made by hand without a rebuild or a
-    // project reload.
+    // NOT a Settings field, same shape as voxi.giPoisonView above -- see consoleNrdLegacyCameraSlot()'s
+    // comment. [live]: toggling resets NRD's history next frame (VoxiRenderer::setNrdLegacyCamera's
+    // comment has the mechanism), enabling an A/B with no rebuild or reload.
     t.push_back({"voxi.nrdLegacyCamera", VarType::Bool, false,
         "A/B switch for the NRD camera-contract fix in VoxiRenderer::beginShadowHistory (see its own "
         "comment on the NRD block for the mechanism this reinstates). Default OFF is the FIXED "
@@ -790,13 +688,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleNrdLegacyCameraSlot() = on; });
         }});
-    // ---- the lighting-contrast fix's five legacy A/B switches (contrast-fix plan, section 3's A/B
-    // table) -- one bit each of consoleLightingLegacySlot()'s own u32, so the user can isolate ONE
-    // root cause at a time instead of typing a bitmask by hand. SAME raw-slot/deviceSetters shape as
-    // voxi.giPoisonView and voxi.nrdLegacyCamera directly above; only the read/stage pair differ,
-    // since these five share one underlying word instead of each owning a whole bool. Default
-    // OFF/false on every one of them: the FIXED behaviour is what ships, and ALL FIVE true must
-    // reproduce HEAD's image exactly (review checklist item 12) -- never a setting to leave on.
+    // ---- lighting-contrast fix's five legacy A/B switches (contrast-fix plan section 3), one bit
+    // each of consoleLightingLegacySlot()'s u32 so one root cause can be isolated at a time. Same
+    // raw-slot/deviceSetters shape as voxi.giPoisonView/nrdLegacyCamera above. Default OFF on all
+    // five (the fixed behaviour); ALL FIVE true must reproduce HEAD's image exactly (checklist item 12).
     auto legacyBitRead = [](u32 bit) {
         return [bit]{ return vBool((consoleLightingLegacySlot() & bit) != 0u); };
     };
@@ -837,15 +732,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "instead of cos (root cause R6; gAmbientParams.z bit 16). Default OFF weights each cone once. "
         "Affects giMode 0, the non-RT fallback, and the cluster and particle passes.",
         legacyBitRead(16u), legacyBitStage(16u)});
-    // W6/M5's OWN legacy A/B switch (section 4(b) of the optimisation-wave-2 plan) -- one bit more of
-    // the SAME consoleLightingLegacySlot() word the five above share, so it composes with them (and
-    // with --lighting-legacy) exactly the same way: one root cause isolated at a time. ON reinstates
-    // the pre-W6 behaviour for comparison only -- a blended (alpha-blend or transmissive) fragment's
-    // per-pixel reservoir store, surface history and NRD readback go back to writing/reading
-    // unconditionally, so the opaque surface behind glass or water loses temporal reuse to whichever
-    // pane covered it last, on D3D12 (Vulkan never marks a draw blended -- see VulkanDevice.cpp's own
-    // blended=false comment -- so this bit is inert there, like the others in this table already are
-    // off their own backend's gaps). Default OFF/false: the FIXED behaviour (W6) is what ships.
+    // W6/M5's own legacy A/B switch (optimisation-wave-2 4(b)) -- one more bit of the same
+    // consoleLightingLegacySlot() word, composing with the five above and --lighting-legacy. Behaviour
+    // and default are in the help string below; inert on Vulkan (VulkanDevice.cpp's blended=false).
     t.push_back({"voxi.legacyBlendedHistoryWrite", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: a blended (alpha-blend or "
         "transmissive) fragment's per-pixel GI/NRD history writes and readbacks stop being suppressed, "
@@ -860,11 +749,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "leaking along edges. Default OFF reprojects the read to where the surface was last frame "
         "(gAmbientParams.z bit 64). A still frame is identical either way.",
         legacyBitRead(64u), legacyBitStage(64u)});
-    // ---- the engine-optimisation-plan measurement dials (M1-M4/W3/W12) -- SAME raw-slot/
-    // deviceSetters shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s own comment
-    // for why these three, unlike the tier/dial fields, cannot be staged as ordinary Settings dials).
-    // Default OFF on all three: none changes the rendered image when off, only what the renderer
-    // measures or how it schedules work getting there.
+    // ---- engine-optimisation-plan measurement dials (M1-M4/W3/W12), same raw-slot/deviceSetters
+    // shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s comment for why). Default
+    // OFF on all three: none changes the rendered image, only what is measured or how work is scheduled.
     t.push_back({"voxi.giForceRebuild", VarType::Bool, false,
         "Measurement only: forces every GI tick to rebuild from scratch, the way the very first tick "
         "after a level load always does. The GI derived-data cache (VoxiRenderer::setGiCacheDir) is "
@@ -902,13 +789,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiFreeAccumulatorSlot() = on; });
         }});
-    // W6/M5's pricing switch (section 4(a) of the optimisation-wave-2 plan) -- see
-    // consoleBlendedGiConeSlot()'s own comment above for the raw-slot idiom and why. Measurement only,
-    // like the three above: neither value changes the rendered image on its own, only which term a
-    // blended (alpha-blend or transmissive) fragment shades its indirect diffuse from. Default false
-    // keeps W6's fix -- ReSTIR shades every fragment, blended ones included, the way the D3 decision
-    // ships it. true drops blended fragments back to the pre-W6 cone gather so the ReSTIR share of
-    // the "blended replay" span (D3D12Device.cpp:5073) can be read by difference.
+    // W6/M5's pricing switch (optimisation-wave-2 4(a); see consoleBlendedGiConeSlot()'s comment for
+    // the raw-slot idiom). Measurement only, like the three above -- default/behaviour details are in
+    // the help string below.
     t.push_back({"voxi.blendedGiCone", VarType::Bool, false,
         "Measurement only (W6/M5): false (default) shades a blended fragment's indirect diffuse from "
         "ReSTIR like any opaque fragment, the fixed W6 behaviour. true forces the pre-existing "
@@ -919,22 +802,17 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleBlendedGiConeSlot() = on; });
         }});
-    // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
-    // the same honesty voxi.giMode above documents at length, and through the SAME mechanism now:
-    // voxi::resolve()'s denoiser field, not a raw Settings read. denoiser was never clamped inside
-    // Settings itself (unlike giMode's old, now-removed clamp), but "read the raw field" and "read
-    // whether it is actually running" only ever coincided because nothing could refuse it that
-    // Settings' own honesty didn't already cover -- RequiresNrd/RequiresRayTracingEnabled/
-    // RequiresGlobalIllumination/NothingToDenoise below all can now (RenderSettingsResolver.hpp). NRD
-    // also refuses to run at any MSAA above 1 (D3D12 will not mix sample counts in one render-target
-    // set, so the G-buffer would be cleared and never written) -- that ONE reason is SOFT
-    // (RequiresMsaaOne): resolve() still reports it as not-effective here, so `set voxi.denoiser true`
-    // at 8x MSAA stages true, commits true, and this read reports back false, with nothing more needed
-    // than `set voxi.msaa 1` alongside it -- the WARN from VoxiRenderer is the other half of that same
-    // story, printed once from the render side.
-    // Occlusion-aware fog (2026-09-24): the fog's in-scattered light scaled by how much sky the air
-    // along the view ray can see, from a world-space volume built off the GI voxels. OFF restores the
-    // old unoccluded fog exactly, for A/B -- the one that glowed blue inside covered arcades.
+    // DIAL, not a tier; reads back what is ACTUALLY running via voxi::resolve()'s denoiser field
+    // (RenderSettingsResolver.hpp), the same honesty mechanism as voxi.giMode above --
+    // denoiser was never clamped inside Settings itself (unlike giMode's old, now-removed clamp) --
+    // reading raw and reading "is it actually running" only ever coincided because nothing could
+    // refuse it that Settings' own honesty didn't already cover; RequiresNrd/RequiresRayTracingEnabled/
+    // RequiresGlobalIllumination/NothingToDenoise can all now refuse it. NRD also refuses above MSAA 1
+    // (D3D12 will not mix sample counts in one render-target set, so the G-buffer would be cleared and
+    // never written) -- that reason is SOFT (RequiresMsaaOne): `set voxi.denoiser true` at 8x MSAA still
+    // stages/commits true and reads back false; VoxiRenderer prints the matching WARN once.
+    // Occlusion-aware fog (2026-09-24): in-scattered light scaled by GI-voxel sky visibility. OFF
+    // restores the old unoccluded fog (the one that glowed blue inside covered arcades), for A/B.
     t.push_back({"voxi.fogOcclusion", VarType::Bool, false,
         "Fog in-scatter respects occlusion: enclosed air (arcades, rooms) stops glowing with sky light it cannot see. Built from the GI voxel volume, so it needs voxel GI on; off = the old unoccluded fog",
         []{ return vBool(Renderer::get().settings().fogOcclusion); },
@@ -944,12 +822,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
     // ---- REBLUR_DIFFUSE history/prepass tuning -- LIVE: VoxiRenderer re-issues NRD's own
-    // SetDenoiserSettings every frame (see applyReblurTuning, VoxiRenderer.cpp), so a change here
-    // takes effect on the NEXT frame with no project reload and no NRD instance recreation -- unlike
-    // voxi.layeredBsdf above, this is NOT a [reload] entry. Only meaningful once voxi.denoiser is on
-    // and REBLUR_DIFFUSE has actually been created (giMode 1 or the sky-occlusion rays wanting it);
-    // harmless and silently kept for later otherwise, same as any other dial set before its feature is
-    // active. Ranges are NRD's own (third_party/nrd/Include/NRDSettings.h's ReblurSettings).
+    // SetDenoiserSettings every frame (applyReblurTuning, VoxiRenderer.cpp), so a change takes effect
+    // next frame with no reload, unlike voxi.layeredBsdf above. Only meaningful once voxi.denoiser is
+    // on and REBLUR_DIFFUSE exists; harmless and kept otherwise. Ranges are NRD's own (NRDSettings.h).
     t.push_back({"voxi.reblurDiffusePrepassBlurRadius", VarType::F32, false,
         "REBLUR_DIFFUSE pre-accumulation spatial blur radius, in pixels; 0 skips the pre-pass dispatch "
         "entirely. NRD's own default and this engine's is 30 (engine clamps to [0,100] -- NRD's header "
@@ -1037,21 +912,19 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rtShadowDenoise = n; }); }});
     t.push_back({"voxi.rtRenderMode", VarType::U32, false,
-        // NO LONGER "opt-in only, no quality tier turns this on" -- the ladder does now (D3, the
-        // settings-separation retune): Medium/High/Epic derive this to 1, Low derives it to 0
-        // (rasteriser, by explicit product decision, not a hardware gap) and Off to 0 (no acceleration
-        // structure to trace against). ladder::rtRenderMode (QualityLadder.hpp) has the full reasoning.
+        // No longer opt-in only with no quality tier turning it on -- the ladder now derives it (D3,
+        // settings-separation retune): Medium/High/Epic -> 1, Low -> 0 (rasteriser, product decision
+        // not hardware gap), Off -> 0 (no acceleration structure to trace against). Full reasoning:
+        // ladder::rtRenderMode.
         "0 = rasteriser finds the first surface, 1 = a primary ray per pixel does -- gives up hardware early-Z. Derived from the RT tier on a tier change (Off/Low 0, Medium/High/Epic 1) unless set in the same line",
         []{ return vU32(Renderer::get().settings().rtRenderMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rtRenderMode = n; }); }});
-    // Milestone 1's A/B switch over rtRenderMode's OWN internal shape, directly beneath it for the
-    // same reason voxi.giRestirMaxHistory sits under voxi.giRestirVisibility: the two are read
-    // together while bisecting the staged split against the single pass it replaces. Milestone 4
-    // adds value 2, a staged variant that deliberately trades GI quality for speed rather than
-    // staying a same-image comparison -- see Voxi.hpp's own comment on Settings::rayDrivenStages
-    // for the full reasoning. Only meaningful once voxi.rtRenderMode itself resolves to 1 (primary
-    // rays); see RenderSettingsResolver.hpp's Resolution::rayDrivenStages for the Project Settings
-    // page's own greyed reason.
+    // Milestone 1's A/B switch over rtRenderMode's internal shape, placed beneath it (like
+    // voxi.giRestirMaxHistory under voxi.giRestirVisibility) so the two are read together while
+    // bisecting the staged split. Milestone 4's value 2 trades GI quality for speed rather than
+    // staying a same-image comparison -- see Voxi.hpp's Settings::rayDrivenStages comment. Only
+    // meaningful once voxi.rtRenderMode resolves to 1; see RenderSettingsResolver.hpp's
+    // Resolution::rayDrivenStages for the Project Settings page's greyed reason.
     t.push_back({"voxi.rayDrivenStages", VarType::U32, false,
         "0 = single pass (default, today's one ray-driven draw -- the comparison baseline), 1 = "
         "staged: a visibility compute pass, a shadow compute pass, then the same shading draw "
@@ -1195,28 +1068,25 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
 #endif // AVER_MODULE_VOXI
 
 // Post is per-DEVICE state (IDevice::postProcess/setPostProcess), not a process-wide singleton like
-// voxi::Renderer -- but ConsoleVar::read is a zero-argument closure (called with no Engine& in scope
-// from handleVarGet/handleVarsList, and from commitBatch's post-commit diff, which has only the
-// ConsoleBatch). Rather than thread a device pointer through every one of those call sites, the
-// console panel hands its (single, process-lifetime-stable once attached) device pointer to this file
-// once a frame via setConsoleDevice() -- see drawConsole(Engine&) in SandboxApp.cpp, which is the only
-// caller. A null device (no swapchain yet) makes every post.* read/stage a documented no-op, not a
-// crash.
+// voxi::Renderer -- but ConsoleVar::read is a zero-argument closure (no Engine& in scope, e.g. from
+// handleVarGet/handleVarsList and commitBatch's post-commit diff). Rather than thread a device
+// pointer through every call site, the console panel hands its (single, process-lifetime-stable once
+// attached) device pointer to this file once a frame via setConsoleDevice() -- see drawConsole(Engine&)
+// in SandboxApp.cpp, the only caller. A null device (no swapchain yet) makes every post.* read/stage
+// a documented no-op, not a crash.
 inline rhi::IDevice*& consoleDeviceSlot() { static rhi::IDevice* d = nullptr; return d; }
 inline void setConsoleDevice(rhi::IDevice* d) { consoleDeviceSlot() = d; }
 inline rhi::IDevice* consoleDevice() { return consoleDeviceSlot(); }
 
-// setPostProcess DOES NO CLAMPING AT ALL (`post_ = p;` in both D3D12Device.cpp and VulkanCommon.hpp)
-// -- the opposite asymmetry from Voxi's setSettings, which clamps unconditionally. So Post entries
-// are the one place THIS TABLE clamps before ever calling setPostProcess, and reports the clamp
-// through the same "requested vs now" diff commitBatch already produces for Voxi -- see ConsoleBatch's
-// own comment. Ranges below are inferred from the field comments and defaults in RHI.hpp, not from any
-// documented contract; PostSettings has none today.
-//
-// One entry per field, spelled out rather than driven by a `f32 PostSettings::*` table: a
-// pointer-to-member table would still need one clamp range and one help string per field anyway, and
-// autoExposure (bool, no clamp) does not fit the same shape as the ten f32 fields around it -- naming
-// each field once is the smaller amount of machinery for eleven entries.
+// setPostProcess does NO clamping (`post_ = p;` in both D3D12Device.cpp and VulkanCommon.hpp) --
+// the opposite of Voxi's setSettings, which clamps unconditionally. So Post entries are the one place
+// THIS TABLE clamps before calling setPostProcess, reporting the clamp through the same "requested vs
+// now" diff commitBatch produces for Voxi (see ConsoleBatch's comment). Ranges below are inferred
+// from RHI.hpp's field comments/defaults, not a documented contract -- PostSettings has none today.
+// One entry per field rather than a `f32 PostSettings::*` table: a pointer-to-member table still
+// needs one clamp range and help string per field, and autoExposure (bool, no clamp) does not fit
+// the shape of the ten f32 fields around it -- naming each field once is the smaller amount of
+// machinery for eleven entries.
 inline void registerPostVars(std::vector<ConsoleVar>& t) {
     auto stageClamped = [](f32 rhi::PostSettings::* mem, f32 lo, f32 hi) {
         return [mem, lo, hi](ConsoleBatch& b, VarValue v) {
@@ -1281,25 +1151,21 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
         readField(&rhi::PostSettings::maxRadiance), stageClamped(&rhi::PostSettings::maxRadiance, 0.0f, 1e6f)});
 }
 
-// The path tracer's matched-environment legacy switch (contrast-fix plan F6/F7; root cause R5) --
-// the SAME raw-slot idiom as consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot() above, but
-// DELIBERATELY NOT declared inside their AVER_MODULE_VOXI guard: aver::pt::PtSceneView's own
-// registration and tier selection have to keep working with AVER_MODULE_VOXI off (see
-// SandboxApp.cpp's own comment on ptSceneViewWantEnabled_ for why), and a slot that variable and
-// SandboxApp.cpp's per-frame reassert both need cannot live inside a guard the path tracer does not
-// share. Written by `set pt.legacyEnvironment` (registerRhiVars just below, the one variable table
-// this file builds unconditionally) or seeded from --pt-legacy-env for a --frames capture with no
-// console, and reasserted onto the live ptSceneView_ once a frame from SandboxApp.cpp's onUpdate via
+// Path tracer's matched-environment legacy switch (contrast-fix plan F6/F7; root cause R5), same
+// raw-slot idiom as consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot() above but DELIBERATELY
+// outside their AVER_MODULE_VOXI guard: PtSceneView's registration/tier selection must keep working
+// with that module off (see SandboxApp.cpp's ptSceneViewWantEnabled_ comment). Written by
+// `set pt.legacyEnvironment` (registerRhiVars below) or seeded from --pt-legacy-env (for a --frames
+// capture with no console); reasserted onto ptSceneView_ each frame from onUpdate via
 // PtSceneView::setLegacyEnvironment.
 inline bool& consolePtLegacyEnvSlot() { static bool v = false; return v; }
 
-// Direct rhi::IDevice toggles that live OUTSIDE PostSettings entirely -- rhi.* rather than post.*,
-// because they are not part of the camera post-processing chain PostSettings describes, they are raw
-// per-device render state. Staged through ConsoleBatch::deviceSetters (a plain list of "call this on
-// the device" closures) rather than through a seed-then-commit struct the way Post is: there is no
-// struct backing these to seed, each one is a single immediate IDevice call, so batching only needs
-// to defer WHEN it runs (until commit, so `set` stays all-or-nothing), not merge several fields into
-// one call the way Post's setPostProcess(one struct) does.
+// Direct rhi::IDevice toggles OUTSIDE PostSettings entirely -- rhi.* not post.*, since these are raw
+// per-device render state, not part of the post-processing chain. Staged through
+// ConsoleBatch::deviceSetters (plain "call this on the device" closures), not a seed-then-commit
+// struct like Post: there is no struct backing these to seed, each is a single immediate call, so
+// batching only defers WHEN it runs (until commit, so `set` stays all-or-nothing), never merging
+// several fields into one call the way Post's setPostProcess(one struct) does.
 inline void registerRhiVars(std::vector<ConsoleVar>& t) {
     t.push_back({"rhi.depthPrepass", VarType::Bool, false,
         "Same-frame depth-only pass ahead of the opaque colour walk, so an occluded fragment never reaches PSMainVoxi's shadow lookup/cone trace/fog -- off by default (identical to every render before this existed), on with --depth-prepass or here",
@@ -1308,15 +1174,13 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice& d){ d.setDepthPrepassEnabled(on); });
         }});
-    // pt.*, not rhi.*: registered here only because this is the one variable table this file builds
-    // with NO module guard (see consolePtLegacyEnvSlot()'s own comment for why that matters for the
-    // path tracer specifically) -- not because this is per-device render state the way
-    // rhi.depthPrepass above is. ON reinstates root cause R5 for comparison only: every path-tracer
-    // miss returns the reference sky (skyColor/averSkyPhysical) instead of the SAME SH sky the raster
-    // ambient term and ReSTIR use (PtFrame gPtTrace.z). Default OFF: every INDIRECT miss, off any
-    // lobe, reads that SH sky; camera rays use skyColor either way. (With kSkyIrradianceCalibration 1
-    // since 2026-09-24 the two skies share a scale and differ only by the SH's L2 smoothing; under
-    // the old 8 the reference sky was 8x dimmer.) See PtSceneView::setLegacyEnvironment.
+    // pt.*, not rhi.*: registered here only because this is the one variable table with NO module
+    // guard (see consolePtLegacyEnvSlot()'s comment), not because it is per-device state like
+    // rhi.depthPrepass. Behaviour is in the help string below; also true but not in it: every
+    // INDIRECT miss off any lobe reads the SH sky and so does ReSTIR, but camera rays use skyColor
+    // either way. (Since kSkyIrradianceCalibration 1 on 2026-09-24 the two skies share scale,
+    // differing only by SH L2 smoothing; under the old 8 the reference sky was 8x dimmer.) See
+    // PtSceneView::setLegacyEnvironment.
     t.push_back({"pt.legacyEnvironment", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: the path tracer's diffuse-bounce "
         "miss returns the unmatched reference sky instead of the same calibrated sky the raster "
@@ -1331,54 +1195,34 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
 // occlusion.* -- ONE entry, for OcclusionCullerImpl::debugForceWaitIdle_ (Occlusion.hpp's
-// setDebugForceWaitIdle). Every OTHER occlusion setting is exactly the case this file's own comment
-// above registerVoxiVars calls out and deliberately leaves out ("occlusion culling... PRIVATE
-// SandboxApp state with no accessor on voxi::Renderer or rhi::IDevice, which is the only surface this
-// table is allowed to reach") -- that reasoning still holds for occlusionCullEnabled_ itself, which
-// stays out. This one is different in exactly the way that comment's own "real options" describe: it
-// needs no call into SandboxApp or IOcclusionCuller at all, only a bool SandboxApp itself reasserts
-// onto the live occluder_ every frame (onUpdate, the same idiom occlusionCullForceOff_ already uses to
-// survive a manifest reload) -- so a raw bool slot this header owns, written by `set`/read by `get`
-// and read back by SandboxApp once a frame, is enough, with none of the complete-type problem a
-// consoleApp() mirroring setConsoleDevice() would have (SandboxApp is only forward-declared up top).
-// Defaults to TRUE -- NOT the base interface's own default-off contract (IOcclusionCuller::
-// setDebugForceWaitIdle's base is a false no-op for a hypothetical future implementer). A follow-up
-// investigation found the no-wait path measurably worse (against a path-traced ground truth, and in
-// a same-shader controlled A/B reproducing a "flat lighting" report) without finding which GI/
-// lighting resource actually depends on the wait -- see OcclusionCuller.cpp's FOLLOW-UP comment
-// above its kInFlight member. This pays the stall by default until that dependency is found and
-// fixed narrowly; set false here (or launch with --no-occlusion-waitidle) to opt back into the
-// faster, not-yet-proven-correct path. SandboxApp seeds this from occlusionDebugForceWaitIdleArg_
-// (--occlusion-waitidle / --no-occlusion-waitidle) before the first read.
+// setDebugForceWaitIdle). Every other occlusion setting is PRIVATE SandboxApp state with no accessor
+// on voxi::Renderer/rhi::IDevice (this file's SCOPE) and stays out, occlusionCullEnabled_ included.
+// This one differs: just a bool SandboxApp reasserts onto occluder_ each frame (onUpdate, same idiom
+// as occlusionCullForceOff_) -- a raw bool slot this header owns, written by `set`/read by `get`, is
+// enough, with no consoleApp()-style complete-type problem (SandboxApp is only forward-declared).
+// Defaults TRUE, NOT the base interface's default-off (IOcclusionCuller's base setDebugForceWaitIdle
+// is a false no-op for a hypothetical future implementer): a follow-up investigation found the no-wait
+// path measurably worse (vs path-traced ground truth, and an A/B reproducing a "flat lighting"
+// report) without finding which GI/lighting resource depends on the wait (OcclusionCuller.cpp's
+// FOLLOW-UP comment above kInFlight). Pays the stall until fixed; set false or launch with
+// --no-occlusion-waitidle (which also seeds this) for the faster, not-yet-proven-correct path.
 inline bool& consoleOcclusionForceWaitIdleSlot() { static bool v = true; return v; }
 
-// occlusion.showCulled -- THE FALSE-CULL FINDER, added for the white-panel investigation's by-hand
-// verification instrument (see the plan's section 3B). Every entity aver/game/SceneSubmission.hpp's
-// chooseRoute() would otherwise route around drawMesh() -- frustum- or occlusion-culled, but NOT
-// owner-hidden, exactly chooseRoute's own debug case -- is instead sent through the ordinary raster
-// route with its colour tinted magenta, so what culling is skipping becomes VISIBLE instead of merely
-// absent. Ray-driven shows the identical tint through inst.albedo, because the direct route shares
-// deliver()'s look with the raster one by construction (that sharing is F1's whole point). At a still
-// camera with this on, any magenta over a surface you can plainly see is a false cull.
-// DEFAULT FALSE -- the OPPOSITE of debugForceWaitIdle's default above, and deliberately so: that one
-// only changes a wait's timing, while this one changes the rendered image (a tinted draw is a
-// different colour going into GI's voxelisation hash, so GI re-voxelises while this is on), which
-// must never happen by accident just from opening the Console tab. Cost when off: one bool test per
+// occlusion.showCulled -- the false-cull finder (white-panel investigation, plan 3B). An entity
+// chooseRoute() (SceneSubmission.hpp) would frustum/occlusion-cull but that is NOT owner-hidden
+// instead draws tinted magenta through the raster route, making what culling skips VISIBLE
+// (ray-driven: same tint via inst.albedo). Magenta over a visible surface at a still camera means a
+// false cull. DEFAULT FALSE, opposite of debugForceWaitIdle above: this changes the rendered image
+// (feeds GI's voxelisation hash), never just from opening the tab. Cost when off: one bool test per
 // culled entity, the same shape chooseRoute already pays for the frustum/occlusion booleans.
 inline bool& consoleOcclusionShowCulledSlot() { static bool v = false; return v; }
 
-// occlusion.cullUnderSuppression -- keeps the occlusion test running even while a render feature
-// (ray-driven Voxi, Path Tracing) has claimed the frame and is painting the scene itself
-// (e.device()->sceneSuppressed()), which is exactly when SandboxApp's F8 gate would otherwise idle
-// culling entirely: in ray-driven mode culling legitimately saves almost no work, because every
-// culled entity still has to be submitted for primary rays, so F8 turns the test off there by
-// default rather than pay HZB seed/reduce/test and a waitIdle for nothing. Without this override,
-// showCulled above (and F1-F4's route-parity guarantee generally) would have nothing left to exercise
-// in the one render mode PTTest actually runs in once F8 lands -- this is the only way to force the
-// occlusion test to keep producing verdicts under suppression so those verdicts can be inspected.
-// DEFAULT FALSE: RENDER.OCCLUSIONCULL and project_.occlusionCull are never written by this slot or by
-// its reader -- it overrides only the idle F8 introduces, never the manifest's own on/off switch, so
-// turning F8's idle back off stays an explicit, named choice made from the Console.
+// occlusion.cullUnderSuppression -- keeps the occlusion test running while a render feature
+// (ray-driven Voxi, Path Tracing) paints the scene itself (sceneSuppressed()), when SandboxApp's F8
+// gate would otherwise idle culling (little saved there, since a culled entity still submits for
+// primary rays, so F8 skips paying HZB seed/reduce/test and a waitIdle for nothing). Without this,
+// showCulled/F1-F4's route-parity checks have nothing to exercise once F8 lands. DEFAULT FALSE: never
+// writes RENDER.OCCLUSIONCULL/project_.occlusionCull, only overrides F8's idle.
 inline bool& consoleOcclusionCullUnderSuppressionSlot() { static bool v = false; return v; }
 
 inline void registerOcclusionVars(std::vector<ConsoleVar>& t) {
@@ -1440,14 +1284,12 @@ inline const std::vector<ConsoleVar>& allVars() {
     return table;
 }
 
-// Runs a staged batch through AT MOST TWO voxi::Renderer::setSettings calls (tier phase, then dial
-// phase -- see ConsoleBatch's own comment for why each phase's snapshot is taken fresh, right here,
-// rather than pre-built when the batch was staged), at most one IDevice::setPostProcess call, and
-// then every staged rhi.* deviceSetters closure, then diffs every staged field's REQUESTED value
-// against what actually landed, using each field's own `read()` -- one diff path for all three
-// sources, since a field can move because the engine clamped it (Voxi), because this table clamped
-// it before ever calling setPostProcess (Post), or -- so far, never, rhi.* fields being plain bools
-// with nothing to clamp -- because a future rhi.* entry's own device call declines the request.
+// Runs a staged batch through at most two voxi::Renderer::setSettings calls (tier phase, then dial
+// phase -- see ConsoleBatch's comment for why each phase snapshots fresh, right here), at most one
+// setPostProcess call, then every deviceSetters closure -- then diffs each field's REQUESTED value
+// against read(): one path for all three sources (Voxi's clamp, Post's pre-clamp, or -- so far never,
+// rhi.* fields being plain bools with nothing to clamp -- a future rhi.* device call declining the
+// request).
 inline SetOutcome commitBatch(ConsoleBatch& b) {
     SetOutcome out;
 #if AVER_MODULE_VOXI
@@ -1457,9 +1299,8 @@ inline SetOutcome commitBatch(ConsoleBatch& b) {
         voxi::Renderer::get().setSettings(snap);
     }
     if (!b.dialSetters.empty()) {
-        // RE-READ here, not a snapshot taken when the batch was built: if the tier phase above just
-        // ran, this is what makes its derivation visible to the dial phase instead of being clobbered
-        // by a stale pre-tier-change copy. See ConsoleBatch's own comment for the full reasoning.
+        // RE-READ here, not a snapshot from when the batch was built, so a tier-phase derivation is
+        // visible to the dial phase instead of clobbered by a stale copy. See ConsoleBatch's comment.
         voxi::Settings snap = voxi::Renderer::get().settings();
         for (auto& fn : b.dialSetters) fn(&snap);
         voxi::Renderer::get().setSettings(snap);
@@ -1482,11 +1323,10 @@ inline SetOutcome commitBatch(ConsoleBatch& b) {
 // PART A: the console command registry (help, frametime, get, set, vars)
 // =================================================================================================
 
-// `print` writes into the console's OWN scrollback, a channel deliberately separate from the engine
-// log (see SandboxApp.cpp's drawConsole for why) -- a handler that also wants engine-wide visibility
-// calls AVER_INFO/AVER_WARN itself in addition. Returns true on success; a handler that fails MUST
-// call print(LogLevel::Error, ...) itself before returning false, so the console never has to
-// synthesize a generic error message for a specific failure it does not understand.
+// `print` writes into the console's OWN scrollback, separate from the engine log by design (see
+// SandboxApp.cpp's drawConsole) -- a handler wanting engine-wide visibility also calls AVER_INFO/WARN.
+// Returns true on success; a failing handler MUST call print(Error, ...) itself before returning
+// false, so the console never synthesizes a generic message for a failure it doesn't understand.
 using ConsolePrint = std::function<void(LogLevel, std::string)>;
 using ConsoleHandler = std::function<bool(SandboxApp& app, Engine& e,
                                            const std::vector<std::string>& args,
@@ -1500,10 +1340,9 @@ struct ConsoleCommandDesc {
 
 inline const std::vector<ConsoleCommandDesc>& consoleCatalog();
 
-// A short, DISTINCT-from-`help` welcome banner for the transcript's OWN empty state (drawConsole in
-// SandboxApp.cpp seeds these in whenever consoleLines_ is empty, including right after Clear) -- see
-// WHAT TO BUILD item 4, "an empty console worth reading". Kept short on purpose: `help` below has the
-// full command list and grammar, this only orients someone who has never typed anything here.
+// Short welcome banner for the transcript's empty state (drawConsole seeds it whenever
+// consoleLines_ is empty, incl. after Clear) -- see WHAT TO BUILD item 4, "an empty console worth
+// reading". Distinct from `help`, which has the full command list.
 inline std::vector<std::string> consoleWelcomeLines() {
     return {
         "This is a live REPL over the engine's own render/post settings, not a log viewer.",
@@ -1527,10 +1366,9 @@ inline bool handleHelp(SandboxApp&, Engine&, const std::vector<std::string>&, co
         line.resize(w, ' ');
         print(LogLevel::Info, line + "  -- " + c.help);
     }
-    // GRAMMAR AND WORKED EXAMPLES, appended below the command list rather than replacing it -- the
-    // "help that teaches" half of the console rework (WHAT TO BUILD item 4). Every example below
-    // names a variable that is genuinely in allVars() right now, so copy-pasting one always runs
-    // rather than teaching a name this table used to have.
+    // Grammar and worked examples, appended below the command list -- the "help that teaches" half
+    // of the console rework (WHAT TO BUILD item 4). Every example below names a variable genuinely
+    // in allVars(), so copy-pasting one always runs.
     print(LogLevel::Info, "");
     print(LogLevel::Info, "Names are dotted (voxi.giCones, post.exposure, rhi.depthPrepass) and case-insensitive.");
     print(LogLevel::Info, "Values: a whole number, a decimal, a bool (true/false, 1/0, on/off), or a");
@@ -1551,28 +1389,25 @@ inline bool handleHelp(SandboxApp&, Engine&, const std::vector<std::string>&, co
     return true;
 }
 
-// The headline command. Walks IDevice::gpuTiming()'s flat, parent-indexed node list as an indented
-// tree -- inclusive ms (what the node's own report), exclusive ms (inclusive minus the sum of direct
-// children, i.e. the pass's own time), and percent of the GPU total -- then prints the GPU total
-// against this instant's CPU frame time so GPU-bound vs CPU-bound is visible at a glance. Both
-// no-data axes are reported as DIFFERENT SENTENCES, not as zeros that could be mistaken for a
-// measurement -- see GpuTimingReport's own comment for why the two axes exist.
+// Walks IDevice::gpuTiming()'s flat, parent-indexed node list as an indented tree -- inclusive ms,
+// exclusive ms (inclusive minus direct children, i.e. the pass's own time), percent of GPU total --
+// then prints GPU total vs this instant's CPU frame time. No-data axes print as distinct sentences,
+// not zeros that read as a measurement -- see GpuTimingReport's comment for why both axes exist.
 inline bool handleFrameTime(SandboxApp&, Engine& e, const std::vector<std::string>&, const ConsolePrint& print) {
     if (!e.device()) { print(LogLevel::Error, "No render device is attached."); return false; }
-    // ONE FORMATTER, shared with the packaged game (aver/rhi/GpuTimingFormat.hpp). It used to live
-    // here, in a header the game cannot include -- which is the whole reason a shipped AverGame.exe
-    // could not show timings it was already paying to collect. Moving it beside the report it
-    // formats means the two hosts cannot drift into printing different things from the same data.
+    // One formatter, shared with the packaged game (aver/rhi/GpuTimingFormat.hpp). It used to live
+    // here, in a header the game cannot include, which is why a shipped AverGame.exe could not show
+    // timings it was already paying to collect -- moved beside the report it formats so the two
+    // hosts cannot drift into printing different things from the same data.
     const rhi::GpuTimingReport r = e.device()->gpuTiming();
     const f64 gpuTotalMs = rhi::formatGpuTiming(
         r, [&](const std::string& line) { print(LogLevel::Info, line); });
     if (!r.supported || r.nodes.empty() || r.framesAccumulated == 0) return true;
 
-    // GPU total here is the sum of TOP-LEVEL marked spans only (mirrors collectGpuTiming's own
-    // topLevelMs, which excludes anything unmarked); CPU frame is THIS INSTANT's e.time().dt, not an
-    // average. The two are deliberately not claimed to be a matched pair -- see the caveat printed
-    // alongside them -- but a GPU total that tracks well below the CPU frame time says CPU-bound, and
-    // one that tracks close to or above it says GPU-bound, which is the whole point of printing both.
+    // GPU total is the sum of TOP-LEVEL marked spans only (collectGpuTiming's topLevelMs, which
+    // excludes anything unmarked); CPU frame is THIS INSTANT's e.time().dt, not an average -- not a
+    // matched pair (see the printed caveat). GPU total well below CPU frame says CPU-bound; close to
+    // or above says GPU-bound.
     char tot[256];
     std::snprintf(tot, sizeof tot,
                   "GPU total (marked passes): %.2fms  |  CPU frame (this instant): %.2fms -- a rough "
@@ -1595,13 +1430,13 @@ inline bool handleVarGet(SandboxApp&, Engine&, const std::vector<std::string>& a
     return true;
 }
 
-// `vars` (no args): EXACTLY the original output, unchanged line-for-line -- WHAT TO BUILD says the
-// existing command "should stay working exactly as they do", and this is the form anything already
-// relying on today's shape (a screenshot script's grep, a person's muscle memory) depends on.
-// `vars <text>` (WHAT TO BUILD item 3, the new half): a substring FILTER over name-or-description,
-// grouped by prefix (see varGroupKey's own comment) with a [live]/[reload] honesty tag inline -- "vars
-// gi" finds every voxi.gi* dial under one heading instead of scattered among fifty other lines, and
-// "vars firefly" (a word no variable's NAME contains) still finds anything whose DESCRIPTION does.
+// `vars` (no args): unchanged line-for-line -- WHAT TO BUILD says existing commands "should stay
+// working exactly as they do" -- since a screenshot script's grep or muscle memory may depend on
+// today's shape.
+// `vars <text>` (WHAT TO BUILD item 3, the new half): substring filter over name-or-description,
+// grouped by prefix (varGroupKey) with a [live]/[reload] tag -- "vars gi" groups every voxi.gi* dial
+// under one heading instead of scattered among fifty other lines; "vars firefly" still finds a
+// description match even when no NAME contains the word.
 inline bool handleVarsList(SandboxApp&, Engine&, const std::vector<std::string>& args, const ConsolePrint& print) {
     if (args.empty()) {
         for (const ConsoleVar& v : allVars()) {
@@ -1632,11 +1467,9 @@ inline bool handleVarsList(SandboxApp&, Engine&, const std::vector<std::string>&
     return true;
 }
 
-// `set name value [name value ...]`: all-or-nothing. Every pair is looked up, checked for
-// read-only, and parsed to its declared type BEFORE anything is staged -- a bad token anywhere in
-// the line (an unknown name, a read-only name, or a value that does not parse) aborts the WHOLE
-// line with one specific error and stages nothing, so a typo in the third pair can never half-apply
-// the first two.
+// `set name value [name value ...]`: all-or-nothing. Every pair is looked up, checked read-only,
+// and parsed BEFORE anything is staged -- a bad token anywhere (unknown name, read-only, unparsable
+// value) aborts the WHOLE line with one error and stages nothing, so a later typo cannot half-apply.
 inline bool handleVarSet(SandboxApp&, Engine& e, const std::vector<std::string>& args, const ConsolePrint& print) {
     if (args.size() < 2 || args.size() % 2 != 0) {
         print(LogLevel::Error, "Usage: set <name> <value> [<name> <value> ...]");
@@ -1688,8 +1521,8 @@ inline bool handleVarSet(SandboxApp&, Engine& e, const std::vector<std::string>&
     }
     const SetOutcome outcome = commitBatch(batch);
 
-    // One line per field: the clamp/derivation note if commitBatch produced one for it (the "say so,
-    // not silently" case), otherwise a plain confirmation that it landed exactly as asked.
+    // One line per field: commitBatch's clamp/derivation note if it produced one (the "say so, not
+    // silently" case), else a plain confirmation it landed as asked.
     for (const Staged& s : staged) {
         const std::string prefix = s.var->name + ":";
         bool noted = false;
@@ -1716,14 +1549,12 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
     t.push_back({"vars", "vars [text] -- list every variable, or filter by name/description and group by prefix", &handleVarsList});
 #if AVER_MODULE_VOXI
     // ---- per-history reset commands: bisect a burned-in ReSTIR-GI/RT/NRD artifact by hand, one
-    // history at a time, without a resize (a resize's own "cure" is a same-shape flag flip -- see
-    // VoxiRenderer::resetGiHistory's own comment). Each raises a one-shot request on voxi::Renderer
-    // (Voxi.hpp), consumed next frame by SandboxApp.cpp right beside voxiRenderer_.setSettings(vs)
-    // and forwarded to the matching VoxiRenderer::reset*History() method. TRY resetgihistory FIRST --
-    // see each command's own help string for why, and Part 3(a) of this task's own notes for the
-    // full order. The voxel-cone GI volume needs none of these: voxelizePass clears before every
-    // injection (VoxiRenderer.cpp), so it cannot accumulate poison across rebuilds the way a
-    // ping-ponged history can.
+    // history at a time, without a resize (VoxiRenderer::resetGiHistory's comment has the same-shape
+    // flag-flip cure). Each raises a one-shot request on voxi::Renderer, consumed next frame by
+    // SandboxApp.cpp beside voxiRenderer_.setSettings(vs). TRY resetgihistory FIRST (see each
+    // command's help string for why, and Part 3(a) of this task's notes for the full order). The
+    // voxel-cone GI volume needs none of these: voxelizePass clears before every injection, so it
+    // cannot accumulate poison the way a ping-ponged history can.
     t.push_back({"resetgihistory",
         "Invalidate the ReSTIR-GI reservoir + surface history (voxi.giMode 1 only) on the next frame "
         "-- the same thing a viewport resize does to this one resource, without resizing anything. "
@@ -1782,26 +1613,23 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
 }
 } // namespace detail
 
-// Cached exactly like GraphNodeDefs.hpp's own catalog() at its line ~1069: built once, on first
-// call, which happens well after main() so there is no static-init-order hazard even though
-// `help`'s own handler calls this same function to enumerate every entry including itself.
+// Cached like GraphNodeDefs.hpp's own catalog() at its line ~1069: built once, on first call, well
+// after main() -- no static-init-order hazard even though `help`'s handler calls this to enumerate
+// itself.
 inline const std::vector<ConsoleCommandDesc>& consoleCatalog() {
     static const std::vector<ConsoleCommandDesc> table = detail::buildConsoleCatalog();
     return table;
 }
 
-// Case-insensitive lookup, same convention as findVar/graphNodeCatalog's own lookup. Returns
-// nullptr for a name this catalog does not know; the caller (drawConsole's Enter handler) is the
-// ONE place that synthesizes an "unknown command" line, because by definition no handler exists yet
-// to say it more specifically.
+// Case-insensitive lookup (findVar/graphNodeCatalog convention). Returns nullptr for an unknown
+// name; drawConsole's Enter handler is the one place that synthesizes an "unknown command" line.
 inline const ConsoleCommandDesc* findCommand(std::string_view name) {
     for (const ConsoleCommandDesc& c : consoleCatalog()) if (detail::ciEquals(c.name, name)) return &c;
     return nullptr;
 }
 
-// Substring search over a command, name or one-line help -- the command-table twin of varMatchesQuery
-// above, used by the live suggestion popup (SandboxApp.cpp) so typing a fragment of what a command
-// DOES ("frame" for frametime's "frame-time breakdown") finds it same as typing its name would.
+// Substring search over name or help -- the command-table twin of varMatchesQuery, used by the live
+// suggestion popup so typing what a command DOES ("frame" for frametime) finds it too.
 inline bool commandMatchesQuery(const ConsoleCommandDesc& c, std::string_view query) {
     return detail::ciContains(c.name, query) || detail::ciContains(c.help, query);
 }

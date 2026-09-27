@@ -1,6 +1,6 @@
-// Editor: the material and mode panels, the World Outliner, the Details panel and asset assignment.
-// Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
-// verbatim; the class itself is declared in SandboxApp.hpp.
+// Editor: material and mode panels, World Outliner, Details panel, asset assignment.
+// Split out of the 29,952-line SandboxApp.cpp on 2026-09-16 (method bodies moved verbatim); the
+// class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
 
@@ -37,9 +37,8 @@ bool SandboxApp::assetPicker(const char* popupId, const std::vector<AssetChoice>
                                  assetPickerFilter_, sizeof assetPickerFilter_);
         ImGui::Separator();
 
-        // NEVER A SILENT TRUNCATION, the same rule the node palette follows: a capped list that
-        // simply stops reads as "there is no such asset", which is the wrong thing to learn from
-        // a full box.
+        // NEVER A SILENT TRUNCATION (same rule as the node palette): a capped list that just
+        // stops reads as "no such asset", the wrong thing to learn from a full box.
         constexpr usize kShown = 40;
         usize matched = 0, drawn = 0;
         for (const AssetChoice& c : candidates) {
@@ -68,9 +67,8 @@ bool SandboxApp::assetPicker(const char* popupId, const std::vector<AssetChoice>
 
 #if AVER_WITH_IMGUI
 #if AVER_MODULE_SCENE
-// The particle path, EXTRACTED so the drag-drop target and the picker share one implementation.
-// Writing the resolve/hash/assign/mark/log sequence a second time is exactly the "two
-// implementations of one fact" shape this file keeps paying for elsewhere.
+// Extracted so the drag-drop target and the picker share one resolve/hash/assign/mark/log
+// implementation instead of two ("two implementations of one fact" -- a recurring shape here).
 bool SandboxApp::assignParticleEffect(scene::Entity ent, const std::string& absPath) {
 #if AVER_MODULE_PARTICLES
     scene::World& w = scene::World::instance();
@@ -100,16 +98,15 @@ bool SandboxApp::assignParticleEffect(scene::Entity ent, const std::string& absP
 #endif
 }
 
-// A mesh id IS fnv1a64 of the project-relative path, which is exactly what meshPathById_ is keyed
-// on -- so a picked id needs no conversion, unlike the material below.
+// A mesh id IS fnv1a64 of the project-relative path (what meshPathById_ is keyed on), so a picked
+// id needs no conversion, unlike the material below.
 bool SandboxApp::assignMeshId(scene::Entity ent, u64 meshId) {
     scene::World& w = scene::World::instance();
     auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
     if (!mr) return false;
     mr->mesh = meshId;
-    // WITHOUT THIS THE PICTURE DOES NOT CHANGE. The GPU path only re-uploads when dirty is set --
-    // the same fix EditorEntitySnapshot records after restoring a mesh renderer, and the same one
-    // a reassignment needs.
+    // WITHOUT THIS THE PICTURE DOES NOT CHANGE: the GPU path only re-uploads when dirty is set
+    // (same fix EditorEntitySnapshot applies when restoring a mesh renderer).
     mr->dirty = 1;
     markLevelUnsaved();
     const auto it = meshPathById_.find(meshId);
@@ -121,10 +118,9 @@ bool SandboxApp::assignMeshId(scene::Entity ent, u64 meshId) {
     return true;
 }
 
-// MATERIAL IDENTITY IS AN INTERNED NAME TOKEN, not a path hash, and getting that wrong is silent:
-// an fnv1a64 written into mr->material resolves to nothing, or by coincidence to an unrelated
-// surface. content_'s surface materials are keyed on the token aver_scene_material() interns, so the picker
-// carries tokens and this writes one straight through.
+// MATERIAL IDENTITY IS AN INTERNED NAME TOKEN, not a path hash -- an fnv1a64 here would resolve
+// to nothing, or by coincidence to an unrelated surface, and fail silently. content_'s surface
+// materials are keyed on the token aver_scene_material() interns, so the picker carries tokens.
 bool SandboxApp::assignMaterialToken(scene::Entity ent, i32 token) {
     scene::World& w = scene::World::instance();
     auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
@@ -190,38 +186,31 @@ std::string SandboxApp::saveMaterialSource(const std::string& name, const pbr::M
 #endif
 
 #if AVER_WITH_IMGUI
-// Draws the material half of the Details panel, editing the shared MaterialDesc where there is
-// one and the actor's own values otherwise.
-// TAKES A HANDLE, not a MeshObj. This whole panel -- ~25 sliders, the IOR/F0 consistency
-// check, the texture slots and Save to C# -- was reachable from exactly one call site: the
-// editor's PLACEHOLDER objects. A real scene entity's Details offered Transform and Mesh
-// and nothing else, which docs/EDITOR.md:276 states outright. The material was always one
-// lookup away (content_'s surface materials map the token a CMeshRenderer carries to exactly this
-// handle); only the signature stood in the way.
-// THE GUARD IS ABOVE THE SIGNATURE, not inside the body -- same fix, same reason, as
-// saveMaterialSource above: pbr::MaterialHandle is in the parameter list, so a PBR=OFF tree
-// could not compile this definition however dead its body was, and the declaration in
-// SandboxApp.hpp is guarded the same way.
+// Draws the material half of the Details panel: the shared MaterialDesc where there is one, the
+// actor's own values otherwise.
+// TAKES A HANDLE, not a MeshObj -- this ~25-slider panel (IOR/F0 check, texture slots, Save to
+// C#) used to be reachable only from placeholder objects (a scene entity's Details offered just
+// Transform and Mesh; docs/EDITOR.md:276), even though content_'s surface materials already map
+// a CMeshRenderer's token straight to a handle -- only the signature stood in the way.
+// GUARDED ABOVE THE SIGNATURE, not inside the body, for the same reason as saveMaterialSource
+// above: pbr::MaterialHandle in the parameter list means a PBR=OFF tree can't compile this
+// definition at all; SandboxApp.hpp's declaration carries the same guard.
 #if AVER_MODULE_PBR
 void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(handle);
     if (!d) { ImGui::TextDisabled("No material (drawing with the fallback)"); return; }
     bool changed = false;
 
-    // ---- ONE UNDO ENTRY PER INTERACTION, not per frame -------------------------------------
-    //
-    // Every control below writes straight through a MaterialDesc* and called touch(); nothing
-    // was ever pushed, so Ctrl+Z after darkening a wall undid whatever came BEFORE it and left
-    // the wall dark. EditCmd::Kind had no Material case at all.
-    //
-    // A DRAG IS ONE EDIT. `changed` is true on every frame of a slider drag, so pushing on it
-    // would put a hundred entries on a 64-deep stack and evict everything else the user did.
-    // ImGui's IsItemActivated/IsItemDeactivatedAfterEdit bracket the whole interaction, which is
-    // the same begin/end shape beginTransformEdit/endTransformEdit already uses for the gizmo.
-    //
-    // `before` IS SNAPSHOTTED AT THE TOP OF THE FRAME, while nothing is active -- not on the
-    // activation frame itself, because ImGui has already written the first drag delta into *d by
-    // the time IsItemActivated() can be asked.
+    // ---- ONE UNDO ENTRY PER INTERACTION, not per frame ----
+    // Every control here wrote straight through a MaterialDesc* via touch() with nothing ever
+    // pushed (EditCmd::Kind had no Material case at all), so Ctrl+Z undid whatever came before
+    // the edit, not the edit itself.
+    // A DRAG IS ONE EDIT: `changed` is true every frame of a slider drag, so pushing on it would
+    // put a hundred entries on the 64-deep undo stack and evict everything else the user did.
+    // IsItemActivated/IsItemDeactivatedAfterEdit bracket the whole interaction instead (the same
+    // shape beginTransformEdit/endTransformEdit use for the gizmo).
+    // `before` is snapshotted at the top of the frame, not on the activation frame itself --
+    // ImGui has already written the first drag delta into *d by the time IsItemActivated() fires.
     if (!matEditActive_) { matEditBefore_ = *d; matEditHandle_ = handle; }
     bool started = false, finished = false;
     const auto track = [&](bool c) {
@@ -237,12 +226,11 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     changed |= track(ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f"));
     changed |= track(ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f));
 
-    // IOR AND REFLECTANCE ARE THE SAME PHYSICAL FACT TWICE, which is why this control reports the
-    // disagreement instead of quietly letting the two drift. F0 = ((1-n)/(1+n))^2, so 1.52 glass
-    // implies 0.0426; a mismatch reflects an amount its own refraction calls impossible, invisible
-    // until a grazing angle or the critical angle.
-    // REPORTED, NOT ENFORCED: clamping reflectance to the ior would take away a knob authors
-    // legitimately reach for (a thin film or coated lens really does deviate).
+    // IOR and Reflectance are the same physical fact twice; F0 = ((1-n)/(1+n))^2, so 1.52 glass
+    // implies 0.0426 -- a mismatch implies a physically impossible reflectance, invisible until a
+    // grazing or critical angle.
+    // REPORTED, NOT ENFORCED: clamping reflectance to the IOR would remove a knob authors
+    // legitimately need (a thin film or coated lens really does deviate).
     changed |= track(ImGui::SliderFloat("IOR", &d->ior, 1.0f, 2.5f, "%.3f"));
     {
         const float n  = d->ior <= 0.0f ? 1.0f : d->ior;
@@ -256,9 +244,9 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
                                   f0, d->reflectance);
         }
     }
-    // Transmission is the SUBSTRATE's property and applies whether or not the material is
-    // blended: it scales the diffuse lobe (a transmissive surface must not also scatter its full
-    // base colour back at you) and, on a blended material, pulls coverage toward 1 - transmission.
+    // Transmission is a SUBSTRATE property, applying whether or not the material is blended: it
+    // scales the diffuse lobe (a transmissive surface must not also scatter its full base colour
+    // back at you) and, when blended, pulls coverage toward 1 - transmission.
     changed |= track(ImGui::SliderFloat("Transmission", &d->transmission, 0.0f, 1.0f));
     if (d->transmission > 0.0f && d->alphaMode != pbr::AlphaMode::Blend) {
         ImGui::SameLine();
@@ -267,9 +255,8 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
             ImGui::SetTooltip("Transmission still dims the diffuse lobe here, but this material is\n"
                               "not BLEND translucent, so nothing will be visible THROUGH it.");
     }
-    // WEIGHT is the on/off: 0 skips the wrap-diffuse and back-scatter terms entirely, so RADIUS
-    // (which only widens the back-scatter lobe those terms produce) has nothing to widen until
-    // Weight is above 0. Disabling it at 0 keeps the panel from offering a control that does nothing.
+    // WEIGHT is the on/off: 0 skips the wrap-diffuse/back-scatter terms, so RADIUS has nothing to
+    // widen until Weight > 0 -- disabled at 0 to avoid offering a control that does nothing.
     changed |= track(ImGui::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f));
     ImGui::BeginDisabled(d->subsurfaceWeight <= 0.0f);
     changed |= track(ImGui::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f));
@@ -291,10 +278,8 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
         d->uvMode = static_cast<pbr::UvMode>(uvMode);
         changed = true;
     }
-    // TRACKED THE SAME WAY, but read AFTER the widget and OUTSIDE its own if: a Combo that was
-    // opened and dismissed without a change still activated and deactivated, and an interaction
-    // that begins here must still close the bracket rather than leaving it open for whatever
-    // control the user touches next.
+    // Tracked the same way but read AFTER the widget, outside its own if: a Combo opened and
+    // dismissed without a change still activates/deactivates and must still close the bracket.
     track(false);
     if (d->uvMode == pbr::UvMode::WorldAligned) {
         changed |= track(ImGui::SliderFloat("Tile Size (cm)", &d->uvTiling, 5.0f, 2000.0f, "%.0f",
@@ -311,22 +296,19 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
             d->textures[s].path = buf;
             changed = true;
         }
-        // A TEXT FIELD IS THE CASE THE BRACKET EXISTS FOR: InputText reports `changed` on every
-        // keystroke, so pushing per frame would put one undo entry per LETTER typed into a
-        // texture path. IsItemDeactivatedAfterEdit fires once, when focus leaves.
+        // A text field is the case the bracket exists for: InputText reports `changed` per
+        // keystroke, so a per-frame push would cost one undo entry per LETTER typed;
+        // IsItemDeactivatedAfterEdit fires once, when focus leaves.
         track(false);
     }
     if (started) matEditActive_ = true;
-    // WHETHER ANYTHING MOVED IS ImGui'S ANSWER, NOT A COMPARISON. Diffing the two descs would
-    // mean either a memcmp -- wrong, MaterialDesc holds std::strings whose pointers differ
-    // without the value differing -- or an enumeration of every field the panel edits, which is
-    // a list that goes stale the next time a control is added. Each control's own return value
-    // already means "this was edited"; latching that across the interaction is the same fact,
-    // and it cannot drift.
+    // Whether anything moved is ImGui's answer, not a diff: a memcmp is wrong (MaterialDesc holds
+    // std::strings whose pointers can differ without the value differing) and a field-by-field
+    // comparison goes stale the next time a control is added. Each control's own return value
+    // already means "edited"; latching that across the interaction can't drift.
     if (changed) { matEditDirty_ = true; pbr::MaterialLibrary::get().touch(handle); }
-    // PUSHED ON RELEASE. Clicking a slider without moving it still fires
-    // IsItemDeactivatedAfterEdit on some widgets, and an entry that restores the state it was
-    // already in is worse than none: it makes Ctrl+Z visibly do nothing, once.
+    // Pushed on release: clicking a slider without moving it can still fire
+    // IsItemDeactivatedAfterEdit, and a no-op entry makes Ctrl+Z visibly do nothing, once.
     if (finished && matEditActive_ && matEditHandle_ == handle) {
         matEditActive_ = false;
         if (matEditDirty_) {
@@ -365,10 +347,10 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
 #endif  // AVER_MODULE_PBR
 
 // The MODE panel: the active editing mode's own tools and settings, on the left.
-// WHY A PANEL AND NOT MORE TOOLBAR: the toolbar row is a good place for four brush buttons, a bad
-// place for the dozen controls a real sculpt tool set needs (radius, strength, falloff, flatten
-// target, a noise generator with four parameters). Those were either absent or buried in a popup
-// behind a button labelled with a number. A panel can show its whole surface at once.
+// A panel, not more toolbar: a toolbar row suits four brush buttons, not the dozen controls a
+// real sculpt tool set needs (radius, strength, falloff, flatten target, a 4-param noise gen) --
+// previously absent or buried in a popup behind a numbered button. A panel shows its whole
+// surface at once.
 void SandboxApp::buildModePanel(Engine& e) {
     (void)e;
     ImGui::Begin("Mode");
@@ -397,11 +379,9 @@ void SandboxApp::buildModePanel(Engine& e) {
 }
 
 // A labelled text field backed by a std::string. True on the frame the value changed.
-//
-// ImGui edits a fixed char buffer, and the string it is backing may be arbitrarily long, so the
-// copy is bounded and the write-back only happens when InputText says something changed -- a
-// blind copy every frame would truncate a value the user never touched, on the first frame the
-// page was opened.
+// ImGui edits a fixed char buffer while the backing string may be arbitrarily long, so the copy
+// is bounded and write-back only happens on a real InputText change -- a blind copy every frame
+// would truncate an untouched value the first frame the page opens.
  bool SandboxApp::editField(const char* label, std::string& value, usize cap) {
     std::vector<char> buf(cap, '\0');
     const usize n = value.size() < cap - 1 ? value.size() : cap - 1;
@@ -427,11 +407,9 @@ void SandboxApp::buildSelectModePanel() {
     ImGui::TextDisabled("SPACE");
     if (ImGui::Button(worldSpace_ ? "World" : "Local", ImVec2(-1, 0))) worldSpace_ = !worldSpace_;
     ImGui::Spacing();
-    // A CHECKBOX PLUS A STEP, matching the state the editor keeps: snapMove_ et al are whether
-    // snapping is on, moveSnap_ et al are the increment -- two values because turning snapping off
-    // must not lose the step you had set.
-    // Checkbox on its own line, value under it full width: side by side, the value field got
-    // whatever the checkbox label left over, clipping "15 deg" to "15 de".
+    // A checkbox plus a step: snapMove_ et al are on/off, moveSnap_ et al are the increment, kept
+    // separate so turning snapping off doesn't lose the set step.
+    // Checkbox on its own line, value below at full width -- side by side clipped "15 deg" to "15 de".
     ImGui::TextDisabled("SNAPPING");
     ImGui::Checkbox("Grid (position)", &snapMove_);
     ImGui::SetNextItemWidth(-1);
@@ -452,13 +430,12 @@ void SandboxApp::buildSimulateModePanel() {
     ImGui::TextWrapped("Runs the game in the viewport: physics ticks, gameplay scripts run, and "
                        "input goes to the game instead of the editor.");
     ImGui::Spacing();
-    // startPlay/stopPlay are AVER_MODULE_FRAMEWORK entry points -- they spawn a pawn under a
-    // GameMode and drive aver_fw_play_state, none of which exists without the framework. Without
-    // this guard the button still LINKS (playSessionActive() has its own #else returning false)
-    // but pressing it calls a function the framework-off tree never compiled: exactly the mismatch
-    // module-matrix.ps1 exists to catch. Guarding the whole block rather than just the two calls,
-    // because a Play button that is always false and always offers Play, never Stop, is not a
-    // degraded feature -- it is a control wired to a game mode that was never there.
+    // startPlay/stopPlay are AVER_MODULE_FRAMEWORK entry points (spawn a pawn under a GameMode,
+    // drive aver_fw_play_state); without this guard the button still links (playSessionActive()
+    // has its own #else returning false) but calls into code a
+    // framework-off tree never compiled -- the mismatch module-matrix.ps1 exists to catch. The
+    // whole block is guarded, not just the two calls: a Play that always offers Play, never Stop,
+    // is a control wired to a game mode that was never there, not a degraded feature.
 #if AVER_MODULE_FRAMEWORK
     const bool active = playSessionActive();
     if (!active) {
@@ -479,21 +456,18 @@ void SandboxApp::buildSimulateModePanel() {
 
 #if AVER_WITH_IMGUI
 // The level's WATER record, as a panel.
-//
-// WHY THERE WAS NONE. levelHeader_.waters is populated only by the loader and copied wholesale
-// by saveLevel, so a water plane could be authored by hand-editing the .ocworld and in no other
-// way -- no menu item, no Add entry, no Outliner row, nothing in Details. The Add menu offers
-// Cube, Player Start and Sphere, with Plane and Point Light greyed out.
-//
-// ONE RECORD, because WaterRenderer holds one level and one wave set; GameWater::applyLevel
-// already warns when a file declares more and renders the first. Offering a list here would let
-// someone author a second surface the renderer then silently ignores.
+// Previously unreachable except by hand-editing the .ocworld: levelHeader_.waters is populated
+// only by the loader/saveLevel, with no menu item, Add entry, Outliner row or Details section
+// (the Add menu offers Cube, Player Start, Sphere; Plane and Point Light are greyed out).
+// ONE RECORD ONLY: WaterRenderer holds one level and one wave set (GameWater::applyLevel warns
+// and renders just the first when a file declares more), so a list here would let someone author
+// a second surface the renderer silently ignores.
 void SandboxApp::buildWaterPanel(Engine& e) {
-    // AVER_MODULE_FLUIDS, NOT SCENE. water_ is a game::GameWater, declared in SandboxApp.hpp under
-    // AVER_MODULE_FLUIDS alone (see that member's own comment on why water is independent of
-    // Particles/Scene) -- everything else this function touches, levelHeader_ and camPos_ among
-    // them, is unconditional. A fluids-off, scene-on tree used to compile this as the SCENE branch
-    // and call water_.applyLevel on a member the module-matrix row never declared.
+    // Guarded on AVER_MODULE_FLUIDS, not SCENE: water_ is a game::GameWater declared under FLUIDS
+    // alone in SandboxApp.hpp (see that member's comment on why water is independent of
+    // Particles/Scene); everything else here (levelHeader_, camPos_) is unconditional. A
+    // fluids-off, scene-on tree used to compile this as the SCENE branch and call
+    // water_.applyLevel on an undeclared member.
 #if AVER_WITH_IMGUI && AVER_MODULE_FLUIDS
     ImGui::TextDisabled("WATER");
     if (levelHeader_.waters.empty()) {
@@ -501,9 +475,8 @@ void SandboxApp::buildWaterPanel(Engine& e) {
         if (ImGui::Button("Add Water", ImVec2(-1, 0))) {
             fmt::OcWaterPlacement wp;
             wp.name = "Water";
-            // AT THE CAMERA'S FEET, not at z=0: a plane at the origin is invisible in a level
-            // built up on terrain, and "nothing happened" is the worst answer a new button can
-            // give. Rounded so the number in the field is one somebody would have typed.
+            // At the camera's feet, not z=0 (invisible on terrain built up from the origin).
+            // Rounded so the field shows a number somebody would actually have typed.
             wp.levelCm = std::floor(camPos_.z / 10.0f) * 10.0f - 100.0;
             wp.infinite = true;
             levelHeader_.waters.assign(1, std::move(wp));
@@ -533,8 +506,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
     }
     if (ImGui::Checkbox("Infinite", &wp.infinite)) changed = true;
     if (!wp.infinite) {
-        // X AND Y ONLY. The record has no Z extent: the surface is a plane at `level`, and its
-        // bounds are the footprint it covers, which is why OcWaterPlacement's bounds are 2D.
+        // X/Y only: the surface is a plane at `level`, so bounds are its 2D footprint.
         f32 mn[2] = {static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1])};
         f32 mx[2] = {static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1])};
         ImGui::SetNextItemWidth(-1.0f);
@@ -556,10 +528,8 @@ void SandboxApp::buildWaterPanel(Engine& e) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("An .ocmat name. Empty draws the renderer's own fallback look.");
     }
-    // SIMULATE IS SHOWN BUT REFUSED WHEN INFINITE, which is the one pairing the format can carry
-    // and nothing can honour -- a simulated volume is a closed shell and needs a size.
-    // GameWater::applyLevel says the same thing in a warning; saying it here stops the author
-    // reaching a state that only complains later.
+    // Shown but disabled when Infinite: a simulated volume needs a closed shell/size, which the
+    // format can express but nothing can honour. GameWater::applyLevel warns on this too.
     ImGui::BeginDisabled(wp.infinite);
     if (ImGui::Checkbox("Simulate", &wp.simulate)) changed = true;
     ImGui::EndDisabled();
@@ -583,21 +553,18 @@ void SandboxApp::buildWaterPanel(Engine& e) {
 #endif
 }
 
-// The landscape tool set. This is what the mode was missing.
-//
-// WHERE THE GUARD STARTS -- it used to start a hundred lines higher, with buildWaterPanel inside
-// it. Water was never a terrain feature: it is a property OF THE LEVEL, like the sun and the fog
-// (see the Sky panel's own comment at the call site), and buildWaterPanel touches nothing but
-// levelHeader_.waters and water_. It was swept in only because it is defined immediately above
-// this function, and an AVER_MODULE_LANDSCAPE=OFF build died on the mismatch: the call site below
-// in this same file is guarded on AVER_WITH_IMGUI alone, which is correct and stayed correct.
-// Everything from here down genuinely reads landscape_, so here is where the block belongs.
+// The landscape tool set: what Landscape mode was missing.
+// GUARD BOUNDARY MOVED HERE: it used to start about a hundred lines higher and wrap
+// buildWaterPanel too (swept in only because it sat just above this function), but water is a
+// level property (like sun/fog -- see the Sky panel's comment) touching only levelHeader_.waters
+// and water_, and an AVER_MODULE_LANDSCAPE=OFF build died on that mismatch. The call site below,
+// guarded on AVER_WITH_IMGUI alone, was already correct. Everything from here down genuinely
+// reads landscape_.
 #if AVER_MODULE_LANDSCAPE
 void SandboxApp::buildLandscapeModePanel(Engine& e) {
     if (!landscape_.loaded()) {
-        // A DEAD END UNTIL NOW: this printed one sentence and returned, so the terrain mode
-        // offered nothing at all to a level without terrain -- and nothing anywhere else in the
-        // editor could make some either.
+        // Previously a dead end: this printed one line and returned, and nothing else in the
+        // editor could create a landscape either.
         ImGui::TextWrapped("This level has no landscape section.");
         ImGui::Spacing();
         ImGui::TextDisabled("CREATE ONE");
@@ -634,10 +601,8 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
         return;
     }
 
-    // ---- where the section sits, which had no control at all -------------------------------
-    // The LANDSCAPE record's x/y/z were readable only by hand-editing the .ocworld. They are the
-    // section's own origin sample in world space, so this is how a terrain is aligned to the
-    // rest of a level rather than to wherever the heightfield happened to be authored.
+    // ---- PLACEMENT: previously no control at all (x/y/z only reachable by hand-editing the
+    // .ocworld) -- the section's own origin sample in world space, for aligning terrain to a level.
     ImGui::TextDisabled("PLACEMENT");
     {
         f32 org[3] = {landscape_.data().originCm[0], landscape_.data().originCm[1],
@@ -652,9 +617,8 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     ImGui::Spacing();
 
     ImGui::TextDisabled("SCULPT");
-    // 6 tools, but only the first 4 have a bound hotkey (SculptRaise..SculptFlatten, keys 1-4) --
-    // Ramp and Noise are new and mouse/panel-only for now, so the tooltip below is not shown for
-    // them rather than advertising a key that does nothing.
+    // 6 tools; only the first 4 have a hotkey (SculptRaise..SculptFlatten, keys 1-4). Ramp/Noise
+    // are mouse/panel-only for now, so no tooltip advertises a key that does nothing.
     for (int i = 0; i < 6; ++i) {
         const bool on = static_cast<int>(sculptTool_) == i;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
@@ -667,9 +631,8 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     ImGui::TextDisabled("BRUSH");
     editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
     editor::panelFloat("Strength (cm/s)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-    // FALLOFF is new all the way down: applyBrush's curve was a hardcoded smoothstep with no way
-    // to reach it. A hard-edged brush and a soft one are different tools for different jobs, and
-    // every terrain editor exposes the difference.
+    // FALLOFF is new: applyBrush's curve was a hardcoded smoothstep with no way to reach it, and
+    // every terrain editor exposes hard vs. soft edge as separate tools.
     editor::panelFloat("Falloff", &sculptFalloff_, 0.0f, 1.0f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("0 is a hard edge, 1 is a soft smoothstep shoulder.");
@@ -699,9 +662,8 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextDisabled("GENERATE");
-    // The noise generator existed and was reachable from nowhere: terrainHeightAt() was wired
-    // only as the height source for procedural tiles past the authored rim, never as something a
-    // level author could apply to the section they are editing.
+    // The noise generator existed but was unreachable: terrainHeightAt() was wired only as the
+    // height source for procedural tiles past the authored rim, not as an author-facing tool.
     editor::panelFloat("Feature size (cm)", &landscape_.noiseParams().featureSizeCm, 500.0f, 50000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
     editor::panelFloat("Amplitude (cm)", &landscape_.noiseParams().amplitudeCm, 0.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
     editor::panelInt("Octaves", &landscape_.noiseParams().octaves, 1, 8);
@@ -722,15 +684,13 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
                         landscape_.data().spacingCm);
 }
 
-// The Foliage panel's empty-palette action: writes a starter .ocfoliage and opens its tab,
-// reusing cbCreateFoliageType() rather than duplicating its write-then-open logic (see that
-// function's own comment for why it is unconditional and what it writes). The only thing this
-// wrapper adds is WHERE it lands: cbCreateFoliageType() writes into cbSelectedDir_, the Content
-// Browser's currently browsed folder, which from this panel could be anything -- read-only engine
-// content, some deeply nested subfolder, or empty. Content/Foliage is created if needed and the
-// browser is pointed at it first, so a click here always lands somewhere sensible instead of
-// wherever the browser last happened to be. cbCreateFoliageType() itself already refreshes the
-// palette on success, so a freshly created type is paintable on this very frame.
+// The Foliage panel's empty-palette action: writes a starter .ocfoliage and opens its tab, reusing
+// cbCreateFoliageType() rather than duplicating its write-then-open logic (see that function's own
+// comment). This wrapper only fixes WHERE it lands: cbCreateFoliageType() writes into
+// cbSelectedDir_ (the Content Browser's currently browsed folder), which from this panel could be
+// anything -- read-only engine content, a deeply nested subfolder, or empty -- so Content/Foliage
+// is created and browsed to first. cbCreateFoliageType() already refreshes the palette, so the
+// new type paints immediately.
 void SandboxApp::foliagePanelCreateType() {
     if (!project_.valid()) return;
     const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Foliage";
@@ -782,54 +742,32 @@ void SandboxApp::buildFoliageModePanel() {
 #endif
 
 #if AVER_WITH_IMGUI
-// Marks a level record as one this level now carries, because the author has been editing it.
+// Marks a level record (sun/sky/fog/clouds) as authored, so saveLevel writes it, and marks the
+// level dirty -- the same fact twice: setting `has` means saveLevel now emits a record it would
+// not have before, i.e. the document differs from the file.
 //
-// THE BUG THIS CLOSES. hasLevelSun_/hasLevelSky_/hasLevelFog_ were set ONLY by the loader, and
-// saveLevel writes each record only when its flag is set. So on a level whose file carried no
-// SUN, every slider under "Directional Light (Sun)" was live in the viewport and thrown away on
-// save -- no dirty marker, no warning, and saveLevel's own comment claiming Details edits
-// survive was true only for levels that already had the record.
+// FIXES: hasLevelSun_ etc. were previously set only by the loader, so a level with no SUN record
+// silently threw away every edit on save (saveLevel's own comment claiming Details edits survive
+// was true only for levels that already had the record). levelHasUnsavedEdits() is driven purely
+// by the undo serial and these panels push no EditCmd, so nothing else marked it dirty either.
 //
-// IsAnyItemActive is FRAME-GLOBAL, not scoped to this section, and that is a deliberate trade
-// rather than an oversight: dragging a control in another panel while this section happens to
-// be selected also sets the flag. The cost of that false positive is one extra record in the
-// file, describing exactly the sun the author was already looking at. The cost of the false
-// NEGATIVE it replaces was silently discarding their work.
-// Notes that a level RECORD (sun, fog, clouds, sky) has been authored, so saveLevel writes it.
+// IsAnyItemActive() is FRAME-GLOBAL BY DESIGN: dragging a control elsewhere while this section is
+// open also sets the flag -- one spurious record beats silently discarding real edits.
 //
-// AND MARKS THE DOCUMENT DIRTY, WHICH IT DID NOT. levelHasUnsavedEdits() is driven purely by the
-// undo serial, and none of these panels push an EditCmd -- so changing the sun angle and closing
-// the editor gave no prompt, no autosave, and the change was gone. The record flag alone only
-// means "write this IF something else causes a save".
-//
-// THE TWO ARE THE SAME FACT. Setting `has` is exactly the statement that saveLevel will now emit
-// a record it would not have emitted before, i.e. that the document differs from the file. That
-// is the definition of dirty, so anything setting one must set the other.
-//
-// markLevelUnsaved() rather than a serial bump, because these edits are NOT undoable: there is
-// no command to walk back to, so the mark must be the one that cannot be cleared by undoing.
-// Saving clears it, which is the only thing that should.
-//
-// THE PREDICATE IS LOOSE AND STAYS LOOSE: IsAnyItemActive() is true for an active item ANYWHERE,
-// not just in this section, so dragging an unrelated slider while a sun panel is open marks the
-// level dirty. That looseness is pre-existing -- it already decided whether the record got
-// written at all -- and the failure it now causes is a needless save prompt, against a failure
-// it prevents of silently losing authored lighting. Not a trade worth agonising over.
+// markLevelUnsaved(), not a serial bump: these edits are not undoable, so the mark must survive
+// undo and clear only on save.
 void SandboxApp::markLevelRecordEdited(bool& has) {
     if (ImGui::IsAnyItemActive()) { has = true; markLevelUnsaved(); }
 }
 
-// Draws the World Outliner and the Details panel, each only when Window > ... has it on.
-//
-// SPLIT SO EACH CAN BE HIDDEN. ImGui::Begin does NOT skip a window whose p_open points at
-// false -- that early-out is BeginPopupModal's, not Begin's -- so a hideable panel has to be
-// guarded by its caller. These were one function submitting both unconditionally, which is why
-// their Window menu items could never do anything.
+// Draws the World Outliner and Details panel, each only when Window > ... has it on.
+// SPLIT SO EACH CAN BE HIDDEN: ImGui::Begin does not skip a window whose p_open is false (that
+// early-out is BeginPopupModal's, not Begin's), so hiding needs a caller-side guard -- previously
+// one function submitted both unconditionally, so their Window menu items could never do anything.
 void SandboxApp::buildPanels(Engine& e) {
     if (showOutliner_) buildOutlinerPanel();
-    // TAKES THE ENGINE NOW: the Level branch of the Details panel edits the level's WATER
-    // record, and applying that to the live surface needs a device. The (void)e that used to sit
-    // here was the sign that nothing in these panels had yet needed one.
+    // Takes the Engine now (previously `(void)e`, since nothing here needed one): the Level
+    // branch edits the WATER record, and applying it to the live surface needs a device.
     if (showDetails_)  buildDetailsPanel(e);
 }
 
@@ -837,8 +775,7 @@ void SandboxApp::buildPanels(Engine& e) {
 
 #if AVER_WITH_IMGUI
 #if AVER_MODULE_SCENE
-// ASCII lowercase, matching the Content Browser's own filter rather than inventing a second
-// rule: a name here is an editor label, not user text needing locale-aware folding.
+// ASCII lowercase, matching the Content Browser's filter: an editor label, not locale text.
  std::string SandboxApp::lowerCopy(std::string v) {
     for (char& c : v) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
     return v;
@@ -863,17 +800,13 @@ void SandboxApp::drawOutlinerDragSource(scene::Entity ent) {
 }
 
 // Makes a row a drop target, in two tiers.
+// A CYCLE IS NEVER OFFERED: the row peeks at the payload before BeginDragDropTarget, so dropping
+// onto yourself or a descendant has no target at all (GraphEditor's/BtEditor's filter-before-
+// offering idiom). World::setParent refuses a cycle anyway; this keeps the UI from proposing one.
 //
-// A CYCLE IS NEVER OFFERED. The row peeks at the payload BEFORE calling BeginDragDropTarget, so
-// dropping onto yourself or your own descendant has no target at all -- no highlight, nothing
-// to click. That is GraphEditor's and BtEditor's idiom: filter before offering, rather than
-// accepting and then explaining. World::setParent refuses a cycle anyway; this is so the UI
-// never proposes one.
-//
-// AN OFF-LEVEL ENDPOINT IS OFFERED AND REFUSED, with a reason. It would succeed in the live
-// world and be GONE on the next save, because saveLevel writes a parent only for entities the
-// level owns. A drop that visibly works and quietly reverts is a worse trap than one that says
-// why it cannot happen -- which is the whole reason the two commits before this one exist.
+// AN OFF-LEVEL ENDPOINT IS OFFERED AND REFUSED, WITH A REASON: it would succeed live but be gone
+// on the next save (saveLevel writes a parent only for entities the level owns) -- a drop that
+// visibly works and quietly reverts is worse than one that explains why it can't happen.
 void SandboxApp::drawOutlinerDropTarget(scene::Entity ent) {
     scene::World& w = scene::World::instance();
     scene::Entity dragged = scene::kInvalidEntity;
@@ -888,8 +821,8 @@ void SandboxApp::drawOutlinerDropTarget(scene::Entity ent) {
     const bool offLevel = dragged != scene::kInvalidEntity &&
                           reparentLegality(dragged, ent) == ReparentLegality::OffLevel;
     if (offLevel) {
-        // PEEK ONLY, so ImGui never paints the row as about to accept. The delivering branch is
-        // structurally unreachable for this case, not merely un-taken.
+        // Peek only, so ImGui never paints the row as about to accept -- the delivering branch is
+        // structurally unreachable here, not merely un-taken.
         ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType,
                                      ImGuiDragDropFlags_AcceptPeekOnly);
         ImGui::SetTooltip("'%s' is not part of the saved level. This relationship would be lost "
@@ -910,17 +843,15 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     const auto it = children.find(static_cast<u32>(row.ent));
     const bool hasKids = it != children.end() && !it->second.empty();
 
-    // NEITHER _Framed NOR _FramePadding, and that is the gates constraint rather than taste.
-    // For a plain TreeNodeEx the vertical padding is min(CurrLineTextBaseOffset, FramePadding.y)
-    // and that offset is 0 at the start of a row, so the row is exactly as tall as the
-    // Selectable it replaces. Either flag would add FramePadding.y*2. This panel is a
-    // ratio-sized dock node and cannot reach the Level viewport rect anyway, but the rule costs
-    // nothing to hold and the reason is worth writing down. SpanAvailWidth matches the Content
-    // Browser's own folder tree rather than inventing a second convention.
+    // NEITHER _Framed NOR _FramePadding -- a gates constraint, not taste: for a plain TreeNodeEx
+    // the vertical padding is min(CurrLineTextBaseOffset, FramePadding.y), which is 0 at a row's
+    // start, so the row matches the Selectable it replaces exactly; either flag adds
+    // FramePadding.y*2. (This panel is a ratio-sized dock node and can't reach the Level viewport
+    // rect anyway, but the rule costs nothing to hold.) SpanAvailWidth matches the Content
+    // Browser's own folder tree.
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
-    // THE WHOLE SET IS HIGHLIGHTED, not just the anchor -- a multi-select the user cannot SEE
-    // is indistinguishable from a broken one, and the first thing they would do is click again
-    // and lose it.
+    // The whole set is highlighted, not just the anchor: an invisible multi-select looks broken,
+    // and the first thing a user does with a "broken" selection is click again and lose it.
     if (sel_ == kSelScene && (selEntity_ == row.ent || multiIsSelected(row.ent)))
         flags |= ImGuiTreeNodeFlags_Selected;
     if (!hasKids) {
@@ -931,9 +862,8 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         if (depth == 0) flags |= ImGuiTreeNodeFlags_DefaultOpen;
     }
 
-    // THE ROW BECOMES A TEXT FIELD while it is being renamed, rather than opening a dialog:
-    // the name is edited where it is read, which is what every file browser and every other
-    // editor's outliner does, and it keeps the tree's shape from jumping under the cursor.
+    // The row becomes a text field while renaming, rather than a dialog: edited where it's read,
+    // as every file browser and outliner does, keeping the tree's shape from jumping.
     if (outlinerRenaming_ == row.ent) {
         ImGui::SetNextItemWidth(-1.0f);
         if (outlinerRenameFocus_) { ImGui::SetKeyboardFocusHere(); outlinerRenameFocus_ = false; }
@@ -956,10 +886,9 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         return;
     }
 
-    // EVERY DRAWN ROW, IN ORDER, so a shift-click has a range to walk. Recorded here rather
-    // than rebuilt on demand because only this walk knows the tree's filtered, sorted, expanded
-    // shape -- the same reason the Content Browser ranges over its `shown` list and not the
-    // folder's contents.
+    // Every drawn row, in order, so a shift-click has a range to walk: recorded here because only
+    // this walk knows the filtered/sorted/expanded shape (same reason the Content Browser ranges
+    // over its `shown` list, not the folder's contents).
     outlinerOrder_.push_back(row.ent);
 
     const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
@@ -967,9 +896,8 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     // IsItemToggledOpen separates "clicked the arrow" from "clicked the label" on one node, so
     // expanding a parent does not also select it.
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-        // SAME KEYS AS THE CONTENT BROWSER NEXT DOOR, and as every file browser: shift extends a
-        // range from the anchor, ctrl toggles one, a bare click replaces. Making the two panels
-        // disagree about this would be worse than either behaviour on its own.
+        // Same keys as the Content Browser and every file browser: shift extends from the
+        // anchor, ctrl toggles, a bare click replaces -- the two panels must agree on this.
         const ImGuiIO& cio = ImGui::GetIO();
         if (cio.KeyShift && sel_ == kSelScene && selEntity_ != scene::kInvalidEntity)
             multiRange(row.ent);
@@ -978,9 +906,8 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         else
             multiSetSingle(row.ent);
     }
-    // F2 AND RIGHT-CLICK > RENAME, the two gestures a file browser has trained everyone to
-    // expect -- and the ones the Content Browser next door already implements for a FILE. The
-    // Outliner had neither, for an entity.
+    // F2 and right-click > Rename: the gestures a file browser trains everyone to expect, and
+    // ones the Content Browser next door already has for a FILE. The Outliner had neither.
     if (ImGui::IsItemHovered() && ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
         // Renaming is a one-entity act, so it collapses the selection rather than renaming the
         // anchor of a set and leaving the rest looking selected but untouched.
@@ -988,22 +915,17 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         beginOutlinerRename(row.ent);
     }
     if (ImGui::BeginPopupContextItem(("##ctx" + std::to_string((u32)row.ent)).c_str())) {
-        // A right-click on a row that is ALREADY part of the selection keeps the whole set --
-        // otherwise "select five, right-click, Delete" would delete one, which is the single most
-        // annoying way for a multi-select to be half-implemented. Right-clicking OUTSIDE the set
-        // selects just that row, as everywhere else.
+        // Right-click on a row already in the selection keeps the whole set (otherwise "select
+        // five, right-click, Delete" deletes one); right-click outside it selects just that row.
         if (!multiIsSelected(row.ent)) multiSetSingle(row.ent);
         else { sel_ = kSelScene; selEntity_ = row.ent; }
         if (ImGui::MenuItem("Rename", "F2")) beginOutlinerRename(row.ent);
-        // THE OTHER HALF OF WHAT A RIGHT-CLICK IS FOR. This menu offered Rename and nothing else,
-        // so the one place a person looks to delete a thing in a tree had no way to. Goes through
-        // deleteSelection() rather than destroyEntity() so it captures the subtree for undo -- the
-        // row above has already made this entity the selection.
-        // DEFERRED, NOT DONE HERE, for two reasons that both bite. TreeNodeEx has already
-        // PUSHED for a row with children, and the matching TreePop is below -- returning early
-        // from here would leave ImGui's tree stack unbalanced. And this walk holds references
-        // into `children` and `row`, which destroying an entity mid-walk invalidates. The
-        // request is answered after the whole tree is drawn.
+        // Rename was the only entry; this adds Delete via deleteSelection() (not destroyEntity(),
+        // so the subtree is captured for undo -- the row above already made this entity the
+        // selection).
+        // DEFERRED, NOT DONE HERE: TreeNodeEx has pushed for a row with children (unbalancing the
+        // tree stack on an early return), and this walk holds references into `children`/`row`
+        // that destroying an entity mid-walk would invalidate. Answered after the whole tree draws.
         if (ImGui::MenuItem("Delete", editor::chordToString(
                 keybinds_.chordFor(editor::CommandId::EditDelete)).c_str())) {
             outlinerDeleteRequest_ = row.ent;
@@ -1030,18 +952,13 @@ void SandboxApp::buildOutlinerPanel() {
     // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
     outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
-    // A FILTER, because an alphabetical tree of six thousand entities is a list you scroll past,
-    // not one you find anything in. Sponza alone lists a few hundred.
-    //
-    // MATCHES A ROW BY NAME AND KEEPS ITS ANCESTORS. Hiding a parent whose child matched would
-    // orphan the match -- the tree is drawn by walking roots down, so a row whose parent is gone
-    // is never reached and the filter would appear to find nothing. Keeping the chain is what
-    // makes a hit visible in the place it actually lives.
-    // GUARDED WITH WHAT IT FILTERS. outlinerFilter_ matches entity names, so it lives behind
-    // AVER_MODULE_SCENE in SandboxApp.hpp with the rest of the Outliner's state -- while this
-    // panel is drawn under AVER_WITH_IMGUI alone, which proves nothing about there being a world.
-    // A scene-less editor still opens the Outliner; it just has only placeholder objects to list,
-    // and a name filter over a handful of those is not worth a box that filters nothing.
+    // A FILTER: an alphabetical tree of six thousand entities is scrolled past, not searched
+    // (Sponza alone lists a few hundred).
+    // Matches by name and keeps ancestors, so a hit stays reachable in the walked-from-root tree
+    // (see Pass 1b below for the mechanics).
+    // GUARDED WITH WHAT IT FILTERS: outlinerFilter_ lives behind AVER_MODULE_SCENE in
+    // SandboxApp.hpp, while this panel draws under AVER_WITH_IMGUI alone -- a scene-less editor
+    // still opens the Outliner, just with only placeholder objects, not worth filtering.
 #if AVER_MODULE_SCENE
     {
         char buf[128];
@@ -1069,36 +986,27 @@ void SandboxApp::buildOutlinerPanel() {
         for (u32 i = 0; i < n; ++i) {
             const scene::Entity ent = w.at(i);
             if (!w.valid(ent) || w.destroyPending(ent)) continue;
-            // Chunk-streamed entities are excluded on purpose: potentially hundreds of them come
-            // and go as the camera moves, and this list is for what a designer placed. Their
-            // live count is in the Chunk Streaming stats window instead (buildChunkStreamingPanel).
+            // Chunk-streamed entities are excluded on purpose: hundreds can come and go as the
+            // camera moves; this list is what a designer placed (live count: buildChunkStreamingPanel).
             if (anyChunkWorldOwns(ent)) continue;
-            // The graph-driven drone is excluded for the identical reason: transient, not
-            // authored, tracked separately (see the [Drone] AVER_INFO lines / the Details panel
-            // if selected directly some other way -- there isn't one; it just isn't listed here).
+            // The drone is excluded for the same reason: transient, not authored (tracked via the
+            // [Drone] AVER_INFO lines instead; it has no Details entry either).
             if (ent == droneEntity_) continue;
             const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
             const std::string nm = w.name(ent);
-            // Anything drawable, plus anything named -- an empty used as a parent is still a
-            // node someone needs to be able to reach. RELAXED for the tree: an unnamed,
-            // mesh-less entity is also kept once it HAS a child, because hiding a group pivot
-            // the instant somebody drops onto it would make a successful reparent look like it
-            // had silently failed. childCount is the raw engine count, so a pivot whose children
-            // are all chunk- or drone-filtered shows as an empty-looking leaf; narrow enough to
-            // accept rather than add a third pass over the survivor set.
+            // Anything drawable or named is kept, plus an unnamed mesh-less entity once it HAS a
+            // child (else hiding a pivot the instant something reparents onto it looks like a
+            // failed reparent). childCount is the raw engine count, so a pivot whose children are
+            // all filtered shows as an empty leaf -- accepted over a third pass on survivors.
             if (!mr && nm.empty() && w.childCount(ent) == 0) continue;
             rows.push_back(OutlinerRow{ent, w.parent(ent), outlinerLabelFor(ent)});
             survived.insert(static_cast<u32>(ent));
         }
 
-        // PASS 1b: THE NAME FILTER, applied after the rows exist so ancestors can be kept.
-        //
-        // A row matches on a case-insensitive substring of its shown label. Its ANCESTORS are
-        // kept too, even when they do not match: the tree below is drawn by walking roots
-        // downward, so a row whose parent was dropped is simply never visited -- filtering
-        // naively would hide every nested match and the box would look broken on exactly the
-        // deep hierarchies it is most needed for. Descendants of a match are NOT kept: "show me
-        // the thing I named" should not unfold its entire subtree.
+        // PASS 1b: the name filter, applied after rows exist so ancestors can be kept. Matches a
+        // case-insensitive substring of the label; ancestors are kept too (a dropped parent's row
+        // is never visited by the root-down walk below) but descendants of a match are NOT --
+        // "show me the thing I named" shouldn't unfold its subtree.
         if (!outlinerFilter_.empty()) {
             const std::string needle = lowerCopy(outlinerFilter_);
             std::unordered_map<u32, const OutlinerRow*> byEnt;
@@ -1126,18 +1034,17 @@ void SandboxApp::buildOutlinerPanel() {
             for (const OutlinerRow& r : rows) survived.insert(static_cast<u32>(r.ent));
         }
 
-        // PASS TWO, and it HAS to be a second pass: w.at() walks the dense array, which is
-        // swap-with-last on destroy and carries no ordering guarantee, so a child can appear
-        // before its parent. Testing parent membership against a set still being filled would
-        // promote the children of a later-indexed parent to the root list.
+        // PASS TWO, and it has to be separate: w.at() walks the dense array (swap-with-last on
+        // destroy, no ordering guarantee), so a child can appear before its parent -- testing
+        // membership against a still-filling set would wrongly promote children to roots.
         std::unordered_map<u32, std::vector<const OutlinerRow*>> children;
         std::vector<const OutlinerRow*> roots;
         for (const OutlinerRow& r : rows) {
             if (r.par != scene::kInvalidEntity && survived.count(static_cast<u32>(r.par)))
                 children[static_cast<u32>(r.par)].push_back(&r);
             else
-                roots.push_back(&r);   // a true root, OR one whose parent is filtered out or
-                                       // gone: promoted so it stays reachable, never dropped.
+                roots.push_back(&r);   // true root, or one whose parent was filtered out or
+                                       // gone -- promoted so it stays reachable.
         }
         // ALPHABETICAL, not scan order: linkToParent PREPENDS, so the engine's child order is
         // newest-first and the list would visibly reshuffle every time anything is attached.
@@ -1151,9 +1058,9 @@ void SandboxApp::buildOutlinerPanel() {
         outlinerOrder_.clear();
         for (const OutlinerRow* r : roots) drawOutlinerRow(*r, children, 0);
 
-        // THE DEFERRED DELETE, answered here: the tree is fully drawn, every TreePop is paired,
-        // and nothing below reads the row structures any more. Routed through deleteSelection so
-        // it captures the subtree for undo exactly as the menu and the key do.
+        // The deferred delete, answered here: the tree is fully drawn, every TreePop is paired,
+        // and nothing below reads the row structures. Routed through deleteSelection so it
+        // captures the subtree for undo too.
         if (outlinerDeleteRequest_ != scene::kInvalidEntity) {
             const scene::Entity doomed = outlinerDeleteRequest_;
             outlinerDeleteRequest_ = scene::kInvalidEntity;
@@ -1195,12 +1102,10 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
     if (sel_>=0 && sel_<(int)objects_.size()){
         MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
         if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-            // BRACKETED FOR UNDO, exactly as the scene-entity branch below does. These three
-            // drags were the only transform edits in the editor that pushed nothing: the
-            // machinery already handles placeholder objects (selectedXform and endTransformEdit
-            // both branch for them, and the GIZMO drives these same objects through it), so
-            // dragging a placeholder in the viewport was undoable and typing the same number
-            // here was not.
+            // Bracketed for undo, as the scene-entity branch below does: these three drags were
+            // the only transform edits pushing nothing (selectedXform/endTransformEdit already
+            // branch for placeholder objects via the gizmo, so dragging was undoable but typing
+            // the same number here was not).
             ImGui::DragFloat3("Location (cm)", &o.pos.x, 1.0f);
             if (ImGui::IsItemActivated()) beginTransformEdit();
             bool objDone = ImGui::IsItemDeactivatedAfterEdit();
@@ -1226,13 +1131,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         scene::World& w = scene::World::instance();
         const std::string nm = w.name(selEntity_);
         const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
-        // EDITABLE, WHICH IT HAS NEVER BEEN. This was TextUnformatted and there was no rename
-        // affordance anywhere in the editor -- not here, not in the Outliner, no F2, no context
-        // menu -- so a level of "Cube 1..40" stayed that way. entityLabels_ was written only at
-        // spawn/paste/duplicate/load and never from anything a person did.
-        //
-        // COMMITTED ON ENTER OR ON LOSING FOCUS, not per keystroke, for the reason the material
-        // panel spells out: otherwise every letter typed is its own undo entry.
+        // Editable, which it never was: no rename affordance existed anywhere (not here, not the
+        // Outliner, no F2, no context menu) so a level of "Cube 1..40" stayed that way;
+        // entityLabels_ was written only at spawn/paste/duplicate/load, never by a person.
+        // Committed on Enter or losing focus, not per keystroke -- else every letter typed is its
+        // own undo entry (see materialPanel's comment).
         {
             char nameBuf[128];
             std::snprintf(nameBuf, sizeof nameBuf, "%s",
@@ -1247,10 +1150,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             uiReg_.track("details.entityName");
         }
         ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
-        // MULTI-SELECTION. Computed once and reused by Transform/Mesh/Material below, which all
-        // apply to the whole set; name and components stay single-entity (the anchor alone, per
-        // multiSel_'s own header comment -- "one entity to talk about"), so this doubles as the
-        // reminder that the name field above speaks for the anchor only.
+        // Multi-selection, computed once and reused by Transform/Mesh/Material below (which apply
+        // to the whole set); name and components stay single-entity, the anchor alone -- per
+        // multiSel_'s own header comment, "one entity to talk about".
         const std::vector<scene::Entity> multiSelected = selectedEntities();
         if (multiSelected.size() > 1) {
             ImGui::SameLine();
@@ -1280,22 +1182,16 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 if (moved) w.setLocalTransform(selEntity_, xf);
                 if (done) endTransformEdit();
               } else {
-                // MULTI-SELECTION TRANSFORM, PER COMPONENT. The anchor's own value is shown --
-                // same DragFloat3 calls as the single-entity branch above -- but a component that
-                // is actually EDITED this frame is a SET applied to every selected entity, not the
-                // gizmo's world-space DELTA (see the drag handler in SandboxViewport.cpp): typing
-                // Z=0 puts every selected prop on the floor at its own X/Y, rather than sliding the
-                // whole group by however far the anchor moved. Untouched components are left
-                // exactly where each entity's own transform already had them -- which is why a
-                // component is diffed against `orig*`, the anchor's reading from the TOP of this
-                // frame before any widget touched it, rather than assumed from which DragFloat3
-                // fired.
+                // MULTI-SELECTION TRANSFORM, PER COMPONENT: shows the anchor's value via the same
+                // DragFloat3 calls as the single-entity branch, but an edited component is SET on
+                // every selected entity, not the gizmo's world-space delta (SandboxViewport.cpp)
+                // -- typing Z=0 floors every prop at its own X/Y. Diffed against `orig*` (anchor's
+                // pre-edit reading) so untouched components stay put.
                 //
-                // forEachMultiMoved SUPPLIES THE SET, both for the "(mixed)" check below and for
-                // the apply: it already excludes the anchor and any entity whose parent is also
-                // selected, the same rule the gizmo drag uses so a selected child is not moved
-                // twice (endTransformEdit's own multiMoveBefore_/alsoMoved diff -- unchanged here
-                // -- then turns whatever this writes into the one undo entry for the gesture).
+                // forEachMultiMoved supplies the set (for "(mixed)" and the apply): excludes the
+                // anchor and any entity whose parent is selected too (so a selected child isn't
+                // moved twice), same rule as the gizmo drag; endTransformEdit's
+                // multiMoveBefore_/alsoMoved diff still yields one undo entry.
                 Transform xf = loc->xf;
                 Vec3 euler = eulerDegFromQuat(xf.rotation);
                 const Vec3 origPos = xf.position, origEuler = euler, origScale = xf.scale;
@@ -1303,9 +1199,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 bool posMixed[3] = {false, false, false};
                 bool rotMixed[3] = {false, false, false};
                 bool scaleMixed[3] = {false, false, false};
-                // SAME TOLERANCE nearlySameXform/nearlySameTransform use elsewhere in this class:
-                // a "(mixed)" flag is a judgement call about two numbers meaning the same thing,
-                // not the bit-exact touch test the apply below needs.
+                // Same tolerance as nearlySameXform/nearlySameTransform elsewhere: "(mixed)" is a
+                // judgement call about equal-enough numbers, not the bit-exact touch test below.
                 forEachMultiMoved([&](scene::Entity, const Transform& oxf) {
                     const Vec3 oe = eulerDegFromQuat(oxf.rotation);
                     if (std::fabs(oxf.position.x - origPos.x) > 1e-4f) posMixed[0] = true;
@@ -1318,10 +1213,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     if (std::fabs(oxf.scale.y - origScale.y) > 1e-4f) scaleMixed[1] = true;
                     if (std::fabs(oxf.scale.z - origScale.z) > 1e-4f) scaleMixed[2] = true;
                 });
-                // (mixed) NEXT TO A ROW WHOSE THREE AXES ARE ONE DragFloat3, so it cannot sit on
-                // just the disagreeing axis the way a per-field marker would -- SameLine plus a
-                // hover tooltip is the same "flag it, explain it on hover" idiom the IOR/F0
-                // consistency check above (materialPanel) already uses for the same reason.
+                // "(mixed)" sits beside the whole DragFloat3 row (one control, three axes), so it
+                // can't mark just the disagreeing axis -- same flag-it/explain-on-hover idiom as
+                // the IOR/F0 check in materialPanel.
                 const auto showMixedTag = [&](const bool m[3]) {
                     if (!(m[0] || m[1] || m[2])) return;
                     ImGui::SameLine();
@@ -1350,9 +1244,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 showMixedTag(scaleMixed);
 
                 if (moved) {
-                    // TOUCHED, not "nonzero": the axis (or axes) a widget above actually wrote
-                    // this frame, found the same way the mixed check above found disagreement --
-                    // by comparing against the pre-edit reading.
+                    // "Touched", not "nonzero": which axis a widget wrote this frame, found the
+                    // same way the mixed check above did -- by comparing to the pre-edit reading.
                     const bool touchPos[3]   = {xf.position.x != origPos.x,
                                                 xf.position.y != origPos.y,
                                                 xf.position.z != origPos.z};
@@ -1389,12 +1282,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             if (ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool vis = authoredVisible(selEntity_);
                 if (ImGui::Checkbox("Visible", &vis)) {
-                    // APPLIES TO THE WHOLE SELECTION, the same multi-selection rule the Mesh/
-                    // Material pickers just below use -- but UNLIKE them, this one pushes an undo
-                    // entry: Visible is now AUTHORED, level-saved data (owner decision, Unreal-
-                    // style), not session bookkeeping, so a stray click has to be as recoverable as
-                    // a transform edit. One EditCmd for the whole click, restoring every touched
-                    // entity's own previous authored state on Ctrl+Z -- see EditCmd::VisibilityChange.
+                    // Applies to the whole selection (same rule as the Mesh/Material pickers
+                    // below), but unlike them pushes undo: Visible is authored, level-saved data
+                    // (owner decision, Unreal-style), not session bookkeeping, so a stray click
+                    // needs to be as recoverable as a transform edit -- one EditCmd per click
+                    // restores every touched entity (EditCmd::VisibilityChange).
                     EditCmd c;
                     c.kind = EditCmd::Kind::Visibility;
                     for (const scene::Entity ent : multiSelected) {
@@ -1406,10 +1298,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     }
                     if (!c.visibility.empty()) pushEdit(std::move(c));
                 }
-                // SAVED WITH THE LEVEL, Unreal-style -- unlike H/Shift+H/Ctrl+H, which stay a
-                // temporary, editor-only hide and never reach the file (see hideSelection's own
-                // comment, SandboxViewport.cpp). The anchor can be checked here (authored visible)
-                // and still read invisible in the viewport right now, if H is the reason why.
+                // Saved with the level, Unreal-style -- unlike H/Shift+H/Ctrl+H (temporary,
+                // editor-only, see hideSelection in SandboxViewport.cpp; can disagree with this).
                 if (ImGui::IsItemHovered()) {
                     const bool hHidden = std::find(editorHidden_.begin(), editorHidden_.end(),
                                                    selEntity_) != editorHidden_.end();
@@ -1421,20 +1311,19 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         ImGui::SetTooltip("Saved with the level.\n"
                                           "H hides it in the editor only, without changing this.");
                 }
-                // THE FIELD IS NOW REASSIGNABLE. It printed this hex id and offered nothing --
-                // no picker, and not even a drop target: the only mesh drag-drop in the editor
-                // lands on the 3D VIEWPORT and SPAWNS A NEW ENTITY, which is a different verb.
-                // So there was no way, anywhere, to point an existing entity at another mesh.
+                // Now reassignable: previously just a printed hex id, with no picker and not even
+                // a drop target -- the only mesh drag-drop in the editor lands on the 3D viewport
+                // and spawns a NEW entity, a different verb.
                 const auto meshIt = meshPathById_.find(mr->mesh);
                 ImGui::TextDisabled("mesh  %s", meshIt == meshPathById_.end()
                                                     ? "(unloaded)" : meshIt->second.c_str());
                 if (ImGui::Button("Change Mesh...")) ImGui::OpenPopup("##pickMesh");
                 uiReg_.track("details.mesh.pick");
                 {
-                    // CANDIDATES ARE THE MESHES ACTUALLY LOADED, from the map populated for
-                    // exactly this ("the foliage palette, a future asset picker"). Listing every
-                    // .ocmesh in the content index instead would offer meshes the device has
-                    // refused or that were never loaded, and picking one would blank the entity.
+                    // Candidates are meshes actually loaded (from the map populated for this --
+                    // "the foliage palette, a future asset picker"); listing every .ocmesh in the
+                    // content index could offer one the device refused or never loaded, blanking
+                    // the entity if picked.
                     std::vector<AssetChoice> cands;
                     cands.reserve(meshPathById_.size());
                     for (const auto& kv : meshPathById_) cands.push_back({kv.second, kv.first});
@@ -1445,12 +1334,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         if (multiSelected.size() <= 1) {
                             assignMeshId(selEntity_, picked);
                         } else {
-                            // APPLIES TO THE WHOLE SELECTION, same as Transform above -- pick a
-                            // mesh once and every selected entity that HAS a CMeshRenderer takes
-                            // it, not just the anchor whose slot the picker read from.
-                            // assignMeshId is already a per-entity, all-or-nothing call (false and
-                            // a no-op for anything without the component), so this is that same
-                            // call in a loop rather than a second implementation of it.
+                            // Applies to the whole selection, same as Transform above: every
+                            // entity with a CMeshRenderer takes the pick, not just the anchor.
+                            // assignMeshId is already per-entity all-or-nothing (false, a no-op,
+                            // for anything without the component), so this just loops it rather
+                            // than reimplementing.
                             int n = 0;
                             for (const scene::Entity ent : multiSelected)
                                 if (assignMeshId(ent, picked)) ++n;
@@ -1467,40 +1355,34 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 }
             }
 
-            // THE MATERIAL, which a scene entity's Details has never offered. The scene stores a
-            // NAME TOKEN, not a material handle -- content_'s surface materials map between them,
-            // populated when the project's .ocmat files load -- so this is the one lookup that
-            // stood between the panel and the entities anybody actually edits.
-            //
-            // Says WHICH surface by name, because the desc behind it is SHARED: every entity
-            // using M_Floor is looking at these same sliders, and editing them here moves all of
-            // them. That is the material system working as designed, and it is the sort of thing
-            // a panel should say out loud rather than let somebody discover.
+            // The material, which Details never offered: the scene stores a NAME TOKEN, not a
+            // handle -- content_'s surface materials map between them once .ocmat files load.
+            // The one lookup that stood between the panel and the entities anybody actually edits.
+            // Named explicitly because the desc is SHARED: every entity using M_Floor edits the
+            // same sliders (the material system working as designed, not a bug) -- which the
+            // panel should say rather than let someone discover.
 #if AVER_MODULE_PBR
             if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-                // THE SAME FALLBACK THE DRAW USES. This panel reads mr->material directly, so
-                // without this it would report "(none)" for an entity the renderer is happily
-                // drawing with the mesh's own material -- a panel disagreeing with the picture.
+                // Same fallback the draw uses: without it, an entity drawn fine via the mesh's
+                // own material would report "(none)" here -- the panel disagreeing with the picture.
                 const i32 shown = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
                 const char* surfaceName = aver_scene_material_name(shown);
 
-                // A MATERIAL COULD NOT BE ASSIGNED AT ALL BEFORE THIS -- not by picker, and not
-                // by drag either, because isPlaceableAssetExt refuses to start a drag on a
-                // .ocmat. The panel could edit the parameters of whatever material the mesh's own
-                // slot already named, and nothing could change WHICH material that was.
+                // Previously unassignable at all -- no picker, and no drag either
+                // (isPlaceableAssetExt refuses .ocmat): the panel could edit parameters but never
+                // change WHICH material.
                 if (ImGui::Button("Change Material...")) ImGui::OpenPopup("##pickMaterial");
                 uiReg_.track("details.material.pick");
                 {
-                    // TOKENS, NOT PATH HASHES. content_'s surface materials map is keyed on the
-                    // interned name token, which is what mr->material holds; an fnv1a64 here would
-                    // resolve to nothing or, worse, to an unrelated surface by coincidence.
+                    // Tokens, not path hashes: content_'s surface map is keyed on the interned
+                    // token mr->material holds; an fnv1a64 here could resolve to nothing, or worse,
+                    // to an unrelated surface by coincidence.
                     std::vector<AssetChoice> cands;
                     cands.reserve(content_.surfaceMaterials().size());
                     for (const auto& kv : content_.surfaceMaterials()) {
                         if (!kv.second) continue;   // interned but no .ocmat loaded behind it
-                        // `matName`, not `nm`: this Details branch's own entity-name `nm` (set
-                        // above, from selEntity_) is still in scope here, and this shadowed it
-                        // (C4456) despite naming an unrelated thing -- a MATERIAL's display name.
+                        // `matName`, not `nm`: the entity-name `nm` set above is still in scope
+                        // here and would be shadowed (C4456) by an unrelated MATERIAL name.
                         const char* matName = aver_scene_material_name(kv.first);
                         cands.push_back({matName && *matName ? matName : "(unnamed)",
                                          static_cast<u64>(static_cast<u32>(kv.first))});
@@ -1542,9 +1424,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 #endif
         }
 #if AVER_MODULE_PARTICLES
-        // The authoring surface DECIDED components need: visible and editable the same way
-        // CMeshRenderer just above is. No picker widget beyond drag-drop exists for
-        // CMeshRenderer::mesh either, so an emitter's own effect id follows that same shape.
+        // Visible/editable the same way CMeshRenderer is above; no picker beyond drag-drop exists
+        // for CMeshRenderer::mesh either, so the emitter's effect id follows the same shape.
         if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
             if (ImGui::CollapsingHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
@@ -1553,17 +1434,15 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     else         pe->flags &= ~scene::kParticleEmitterStopped;
                 }
                 ImGui::TextDisabled("effect id 0x%llx", (unsigned long long)pe->effect);
-                // Drop a .ocparticle from the Content Browser directly onto this row to point this
-                // emitter at it -- the SAME id space content_.loadProjectParticleEffects() populates, so a
-                // freshly authored effect resolves the moment it lands here.
-                // THROUGH THE SHARED HELPER NOW. The resolve/validate/hash/assign/mark/log
-                // sequence used to be written out here, and the picker below would have been a
-                // second copy of it -- the "two implementations of one fact" shape this file
-                // keeps paying for. assignParticleEffect owns it; both callers just hand it a path.
-                // THE BROWSER'S ONE PAYLOAD. The Content Browser sends its whole selection under
-                // kCbMoveDragDropType (ImGui keeps exactly one payload per drag, see the viewport
-                // drop target), so this row takes the first .ocparticle in it. kAssetDragDropType
-                // is still accepted from any source that sends a single asset.
+                // Drop a .ocparticle from the Content Browser to point this emitter at it -- same
+                // id space content_.loadProjectParticleEffects() populates, so a freshly authored
+                // effect resolves immediately. Through the shared helper (assignParticleEffect,
+                // "two implementations of one fact") rather than a second resolve/validate/hash/
+                // assign/mark/log copy -- the picker below would otherwise have been that second copy.
+                // THE BROWSER'S ONE PAYLOAD: it sends its selection under kCbMoveDragDropType
+                // (ImGui keeps one payload per drag, see the viewport drop target), so this row
+                // takes the first .ocparticle in it; kAssetDragDropType is still accepted from a
+                // single-asset source.
                 if (ImGui::BeginDragDropTarget()) {
                     const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
                     if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
@@ -1586,20 +1465,16 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 if (ImGui::Button("Change Effect...")) ImGui::OpenPopup("##pickEffect");
                 uiReg_.track("details.effect.pick");
                 {
-                    // CANDIDATES COME FROM THE CONTENT INDEX, not from a loaded-effects map:
-                    // unlike a mesh, an effect is resolved when it is ASSIGNED (so a freshly
-                    // authored one works the moment it lands), so listing only already-loaded
-                    // effects would hide exactly the file the author just made.
-                    // content_.index() MAPS id -> ABSOLUTE path, not relative, and an earlier draft
-                    // of this comment said relative. Its KEY is fnv1a64 of the project-relative
-                    // spelling -- the same id space pe->effect holds, so the listed id is the
-                    // effect id and needs no hashing here -- but its VALUE is
-                    // `it->path().string()` straight off the directory iterator (content_.adopt()).
-                    // The two halves genuinely disagree, which is why the
-                    // label has to be derived rather than used as-is.
-                    //
-                    // LABELLED RELATIVE, so this popup reads like the Mesh and Material ones a few
-                    // rows above instead of showing the developer's whole local directory tree.
+                    // Candidates come from the content index, not a loaded-effects map: an effect
+                    // resolves on ASSIGNMENT (unlike a mesh), so listing only loaded ones would
+                    // hide the file the author just made.
+                    // content_.index() maps id -> ABSOLUTE path (an earlier draft of this comment
+                    // said relative -- it's not). Its KEY is fnv1a64 of the project-relative path
+                    // (pe->effect's id space, so no hashing needed), but its VALUE is
+                    // `it->path().string()` straight off the directory iterator (content_.adopt());
+                    // the two disagree, which is why the label is derived rather than used as-is.
+                    // Labelled relative, so this popup reads like the Mesh/Material ones above
+                    // instead of the developer's whole local directory tree.
                     std::vector<AssetChoice> cands;
                     for (const auto& kv : content_.index()) {
                         if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
@@ -1609,16 +1484,14 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                               [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
                     u64 picked = 0;
                     if (assetPicker("##pickEffect", cands, pe->effect, &picked)) {
-                        // ASSIGNED BY PATH, not by writing the id straight in, so it goes through
-                        // the identical resolve/validate the drop does -- including the extension
-                        // check and the project-relative normalisation. Writing pe->effect here
-                        // would be the second implementation this extraction exists to avoid.
-                        // PASSED STRAIGHT THROUGH, because content_.pathFor()'s value is ALREADY
-                        // absolute. The previous line joined it onto contentDir() first, which
-                        // happened to produce the right answer only because std::filesystem's
-                        // operator/ DISCARDS the left side when the right is absolute -- correct
-                        // by accident, and silently wrong the day that map starts storing
-                        // relative paths, which its own key spelling suggests it should.
+                        // Assigned by path, not by writing the id directly, so it goes through the
+                        // same resolve/validate the drop does -- extension check and project-
+                        // relative normalisation included (writing pe->effect would duplicate it).
+                        // Passed straight through: content_.pathFor()'s value is already absolute.
+                        // Joining it onto contentDir() first (as before) was correct only by
+                        // accident (operator/ discards the left side when the right is absolute) --
+                        // and would break the day that map starts storing relative paths, which its
+                        // own key spelling suggests it should.
                         const std::string path = content_.pathFor(picked);
                         if (!path.empty())
                             assignParticleEffect(selEntity_, path);
@@ -1631,9 +1504,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 
 #if AVER_MODULE_PHYSICS
         // ---- Soft Body, and the physics viewer for it ----
-        // A PANEL THAT READS THE SIMULATION, not just the component: the component says what was
-        // authored, but is it simulating, how many particles, did it take the skinned path, is it
-        // being drawn are answerable only from the live body and render feature.
+        // Reads the SIMULATION, not just the component: whether it's simulating, particle count,
+        // skinned path, and whether it's drawn are answerable only from the live body/render feature.
         if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
             if (ImGui::CollapsingHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
@@ -1677,9 +1549,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     if (particles == 0)
                         ImGui::TextDisabled(ICON_WARNING " the body has no particles");
 
-                    // Where its particles actually are, so "is it simulating" is answerable
-                    // without a debugger: a body at rest and a body falling look identical in
-                    // every other readout here.
+                    // Where its particles actually are, so "is it simulating" needs no debugger:
+                    // at rest and falling look identical in every other readout here.
                     std::vector<f32> pos(static_cast<usize>(particles) * 3, 0.0f);
                     const i32 got = particles > 0
                         ? aver_phys_softbody_vertices(sb->body, pos.data(), particles) : 0;
@@ -1700,9 +1571,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 }
 
 #if AVER_MODULE_RENDER_SOFTBODY
-                // IS IT ACTUALLY BEING DRAWN? Simulating and drawing are separate failures with
-                // identical symptoms from the viewport, and this is the one line that tells them
-                // apart: a non-zero draw handle means the scene pass substitutes simulated vertices for the authored mesh.
+                // Is it actually drawn? Simulating and drawing fail identically from the
+                // viewport; a non-zero draw handle means simulated vertices replace the authored mesh.
                 const bool drawn = softBodyScene_ && softBodyScene_->drawHandle(selEntity_) != 0;
                 ImGui::TextDisabled("%s drawn from the simulation: %s",
                                     drawn ? ICON_VISIBILITY : ICON_WARNING, drawn ? "yes" : "no");
@@ -1719,16 +1589,13 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 #endif
 
         // ---- Add Component ----
-        // THERE WAS NO WAY TO ADD A COMPONENT FROM THE EDITOR AT ALL before this: every panel
-        // above renders only when its component is ALREADY on the entity, so one no importer or
-        // template attaches was unreachable without hand-editing a level file.
+        // Previously impossible from the editor: every panel above renders only when its
+        // component already exists, so one no importer/template attaches needed a hand-edited file.
         ImGui::Separator();
         if (ImGui::Button(ICON_ADD " Add Component")) ImGui::OpenPopup("addComponent");
         if (ImGui::BeginPopup("addComponent")) {
-            // Listed by hand rather than walked from the component registry, deliberately: the
-            // registry knows every component's NAME and SIZE, nothing about whether attaching one
-            // from a menu is meaningful (CWorld/CLocal are written by the transform pass and would
-            // corrupt an entity by hand). An allow-list is the same information, kept visible.
+            // Listed by hand, not walked from the registry: the registry knows name/size, nothing
+            // about whether menu-attaching one is safe (CWorld/CLocal would corrupt an entity).
             struct Addable { u32 id; const char* name; const char* tip; };
             static const Addable kAddable[] = {
                 {scene::kComponentSoftBody, ICON_TUNE " Soft Body",
@@ -1738,21 +1605,17 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 const bool present = w.hasComponent(selEntity_, a.id);
                 ImGui::BeginDisabled(present);
                 if (ImGui::MenuItem(a.name)) {
-                    // addComponent hands back ZERO-FILLED storage and never runs a constructor,
-                    // so the defaults are written over it here -- the same fix World::create()
-                    // makes, and the bug CSynapseAgent already paid for once.
+                    // addComponent hands back zero-filled storage with no constructor run, so
+                    // defaults are written here -- same fix as World::create(); CSynapseAgent hit this bug once.
                     if (a.id == scene::kComponentSoftBody) {
                         if (auto* c = static_cast<scene::CSoftBody*>(
                                 w.addComponent(selEntity_, a.id)))
                             *c = scene::CSoftBody{};
                     }
                     cbStatus_ = std::string("Added ") + a.name;
-                    // NOT UNDOABLE, SO IT MUST AT LEAST BE DIRTY. Adding a component pushes no
-                    // EditCmd (there is no Kind for it), so without this the level closed clean
-                    // and the component was gone. A prompt the author can answer beats a silent
-                    // loss. Remove Component, just below, does not have this problem: it captures
-                    // the whole component before dropping it, so it can afford to be undoable
-                    // instead.
+                    // Not undoable, so at least mark dirty: adding pushes no EditCmd, so without
+                    // this the level closed clean and the component was silently gone. Remove
+                    // Component below has no such problem -- it captures the component and can be undoable.
                     markLevelUnsaved();
                 }
                 ImGui::EndDisabled();
@@ -1765,12 +1628,10 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         }
 
         // ---- Remove Component ----
-        // scene::World::removeComponent is implemented and tested (tests/scene/src/SceneTest.cpp)
-        // but had zero editor callers -- Add Component's own comment above used to say so outright.
-        // kRemovable lists exactly what kAddable offers, for the same reason kAddable is an
-        // allow-list rather than a walk of the component registry: CLocal/CWorld/CHierarchy are
-        // what makes the row an entity at all, and removing one by menu would corrupt it, not
-        // simplify it.
+        // scene::World::removeComponent was implemented and tested (tests/scene/src/SceneTest.cpp)
+        // but had zero editor callers. kRemovable mirrors kAddable's allow-list for the same
+        // reason: CLocal/CWorld/CHierarchy
+        // make the row an entity at all, and removing one by menu would corrupt it, not simplify it.
         ImGui::SameLine();
         if (ImGui::Button(ICON_DELETE " Remove Component")) ImGui::OpenPopup("removeComponent");
         if (ImGui::BeginPopup("removeComponent")) {
@@ -1784,10 +1645,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 anyPresent = anyPresent || present;
                 ImGui::BeginDisabled(!present);
                 if (ImGui::MenuItem(r.name)) {
-                    // UNDOABLE: removeComponentFromSelection captures the component byte-exact
-                    // before dropping it, so undo puts back exactly what was there -- unlike Add
-                    // Component above, which has no "before" to capture and falls back to a bare
-                    // markLevelUnsaved().
+                    // Undoable: removeComponentFromSelection captures the component byte-exact
+                    // before dropping it, unlike Add Component above (no "before" to capture).
                     if (removeComponentFromSelection(r.id))
                         cbStatus_ = std::string("Removed ") + r.name;
                 }
@@ -1823,10 +1682,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                   "it toward orange by elevation on its own.");
         }
         ImGui::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
-        // hasLevelSun_ sits inside SandboxApp.hpp's big AVER_MODULE_SCENE block, beside
-        // loadLevel/saveLevel and levelEntities_ -- a level IS a set of scene entities in this
-        // engine, so "this level authored a SUN record" is a fact only a scene-on build can ever
-        // populate or write back. A scene-off tree never runs the loader that sets it.
+        // hasLevelSun_ lives in SandboxApp.hpp's AVER_MODULE_SCENE block beside loadLevel/
+        // saveLevel: only a scene-on build ever runs the loader that populates it.
 #if AVER_MODULE_SCENE
         markLevelRecordEdited(hasLevelSun_);
 #endif
@@ -1880,22 +1737,19 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         }
         ImGui::ColorEdit3("Ground", sky_.groundAlbedo);
         ImGui::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
-        // RANGE 0..32, LOGARITHMIC, AND IT USED TO STOP AT 2.
+        // Range 0..32, logarithmic (used to stop at 2): the multiplier on the only term that fills
+        // an enclosed space (sky light through openings), and an arcade needs far more of it than
+        // a slider stopping at 2 can express. MEASURED on PTTest Sponza at exposure 1,
+        // 3D-viewport luminance percentiles (sunlit surfaces reach 237 in every row):
         //
-        // This is the multiplier on the only term that fills an enclosed space -- sky light
-        // through the openings -- and an arcade needs far more of it than a slider that stops at
-        // 2 can express. MEASURED on PTTest Sponza at exposure 1, luminance percentiles of the
-        // 3D viewport, sunlit surfaces reaching 237 in every row:
-        //
-        //   Sky Light  1    p50   8   p90 48    <- the median pixel is essentially black
+        //   Sky Light  1    p50   8   p90 48    <- median pixel essentially black
         //   Sky Light  4    p50  15   p90 48
         //   Sky Light 16    p50  34   p90 75    <- shadows readable, sun unchanged
         //
-        // The sun is correctly scaled: a directly lit surface reaches 237/255 with no exposure
-        // at all. What was missing was the fill, and the control for it could not reach the
-        // value the scene wanted -- so "everything is too dark" was, in part, unauthorable.
-        // Logarithmic because the useful range spans two orders of magnitude and the interesting
-        // end is the bottom.
+        // The sun itself is correctly scaled (237/255 with no exposure); the fill just couldn't
+        // reach the value the scene needed -- so "everything is too dark" was, in part,
+        // unauthorable. Logarithmic: the useful range spans two orders of magnitude and the
+        // interesting end is the bottom.
         ImGui::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
                            ImGuiSliderFlags_Logarithmic);
 
@@ -1914,11 +1768,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         ImGui::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
         ImGui::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
         ImGui::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
-        // FOG IS ITS OWN RECORD, so it needs its own mark. markLevelRecordEdited went in
-        // for SUN and SKY and this was missed, which left Fog Tint and Fog Density still
-        // silently discarded on a level whose file carries no FOG line.
-        // Guarded for the same reason hasLevelSun_ is above: the flag lives in the scene-only
-        // level-lifecycle state and means nothing without it.
+        // FOG is its own record and needs its own mark: markLevelRecordEdited went in for SUN/SKY
+        // but missed FOG, silently discarding Fog Tint/Density on a level with no FOG line.
+        // Guarded for the same reason as hasLevelSun_ above.
 #if AVER_MODULE_SCENE
         markLevelRecordEdited(hasLevelFog_);
         if (streaming_.enabled()) {
@@ -1952,21 +1804,16 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
             ImGui::DragFloat2("Wind", sky_.cloudWind, 5.0f);
         }
-        // CLOUDS IS ITS OWN RECORD, so it needs its own mark, for the same reason FOG did. The
-        // Clouds checkbox is above the `if`, deliberately: turning clouds OFF is an edit that
-        // has to reach the file, and marking only inside the enabled branch would make "off"
-        // the one cloud setting that could never be saved.
-        // Same as hasLevelSun_/hasLevelFog_ above: both flags live in the scene-only
-        // level-lifecycle state and have nothing to mark without a scene to load a level into.
+        // CLOUDS is its own record, same reason as FOG. The Clouds checkbox sits above the `if`
+        // deliberately: turning clouds OFF must reach the file, so marking only inside the
+        // enabled branch would make "off" the one setting that could never be saved.
 #if AVER_MODULE_SCENE
         markLevelRecordEdited(hasLevelClouds_);
         markLevelRecordEdited(hasLevelSky_);
 #endif
-        // WATER LIVES BESIDE THE SKY, not in a mode of its own: it is a property OF THE LEVEL,
-        // exactly like the sun and the fog above it, and the panel a person already opens to set
-        // the weather is where they will look for it. No markLevelRecordEdited -- unlike SUN and
-        // FOG, waters ride through saveLevel as part of levelHeader_ rather than through a
-        // has-flag, so editing the vector IS the edit.
+        // Water lives beside the Sky, not its own mode: it's a level property like sun/fog, and
+        // the weather panel is where an author looks for it. No markLevelRecordEdited needed --
+        // unlike SUN/FOG it rides through saveLevel as part of levelHeader_, so editing IS the edit.
         ImGui::Separator();
         buildWaterPanel(e);
     } else if (sel_==-4){
@@ -1975,11 +1822,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The exposure adjusts automatically as the view gets brighter or\n"
                               "darker, like eyes -- quickly toward light, more slowly toward dark.");
-        // STOPS, NOT THE RAW LINEAR MULTIPLIER post_.exposure IS: a linear drag has no sense of
-        // scale attached to it, which is how one landed at 4.05 (+2 stops) and stayed there through
-        // every relaunch, brightening every view enough to mask whatever the engine's own tuned
-        // defaults (RHI.hpp) were actually doing. EV reads the same whether it is compensation on
-        // Eye Adaptation's result or, with Eye Adaptation off, a fixed exposure relative to 1.
+        // Stops, not the raw linear post_.exposure: a linear drag has no scale, which is how one
+        // landed at 4.05 (+2 stops) and masked the engine's tuned defaults (RHI.hpp) every launch.
+        // EV reads the same whether it's compensation on Eye Adaptation or a fixed exposure.
         f32 ev = (post_.exposure > 0.0f) ? std::log2(post_.exposure) : 0.0f;
         if (ImGui::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
             post_.exposure = std::exp2(ev);
@@ -1992,10 +1837,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         ImGui::SameLine();
         if (ImGui::Button("Reset")) post_.exposure = 1.0f;
         if (post_.autoExposure) {
-            // LIVE READOUT so a value that never moves reads as stuck rather than as adaptation
-            // doing its job -- see IDevice::postExposureReadout for why it lags the eye by a frame
-            // or two. The clamps and histogram cuts it adapts within are tuned engine defaults now
-            // (RHI.hpp), not dials this panel hands out to be dragged somewhere that pins them.
+            // Live readout, so a stuck-looking value reads as adaptation working, not broken (see
+            // IDevice::postExposureReadout; it lags the eye by a frame or two). Clamps/histogram
+            // cuts are tuned engine defaults (RHI.hpp), not panel-exposed dials.
             f32 metered = 0.0f;
             if (e.device() && e.device()->postExposureReadout(metered))
                 ImGui::TextDisabled("Adapted to %+.1f EV", std::log2(metered));
@@ -2025,9 +1869,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 void SandboxApp::buildChunkStreamingPanel() {
     if (!streaming_.enabled()) return;
     const world::StreamStats& s = streaming_.stats();
-    // ANCHORED TO THE VIEWPORT, not the window's top-left corner. It used to sit at a fixed
-    // (12, 60) from the window origin, the viewport's corner too until a docked panel appeared on
-    // the left, after which this overlay covered the mode panel's tool buttons.
+    // Anchored to the viewport, not the window's corner: a fixed (12, 60) from the window origin
+    // used to overlap the mode panel's tool buttons once a docked panel appeared on the left.
     ImGui::SetNextWindowPos(ImVec2(vpX_ + 12.0f * dpi_, vpY_ + 60.0f * dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.85f);
     if (!ImGui::Begin("Chunk Streaming", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) {

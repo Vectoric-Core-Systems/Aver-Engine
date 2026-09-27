@@ -2400,36 +2400,27 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     depthOnlyMesh_ = 0;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     if (!meshes_[mesh - 1].alive) return;
-    // `blended` explicit and false: TRANSLUCENT MESHES ARE D3D12-ONLY TODAY. IDevice::setDrawBlended
-    // (RHI.hpp:613) is the seam a caller marks a draw translucent with, but VulkanDevice doesn't
-    // override it -- the base setter is a no-op and drawBlended() always answers false. So every draw
-    // here is opaque by construction; both explicit `false`s below say so rather than leaning on a default.
+    // `blended` explicit false: translucent meshes are D3D12-only (IDevice::setDrawBlended, RHI.hpp:613); VulkanDevice's setter is a no-op so drawBlended() always answers false -- both explicit `false`s below say so rather than leaning on a default.
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
-    // CONCRETELY WRONG, NOT JUST UNSUPPORTED: a caller that marks a glass mesh blended and draws it
-    // here gets the same opaque path as everything else -- scenePso_/wirePso_/meshPso_ each build a
-    // single hardcoded-opaque VkPipelineColorBlendAttachmentState (createPipeline() ~1321,
-    // initMeshShaders() ~1490) with no BlendMode read anywhere. The glass paints solid instead of
-    // vanishing; nothing logs or asserts it.
-    //
-    // WHAT REAL SUPPORT WOULD TAKE: (a) override setDrawBlended/drawBlended with a sticky bool reset
-    // in beginFrame, like D3D12Device's; (b) after the submitDraw loop above (so a feature like the
-    // path tracer still sees the blended instance), divert a blended mesh into a new per-frame vector
-    // instead of walking scenePipeline here; (c) in endFrame, after the sky draw (its depth-EQUAL
-    // no-write PSO would paint over blended geometry drawn earlier) and before transparentPass, sort
-    // that vector back-to-front and replay it through a blendEnable=VK_TRUE variant of each PSO
-    // (toVkBlendAttachment already builds one for BlendMode::AlphaBlend,
-    // VulkanResourceFactory.cpp:500-528) paired with depth-write-off.
+    // CONCRETELY WRONG, not just unsupported: a blended glass mesh takes the same opaque path --
+    // scenePso_/wirePso_/meshPso_ each hardcode an opaque VkPipelineColorBlendAttachmentState
+    // (createPipeline() ~1321, initMeshShaders() ~1490), with no BlendMode read anywhere; it paints
+    // solid, and nothing logs or asserts it.
+    // TODO: override setDrawBlended/drawBlended (sticky, like D3D12Device's); after the submitDraw
+    // loop above (so e.g. the path tracer still sees the blended instance) divert blended meshes to
+    // a per-frame vector; in endFrame, after the sky draw (its depth-EQUAL no-write PSO would paint
+    // over blended geometry drawn earlier) and before transparentPass, sort that vector back-to-front
+    // and replay through a blendEnable=VK_TRUE PSO variant (toVkBlendAttachment already has one for
+    // BlendMode::AlphaBlend, VulkanResourceFactory.cpp:500-528) with depth-write off.
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
-        // A PREPASSED DRAW GOES DOWN THE SAME GEOMETRY PATH ITS DEPTH WAS WRITTEN THROUGH -- the
-        // input assembler, because drawMeshDepthPrepass has no mesh-shader twin. Passing msActive_
-        // here unconditionally handed every prepassed draw the ORDINARY mesh-shader pipeline (Less,
-        // write on), which then rejected the equal depth the prepass had just written for the same
-        // triangle, and the frame came out almost entirely unshaded. D3D12Device::drawMesh's twin
-        // carries the full account and the measurement.
+        // A prepassed draw must reuse the same geometry path its depth was written through (the input
+        // assembler; drawMeshDepthPrepass has no mesh-shader twin). Passing msActive_ unconditionally
+        // gave prepassed draws the ordinary Less/write-on pipeline, rejecting the equal depth the prepass
+        // just wrote -- the frame came out almost unshaded (full account/measurement: D3D12Device::drawMesh's twin).
         const bool featureMs = msActive_ && meshPso_ && !prepassed;
         const PipelineHandle fp = f->scenePipeline(featureMs, wireframe_, prepassed, false);
         if (!fp) break;
@@ -2442,8 +2433,8 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
-        // UNLIT REACHES THE MATERIAL SHADER TOO, not just gMaterial.z. The twin of
-        // D3D12Device.cpp's call; see writeShadingConstants there for why both fields are written.
+        // UNLIT reaches the material shader too, not just gMaterial.z (D3D12Device.cpp's twin call;
+        // see writeShadingConstants there for why both fields are written).
         writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // featureMs, not msActive_: the draw call has to match the pipeline chosen above.
@@ -2483,20 +2474,17 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
 }
 
 // ================================================================================================
-// 11b. drawMeshDepthPrepass -- draws `mesh`'s depth ONLY, through whichever registered feature both
-//     overridesScenePipeline() and offers a non-zero depthPrepassPipeline(). See IDevice's comment
-//     (RHI.hpp:449-460) and D3D12Device::drawMeshDepthPrepass (D3D12Device.cpp:3033-3093), which
-//     this copies structurally: same walk over features_, same table-0/frame-CB/table-1/object-
-//     constant sequence, just a different pipeline and no colour/material tail. Not folded into
-//     drawMesh(): the caller (SandboxApp's prepass phase) runs this from a separate, earlier walk,
-//     never interleaved per-instance with colour draws (matters to the GPU stat tree's span budget).
-//
-//     UNLIKE D3D12Device, there is no fovPso_/fovSet_/fovCbBytes_ elision cache here: drawMesh()
-//     above already re-binds pipeline and b0 set on every call, so this does the same -- redundant
-//     relative to D3D12's cached path, not incorrect.
+// 11b. drawMeshDepthPrepass -- depth-only draw through whichever feature offers
+//     overridesScenePipeline() + depthPrepassPipeline(); structurally copies
+//     D3D12Device::drawMeshDepthPrepass (D3D12Device.cpp:3033-3093, see also IDevice RHI.hpp:449-460):
+//     same table-0/frame-CB/table-1/object-constant walk, no colour/material tail. Kept separate from
+//     drawMesh() because the caller (SandboxApp's prepass phase) runs it from an earlier,
+//     non-interleaved walk (GPU stat tree's span budget). No fovPso_/fovSet_/fovCbBytes_ elision
+//     cache here as in D3D12Device -- drawMesh() already re-binds pipeline/b0 every call, so this
+//     matches it (redundant, not incorrect).
 // ================================================================================================
-// D3D12Device's twins, same split: the frame-wide prepass is gated and counted, the per-draw one
-// (IDevice::drawMeshDepthOnly, for alpha-masked draws) is neither, and both share one body.
+// Frame-wide prepass is gated+counted; the per-draw twin (drawMeshDepthOnly, alpha-masked draws) is
+// neither -- both share depthOnlyDraw's body, matching D3D12Device's split.
 void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16], const f32 color[4]) {
     if (!depthPrepassEnabled_) return;
     depthOnlyDraw(mesh, world, color, /*allowComputeWritten=*/false);
@@ -2510,8 +2498,7 @@ bool VulkanDevice::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32
                                  bool allowComputeWritten) {
     if (!hasSwapchain_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return false;
     if (!meshes_[mesh - 1].alive) return false;
-    // Compute-written meshes: excluded from the FRAME-WIDE prepass, accepted by the per-draw path
-    // (m.vb IS the posed buffer; drawMesh honours `prepassed` via depthOnlyMesh_). See D3D12's twin.
+    // Compute-written meshes: excluded from the FRAME-WIDE prepass, accepted by the per-draw path (m.vb IS the posed buffer; drawMesh honours `prepassed` via depthOnlyMesh_; see D3D12's twin).
     if (!allowComputeWritten && meshVertexBuffer(mesh) != 0) return false;
     // No raster colour pass to consume it, so no raster depth -- see D3D12Device::depthOnlyDraw.
     if (wireframe_) return false;
@@ -2525,10 +2512,9 @@ bool VulkanDevice::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
         const void* cb = nullptr; u32 cbBytes = 0;
         if (f->sceneConstants(&cb, &cbBytes) && cb && cbBytes) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
-        // Table 1: the SAME material binding the caller set via setDrawBinding for this instance's
-        // upcoming colour draw -- PSDepthPrepass reads gBaseColorMap/gAlphaCutoff/gMaterialFlags out
-        // of exactly that set, same registers PSMainVoxi reads them at (both pipelines share `gi`,
-        // VoxiRenderer.cpp's giLayout()).
+        // Table 1: the same material binding as this instance's upcoming colour draw -- PSDepthPrepass
+        // reads gBaseColorMap/gAlphaCutoff/gMaterialFlags at the same registers PSMainVoxi does (both
+        // share `gi`, VoxiRenderer.cpp's giLayout()).
         rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         f32 fc[kObjectConstantDwords] = {};
         std::memcpy(fc, world, 16 * sizeof(f32));
@@ -2592,17 +2578,14 @@ bool VulkanDevice::ensureViewportTexture() {
     return true;
 }
 u64 VulkanDevice::viewportTextureId() {
-    // Once a UI backend exists this is just another texture: the editor draws the composited scene
-    // in its viewport panel via this handle. Returned a hard 0 while there was no toolkit to make
-    // one -- why the viewport rendered black the first time the UI itself came up.
+    // Once a UI backend exists this is just another texture the editor's viewport panel draws via
+    // this handle; a hard 0 while there was no toolkit was why the viewport rendered black at first.
     if (!viewportToTex_ || !ensureViewportTexture()) return 0;
     return uiTextureId(viewportTex_);
 }
 
 void VulkanDevice::notifyRenderTargetsChanged() {
-    // SCENE size, not present size: a render feature builds its pipelines and size-dependent targets
-    // against whatever a scene draw actually rasterises into (sceneWidth_/sceneHeight_, now that
-    // renderScale_ can decouple the two). Mirrors D3D12Device::notifyRenderTargetsChanged exactly.
+    // SCENE size, not present size: features build size-dependent targets against what a scene draw rasterises into (sceneWidth_/sceneHeight_, decoupled by renderScale_); mirrors D3D12's.
     if (sampleCount_ == notifiedSamples_ && backbufferFormat() == notifiedColor_ && depthFormat() == notifiedDepth_ &&
         sceneWidth_ == notifiedWidth_ && sceneHeight_ == notifiedHeight_) return;
     notifiedSamples_ = sampleCount_;
@@ -2613,12 +2596,9 @@ void VulkanDevice::notifyRenderTargetsChanged() {
     for (IRenderFeature* f : features_) f->onRenderTargetsChanged(sampleCount_, backbufferFormat(), depthFormat(), sceneWidth_, sceneHeight_);
 }
 
-// Reads back the metered-exposure slot THIS frame's beginFrame just waited on, if runPostChain
-// filled it the LAST time this slot came round (kFrameCount frames ago) -- see expReadback_'s own
-// comment for the pipeline. A slot autoExp skipped last time (expReadbackPending_ false) is left
-// alone: expReadoutValue_/expReadoutSeeded_ simply keep whatever they last held, which is the
-// correct "hasn't updated" state for a live UI readout. Mirrors D3D12Device::collectExposureReadout
-// field-for-field.
+// Reads back the metered-exposure slot this frame's beginFrame waited on, filled by runPostChain
+// kFrameCount frames ago (expReadback_'s comment). A slot autoExp skipped last time
+// (expReadbackPending_ false) is left alone -- expReadoutValue_/expReadoutSeeded_ keep their last value, correctly "hasn't updated". Mirrors D3D12Device::collectExposureReadout field-for-field.
 void VulkanDevice::collectExposureReadout() {
     if (!expReadbackPending_[frameIndex_] || !expReadback_[frameIndex_]) return;
     expReadbackPending_[frameIndex_] = false;
@@ -2628,10 +2608,9 @@ void VulkanDevice::collectExposureReadout() {
     std::memcpy(&value, mapped, sizeof value);
     std::memcpy(&seeded, static_cast<const u8*>(mapped) + sizeof value, sizeof seeded);
     api_.UnmapMemory(device_, expReadbackMemory_[frameIndex_]);
-    // Matches CSExposure's own contract (post.hlsl): byte 4 goes to 1 the first time it ever runs
-    // and stays there, so seeded == 0 here should never happen -- this frame's autoExp gate already
-    // guarantees CSExposure ran first in submission order. postExposureReadout's contract is
-    // "false", not "garbage", either way, so this checks rather than assumes.
+    // Matches CSExposure's contract (post.hlsl): byte 4 goes to 1 the first time it runs and stays
+    // there, so seeded==0 here should never happen -- this frame's autoExp gate already guarantees
+    // CSExposure ran first. postExposureReadout's contract is "false", not "garbage", either way -- this checks rather than assumes.
     if (seeded && std::isfinite(value) && value > 0.0f) {
         expReadoutValue_ = value;
         expReadoutSeeded_ = true;
@@ -2645,15 +2624,13 @@ void VulkanDevice::collectExposureReadout() {
 void VulkanDevice::beginFrame() {
     if (!hasSwapchain_) return;
     // FIRST, BEFORE ANYTHING RECORDS: a render-scale change frees and recreates the depth buffer,
-    // MSAA target and post chain, and doing that mid-recording is what lost the device at Present
-    // (C2-13, aver-render-scale-device-loss). See setRenderScale's comment for the full account.
+    // MSAA target and post chain, and doing that mid-recording is what lost the device at Present (C2-13, aver-render-scale-device-loss; see setRenderScale's comment for the full account).
     applyPendingRenderScale();
 
     ++frameSerial_;
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;
     waitTimeline(frameTimelineValues_[frameIndex_]);
-    // The wait above already proved this slot's last GPU work (including any exposure-readout
-    // copy runPostChain recorded into it) is done -- see collectExposureReadout's own comment.
+    // The wait above already proved this slot's last GPU work (including any exposure-readout copy runPostChain recorded into it) is done -- see collectExposureReadout's own comment.
     collectExposureReadout();
     if (meshGeomPool_[frameIndex_]) api_.ResetDescriptorPool(device_, meshGeomPool_[frameIndex_], 0);
 
@@ -2665,9 +2642,8 @@ void VulkanDevice::beginFrame() {
 
     const VkResult ar = api_.AcquireNextImageKHR(device_, swapchain_, UINT64_MAX, imageAvailable_[frameIndex_], VK_NULL_HANDLE, &imageIndex_);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
-        // The window changed since the last resize() call reached us; rebuild at the size we still
-        // believe is current and skip drawing this frame -- the caller's next resize() (or the next
-        // beginFrame after one) will pick up the real size.
+        // The window changed since the last resize() call; rebuild at the size still believed current
+        // and skip this frame -- the next resize() (or the next beginFrame after one) picks up the real size.
         api_.EndCommandBuffer(cmd);
         resize(width_, height_);
         return;
@@ -2706,14 +2682,13 @@ void VulkanDevice::beginFrame() {
     colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     std::memcpy(colorAtt.clearValue.color.float32, sceneClear_, sizeof(sceneClear_));
-    // AND sceneResolvedView_, which the barrier above already guards on: createPostTargets builds
-    // the resolve target only when sampleCount_ > 1 AND it gets far enough to build it, so "MSAA is
-    // on" alone doesn't mean there's somewhere to resolve TO. Asking for a resolve without one is
-    // rejected outright ("resolveMode ... is not VK_RESOLVE_MODE_NONE, resolveImageView must not be
-    // VK_NULL_HANDLE") -- the two guards disagreeing was the bug.
+    // AND sceneResolvedView_: createPostTargets builds the resolve target only when sampleCount_>1
+    // and gets that far, so "MSAA is on" alone doesn't guarantee somewhere to resolve to -- asking
+    // for a resolve without one is rejected outright ("resolveMode ... is not VK_RESOLVE_MODE_NONE,
+    // resolveImageView must not be VK_NULL_HANDLE"); the two guards disagreeing was the bug.
     if (msaa && sceneResolvedView_) {
-        // The MSAA resolve happens HERE, ending this rendering scope -- no separate vkCmdResolveImage
-        // call exists in this backend; VkRenderingAttachmentInfo's own resolveMode/resolveImageView/
+        // The MSAA resolve happens HERE, ending this scope -- no separate vkCmdResolveImage call
+        // exists in this backend; VkRenderingAttachmentInfo's resolveMode/resolveImageView/
         // resolveImageLayout fields do it inline, simpler than D3D12's ResolveSubresource, not missing.
         colorAtt.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
         colorAtt.resolveImageView = sceneResolvedView_;
@@ -2726,8 +2701,7 @@ void VulkanDevice::beginFrame() {
     depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAtt.clearValue.depthStencil = {1.0f, 0};
 
-    // The rendering scope's area is the SCENE extent -- msaaColorView_/depthView_ are now
-    // sceneWidth_ x sceneHeight_, and Vulkan dynamic rendering requires renderArea to fit inside every attachment.
+    // The rendering scope's area is the SCENE extent -- msaaColorView_/depthView_ are now sceneWidth_ x sceneHeight_, and Vulkan's dynamic rendering requires renderArea to fit inside every attachment.
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {sceneWidth_, sceneHeight_}};
     ri.layerCount = 1;
@@ -2735,9 +2709,9 @@ void VulkanDevice::beginFrame() {
     ri.pDepthAttachment = &depthAtt;
     sceneScopeOpened_ = pushRenderScope(cmd, ri);
 
-    // vpX_/vpY_/vpW_/vpH_ are already in SCENE space (setViewportRect rescales via scaleToSceneW/H
-    // before storing). The "no sub-rect" fallback must be the scene's own extent, not the present
-    // one, or renderScale_<1 would set a viewport larger than the render area -- validation error, UB without it.
+    // vpX_/vpY_/vpW_/vpH_ are already scene-space (setViewportRect rescales via scaleToSceneW/H
+    // before storing); the "no sub-rect" fallback must be the scene's own extent, or renderScale_<1
+    // sets a viewport larger than the render area -- validation error, UB without it.
     const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
     const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
     const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
@@ -2756,9 +2730,9 @@ void VulkanDevice::beginFrame() {
         ++claimants;
         if (!winner) winner = f;
     }
-    // Kept in step with D3D12Device::beginFrame (full account there): only the first claimant paints,
-    // registration order decides it, and nothing said so -- including the SINGLE-claimant case, which
-    // is the one that actually cost a measurement. See IRenderFeature::suppressesScene.
+    // Kept in step with D3D12Device::beginFrame: only the first claimant paints (registration order),
+    // including the SINGLE-claimant case -- the one that actually cost a measurement. See
+    // IRenderFeature::suppressesScene.
     if (winner != lastSuppressWinner_ || claimants != lastSuppressClaimants_) {
         if (claimants > 1)
             AVER_WARN("[RHI.Vulkan] {} render features claim the whole scene; '{}' wins on "
@@ -2781,39 +2755,27 @@ void VulkanDevice::beginFrame() {
         if (winner->suppressesWholeFrame()) frameSuppressed_ = true;
         return;
     }
-    // Unlike D3D12Device::beginFrame, nothing is bound here as a "default" pipeline: every draw
-    // entry point binds its own pipeline before drawing, and there's no field to cache "last bound"
-    // against (see drawMesh's own comment) -- nothing for a default bind here to save.
+    // Unlike D3D12Device::beginFrame, nothing is bound here as a "default" pipeline: every entry
+    // point binds its own before drawing (see drawMesh's own comment), so there's no "last bound" cache to save.
 }
 
-// KNOWN DEFECT, MEASURED, NOT YET FIXED: A PASS THAT WANTS ITS OWN RENDER TARGET DOES NOT GET ONE.
-//
-// This joins whatever scope is already open and DISCARDS the caller's VkRenderingInfo -- right for
-// the case it was written for (two owners recording into one command buffer; dynamic-rendering
-// scopes cannot nest), wrong whenever the inner request names DIFFERENT attachments.
-//
-// WHAT IT COSTS: VoxiRenderer::shadowPass calls setRenderTargets(nullptr, 0, shadowTex_)
-// (VoxiRenderer.cpp:1175) and draws from inside the scene scope beginFrame already opened, so those
-// draws join the SCENE's attachments and the cascade shadow map is never written. Nothing looks
-// obviously broken -- light-space geometry lands outside the scene viewport and is just clipped --
-// the frame simply has no cascade shadows. Probed beside the cube in the default scene with --no-rt
-// (forces the cascade path; ray-traced shadows are the default and DO work here):
-//     D3D12  darkest floor pixel (13, 15, 19)  -- a shadow
-//     Vulkan darkest floor pixel (66, 66, 66)  -- unshadowed floor colour, no shadow anywhere
-// giShadowPass (:1293) has the same shape, so GI's shadow map is equally empty and voxel light
-// injection is unshadowed on this backend.
-//
-// THE ONE-LINE FIX (tried, reverted): closing the open scope and opening the requested one does
-// retarget the shadow map correctly ("[Voxi shadow map]" attaches, draws arrive), but three
-// mismatches surface immediately -- the bound pipeline's rasterizationSamples and
-// VkPipelineRenderingCreateInfo formats are the SCENE's, not the shadow map's, and the shadow image
-// is never transitioned to DEPTH_ATTACHMENT_OPTIMAL. Validation went 10 -> 40 and the floor stopped
-// drawing entirely.
-//
-// THE REAL FIX belongs with setRenderTargets: the scope must FOLLOW the currently-bound targets
-// (close on retarget, reopen lazily at the next draw, persist across draws), and pipelines must be
-// built against the sample count and formats of the targets they'll actually use -- a change to how
-// every pass gets its scope, wanted deliberately rather than as a patch under a shadow bug.
+// KNOWN DEFECT, MEASURED, NOT FIXED: a pass wanting its own render target doesn't get one -- this
+// joins whatever scope is already open and discards the caller's VkRenderingInfo, which is right for
+// two owners sharing one command buffer (dynamic-rendering scopes can't nest) but wrong when the
+// inner request names different attachments.
+// COST: VoxiRenderer::shadowPass's setRenderTargets(nullptr, 0, shadowTex_) (VoxiRenderer.cpp:1175)
+// draws into the SCENE's attachments instead, so the cascade shadow map is never written (light-space
+// geometry just clips outside the scene viewport -- nothing looks obviously broken). Measured beside
+// the cube with --no-rt (forces the cascade path; ray-traced shadows, the default, DO work here):
+// D3D12 darkest floor pixel (13,15,19, shadowed) vs Vulkan (66,66,66, unshadowed). giShadowPass
+// (:1293) has the same shape -- GI's shadow map and voxel light injection are equally unshadowed here.
+// TRIED, REVERTED: closing/reopening the scope does retarget correctly ("[Voxi shadow map]" attaches,
+// draws arrive), but the bound pipeline's rasterizationSamples/VkPipelineRenderingCreateInfo formats
+// stay the SCENE's, and the shadow image is never transitioned to DEPTH_ATTACHMENT_OPTIMAL --
+// validation errors went 10->40 and the floor stopped drawing.
+// REAL FIX: belongs with setRenderTargets -- the scope must follow the bound targets (close on
+// retarget, reopen lazily, persist across draws) and pipelines must match the targets they actually
+// use; a deliberate change, not a patch under this bug.
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
     if (renderScopeDepth_ != 0) return false;   // already inside one: join it rather than nest
     api_.CmdBeginRendering(cmd, &ri);
@@ -2831,8 +2793,7 @@ void VulkanDevice::endFrame() {
     if (!hasSwapchain_) return;
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
 
-    // THE DEFERRED SKY DRAW -- same timing as D3D12Device::endFrame: after every opaque drawMesh
-    // call, before the rendering scope closes. frameSuppressed_, not sceneSuppressed_ -- see D3D12's comment.
+    // THE DEFERRED SKY DRAW -- same timing as D3D12Device::endFrame: after every opaque drawMesh call, before the rendering scope closes (frameSuppressed_, not sceneSuppressed_ -- see D3D12's comment).
     if (skyEnabled_ && !frameSuppressed_) {
         // Still inside the rendering scope over msaaColorView_/depthView_ (SCENE-sized) -- see beginFrame's fallback.
         const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
@@ -2851,14 +2812,12 @@ void VulkanDevice::endFrame() {
     }
 
     if (!sceneSuppressed_ || true) {
-        // Always closes the scope this frame's beginFrame opened, suppressed or not -- a suppressed
-        // scene still drew INTO msaaColor_/depthView_ via scenePass(), it just skipped the sky.
+        // Always closes the scope this frame's beginFrame opened, suppressed or not -- a suppressed scene still drew into msaaColor_/depthView_ via scenePass(), it just skipped the sky.
         popRenderScope(cmd, sceneScopeOpened_);
         sceneScopeOpened_ = false;
     }
 
-    // Barrier the resolved scene (or, with no MSAA, msaaColor_ itself) into something the post
-    // chain's shaders can sample.
+    // Barrier the resolved scene (or, with no MSAA, msaaColor_ itself) into something the post chain's shaders can sample.
     const bool msaa = sampleCount_ > 1;
     VkImage sceneImg = msaa ? sceneResolved_ : msaaColor_;
     VkImageMemoryBarrier2 toSrv = imgBarrier(sceneImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2885,9 +2844,7 @@ void VulkanDevice::endFrame() {
         api_.CmdSetViewport(cmd, 0, 1, &vp);
         api_.CmdSetScissor(cmd, 0, 1, &sc);
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
-        // THE UI LAST, over everything else the overlay drew, and INSIDE the scope this opened --
-        // IUiBackend::render must not open its own (see its comment). Only reachable with a backend
-        // installed, which no game build does.
+        // The UI paints last, over the overlay and INSIDE this scope (IUiBackend::render must not open its own); only reachable with a backend installed, which no game build does.
         if (uiBackend_ && uiUp_) uiBackend_->render(reinterpret_cast<u64>(cmd));
         popRenderScope(cmd, overlayScope);
     }
@@ -3012,8 +2969,7 @@ void VulkanDevice::resize(u32 w, u32 h) {
     if (old) api_.DestroySwapchainKHR(device_, old, nullptr);
 
     width_ = extent.width; height_ = extent.height;
-    // Recompute the scene size for the new present size -- createDepthBuffer()/createMsaaColor()
-    // below read sceneWidth_/sceneHeight_, so this must run first or they'd allocate at the STALE size.
+    // Recompute the scene size for the new present size -- createDepthBuffer()/createMsaaColor() below read sceneWidth_/sceneHeight_, so this must run first or they'd allocate at the STALE size.
     computeSceneSize();
     vpX_ = vpY_ = vpW_ = vpH_ = 0;   // scene-space; stale the instant sceneWidth_/sceneHeight_ moved
     for (u32 i = 0; i < kFrameCount; ++i) frameTimelineValues_[i] = nextTimelineValue_;   // already-retired: we just waited
@@ -3035,20 +2991,16 @@ void VulkanDevice::resize(u32 w, u32 h) {
 
 // ================================================================================================
 // 14. The camera post chain. Bloom pyramid, eye adaptation, tonemap/gamma composite -- same passes,
-//     same formulas, same PostCB fields as D3D12Device.cpp's; see rhi::postShaderSource() for the
-//     HLSL every one binds against.
-//
-//     DESCRIPTOR STRATEGY, and why it differs from D3D12's descriptor HEAP: D3D12 writes every
-//     SRV/UAV/sampler triple ONCE at resize time and reuses the same heap slots every frame after --
-//     only the DATA changes, an ordinary GPU-GPU hazard the barriers below already order. This
-//     backend copies that shape rather than updating descriptors per frame: Vulkan forbids rewriting
-//     a descriptor set a not-yet-completed command buffer still references (see dispatchMesh's
-//     note), so writing kPostSlotCount sets ONCE per resize sidesteps that hazard entirely.
+//     formulas and PostCB fields as D3D12Device.cpp's; see rhi::postShaderSource() for the HLSL.
+//     DESCRIPTOR STRATEGY vs D3D12's heap: D3D12 writes every SRV/UAV/sampler triple once at resize
+//     and only the DATA changes per frame (an ordinary GPU-GPU hazard the barriers already order).
+//     This backend copies that shape because Vulkan forbids rewriting a descriptor set a
+//     not-yet-completed command buffer still references (see dispatchMesh's note) -- writing
+//     kPostSlotCount sets once per resize sidesteps the hazard.
 // ================================================================================================
 
 // The post chain's register map, at FILE scope because createPostPipelines AND createPostTargets
-// compile the same shaders and must map them identically -- two copies that could drift produce a
-// pipeline whose shaders and layout disagree, and on AMD that doesn't error, it takes the process.
+// compile the same shaders and must map them identically -- two copies that could drift produce a pipeline whose shaders and layout disagree, and on AMD that doesn't error, it takes the process.
 namespace {
 const VkRegisterBind kPostBinds[] = {
         {'b', 0, 0, kVkSetConstants, 0},
@@ -3058,8 +3010,7 @@ const VkRegisterBind kPostBinds[] = {
         {'u', 0, 0, kVkSetConstants, 4},
         {'u', 1, 0, kVkSetConstants, 5},
         {'s', 0, 0, kVkSetConstants, 6},
-        // u2/u3: local exposure's raw and blurred grids. 7/8, not the 6/7 that would immediately
-        // follow u1 -- binding 6 is already the immutable sampler (s0), so these fall in right after it.
+        // u2/u3: local exposure's raw and blurred grids, at 7/8 not 6/7 since binding 6 is already the immutable sampler (s0).
         {'u', 2, 0, kVkSetConstants, 7},
         {'u', 3, 0, kVkSetConstants, 8},
     };
@@ -3068,26 +3019,20 @@ constexpr u32 kPostBindCount = static_cast<u32>(sizeof(kPostBinds) / sizeof(kPos
 
 
 bool VulkanDevice::createPostPipelines() {
-    // THIS CHAIN REFUSED TO BUILD AT ALL until now, for three unrelated reasons:
-    //
-    //   THE SET -- a WRONG TOOL, not a real limit. rhi::postShaderSource() declares b0/t0/t1/t2/s0/
-    //   u0/u1 with no register space, and DXC maps space to descriptor SET, so everything landed in
-    //   set 0 while this layout wants kVkSetConstants. -fvk-u-shift only moves binding NUMBERS within
-    //   one space; the fix is -fvk-bind-register, mapping each register to an explicit (set,
-    //   binding) -- kPostBinds is that map.
-    //
-    //   THE COMBINED SAMPLERS -- the LAYOUT was wrong, not the shader: it asked for
-    //   COMBINED_IMAGE_SAMPLER, but DXC always emits separate Texture2D + SamplerState, so the layout
-    //   now declares SAMPLED_IMAGE plus an immutable SAMPLER at binding 6.
-    //
-    //   THE DESCRIPTOR POOL WAS HALF THE SIZE IT NEEDED (see pool-size array below) -- the one that
-    //   actually killed the process, since AMD answers a bound null descriptor set with an access
-    //   violation rather than an error.
-    //
-    // THE FIRST TWO WERE VERIFIED WITHOUT VALIDATION LAYERS (no LunarG SDK here, none for Windows)
-    // via AVER_VK_DUMP_SPIRV: OpDecorate DescriptorSet/Binding on each module showed AverPost at
-    // set 2 binding 0, gPostSceneTex at 2/1, gPostSamp at 2/6, gPostHist at 2/4 -- exactly as
-    // kPostBinds asks. The compiler was doing its job; the pool was not.
+    // THIS CHAIN REFUSED TO BUILD, for three unrelated reasons:
+    //  1. THE SET, wrong tool not a real limit: postShaderSource() declares b0/t0/t1/t2/s0/u0/u1 with
+    //     no register space, and DXC maps space to descriptor SET, so everything landed in set 0.
+    //     -fvk-u-shift only moves binding NUMBERS within one space; fix is -fvk-bind-register,
+    //     mapping each register to an explicit (set, binding) -- kPostBinds.
+    //  2. THE COMBINED SAMPLERS: the layout asked for COMBINED_IMAGE_SAMPLER, but DXC always emits
+    //     separate Texture2D + SamplerState; layout now declares SAMPLED_IMAGE + immutable SAMPLER
+    //     at binding 6.
+    //  3. THE DESCRIPTOR POOL was half the size needed (see pool-size array below) -- the one that
+    //     actually killed the process: AMD answers a bound null descriptor set with an access
+    //     violation, not an error.
+    // First two verified without validation layers (no LunarG SDK, none for Windows) via
+    // AVER_VK_DUMP_SPIRV: OpDecorate DescriptorSet/Binding showed AverPost at 2/0, gPostSceneTex at
+    // 2/1, gPostSamp at 2/6, gPostHist at 2/4 -- exactly as kPostBinds asks. The compiler was fine; the pool was not.
 
     if (!postSampler_) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -3098,13 +3043,12 @@ bool VulkanDevice::createPostPipelines() {
         if (!vkOk(api_.CreateSampler(device_, &si, nullptr, &postSampler_), "post sampler")) return false;
     }
     if (!postSetLayout_) {
-        // NINE, not seven: t0/t1 are SAMPLED_IMAGE and s0 is its own immutable SAMPLER at binding 6
-        // (what DXC emits for Texture2D + SamplerState); bindings 7/8 are u2/u3, local exposure's raw
-        // and blurred grids (kPostBinds above). Every binding is VK_SHADER_STAGE_ALL already, so 7/8
-        // need no special case for PSComposite reading gPostLocalGridBlur (u3) directly in the
-        // fragment shader -- that visibility was already there. bindingCount used to say six, leaving
-        // binding 6 built but never handed to Vulkan -- validation caught it: "SPIR-V uses descriptor
-        // [Set 2, Binding 6, variable gPostSamp] but the binding was not declared in pSetLayouts[2]".
+        // NINE, not seven: t0/t1 are SAMPLED_IMAGE, s0 is an immutable SAMPLER at binding 6 (what DXC
+        // emits for Texture2D + SamplerState), and 7/8 are u2/u3 (local exposure's raw/blurred grids).
+        // All VK_SHADER_STAGE_ALL already, so PSComposite reading gPostLocalGridBlur (u3) directly
+        // needs no special case. bindingCount used to say six, leaving binding 6 built but never
+        // handed to Vulkan -- validation caught it: "SPIR-V uses descriptor [Set 2, Binding 6,
+        // variable gPostSamp] but the binding was not declared in pSetLayouts[2]".
         VkDescriptorSetLayoutBinding binds[9] = {};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_ALL, nullptr};
@@ -3129,18 +3073,15 @@ bool VulkanDevice::createPostPipelines() {
     }
     if (!postDescriptorPool_) {
         VkDescriptorPoolSize sizes[4] = {
-            // EVERY COUNT IS PER FRAME IN FLIGHT -- the pool-size bug from this function's header
-            // comment. It used to be sized for kPostSlotCount alone, half of the
-            // `kFrameCount * kPostSlotCount` sets actually allocated below, so vkAllocateDescriptorSets
+            // Every count is PER FRAME IN FLIGHT (the pool-size bug above): sized for kPostSlotCount
+            // alone, half of `kFrameCount * kPostSlotCount` actually allocated -- vkAllocateDescriptorSets
             // returned VK_ERROR_OUT_OF_POOL_MEMORY and the unallocated sets stayed VK_NULL_HANDLE and
             // got bound anyway -- latent (behind `#if 0`, never compiled) until AMD's access violation.
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kFrameCount * kPostSlotCount},
-            // SAMPLED_IMAGE and SAMPLER separately, matching the layout above -- an immutable sampler
-            // still consumes a pool slot; immutable means the set can't rewrite it, not that it's free.
+            // SAMPLED_IMAGE and SAMPLER separately, matching the layout above -- an immutable sampler still consumes a pool slot; immutable means the set can't rewrite it, not that it's free.
             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFrameCount * kPostSlotCount * 2},
             {VK_DESCRIPTOR_TYPE_SAMPLER, kFrameCount * kPostSlotCount},
-            // FIVE storage buffers per set, not three: t2 (gPostExpRead) + u0/u1 (histogram, exposure)
-            // + u2/u3 (local exposure's raw and blurred grids, new).
+            // FIVE storage buffers per set, not three: t2 (gPostExpRead) + u0/u1 (histogram, exposure) + u2/u3 (local exposure's raw and blurred grids, new).
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrameCount * kPostSlotCount * 5},
         };
         VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -3206,13 +3147,11 @@ bool VulkanDevice::createPostPipelines() {
     if (!makeGfx("PSBloomPrefilter", kVkSceneColorFormat, false, nullptr, bloomPrefilterPso_)) return false;
     if (!makeGfx("PSBloomDown", kVkSceneColorFormat, false, nullptr, bloomDownPso_)) return false;
     if (!makeGfx("PSBloomUp", kVkSceneColorFormat, true, nullptr, bloomUpPso_)) return false;
-    // PSComposite's 4 permutations are NOT built here, unlike every other post PSO: their RT format
-    // is the SWAPCHAIN's negotiated format, which doesn't exist yet (this runs from init(), before
-    // any window). D3D12 can build its composite PSOs here because RTVFormats is a fixed compile-time
-    // constant it doesn't negotiate; this backend DOES negotiate swapchainFormat_, and a Vulkan
-    // pipeline via dynamic rendering is bound to an EXACT attachment format at creation, no
-    // VkRenderPass-style fallback. So composite PSOs are built lazily in createPostTargets(), the
-    // first point swapchainFormat_ is known.
+    // PSComposite's 4 permutations are NOT built here (unlike every other post PSO): their RT format
+    // is the negotiated swapchainFormat_, unknown this early (init(), before any window). D3D12 can
+    // build composite PSOs here because RTVFormats is a fixed compile-time constant; a Vulkan dynamic-
+    // rendering pipeline is bound to an EXACT attachment format at creation, no VkRenderPass-style
+    // fallback. So composite PSOs are built lazily in createPostTargets(), the first point swapchainFormat_ is known.
 
     auto makeCompute = [&](const char* entry, VkPipeline& out) {
         std::vector<u32> csSpv;
@@ -3245,9 +3184,9 @@ bool VulkanDevice::createPostPipelines() {
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, expBuf_, expMemory_, nullptr, "post exposure")) return false;
     }
     // Both frame-in-flight rings are created EAGERLY, unlike VulkanRenderContext's own (which can be
-    // lazy): this ring's buffer is what binding 0 of every persistent post-chain descriptor set
-    // points at, and that binding must be valid the moment createPostTargets() finishes -- no later
-    // safe point to rewrite it (sets are written ONCE and never touched again).
+    // lazy): this ring's buffer is what binding 0 of every persistent post-chain set points at, and
+    // must be valid the moment createPostTargets() finishes -- no later safe point to rewrite it
+    // (sets are written ONCE and never touched again).
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (postRing_[i].buffer) continue;
         if (!createBufferCommitted(*this, kRhiRingBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -3267,9 +3206,9 @@ void VulkanDevice::releasePostTargets() {
     if (bloomTex_) { destroyImageCommitted(*this, bloomTex_, bloomMemory_); bloomTex_ = VK_NULL_HANDLE; bloomMemory_ = VK_NULL_HANDLE; }
     if (sceneResolvedView_) { api_.DestroyImageView(device_, sceneResolvedView_, nullptr); sceneResolvedView_ = VK_NULL_HANDLE; }
     if (sceneResolved_) { destroyImageCommitted(*this, sceneResolved_, sceneResolvedMemory_); sceneResolved_ = VK_NULL_HANDLE; sceneResolvedMemory_ = VK_NULL_HANDLE; }
-    // FACTORY HANDLES, so destroyTexture -- not a raw Vk* teardown. The only two targets here created
-    // through VulkanResourceFactory rather than createImageCommitted directly (see AverSR's field
-    // comments for why). Mirrors D3D12Device::releasePostTargets' identical teardown.
+    // Factory handles, so destroyTexture, not a raw Vk* teardown -- the only two targets here created
+    // through VulkanResourceFactory rather than createImageCommitted (see AverSR's field comments).
+    // Mirrors D3D12Device::releasePostTargets' identical teardown.
     if (rhiFactory_) {
         if (sceneColorTex_) { rhiFactory_->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
         if (presentHdrTex_) { rhiFactory_->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
@@ -3278,11 +3217,8 @@ void VulkanDevice::releasePostTargets() {
     if (postDescriptorPool_) api_.ResetDescriptorPool(device_, postDescriptorPool_, 0);   // safe: waitForGpu() always precedes this (resize/setSampleCount)
     postSets_.clear();
     bloomMips_ = bloomW_ = bloomH_ = 0;
-    // Exposure readout: fixed 8 bytes per slot, independent of scene resolution like histBuf_/
-    // expBuf_ themselves, but dropped and rebuilt here anyway -- see expReadback_'s own comment for
-    // why this function pair is where its lifetime lives instead. A pending copy a resize
-    // interrupted names a slot that no longer holds what it promised, so the flag goes with the
-    // buffer; safe for the same reason the descriptor pool reset just above is.
+    // Exposure readout: fixed 8 bytes/slot, independent of scene resolution like histBuf_/expBuf_, but
+    // dropped and rebuilt here anyway (see expReadback_'s comment for why this pair owns its lifetime). A pending copy a resize interrupted names a slot no longer valid, so the flag goes with the buffer -- safe for the same reason the pool reset above is.
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (expReadback_[i]) { destroyBufferCommitted(*this, expReadback_[i], expReadbackMemory_[i]); expReadback_[i] = VK_NULL_HANDLE; expReadbackMemory_[i] = VK_NULL_HANDLE; }
         expReadbackPending_[i] = false;
@@ -3290,9 +3226,7 @@ void VulkanDevice::releasePostTargets() {
     postReady_ = false;
 }
 
-// Builds PSComposite's 4 permutations against swapchainFormat_ -- deferred from createPostPipelines
-// (see that comment). Guarded to run once: swapchainFormat_ is fixed for the swapchain's whole life
-// (only width_/height_ change across a resize), so nothing here rebuilds on later createPostTargets() calls.
+// Builds PSComposite's 4 permutations against swapchainFormat_ (deferred from createPostPipelines, see that comment). Guarded to run once: swapchainFormat_ is fixed for the swapchain's life, so nothing here rebuilds on later createPostTargets() calls.
 bool VulkanDevice::createPostTargets() {
     if (!compositePso_[0][0] && postPipelineLayout_ && swapchainFormat_ != VK_FORMAT_UNDEFINED) {
         std::vector<u32> vsSpv;
@@ -3362,9 +3296,7 @@ bool VulkanDevice::createPostTargets() {
     releasePostTargets();
     if (!postPipelineLayout_ || width_ == 0 || height_ == 0) return false;
 
-    // sceneResolved_ is sized off the SCENE extent, not the present one -- it resolves msaaColor_,
-    // itself now sceneWidth_ x sceneHeight_. width_/height_==0 iff sceneWidth_/sceneHeight_==0 too
-    // (computeSceneSize), so the guard just above already covers this.
+    // sceneResolved_ is sized off the SCENE extent -- it resolves msaaColor_, itself now sceneWidth_ x sceneHeight_; width_/height_==0 iff sceneWidth_/sceneHeight_==0 too, so the guard above covers this.
     if (sampleCount_ > 1) {
         VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ci.imageType = VK_IMAGE_TYPE_2D;
@@ -3382,8 +3314,7 @@ bool VulkanDevice::createPostTargets() {
         if (!vkOk(api_.CreateImageView(device_, &vi, nullptr, &sceneResolvedView_), "scene resolve view")) return false;
     }
 
-    // Bloom tracks the SCENE's resolution, not the present one -- samples off the (possibly
-    // downscaled) scene target, same as sceneResolved_. Mirrors D3D12's identical bloomW_/bloomH_ derivation.
+    // Bloom tracks the SCENE's resolution, not the present one -- samples off the (possibly downscaled) scene target, same as sceneResolved_ (mirrors D3D12's bloomW_/bloomH_ derivation).
     bloomW_ = sceneWidth_ / 2 > 1 ? sceneWidth_ / 2 : 1;
     bloomH_ = sceneHeight_ / 2 > 1 ? sceneHeight_ / 2 : 1;
     bloomMips_ = 1;
@@ -3411,16 +3342,13 @@ bool VulkanDevice::createPostTargets() {
     }
 
     // ---- AverSR's two intermediates, and the descriptor slot that reads the upscaled one ----
-    //
-    // GUARDED ON upscaler_, ALL OF IT -- mirrors D3D12Device::createPostTargets: an Off build
-    // (upscaler_==nullptr, the permanent default) must not pay for two HDR textures it never samples,
-    // nor write a descriptor slot pointing at texture(0) -- kPostSlotCompositeUpscaled simply stays
-    // allocated-but-unwritten, safe because runPostChain only selects it after a successful copy.
+    // Guarded on upscaler_ entirely (mirrors D3D12Device::createPostTargets): an Off build
+    // (upscaler_==nullptr, the permanent default) must not pay for two HDR textures it never samples nor write
+    // a descriptor slot pointing at texture(0) -- kPostSlotCompositeUpscaled stays
+    // allocated-but-unwritten, safe since runPostChain only selects it after a successful copy.
     if (upscaler_ && rhiFactory_) {
-        // #1: a factory-created ALIAS of the scene colour. The raw VkImage (sceneResolvedView_ or
-        // msaaColorView_) was never allocated through VulkanResourceFactory, so it has no
-        // TextureHandle, and IUpscaler::execute needs one for UpscalerInput::color -- a per-frame
-        // vkCmdCopyImage fills this; sampled-only, nothing draws into it directly.
+        // #1: a factory-created ALIAS of the scene colour. The raw VkImage (sceneResolvedView_/
+        // msaaColorView_) was never allocated through VulkanResourceFactory, so it has no TextureHandle, which IUpscaler::execute needs for UpscalerInput::color -- a per-frame vkCmdCopyImage fills this, sampled-only; nothing draws into it directly.
         TextureDesc sc;
         sc.width = sceneWidth_; sc.height = sceneHeight_;
         sc.format = fromVkFormat(kVkSceneColorFormat);
@@ -3430,9 +3358,8 @@ bool VulkanDevice::createPostTargets() {
         sceneColorTex_ = rhiFactory_->createTexture(sc);
         sceneColorTexW_ = sceneWidth_; sceneColorTexH_ = sceneHeight_;
 
-        // #2: AverSR's output, HDR and PRESENT-sized -- the upscale runs on radiance before the
-        // tonemap, so PSComposite sees an image already the right size and its own resample
-        // degenerates to 1:1, letting the composite shader/pipeline stay untouched by AverSR.
+        // #2: AverSR's output, HDR and PRESENT-sized -- the upscale runs on radiance before the tonemap,
+        // so PSComposite sees an image already the right size and its resample degenerates to 1:1, letting the composite shader/pipeline stay untouched by AverSR.
         TextureDesc ph;
         ph.width = width_; ph.height = height_;
         ph.format = fromVkFormat(kVkSceneColorFormat);
@@ -3450,23 +3377,19 @@ bool VulkanDevice::createPostTargets() {
             if (sceneColorTex_) { rhiFactory_->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
             if (presentHdrTex_) { rhiFactory_->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
         }
-        // The descriptor set itself is written below, alongside every other slot -- writeSlot needs
-        // dstT->srvView, which is only known once creation above has actually succeeded.
+        // The descriptor set itself is written below, alongside every other slot -- writeSlot needs dstT->srvView, known only once creation above succeeds.
     }
 
-    // ---- local exposure's bilateral grid: scene-sized like the bloom pyramid above, so it is
-    // rebuilt every time this function runs. Not a hot path (only on resize/sample-count/upscaler
-    // changes, never per frame), so the simplest thing that is obviously correct is to always
-    // destroy-then-recreate at the CURRENT scene size rather than track the old size and skip when
-    // unchanged. Unlike bloomTex_, the OLD generation is destroyed HERE rather than by
-    // releasePostTargets() -- the final (shutdown) free for whatever generation is live when the
-    // device goes away lives in ~VulkanDevice beside histBuf_/expBuf_ (see those members).
+    // ---- local exposure's bilateral grid: scene-sized like the bloom pyramid, rebuilt every call.
+    // Not a hot path (resize/sample-count/upscaler changes only), so always destroy-then-recreate at
+    // the current scene size rather than track and skip when unchanged. Unlike bloomTex_, the old
+    // generation is destroyed HERE, not by releasePostTargets(); the shutdown free lives in
+    // ~VulkanDevice beside histBuf_/expBuf_.
     if (localGridBuf_) { destroyBufferCommitted(*this, localGridBuf_, localGridMemory_); localGridBuf_ = VK_NULL_HANDLE; localGridMemory_ = VK_NULL_HANDLE; }
     if (localGridBlurBuf_) { destroyBufferCommitted(*this, localGridBlurBuf_, localGridBlurMemory_); localGridBlurBuf_ = VK_NULL_HANDLE; localGridBlurMemory_ = VK_NULL_HANDLE; }
     {
         // tile = 32x32 SCENE pixels (sceneWidth_/sceneHeight_, the same extent bloomW_/bloomH_ and
-        // sceneResolved_ derive from just above) -- matches CSLocalGrid's dispatch(gridW, gridH, 1)
-        // in runPostChain, which must compute gridW/gridH the same way.
+        // sceneResolved_ derive from just above) -- matches CSLocalGrid's dispatch(gridW, gridH, 1) in runPostChain, which must compute gridW/gridH the same way.
         const u32 gridW = (sceneWidth_ + kLocalExpTile - 1) / kLocalExpTile;
         const u32 gridH = (sceneHeight_ + kLocalExpTile - 1) / kLocalExpTile;
         const VkDeviceSize gridBytes = VkDeviceSize(gridW) * gridH * kLocalExpBins * kLocalExpCellBytes;
@@ -3475,29 +3398,22 @@ bool VulkanDevice::createPostTargets() {
         if (!createBufferCommitted(*this, gridBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, localGridBlurBuf_, localGridBlurMemory_, nullptr, "local exposure grid (blurred)")) return false;
         // No CmdFillBuffer clear, unlike histBuf_/expBuf_: CSLocalGrid overwrites (Store) all 16 bins
-        // of every tile it dispatches over, every frame -- nothing here ever reads a bin it did not
-        // just write this same frame, so a stale or uninitialized previous generation cannot leak in.
+        // of every tile it dispatches over, every frame -- nothing here ever reads a bin it did not just write this same frame, so a stale or uninitialized previous generation cannot leak in.
     }
 
-    // ---- exposure readout: one small HOST_VISIBLE|HOST_COHERENT buffer per frame slot, holding a
-    // copy of expBuf_'s first 8 bytes for IDevice::postExposureReadout's live UI number -- see
-    // expReadback_'s own comment for the whole pipeline. Non-fatal on failure, same treatment
-    // AverSR's own targets get above: a UI readout nothing else in the post chain depends on, so a
-    // failed alloc just leaves postExposureReadout returning false.
+    // ---- exposure readout: one HOST_VISIBLE|HOST_COHERENT buffer per frame slot, a copy of expBuf_'s
+    // first 8 bytes for IDevice::postExposureReadout's UI number (see expReadback_'s comment). Non-fatal on failure, like AverSR's targets: nothing else depends on it.
     for (u32 i = 0; i < kFrameCount; ++i) {
-        // createBufferCommitted already logs its own failure; nothing more to do here -- a null
-        // slot just makes runPostChain skip the copy and postExposureReadout keeps returning false.
+        // createBufferCommitted already logs its own failure; a null slot just makes runPostChain skip the copy and postExposureReadout keep returning false.
         createBufferCommitted(*this, 2 * sizeof(u32), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 expReadback_[i], expReadbackMemory_[i], nullptr, "post exposure readback");
     }
 
-    // ---- descriptors: kFrameCount * kPostSlotCount of them, written ONCE for this resize
-    // generation. Doubled per frame-in-flight slot NOT because the textures/buffers differ (they
-    // don't: one bloom pyramid, one histogram, one exposure scalar, shared like D3D12's single
-    // postSrvHeap_), but because binding 0 in every one is a UNIFORM_BUFFER_DYNAMIC over THIS
-    // FRAME'S postRing_[frameIndex_] specifically -- two different ring buffers (one per frame in
-    // flight) can't share one descriptor slot 0 without rewriting it, which this scheme exists to avoid.
+    // ---- descriptors: kFrameCount * kPostSlotCount, written ONCE per resize generation. Doubled per
+    // frame-in-flight slot not because textures/buffers differ (one bloom pyramid, histogram, exposure
+    // scalar, shared like D3D12's single postSrvHeap_) but because binding 0 is a
+    // UNIFORM_BUFFER_DYNAMIC over THIS frame's postRing_[frameIndex_] -- two ring buffers can't share one slot 0 without rewriting it, which this scheme avoids.
     VkImageView sceneView = sceneResolvedView_ ? sceneResolvedView_ : msaaColorView_;
     const u32 totalSlots = kFrameCount * kPostSlotCount;
     postSets_.assign(totalSlots, VK_NULL_HANDLE);
@@ -3516,8 +3432,7 @@ bool VulkanDevice::createPostTargets() {
         VkDescriptorBufferInfo u0i{histBuf_, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo u1i{expBuf_, 0, VK_WHOLE_SIZE};
         // u2/u3: local exposure's raw and blurred grids. Every slot gets them, same as u0/u1 --
-        // including kPostSlotComposite/kPostSlotCompositeUpscaled, since PSComposite reads
-        // gPostLocalGridBlur (u3) directly, with no separate SRV slot for it (see the contract).
+        // including kPostSlotComposite/kPostSlotCompositeUpscaled, since PSComposite reads gPostLocalGridBlur (u3) directly, with no separate SRV slot for it (see the contract).
         VkDescriptorBufferInfo u2i{localGridBuf_, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo u3i{localGridBlurBuf_, 0, VK_WHOLE_SIZE};
         VkWriteDescriptorSet w[8] = {};
@@ -3537,12 +3452,11 @@ bool VulkanDevice::createPostTargets() {
         w[6].descriptorCount = 1; w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[6].pBufferInfo = &u2i;
         w[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; w[7].dstSet = set; w[7].dstBinding = 8;
         w[7].descriptorCount = 1; w[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[7].pBufferInfo = &u3i;
-        // EIGHT WRITES, NOT NINE. Binding 6 is an IMMUTABLE sampler: the layout supplies it and
-        // writing to it is a validation error, not merely redundant.
+        // EIGHT writes, not nine: binding 6 is an IMMUTABLE sampler, and writing to it is a validation
+        // error, not merely redundant.
         api_.UpdateDescriptorSets(device_, 8, w, 0, nullptr);
     };
-    // The upscaled-composite slot's source, resolved AFTER the AverSR block so a failed creation
-    // there (presentHdrTex_ left at 0) leaves this null and the loop below skips writing the slot.
+    // The upscaled-composite slot's source, resolved AFTER the AverSR block so a failed creation there (presentHdrTex_ left at 0) leaves this null and the loop below skips writing the slot.
     RhiTexture* presentHdrT = (upscaler_ && presentHdrTex_ && rhiFactory_) ? rhiFactory_->texture(presentHdrTex_) : nullptr;
     for (u32 fi = 0; fi < kFrameCount; ++fi) {
         writeSlot(fi, kPostSlotPrefilter, sceneView, sceneView, true);
@@ -3552,8 +3466,7 @@ bool VulkanDevice::createPostTargets() {
             writeSlot(fi, kPostSlotDownBase + (m - 1), bloomSampledViews_[m - 1], bloomSampledViews_[m - 1], false);
             writeSlot(fi, kPostSlotUpBase + (m - 1), bloomSampledViews_[m], bloomSampledViews_[m], false);
         }
-        // Same PSO and t1/expAtT2 as kPostSlotComposite -- only t0 differs (AverSR output vs raw
-        // scene view). Left unwritten when no upscaler is set (see AverSR block comment above).
+        // Same PSO and t1/expAtT2 as kPostSlotComposite -- only t0 differs (AverSR output vs raw scene view); left unwritten when no upscaler is set (see AverSR block comment above).
         if (presentHdrT && presentHdrT->srvView)
             writeSlot(fi, kPostSlotCompositeUpscaled, presentHdrT->srvView, bloomSampledViews_[0], true);
     }
@@ -3570,8 +3483,7 @@ ConstantAllocation VulkanDevice::postConstants(const void* data, u32 bytes) {
     const VkDeviceSize need = offset + bytes;
     if (need > ring.bytes) {
         // Growth mid-frame would invalidate every earlier allocation's address this frame already
-        // handed out -- acceptable only because kRhiRingBytes (1 MiB) vastly exceeds one frame's
-        // post-chain usage (well under 2 KiB); not expected to trigger after the first frame.
+        // handed out -- acceptable only because kRhiRingBytes (1 MiB) vastly exceeds one frame's post-chain usage (well under 2 KiB); not expected to trigger after the first frame.
         VkDeviceSize newSize = ring.wanted ? ring.wanted : kRhiRingBytes;
         while (newSize < need && newSize < kRhiRingMaxBytes) newSize *= 2;
         if (newSize < need) {
@@ -3587,8 +3499,7 @@ ConstantAllocation VulkanDevice::postConstants(const void* data, u32 bytes) {
         }
         ring.bytes = newSize; ring.wanted = newSize; ring.coherent = true; ring.used = 0;
         api_.MapMemory(device_, ring.memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&ring.mapped));
-        // Re-point binding 0 of every post-chain descriptor set for THIS frame-in-flight slot at the
-        // (moved) ring buffer -- createPostPipelines() sizes the ring at kRhiRingBytes precisely so this almost never runs.
+        // Re-points binding 0 of every post-chain set for THIS frame-in-flight slot at the moved ring buffer -- createPostPipelines() sizes the ring so this almost never runs.
         const u32 base = frameIndex_ * kPostSlotCount;
         for (u32 slot = 0; slot < kPostSlotCount && base + slot < postSets_.size(); ++slot) {
             VkDescriptorBufferInfo bi{ring.buffer, 0, sizeof(PostCB)};
@@ -3607,14 +3518,12 @@ ConstantAllocation VulkanDevice::postConstants(const void* data, u32 bytes) {
 
 // Scene -> swapchain image. Records the whole chain and leaves `bbImage` in COLOR_ATTACHMENT_OPTIMAL
 // (endFrame's barrier takes it to PRESENT_SRC_KHR after). The scene colour source (msaaColor_, or
-// sceneResolved_ when MSAA'd) is ALREADY in SHADER_READ_ONLY_OPTIMAL by the time this runs; endFrame
-// barriers it there right before calling this, mirroring D3D12's resolve-then-SRV-barrier.
-//
-// viewportToTex_ IS honoured now, in the composite below. It used to be ignored because this
-// backend had no uiTextureId to hand the image out through, so nothing could consume it. Now the
-// editor asks for exactly this (SandboxApp calls setViewportToTexture(true), draws
-// viewportTextureId() in its viewport panel); compositing to the swapchain regardless left that panel
-// BLACK -- the UI covered the backbuffer the scene had been put on, and the image it wanted was never rendered.
+// sceneResolved_ when MSAA'd) is already SHADER_READ_ONLY_OPTIMAL by the time this runs; endFrame
+// barriers it there first, mirroring D3D12's resolve-then-SRV-barrier.
+// viewportToTex_ is honoured in the composite below (SandboxApp's setViewportToTexture(true) +
+// viewportTextureId()); it used to be ignored (this backend had no uiTextureId to hand the image out
+// through), and compositing to the swapchain regardless left that panel BLACK -- the UI covered the
+// backbuffer the scene had been put on, and the image it wanted was never rendered.
 void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*bbFormat*/) {
     {
         const auto now = std::chrono::steady_clock::now();
@@ -3640,11 +3549,11 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         return;
     }
 
-    // THE ONE FRAME sceneResolved_ HAS NO LAYOUT: built lazily from inside this function, so it
-    // exists only AFTER this frame's scene pass was already recorded -- the MSAA resolve that
-    // normally defines its layout hasn't run yet. The composite below samples it and the layer
-    // catches the read at submit: "expects ... SHADER_READ_ONLY_OPTIMAL -- instead ... UNDEFINED."
-    // Once per run; from the next frame the resolve has been through it. UNDEFINED discards nothing that exists.
+    // The ONE frame sceneResolved_ has no layout: built lazily here, so it exists only after this
+    // frame's scene pass was recorded and the MSAA resolve that normally sets its layout hasn't run.
+    // The composite below samples it and the layer catches the read at submit: "expects ...
+    // SHADER_READ_ONLY_OPTIMAL -- instead ... UNDEFINED." Once per run, so seed it once; UNDEFINED
+    // discards nothing that exists, and from the next frame the resolve covers it.
     if (postTargetsFresh_) {
         postTargetsFresh_ = false;
         if (sceneResolved_) {
@@ -3658,22 +3567,20 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
 
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
     const bool autoExp = post_.autoExposure && caps_.computeShaders;
-    // INDEPENDENT OF autoExp: both strengths can be nonzero with auto-exposure off (a fixed
+    // Independent of autoExp: both strengths can be nonzero with auto-exposure off (a fixed
     // post_.exposure still wants regions pulled toward middle grey). Mirrors D3D12Device's identical
-    // `localExp` -- caps_.computeShaders is always true on this backend (core 1.0 mandates a
-    // compute-capable queue), and localGridBuf_/localGridBlurBuf_ are always non-null once postReady_
-    // is true (createPostTargets fails the whole chain, not just this feature, if their allocation
-    // fails -- unlike D3D12's soft-degrade path), so both extra checks are belt-and-braces here.
+    // `localExp` -- caps_.computeShaders is always true here (core 1.0 mandates a compute-capable
+    // queue), and localGridBuf_/localGridBlurBuf_ are always non-null once postReady_ is true
+    // (createPostTargets fails the whole chain on their alloc failure, unlike D3D12's soft degrade), so both checks are belt-and-braces.
     const bool localExp = (post_.localExposureShadows > 0.0f || post_.localExposureHighlights > 0.0f) &&
                           caps_.computeShaders && localGridBuf_ && localGridBlurBuf_;
 
     if (!expSeeded_) {
-        // ZEROED WITH vkCmdFillBuffer RATHER THAN COPIED FROM THE CONSTANT RING. The copy it replaces
-        // was a validation error too, twice a run: the post ring is VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-        // only, and vkCmdCopyBuffer requires TRANSFER_SRC on its source. Adding that flag would have
-        // silenced the layer, but this removes the staging entirely -- 1 KB of zeros no longer gets
-        // written on the CPU and uploaded to seed two buffers the GPU can clear by itself, dropping
-        // the ring-allocation failure path with it.
+        // Zeroed with vkCmdFillBuffer, not copied from the constant ring: the copy it replaced was a
+        // validation error too, twice a run -- the ring is VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT only and
+        // vkCmdCopyBuffer requires TRANSFER_SRC on its source. Adding that flag would have silenced
+        // the layer, but this removes the staging entirely -- the CPU-staged 1 KB of zeros is gone,
+        // dropping the ring-allocation failure path with it.
         {
             VkBufferMemoryBarrier2 pre[2] = {
                 bufBarrier(histBuf_, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT),
@@ -3704,19 +3611,13 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         // The twin of D3D12Device.cpp's fill; see there for why both move together.
         cb.misc[3] = static_cast<f32>(post_.tonemap);
         cb.clampRadiance[0] = post_.maxRadiance;
-        // y/z: local exposure's shadow/highlight strengths -- gPostClamp.y/z in post.hlsl's
-        // PSComposite. FILLED HERE, UNCONDITIONALLY, same reasoning as misc/adapt above: every pass
-        // shares this one fillCommon, so the composite and the two new compute passes all see the
-        // same values without a separate path. Byte-for-byte mirror of D3D12Device's identical fill.
+        // y/z: local exposure's shadow/highlight strengths (gPostClamp.y/z in post.hlsl's PSComposite). Filled here unconditionally since every pass shares this one fillCommon -- byte-for-byte mirror of D3D12Device's fill.
         cb.clampRadiance[1] = post_.localExposureShadows;
         cb.clampRadiance[2] = post_.localExposureHighlights;
         cb.clampRadiance[3] = 1.0f - std::exp(-post_.exposureSpeedDark * frameSeconds_);   // darker-view adaption alpha
 
-        // gPostRegion: the docked editor's viewport sub-rect, in the post chain's own normalised
-        // SOURCE space. The twin of D3D12Device's identical fill -- see there for why normalising by
-        // sceneWidth_/sceneHeight_ (NOT width_/height_) is what vpX_/vpY_/vpW_/vpH_ actually need:
-        // setViewportRect stores them already scaled into scene space, not present space, on both
-        // backends. (0,0,1,1) identity whenever no sub-rect is set (undocked / game runtime).
+        // gPostRegion: the docked editor's viewport sub-rect, normalised by sceneWidth_/sceneHeight_
+        // (not width_/height_) since setViewportRect stores vpX_/vpY_/vpW_/vpH_ already in scene space on both backends. (0,0,1,1) identity when no sub-rect is set (undocked/game runtime).
         if (vpW_ > 0 && vpH_ > 0 && sceneWidth_ > 0 && sceneHeight_ > 0) {
             cb.region[0] = std::fmin(std::fmax(f32(vpX_) / f32(sceneWidth_),  0.0f), 1.0f);
             cb.region[1] = std::fmin(std::fmax(f32(vpY_) / f32(sceneHeight_), 0.0f), 1.0f);
@@ -3726,10 +3627,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             cb.region[0] = 0.0f; cb.region[1] = 0.0f; cb.region[2] = 1.0f; cb.region[3] = 1.0f;
         }
 
-        // gPostEye: PostSettings' perceptual eye-adaptation dials. The twin of D3D12Device's
-        // identical fill -- y is the calibration constant, not a PostSettings field: see
-        // kLuminanceToCdm2's own comment (RHI.hpp, beside PostSettings) for its LevelSky.hpp
-        // derivation.
+        // gPostEye: PostSettings' perceptual eye-adaptation dials (mirrors D3D12Device's fill). y is the calibration constant, not a PostSettings field -- see kLuminanceToCdm2's comment (RHI.hpp, beside PostSettings) for its LevelSky.hpp derivation.
         cb.eye[0] = post_.adaptationRealism;
         cb.eye[1] = kLuminanceToCdm2;
         cb.eye[2] = post_.nightVision;
@@ -3741,13 +3639,9 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         const VkDescriptorSet set = slotSet(slot);
         api_.CmdBindDescriptorSets(cmd, bp, postPipelineLayout_, kVkSetConstants, 1, &set, 1, &offset);
     };
-    // vx/vy: the destination's top-left offset, default 0 for every pass that always fills its whole
-    // target (bloom's pyramid, the histogram). Only the composite passes it non-zero, to confine the
-    // draw -- AND THE RENDER AREA ITSELF, not just the raster viewport -- to the docked viewport's
-    // sub-rect. Shrinking renderArea matters here in a way it does not for D3D12's scissor alone:
-    // loadOp/storeOp apply to the whole renderArea, so leaving it at the full destination size with
-    // LOAD_OP_DONT_CARE would let the implementation treat pixels the draw never rasterizes into as
-    // fair game to discard too, rather than simply leaving them untouched.
+    // vx/vy: destination top-left offset, 0 for passes that fill their whole target (bloom's pyramid, the histogram). Only the
+    // composite passes it non-zero, confining the RENDER AREA itself (not just the viewport) to the
+    // docked sub-rect -- matters more than D3D12's scissor alone since loadOp/storeOp apply to the whole renderArea and LOAD_OP_DONT_CARE would let outside pixels be discarded too.
     auto fullscreen = [&](VkPipeline pso, u32 slot, u32 w, u32 h, VkImageView rtv, u32 vx = 0, u32 vy = 0) {
         VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         att.imageView = rtv; att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -3782,12 +3676,8 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     };
 
     // ---- eye adaptation ----
-    // hw/hh (downscaled dispatch grid) and src dims derive from the SCENE target (sceneWidth_/
-    // sceneHeight_, not present width_/height_) -- mirrors D3D12's identical block.
-    //
-    // DOCKED: metered over the sub-rect's own scene-pixel extent (vpW_/vpH_, already scene-space),
-    // not the whole scene target -- see D3D12Device::runPostChain's identical comment. Full scene
-    // extent, unchanged, when undocked (vpW_/vpH_ == 0).
+    // hw/hh (downscaled dispatch grid) and src dims derive from the SCENE target, not present
+    // width_/height_ (mirrors D3D12's block). DOCKED: metered over the sub-rect's own scene-pixel extent (vpW_/vpH_, already scene-space); full scene extent when undocked (vpW_/vpH_==0).
     if (autoExp) {
         const u32 regionW = vpW_ ? vpW_ : sceneWidth_;
         const u32 regionH = vpH_ ? vpH_ : sceneHeight_;
@@ -3807,12 +3697,8 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         api_.CmdDispatch(cmd, 1, 1, 1);
     }
     {
-        // Metered-exposure readout (IDevice::postExposureReadout): only while CSExposure actually
-        // ran THIS frame -- mirrors D3D12Device::runPostChain's identical gate; autoExp false leaves
-        // expBuf_ holding whatever a PREVIOUS frame wrote, and copying that would show a live
-        // "metered" number for a control that isn't running. Detours expBuf_ through TRANSFER_READ
-        // and back to the SHADER_READ access/stage the composite below already expects either way,
-        // so this block ends in the same state on both paths.
+        // Metered-exposure readout (IDevice::postExposureReadout): only while CSExposure ran THIS frame -- mirrors D3D12Device::runPostChain's gate; autoExp false leaves expBuf_ holding a PREVIOUS frame's value, which would show a live number
+        // for a control that isn't running. Detours through TRANSFER_READ; either path ends at the same SHADER_READ state the composite below expects.
         const bool readExp = autoExp && expReadback_[frameIndex_] != VK_NULL_HANDLE;
         if (readExp) {
             VkBufferMemoryBarrier2 expToCopy = bufBarrier(expBuf_, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -3832,18 +3718,13 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     }
 
     // ---- local exposure: bilateral grid of log-luminance ----
-    // Runs regardless of autoExp -- unlike eye adaptation this never depends on it, it only depends
-    // on the strengths being nonzero. Reuses kPostSlotHistogram's descriptor set (t0/t1 already point
-    // at sceneView, same as CSHistogram's own source, and every slot now carries u2/u3 -- see
-    // createPostTargets' writeSlot). gridW/gridH mirror createPostTargets' own derivation exactly;
-    // if they disagree, CSLocalGrid's dispatch and the grid buffers' allocated size disagree too.
+    // Runs regardless of autoExp -- unlike eye adaptation, never depends on it, only on the strengths being nonzero. Reuses kPostSlotHistogram's set
+    // (t0/t1 point at sceneView, same as CSHistogram's source; every slot carries u2/u3 -- createPostTargets' writeSlot); gridW/gridH must mirror createPostTargets' derivation or the dispatch and buffer size disagree.
     if (localExp) {
         const u32 gridW = (sceneWidth_ + kLocalExpTile - 1) / kLocalExpTile;
         const u32 gridH = (sceneHeight_ + kLocalExpTile - 1) / kLocalExpTile;
 
-        // CSLocalGrid: one group per tile, each thread a 2x2 block of scene pixels -- dst is the
-        // GRID's own extent (what the dispatch covers), src is the SCENE's (what t0 actually is,
-        // for the UV each thread samples and the per-pixel bounds check).
+        // CSLocalGrid: one group per tile, each thread a 2x2 block of scene pixels -- dst is the GRID's own extent (the dispatch), src is the SCENE's (what t0 is, for the UV each thread samples and the per-pixel bounds check).
         fillCommon(gridW, gridH, sceneWidth_, sceneHeight_);
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, localGridPso_);
         bindSetFor(VK_PIPELINE_BIND_POINT_COMPUTE, kPostSlotHistogram);
@@ -3853,8 +3734,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
                                                        VK_ACCESS_2_SHADER_STORAGE_READ_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
         pipelineBarrier(api_, cmd, nullptr, 0, &gridToBlur, 1);
 
-        // CSLocalBlur: samples no texture (its 3x3x3 separable blur reads only u2), but src is still
-        // the SCENE size -- post.hlsl derives the grid's own extent from gPostSrc in all three passes.
+        // CSLocalBlur: samples no texture (its 3x3x3 separable blur reads only u2), but src is still the SCENE size -- post.hlsl derives the grid's extent from gPostSrc in all three passes.
         fillCommon(gridW, gridH, sceneWidth_, sceneHeight_);
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, localBlurPso_);
         bindSetFor(VK_PIPELINE_BIND_POINT_COMPUTE, kPostSlotHistogram);
@@ -3868,8 +3748,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // ---- bloom ----
     if (bloom) {
         bloomTo(0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
-        // Prefilter's source is the scene target, not the present size -- see bloomW_/bloomH_'s own
-        // derivation in createPostTargets, which already tracks sceneWidth_/sceneHeight_.
+        // Prefilter's source is the scene target, not the present size -- see bloomW_/bloomH_'s derivation in createPostTargets, which tracks sceneWidth_/sceneHeight_.
         fillCommon(mipW(0), mipH(0), sceneWidth_, sceneHeight_);
         fullscreen(bloomPrefilterPso_, kPostSlotPrefilter, mipW(0), mipH(0), bloomAttachmentViews_[0]);
 
@@ -3889,29 +3768,23 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     }
 
     // ---- AverSR: the upscale (HDR, before the tonemap) ----
-    //
-    // ONLY WHEN AN UPSCALER IS SET, and this generation's createPostTargets built both AverSR
-    // targets -- with either false, none of this runs and the composite takes its usual path. That
-    // is docs/AVERSR.md's "Off must be bit-identical" invariant, expressed as one pointer + one
-    // handle test, mirroring D3D12's identical guard.
-    //
-    // BEFORE THE TONEMAP, deliberately: the composite fuses resize + exposure + bloom + ACES + gamma
-    // into one pass, so an upscaler can't simply replace it. Resampling scene RADIANCE and handing
-    // the composite an already present-sized image leaves that shader/pipeline untouched -- its own
-    // resample degenerates to 1:1.
+    // Only when an upscaler is set AND this generation's createPostTargets built both AverSR
+    // targets; otherwise none of this runs (docs/AVERSR.md's "Off must be bit-identical" invariant,
+    // one pointer + one handle test, mirroring D3D12's guard). Before the tonemap deliberately: the
+    // composite fuses resize+exposure+bloom+ACES+gamma into one pass, so an upscaler can't simply
+    // replace it -- resampling scene RADIANCE and handing the composite an already present-sized
+    // image leaves that shader/pipeline untouched -- its resample degenerates to 1:1.
     bool srUpscaled = false;
     if (upscaler_ && sceneColorTex_ && presentHdrTex_ && rhiFactory_ && rhiContext_) {
         RhiTexture* srcT = rhiFactory_->texture(sceneColorTex_);
         RhiTexture* dstT = rhiFactory_->texture(presentHdrTex_);
         if (srcT && srcT->image && dstT && dstT->image && dstT->rtvView) {
             const VkImage sceneImg = (sampleCount_ > 1) ? sceneResolved_ : msaaColor_;
-            // The copy exists only because `sceneImg` has no TextureHandle (see sceneColorTex_'s
-            // field comment). Both images return to SHADER_READ_ONLY_OPTIMAL right after: sceneImg
-            // because every OTHER reader already expects it there (bloom prefilter, or endFrame's
-            // barrier with bloom off), and srcT because that's the layout its creation
-            // (transitionFreshImage, ResourceState::ShaderResource) put it in --
-            // this private raw-VkImage dance hands it back exactly where it found it, never touching
-            // VulkanResourceFactory's own state tracking.
+            // The copy exists only because `sceneImg` has no TextureHandle (see sceneColorTex_'s field
+            // comment). Both images return to SHADER_READ_ONLY_OPTIMAL after: sceneImg because every
+            // other reader expects it there (bloom prefilter, or endFrame's barrier with bloom off),
+            // srcT because that's where its creation (transitionFreshImage, ResourceState::ShaderResource) put it -- this
+            // raw-VkImage dance hands both back where it found them, untouched by VulkanResourceFactory's own state tracking.
             VkImageMemoryBarrier2 preCopy[2] = {
                 imgBarrier(sceneImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                           VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -3936,10 +3809,9 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             };
             pipelineBarrier(api_, cmd, postCopy, 2);
 
-            // execute()'s documented contract (RHIResources.hpp): the CALLER binds the target and
-            // sets viewport/scissor; the implementation only records its own pipeline/draw. Vulkan's
-            // dynamic rendering needs an explicit CmdBeginRendering/CmdEndRendering BRACKET around
-            // that hand-off (D3D12's OMSetRenderTargets alone suffices) -- mechanical, not a divergence.
+            // execute()'s documented contract (RHIResources.hpp): the CALLER binds the target and sets
+            // viewport/scissor; the impl only records its own pipeline/draw. Vulkan's dynamic rendering
+            // needs an explicit CmdBeginRendering/CmdEndRendering bracket around that hand-off (D3D12's OMSetRenderTargets alone suffices) -- mechanical, not a divergence.
             VkImageMemoryBarrier2 toUpscaleRt = imgBarrier(dstT->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                                            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                                                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
@@ -3969,12 +3841,10 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             pipelineBarrier(api_, cmd, &backToSrv, 1);
 
             // Unlike D3D12 (which must restore its cached descriptor heap/root signature here), nothing
-            // needs restoring: every post-chain draw already rebinds its own pipeline/descriptor set
-            // from scratch before drawing (fullscreen()/bindSetFor()), so nothing persists to go stale.
+            // needs restoring: every post-chain draw already rebinds its own pipeline/set from scratch before drawing (fullscreen()/bindSetFor()), so nothing persists to go stale.
             srUpscaled = true;
 
-            // ONCE, and it reports what actually happened rather than what was configured -- see
-            // D3D12Device::runPostChain's identical line for why that distinction matters here.
+            // Logged ONCE, reporting what actually happened rather than what was configured -- see D3D12Device::runPostChain's identical line.
             if (!srLogged_) {
                 srLogged_ = true;
                 AVER_INFO("[AverSR] '{}' upscaling {}x{} -> {}x{} in HDR, before the tonemap",
@@ -3985,20 +3855,19 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
 
     // ---- composite: straight to the swapchain image ----
     // dst is present-space (width_/height_); src is the scene target (sceneWidth_/sceneHeight_,
-    // or 1:1 at default renderScale_==1.0). This IS the render-scale upscale: PSComposite already
-    // bilinear-samples by normalized UV, so only the source size differs from the destination. ON
-    // THE AverSR PATH t0 is already present-sized and the shader's stretch does nothing -- AverSR's
-    // filter produced those pixels, not the composite's sampler. src STAYS THE SCENE SIZE there all
-    // the same: PSComposite never reads src for its own sampling, and local exposure reads it as the
-    // size its grid was built at, which is always the scene's. The twin of D3D12Device.cpp's fill.
+    // 1:1 at default renderScale_==1.0) -- this IS the render-scale upscale, since PSComposite
+    // bilinear-samples by normalized UV, so only the source size differs from the destination. On
+    // the AverSR path t0 is already present-sized and the shader's stretch does nothing (AverSR
+    // produced those pixels, not the composite's sampler); src still stays the scene size since
+    // PSComposite never reads src for its own sampling, and local exposure reads it as the size its grid was
+    // built at. Mirrors D3D12Device.cpp's fill.
     fillCommon(width_, height_, sceneWidth_, sceneHeight_);
 
-    // THE COMPOSITE'S OWN DESTINATION RECT, confined to the docked sub-rect gPostRegion (just written
-    // above by fillCommon) already describes in normalised source space -- scaled back up into
-    // PRESENT-space pixels here since the destination (viewport texture or swapchain image) is
-    // present-sized, unlike gPostRegion's scene-space source. Full canvas (0,0,width_,height_)
-    // whenever region is the (0,0,1,1) identity, so this is byte-identical to before this feature
-    // existed on every undocked path. Mirrors D3D12Device::runPostChain's identical derivation.
+    // The composite's own destination rect, confined to the docked sub-rect gPostRegion (fillCommon,
+    // normalised source space) scaled back up into PRESENT-space pixels since the destination
+    // (viewport texture or swapchain image) is present-sized. Full canvas (0,0,width_,height_) when
+    // region is the (0,0,1,1) identity -- byte-identical to every
+    // undocked path before this feature existed. Mirrors D3D12Device::runPostChain.
     u32 compositeX = static_cast<u32>(cb.region[0] * static_cast<f32>(width_)  + 0.5f);
     u32 compositeY = static_cast<u32>(cb.region[1] * static_cast<f32>(height_) + 0.5f);
     u32 compositeW = static_cast<u32>(cb.region[2] * static_cast<f32>(width_)  + 0.5f);
@@ -4010,7 +3879,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     if (compositeX + compositeW > width_)  compositeW = width_  - compositeX;
     if (compositeY + compositeH > height_) compositeH = height_ - compositeY;
 
-    // WHERE THE COMPOSITE LANDS: the swapchain image normally, or the viewport texture when the
+    // Where the composite lands: the swapchain image normally, or the viewport texture when the
     // editor asked for one -- only the destination changes (same pipeline/source/extent), since the
     // texture is created at width_ x height_ in the swapchain's format (see ensureViewportTexture).
     VkImage dstImage = bbImage;
@@ -4023,19 +3892,15 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     }
 
     // UNDEFINED as the old layout is right for the swapchain image always, and for the viewport
-    // texture whenever it is fully overwritten (undocked, or docked with no sub-rect narrower than
-    // the whole canvas) -- neither's previous contents are read by this pass.
-    //
-    // DOCKED WITH A NARROWER SUB-RECT: renderArea below (see fullscreen's own comment) confines the
-    // RENDER PASS itself to the sub-rect, so loadOp/storeOp never touch pixels outside it -- those
-    // keep whatever vpTex held before this barrier, exactly like D3D12's untouched scissor region.
-    // This OUTER layout transition is still whole-image (Vulkan has no sub-rect barrier), which
-    // technically permits the implementation to treat the WHOLE image's contents as undefined from
-    // here on, not just the sub-rect -- broader than the render pass itself claims. Left as UNDEFINED
-    // rather than threading a tracked "last known layout" through resize/texture-recreation (a bigger
-    // change than this feature needs) because it is provably inert either way: SandboxShell's "Level"
-    // ImGui::Image is vpTex's ONLY reader, and its uv0/uv1 crop to this exact same sub-rect (see the
-    // D3D12 composite's identical note), so nothing ever samples the part left "undefined" here.
+    // texture when fully overwritten (undocked, or docked with no sub-rect narrower than the whole
+    // canvas) -- neither's previous contents are read by this pass. DOCKED WITH
+    // A NARROWER SUB-RECT: renderArea confines the render pass to the sub-rect, so loadOp/storeOp never
+    // touch pixels outside it -- those keep whatever vpTex held before this barrier, like D3D12's
+    // untouched scissor region -- even though this OUTER transition is whole-image (Vulkan has no
+    // sub-rect barrier), technically permitting the WHOLE image to be treated as undefined from here
+    // on, broader than the render pass itself claims. Provably inert since SandboxShell's "Level"
+    // ImGui::Image is vpTex's ONLY reader and its uv0/uv1 crop to this same sub-rect. Left as
+    // UNDEFINED rather than tracking layout through resize/recreation (a bigger change than needed).
     VkImageMemoryBarrier2 toRt = imgBarrier(dstImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                             VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
@@ -4044,8 +3909,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
               srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite,
               compositeW, compositeH, dstView, compositeX, compositeY);
 
-    // Back to SHADER_READ so the UI can sample it in the overlay pass that follows. Only for the
-    // texture -- the swapchain image's own transition to PRESENT is endFrame's business.
+    // Back to SHADER_READ so the UI can sample it in the overlay pass that follows -- only for the texture; the swapchain image's own transition to PRESENT is endFrame's business.
     if (vpTex) {
         VkImageMemoryBarrier2 toSrv = imgBarrier(vpTex->image, VK_IMAGE_ASPECT_COLOR_BIT,
                                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -4053,8 +3917,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
                                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
         pipelineBarrier(api_, cmd, &toSrv, 1);
 
-        // The backbuffer still has to reach COLOR_ATTACHMENT for the overlay pass, which no longer
-        // happens as a side effect of compositing into it.
+        // The backbuffer still has to reach COLOR_ATTACHMENT for the overlay pass, which no longer happens as a side effect of compositing into it.
         VkImageMemoryBarrier2 bbToRt = imgBarrier(bbImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                                   VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
@@ -4076,9 +3939,8 @@ bool VulkanDevice::getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) {
     return true;
 }
 
-// GPU self-test: clears a tiny offscreen target to `in`, reads the pixel back into `out`. Runs on
-// its own one-shot command buffer + plain fence rather than the frame command buffer, since a
-// caller may reasonably invoke this before the first frame or between frames.
+// GPU self-test: clears a tiny offscreen target to `in`, reads the pixel back into `out`. Uses its
+// own one-shot command buffer + fence (not the frame buffer) since callers may invoke it before the first frame or between frames.
 bool VulkanDevice::selfTest(const f32 in[4], f32 out[4]) {
     if (!device_) return false;
     constexpr VkFormat kFmt = VK_FORMAT_R8G8B8A8_UNORM;   // core-mandatory support; no swapchain needed
@@ -4157,9 +4019,9 @@ bool VulkanDevice::selfTest(const f32 in[4], f32 out[4]) {
 } // namespace aver::rhi::vkb
 
 // ================================================================================================
-// 16. createVulkanDevice -- the forward declaration in modules/rhi/src/RHI.cpp names it exactly
-//     this: aver::rhi::detail::createVulkanDevice(const DeviceDesc&). Mirrors D3D12's own
-//     createD3D12Device (an ordinary `new` + init() + rollback-on-failure), NOT redesigned here.
+// 16. createVulkanDevice -- named to match modules/rhi/src/RHI.cpp's forward declaration
+//     (aver::rhi::detail::createVulkanDevice(const DeviceDesc&)). Mirrors D3D12's own
+//     createD3D12Device (new + init() + rollback-on-failure), not redesigned here.
 // ================================================================================================
 namespace aver::rhi::detail {
 
@@ -4177,28 +4039,22 @@ IDevice* createVulkanDevice(const DeviceDesc& desc) {
 
 // aver::rhi::vkb, NOT aver::rhi: these define members of vkb::VulkanResourceFactory/
 // VulkanRenderContext, but the vkb namespace closed further up -- opening bare aver::rhi here put
-// the definitions where those class names don't resolve. The backend stopped compiling the moment
-// these were added, and it went unnoticed for a long stretch because AVER_RHI_VULKAN defaulted to
-// OFF back then, so no default build ever reached this translation unit to fail on it.
-// CMakeLists.txt:58 has since flipped the option to ON -- that is the whole point of the "port
-// everything to Vulkan" push this file is part of -- so do not let a future edit reintroduce the
-// belief encoded in that old parenthetical: this file DOES get built by default now, and a compile
-// error here breaks every default build immediately, the way one always should have.
+// them where those class names don't resolve. Went unnoticed for a long stretch because
+// AVER_RHI_VULKAN defaulted OFF, so no default build reached this TU. CMakeLists.txt:58 has since
+// flipped it ON -- do not reintroduce the old belief encoded in that: this file DOES get built by
+// default now, and a compile error here breaks every default build immediately.
 namespace aver::rhi::vkb {
 
 // ---- the ray path's bindless texture table: DECLINED on this backend, for now ----
-//
-// Declined rather than stubbed to a silent zero. Every caller is gated on
-// DeviceCaps::rtBindlessTextures, and VulkanDevice::queryCaps() (see the caps_.rtBindlessTextures
-// assignment above the two AVER_INFO caps lines) deliberately hardcodes that bit to false on THIS
-// backend even on hardware where descriptor indexing and inline ray query are both genuinely present
-// and enabled -- precisely because this function has nothing real to back the flag up with yet.
-// So arriving here with the normal gated callers (VoxiRenderer::ensureTextureTable,
-// PathTracer::ensureTexturing) should be impossible, not merely unexpected: it would mean a NEW
-// caller forgot to check the flag, or that caps_.rtBindlessTextures got reconnected to the hardware
-// expression without this stub being replaced first. Either way this still declines cleanly rather
-// than asserting, and the flat-albedo path takes over exactly as it does on a device that genuinely
-// lacks the capability.
+// Declined, not stubbed to a silent zero. Every caller gates on DeviceCaps::rtBindlessTextures
+// (see the caps_.rtBindlessTextures assignment above the AVER_INFO caps lines), which
+// VulkanDevice::queryCaps() deliberately hardcodes false here even where descriptor indexing
+// and inline ray query are genuinely present -- this function has nothing real to back the flag with
+// yet. Reaching here via the normal gated callers (VoxiRenderer::ensureTextureTable,
+// PathTracer::ensureTexturing) should be impossible, not merely unexpected: either a NEW caller
+// forgot to check the flag, or rtBindlessTextures got reconnected to the hardware expression
+// without this stub being replaced. Either way it declines cleanly rather than asserting,
+// and the flat-albedo path takes over, as on hardware that genuinely lacks the capability.
 
 BindlessTableHandle VulkanResourceFactory::createBindlessTextureTable(u32 capacity) {
     AVER_WARN("[RHI.Vulkan] bindless texture tables are not implemented on this backend yet "

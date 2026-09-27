@@ -1,57 +1,31 @@
 #pragma once
-// THE ONE node-type descriptor table for the .ocgraph editor.
+// THE ONE node-type descriptor table for the .ocgraph editor: the Add-Node palette, node spawning
+// and pin-type display all read it. Adding a node type is ONE call to node(...) in
+// graphNodeCatalog() below (the table docs/VISUAL_SCRIPTING.md Slice 6 asks for). Pure data: no
+// ImGui, no Engine, no scene:: -- testable headless.
 //
-// Every place in the editor that needs to know what pins a node type has -- the Add-Node palette,
-// spawning a fresh node onto the canvas, and pin-type display -- reads this table. Adding a node
-// type is ONE call to node(...) in graphNodeCatalog() below, not a hunt through drawing code. This
-// is the table the build task (and docs/VISUAL_SCRIPTING.md Slice 6) asks for.
+// FOR STARTING SHAPE ONLY: an existing node instance carries its own pins in the file
+// (aver::fmt::OcGraphNode::pins, OcGraph.hpp); drawing/editing reads THOSE, not this table, so a
+// nonstandard pin set still renders. This table only supplies the palette's shape and a
+// freshly-spawned node's initial pins.
 //
-// Deliberately pure data: no ImGui, no Engine, no scene:: include. It can be read from a headless
-// test the same way it is read from the ImGui palette.
+// PROVENANCE: mirrors GraphCompiler.cs/OcGraphParser.cs's AddDefaultPins, as read 2026-08-13 --
+// including the flow/exec vocabulary (Branch, Sequence, While, ForEach, OnStart, OnTick) copied
+// field-for-field, pin-for-pin, same order, from AddDefaultPins' own "flow / exec nodes" section. A
+// hand-kept copy, NOT generated, so the C++ build has no C# dependency; if GraphCompiler.cs's node
+// set moves, update this table to match by hand.
+// PARITY MATTERS MOST FOR FLOW TYPES: a spawned node's pins get written into the file as real PIN
+// records on save (GraphEditor.cpp's add-node popup copies them verbatim), and AddDefaultPins skips
+// any node with explicit pins already, so a mismatch here means an editor-authored graph and a
+// hand/C#-authored one diverge (the "agree by coincidence" trap OcGraph.hpp's `outputs` comment
+// warns about).
 //
-// WHAT THIS TABLE IS FOR, AND WHAT IT IS NOT FOR:
-// A loaded/edited graph's node instances already carry their own pins in the file
-// (aver::fmt::OcGraphNode::pins -- see modules/formats/include/aver/formats/OcGraph.hpp). Drawing
-// and editing an EXISTING node reads pins from the node instance itself, not from this table, so a
-// node saved by some future tool with a nonstandard pin set still renders correctly. This table is
-// consulted only when the editor itself must invent a node's starting shape: populating the palette,
-// and giving a freshly-spawned node its initial pins.
-//
-// PROVENANCE: the pin names/types below mirror the shape scripting/csharp/Aver.Graph/GraphCompiler.cs
-// and OcGraphParser.cs (AddDefaultPins) expect, as read on 2026-08-13 (updated to add the exec/flow
-// vocabulary: Branch, Sequence, While, ForEach, OnStart, OnTick -- see OcGraphParser.AddDefaultPins'
-// own "flow / exec nodes" section, which this table's flow entries below were copied from field for
-// field, pin for pin, in the same order). Those C# files are owned by a concurrent workflow and are
-// NOT included or generated from here -- this table owns its own copy of the vocabulary so a C++
-// editor build never depends on a C# file. If GraphCompiler.cs's node set has moved since, update this
-// table to match; it is one line per node type by design.
-//
-// EXACT PARITY MATTERS MORE FOR THE FLOW TYPES THAN IT DID BEFORE. A node spawned from this catalog
-// gets its pins written into the file as real PIN records when the editor saves (see the "add node"
-// popup in GraphEditor.cpp, which copies a GraphNodeDesc's pins verbatim onto the new OcGraphNode).
-// Once a node has ANY explicit pins, OcGraphParser.AddDefaultPins skips it entirely (its early-return
-// on `node.Pins.Count > 0`) -- so if this table and AddDefaultPins ever disagree on a flow type's
-// shape, an editor-authored graph gets one pin set and a hand-written or C#-authored graph of the same
-// type gets another, which is exactly the "two implementations agree by coincidence, not by
-// construction" trap the `outputs` field's own comment in OcGraph.hpp warns about.
-//
-// GetField/SetField (and their Vec3 siblings GetFieldVec3/SetFieldVec3 below) address a scene field by
-// name via a `field=` NODE-line attribute on the C# side's own reader
-// (scripting/csharp/Aver.Graph/OcGraphParser.cs, "field=" case). Spawn (below) addresses a registered
-// class the same way, via `class=`; Param (below) names a declared PARAM via `param=`. Same reader,
-// same generic key=value mechanism (modules/formats/src/OcGraph.cpp's NODE-line parsing reads only
-// what parses as a numeric x/y coordinate as position; every OTHER trailing token is captured VERBATIM
-// into OcGraphNode::extraTokens -- modules/formats/include/aver/formats/OcGraph.hpp -- and re-emitted
-// on save), so `field=`/`param=`/`class=` all genuinely DO survive an editor load/save round trip; the
-// grammar was never the gap. The FORMER gap, NOW CLOSED (see GraphNodeDesc::attributes below and
-// sandbox/src/GraphEditor.cpp's details panel): this editor used to have no property/inspector panel
-// for ANY node, so extraTokens round-tripped opaquely but was not READABLE or EDITABLE from the GUI. A
-// node type's `attributes` list below is what the details panel reads to know which key=value tokens
-// to show as labelled, always-present rows for that type; anything else the node's extraTokens still
-// carries -- a key this table doesn't declare, on ANY node type -- is shown too, as a generic row, by
-// GraphEditorGeometry.hpp's computeAttributeRows (see its own header comment for why that split is a
-// hybrid, not a fully generic key=value editor: a node TYPE still gets to say what it expects, the way
-// it already says what pins it has, but nothing the table doesn't know about is ever dropped).
+// field=/param=/class=: generic NODE-line key=value attributes, captured verbatim into
+// OcGraphNode::extraTokens (OcGraph.cpp's parser keeps only a numeric x/y as position), so they
+// round-trip load/save -- the grammar was never the gap. The FORMER gap, now closed: this editor had
+// no property panel for ANY node, so extraTokens round-tripped opaquely but wasn't readable/editable
+// from the GUI. A type's `attributes` list is what the details panel shows as labelled rows; anything
+// else in extraTokens shows too, as a generic row (GraphEditorGeometry.hpp's computeAttributeRows).
 #include <algorithm>    // stable_sort, for graphPaletteSearch's ranking
 #include <cstdint>
 #include <string>
@@ -65,52 +39,36 @@ namespace aver::editor {
 // aver::fmt::OcGraphPin exactly so a catalog entry converts into a real pin with no per-field mapping.
 struct GraphPinSpec {
     std::string name;
-    std::string type;         // "float" | "int" | "bool" | "string" -- matches OcGraphPin::type. A
-                               // material node's pin also uses this same free string for "float2" /
-                               // "float3" / "float4" -- see aver::pbr::MaterialGraphHlsl.cpp's
-                               // typeFromPin(), which reads exactly those spellings, plus this
-                               // header's own Material section below.
+    std::string type;         // "float"|"int"|"bool"|"string" (OcGraphPin::type); material pins also
+                               // use "float2"/"float3"/"float4" -- see MaterialGraphHlsl.cpp's
+                               // typeFromPin() and this header's Material section below.
     bool isOutput = false;
     std::string defaultValue; // only meaningful for input pins; empty = none
 };
 
-// One NODE-line key=value attribute a node type declares -- param=/field=/class= today. Deliberately
-// just (key, label): the details panel that reads this needs nothing more to draw a labelled,
-// always-present InputText row (see GraphEditorGeometry.hpp's computeAttributeRows, which takes a
-// plain vector<pair<string,string>> rather than this type directly, for the same "stay decoupled from
-// the catalog" reason computeNodeLayout takes `title` as a parameter -- see that function's comment).
+// One NODE-line key=value attribute a node type declares (param=/field=/class= today). Just
+// (key, label): computeAttributeRows (GraphEditorGeometry.hpp) draws it as a labelled InputText row,
+// taking a plain vector<pair<string,string>> rather than this type, to stay decoupled from the
+// catalog (same reason computeNodeLayout takes `title` as a parameter).
 struct GraphAttributeSpec {
     std::string key;   // matches the extraTokens `key=` half exactly, e.g. "class"
     std::string label; // shown in the details panel, e.g. "Class"
 };
 
 // Which .ocgraph DOMAIN(s) a node type may appear in. Mirrors aver::fmt::OcGraphDomain
-// (modules/formats/include/aver/formats/OcGraph.hpp): kDomainGameplay is a graph with no DOMAIN
-// record, or `DOMAIN gameplay`, compiled to IL by scripting/csharp/Aver.Graph/GraphCompiler.cs;
-// kDomainMaterial is `DOMAIN material`, compiled to HLSL by aver::pbr::compileMaterialGraph()
-// (modules/render.pbr/src/MaterialGraphHlsl.cpp). No flag mirrors OcGraphDomain::Unknown -- that
-// value means "a DOMAIN this build does not recognise", which is never something a catalog entry
-// is FOR; it is the absence of an answer, not a third kind of node.
+// (OcGraph.hpp): kDomainGameplay = no DOMAIN record or `DOMAIN gameplay` (compiled to IL by
+// GraphCompiler.cs); kDomainMaterial = `DOMAIN material` (compiled to HLSL by
+// aver::pbr::compileMaterialGraph(), MaterialGraphHlsl.cpp). No flag mirrors ::Unknown -- that's an
+// unrecognised DOMAIN, not a third kind of node.
 //
-// A BITMASK, NOT A COPY OF THAT ENUM. OcGraphDomain is a plain enum because a LOADED GRAPH is
-// answering a different question than a CATALOG ENTRY is: a .ocgraph file carries exactly one
-// DOMAIN record, so a graph is unambiguously gameplay or material, never both, and an enum is the
-// right shape for a value that is always exactly one thing. A palette entry answers "which
-// domain(s) is this node TYPE STRING valid in", and that is not always a single answer: ConstFloat
-// means the same thing -- a literal number -- whichever compiler reads it, so one node type can
-// belong to both at once. An enum could only ever pick one, which would force either an entry that
-// lies about the domain it left out, or -- the choice this table actually makes for every name
-// whose SHAPE genuinely differs between the two compilers, e.g. Add's scalar gameplay pins versus
-// its float3 material ones (see the Material section of buildCatalog() below) -- a second,
-// differently-shaped entry under the same type name. The bitmask makes that a choice made per node
-// type rather than forced on every one of them: a future case that really is shape-identical in
-// both domains sets kDomainBoth on ONE entry instead of adding a duplicate row that looks different
-// only in its category field.
+// A BITMASK, NOT a copy of that enum: a loaded graph is unambiguously one domain, but a node TYPE
+// STRING can be valid in both (e.g. ConstFloat means the same literal either way) while some names
+// differ in SHAPE per domain (Add: scalar gameplay pins vs float3 material ones, see the Material
+// section below) and need two differently-shaped entries under the same type name. The bitmask lets
+// each case choose: kDomainBoth on one entry when shape-identical, two entries when not.
 //
-// A PLAIN ENUM, NOT enum class, for the reason EditorKeybinds.hpp's Scope bitmask is not one
-// either: this value is only ever combined and tested with `|`/`&`, never passed somewhere its
-// implicit conversion to int would be a hazard, so enum class would buy nothing but an operator
-// overload this header has no other use for.
+// Plain enum, not enum class: only ever combined/tested with `|`/`&`, so the implicit-int-conversion
+// hazard enum class guards against doesn't apply here (same reasoning as EditorKeybinds.hpp's Scope).
 enum GraphNodeDomain : std::uint32_t {
     kDomainGameplay = 1u << 0,
     kDomainMaterial = 1u << 1,
@@ -125,13 +83,11 @@ struct GraphNodeDesc {
     std::vector<GraphPinSpec> pins;    // inputs and outputs mixed; isOutput distinguishes which
     std::vector<GraphAttributeSpec> attributes; // NODE-line key=value attributes this type takes;
                                                  // empty for every type that has none (most of them).
-    // Which domain(s) this node type belongs to -- see GraphNodeDomain above. Defaults to
-    // kDomainGameplay, matching every entry that predates this field: a braced-init-list shorter
-    // than the struct's member count leaves the trailing members it did not mention at their own
-    // default member initializer, so every existing `t.push_back({...})` call above -- whether it
-    // supplied four elements, five, or anything in between -- keeps compiling and keeps meaning
-    // exactly what it meant before, with not one of those ~200 lines touched. Only the Material
-    // section at the bottom of buildCatalog() sets this explicitly.
+    // Domain(s) this type belongs to -- see GraphNodeDomain above. Defaults to kDomainGameplay so
+    // every pre-existing shorter braced-init `t.push_back({...})` above still compiles and means
+    // what it did (a short init list leaves trailing members at their default) -- not one of those
+    // ~200 lines needed touching. Only the Material section at the bottom of buildCatalog() sets
+    // this explicitly.
     GraphNodeDomain domain = kDomainGameplay;
 };
 
@@ -149,38 +105,24 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
 inline std::vector<GraphNodeDesc> buildCatalog() {
     std::vector<GraphNodeDesc> t;
     // -- constants: a single output pin carrying the literal as its default value --
-    //
-    // THE `value` ATTRIBUTE IS WHAT MAKES THESE USABLE AT ALL, and its absence was the single
-    // biggest hole in this editor. A Const spawned from the palette carried only its PIN default, and
-    // the details panel renders a row per DECLARED attribute (plus any key=value the node already
-    // has) -- so a fresh Const showed "This node type has no attributes." and there was no
-    // affordance anywhere to type a number into it. Every constant in an editor-built graph was 0,
-    // permanently. That is most of the reason every graph in this repo is hand-written text: you
-    // could not author a speed, a duration, a key code or a direction without leaving the editor.
-    //
-    // The parser has read `value=` on a Const all along, and reads it BY THE NODE'S DECLARED TYPE
-    // (OcGraphParser.cs) rather than by guessing from the literal's shape -- so `value=100` on a
-    // ConstFloat is refused by name rather than silently compiled to 0.0f. Declaring it here is all
-    // that was missing to reach it.
+    // The `value` attribute is what makes these editable: a fresh Const spawned from the palette had
+    // only its PIN default and the details panel shows nothing for a type with no declared
+    // attributes, so every editor-built constant was permanently 0 until this was added. The parser
+    // already read `value=` on a Const, by the node's DECLARED TYPE (OcGraphParser.cs) rather than
+    // guessing from the literal -- declaring it here was all that was missing (most of why this
+    // repo's graphs were hand-written text instead of authored in the editor).
     t.push_back({"ConstFloat", "Const Float", "Const", {pin("value", "float", true, "0")}, {attr("value", "Value")}});
     t.push_back({"ConstInt",   "Const Int",   "Const", {pin("value", "int",   true, "0")}, {attr("value", "Value")}});
     t.push_back({"ConstBool",  "Const Bool",  "Const", {pin("value", "bool",  true, "false")}, {attr("value", "Value")}});
-    // -- arithmetic: a, b in; result out --
     t.push_back({"Add",      "Add",      "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
-    // -- Print: the node this vocabulary has never had, and the one a Blueprint author reaches for
-    //    first. There was no way to observe ANYTHING from inside a graph -- no value, no branch
-    //    taken, no event fired -- so debugging one meant adding an OUT record and reading the
-    //    GraphHost tick log, which only works for a value you can route all the way to the
-    //    graph's own output. LABELLED BY NODE ID rather than by an attribute: `NODE muzzleLen
-    //    Print` already names itself, the id is already unique within the graph, and an
-    //    attribute would have needed a parser field, a writer field and an editor row to say
-    //    what the id says for free.
-    // -- VECTOR MATHS. Every math node in this table was SCALAR, in an engine whose world is
-    //    centimetres in three axes: a graph wanting a direction, a distance or an offset had to
-    //    spell it out one component at a time out of Add and Multiply, which is how
-    //    AN_FPCharacter ends up a wall of Const Float. There is no Vec3 PIN TYPE to carry these
-    //    (PinType is Float, Int, Bool, Exec), so they take and return loose components -- exactly
-    //    the convention GetFieldVec3/SetFieldVec3 already established.
+    // -- Print: no way existed to observe ANYTHING from inside a graph (no value, no branch, no
+    //    event) short of an OUT record read from the GraphHost tick log. Labelled by NODE ID rather
+    //    than an attribute: `NODE muzzleLen Print` already names itself uniquely, where an attribute
+    //    would have needed a parser field, a writer field and an editor row to say the same for free.
+    // -- VECTOR MATHS: every math node here was SCALAR in a centimetre, three-axis world, so a
+    //    direction/distance/offset had to be spelled out component-by-component (AN_FPCharacter's
+    //    wall of Const Float). No Vec3 PIN TYPE exists (Float/Int/Bool/Exec only), so these take and
+    //    return loose components, the convention GetFieldVec3/SetFieldVec3 already established.
     t.push_back({"VecAdd", "Vec Add", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
     t.push_back({"VecSub", "Vec Subtract", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
     t.push_back({"VecScale", "Vec Scale", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("s", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
@@ -190,14 +132,12 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"VecDot", "Vec Dot", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("result", "float", true)}});
     t.push_back({"VecLength", "Vec Length", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("result", "float", true)}});
     t.push_back({"VecDistance", "Vec Distance", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("result", "float", true)}});
-    // -- THE ENGINE'S OWN API, reachable from a graph. Measured before these were written: 72 of
-    //    the 77 public members of Aver.Framework had no node at all. AverCharacter had exactly one
-    //    (Jump) out of eighteen, Game had none out of twelve, AverPlayerController none out of four.
-    //    These are the three classes a gameplay graph reaches for first.
+    // -- THE ENGINE'S OWN API, reachable from a graph. Measured before these existed: 72/77 public
+    //    members of Aver.Framework had no node (AverCharacter 1/18, Game 0/12, AverPlayerController
+    //    0/4) -- the three classes a gameplay graph reaches for first.
     //
-    //    Teleport is NOT SetFieldVec3 on CLocal.position, and the difference matters: setting the
-    //    transform alone leaves the physics capsule where it was and the character snaps back on
-    //    the next step. Teleport moves both and clears velocity.
+    //    Teleport != SetFieldVec3 on CLocal.position: the transform alone leaves the physics capsule
+    //    behind and the character snaps back next step. Teleport moves both and clears velocity.
     t.push_back({"GetVelocity", "Get Velocity", "Character", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"IsGrounded", "Is Grounded", "Character", {pin("entity", "int", false), pin("grounded", "bool", true)}});
     t.push_back({"SetVelocity", "Set Velocity", "Character", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
@@ -216,28 +156,24 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         {attr("path", "Path")}});
     t.push_back({"LoadGame", "Load Game", "Game", {pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
         {attr("path", "Path")}});
-    // -- CONVERSION. Validate refuses a LINK whose two pins differ in type (Graph.cs's
-    //    srcPin.Type != tgtPin.Type check), which is what stops an exec pin being wired to a
-    //    float -- correct, and it also meant an int or a bool could not reach a float input at
-    //    all. Unreal converts silently and shows a little cast bubble on the wire; this
-    //    vocabulary has no such machinery, so the cast is a node you can see.
-    //    FloatToInt TRUNCATES toward zero, which is what C# (int)f does -- Floor exists for the
-    //    other rounding, and having both means neither has to be guessed.
-    // INT TO FLOAT IS LOSSY ABOVE 2^24, and in this engine that is not a corner case: a float32
-    // carries 24 mantissa bits, so past 16777216 only EVEN integers survive -- and ENTITY HANDLES
-    // START AT 16777216. Converting one to a float silently rounds it to its neighbour. That cost
-    // an hour: a graph printed a player controller as 16777224 while the ABI returned 16777225,
-    // and it read exactly like the engine handing back the wrong entity. Use PrintInt for handles.
+    // -- CONVERSION: Validate refuses a link whose pins differ in type (Graph.cs's srcPin.Type !=
+    //    tgtPin.Type), so an int/bool cannot reach a float input without an explicit, visible cast
+    //    node (Unreal converts silently with a cast bubble; this vocabulary has none).
+    //    FloatToInt TRUNCATES toward zero (C# (int)f); Floor exists for the other rounding.
+    // INT TO FLOAT IS LOSSY ABOVE 2^24 (float32's 24 mantissa bits; only EVEN integers survive past
+    // 16777216) -- and ENTITY HANDLES START AT 16777216, so converting one silently rounds to its
+    // neighbour -- cost an hour debugging what read exactly like the engine handing back the wrong
+    // entity: a controller printed as 16777224 while the ABI returned 16777225. Use PrintInt for
+    // handles.
     t.push_back({"IntToFloat", "Int To Float", "Convert", {pin("a", "int", false), pin("result", "float", true)}});
     t.push_back({"BoolToFloat", "Bool To Float", "Convert", {pin("a", "bool", false), pin("result", "float", true)}});
     t.push_back({"FloatToInt", "Float To Int", "Convert", {pin("a", "float", false), pin("result", "int", true)}});
     // PrintInt exists because Print takes a float and a float cannot hold an entity handle --
     // see the IntToFloat note above. Anything counting entities, indices or ids wants this one.
-    // -- THE ENTITY TRANSFORM, which GetFieldVec3 on CLocal.position only half covered. LOCAL IS
-    //    NOT WORLD: a gun parented to a camera has the same local position forever, and a graph
-    //    measuring a distance or aiming something needs where it actually is. The three axis nodes
-    //    are the transform's own orientation, distinct from the existing GetForward, which reads
-    //    an AverCharacter's look direction and its pitch clamp.
+    // -- THE ENTITY TRANSFORM: GetFieldVec3 on CLocal.position only half covered this. LOCAL IS NOT
+    //    WORLD (a gun parented to a camera keeps the same local position forever), so a graph
+    //    measuring distance needs the world one. The three axis nodes are the transform's own
+    //    orientation, distinct from GetForward, which reads an AverCharacter's look + pitch clamp.
     t.push_back({"GetWorldPosition", "Get World Position", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"GetEntityForward", "Get Forward Axis", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"GetEntityRight", "Get Right Axis", "Transform", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
@@ -246,23 +182,19 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"IsAlive", "Is Alive", "Transform", {pin("entity", "int", false), pin("alive", "bool", true)}});
     t.push_back({"IsActor", "Is Actor", "Transform", {pin("entity", "int", false), pin("isActor", "bool", true)}});
     t.push_back({"Translate", "Translate", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
-    // SetLocalPosition sits beside SetLocalScale and shares its pin shape exactly -- see
-    // OcGraphParser's own note on the pair. Moving a child and resizing one should not be two
-    // different things to learn. Translate above is the RELATIVE peer; this one is absolute.
+    // SetLocalPosition shares SetLocalScale's pin shape exactly (OcGraphParser's note on the pair):
+    // moving and resizing shouldn't be two different things to learn. Translate is its RELATIVE peer.
     t.push_back({"SetLocalPosition", "Set Local Position", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
-    // THE PALETTE COULD MOVE, SCALE, PARENT AND DESTROY AN ENTITY AND COULD NOT TURN ONE. A turret
-    // tracking a target, an AI facing where it walks, a door swinging, a pickup spinning: every one
-    // of those needed C#, while Entity::SetLocalRotation sat fully implemented and unreachable from
-    // a graph. Measured against the whole Transform category, it was the only verb missing.
+    // THE PALETTE COULD MOVE, SCALE, PARENT AND DESTROY AN ENTITY BUT NOT TURN ONE (turret tracking,
+    // AI facing, a swinging door): Entity::SetLocalRotation was implemented but unreachable from a
+    // graph, the only Transform verb missing.
     //
-    // YAW/PITCH/ROLL IN DEGREES, NOT x/y/z, and the names are load-bearing rather than cosmetic:
-    // PinType is Float/Int/Bool/Exec with no quaternion, so a rotation must ride on three floats --
-    // and three floats called x/y/z sitting next to a position node that also takes x/y/z is exactly
-    // how somebody wires roll into yaw and gets a turret that lies on its side. The pin names are the
-    // only thing carrying which axis is which.
+    // YAW/PITCH/ROLL IN DEGREES, not x/y/z -- load-bearing, not cosmetic: with no quaternion pin
+    // type, three floats named x/y/z next to a position node's own x/y/z is how someone wires roll
+    // into yaw. The pin names alone carry which axis is which.
     //
-    // The values mean what .ocmap's PLACE records mean, because the bridge composes them through the
-    // engine's own Rot::ToQuat rather than a second Euler convention of its own.
+    // Values mean what .ocmap's PLACE records mean: the bridge composes them via Rot::ToQuat, not a
+    // second Euler convention.
     t.push_back({"SetLocalRotation", "Set Local Rotation", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("yaw", "float", false), pin("pitch", "float", false), pin("roll", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     // Yaw and pitch only, roll left at zero -- rolling toward a target is what a stunt plane does,
     // not what anything aiming does. Same pin shape as Set Local Position on purpose: "move there"
@@ -270,20 +202,19 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"LookAt", "Look At", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetLocalScale", "Set Local Scale", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"DestroyEntity", "Destroy Entity", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
-    // -- PHYSICS. A BODY IS NOT AN ENTITY: a body is a Jolt handle with a shape and a velocity, an
-    //    entity is a scene node that may or may not own one, and SetBodyEntity is the bridge. A body
-    //    a graph creates reports NO owner to Raycast until something stamps one on, so a trigger the
-    //    graph built is invisible to the graph asking what it hit. Body handles ride on INT pins.
-    //    OverlapSphere is deliberately absent: it returns an ARRAY, and there is no container pin.
+    // -- PHYSICS. A BODY IS NOT AN ENTITY: a body is a Jolt handle with shape+velocity, an entity is
+    //    a scene node that may or may not own one, SetBodyEntity bridges them. A body with no owner
+    //    stamped on reports nothing to Raycast, so a graph-built trigger is invisible to it. Body
+    //    handles ride on INT pins. OverlapSphere is deliberately absent: it returns an ARRAY, and
+    //    there's no container pin.
     t.push_back({"GetBodyPosition", "Get Body Position", "Physics", {pin("body", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"GetBodyVelocity", "Get Body Velocity", "Physics", {pin("body", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"IsBodyValid", "Is Body Valid", "Physics", {pin("body", "int", false), pin("valid", "bool", true)}});
     t.push_back({"GetBodyCount", "Body Count", "Physics", {pin("count", "int", true)}});
-    //    IsPhysicsReady / GetFixedStep: the two Physics STATUS reads (Physics.Ready, Physics.FixedStep).
-    //    Pure, no exec, no inputs -- they ask the simulation about itself. Worth nodes because a graph
-    //    that adds bodies before aver_phys_init has run gets silent zeros back from every creator, and
-    //    until now it had no way to ASK. GetFixedStep is what a graph integrating by hand needs so it
-    //    matches the simulation's own step rather than a hardcoded 1/60.
+    //    IsPhysicsReady / GetFixedStep: pure STATUS reads (Physics.Ready/Physics.FixedStep), no exec,
+    //    no inputs. Needed because a graph adding bodies before aver_phys_init has run gets silent
+    //    zeros back from every creator and, until now, had no way to ask first. GetFixedStep lets
+    //    hand-integration match the sim's real step instead of a hardcoded 1/60.
     t.push_back({"IsPhysicsReady", "Is Physics Ready", "Physics", {pin("ready", "bool", true)}});
     t.push_back({"GetFixedStep", "Fixed Step", "Physics", {pin("seconds", "float", true)}});
     t.push_back({"RaycastAny", "Raycast Any", "Physics", {pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("hit", "bool", true)}});
@@ -300,29 +231,25 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"AddSensorSphere", "Add Sensor Sphere", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"SphereCast", "Sphere Cast", "Physics", {pin("exec", "exec", false), pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("hit", "bool", true), pin("body", "int", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
 
-    // -- PHYSICS: FORCES, MATERIAL, MOTION AND LAYERS. Four more families on the same body handle the
-    //    creators above return. A force/torque lasts one physics step and must be re-applied to push
-    //    continuously; an impulse changes velocity instantly and does not accumulate -- see
-    //    Aver.Physics/Body.cs's own section comment for the exact unit derivations (force is
-    //    kg*cm/s^2, torque is kg*cm^2/s^2). Angular velocity is RADIANS per second about each engine
-    //    axis, never degrees, matching every rotation in this file.
+    // -- PHYSICS: FORCES, MATERIAL, MOTION AND LAYERS, on the body handles the creators above return.
+    //    A force/torque lasts one step and must be reapplied to push continuously; an impulse changes
+    //    velocity instantly and doesn't accumulate (units: force kg*cm/s^2, torque kg*cm^2/s^2, see
+    //    Aver.Physics/Body.cs). Angular velocity is RADIANS/s, never degrees, matching every rotation here.
     t.push_back({"AddForce", "Add Force", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"AddImpulse", "Add Impulse", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"AddTorque", "Add Torque", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"AddAngularImpulse", "Add Angular Impulse", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"GetBodyAngularVelocity", "Get Body Angular Velocity", "Physics", {pin("body", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"SetBodyAngularVelocity", "Set Body Angular Velocity", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
-    //    Material and mass: DYNAMIC BODIES ONLY for mass -- a static or kinematic body has infinite
-    //    mass by definition, so SetBodyMass on one simply fails (success=false) rather than changing
-    //    what the body is.
+    //    Material and mass: mass applies to DYNAMIC BODIES ONLY -- static/kinematic have infinite
+    //    mass by definition, so SetBodyMass on one fails (success=false) rather than changing the body.
     t.push_back({"SetBodyFriction", "Set Body Friction", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("friction", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetBodyRestitution", "Set Body Restitution", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("restitution", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetBodyGravityFactor", "Set Body Gravity Factor", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("factor", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetBodyMass", "Set Body Mass", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("mass", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"GetBodyMass", "Get Body Mass", "Physics", {pin("body", "int", false), pin("mass", "float", true), pin("success", "bool", true)}});
-    //    Motion type and sleeping. motionType rides an INT PIN: 0 Static, 1 Kinematic, 2 Dynamic --
-    //    Aver.Physics.MotionType's own numbering. GetBodyMotionType answers -1 for a dead handle,
-    //    which is why success exists instead of trusting the int alone (0 is a real answer, Static).
+    //    Motion type and sleeping: motionType is an INT PIN, Aver.Physics.MotionType's numbering
+    //    (0 Static, 1 Kinematic, 2 Dynamic). GetBodyMotionType returns -1 for a dead handle, hence success.
     t.push_back({"SetBodyMotionType", "Set Body Motion Type", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("motionType", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"GetBodyMotionType", "Get Body Motion Type", "Physics", {pin("body", "int", false), pin("motionType", "int", true), pin("success", "bool", true)}});
     t.push_back({"ActivateBody", "Activate Body", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
@@ -335,56 +262,43 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    ((a,b) also sets (b,a)), the same matrix a level teardown resets to all-colliding.
     t.push_back({"SetLayerCollision", "Set Layer Collision", "Physics", {pin("exec", "exec", false), pin("layerA", "int", false), pin("layerB", "int", false), pin("collide", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
 
-    // -- JOINTS. A constraint between two body handles, created ONCE at a WORLD-SPACE point/axis --
-    //    move the bodies to where they belong FIRST, then join them there, exactly like Add*Box above
-    //    places a shape before anything can touch it. BODY B == 0 (what an unwired int pin already
-    //    reads as) JOINS BODY A TO THE WORLD instead of to nothing -- a door hinged to a wall that is
-    //    not itself simulated, not a joint with a missing argument. A JOINT HANDLE RIDES AN INT PIN
-    //    LIKE A BODY HANDLE, BUT THE TWO ARE NOT INTERCHANGEABLE: Jolt's own handle ranges overlap, so
-    //    GetBodyPosition on a joint handle (or JointRemove on a body handle) is a silent wrong answer
-    //    that only the graph author can avoid by keeping the two straight -- there is no type system
-    //    here to catch it. Angles are RADIANS, distances/points CENTIMETRES, matching every other
-    //    physics node in this file. Hinge and Slider each take a SECOND axis pin trio (nx/ny/nz) that
-    //    MUST be perpendicular to the first -- it is the zero-angle/zero-offset reference the limits
-    //    are measured from, not a second direction of travel.
+    // -- JOINTS: a constraint between two body handles, created ONCE at a WORLD-SPACE point/axis --
+    //    move the bodies into place FIRST, then join them there (like Add*Box). BODY B == 0 (an
+    //    unwired int pin's default) JOINS BODY A TO THE WORLD instead of to nothing -- like a door
+    //    hinged to a wall that isn't itself simulated, not a joint with a missing argument. A JOINT
+    //    HANDLE RIDES AN INT PIN LIKE A BODY HANDLE BUT THE TWO ARE NOT INTERCHANGEABLE (Jolt's
+    //    ranges overlap, no type system catches it). Angles RADIANS, distances/points CENTIMETRES.
+    //    Hinge/Slider's second axis trio (nx/ny/nz) MUST be perpendicular to the first: the zero
+    //    reference, not a travel direction.
     t.push_back({"JointFixed", "Joint: Fixed", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("axX", "float", false), pin("axY", "float", false), pin("axZ", "float", false), pin("ayX", "float", false), pin("ayY", "float", false), pin("ayZ", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
     t.push_back({"JointPoint", "Joint: Point", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
     t.push_back({"JointDistance", "Joint: Distance", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("paX", "float", false), pin("paY", "float", false), pin("paZ", "float", false), pin("pbX", "float", false), pin("pbY", "float", false), pin("pbZ", "float", false), pin("minDist", "float", false), pin("maxDist", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
     t.push_back({"JointHinge", "Joint: Hinge", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("nx", "float", false), pin("ny", "float", false), pin("nz", "float", false), pin("minAngleRad", "float", false), pin("maxAngleRad", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
     t.push_back({"JointSlider", "Joint: Slider", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("sx", "float", false), pin("sy", "float", false), pin("sz", "float", false), pin("nx", "float", false), pin("ny", "float", false), pin("nz", "float", false), pin("minCm", "float", false), pin("maxCm", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
-    //    Motor/limit/enable/remove/value all key off the JOINT handle, never a body. state on
-    //    JointSetMotor is Aver.Physics.MotorState: 0 Off, 1 Velocity (target is radians or
-    //    centimetres PER SECOND), 2 Position (target is the absolute radians/centimetres to hold).
-    //    Always axis 0 -- every named joint above has at most one motorised axis; the six-DOF
-    //    per-axis motor is not exposed to the graph.
+    //    Motor/limit/enable/remove/value key off the JOINT handle, never a body. state on
+    //    JointSetMotor is Aver.Physics.MotorState (0 Off, 1 Velocity [target rad or cm/s], 2 Position
+    //    [target absolute rad/cm]). Always axis 0 -- every named joint above has at most one
+    //    motorised axis; the six-DOF per-axis motor isn't exposed here.
     t.push_back({"JointSetMotor", "Joint Set Motor", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("state", "int", false), pin("target", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"JointSetEnabled", "Joint Set Enabled", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("enabled", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"JointRemove", "Joint Remove", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"GetJointValue", "Get Joint Value", "Physics", {pin("joint", "int", false), pin("value", "float", true), pin("success", "bool", true)}});
 
-    // -- FUNCTION. The three node types a user-defined function is made of. They are in this catalog
-    //    for their DISPLAY NAME and their HEADER COLOUR, and deliberately NOT for dropping: the
-    //    palette skips the whole "Function" category (see GraphEditor.cpp's Add Node popup), because
-    //    none of the three is a node an author places on its own.
-    //
-    //    A second FuncEntry breaks the function (Validate: "a function begins in exactly one place"),
-    //    a FuncReturn with no FUNCOUT to fill has nothing to do, and a CallFunc has no pin shape at
-    //    all until it knows its callee. All three are created by the Functions panel instead, which
-    //    knows which function they belong to and can give them the right pins immediately.
-    //
-    //    THEIR PINS HERE ARE EMPTY, and that is correct rather than lazy: every one of the three
-    //    takes its pins from a FUNC declaration elsewhere in the file, so a fixed list here would be
-    //    a second answer to a question that already has one. GraphEditor::resyncFunctionNodePins is
-    //    the single place that derives them, and it agrees pin-for-pin with the C# side's own
-    //    AddDefaultPins.
+    // -- FUNCTION: the three node types a user-defined function is made of, present here only for
+    //    DISPLAY NAME and HEADER COLOUR -- the palette skips "Function" entirely since none of the
+    //    three is placed by an author directly (a second FuncEntry breaks the function -- Validate:
+    //    "a function begins in exactly one place"; a bare FuncReturn has no FUNCOUT to fill, a
+    //    CallFunc has no pin shape at all until it knows its callee). The Functions panel creates
+    //    them with the right pins. PINS HERE ARE EMPTY: each takes its real pins from a FUNC
+    //    declaration, derived by the single place that does so, GraphEditor::resyncFunctionNodePins,
+    //    which agrees pin-for-pin with AddDefaultPins.
     t.push_back({"FuncEntry", "Function Entry", "Function", {}});
     t.push_back({"FuncReturn", "Return", "Function", {}});
     t.push_back({"CallFunc", "Call Function", "Function", {}});
 
-    // -- TAGS AND VISIBILITY. Entity's own tag bitmask, which the C# side has had all along and the
-    //    graph vocabulary could not reach. A tag here is an int bit pattern, not a string, so these
-    //    needed none of the compile-time-attribute machinery class=/name=/var= exist for -- and a
-    //    graph can COMPUTE a mask, which a string attribute could never do.
+    // -- TAGS AND VISIBILITY: Entity's own tag bitmask, unreachable from a graph until now. A tag is
+    //    an int bit pattern, not a string, so it needs none of class=/name=/var='s attribute
+    //    machinery -- and a graph can COMPUTE a mask, which a string attribute never could.
     t.push_back({"SetVisible", "Set Visible", "Scene", {pin("exec", "exec", false), pin("entity", "int", false),
         pin("visible", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"AddTag", "Add Tag", "Scene", {pin("exec", "exec", false), pin("entity", "int", false),
@@ -395,34 +309,20 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("has", "bool", true)}});
     t.push_back({"GetTags", "Get Tags", "Scene", {pin("entity", "int", false), pin("mask", "int", true)}});
 
-    // -- SWITCH. Blueprint's Switch on Int: route the exec chain to ONE of several outputs by an
-    //    integer, instead of nesting Branches. Until this existed a three-way choice cost two Branch
-    //    nodes and a comparison each, and the graph said "is it 0, else is it 1, else" rather than
-    //    what it meant.
-    //
-    //    FOUR CASES PLUS A DEFAULT, a fixed set rather than a pin count an author grows. Blueprint
-    //    lets you add pins; this format derives a node's pins from its TYPE (AddDefaultPins), so a
-    //    variable count would need per-node PIN records written into the file and kept in step with
-    //    the wiring by hand. Four covers the cases a state machine or a weapon-slot selector actually
-    //    has, and a fifth is a second Switch off `default` -- which is exactly what the nesting looks
-    //    like when it IS warranted.
-    //
-    //    `taken` reports which output fired, and -1 for the default, so a graph can observe its own
-    //    routing without a parallel chain of comparisons. Same reason Branch has `tookTrue`.
+    // -- SWITCH: Blueprint's Switch on Int -- routes the exec chain to ONE of several outputs by an
+    //    integer instead of nesting Branches (a three-way choice used to cost two Branch+compare
+    //    pairs). FOUR CASES PLUS A DEFAULT, fixed rather than grown: pins derive from a node's TYPE
+    //    (AddDefaultPins), so a variable count would need hand-kept PIN records; a fifth case is a
+    //    second Switch off `default`. `taken` reports which output fired (-1 for default), the same
+    //    reason Branch has `tookTrue`.
     t.push_back({"SwitchInt", "Switch on Int", "Flow", {pin("exec", "exec", false), pin("selector", "int", false), pin("case0", "exec", true), pin("case1", "exec", true), pin("case2", "exec", true), pin("case3", "exec", true), pin("default", "exec", true), pin("taken", "int", true)}});
 
-    // -- REROUTE. A node that returns exactly what it was given, and exists only so a WIRE can be
-    //    bent around something. Blueprint draws these as a bare dot; here they are ordinary small
-    //    nodes, because the pin-drawing code already knows how to put one pin on each side and a
-    //    special case would be a second thing to maintain for a cosmetic gain.
-    //
-    //    ONE PER TYPE, because Validate refuses a link whose pins differ in type and there are no
-    //    generics here. That is four nodes instead of one, and the alternative -- a wildcard pin
-    //    type -- would weaken the check that catches every genuinely wrong wiring.
-    //
-    //    They compile to NOTHING. A data reroute emits its input and no instruction of its own; the
-    //    exec one falls through to the fan-out every exec node ends with. Bending a wire costs a
-    //    graph author nothing at run time, which is the only way a purely visual node is honest.
+    // -- REROUTE: returns exactly what it was given, existing only to bend a WIRE. Ordinary small
+    //    nodes rather than Blueprint's bare dot, since the pin-drawing code already handles one pin
+    //    per side. ONE PER TYPE (four nodes, not one): Validate refuses a link whose pins differ in
+    //    type and there are no generics here; a wildcard type would weaken that check. Compile to
+    //    NOTHING: a data reroute emits its input with no instruction of its own; the exec one falls
+    //    through to the usual fan-out.
     t.push_back({"RerouteFloat", "Reroute (Float)", "Flow", {pin("a", "float", false), pin("result", "float", true)}});
     t.push_back({"RerouteInt", "Reroute (Int)", "Flow", {pin("a", "int", false), pin("result", "int", true)}});
     t.push_back({"RerouteBool", "Reroute (Bool)", "Flow", {pin("a", "bool", false), pin("result", "bool", true)}});
@@ -431,27 +331,22 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("exec", "exec", false), pin("value", "int", false), pin("then", "exec", true)}});
     t.push_back({"Print", "Print", "Debug", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
-    // -- PRINT STRING: the node that answers "did control flow reach here, and in what order".
-    //    Print and PrintInt cannot: both need a VALUE wired to say anything at all, so proving a
-    //    branch was taken meant inventing a number to print through it. There is no string PIN type
-    //    (PinType is Float/Int/Bool/Exec), so the message is a NODE-line ATTRIBUTE -- the same "the
-    //    value IS the data" treatment sound=/mesh=/clip= already get, and for the same reason.
-    //
-    //    It also fixes the labelling complaint the other two carry: Print labels its line with the
-    //    node's auto-generated id, so a log reads "print3 = 1" and the author works out which node
-    //    that was. Here the author writes the label.
+    // -- PRINT STRING: answers "did control flow reach here, and in what order" -- Print/PrintInt
+    //    can't, since both need a VALUE wired to say anything. No string PIN type exists
+    //    (Float/Int/Bool/Exec only), so the message is a NODE-line ATTRIBUTE -- the same "the value
+    //    IS the data" treatment sound=/mesh=/clip= get. Also fixes Print's labelling: it logs
+    //    "print3 = 1" (the auto-generated id); here the author writes the label directly.
     t.push_back({"PrintString", "Print String", "Debug", {
         pin("exec", "exec", false), pin("then", "exec", true)}, {attr("text", "Text")}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Subtract", "Subtract", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Divide",   "Divide",   "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
-    // -- trig: a in; result out (both concurrent-workflow additions, one line each) --
+    // -- trig (concurrent-workflow additions) --
     t.push_back({"Sin", "Sin", "Math", {pin("a", "float", false), pin("result", "float", true)}});
     t.push_back({"Cos", "Cos", "Math", {pin("a", "float", false), pin("result", "float", true)}});
-    // -- math: the standard library a graph could not previously express ------------
-    // Every one of these is a PURE VALUE node: no exec pins, so it composes into either
-    // compiler. The names are the .ocgraph node types verbatim -- the palette writes what
-    // the parser reads, and a mismatch here produces a node that saves and never loads.
+    // -- math: the standard library, previously unexpressable in a graph --------------
+    // Every one is a PURE VALUE node (no exec pins), composing into either compiler. Names are the
+    // .ocgraph node types verbatim -- a mismatch here produces a node that saves and never loads.
     t.push_back({"Min", "Min", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Max", "Max", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Mod", "Modulo", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
@@ -465,17 +360,15 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"Saturate", "Saturate (0..1)", "Math", {pin("a", "float", false), pin("result", "float", true)}});
     t.push_back({"Clamp", "Clamp", "Math", {pin("a", "float", false), pin("min", "float", false), pin("max", "float", false), pin("result", "float", true)}});
     t.push_back({"Lerp", "Lerp", "Math", {pin("a", "float", false), pin("b", "float", false), pin("t", "float", false), pin("result", "float", true)}});
-    // -- gated flow control: the nodes that REMEMBER between activations -----------
-    // Their state lives in the same per-instance store a VAR uses, so two entities sharing
-    // one graph file gate independently. reset/open/close are BOOL inputs rather than exec
-    // pins because an activation does not carry which pin it arrived on -- see the parser.
+    // -- gated flow control: nodes that REMEMBER between activations, in the same per-instance store
+    //    a VAR uses (two entities sharing one graph file gate independently). reset/open/close are
+    //    BOOL inputs, not exec pins, because an activation carries no record of which pin it arrived on.
     t.push_back({"DoOnce", "Do Once", "Flow", {pin("exec", "exec", false), pin("reset", "bool", false), pin("then", "exec", true)}});
     t.push_back({"Gate", "Gate", "Flow", {pin("exec", "exec", false), pin("open", "bool", false), pin("close", "bool", false), pin("then", "exec", true)}});
     t.push_back({"FlipFlop", "Flip Flop", "Flow", {pin("exec", "exec", false), pin("a", "exec", true), pin("b", "exec", true), pin("isA", "bool", true)}});
     // -- logic --
-    // BOOLEAN OPERATORS, which this vocabulary did not have at all. Without them "A and B"
-    // is a Branch whose true-exec runs a second Branch, OR is not expressible without
-    // restructuring everything downstream, and NOT requires swapping two exec wires.
+    // BOOLEAN OPERATORS, previously absent entirely: "A and B" meant nesting Branches, OR meant
+    // restructuring everything downstream, and NOT meant swapping two exec wires.
     t.push_back({"And", "AND", "Logic", {pin("a", "bool", false), pin("b", "bool", false), pin("result", "bool", true)}});
     t.push_back({"Or", "OR", "Logic", {pin("a", "bool", false), pin("b", "bool", false), pin("result", "bool", true)}});
     t.push_back({"Xor", "XOR", "Logic", {pin("a", "bool", false), pin("b", "bool", false), pin("result", "bool", true)}});
@@ -495,12 +388,10 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         {attr("field", "Field")}});
     t.push_back({"SetField", "Set Field", "Scene", {pin("entity", "int", false), pin("value", "float", false), pin("success", "bool", true)},
         {attr("field", "Field")}});
-    // -- GetField/SetField's Vec3 siblings: a Vec3-kind scene field (CLocal.position, CLight.colour,
-    //    ...) as three ordinary float pins rather than one new pin TYPE -- see
-    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's FieldKindVec3/RequireVec3Field comments for why
-    //    that shape was chosen over adding a "vec3" pin type. Pin sets copied field for field from
-    //    OcGraphParser.AddDefaultPins's "getfieldvec3"/"setfieldvec3" cases, same as GetField/SetField
-    //    above. No exec pins on either by default (mirrors GetField/SetField exactly).
+    // -- GetField/SetField's Vec3 siblings: a Vec3-kind field (CLocal.position, CLight.colour, ...)
+    //    as three float pins rather than a new pin TYPE -- see GraphCompiler.cs's
+    //    FieldKindVec3/RequireVec3Field. Pins copied field-for-field from AddDefaultPins's
+    //    "getfieldvec3"/"setfieldvec3" cases; no exec pins by default, same as GetField/SetField.
     t.push_back({"GetFieldVec3", "Get Field (Vec3)", "Scene", {
         pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)},
         {attr("field", "Field")}});
@@ -508,24 +399,21 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
         pin("success", "bool", true)},
         {attr("field", "Field")}});
-    // -- GetForward: where a Character is LOOKING, plus where its eyes are. Filed under Scene beside the
-    //    field readers rather than under Input, because it reads accumulated STATE (the character's own
-    //    yaw/pitch after its clamp) and not this frame's device movement the way MouseDelta does --
-    //    reading it twice in a frame gives the same answer twice, which is the property that decides
-    //    which group a node belongs in here. Six outputs and no exec pins, copied from
-    //    OcGraphParser.AddDefaultPins's "getforward" case; the eye position rides along because a
-    //    direction with no origin cannot build a ray (see GraphInterop.LookDirectionForGraph).
-    // -- Jump: one call into AverCharacter.Jump, which declines in mid-air by itself, so a graph
-    //    wiring this straight to a key gets single jumps and no flight without testing anything.
-    //    `jumped` reports whether it actually happened, which "the key was pressed" is not.
+    // -- GetForward: where a Character is LOOKING, plus its eye position. Filed under Scene, not
+    //    Input, because it reads accumulated STATE (yaw/pitch after clamp), not this frame's device
+    //    movement -- reading it twice gives the same answer twice, the property that decides the
+    //    grouping. Six outputs, no exec pins (AddDefaultPins' "getforward"); eye position rides along
+    //    since a direction with no origin can't build a ray (GraphInterop.LookDirectionForGraph).
+    // -- Jump: one call into AverCharacter.Jump, which declines mid-air by itself -- wiring straight
+    //    to a key gets single jumps, no flight, with no testing needed. `jumped` reports whether it
+    //    actually happened, which "the key was pressed" is not.
     t.push_back({"Jump", "Jump", "Actor", {
         pin("exec", "exec", false), pin("entity", "int", false),
         pin("then", "exec", true), pin("jumped", "bool", true)},
         {}});
-    // -- GetViewEntity: the CAMERA node a character looks through. A first-person viewmodel parents to
-    //    this, not to the character -- parent a gun to the pawn and it stays put while the camera
-    //    pitches around it. Filed under Scene beside GetForward for the same reason: it reads state,
-    //    not this frame's input.
+    // -- GetViewEntity: the CAMERA node a character looks through. A first-person viewmodel parents
+    //    to this, not the character -- parenting a gun to the pawn leaves it behind as the camera
+    //    pitches. Filed under Scene beside GetForward: it reads state, not this frame's input.
     t.push_back({"GetViewEntity", "Get View Entity", "Scene", {
         pin("entity", "int", false), pin("view", "int", true), pin("success", "bool", true)},
         {}});
@@ -535,67 +423,47 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("eyeX", "float", true), pin("eyeY", "float", true), pin("eyeZ", "float", true),
         pin("success", "bool", true)},
         {}});
-    // -- MouseDelta / MoveAxis: continuous input -- look and move, the two things a first-person
-    //    controller is made of, neither of which InputKey's digital key state can express. Both get
-    //    exec pins by default (unlike GetField/SetField/GetFieldVec3/SetFieldVec3 above, mirroring
-    //    Spawn/Raycast instead) -- see scripting/csharp/Aver.Graph/GraphCompiler.cs's
-    //    IsExecCapableMouseDeltaType/IsExecCapableMoveAxisType comments for why: one frame's input
-    //    must cost exactly one native call regardless of how many output pins a graph reads, and that
-    //    guarantee needs the same exec-visit-cached shape Raycast already established, even though
-    //    neither read is expensive the way a physics query is. Pin sets copied field for field from
-    //    OcGraphParser.AddDefaultPins's "mousedelta"/"moveaxis" cases. MoveAxis has no "z" pin --
-    //    Input.MoveAxis's own Z is hardcoded 0 always (Aver.Framework/Input.cs).
-    //
-    //    THE LOW-LEVEL PATH, now that InputAction exists below: these read the device directly, with
-    //    no name and no rebinding in between -- right for a raw camera look, wrong for anything a
-    //    project wants a player (or a rebinding UI) to reconfigure, where InputAction is the one to
-    //    reach for instead. Unchanged by InputAction's addition.
+    // -- MouseDelta / MoveAxis: continuous input -- look and move, neither expressible through
+    //    InputKey's digital state. Exec pins by default (mirroring Spawn/Raycast): one frame's input
+    //    must cost exactly one native call regardless of pin count (GraphCompiler.cs's
+    //    IsExecCapableMouseDeltaType/MoveAxisType) -- not because either read is itself expensive,
+    //    only for that one-call-per-frame guarantee. MoveAxis has no "z": Input.MoveAxis's Z is
+    //    hardcoded 0 always (Aver.Framework/Input.cs). LOW-LEVEL PATH: reads the device directly, no
+    //    name/rebinding -- InputAction (below) is the one to use for anything reconfigurable.
     t.push_back({"MouseDelta", "Mouse Delta", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true),
         pin("deltaX", "float", true), pin("deltaY", "float", true), pin("wheel", "float", true)}});
     t.push_back({"MoveAxis", "Move Axis", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true),
         pin("forward", "float", true), pin("right", "float", true)}});
-    // -- InputKey: digital key state, the discrete half of input beside MouseDelta/MoveAxis above.
-    //    NO EXEC PINS, and that is the difference from its neighbours rather than an oversight:
-    //    reading one polled key is idempotent and returns the same answer however often it is asked
-    //    within a frame, so there is nothing to cache and no visit to anchor the read to. Its two
-    //    louder neighbours need the exec shape only because they fill several outputs from one call.
-    //    `key` is a plain int -- this format has no symbolic enum lookup, so an author writes the
-    //    numeric value from Aver.Framework's Key enum. --
+    // -- InputKey: digital key state, the discrete half of input beside MouseDelta/MoveAxis. NO EXEC
+    //    PINS, deliberately: a polled key read is idempotent within a frame, so there's nothing to
+    //    cache or anchor a visit to (unlike its neighbours, which fill several outputs per call).
+    //    `key` is a plain int -- no symbolic enum lookup, so an author writes Aver.Framework's Key
+    //    enum value directly.
     t.push_back({"InputKey", "Input Key", "Input", {
         pin("key", "int", false), pin("down", "bool", true)}});
-    // -- InputKeyPressed / InputKeyReleased: the EDGE, where InputKey above gives the STATE.
-    //    `down` is true every frame a key is held, which is the wrong answer for jumping, firing
-    //    a semi-auto, or toggling anything -- all of which fire once per press. Building that from
-    //    InputKey needs a DoOnce and a variable per key; the framework ABI has answered it
-    //    directly all along (aver_fw_input_key_pressed / _released). The output pin is named
-    //    `triggered` rather than `down` because it is an EVENT and not a state. --
+    // -- InputKeyPressed / InputKeyReleased: the EDGE, where InputKey gives the STATE. `down` stays
+    //    true every held frame, wrong for jump/fire-semi-auto/toggle, which need once-per-press;
+    //    building that from InputKey needs a DoOnce+variable per key, but the ABI already answers it
+    //    directly (aver_fw_input_key_pressed/_released). `triggered`, not `down`: it's an EVENT.
     t.push_back({"InputKeyPressed", "Input Key Pressed", "Input", {
         pin("key", "int", false), pin("triggered", "bool", true)}});
     t.push_back({"InputKeyReleased", "Input Key Released", "Input", {
         pin("key", "int", false), pin("triggered", "bool", true)}});
-    // -- InputAction / InputActionPressed / InputActionReleased: the PREFERRED input path over
-    //    InputKey/MouseDelta/MoveAxis above -- one named, rebindable ACTION (aver_fw_action_register/
-    //    bind/value2/held/pressed/released, framework_abi.h's Named Actions section, minor 5) instead
-    //    of a literal key code or a raw device axis. `action` is a HANDLE -- the int
-    //    aver_fw_action_register/_find returned -- NOT a name: this format has no string pin (PinType
-    //    is Float/Int/Bool/Exec) and the name-by-attribute mechanism ClassName/EventName/CurveName use
-    //    lives on Node in Graph.cs, outside this slice's owned files. See
-    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's EmitInputAction comment for the full accounting
-    //    -- including why that makes the handle less stable to author than InputKey's own "key" int --
-    //    and what a future name pin would need.
+    // -- InputAction / InputActionPressed / InputActionReleased: the PREFERRED path over
+    //    InputKey/MouseDelta/MoveAxis -- one named, rebindable ACTION (aver_fw_action_register/
+    //    bind/value2/held/pressed/released, framework_abi.h's Named Actions section, minor 5)
+    //    instead of a literal key or raw axis. `action` is a HANDLE (aver_fw_action_register/_find's
+    //    int), NOT a name: no string PinType exists, and the name-by-attribute mechanism
+    //    ClassName/EventName/CurveName use lives on Node in Graph.cs, outside this slice's files
+    //    (see GraphCompiler.cs's EmitInputAction, incl. why less stable to author than InputKey's
+    //    "key"). Mirrors InputKey's shape (NO exec pins, pure array-scan reads) but widens `down`
+    //    into float2 + held.
     //
-    //    InputAction mirrors InputKey's shape (NO exec pins -- both native calls behind it,
-    //    aver_fw_action_value2/_held, are pure array-scan reads with no side effect, cheap enough to
-    //    redundantly pull the same way GetForward's six-output read already is) but widens InputKey's
-    //    single `down` bool into the float2 + held an action (digital, 1D or 2D axis alike) can carry.
-    //    InputActionPressed/Released are InputKeyPressed/Released's exact twins, one level up. --
-    // action= (OWNER DECISION, 2026-09-17): when present, the handle comes from
-    // GraphInterop.ActionHandleForGraph(name) instead of the `action` pin below, which is then
-    // ignored -- see GraphCompiler.cs's EmitInputAction for the compiled difference. OPTIONAL, unlike
-    // RebindAction/GetActionKey's own action= further down: a graph authored before this existed still
-    // wires the pin by hand and keeps compiling unchanged.
+    // action= (OWNER DECISION, 2026-09-17): when present, GraphInterop.ActionHandleForGraph(name)
+    // supplies the handle instead of the `action` pin, which is then ignored. OPTIONAL, unlike
+    // RebindAction/GetActionKey's action= below: a pre-existing graph still wires the pin by hand.
     t.push_back({"InputAction", "Input Action", "Input", {
         pin("action", "int", false),
         pin("x", "float", true), pin("y", "float", true), pin("held", "bool", true)}, {attr("action", "Action")}});
@@ -604,49 +472,39 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"InputActionReleased", "Input Action Released", "Input", {
         pin("action", "int", false), pin("triggered", "bool", true)}, {attr("action", "Action")}});
     // -- REBINDABLE INPUT: SaveInputBindings/LoadInputBindings/ResetInputBindings/RebindAction/
-    //    GetActionKey/GetPressedKey -- the Unreal-Enhanced-Input-style vocabulary a project with no C#
-    //    at all can still ship a rebinding menu from (OWNER DECISION, 2026-09-17; see Aver.Framework
-    //    EnhancedInput.SaveAllBindings/LoadAllBindings/ResetAllBindings/RebindAction/TryGetBindingKey
-    //    and GraphInterop's *ForGraph wrappers around them). Every one of these reads or writes the
-    //    SAME pushed-context bindings InputAction/InputActionPressed/InputActionReleased above already
-    //    read from -- there is no separate "graph-owned" binding table, so a rebind made here is
-    //    visible to those three on the very next frame, scheme-loaded context included (InputScheme.cs
-    //    pushes the loaded .ocinput through the identical EnhancedInput.AddContext path).
+    //    GetActionKey/GetPressedKey -- Unreal-Enhanced-Input-style rebinding menu with no C# at all
+    //    (OWNER DECISION, 2026-09-17; Aver.Framework EnhancedInput.* via GraphInterop's *ForGraph
+    //    wrappers). All six read/write the SAME pushed-context bindings InputAction/Pressed/Released
+    //    already use -- there is no separate "graph-owned" binding table -- so a rebind is visible
+    //    to those three next frame, scheme-loaded context included (InputScheme.cs pushes a loaded
+    //    .ocinput through the same EnhancedInput.AddContext path).
     //
-    //    `action=` NAMES THE ACTION, not a handle -- unlike InputAction's own `action` PIN above, which
-    //    predates a name-by-attribute mechanism existing at all (see that node's own comment). These
-    //    six are all new, so there is no legacy int-pin shape to preserve, and a rebinding UI is
-    //    exactly the case where an author wants to type "Jump" once rather than look up a handle.
-    //
-    //    SAVE/LOAD/RESET ARE EXEC-ONLY, matching SaveGame/LoadGame's own shape above -- they act on the
-    //    whole pushed-context stack, not one action, so there is nothing for a data pin to name.
+    //    `action=` NAMES THE ACTION (not a handle, unlike InputAction's pin, predating name-by-
+    //    attribute) -- all six are new. SAVE/LOAD/RESET ARE EXEC-ONLY (matching SaveGame/LoadGame):
+    //    they act on the whole stack, not one action, so there's nothing for a data pin to name.
     t.push_back({"SaveInputBindings", "Save Input Bindings", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"LoadInputBindings", "Load Input Bindings", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"ResetInputBindings", "Reset Input Bindings", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
-    // RebindAction's action= is REQUIRED, not optional like InputAction's -- a rebind naming no action
-    // is not a lesser version of this node, it is not this node, so GraphCompiler.cs's EmitRebindAction
-    // refuses to compile one missing it, by name. Declared here exactly like every optional attribute
-    // above regardless: this table only says WHICH key=value rows the details panel shows, not which
-    // are required -- that distinction lives in the compiler's own error, not a second flag here.
+    // RebindAction's action= is REQUIRED, not optional like InputAction's: EmitRebindAction
+    // (GraphCompiler.cs) refuses to compile one missing it. Declared here like any attribute
+    // regardless -- this table only says WHICH rows the details panel shows, not which are required;
+    // that distinction lives in the compiler's error, not a second flag here.
     t.push_back({"RebindAction", "Rebind Action", "Input", {
         pin("exec", "exec", false), pin("slot", "int", false), pin("key", "int", false),
         pin("then", "exec", true), pin("success", "bool", true)}, {attr("action", "Action")}});
-    // GetActionKey: pure data, like InputAction above -- reading the current binding has no side effect
-    // and costs nothing to redo on every pull. `key` is -1 when the slot names no binding (out of
-    // range, or the action/slot pair was never bound at all).
+    // GetActionKey: pure data, like InputAction -- reading a binding has no side effect and costs
+    // nothing to redo per pull. `key` is -1 when the slot names no binding (out of range, or unbound).
     t.push_back({"GetActionKey", "Get Action Key", "Input", {
         pin("slot", "int", false), pin("key", "int", true), pin("bound", "bool", true)}, {attr("action", "Action")}});
     // GetPressedKey: which key was pressed THIS FRAME, for a "press any key to rebind" capture step --
-    // the one thing no other node here can answer, since every InputKey* node above takes a key rather
-    // than finding one. -1 when nothing was pressed this frame.
+    // the one thing no InputKey* node can answer, since those take a key rather than finding one. -1 when none.
     t.push_back({"GetPressedKey", "Get Pressed Key", "Input", {
         pin("key", "int", true), pin("pressed", "bool", true)}});
     // -- Select: pick one of two values by a bool. Pure data, no exec pins. In the PULL compiler BOTH
-    //    arms are computed regardless of cond -- see GraphCompiler.EmitSelect, which explains why
-    //    that is correct and not a missing short-circuit. --
+    //    arms are computed regardless of cond (GraphCompiler.EmitSelect) -- not a missing short-circuit.
     t.push_back({"Select", "Select", "Logic", {
         pin("cond", "bool", false), pin("ifTrue", "float", false), pin("ifFalse", "float", false),
         pin("result", "float", true)}});
@@ -661,124 +519,94 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("then", "exec", true),
         pin("hit", "bool", true), pin("entity", "int", true),
         pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
-    // WHY THESE THREE ARRIVE LATE. Select, InputKey and Raycast were added to OcGraphParser and to
-    // both compilers in 1425b67 and never to this table, so for two slices they were fully supported
-    // by the runtime and completely absent from the Add-Node palette -- authorable only by hand-
-    // editing .ocgraph text. Nothing caught it because this table is a DELIBERATE separate copy of
-    // the vocabulary (see the header comment) with no build-time link to the C# side that would
-    // notice the omission. Adding MouseDelta/MoveAxis is what made it visible: the palette would
-    // have shown an Input category holding the mouse but not the keyboard.
+    // WHY THESE THREE ARRIVE LATE: Select, InputKey and Raycast were added to OcGraphParser and both
+    // compilers (1425b67) but never to this table -- runtime-supported yet absent from the palette
+    // for two slices (authorable only by hand-editing .ocgraph text), since this is a DELIBERATE
+    // separate copy with no build-time link to catch the omission (see header comment). Adding
+    // MouseDelta/MoveAxis made the gap visible: Input would show the mouse but not the keyboard.
 
-    // -- graph parameter read, another concurrent-workflow addition; type defaults to float, the
-    //    common case, and can be edited per-instance like any other pin since layout/pin-typing
-    //    always prefers the node's own recorded pins over this table (see the header comment).
-    //    param= names which declared PARAM this node reads. --
+    // -- graph parameter read; type defaults to float (the common case) and is editable per-instance
+    //    since pin-typing always prefers a node's own recorded pins over this table. param= names
+    //    which declared PARAM this node reads.
     t.push_back({"Param", "Param", "Param", {pin("value", "float", true)}, {attr("param", "Param Name")}});
-    // -- SELF: THE NODE WITHOUT WHICH A CANVAS-AUTHORED GRAPH COULD NOT DRIVE ANYTHING.
-    //    Nearly every Scene, Character, Physics, Animation and Audio node takes an `entity` pin, and
-    //    the only way to reach the graph's own handle was `PARAM entity int` plus a Param node --
-    //    a top-level record the editor cannot write, because OcGraphData does not model parameters
-    //    at all (modules/formats/include/aver/formats/OcGraph.hpp). So the Param row above was
-    //    unusable from the canvas: it can name a parameter but nothing here can declare one. That is
-    //    the reason every gameplay graph in this repository is hand-written text, alongside the
-    //    Const rows' missing `value` attribute.
+    // -- SELF: without which a canvas-authored graph couldn't drive anything. Nearly every Scene/
+    //    Character/Physics/Animation/Audio node takes an `entity` pin, but reaching it needed
+    //    `PARAM entity int` + a Param node -- a top-level record the editor can't write (OcGraphData
+    //    has no parameter model), so Param alone was unusable from the canvas -- why every gameplay
+    //    graph in this repo is hand-written text, alongside the Const rows' missing `value` attribute.
     //
-    //    NO ATTRIBUTES, deliberately: there is nothing to configure. Graph.ResolveSelfNodes rewrites
-    //    it into `Param entity` at parse time and declares the PARAM if the file did not, so by the
-    //    time the compiler, GraphHost or the C++ writer sees the graph there is no Self node left --
-    //    which is why this row needs no counterpart anywhere in GraphCompiler.cs.
-    //    THE OUTPUT PIN IS CALLED `value`, NOT `entity`, and that is not cosmetic. The desugar
-    //    turns this node into a Param node and nothing else -- EmitParam stores the loaded argument
-    //    into the local for the pin named "value" and no other, so a pin called "entity" would have
-    //    left the value on the stack and stored nothing. Matching Param's pin name is what keeps
-    //    the rewrite a pure type change, with no pin renaming and no LINK rewriting to go wrong.
+    //    NO ATTRIBUTES: Graph.ResolveSelfNodes rewrites it into `Param entity` at parse time
+    //    (declaring the PARAM if missing), so no Self node survives to the compiler, GraphHost or
+    //    C++ writer -- hence no counterpart in GraphCompiler.cs.
+    //
+    //    OUTPUT PIN IS `value`, NOT `entity` -- not cosmetic: EmitParam stores into the local for
+    //    pin "value" specifically (a pin named "entity" would leave the value on the stack, storing
+    //    nothing), keeping the rewrite a pure type change with no pin/LINK rewriting.
     t.push_back({"Self", "Self", "Param", {pin("value", "int", true)}});
 
-    // -- flow / exec: control flow, not data flow. "exec" is a PIN TYPE, exactly like "float"/"int"/
-    //    "bool" above -- see modules/formats/include/aver/formats/OcGraph.hpp's comment on
-    //    OcGraphLink for why that alone is the whole format change this needed. Pin sets below match
-    //    scripting/csharp/Aver.Graph/OcGraphParser.cs's AddDefaultPins EXACTLY -- see this file's own
-    //    header comment for why that parity is load-bearing, not cosmetic.
+    // -- flow / exec: control flow, not data flow. "exec" is a PIN TYPE like "float"/"int"/"bool"
+    //    (OcGraph.hpp's OcGraphLink comment) -- the whole format change this needed. Pin sets below
+    //    match OcGraphParser.cs's AddDefaultPins EXACTLY (parity is load-bearing, see header comment).
     //
     // branch: a bool condition and one incoming exec pulse; exactly one of "true"/"false" fires.
-    //    "tookTrue" is OPT-IN OBSERVABILITY (see GraphCompiler.EmitBranch's comment), not required
-    //    wiring -- present so a graph author (or a test) can inspect which way a branch went.
+    //    "tookTrue" is OPT-IN OBSERVABILITY (GraphCompiler.EmitBranch), not required wiring.
     t.push_back({"Branch", "Branch", "Flow", {
         pin("exec", "exec", false), pin("cond", "bool", false),
         pin("true", "exec", true), pin("false", "exec", true), pin("tookTrue", "bool", true)}});
-    // sequence: fires each of its exec outputs in file order -- two by default ("then0" then
-    //    "then1"); add more via PIN records to widen it. "fireLog" is opt-in observability, the
-    //    sequence equivalent of branch's "tookTrue" (see GraphCompiler.EmitExecFanOut's comment).
+    // sequence: fires each exec output in file order -- two by default ("then0","then1"); widen via
+    //    PIN records. "fireLog" is opt-in observability, sequence's version of branch's "tookTrue".
     t.push_back({"Sequence", "Sequence", "Flow", {
         pin("exec", "exec", false), pin("then0", "exec", true), pin("then1", "exec", true),
         pin("fireLog", "int", true)}});
-    // while: "cond" is re-checked every pass (never cached -- see GraphCompiler's PUSH VS PULL
-    //    comment); "loop" is the body, "done" fires once after; "iterations" counts completed passes,
-    //    both a genuinely useful runtime value and the proof a runaway loop's guard actually bit.
+    // while: "cond" is re-checked every pass, never cached (GraphCompiler's PUSH VS PULL comment);
+    //    "loop" is the body, "done" fires once after, "iterations" counts passes (also proves a
+    //    runaway-loop guard actually bit).
     t.push_back({"While", "While", "Flow", {
         pin("exec", "exec", false), pin("cond", "bool", false),
         pin("loop", "exec", true), pin("done", "exec", true), pin("iterations", "int", true)}});
-    // forEach: the COUNTED-REPEAT variant, not a per-element iterator -- the format has no
-    //    array/collection pin type yet, so a real "for each item in a list" cannot be expressed
-    //    today (see GraphCompiler.EmitForEach's comment for the honest "left rough for phase 2"
-    //    note). "count" says how many passes; "index" is the current one, 0..count-1.
+    // forEach: COUNTED-REPEAT, not per-element -- no array/collection pin type exists yet, so a real
+    //    "for each item in a list" can't be expressed (GraphCompiler.EmitForEach, "left rough for
+    //    phase 2"). "count" is total passes; "index" is 0..count-1.
     t.push_back({"ForEach", "For Each (counted)", "Flow", {
         pin("exec", "exec", false), pin("count", "int", false),
         pin("loop", "exec", true), pin("index", "int", true), pin("done", "exec", true)}});
-    // onstart / ontick: event entry points -- what actually makes one of these run is a top-level
-    //    ENTRY <nodeId> <eventName> record (OcGraphData::entryPoints), not anything about this node's
-    //    TYPE; these two are just convenience triggers with a single exec output and no inputs of
-    //    their own to place at the head of a chain and mark with ENTRY. Per-tick data (delta time, in
-    //    particular) is deliberately NOT a special pin here -- it is an ordinary PARAM the graph
-    //    declares (e.g. `PARAM deltaTime float`) and reads with a `param` node inside the chain, the
-    //    same plumbing every dataflow graph already uses for `time`/`entity`.
-    // "Event", NOT "Flow", and the distinction is the whole point of colouring by category. These
-    // are where execution ENTERS the graph -- nothing upstream drives them, an ENTRY record does --
-    // whereas Branch and Sequence merely reorder execution that is already running. Grouping them
-    // with flow control made the palette read as though OnTick were a kind of Branch, and gave the
-    // one node a reader most wants to find at a glance the same colour as the most common node on
-    // the canvas.
+    // onstart / ontick: event entry points -- what runs one is a top-level ENTRY <nodeId>
+    //    <eventName> record (OcGraphData::entryPoints), not the node's TYPE; these are just
+    //    convenience triggers (single exec output, no inputs) to mark with ENTRY. Per-tick data
+    //    (delta time) is an ordinary PARAM (e.g. `PARAM deltaTime float`) read via a `param` node,
+    //    the same plumbing every dataflow graph uses for `time`/`entity`. "Event", NOT "Flow": these
+    //    are where execution ENTERS the graph (an ENTRY record drives them), unlike Branch/Sequence
+    //    which reorder execution already running -- grouping with flow control would read as though
+    //    OnTick were a kind of Branch, sharing the most-common-node colour with the one most wanted.
     t.push_back({"OnStart", "On Start", "Event", {pin("exec", "exec", true)}});
     t.push_back({"OnTick", "On Tick", "Event", {pin("exec", "exec", true)}});
-    // onhit: same bare-trigger shape as onstart/ontick above -- a labelled starting point an ENTRY
-    //    record points at, nothing more. What makes it fire ON DEMAND (a host calling
-    //    Aver.Graph.GraphHost.Fire, rather than the fixed per-frame Tick() cadence OnStart/OnTick get)
-    //    is entirely a scripting/csharp/Aver.Graph/GraphHost.cs concept -- this editor, like the C#
-    //    parser's own AddDefaultPins, treats "OnHit" as nothing more than one more ENTRY event name; a
-    //    project inventing a different one needs no new catalog entry to place ITS trigger node, only
-    //    a differently-named NODE of type OnStart/OnTick/OnHit (any bare-trigger type already
-    //    suffices) and its own ENTRY record naming the event.
+    // onhit: same bare-trigger shape as onstart/ontick -- an ENTRY record's labelled starting point,
+    //    nothing more. Firing ON DEMAND (GraphHost.Fire, vs OnStart/OnTick's fixed Tick() cadence) is
+    //    a GraphHost.cs concept; this editor treats "OnHit" as just another ENTRY event name, so a
+    //    project inventing a new event needs no new catalog entry -- any bare-trigger type plus its
+    //    own ENTRY record naming the event suffices.
     t.push_back({"OnHit", "On Hit", "Event", {pin("exec", "exec", true)}});
-    // -- CustomEvent: an entry point whose event NAME is the author's, not one of three the
-    //    palette happened to ship. Same shape as the three above and the same treatment
-    //    everywhere -- what fires an event has always been the top-level ENTRY record, never the
-    //    node type. The editor keeps a `name=` attribute on the NODE line in step with that
-    //    record so the canvas has something to show and edit; nothing at runtime reads it. --
+    // -- CustomEvent: an entry point whose event NAME is the author's, not one the palette shipped.
+    //    Same treatment as onstart/ontick/onhit: an ENTRY record fires it, never the node TYPE. The
+    //    `name=` attribute keeps the NODE line in step with that record for the canvas to show/edit;
+    //    nothing at runtime reads it.
     t.push_back({"CustomEvent", "Custom Event", "Event", {pin("exec", "exec", true)}});
 
-    // Spawn: SIDE-EFFECTING (creates a new scene entity), so -- unlike GetField/SetField/GetFieldVec3/
-    //    SetFieldVec3 above -- it gets exec pins by default, mirroring Raycast's own reasoning. See
-    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableSpawnType comment for why it is
-    //    refused by the pure-dataflow (PULL) compiler even more strictly than SetField is. class= names
-    //    which registered class to spawn -- the same generic key=value NODE-line attribute field=/
-    //    param= already use.
+    // Spawn: SIDE-EFFECTING (creates a scene entity), so -- unlike GetField/SetField/GetFieldVec3/
+    //    SetFieldVec3 -- it gets exec pins by default, mirroring Raycast (see GraphCompiler.cs's
+    //    IsExecCapableSpawnType: refused by the pure-dataflow/PULL compiler even more strictly than
+    //    SetField). class= names the registered class to spawn, the same field=/param= mechanism.
     t.push_back({"Spawn", "Spawn", "Actor", {
         pin("exec", "exec", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
         pin("then", "exec", true), pin("entity", "int", true)},
         {attr("class", "Class")}});
 
     // CharacterMove: the last Blueprint-parity node -- ONE coarse, exec-only wrapper around
-    //    AverCharacter.Drive (via AverCharacter.DriveFromGraph -> GraphInterop.CharacterMoveForGraph),
-    //    matching the owner's own literal signature: CharacterMove(entity, dt, forward, right,
-    //    yawDelta, pitchDelta) -> then, success. See
-    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableCharacterMoveType comment for why
-    //    it is refused by the pure-dataflow (PULL) compiler exactly as strictly as Spawn is. UNLIKE
-    //    Spawn's class= above, this node has NO NODE-line attribute at all: every input the native
-    //    call needs is an ordinary pin, because a graph author computes dt/forward/right/yawDelta/
-    //    pitchDelta at RUNTIME (a PARAM, a MoveAxis, a MouseDelta), never chooses them at edit time
-    //    the way a class name is chosen. "success" is a real outcome -- false, with a log line, never
-    //    a throw and never a silent no-op -- when the entity is not a live actor, or is a live actor
-    //    that is not an AverCharacter; see GraphInterop.CharacterMoveForGraph's own comment.
+    //    AverCharacter.Drive (DriveFromGraph -> GraphInterop.CharacterMoveForGraph): CharacterMove
+    //    (entity, dt, forward, right, yawDelta, pitchDelta) -> then, success. Refused by the PULL
+    //    compiler (GraphCompiler.cs's IsExecCapableCharacterMoveType) as strictly as Spawn. UNLIKE
+    //    Spawn's class=, NO NODE-line attribute: every input is computed at RUNTIME, not chosen at
+    //    edit time. "success" is false (logged, no throw) when the entity isn't a live AverCharacter.
     t.push_back({"CharacterMove", "Character Move", "Actor", {
         pin("exec", "exec", false),
         pin("entity", "int", false), pin("dt", "float", false),
@@ -786,29 +614,24 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("yawDelta", "float", false), pin("pitchDelta", "float", false),
         pin("then", "exec", true), pin("success", "bool", true)}});
 
-    // GetSynapseTarget: a PURE node reading CSynapseAgent's current steering target, tracked by the
-    //    native AgentSystem tick (aver_fw_synapse_target, framework_abi.h). NO exec pins -- a data
-    //    read exactly like GetWorldPosition, refused by side-effect rules for the identical reason
-    //    (see IsExecCapableCharacterMoveType's own comment on what "PURE" means here). "success" --
-    //    not a more specific name -- to reuse EmitPullVec3Read's own x/y/z-plus-bool shape exactly as
-    //    GetWorldPosition does, and because false here is a real "nothing to head toward right now"
-    //    outcome (no CSynapseAgent, or its status is not Pathing), not an error -- see
-    //    GraphInterop.SynapseGetTargetForGraph's own comment.
+    // GetSynapseTarget: a PURE node reading CSynapseAgent's current steering target (native
+    //    AgentSystem tick, aver_fw_synapse_target). NO exec pins, like GetWorldPosition (refused by
+    //    side-effect rules for the same reason -- see IsExecCapableCharacterMoveType on what "PURE"
+    //    means here). "success" reuses EmitPullVec3Read's x/y/z-plus-bool shape; false is a real
+    //    "nothing to head toward" outcome (no CSynapseAgent, or not Pathing), not an error
+    //    (GraphInterop.SynapseGetTargetForGraph).
     t.push_back({"GetSynapseTarget", "Get Synapse Target", "Actor", {
         pin("entity", "int", false),
         pin("x", "float", true), pin("y", "float", true), pin("z", "float", true),
         pin("success", "bool", true)}});
 
     // SynapseSteer: a PURE node turning "where am I, where do I want to go" into the
-    //    forward/right/yawDelta CharacterMove above already consumes -- see
-    //    GraphInterop.SynapseSteerForGraph's own comment for the full contract. Takes an EXPLICIT
-    //    target (x/y/z), never CSynapseAgent's own: the identical node does direct chase (a seen
-    //    enemy's live position) and path-following (GetSynapseTarget's own output above) for that
-    //    reason, and neither this node nor the compiler needs to know which one a graph is doing.
-    //    "success" -- the entity was alive, matching every other pure node's meaning for that pin --
-    //    is a SEPARATE output from "arrived": a graph that never checks success still gets usable
-    //    (if meaningless) zeros for a dead entity, but a caller that DOES check it can tell "nothing
-    //    happened" from "arrived and correctly holding still".
+    //    forward/right/yawDelta CharacterMove consumes (GraphInterop.SynapseSteerForGraph). Takes an
+    //    EXPLICIT target (x/y/z), never CSynapseAgent's own, so one node does both direct chase and
+    //    path-following (feeding it GetSynapseTarget's output) with neither this node nor the
+    //    compiler needing to know which. "success" (entity alive) is SEPARATE from "arrived": a
+    //    graph that never checks success still gets usable-looking zeros for a dead entity, but a
+    //    caller can tell "nothing happened" from "arrived and correctly holding still".
     t.push_back({"SynapseSteer", "Synapse Steer", "Actor", {
         pin("entity", "int", false), pin("dt", "float", false),
         pin("targetX", "float", false), pin("targetY", "float", false), pin("targetZ", "float", false),
@@ -816,33 +639,24 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("forward", "float", true), pin("right", "float", true), pin("yawDelta", "float", true),
         pin("arrived", "bool", true), pin("success", "bool", true)}});
 
-    // GetSynapsePerception: a PURE node reading CSynapsePerception's current sight state, tracked
-    //    by the native PerceptionSystem tick (aver_fw_synapse_perception, framework_abi.h). The
-    //    companion query "OnSeeTarget" itself needs -- the graph-event seam
-    //    (ScriptHost::graphFire) carries no payload, so a handler for "I just saw something" has no
-    //    other way to ask WHICH entity that was. "success" means something DIFFERENT here than on
-    //    every other node above: it is NOT "could I see the target" (canSeeTarget answers that, and
-    //    false is a real, common, meaningful state -- see GraphInterop.SynapseGetPerceptionForGraph's
-    //    own comment) -- it means "does this entity carry CSynapsePerception at all".
+    // GetSynapsePerception: a PURE node reading CSynapsePerception's sight state (native
+    //    PerceptionSystem tick, aver_fw_synapse_perception) -- the companion query "OnSeeTarget"
+    //    needs, since the graph-event seam (ScriptHost::graphFire) carries no payload naming WHICH
+    //    entity was seen. "success" means something DIFFERENT here: NOT "could I see the target"
+    //    (canSeeTarget answers that; false is common and meaningful) but "does this entity carry
+    //    CSynapsePerception at all" (GraphInterop.SynapseGetPerceptionForGraph).
     t.push_back({"GetSynapsePerception", "Get Synapse Perception", "Actor", {
         pin("entity", "int", false),
         pin("canSeeTarget", "bool", true), pin("lastKnownTarget", "int", true),
         pin("timeSinceSeen", "float", true), pin("success", "bool", true)}});
 
-    // -- AUDIO. The mixer, the WASAPI device and the whole aver_audio_* C ABI were built, tested and
-    //    then never called by anything for weeks -- see docs' own "declared but unread" shape. These
-    //    six are the graph half of connecting it, alongside Aver.Framework's Audio class.
-    //
-    //    sound= is a PATH and a NODE-line ATTRIBUTE, not a pin, for SetName's exact reason: which
-    //    file to play is edit-time data and PinType has no String member. The load behind it is
-    //    cached natively (same path -> same handle, decoded once), so a node that plays every tick
-    //    costs a lookup rather than a decode.
-    //
-    //    PlaySound/PlaySoundAt are EXEC: making a noise is a side effect, and a dataflow pull would
-    //    fire one per invocation with nothing able to gate it -- the identical argument Spawn and
-    //    CreateEntity already make. Both hand back a VOICE int so a graph can stop or steer it.
-    //    "voice" is 0 when there is no audio device, which is a SUPPORTED configuration rather than
-    //    an error, so success being false does not mean something went wrong.
+    // -- AUDIO: the mixer, WASAPI device and aver_audio_* C ABI were built and tested but never
+    //    called by anything for weeks (docs' "declared but unread" shape). These six connect it,
+    //    alongside Aver.Framework's Audio class. sound= is a PATH attribute, not a pin (no String
+    //    PinType); cached natively (same path -> same handle), so playing every tick costs a lookup.
+    //    PlaySound/PlaySoundAt are EXEC (a side effect -- a dataflow pull would fire one per
+    //    invocation with nothing able to gate it, like Spawn/CreateEntity) and return a VOICE
+    //    int to stop/steer it. "voice" is 0 with no audio device -- SUPPORTED, not an error.
     t.push_back({"PlaySound", "Play Sound", "Audio", {
         pin("exec", "exec", false),
         pin("volume", "float", false), pin("pitch", "float", false),
@@ -879,78 +693,52 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("then", "exec", true), pin("success", "bool", true)}});
 
     // FireEvent: GAP 3, cross-entity events -- fires a DECLARED event (event=, e.g. "OnHit") on
-    //    ANOTHER entity's own graph. SIDE-EFFECTING (runs a stranger's whole exec chain, not a scalar
-    //    write) -- exec pins by default, mirroring Spawn/CharacterMove above rather than SetField; see
-    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's IsExecCapableFireEventType comment for why it
-    //    is refused by the pure-dataflow (PULL) compiler entirely, the same strictness Spawn/
-    //    CharacterMove get. "target" is an ordinary int PIN (computed at runtime -- a Spawn's own
-    //    entity output, a VAR, a Raycast's entity pin), NOT a NODE-line attribute, unlike event=:
-    //    which entity to fire at is runtime data, exactly the same "pin vs attribute" split Spawn's
-    //    x/y/z-pins-vs-class=-attribute already established. "fired" is a real outcome -- false, with
-    //    a log line, never a silent true -- when the target has no live graph at all, or one that
-    //    never declared this event; see Aver.Graph/GraphEvents.cs's own comment for the full failure-
-    //    mode table and the reentrancy guard that keeps a self-fire or a fire cycle between graphs
-    //    from stack-overflowing the process.
+    //    ANOTHER entity's graph. SIDE-EFFECTING, exec pins by default (mirroring Spawn/CharacterMove),
+    //    refused entirely by the PULL compiler. "target" is a runtime int PIN, NOT an attribute like
+    //    event= (same split as Spawn's x/y/z-vs-class=). "fired" is false (logged, never silently
+    //    true) when the target has no live graph declaring this event (GraphEvents.cs has the
+    //    failure-mode table and the reentrancy guard against a self-fire/fire cycle stack-overflowing
+    //    the process).
     t.push_back({"FireEvent", "Fire Event", "Actor", {
         pin("exec", "exec", false), pin("target", "int", false),
         pin("then", "exec", true), pin("fired", "bool", true)},
         {attr("event", "Event")}});
 
-    // GetVar / SetVar: graph-local PERSISTENT variables -- the "nothing survives between ticks" gap,
-    // closed by storage the GraphHost driving a compiled graph owns per instance (see
-    // scripting/csharp/Aver.Graph/GraphVarStore.cs's own comment for the full contract). var= names
-    // which declared VAR the node addresses, the same generic key=value NODE-line attribute mechanism
-    // field=/param=/class= already use.
-    //
-    // GetVar: a PURE READ, so -- like GetField/GetFieldVec3 above -- no exec pins. Pin type defaults to
-    // float here (adjustable per-instance, same convention Param's own catalog entry documents, since
-    // layout/pin-typing always prefers a node's own recorded pins over this table -- see the header
-    // comment).
+    // GetVar / SetVar: graph-local PERSISTENT variables -- closes the "nothing survives between
+    // ticks" gap via storage the GraphHost owns per instance (GraphVarStore.cs). var= names the
+    // declared VAR, the same field=/param=/class= mechanism. GetVar: a PURE READ (no exec pins),
+    // pin type defaulting to float, adjustable per-instance.
     t.push_back({"GetVar", "Get Var", "Var", {pin("value", "float", true)}, {attr("var", "Var Name")}});
-    // SetVar: A WRITE IS A SIDE EFFECT (see GraphCompiler.IsExecCapableVarSideEffectType's own comment),
-    // so -- UNLIKE GetField/SetField/GetFieldVec3/SetFieldVec3, which get NO exec pins by default --
-    // this DOES get exec pins by default, mirroring Spawn/Raycast rather than SetField: SetVar has no
-    // legitimate non-exec path at all, so a freshly palette-spawned node needs to already be usable, not
-    // require an author to hand-add exec pins before it does anything useful. No "success" pin -- a
-    // write into an in-process store has no runtime failure mode a native field write does (unknown
-    // entity, read-only field, missing component), so there is nothing left to report.
+    // SetVar: A WRITE IS A SIDE EFFECT (GraphCompiler.IsExecCapableVarSideEffectType), so -- unlike
+    // GetField/SetField/GetFieldVec3/SetFieldVec3 -- it gets exec pins by default (mirroring
+    // Spawn/Raycast): SetVar has no legitimate non-exec path, so a freshly spawned node needs to
+    // already be usable. No "success" pin: an in-process write has no runtime failure mode (unknown
+    // entity, read-only field, missing component) to report.
     t.push_back({"SetVar", "Set Var", "Var", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)},
         {attr("var", "Var Name")}});
 
     // -- SetParent / SetViewEntity / SetName: three one-ABI-call writes, dispatched SetField-style --
-    //    no exec pins by default (unlike Spawn/SetVar above), reachable from BOTH C# compilers, and
-    //    still refused if pulled as a bare data value with no exec visit -- see
-    //    scripting/csharp/Aver.Graph/OcGraphParser.cs's "SetParent / SetViewEntity / SetName" comment
-    //    for the full "why SetField-style, not Spawn/SetVar-style" reasoning this table's own pin sets
-    //    were copied from field for field.
-    //
-    //    SetParent: aver_scene_set_parent(child, parent) -> success (scene_abi.h:105). Already refuses
-    //    a cycle, a self-parent, and a doomed parent, returning 0 -- surfaced on "success" rather than
-    //    swallowed.
+    //    no exec pins by default (unlike Spawn/SetVar), reachable from both C# compilers, still
+    //    refused if pulled with no exec visit (OcGraphParser.cs's "SetParent / SetViewEntity /
+    //    SetName" comment has the full reasoning). SetParent: aver_scene_set_parent(child, parent)
+    //    -> success (scene_abi.h:105); refuses a cycle, self-parent, or doomed parent (returns 0).
     t.push_back({"SetParent", "Set Parent", "Scene", {
         pin("child", "int", false), pin("parent", "int", false), pin("success", "bool", true)}});
     //    SetViewEntity: aver_fw_set_view_entity(entity) -> void (framework_abi.h:206). NO OUTPUT PIN --
     //    the ABI returns nothing, so there is no return code to invent one for.
     t.push_back({"SetViewEntity", "Set View Entity", "Actor", {
         pin("entity", "int", false)}});
-    //    SetName: aver_scene_set_name(entity, name) -> success (scene_abi.h:113). name= is a NODE-line
-    //    attribute, not a pin -- the string IS the data this node writes, not a lookup key, but PinType
-    //    has no String member (see OcGraphParser.cs's own PinType-has-no-String comment), so a
-    //    NODE-line attribute is still the only route it can reach this node.
+    //    SetName: aver_scene_set_name(entity, name) -> success (scene_abi.h:113). name= is a
+    //    NODE-line attribute, not a pin, since PinType has no String member (OcGraphParser.cs).
     t.push_back({"SetName", "Set Name", "Scene", {
         pin("entity", "int", false), pin("success", "bool", true)},
         {attr("name", "Name")}});
 
-    //    CreateEntity / FindEntity: the other two members of SetName's own name= family
-    //    (Entity.Create(name), Game.Find(name)). They REUSE name=/Node.NameValue verbatim -- the
-    //    parser already carries it for SetName, so neither needed a single line of new parsing, and
-    //    the C++ writer round-trips it through the generic extraTokens path like every other key=value.
-    //
-    //    CreateEntity is EXEC (it makes a new entity -- a side effect, refused by the pure-dataflow
-    //    compiler exactly as Spawn is), FindEntity is PURE (a lookup is idempotent, like GetWorldPosition).
-    //    FindEntity returns 0 when nothing matches, which is a real, common answer and not an error --
-    //    "found" says which case it is, the same split GetSynapsePerception's own success pin uses.
+    //    CreateEntity / FindEntity: SetName's name= family siblings (Entity.Create(name),
+    //    Game.Find(name)), reusing name=/Node.NameValue verbatim. CreateEntity is EXEC (a side
+    //    effect, refused like Spawn); FindEntity is PURE (idempotent), returning 0 for no match (a
+    //    real answer, not an error) -- "found" disambiguates, as GetSynapsePerception's success does.
     t.push_back({"CreateEntity", "Create Entity", "Scene", {
         pin("exec", "exec", false),
         pin("then", "exec", true), pin("entity", "int", true), pin("success", "bool", true)},
@@ -960,11 +748,10 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         {attr("name", "Name")}});
 
     // -- SetMesh / SetMaterial: coarse, dedicated nodes wrapping Entity.SetMesh/SetMaterial
-    //    (EntityScene.cs) through Aver.Framework.GraphInterop.SetMeshForGraph/SetMaterialForGraph --
-    //    NOT a generalised I64-capable SetField and NOT a generic "add a missing component" node; see
-    //    OcGraphParser.cs's own "SetMesh / SetMaterial" comment. Same SetField-style dispatch as the
-    //    three types just above (EnsureMeshRenderer's own idempotent "add if absent" guard is what
-    //    makes re-running this every tick harmless).
+    //    (EntityScene.cs) via GraphInterop.SetMeshForGraph/SetMaterialForGraph -- NOT a generalised
+    //    SetField and NOT a generic "add missing component" node (OcGraphParser.cs). Same
+    //    SetField-style dispatch as above; EnsureMeshRenderer's idempotent add-if-absent guard makes
+    //    re-running this every tick harmless.
     t.push_back({"SetMesh", "Set Mesh", "Scene", {
         pin("entity", "int", false), pin("success", "bool", true)},
         {attr("mesh", "Mesh")}});
@@ -972,134 +759,89 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("entity", "int", false), pin("success", "bool", true)},
         {attr("material", "Material")}});
 
-    // -- AttachToSocket: hangs `entity` on a named socket of `parent`'s rig, so it rides the posed
-    //    bone every frame. TWO entity pins rather than one, unlike every Set* node above, because
-    //    an attachment is a relationship: the thing and what it hangs from. socket= names it, the
-    //    same NODE-line-attribute mechanism mesh=/material=/name= use, because PinType has no
-    //    string member and this is the only way a literal name reaches a node.
+    // -- AttachToSocket: hangs `entity` on a named socket of `parent`'s rig, riding the posed bone
+    //    every frame. TWO entity pins, unlike every Set* node, since an attachment is a relationship
+    //    between two things. socket= names it, the same mesh=/material=/name= NODE-line mechanism
+    //    (no string PinType exists).
     t.push_back({"AttachToSocket", "Attach To Socket", "Scene", {
         pin("entity", "int", false), pin("parent", "int", false), pin("success", "bool", true)},
         {attr("socket", "Socket")}});
 
-    // -- GetAnimCurve: a PURE read, so it has no exec pins and needs no exec emitter -- the only
-    //    node in this animation group that reads rather than writes. curve= names it, the same
-    //    NODE-line attribute mechanism every other string carrier here uses.
+    // -- GetAnimCurve: a PURE read (no exec pins, no exec emitter) -- the only reader in this
+    //    animation group. curve= names it, the usual NODE-line attribute mechanism.
     t.push_back({"GetAnimCurve", "Get Anim Curve", "Scene", {
         pin("entity", "int", false), pin("value", "float", true)},
         {attr("curve", "Curve")}});
 
-    // -- SetSkeleton / PlayAnimation: SetMesh/SetMaterial's own animation-family siblings, wrapping
-    //    Aver.Framework.Entity.SetSkeleton/PlayAnimation (Animation.cs) through
-    //    GraphInterop.SetSkeletonForGraph/PlayAnimationForGraph -- same SetField-style dispatch, same
-    //    "EnsureComponent's own idempotent add-if-absent guard is what makes re-running this every
-    //    tick harmless" reasoning SetMesh's own comment gives (SetSkeleton/PlayAnimation each add
-    //    their component -- CSkeletalMesh/CAnimator -- the identical way EnsureMeshRenderer does).
+    // -- SetSkeleton / PlayAnimation: SetMesh/SetMaterial's animation-family siblings, wrapping
+    //    Entity.SetSkeleton/PlayAnimation (Animation.cs) via GraphInterop.SetSkeletonForGraph/
+    //    PlayAnimationForGraph -- same SetField-style dispatch and idempotent add-if-absent guard
+    //    (each adds its component, CSkeletalMesh/CAnimator, like EnsureMeshRenderer).
     //
-    //    BINDING IS BY ARRAY INDEX, NOT NAME (AnimSampler.cpp's `t.boneIndex` bounds-check, never an
-    //    identity-check) -- this node cannot enforce that a skeleton= and a clip= authored on the same
-    //    entity actually agree on joint order; a mismatch drives the wrong bone, or silently drops the
-    //    track if out of range, with no error this node -- or anything downstream of it -- can raise.
-    //    That is a content problem this graph layer has no visibility into, not a gap in the node.
+    //    BINDING IS BY ARRAY INDEX, NOT NAME (AnimSampler.cpp's `t.boneIndex` bounds-check only) --
+    //    this node can't enforce that a skeleton= and a clip= on the same entity agree on joint
+    //    order; a mismatch drives the wrong bone or silently drops the track, with no error raised.
+    //    A content problem outside this graph layer's visibility, not a gap in the node.
     t.push_back({"SetSkeleton", "Set Skeleton", "Scene", {
         pin("entity", "int", false), pin("success", "bool", true)},
         {attr("skeleton", "Skeleton")}});
-    //    PlayAnimation gets a THIRD input pin -- loop -- that no Set*-shaped node above needs, because
-    //    Entity.PlayAnimation itself takes a second scalar argument (Animation.cs's own `bool loop =
-    //    true`), unlike SetMesh/SetMaterial/SetSkeleton's single string write. A PIN, not a NODE-line
-    //    attribute, for the opposite reason clip= is one: loop is genuine runtime data a graph may
-    //    reasonably compute (e.g. "loop unless this is the death clip"), not edit-time-only naming, so
-    //    it belongs on the wire the same way PlaySound's own "looping" pin does just above. The default
-    //    "true" mirrors Animation.cs's own default parameter -- unlike PlaySound's looping (which
-    //    defaults to non-looping when left unwired), a freshly spawned PlayAnimation node should behave
-    //    like calling PlayAnimation(clip) from C# with nothing else touched.
+    //    PlayAnimation gets a THIRD input pin -- loop -- since Entity.PlayAnimation takes a second
+    //    scalar argument (Animation.cs's `bool loop = true`), unlike SetMesh/SetMaterial/SetSkeleton's
+    //    single string write. A PIN, not an attribute (opposite of clip=): loop is runtime data a
+    //    graph may compute (e.g. "loop unless this is the death clip"), like PlaySound's "looping"
+    //    pin. Default "true" mirrors Animation.cs's default, so a fresh node behaves like calling
+    //    PlayAnimation(clip) untouched.
     t.push_back({"PlayAnimation", "Play Animation", "Scene", {
         pin("entity", "int", false), pin("loop", "bool", false, "true"), pin("success", "bool", true)},
         {attr("clip", "Clip")}});
-    // -- SetControlRig: the third of the animation family, and the node that makes a control rig
-    //    reachable from a LEVEL. Everything under it was already built and tested -- anim::twoBoneIk
-    //    and anim::aimAt, the .ocrig format, CControlRig applied through AnimSystem's pose-modifier
-    //    seam -- but a rig could only be attached from C++, so a rigged character could not be placed
-    //    in a map at all. A skinned character reaches a level through a graph CLASS (there is no
-    //    skeleton field on an .ocworld PLACE record), which makes THIS node the missing link rather
-    //    than a new level-format attribute.
+    // -- SetControlRig: the third animation-family node, making a control rig reachable from a
+    //    LEVEL. Everything under it (twoBoneIk/aimAt, .ocrig, CControlRig via AnimSystem's
+    //    pose-modifier seam) was built and tested but only attachable from C++, since a skinned
+    //    character reaches a level via a graph CLASS (no skeleton field on .ocworld PLACE).
     //
-    //    THE COMPONENT IT ATTACHES IS NOT A BUILT-IN, which is what separates it from SetSkeleton
-    //    directly above. CControlRig is registered at runtime (docs/SYNAPSE.md section 6's pattern),
-    //    so it has no AVER_SCENE_COMP_* id and is attached by NAME through aver_scene_component --
-    //    scene ABI 1.4, added for exactly this and useful to every other dynamic component after it.
-    //    In a host that never registered CControlRig the node returns false and changes nothing.
+    //    NOT A BUILT-IN (unlike SetSkeleton): CControlRig is registered at runtime (docs/SYNAPSE.md
+    //    section 6), attached by NAME through aver_scene_component (scene ABI 1.4); a host that
+    //    never registered it gets false, no change.
     //
-    //    weight is a PIN and rig= is an attribute, for the same split PlayAnimation's loop pin
-    //    documents just above: which rig an entity wears is edit-time naming, but how strongly it is
-    //    worn is genuine runtime data a graph may compute -- fading a reach out as the hand arrives,
-    //    or dropping it to 0 on death, is the ordinary use, and 0 disables the rig without detaching
-    //    it. The default "1" matches Entity.SetControlRig's own default parameter.
+    //    weight is a PIN, rig= an attribute (same split as PlayAnimation's loop): which rig is
+    //    edit-time, how strongly worn is runtime data. Default "1" matches SetControlRig's own default.
     t.push_back({"SetControlRig", "Set Control Rig", "Scene", {
         pin("entity", "int", false), pin("weight", "float", false, "1"), pin("success", "bool", true)},
         {attr("rig", "Rig")}});
 
     // ============================================================================================
     // MATERIAL NODES -- DOMAIN material, compiled to HLSL by aver::pbr::compileMaterialGraph()
-    // (modules/render.pbr/src/MaterialGraphHlsl.cpp). READ THAT FILE'S emitNode() FIRST: it is the
-    // authority on every node type below, on every pin name, and on every promotion rule this table
-    // only describes; this section is the palette's VIEW of that authority, not a second definition
-    // of it. A mismatch here produces exactly the failure this whole table exists to prevent -- a
-    // node that spawns from the Add-Node menu and then refuses to compile.
+    // (MaterialGraphHlsl.cpp). READ emitNode() FIRST: it is the authority on every node type/pin
+    // name/promotion rule below; a mismatch here produces the exact failure this table exists to
+    // prevent -- a node that spawns and then refuses to compile.
     //
-    // WHAT A MATERIAL NODE IS, AND WHY IT CAN NEVER CARRY AN EXEC PIN. Every gameplay node above
-    // describes a STEP: it may run a side effect, and it is reached by an exec pulse that arrives on
-    // one pin and leaves on another, in an order an ENTRY record and the exec wiring decide. A
-    // material node describes a VALUE, not a step. A material graph has no exec pins anywhere in it,
-    // no ENTRY point and no OUT record (see MaterialGraphHlsl.cpp's own header comment, point 1 --
-    // "IT IS PULL, NOT PUSH"), because averEvalMaterial runs once per pixel and produces one surface;
-    // "once per pixel" has no room for "and then do this". Every node below is pure data-flow:
-    // compileMaterialGraph starts at the one MaterialOutput node and walks BACKWARDS along links,
-    // emitting a node only when something downstream actually reads it, so the order code comes out
-    // in is whatever that dependency walk decides, never the order nodes were dropped on the canvas
-    // or wired left to right. There is no `exec`/`then` pair on a single entry in this section, and
-    // there never can be one for the same reason there is no Branch or Sequence in HLSL's per-pixel
-    // evaluation: "this happens before that" is not a question a pixel shader's data-flow answers.
+    // NO EXEC PIN, EVER: a gameplay node describes a STEP; a material node describes a VALUE. No
+    // exec pins, ENTRY point or OUT record (PULL, NOT PUSH -- MaterialGraphHlsl.cpp point 1):
+    // averEvalMaterial runs once per pixel with no room for "and then do this". compileMaterialGraph
+    // walks BACKWARDS from MaterialOutput, emitting only what's actually read -- emit order is
+    // whatever the walk decides, never canvas position or wiring order.
     //
-    // WIDTH IS NOMINAL HERE, NOT ENFORCED HERE. Every node the vocabulary generalises over width
-    // (Add, Sin, Saturate, Clamp, ...) is declared float3 below, because a colour, a direction or a
-    // position -- float3 -- is what an author reaches for one of these on first. The compiler does
-    // not actually hold a freshly spawned node to that width: emitNode's widestInput() re-derives
-    // the REAL width from whatever is actually linked into a generic node's inputs at compile time
-    // (an input that is only a literal does not count towards it -- see widestInput's own comment),
-    // so wiring a float2 UV into an Add's `a` computes at float2, not float3, whatever this table
-    // says. What this table DOES have to get exactly right, because nothing downstream re-derives
-    // it, is the pin NAMES a link or a literal is addressed by, and the DEFAULT LITERAL on a pin
-    // nothing gets wired to -- both ride on a freshly spawned node verbatim, straight from here.
+    // WIDTH IS NOMINAL, NOT ENFORCED: generic-width nodes (Add, Sin, Saturate, Clamp, ...) declare
+    // float3 below (what an author reaches for first), but emitNode's widestInput() re-derives the
+    // REAL width from what's linked at compile time (an input that is only a literal doesn't count
+    // towards it) -- wiring a float2 UV computes at float2 regardless. What this table must get
+    // right: pin NAMES and the DEFAULT LITERAL on unwired pins.
     //
-    // A KNOWN, ACCEPTED NAME COLLISION. Several material type names below -- Add, Subtract,
-    // Multiply, Divide, Min, Max, Lerp, Clamp, Saturate, Abs, Floor, Ceil, Sqrt, Sin, Cos, and
-    // ConstFloat -- are ALSO existing gameplay type names above, because both compilers independently
-    // reached for the same short verb for the same arithmetic. That is not a naming accident this
-    // table can paper over: emitNode() and GraphCompiler.cs's own switch each key off the literal
-    // node TYPE string, so a material Add must be spelled exactly "Add" for the material compiler to
-    // recognise it -- the identical string the gameplay compiler already owns for its own,
-    // differently-shaped, scalar Add. findGraphNodeDesc(typeId) has no domain parameter and returns
-    // the FIRST entry whose type matches, which for every name on that list is still the gameplay
-    // entry pushed earlier in this function; so today the Add-Node popup's Const/Math/Vector/Input
-    // categories show both a name's gameplay and material shapes side by side, and
+    // A KNOWN, ACCEPTED NAME COLLISION: Add, Subtract, Multiply, Divide, Min, Max, Lerp, Clamp,
+    // Saturate, Abs, Floor, Ceil, Sqrt, Sin, Cos and ConstFloat are ALSO gameplay type names -- both
+    // compilers key off the literal TYPE string, so these spellings are shared, not accidental.
+    // findGraphNodeDesc (no domain param) returns the FIRST match, always gameplay's, so today the
+    // Add-Node popup's Const/Math/Vector/Input categories show both shapes side by side, and
     // addNodeFromCatalog (GraphEditor.cpp) resolves either menu item to the SAME gameplay shape
-    // until something teaches that lookup which domain the open graph actually is. Fixing that
-    // belongs to GraphEditor.cpp, not to this table: this table's job here is to describe the
-    // material vocabulary completely and exactly, one entry per node type, the same as every
-    // gameplay entry above it. ConstFloat's shape below is worth calling out on its own -- it is
-    // byte-for-byte the SAME as the gameplay ConstFloat entry at the top of this function (one
-    // `value` output, default "0"), because a bare literal number means the same thing to both
-    // compilers. It still gets its own entry here rather than kDomainBoth on the existing one, for
-    // the identical "do not touch the ~200 existing rows" reason the domain field itself defaults to
-    // gameplay; GraphNodeDomain exists so a future cleanup that does touch that row has a value to
-    // set on it, not to force one here.
+    // until that lookup learns the open graph's domain (a GraphEditor.cpp fix). ConstFloat here is
+    // byte-for-byte gameplay's ConstFloat (a bare literal means the same to both) -- a separate entry
+    // rather than kDomainBoth, for the same "don't touch the ~200 existing rows" reason domain
+    // defaults to gameplay; GraphNodeDomain exists for a future cleanup to use, not to force one now.
     // ============================================================================================
 
-    // -- CONST: the vocabulary's own literals, one entry per width. Shape matches
-    //    MaterialGraphHlsl.cpp's ConstFloat/ConstFloat2/ConstFloat3/ConstFloat4 case exactly: a
-    //    single `value` output whose own default IS the constant, the same idiom the gameplay
-    //    ConstFloat entry above already established -- the literal rides on the pin, not on a
-    //    NODE-line attribute, because a PIN record already round-trips a default through load/save.
+    // -- CONST: one literal entry per width, matching MaterialGraphHlsl.cpp's ConstFloat/2/3/4 case:
+    //    a single `value` output whose default IS the constant (same idiom as gameplay's ConstFloat)
+    //    -- on the pin, not a NODE-line attribute, since a PIN record already round-trips defaults.
     t.push_back({"ConstFloat",  "Const Float",  "Const", {pin("value", "float",  true, "0")},
         {}, kDomainMaterial});
     t.push_back({"ConstFloat2", "Const Float2", "Const", {pin("value", "float2", true, "0,0")},
@@ -1109,11 +851,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"ConstFloat4", "Const Float4", "Const", {pin("value", "float4", true, "0,0,0,0")},
         {}, kDomainMaterial});
 
-    // -- INPUT: what the renderer already knows about this pixel or this object, read-only and
-    //    needing no wiring at all -- emitNode's own "what the renderer knows about this pixel"
-    //    section. UV is the surface's own UV (averSurfaceUV); the rest are xyz reads off the
-    //    vertex, the camera or the instance transform -- see MaterialGraphHlsl.cpp for exactly which
-    //    field each one binds.
+    // -- INPUT: what the renderer already knows about this pixel/object, read-only, no wiring needed
+    //    (emitNode's "what the renderer knows" section). UV is averSurfaceUV; the rest are xyz reads
+    //    off the vertex/camera/instance transform (see MaterialGraphHlsl.cpp for exact bindings).
     t.push_back({"UV",             "UV",             "Input", {pin("uv",  "float2", true)}, {}, kDomainMaterial});
     t.push_back({"WorldPosition",  "World Position",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"WorldNormal",    "World Normal",    "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
@@ -1121,19 +861,16 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"CameraPosition", "Camera Position",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"ObjectPosition", "Object Position",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
 
-    // -- MATH: generic-width arithmetic and the standard library over it, promoted at COMPILE TIME
-    //    to the widest of whatever is actually linked in -- see the section comment above on why
-    //    "float3" here is nominal, not enforced. Pin names a/b/result match emitNode's binary()/
-    //    call() helpers exactly.
+    // -- MATH: generic-width arithmetic, promoted at COMPILE TIME to the widest linked input (see
+    //    "float3 is nominal" above). Pin names a/b/result match emitNode's binary()/call() helpers.
     t.push_back({"Add",      "Add",      "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Subtract", "Subtract", "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Divide",   "Divide",   "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Min",      "Min",      "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Max",      "Max",      "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
-    // Power/Modulo -- named for what they DO, not gameplay's Pow/Mod type strings: emitNode's own
-    // switch checks `ciEquals(ty, "Power")` / `ciEquals(ty, "Modulo")` verbatim, so these exact
-    // spellings are load-bearing, not a style choice this table is free to shorten.
+    // Power/Modulo -- named for what they DO, not gameplay's Pow/Mod: emitNode's switch checks
+    // `ciEquals(ty, "Power")`/`"Modulo"` verbatim, so these spellings are load-bearing, not stylistic.
     t.push_back({"Power",    "Power",    "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Modulo",   "Modulo",   "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
 
@@ -1156,9 +893,8 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("outMin", "float", false, "0"), pin("outMax", "float", false, "1"), pin("result", "float", true)},
         {}, kDomainMaterial});
 
-    // The single-input standard library: one `x` in, one `result` out, both generic-width. Fourteen
-    // node types sharing one shape -- emitNode dispatches every one of these through the same call()
-    // helper, differing only in which HLSL intrinsic (or, for OneMinus, expression) it names.
+    // The single-input standard library: one `x` in, one `result` out, generic-width, fourteen types
+    // sharing one shape -- emitNode dispatches all through call(), differing only in the HLSL intrinsic.
     t.push_back({"Saturate",  "Saturate",  "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Abs",       "Abs",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"Frac",      "Frac",      "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
@@ -1174,11 +910,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"Normalize", "Normalize", "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"OneMinus",  "One Minus", "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
 
-    // -- VECTOR: the geometry ops a shader author reaches for that gameplay's own Vec* nodes above
-    //    do not cover in this shape -- these take and return real float2/float3/float4 pins, because
-    //    a material pin genuinely IS that wide (OcGraphPin::type carries it), unlike PinType in the
-    //    gameplay/exec vocabulary, which has no vector type at all and spells a direction out as
-    //    three loose floats instead.
+    // -- VECTOR: geometry ops gameplay's own Vec* nodes don't cover in this shape -- real
+    //    float2/float3/float4 pins, since a material pin genuinely IS that wide (OcGraphPin::type),
+    //    unlike gameplay PinType, which has no vector type and spells a direction as loose floats.
     t.push_back({"Dot",      "Dot",      "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float", true)}, {}, kDomainMaterial});
     t.push_back({"Length",   "Length",   "Vector", {pin("x", "float3", false), pin("result", "float", true)}, {}, kDomainMaterial});
     t.push_back({"Distance", "Distance", "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float", true)}, {}, kDomainMaterial});
@@ -1186,11 +920,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"Reflect",  "Reflect",  "Vector", {pin("i", "float3", false), pin("n", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
     t.push_back({"BlendNormals", "Blend Normals", "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
 
-    // Assembling and taking apart: MakeFloatN builds a wider value from loose scalars, Split is its
-    // inverse. Split's INPUT pin and its first OUTPUT pin are both named "x" -- that duplication is
-    // the vocabulary's own (emitNode's Split case reads input pin "x" and answers output pins
-    // "x"/"y"/"z"/"w"), not a typo here; isOutput is what tells the two apart, the same as every
-    // other pin pair in this table.
+    // Assembling and taking apart: MakeFloatN builds a wider value from scalars, Split is the
+    // inverse. Split's INPUT and first OUTPUT pin are both named "x" -- not a typo (emitNode's Split
+    // reads input "x", answers "x"/"y"/"z"/"w"); isOutput tells the two apart, as always.
     t.push_back({"MakeFloat2", "Make Float2", "Vector", {
         pin("x", "float", false), pin("y", "float", false), pin("result", "float2", true)}, {}, kDomainMaterial});
     t.push_back({"MakeFloat3", "Make Float3", "Vector", {
@@ -1203,18 +935,15 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("x", "float3", false),
         pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("w", "float", true)},
         {}, kDomainMaterial});
-    // Swizzle: the one node whose OUTPUT WIDTH is an ATTRIBUTE (mask=), not a pin type -- see
-    // emitNode's own comment on why the mask is validated there rather than trusted. The declared
-    // `result` pin type below is the nominal float the vocabulary gives it; the REAL width is
-    // however many characters mask= names, one to four, decided at compile time.
+    // Swizzle: the one node whose OUTPUT WIDTH is an ATTRIBUTE (mask=), not a pin type (emitNode
+    // validates the mask). Declared `result` type is nominal float; REAL width is mask='s length (1-4).
     t.push_back({"Swizzle", "Swizzle", "Vector", {pin("x", "float3", false), pin("result", "float", true)},
         {attr("mask", "Mask")}, kDomainMaterial});
 
-    // -- UV: coordinate transforms, both reading THE SURFACE'S OWN UV when their `uv` input is left
-    //    unwired -- emitNode's uvInput(), the one place in this compiler where an unlinked pin is
-    //    not simply its literal default (see uvInput's own comment for why). The `uv` pin below still
-    //    needs to exist and be named exactly "uv" for a LINK to land on; it carries no default worth
-    //    writing, since one is never actually read.
+    // -- UV: coordinate transforms, reading THE SURFACE'S OWN UV when `uv` is left unwired --
+    //    emitNode's uvInput(), the one place an unlinked pin isn't simply its literal default. The
+    //    `uv` pin still needs to exist, named exactly "uv", for a LINK to land on; its default is
+    //    never read.
     t.push_back({"TilingOffset", "Tiling / Offset", "UV", {
         pin("uv", "float2", false), pin("tiling", "float2", false, "1,1"), pin("offset", "float2", false, "0,0"),
         pin("result", "float2", true)}, {}, kDomainMaterial});
@@ -1231,14 +960,11 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("uv", "float2", false), pin("scale", "float", false, "8"), pin("result", "float", true)},
         {}, kDomainMaterial});
 
-    // -- TEXTURE: the one sampling node -- ONE call and THREE output pins (rgb/a/rgba) off the same
-    //    sample, so a graph reading only `.a` costs one sample and one swizzle, not three (see
-    //    emitNode's own comment). slot= names which of the material's own texture slots to read --
-    //    basecolor, metalrough, normal, occlusion, emissive, layer1basecolor, layer1metalrough or
-    //    layer1normal, the exact eight emitNode's kSlotNames accepts. This table cannot validate the
-    //    slot= VALUE any more than it validates field=/class= elsewhere in the gameplay vocabulary; a
-    //    bad one is a compile-time error from compileMaterialGraph, named clearly, same as every
-    //    other attribute this mechanism carries.
+    // -- TEXTURE: the one sampling node -- ONE call, THREE output pins (rgb/a/rgba) off the same
+    //    sample, so reading only `.a` costs one sample+swizzle, not three. slot= names one of the
+    //    eight texture slots emitNode's kSlotNames accepts (basecolor, metalrough, normal, occlusion,
+    //    emissive, layer1basecolor, layer1metalrough, layer1normal). Not validated here, same as
+    //    field=/class= -- a bad slot= is a clear compile-time error from compileMaterialGraph.
     t.push_back({"SampleTexture", "Sample Texture", "Texture", {
         pin("uv", "float2", false),
         pin("rgb", "float3", true), pin("a", "float", true), pin("rgba", "float4", true)},
@@ -1247,50 +973,40 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     // -- UTILITY --
     t.push_back({"Fresnel", "Fresnel", "Utility", {
         pin("power", "float", false, "5"), pin("result", "float", true)}, {}, kDomainMaterial});
-    // If: a branchless select (lerp+step under the hood -- see emitNode's own comment for why not
-    // HLSL's `?:`). `a`/`b` are the scalars compared; `ifTrue`/`ifFalse` are the generic-width arms
-    // actually returned.
+    // If: a branchless select (lerp+step under the hood, not HLSL's `?:` -- see emitNode). `a`/`b`
+    // are the scalars compared; `ifTrue`/`ifFalse` are the generic-width arms actually returned.
     t.push_back({"If", "If", "Utility", {
         pin("a", "float", false), pin("b", "float", false),
         pin("ifTrue", "float3", false), pin("ifFalse", "float3", false),
         pin("result", "float3", true)}, {}, kDomainMaterial});
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
-    //    MaterialOutput, by construction, since it is where the backward walk that reads everything
-    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS SEVENTEEN INPUTS -- that emptiness
-    //    is load-bearing, not an oversight: compileMaterialGraph treats an input as DRIVEN when it is
-    //    linked OR carries a NON-EMPTY literal, so a default here would make a freshly spawned
-    //    MaterialOutput drive all seventeen fields the moment it exists, destroying the partial-graph
-    //    behaviour that lets a real graph say only "base colour is red" and leave roughness, the
-    //    normal map and alpha exactly what the stock material already had. See
-    //    compileMaterialGraph's own "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE" comment for the full
-    //    reasoning; this entry's job is only to not silently break it by typing a "0" into a
-    //    defaultValue some future edit adds without reading that comment first.
+    //    MaterialOutput, since it's where the backward walk starts. NO DEFAULT on any of its
+    //    seventeen inputs, load-bearing not an oversight: compileMaterialGraph treats an input as
+    //    DRIVEN when linked OR carrying a NON-EMPTY literal, so a default would make a fresh node
+    //    drive all seventeen fields immediately, destroying partial-graph behaviour (a graph saying
+    //    only "base colour is red" leaving roughness/normal/alpha at the stock material's values --
+    //    see compileMaterialGraph's "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE"). Do not add a "0"
+    //    defaultValue here without reading that comment first.
     t.push_back({"MaterialOutput", "Material Output", "Output", {
         pin("BaseColor", "float3", false), pin("Metallic", "float", false), pin("Roughness", "float", false),
         pin("Normal", "float3", false), pin("Emissive", "float3", false), pin("Occlusion", "float", false),
         pin("Opacity", "float", false), pin("AlphaCutoff", "float", false),
-        // Subsurface, and the reason it is worth a pin rather than only a material constant: the
-        // scalar in the .ocmat is one number for a whole object, while the thing that actually makes
-        // subsurface read correctly is a MASK -- thin parts of a mesh scatter more than thick ones.
-        // Driving SubsurfaceRadius from a texture is the difference between a uniformly waxy object
-        // and one whose ears and fingers light up. Same no-default rule as every pin above.
+        // Subsurface: worth a pin, not just a material constant, since a MASK -- thin parts scatter
+        // more than thick ones -- is what makes it read correctly (a texture-driven SubsurfaceRadius
+        // vs. a uniformly waxy object). Same no-default rule as every pin above.
         pin("SubsurfaceWeight", "float", false), pin("SubsurfaceRadius", "float", false),
-        // The dielectric pair. Driving Transmission from a mask is one mesh that is a clear window
-        // with a frosted band, or a bottle with an opaque label, instead of two meshes and two
-        // materials. Ior is per-pixel for the same reason, though it moves far less often.
+        // The dielectric pair: a mask-driven Transmission makes one mesh a clear window with a
+        // frosted band instead of two materials. Ior is per-pixel for the same reason, moving less often.
         pin("Ior", "float", false), pin("Transmission", "float", false),
-        // The volume, alongside Ior/Transmission above: AttenuationColor is the transmittance after
-        // AttenuationDistance centimetres (see kOutputFields in MaterialGraphHlsl.cpp), so driving
-        // the pair per pixel is a thin clear pane at a mesh's face and a deep green edge down its
-        // length, instead of one uniform tint. Same no-default rule as every pin here -- a distance
-        // of 0 or less already means "no volume" for every material that never drives this pin.
+        // The volume: AttenuationColor is the transmittance after AttenuationDistance centimetres
+        // (kOutputFields, MaterialGraphHlsl.cpp) -- per-pixel driving gives a thin clear pane and a
+        // deep green edge instead of one tint. Same no-default rule; 0-or-less already means "no volume".
         pin("AttenuationColor", "float3", false), pin("AttenuationDistance", "float", false),
-        // The coat, and this is where a coat stops being three numbers and starts being a surface:
-        // a weight mask makes one material polished where an object is handled and bare where it is
-        // worn, and a roughness mask puts a clear panel and a scuffed edge on the same car-paint
-        // material. Present whether or not the layered BSDF is compiled in -- AverAuthored carries
-        // the fields unconditionally so a graph does not stop compiling when the setting changes.
+        // The coat: a weight mask makes one material polished where handled, bare where worn; a
+        // roughness mask puts a clear panel and a scuffed edge on the same car paint. Present
+        // whether or not the layered BSDF is compiled in -- AverAuthored carries the fields
+        // unconditionally so a graph doesn't stop compiling when the setting changes.
         pin("CoatWeight", "float", false), pin("CoatRoughness", "float", false),
         pin("CoatF0", "float", false)},
         {}, kDomainMaterial});
@@ -1311,18 +1027,16 @@ inline bool ciEquals(std::string_view a, std::string_view b) {
 
 } // namespace detail
 
-// THE TABLE. inline + function-local static so this header can be included from multiple translation
-// units (the palette, node-spawning code, and the headless test) without an ODR violation and without
-// needing its own .cpp.
+// THE TABLE: inline + function-local static so this header can be included from multiple translation
+// units (palette, node-spawning code, headless test) without an ODR violation and no .cpp of its own.
 inline const std::vector<GraphNodeDesc>& graphNodeCatalog() {
     static const std::vector<GraphNodeDesc> table = detail::buildCatalog();
     return table;
 }
 
-// Case-insensitive lookup: the file format and GraphCompiler.cs both accept mixed case for node type
-// names ("ConstFloat" in the checked-in cross-impl fixture, "constfloat" in the C# switch). Returns
-// nullptr for a type this catalog does not know -- the node still draws from its own recorded pins
-// (see GraphEditorGeometry.hpp), it just cannot be spawned fresh from the palette.
+// Case-insensitive lookup: the file format and GraphCompiler.cs both accept mixed case ("ConstFloat"
+// in the fixture, "constfloat" in the C# switch). Returns nullptr for an unknown type -- the node
+// still draws from its own recorded pins (GraphEditorGeometry.hpp), just can't be spawned fresh.
 inline const GraphNodeDesc* findGraphNodeDesc(const std::string& typeId) {
     for (const GraphNodeDesc& d : graphNodeCatalog()) {
         if (detail::ciEquals(d.typeId, typeId)) return &d;
@@ -1332,17 +1046,15 @@ inline const GraphNodeDesc* findGraphNodeDesc(const std::string& typeId) {
 
 // The same lookup, but preferring an entry that serves `domain`.
 //
-// SIXTEEN NAMES ARE IN BOTH VOCABULARIES -- Add, Multiply, Lerp, Saturate, Sin and the rest -- and
-// they are NOT the same node: the gameplay Add takes two scalars because PinType has no vector
-// types at all, while the material one takes two float3s. Resolving by name alone therefore gives a
-// material graph the scalar shape, and an author dropping Add into a material graph gets a node
-// whose pins do not fit anything around them. This is what the overload exists for.
+// SIXTEEN NAMES ARE IN BOTH VOCABULARIES (Add, Multiply, Lerp, Saturate, Sin, ...) and are NOT the
+// same node: gameplay's Add takes two scalars (no vector PinType), the material one two float3s.
+// Resolving by name alone would give a material graph the scalar shape, with pins that don't fit
+// anything around them -- this overload exists to avoid that.
 //
-// FALLS BACK TO THE PLAIN LOOKUP rather than returning null, deliberately. A node type that only
-// one domain declares is still the right answer for the other: an OLDER graph naming a type this
-// build has since moved between domains, or a gameplay-only node a material author is looking at in
-// a file someone hand-edited, should still draw with the pins the catalog knows rather than lose
-// them. Refusing here would turn a cosmetic mismatch into a node that cannot be drawn at all.
+// FALLS BACK TO THE PLAIN LOOKUP rather than null: a type only one domain declares is still the
+// right answer for the other (an older graph naming a type since moved between domains, or a
+// hand-edited file's gameplay-only node) -- refusing would turn a cosmetic mismatch into a node that
+// can't be drawn at all.
 inline const GraphNodeDesc* findGraphNodeDescIn(const std::string& typeId, GraphNodeDomain domain) {
     for (const GraphNodeDesc& d : graphNodeCatalog()) {
         if (detail::ciEquals(d.typeId, typeId) && (d.domain & domain) != 0u) return &d;
@@ -1352,11 +1064,9 @@ inline const GraphNodeDesc* findGraphNodeDescIn(const std::string& typeId, Graph
 
 // ---- searching the palette ---------------------------------------------------------------------
 //
-// WHY A SEARCH EXISTS AT ALL. This catalog holds 240 node types across 23 categories, and the only
-// way to add one was a right-click menu with a submenu per category and no filter. Finding `VecAdd`
-// meant knowing it is filed under Vector rather than Math; finding `SetFieldVec3` meant knowing it is
-// Scene rather than Transform. A palette you can only use if you already know where everything is
-// is a palette for the person who wrote it.
+// WHY A SEARCH EXISTS: this catalog holds 240 node types across 23 categories, previously reachable
+// only through a right-click submenu-per-category with no filter (finding `VecAdd` meant knowing
+// it's filed under Vector, not Math). A palette usable only by whoever already knows the layout.
 //
 // HERE RATHER THAN IN THE POPUP, so it can be tested with no ImGui context -- the same reason
 // GraphEditor.cpp keeps addNodeFromCatalog separate from the menu item that calls it.
@@ -1380,15 +1090,14 @@ inline usize ciFind(std::string_view hay, std::string_view needle) {
 
 // Palette rows in `domain` matching `query`, best first, at most `limit` of them.
 //
-// THE RANKING IS THE WHOLE POINT and it is three tiers, because a flat substring match puts
-// `SetFieldVec3` above `Add` when you type "add":
+// THE RANKING IS THREE TIERS, because a flat substring match puts `SetFieldVec3` above `Add` for "add":
 //   0  the display name STARTS with the query        -- "add" -> Add, AddChild
 //   1  the display name contains it                  -- "add" -> VecAdd
 //   2  only the type id or the category contains it   -- "vector" -> every Vector row
-// Ties keep catalog order, which groups a family together rather than shuffling it.
+// Ties keep catalog order, grouping a family rather than shuffling it.
 //
-// An empty query returns nothing: the caller shows its category menus instead, and a search box that
-// answers "everything" to an empty box would just be the catalog with extra steps.
+// An empty query returns nothing rather than "everything": the caller shows category menus instead,
+// and "everything" would just be the catalog with extra steps.
 inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view query,
                                                             GraphNodeDomain domain,
                                                             usize limit = 40) {
@@ -1398,9 +1107,8 @@ inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view que
     std::vector<std::pair<int, const GraphNodeDesc*>> hits;
     for (const GraphNodeDesc& d : graphNodeCatalog()) {
         if ((d.domain & domain) == 0u) continue;
-        // Function rows are excluded for the reason the category menu excludes them: they are created
-        // by the Functions panel, which knows which function they belong to, and a bare one has no
-        // pins and no owner.
+        // Function rows are excluded for the reason the category menu excludes them: the Functions
+        // panel creates them knowing their owner; a bare one has no pins and no owner.
         if (d.category == "Function") continue;
 
         const usize inName = detail::ciFind(d.displayName, query);
@@ -1421,9 +1129,8 @@ inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view que
     return out;
 }
 
-// How many rows `graphPaletteSearch` would return with no limit -- so a capped list can say how many
-// it is not showing instead of silently ending. A truncated list that looks complete is the reason
-// this is reported rather than assumed.
+// How many rows `graphPaletteSearch` would return with no limit -- so a capped list can report how
+// many it's not showing, instead of silently ending as if it were complete.
 inline usize graphPaletteSearchCount(std::string_view query, GraphNodeDomain domain) {
     return graphPaletteSearch(query, domain, static_cast<usize>(-1)).size();
 }

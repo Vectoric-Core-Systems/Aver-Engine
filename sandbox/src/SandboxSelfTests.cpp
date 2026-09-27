@@ -1501,18 +1501,16 @@ void SandboxApp::runClearShaderCache() {
     const auto r = rhi::sweepShaderCache(dir, 0);
     AVER_INFO("[shader-cache] cleared {} blob(s), {:.1f} MB freed", r.filesRemoved,
               static_cast<f64>(r.bytesRemoved) / (1024.0 * 1024.0));
-    // Named because it is the reassurance that matters: the cache lives under the user's own
-    // data directory, and the sweeper touches only .dxil, so anything else there is still there.
+    // Reassurance: the cache lives under the user's own data dir, and the sweeper touches only .dxil.
     AVER_INFO("[shader-cache] only .dxil blobs were touched; the shaders recompile on next launch");
 }
 
 void SandboxApp::runValidateGraph() {
-    // scripts_ is a scripting::ScriptHost, and that TYPE is declared `#if AVER_MODULE_SCRIPTING` in
-    // SandboxApp.hpp -- there is no member to call graphValidateAvailable/graphValidate on at all in
-    // a scripting-off tree, unlike AVER_WITH_IMGUI above, which this whole function already sits
-    // inside and which proves nothing about AVER_MODULE_SCRIPTING (module-matrix.ps1's scripting-off
-    // row leaves the UI on and only this module off). The function's only reason to exist is to
-    // drive the bridge, so the guard covers the body rather than one call inside it.
+    // scripts_ is a scripting::ScriptHost, typed `#if AVER_MODULE_SCRIPTING` (SandboxApp.hpp) -- no
+    // member (graphValidateAvailable/graphValidate) exists to call in a scripting-off tree, and the
+    // AVER_WITH_IMGUI this function already sits inside proves nothing about it (module-matrix.ps1's
+    // scripting-off row leaves the UI on, only this module off). The guard covers the whole body
+    // since driving the bridge is this function's only job.
 #if AVER_MODULE_SCRIPTING
     if (!scripts_.graphValidateAvailable()) {
         AVER_ERROR("[validate-graph] the staged bridge exports no GraphValidate");
@@ -1562,8 +1560,7 @@ void SandboxApp::runRenameRepointTest() {
     // A real reference, twice, in both separator styles.
     writeFileTextAtomic(referrer.string(),
                         "MESH RepointTmp/Cube.ocmesh\nMESH RepointTmp\\Cube.ocmesh\n");
-    // THE NEAR MISS: a longer folder ending in the same segment. Anchoring must leave this alone,
-    // and it is the file whose survival proves the whole exercise is safe.
+    // THE NEAR MISS: a longer folder ending in the same segment; anchoring must leave it alone -- its survival is the real test.
     const std::string nearMissText = "MESH XRepointTmp/Cube.ocmesh\nMESH RepointTmp/Cube.ocmesh2\n";
     writeFileTextAtomic(nearMiss.string(), nearMissText);
 
@@ -1630,8 +1627,7 @@ void SandboxApp::runSaveDirtyTest() {
     redo();
     check(levelHasUnsavedEdits(), "redoing away from it is dirty again");
 
-    // Save, then undo PAST the save point: the document no longer matches the file, even though
-    // the stack is shorter than it was when saved. Depth alone cannot tell this from clean.
+    // Undo PAST the save point is dirty even though the stack is shorter than at save time; depth alone cannot tell this from clean.
     markLevelSaved();
     undo();
     check(levelHasUnsavedEdits(), "undoing PAST the save point is dirty, not clean");
@@ -1645,13 +1641,10 @@ void SandboxApp::runSaveDirtyTest() {
     markLevelUnsaved();
     check(levelHasUnsavedEdits(), "recovered content reports unsaved even with an empty history");
 
-    // AN EDIT WITH NO UNDO COMMAND MUST STILL BE DIRTY, and this is the case that was silently
-    // wrong: the Details panel's sun/fog/sky/clouds writes, Add Component and the emitter's
-    // effect assignment all push no EditCmd, and levelHasUnsavedEdits() is driven by the undo
-    // serial alone. So changing the sun angle and closing the editor prompted nothing, autosaved
-    // nothing, and lost the change. Asserted through markLevelUnsaved rather than by driving the
-    // panel, because the panel needs ImGui state a headless run does not have -- what is being
-    // pinned is the contract those call sites now rely on.
+    // AN EDIT WITH NO UNDO COMMAND MUST STILL BE DIRTY: sun/fog/sky/clouds, Add Component and the
+    // emitter's effect assignment push no EditCmd, so levelHasUnsavedEdits() (driven by the undo
+    // serial alone) missed them, silently losing changes. Driven via markLevelUnsaved -- the panel
+    // needs ImGui state a headless run lacks; this pins the contract those call sites rely on.
     undoStack_.clear();
     redoStack_.clear();
     markLevelSaved();
@@ -1678,8 +1671,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 #if AVER_MODULE_SCENE
     scene::World& w = scene::World::instance();
     scene::Entity a = w.create("msA"), b = w.create("msB"), c = w.create("msC");
-    // A fourth, deliberately never added to the set: staleness is about the anchor landing
-    // OUTSIDE the selection, and pointing it at a member is correctly not stale.
+    // A fourth, never added to the set: staleness is about the anchor landing OUTSIDE the selection.
     scene::Entity d = w.create("msD");
 
     multiSetSingle(a);
@@ -1702,16 +1694,13 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
     check(selectedEntities().size() == 3, "shift+click takes the whole range in DRAWN order");
     check(selEntity_ == a, "and the anchor stays put so a second shift re-ranges from it");
 
-    // Pointing the anchor at something ALREADY selected is an ordinary act -- the right-click
-    // menu does it -- and must NOT collapse the set. Asserted because getting this wrong is the
-    // easy over-correction, and it would make right-clicking one of five selected rows silently
-    // drop the other four.
+    // Pointing the anchor at something already selected (e.g. right-click) must NOT collapse the
+    // set -- the easy over-correction, which would silently drop the other 4 of a 5-row selection.
     sel_ = kSelScene; selEntity_ = b;
     check(!multiStale(), "moving the anchor WITHIN the set is not stale");
     check(selectedEntities().size() == 3, "and the set survives it");
 
-    // THE ONE THAT MATTERS. Simulate any of the ~40 sites that assign the anchor on their own --
-    // a viewport pick, an undo, a paste, a spawn -- all of which mean "this one thing now".
+    // THE ONE THAT MATTERS: simulates any of the ~40 sites that assign the anchor directly (pick, undo, paste, spawn), all meaning "this one thing now".
     sel_ = kSelScene; selEntity_ = d;
     check(multiStale(), "an anchor assigned OUTSIDE the set marks it stale");
     check(selectedEntities().size() == 1 && selectedEntities()[0] == d,
@@ -1726,12 +1715,9 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
     check(selectedEntities().size() == 1, "a destroyed entity leaves the reported selection");
 
     // ---- UNDOING A MULTI-MOVE RETURNS THE WHOLE SET, NOT JUST THE ANCHOR -------------------
-    //
-    // THE BUG THIS PINS. The gizmo moved every non-anchor entity with a bare setLocalTransform
-    // and recorded nothing, while endTransformEdit pushed one command keyed on selEntity_. Drag
-    // twenty props, Ctrl+Z, and nineteen stayed dragged -- silent, unrepairable scene damage on
-    // an everyday gesture. Asserting the ANCHOR came back would have passed the whole time; the
-    // assertion has to be about the others, which is why it reads them by name below.
+    // Bug pinned: the gizmo moved non-anchor entities via a bare setLocalTransform (unrecorded)
+    // while endTransformEdit pushed one command keyed on selEntity_ -- drag 20 props, Ctrl+Z, and
+    // 19 stayed dragged. Assert the OTHERS return, not just the anchor (that alone would have passed).
     {
         scene::Entity m0 = w.create("mvA"), m1 = w.create("mvB"), m2 = w.create("mvC");
         auto place = [&](scene::Entity e, f32 x) {
@@ -1745,8 +1731,8 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         sel_ = kSelScene; selEntity_ = m0;
 
         check(beginTransformEdit(), "a multi-selection opens a transform gesture");
-        // Move the anchor by hand, then the rest exactly as the gizmo does -- through the same
-        // shared helper, so this exercises the real path rather than a copy of it.
+        // Move the anchor by hand, then the rest through the same shared helper the gizmo uses --
+        // the real path, not a copy of it.
         const Vec3 delta{0.0f, 0.0f, 500.0f};
         Transform at = w.localTransform(m0); at.position += delta; w.setLocalTransform(m0, at);
         forEachMultiMoved([&](scene::Entity e, const Transform& xf) {
@@ -1788,9 +1774,8 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         check(selEntity_ == s0,
               "and anchors on the FIRST row, so a following shift-click ranges downward");
 
-        // Duplicate used to read selEntity_ alone: five selected props, one copy. Counting the
-        // WORLD is what catches that -- asserting the selection changed would not, because the
-        // single-entity path also reselects.
+        // Duplicate used to read selEntity_ alone (5 selected, 1 copy). Count the WORLD to catch
+        // that -- asserting the selection changed would not, since the single-entity path also reselects.
         const usize beforeCount = w.count();
         duplicateSelection();
         check(w.count() == beforeCount + 3,
@@ -1805,11 +1790,9 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
     }
 
     // ---- Ctrl+C / Ctrl+V take the whole set too, and do not double-copy a subtree -----------
-    //
-    // Duplicate was fixed for the set; Copy was not, and the two are separate verbs with
-    // separate code. Copy read the anchor alone and the clipboard could physically hold one
-    // entity, so Ctrl+C on five props and Ctrl+V produced ONE -- silently, because the paste
-    // looked like it worked.
+    // Copy is separate code from Duplicate and was not fixed with it: it read the anchor alone and
+    // the clipboard could physically hold only one entity, so Ctrl+C on five props then Ctrl+V
+    // silently produced ONE -- the paste looked like it had worked.
     {
         scene::Entity c0 = w.create("cpA"), c1 = w.create("cpB"), c2 = w.create("cpC");
         multiClear();
@@ -1817,8 +1800,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         multiSetSingle(c0); multiToggle(c1); multiToggle(c2);
         sel_ = kSelScene; selEntity_ = c0;
 
-        // COUNTING THE WORLD is what catches an anchor-only copy: asserting the clipboard is
-        // non-empty would pass on the broken version too.
+        // Counting the WORLD catches an anchor-only copy -- a non-empty-clipboard assertion would pass on the broken version too.
         const usize beforeCopy = w.count();
         copySelection();
         pasteClipboard();
@@ -1831,10 +1813,9 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         sel_ = -1; selEntity_ = scene::kInvalidEntity;
         undoStack_.clear(); redoStack_.clear();
 
-        // THE ANCESTOR-SKIP CASE, which is the one a naive loop gets wrong. A parent and its own
-        // child both selected must paste TWO entities, not three: captureSubtree already carries
-        // the child along inside the parent, so keeping the child as its own clipboard entry
-        // would paste it twice -- once correctly parented, once orphaned beside it.
+        // THE ANCESTOR-SKIP CASE a naive loop gets wrong: a selected parent+child pastes as TWO,
+        // not three -- captureSubtree already carries the child, so a separate clipboard entry
+        // would double-paste it (once parented, once orphaned).
         scene::Entity par = w.create("cpParent");
         scene::Entity kid = w.create("cpChild", par, Transform{});
         w.flush();
@@ -1862,13 +1843,9 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 }
 
 void SandboxApp::runGraphHitsTest() {
-    // Every failure branch and every assertion below reaches through scripts_ (scripting::ScriptHost,
-    // graphLoad/graphTick/graphNodeHits/graphUnload), and that member is declared
-    // `#if AVER_MODULE_SCRIPTING` in SandboxApp.hpp -- unlike the AVER_WITH_IMGUI this whole function
-    // already sits inside (which proves nothing about AVER_MODULE_SCRIPTING; module-matrix.ps1's
-    // scripting-off row leaves the UI on), a scripting-off tree has no ScriptHost to call any of
-    // this on at all. The whole function is meaningless without it, so the guard covers the
-    // function rather than each call, same as runValidateGraph just above.
+    // scripts_ is typed `#if AVER_MODULE_SCRIPTING` (SandboxApp.hpp); a scripting-off tree has no
+    // ScriptHost to call graphLoad/graphTick/graphNodeHits/graphUnload on. Guard covers the whole
+    // function, same reasoning as runValidateGraph above.
 #if AVER_MODULE_SCRIPTING
     int failures = 0;
     auto check = [&](bool cond, const char* what) {
@@ -1900,9 +1877,8 @@ void SandboxApp::runGraphHitsTest() {
     constexpr i32 kEnt = 424242;   // an id no scene entity here uses; graphLoad only keys a map by it
     std::vector<std::pair<std::string, f32>> hits;
 
-    // DISARMED FIRST, and this is the assertion that would catch "it records unconditionally":
-    // the instrumentation call is in the IL whether or not anyone is looking, so what must be
-    // true is that it stores nothing.
+    // DISARMED FIRST: catches "records unconditionally" -- the instrumentation call is in the IL
+    // regardless, so what must be true is that it stores nothing.
     scripts_.graphSetHitRecording(false);
     check(scripts_.graphLoad(kEnt, graphHitsTestPath_), "the graph loads onto an entity");
     scripts_.graphTick(kEnt, 0.016f);
@@ -1917,12 +1893,11 @@ void SandboxApp::runGraphHitsTest() {
     for (const auto& h : hits) if (h.second < 0.0f || h.second > 5.0f) aged = false;
     check(aged, "and every reported age is a plausible number of seconds, so the payload parsed");
 
-    // THE LAST ENTRY MUST SURVIVE THE ROUND TRIP, and this assertion exists because it did not.
-    // GraphGetHits truncates the payload at a separator so a node id is never cut in half -- and
-    // the first version did that UNCONDITIONALLY, so a payload that fitted perfectly still lost
-    // its final entry. The managed unit tests cannot see it (they call CollectNodeHits directly
-    // and never cross the ABI), and the symptom was a node that provably ran -- it printed -- and
-    // never lit up. Any probe graph reaching here has at least three exec nodes on its chain.
+    // THE LAST ENTRY MUST SURVIVE THE ROUND TRIP: GraphGetHits truncates at a separator so an id
+    // is never cut in half, but the first version did this UNCONDITIONALLY, silently dropping a
+    // payload's final entry. Managed unit tests can't see it (they call CollectNodeHits directly,
+    // never crossing the ABI); the symptom was a node that provably ran (it printed) but never lit
+    // up. Any probe graph reaching here has at least three exec nodes.
     check(hits.size() >= 3,
           "every node on the chain survives marshalling, including the LAST one");
     bool named = !hits.empty();
@@ -1930,7 +1905,7 @@ void SandboxApp::runGraphHitsTest() {
     check(named, "and no entry came back with an empty node id, so nothing was cut mid-entry");
     for (const auto& h : hits) AVER_INFO("[graph-hits-test]   ran: {} ({:.3f}s ago)", h.first, h.second);
 
-    // A DIFFERENT NAME MUST REPORT NOTHING -- the filter is what stops one canvas lighting another
+    // A DIFFERENT NAME MUST REPORT NOTHING: the filter is what stops one canvas lighting another
     // graph's nodes, and it lives on the managed side, so it has to be checked from here too.
     scripts_.graphNodeHits(name + "_NotThisOne", 5.0f, hits);
     check(hits.empty(), "asking for a different graph name reports nothing");
@@ -1963,11 +1938,10 @@ void SandboxApp::runAssetAssignTest() {
         const u64 meshId = fnv1a64(std::string_view("Meshes/Pick.ocmesh"));
         markLevelSaved();
         check(!levelHasUnsavedEdits(), "the level starts clean");
-        // CLEARED FIRST, OR THE dirty ASSERTION BELOW IS VACUOUS. CMeshRenderer::dirty defaults
-        // to 1, so a fresh component already satisfies it -- the first draft of this test passed
-        // with the flag deliberately removed from assignMeshId, which is the exact shape of
-        // assertion this codebase has been burned by before. Zeroing it is what makes the check
-        // observe the assignment rather than the default.
+        // CLEARED FIRST, or the dirty assertion below is vacuous: CMeshRenderer::dirty defaults to
+        // 1, so a fresh component already satisfies it (the first draft passed with the flag
+        // removed from assignMeshId -- the exact assertion shape this codebase has been burned by
+        // before). Zeroing it makes the check observe the assignment, not the default.
         mr->dirty = 0;
         check(assignMeshId(e, meshId), "assignMeshId accepts an entity with a mesh renderer");
         check(mr->mesh == meshId, "the picked mesh id reaches the field unchanged");
@@ -1977,8 +1951,7 @@ void SandboxApp::runAssetAssignTest() {
               "the level is dirty afterwards (these writes have no EditCmd, so this is the only "
               "thing standing between the edit and silent loss on close)");
 
-        // A MATERIAL IS A NAME TOKEN. Interning the same name twice must give the same token, and
-        // that token -- not a hash of anything -- is what belongs in the field.
+        // A MATERIAL IS A NAME TOKEN: interning the same name twice gives the same token, and that token -- not a hash -- belongs in the field.
         const i32 token = aver_scene_material(0, "M_PickTest");
         check(token != 0, "a surface name interns to a non-zero token");
         check(aver_scene_material(0, "M_PickTest") == token, "and interning is stable");
@@ -1991,8 +1964,7 @@ void SandboxApp::runAssetAssignTest() {
         check(levelHasUnsavedEdits(), "and it marks the level dirty too");
     }
 
-    // An entity with no mesh renderer must be refused rather than silently doing nothing to a
-    // component that is not there.
+    // An entity with no mesh renderer must be refused, not silently no-op'd on a component that isn't there.
     const scene::Entity bare = w.create("noRenderer");
     check(!assignMeshId(bare, 1234), "assignMeshId refuses an entity with no mesh renderer");
     check(!assignMaterialToken(bare, 1), "assignMaterialToken refuses it too");
@@ -2002,11 +1974,10 @@ void SandboxApp::runAssetAssignTest() {
     w.addComponent(pem, scene::kComponentParticleEmitter);
     if (auto* pe = w.component<scene::CParticleEmitter>(pem, scene::kComponentParticleEmitter)) {
         *pe = scene::CParticleEmitter{};
-        // THE EXTENSION GATE, which the shared helper owns so the drop target and the picker
-        // cannot disagree about it.
-        // A RELATIVE PATH, because SeparationTest forbids an absolute one anywhere in engine
-        // source and was right to fail this test's first draft. The extension gate runs before
-        // any path resolution, so nothing here needs a real location to exercise it.
+        // THE EXTENSION GATE is owned by the shared helper, so the drop target and picker can't
+        // disagree. A RELATIVE PATH: SeparationTest forbids an absolute one in engine source
+        // (caught this test's first draft); the gate runs before any path resolution, so no real
+        // location is needed to exercise it.
         check(!assignParticleEffect(pem, "Meshes/Thing.ocmesh"),
               "assignParticleEffect refuses anything that is not a .ocparticle");
         check(pe->effect == 0, "and leaves the field alone when it refuses");
@@ -2028,11 +1999,12 @@ void SandboxApp::runUndoTest(Engine& eng) {
 #if AVER_MODULE_SCENE
     {
         scene::World& w = scene::World::instance();
-        // flush() is what actually retires a destroy() and makes count()/valid() see it: World.cpp
-        // destroy() only sets a pending bit, and the slot stays "live" until the next flush() runs
-        // (also why undoing the SAME destroy still works: recreateFrom() just creates a new one).
-        // The normal loop calls flush() once a frame; this test crams several destroys into ONE
-        // frame, so it calls flush() itself after each to see the same eventually-consistent state a human clicking Delete across real frames would.
+        // flush() retires a destroy() and makes count()/valid() see it: World.cpp's destroy() only
+        // sets a pending bit and the slot stays "live" until the next flush() runs (also why
+        // undoing the SAME destroy still works -- recreateFrom() just creates a new one). The
+        // normal loop flushes once a frame; this test crams several destroys into ONE frame, so it
+        // flushes after each to see the same eventually-consistent state a human clicking Delete
+        // across real frames would.
         const u32 base = w.count();
         hideEditorScene_ = true;   // forces spawnCube()'s scene-entity branch, see its own `if`
 
@@ -2041,10 +2013,9 @@ void SandboxApp::runUndoTest(Engine& eng) {
         const scene::Entity a1 = selEntity_;
         check(sel_ == kSelScene && w.valid(a1) && w.count() == base + 1, "spawnCube creates one scene entity");
 
-        // A custom object id, deliberately NOT the fnv1a64(asset name) a fresh create() assigns
-        // on its own -- two entities sharing an asset name naturally share a default objectId.
-        // Only a CUSTOM value distinguishes "this id was deliberately carried over" (undo/redo)
-        // from "whatever a fresh create() computes" (paste/duplicate), so the test forces it into being observable.
+        // A custom object id, not the fnv1a64(asset name) a fresh create() assigns (two entities
+        // sharing an asset name would share that default) -- only a custom value distinguishes
+        // "carried over" (undo/redo) from "freshly computed" (paste/duplicate).
         const u64 customId = 0x00A5EA55u;
         w.setObjectId(a1, customId);
         check(w.objectId(a1) == customId, "setObjectId sets the custom id the rest of this phase checks for");
@@ -2089,11 +2060,8 @@ void SandboxApp::runUndoTest(Engine& eng) {
     }
 
     // ---- deleting a PARENT, and getting its children back ------------------------------------
-    //
-    // World::destroy retires the whole subtree, so a Destroy command carrying one snapshot could
-    // only ever restore one entity: parent a lamp to a table, delete the table, Ctrl+Z, and the
-    // table came back alone. That is data loss and it became reachable the moment a level file
-    // could express a hierarchy.
+    // World::destroy retires the whole subtree; a Destroy command with one snapshot could only
+    // restore one entity -- delete a table with a lamp on it, Ctrl+Z, and the table came back alone.
     {
         scene::World& w = scene::World::instance();
         const u32 base = w.count();
@@ -2107,17 +2075,15 @@ void SandboxApp::runUndoTest(Engine& eng) {
         const scene::Entity grand = selEntity_;
         check(w.count() == base + 3, "three entities for the hierarchy phase");
 
-        // keepWorld = false: the local transform IS the parent-relative one, matching what a
-        // level file's CHILD record stores and what LevelInstance applies on load.
+        // keepWorld = false: the local transform IS the parent-relative one, matching a level file's CHILD record and what LevelInstance applies on load.
         check(w.setParent(child, parent, false), "the child accepts the parent");
         check(w.setParent(grand, child, false),  "and the grandchild accepts the child");
         check(w.parent(child) == parent && w.parent(grand) == child, "the chain is two deep");
 
         // ---- the gizmo's frame ----------------------------------------------------------
-        //
         // selectedXform/setSelectedXform used to return CLocal verbatim while the gizmo draws at
-        // the returned position and drags it by a world-space delta -- so a child of an entity
-        // 5000 cm out drew its manipulator 50 m from its own mesh.
+        // the returned position and drags by a world-space delta -- a child 5000 cm out drew its
+        // manipulator 50 m from its own mesh.
         {
             Transform pxf; pxf.position = Vec3{5000.0f, 0.0f, 0.0f};
             w.setLocalTransform(parent, pxf);
@@ -2130,8 +2096,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(std::fabs(gx.pos.x - 5000.0f) < 0.01f && std::fabs(gx.pos.z - 90.0f) < 0.01f,
                   "and it is WORLD (5000,0,90), not the local (0,0,90) the gizmo would have drawn at");
 
-            // THE ROUND TRIP HAS TO BE EXACT, or every selection would drift a little each time
-            // the panel wrote back a value it had just read.
+            // THE ROUND TRIP HAS TO BE EXACT, or every selection drifts a little each time the panel writes back a value it just read.
             setSelectedXform(gx);
             const auto* back = w.component<scene::CLocal>(child, scene::kComponentLocal);
             check(back && std::fabs(back->xf.position.x) < 0.01f
@@ -2149,12 +2114,10 @@ void SandboxApp::runUndoTest(Engine& eng) {
         }
 
         // ---- undo of a TRANSFORM on a child ---------------------------------------------
-        //
-        // endTransformEdit records before/after through selectedXform, which is WORLD, and
-        // applyXformTo wrote them straight into CLocal. On a root the two frames coincide and
-        // nothing shows; on a child, undo moved the object to its own world coordinates read as
-        // an offset from its parent. This is the case the earlier hierarchy phase did not reach,
-        // because it exercised selectedXform directly rather than the Transform COMMAND.
+        // endTransformEdit records before/after via selectedXform (WORLD), but applyXformTo
+        // writes straight into CLocal -- fine on a root, but on a child undo moved it by its own
+        // world coords read as a parent-relative offset. Unreached above, which drove
+        // selectedXform directly rather than this Transform COMMAND.
         {
             Transform pxf; pxf.position = Vec3{5000.0f, 0.0f, 0.0f};
             w.setLocalTransform(parent, pxf);
@@ -2189,10 +2152,8 @@ void SandboxApp::runUndoTest(Engine& eng) {
         }
 
         // ---- undo of DELETING A CHILD keeps it attached ---------------------------------
-        //
-        // The subtree capture restores everything BELOW the deleted entity. Nothing recorded
-        // what was ABOVE it, so a deleted child came back as a root -- and, since its transform
-        // is parent-relative, at that offset from the world origin instead of from its parent.
+        // Subtree capture restores everything BELOW the deleted entity; nothing recorded what was
+        // ABOVE it, so a deleted child came back as a root, offset from world origin instead of its parent.
         {
             sel_ = kSelScene; selEntity_ = child;
             deleteSelection();
@@ -2211,18 +2172,13 @@ void SandboxApp::runUndoTest(Engine& eng) {
         }
 
         // ---- Duplicate and Paste take the CHILDREN with them ----------------------------
-        //
-        // copySelection/duplicateSelection described ONE entity and spawned ONE entity, so
-        // duplicating a table with a lamp on it produced a bare table -- and the paste looked
-        // like it had worked, which is what made it worth a test rather than a glance. Delete
-        // had carried its subtree since the hierarchy landed; these two never did.
-        //
-        // COUNTED, NOT INSPECTED, deliberately: the depth-2 chain below means a copy that took
-        // only the direct children would come out one entity short, which counting catches and
-        // "does it have a child" would not.
+        // copySelection/duplicateSelection described and spawned ONE entity, so duplicating a
+        // table with a lamp on it produced a bare table that looked like it worked. Delete
+        // already carried its subtree; these two never did. Counted, not inspected: the depth-2
+        // chain below would leave a direct-children-only copy one entity short, which counting
+        // catches and "does it have a child" would not.
         {
-            // A fresh depth-2 chain of its own, so this phase cannot be perturbed by, or
-            // perturb, the parent/child/grand fixture the blocks above are still using.
+            // A fresh depth-2 chain, so this phase cannot perturb, or be perturbed by, the parent/child/grand fixture above.
             const u32 dbase = w.count();
             spawnCube(eng); w.flush(); const scene::Entity dp = selEntity_;
             spawnCube(eng); w.flush(); const scene::Entity dc = selEntity_;
@@ -2245,8 +2201,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(dupChild != scene::kInvalidEntity, "the copy has a child");
             check(dupChild != scene::kInvalidEntity && w.firstChild(dupChild) != scene::kInvalidEntity,
                   "and the child has one too, so the whole depth-2 chain came across");
-            // The copy is its own object, not an alias: rebinding the source's EditId to the
-            // copy would make the undo below delete the ORIGINAL.
+            // The copy is its own object, not an alias: rebinding the source's EditId to the copy would make the undo below delete the ORIGINAL.
             const auto* dcl = dupChild != scene::kInvalidEntity
                 ? w.component<scene::CLocal>(dupChild, scene::kComponentLocal) : nullptr;
             check(dcl && std::fabs(dcl->xf.position.z - 120.0f) < 0.01f,
@@ -2278,30 +2233,24 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(w.count() == dbase + 3 && w.valid(dp) && w.valid(dc) && w.valid(dg),
                   "undo of a paste removes the copy and leaves the original chain");
 
-            // THE CLIPBOARD SURVIVES ITS OWN PASTE. Pasting twice is ordinary, and the second
-            // one must produce a hierarchy too rather than a bare root.
+            // THE CLIPBOARD SURVIVES ITS OWN PASTE: pasting twice is ordinary, and must produce a hierarchy too, not a bare root.
             pasteClipboard(); w.flush();
             check(w.count() == dbase + 6, "a SECOND paste from the same clipboard is complete too");
             undo(); w.flush();
 
-            // Leave the phase as it found it, so the reparent block below still counts from a
-            // known base.
+            // Leave the phase as it found it, so the reparent block below still counts from a known base.
             sel_ = kSelScene; selEntity_ = dp; deleteSelection(); w.flush();
             check(w.count() == dbase, "the copy phase cleaned up after itself");
         }
 
         // ---- a material edit is an undoable COMMAND -------------------------------------
-        //
         // materialPanel wrote straight through a MaterialDesc* and called touch(); EditCmd::Kind
         // had no Material case, so nothing was ever pushed. Ctrl+Z after darkening a wall undid
-        // whatever the user did BEFORE the wall and left the wall dark -- the same shape as the
-        // Player Start bug, and worse, because a material is shared: one slider changes every
-        // entity drawing with it.
-        //
-        // THE PANEL ITSELF NEEDS ImGui AND A MOUSE, so what is exercised here is the half that
-        // does not: the command, its two appliers, and the undo/redo stacks it lives on. The
-        // bracketing (one entry per interaction, not per frame) is the panel's own and is
-        // asserted by reading, not by this test -- see materialPanel's comment.
+        // whatever came BEFORE it and left the wall dark -- the same shape as the Player Start bug,
+        // and worse, since a material is shared: one slider changes every entity drawing with it.
+        // The panel needs ImGui and a mouse; this exercises the command, its two appliers, and the
+        // undo/redo stacks -- the panel's own bracketing (one entry per interaction, not per frame)
+        // is asserted by reading it (see materialPanel's comment).
 #if AVER_MODULE_PBR
         {
             pbr::MaterialDesc md;
@@ -2334,15 +2283,13 @@ void SandboxApp::runUndoTest(Engine& eng) {
                 check(afterUndo && std::fabs(afterUndo->roughnessFactor - 0.20f) < 1e-4f
                                 && std::fabs(afterUndo->metallicFactor) < 1e-4f,
                       "undo restores BOTH sliders, not just the last one moved");
-                // The name is identity, not an edited value: restoring a stale one would rename
-                // a material as a side effect of undoing a roughness drag.
+                // The name is identity, not an edited value: restoring a stale one would rename a material as a side effect of undoing a roughness drag.
                 check(afterUndo && afterUndo->name == "M_UndoTestProbe",
                       "and does NOT rewrite the material's name");
 
-                // A SENTINEL BEFORE THE REDO, so the redo assertion can actually fail. Without
-                // it the check reads "roughness is 0.90" -- which is still true if BOTH undo and
-                // redo did nothing, because 0.90 is what the edit left behind. Poking a third
-                // value in first means only a redo that really re-applies can restore it.
+                // A SENTINEL BEFORE THE REDO, or the assertion can't fail: "roughness is 0.90"
+                // would still hold if BOTH undo and redo did nothing. Poking a third value first
+                // means only a real redo restores it.
                 if (pbr::MaterialDesc* poke = pbr::MaterialLibrary::get().mutableDesc(mh))
                     poke->roughnessFactor = 0.55f;
                 redo();
@@ -2360,13 +2307,10 @@ void SandboxApp::runUndoTest(Engine& eng) {
 #endif
 
         // ---- renaming an entity is an undoable COMMAND ---------------------------------
-        //
-        // Nothing anywhere in the editor could rename a placed entity: no F2, no context menu,
-        // no field in Details. entityLabels_ was written at spawn/paste/duplicate/load and never
-        // from anything a person did, so a level of "Cube 1..40" stayed that way.
-        //
-        // THE UI NEEDS ImGui; the command does not. What is exercised here is the half that can
-        // be: renameEntity, its applier, and the stacks.
+        // Nothing could rename a placed entity (no F2, no context menu, no Details field);
+        // entityLabels_ was written only at spawn/paste/duplicate/load, so a level of "Cube 1..40"
+        // stayed that way. The UI needs ImGui; this exercises the half that doesn't: renameEntity,
+        // its applier, and the stacks.
         {
             const u32 rnbase = w.count();
             spawnCube(eng); w.flush();
@@ -2379,8 +2323,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(entityLabels_[static_cast<u32>(re)] == "Doorway", "renameEntity sets the label");
             check(undoStack_.size() == stackBefore + 1, "and puts ONE entry on the undo stack");
 
-            // A rename to the SAME name is not an edit; pushing for it would make Ctrl+Z do
-            // nothing once, visibly.
+            // A rename to the SAME name is not an edit; pushing for it would make Ctrl+Z do nothing once, visibly.
             renameEntity(re, "Doorway");
             check(undoStack_.size() == stackBefore + 1, "renaming to the same name pushes nothing");
 
@@ -2391,13 +2334,11 @@ void SandboxApp::runUndoTest(Engine& eng) {
             redo();
             check(entityLabels_[static_cast<u32>(re)] == "Doorway", "redo re-applies the rename");
 
-            // THE ASSET NAME IS NOT TOUCHED. CName is the placement's asset path -- what
-            // saveLevel writes as the PLACE record and what resolves the mesh -- so a rename
-            // that reached it would repoint the placement at a file that does not exist.
-            // std::string, NOT ==: World::name returns a const char*, so comparing it to a
-            // literal compares POINTERS and is false however equal the text is. The first
-            // version of this assertion did exactly that and failed against a name that was
-            // already correct -- a test that could not pass rather than one that caught a bug.
+            // THE ASSET NAME IS NOT TOUCHED: CName is the placement's asset path (what saveLevel
+            // writes as the PLACE record and what resolves the mesh); a rename reaching it would
+            // repoint the placement at a nonexistent file. Wrapped in std::string, not ==:
+            // World::name returns a const char*, so comparing to a literal compares POINTERS --
+            // the first version did that and could never pass, even against a correct name.
             check(std::string(w.name(re)) == "Meshes/cube.ocmesh",
                   "and the entity's ASSET name is untouched by any of it");
 
@@ -2407,10 +2348,8 @@ void SandboxApp::runUndoTest(Engine& eng) {
         }
 
         // ---- the Outliner's reparent, as a command --------------------------------------
-        //
-        // pushReparent is what a drag-and-drop in the World Outliner calls. Everything below
-        // drives it directly: the drop itself cannot be exercised headlessly (ImGui's drag state
-        // needs a real mouse), but every decision it makes can be.
+        // pushReparent is what a World Outliner drag-and-drop calls. The drop itself can't be
+        // exercised headlessly (ImGui's drag state needs a real mouse), but every decision it makes can be.
         {
             const u32 rbase = w.count();
             spawnCube(eng); w.flush(); const scene::Entity ra = selEntity_;
@@ -2442,16 +2381,13 @@ void SandboxApp::runUndoTest(Engine& eng) {
             redo(); w.flush();
             check(w.parent(rb) == ra, "redo re-parents it");
 
-            // A CYCLE IS REFUSED, and pushes nothing. The UI never offers this target, but the
-            // command has to hold the line on its own -- a refused drop that still lands an undo
-            // entry would let Ctrl+Z 'restore' a state that never existed.
+            // A CYCLE IS REFUSED and pushes nothing. The UI never offers this target, but the
+            // command must hold the line itself, or a refused drop could let Ctrl+Z 'restore' a state that never existed.
             pushReparent(rc, rb);   // rc under rb, so rb's chain is ra -> rb -> rc
             check(w.parent(rc) == rb, "a grandchild attaches");
             const usize beforeCycle = undoStack_.size();
-            // reparentLegality DIRECTLY, because pushReparent alone cannot discriminate: it
-            // also checks setParent's return, and World refuses a cycle on its own. What the
-            // UI's own guard buys is that the target is never OFFERED -- a property only a real
-            // mouse can observe, so this is the closest a headless check can get to it.
+            // reparentLegality DIRECTLY: pushReparent alone can't discriminate (World already
+            // refuses a cycle via setParent). The UI's guard only buys "never offered", observable only with a real mouse.
             check(reparentLegality(ra, rc) == ReparentLegality::SelfOrDescendant,
                   "the Outliner's own legality test calls an ancestor-under-descendant a cycle");
             check(reparentLegality(ra, ra) == ReparentLegality::SelfOrDescendant,
@@ -2469,9 +2405,8 @@ void SandboxApp::runUndoTest(Engine& eng) {
             pushReparent(rc, rb);
             check(undoStack_.size() == beforeCycle, "dropping onto the CURRENT parent adds nothing to the stack");
 
-            // AN OFF-LEVEL ENDPOINT IS REFUSED. saveLevel writes a parent only for entities the
-            // level owns, so this relationship would be gone on the next reload -- the UI shows
-            // a reason, and the command refuses regardless of what the UI did.
+            // AN OFF-LEVEL ENDPOINT IS REFUSED: saveLevel only writes a parent for level-owned
+            // entities (this relationship would vanish on reload); the command refuses regardless of what the UI showed.
             const scene::Entity stray = w.create("stray", scene::kInvalidEntity, Transform{});
             w.flush();
             check(!isLevelOwned(stray), "an entity outside levelEntities_ is not level-owned");
@@ -2505,7 +2440,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
         w.flush();
         check(w.count() == base + 3, "and undo brings all three back, not just the one that was selected");
 
-        // THE RELATIONSHIP, not just the count. Restoring three loose entities where a hierarchy
+        // THE RELATIONSHIP, not just the count: restoring three loose entities where a hierarchy
         // was is the same data loss one step quieter -- every child would silently jump to its
         // parent-relative offset from the world origin.
         const scene::Entity p2 = selEntity_;
@@ -2530,8 +2465,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
         w.flush();
         check(w.count() == base + 3, "and a second undo restores all three again");
 
-        // Leave the world as this phase found it, so the placeholder-object phase below starts
-        // from a clean count the way it always has.
+        // Leave the world as this phase found it, so the placeholder-object phase below starts from a clean count.
         sel_ = kSelScene; selEntity_ = selEntity_;
         deleteSelection();
         w.flush();
@@ -2598,12 +2532,10 @@ void SandboxApp::runKeybindPersistTest(const std::string& mode) {
         check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+C",
               "Edit.Copy starts at its compiled-in default (Ctrl+C)");
 
-        // SELECT ALL EXISTS AS A COMMAND AT ALL -- that is the regression this guards, and it is
-        // not hypothetical. Select All shipped as a menu row whose "Ctrl+A" was a hardcoded hint
-        // STRING with no registry entry and no dispatch behind it, so the menu advertised a key
-        // that did nothing when pressed. Asserting the chord here is what keeps the menu label
-        // (which now reads chordFor, like every other Edit row) and handleManip's dispatch
-        // describing one binding instead of two independently-maintained ones.
+        // SELECT ALL EXISTS AS A COMMAND AT ALL -- not hypothetical: it shipped as a menu row whose
+        // "Ctrl+A" was a hardcoded hint STRING with no registry entry or dispatch, so the key did
+        // nothing when pressed. This keeps the menu label (now reads chordFor) and handleManip's
+        // dispatch describing ONE binding, not two independently-maintained ones.
         check(editor::chordToString(keybinds_.chordFor(CommandId::EditSelectAll)) == "Ctrl+A",
               "Edit.SelectAll exists as a real command and defaults to Ctrl+A");
         check(keybinds_.conflictWith(CommandId::EditSelectAll,
@@ -2629,9 +2561,8 @@ void SandboxApp::runKeybindPersistTest(const std::string& mode) {
         editor::flushEditorPrefs();
         AVER_INFO("[keybind-test] wrote keybind.edit.copy=Ctrl+K to {}", editor::editorPrefsPath());
     } else if (mode == "read") {
-        // loadEditorPreferences() already ran earlier this frame (see prefsLoaded_) and called
-        // keybinds_.loadFromPrefs() -- everything below checks what THAT load produced, in a
-        // process that has never called rebind() at all.
+        // loadEditorPreferences() already ran this frame (see prefsLoaded_) and called
+        // keybinds_.loadFromPrefs() -- everything below checks what THAT load produced, never rebind().
         check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+K",
               "a FRESH process reads Edit.Copy back as Ctrl+K from editor.ini -- the rebind persisted");
         check(editor::chordToString(keybinds_.chordFor(CommandId::EditPaste)) == "Ctrl+V",
@@ -2648,18 +2579,16 @@ void SandboxApp::runKeybindPersistTest(const std::string& mode) {
 #endif
 
 #if AVER_MODULE_SYNAPSE
-// --bake-nav, fired once. Frame 5 rather than frame 0: applyProject's "Loading level" stage
-// during startup is what builds the collision bodies the bake samples -- a bake at frame 0 would
-// find no floor anywhere and write a valid file describing an empty world.
+// --bake-nav, fired once at frame 5, not 0: applyProject's "Loading level" startup stage builds
+// the collision bodies the bake samples -- frame 0 would find no floor and write an empty-world file.
 void SandboxApp::navBakeCheck(Engine& e) {
     if (navLoadPending_) { navLoadPending_ = false; loadNavForLevel(e); }
     if (!navBakeOnStart_ || navBakeDone_) return;
     if (e.time().frame < 5) return;
     navBakeDone_ = true;
-    // PAIRED WITH bakeNavigationNow'S OWN GUARD. It samples scene::World::instance(), so it is
-    // compiled only under AVER_MODULE_SCENE; AVER_MODULE_SYNAPSE above is the grid math and proves
-    // nothing about there being a world. --bake-nav in a scene-less build has nothing to sample, and
-    // says so rather than silently doing nothing.
+    // Paired with bakeNavigationNow's own guard: it samples scene::World::instance(), compiled
+    // only under AVER_MODULE_SCENE (AVER_MODULE_SYNAPSE above is grid math, proves nothing about a
+    // world). A scene-less build has nothing to sample and says so, rather than doing nothing silently.
 #if AVER_MODULE_SCENE
     bakeNavigationNow(e);
 #else
@@ -2670,40 +2599,32 @@ void SandboxApp::navBakeCheck(Engine& e) {
 #endif
 
 // --gpu-timing: print the per-pass GPU breakdown once, near the end of a bounded run.
-// WHY THIS EXISTS: D3D12Device already has a full hierarchical timestamp profiler, but the ONLY
-// caller was the interactive `frametime` command -- a bounded `--frames N` run, how every
-// measurement here is actually taken, got no breakdown, so attribution was answered by ablation,
-// the exact method that already produced a false answer here (a sky march "costing 2.61ms" when a
-// cheaper sky saved only 0.04ms, because the compiler eliminated everything feeding the term).
-// CALLS handleFrameTime RATHER THAN REPRINTING THE TREE: a second copy would be a second thing to
-// keep correct, and this codebase has been bitten by hand-kept mirrors drifting apart.
-// LATE, at maxFrames_ - 2: numbers are averaged over accumulated frames and lag a readback buffer,
-// so frame 0 would only say "supported but no data yet".
+// D3D12Device already has a full hierarchical timestamp profiler, but the only caller was the
+// interactive `frametime` command -- a bounded --frames N run, the only way any measurement here
+// is taken, got no breakdown, so attribution fell back to ablation -- the same method that already
+// gave a false answer here (a sky march "costing 2.61ms" when a cheaper sky saved only 0.04ms,
+// since the compiler eliminated everything feeding the term). Calls handleFrameTime, not a second
+// hand-kept tree (this codebase has been bitten by those drifting apart), LATE at maxFrames_ - 2
+// since numbers average over accumulated frames and lag a readback buffer, or frame 0 would only
+// say "supported but no data yet".
 // --ray-probe <sx> <sy>: report what viewportRay returns for one screen point.
-//
-// pick, handleSculpt, handleFoliage and dropWorldPoint ALL go through that one function and
-// NONE of them is reachable without a mouse, so the editor's entire screen-to-world conversion
-// had no headless witness at all. What it prints is chosen to be checkable rather than merely
-// informative: the origin's distance IN FRONT OF THE EYE along the view axis, which must equal
-// the near plane and was exactly 0 while ro was hardcoded to eye_, and the reprojection of a
-// point on the ray, which must come back to the pixel that was asked for.
-//
-// LATE, on gpuTimingCheck's frame and for the same kind of reason: vpX_/vpW_ and invVP_ are
-// written by the frame that draws the viewport, so probing at attach time reported a 1600x900
-// rect and an identity-ish camera -- self-consistent, reprojecting perfectly, and describing a
-// view nobody was looking at.
+// pick, handleSculpt, handleFoliage and dropWorldPoint all go through that one function, none
+// reachable without a mouse, so screen-to-world conversion had no headless witness. Prints two
+// checkable numbers: the ray origin's distance in front of the eye along the view axis (must
+// equal the near plane; was 0 while ro was hardcoded to eye_) and the reprojection of a ray point
+// (must return the asked-for pixel). LATE, on gpuTimingCheck's frame: vpX_/vpW_/invVP_ are written
+// by the viewport-drawing frame, so probing at attach time reported a 1600x900 rect and an
+// identity-ish camera -- self-consistent, reprojecting perfectly, and describing a view nobody was looking at.
 void SandboxApp::rayProbeCheck(Engine& e) {
     if (!rayProbe_ || maxFrames_ == 0 || rayProbeDone_) return;
     const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
     if (e.time().frame < want) return;
     rayProbeDone_ = true;
-    // viewportRay is declared `#if AVER_WITH_IMGUI` in SandboxApp.hpp (SandboxViewport.cpp defines
-    // it the same way) -- pick/handleSculpt/handleFoliage/dropWorldPoint all go through that one
-    // function, and none of them exist either without the interactive viewport, so a no-ui or
-    // d3d12-off build has no screen-to-world conversion to report on at all. Guarding just this one
-    // call and letting the log below print anyway would silently report a ray that was never
-    // computed (ro/rd left at their zero-init), which is worse than not printing -- so the whole
-    // body is guarded, and the flag is accepted and answered honestly instead.
+    // viewportRay is `#if AVER_WITH_IMGUI` (SandboxApp.hpp/SandboxViewport.cpp); pick/handleSculpt/
+    // handleFoliage/dropWorldPoint don't exist without it either, so a no-ui or d3d12-off build
+    // has no screen-to-world conversion to report. Guarding only the call and printing anyway
+    // would silently report a never-computed ray (ro/rd left zero-init) -- worse than not
+    // printing -- so the whole body is guarded and the flag answered honestly.
 #if AVER_WITH_IMGUI
     Vec3 ro{}, rd{};
     viewportRay(rayProbeX_, rayProbeY_, ro, rd);
@@ -2732,12 +2653,11 @@ void SandboxApp::gpuTimingCheck(Engine& e) {
         if (lvl == LogLevel::Error) AVER_ERROR("[GPU] {}", msg);
         else                        AVER_INFO ("[GPU] {}", msg);
     });
-    // M6: the SAME video-memory snapshot the [RHI.D3D12]/[RHI.Vulkan] init-time line reports
-    // (C-1's rhi::IDevice::videoMemory), printed here too so a --frames capture's log carries a
-    // budget/usage reading from near the END of the run, beside the frame-time breakdown just
-    // above -- not only from device creation, before the run's own allocations exist. `supported`
-    // false (D3D11, a Vulkan device with no VK_EXT_memory_budget, every mock) prints a distinct
-    // sentence rather than a row of zeros a reader could mistake for "nothing in use".
+    // M6: the SAME video-memory snapshot the init-time [RHI.D3D12]/[RHI.Vulkan] line reports
+    // (C-1's rhi::IDevice::videoMemory), printed again here so a --frames log also carries a
+    // reading from near the END of the run, not only from device creation. `supported` false
+    // (D3D11, Vulkan without VK_EXT_memory_budget, every mock) prints a distinct sentence, not a
+    // row of zeros mistakable for "nothing in use".
     const rhi::VideoMemoryInfo vm = e.device() ? e.device()->videoMemory() : rhi::VideoMemoryInfo{};
     if (vm.supported) {
         AVER_INFO("[GPU] video memory: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
@@ -2749,14 +2669,13 @@ void SandboxApp::gpuTimingCheck(Engine& e) {
 }
 
 // --resize-cycle N: resize the real window every N frames during a bounded run.
-// WHY THIS EXISTS: "Resizing the window crashed my GPU" was a report I could not reproduce.
-// Every headless lever (--render-scale, --aversr-cycle) changes the SCENE size through
-// rebuildSceneTargets, a different path from D3D12Device::resize, whose releasePostTargets() does
-// NOT recreate targets in the same call -- handles read 0 for a frame while a binding set still
-// points at the freed texture. Only a real window resize opens that path.
-// SetWindowPos on the HWND, not an engine call: Engine::frameStep syncs to window_->width/height()
-// every frame, so this reproduces the user's exact path. SWP_NOACTIVATE, since a capture run must
-// not steal focus.
+// WHY: "resizing the window crashed my GPU" could not be reproduced via headless levers
+// (--render-scale, --aversr-cycle change the SCENE size through rebuildSceneTargets, a different
+// path from D3D12Device::resize, whose releasePostTargets() does not recreate targets in the same
+// call -- handles read 0 for a frame while a binding set still points at the freed texture). Only
+// a real resize opens that path. SetWindowPos on the HWND, not an engine call, since
+// Engine::frameStep syncs to window_->width/height() every frame; SWP_NOACTIVATE so a capture run
+// doesn't steal focus.
 void SandboxApp::resizeCheck(Engine& e) {
     if (resizeCycle_ == 0 || !e.window()) return;
     const u64 f = e.time().frame;
@@ -2765,8 +2684,7 @@ void SandboxApp::resizeCheck(Engine& e) {
     if (!hwnd) return;
     RECT r{};
     if (!GetWindowRect(hwnd, &r)) return;
-    // Alternate between two sizes rather than growing without bound: a run of any length stays
-    // on screen, and both directions of the transition get exercised.
+    // Alternate between two sizes rather than growing without bound: stays on screen for any run length, and both resize directions get exercised.
     const int w = (r.right - r.left), h = (r.bottom - r.top);
     const bool big = (resizeStep_++ & 1) == 0;
     const int nw = big ? (w - 137) : (w + 137);   // odd numbers on purpose -- an even split can
@@ -2777,11 +2695,11 @@ void SandboxApp::resizeCheck(Engine& e) {
 }
 
 void SandboxApp::captureCheck(Engine& e) {
-    // --luma-sweep (and --firefly-metric, which shares its readback cycle -- see
-    // lumaSweepCheck()) owns the device's single capture slot for the whole run (it requests a
-    // new frame every tick, not once near the end) -- sharing it with the one-shot probe/--shot
-    // logic below would have the two stomp each other's request on whichever frame they land on
-    // the same tick. Not expected to matter to a measurement run, so refuse rather than guess.
+    // --luma-sweep (and --firefly-metric, sharing its cycle -- see lumaSweepCheck()) owns the
+    // device's single capture slot for the whole run (it requests a new frame every tick, not once
+    // near the end); sharing it with the one-shot probe/--shot logic below would have the two
+    // stomp each other's request on a shared frame. Not expected to matter to a measurement run,
+    // but refuse rather than guess.
     if (lumaSweep_ || fireflyMetric_) return;
     const u64 f = e.time().frame;
     const u64 sf = maxFrames_>8?maxFrames_-3:4;
@@ -2821,61 +2739,48 @@ void SandboxApp::captureCheck(Engine& e) {
     }
 }
 
-// --luma-sweep: FRONT D's measurement flag, added to test (rather than assume) whether the GI
-// estimator's output actually inflates while --cam-wobble moves the camera and settles back
-// down once it is still. Logs one [LumaSweep] line per simulated frame with the 3D viewport's
-// MEAN LINEAR LUMINANCE, decoded from the backbuffer. FLAG-ONLY: it reuses the exact
-// requestCapture()/getFrameImage() readback --shot and --probe already call (see captureCheck
-// above) -- no new GPU pass, no new pipeline, nothing added to what the renderer draws. Default
-// off, so a run that never passes --luma-sweep is bit-for-bit the run it always was.
+// --luma-sweep: FRONT D's measurement flag, testing whether the GI estimator's output actually
+// inflates while --cam-wobble moves the camera and settles back once still. Logs one [LumaSweep]
+// line per simulated frame with the 3D viewport's mean linear luminance, decoded from the
+// backbuffer. Flag-only: reuses the exact requestCapture()/getFrameImage() readback --shot and
+// --probe already use (see captureCheck above) -- no new GPU pass or pipeline. Default off: a run
+// without --luma-sweep is bit-for-bit the run it always was.
 //
-// ONE FRAME OF LAG IS INHERENT TO THE CAPTURE API, not a bug here: requestCapture() is serviced
-// inside present(), so a request made while handling frame f is not ready to read back until the
-// NEXT tick. captureCheck()'s probe has the same lag (see aver-capture-frame-offset); this
-// function just pays it every frame instead of once -- read back the PENDING request (frame
-// f-1's image) first, then issue a fresh one for frame f, so the line logged this tick always
-// describes the PREVIOUS tick's frame number.
+// ONE FRAME OF LAG IS INHERENT TO THE CAPTURE API, not a bug: requestCapture() is serviced inside
+// present(), so a request on frame f is not ready until the NEXT tick (captureCheck's probe has
+// the same lag, see aver-capture-frame-offset; that one pays the lag once, this pays it every
+// frame). This function reads back the PENDING request (frame f-1's image) first, then
+// issues a fresh one for frame f, so the logged line always describes the PREVIOUS tick's frame.
 //
-// SUBSAMPLED 4x4 (~170k samples over a 2750x1639 viewport): a mean does not need every pixel, and
-// a full-resolution decode every frame of a multi-hundred-frame sweep is unnecessary cost for a
-// diagnostic whose own CPU/GPU sync (waitForGpu inside present(), see RHI.D3D12/RHI.Vulkan
-// getFrameImage) already makes every sampled frame slower than an unsampled one.
+// SUBSAMPLED 4x4 (~170k samples over a 2750x1639 viewport): a mean doesn't need every pixel, and
+// full-res decode every frame of a multi-hundred-frame sweep is needless -- the diagnostic's own
+// CPU/GPU sync (waitForGpu in present(), see RHI.D3D12/RHI.Vulkan getFrameImage) already makes a
+// sampled frame slower than an unsampled one.
 //
-// sRGB -> linear BEFORE averaging, not after: the estimator's claimed defect is that its
-// contribution to scene RADIANCE grows, and radiance is additive in LINEAR light, not in the
-// gamma-encoded backbuffer. Averaging the raw 0-255 bytes would still trend the same direction
-// but compress the low end relative to the claim being tested.
+// sRGB -> linear BEFORE averaging: the claimed defect is the estimator's contribution to scene
+// radiance growing, and radiance is additive in LINEAR light, not the gamma-encoded backbuffer;
+// averaging raw bytes would still trend the same way but compress the low end.
 //
-// ---- --firefly-metric, ADDED HERE RATHER THAN AS A SECOND READBACK ----
+// ---- --firefly-metric, added here rather than as a second readback ----
+// A REAL ReSTIR GI FIREFLY IS A SPATIAL OUTLIER, NOT A MEAN: four rounds of giMode 1 firefly
+// fixes shipped with nothing that could count one, since meanLinLuma above is blind to a handful
+// of clamped pixels swamped by a multi-million-pixel average. Extends the SAME readback (own
+// flag, so --luma-sweep alone costs nothing extra and its log line is unchanged) to report
+// OUTLIER PIXELS: count and peak of pixels whose linear luminance exceeds a multiple of their
+// LOCAL neighbourhood's -- a sunlit floor is bright over a wide area, a firefly against its own
+// surroundings.
 //
-// A REAL ReSTIR GI FIREFLY IS A SPATIAL OUTLIER, NOT A MEAN: four rounds of fixes to giMode 1's
-// fireflies shipped with nothing that could count one, because meanLinLuma above is exactly
-// blind to them -- a handful of pixels pegged at the clamp are swamped by a multi-million-pixel
-// average. This extends the SAME readback (one getFrameImage, one sRGB->linear decode, gated by
-// its own flag so a run that never passes --firefly-metric costs nothing extra and changes no
-// existing log line) to also report OUTLIER PIXELS: the count and the peak of pixels whose linear
-// luminance exceeds a multiple of their LOCAL neighbourhood's, which is what marks a pixel as a
-// firefly rather than a legitimately bright surface -- a sunlit floor is bright over a wide area,
-// a firefly is bright against its own immediate surroundings.
-//
-// THE GRID IS THE EXISTING STRIDE-4 SUBSAMPLE, reused rather than a second, denser decode: the
-// mean above already visits every 4th pixel in each direction, so storing that same per-sample
-// luminance into a small 2D array is the only added cost -- no new pass over the image.
-//
-// OUTER RING MINUS INNER CORE, not a plain window mean, for the reference each candidate is
-// judged against: the task this metric exists to serve reports CLUSTERS as well as lone pixels,
-// and a plain window mean over a cluster is dragged upward by the very outlier it is meant to
-// judge -- the more of the window the cluster fills, the more it hides itself. Excluding a small
-// inner core (a candidate's own immediate neighbourhood) from its reference means a cluster up to
-// that size cannot inflate the average it is compared to. Ro/Ri below are grid-cell radii,
-// REASONED not measured (no sweep was run to fit them): Ro=3 is the smallest outer radius that
-// still leaves a full ring of reference cells outside a 3x3 (Ri=1) core at every position.
+// Grid reuses the existing stride-4 subsample (storing the mean loop's own samples is the only
+// added cost). Reference is an OUTER RING MINUS INNER CORE, not a plain window mean, since this
+// metric must report CLUSTERS as well as lone pixels -- a plain mean over a cluster is dragged
+// upward by the outlier it judges; excluding the inner core stops a cluster up to that size from
+// inflating its own reference. Ro/Ri are grid-cell radii, REASONED not measured: Ro=3 is the
+// smallest outer radius leaving a full ring outside a 3x3 (Ri=1) core at every position.
 void SandboxApp::lumaSweepCheck(Engine& e) {
     if ((!lumaSweep_ && !fireflyMetric_) || maxFrames_ == 0) return;
-    // STRIDE: only sample every Nth simulation frame. The pending readback from the PREVIOUS
-    // sampled frame is always collected first regardless of phase, since it was already
-    // requested and costs nothing extra to pick up; only the decision to issue a NEW request is
-    // strided, so a stride>1 run also does fewer GPU stalls, not just fewer log lines.
+    // STRIDE: only sample every Nth frame. The pending PREVIOUS-frame readback is always collected
+    // (already requested, free to pick up); only issuing a NEW request is strided -- fewer GPU
+    // stalls too, not just fewer log lines.
     const bool sampleThisFrame = (e.time().frame % (u64)lumaSweepStride_) == 0;
     if (lumaSweepPending_) {
         std::vector<u8> img; u32 iw = 0, ih = 0;
@@ -2888,21 +2793,15 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                 const f32 s = c / 255.0f;
                 return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
             };
-            // gridW/gridH: same stride-4 walk the mean loop below performs, sized only when
-            // --firefly-metric actually needs the samples kept around -- --luma-sweep alone
-            // allocates nothing extra, staying exactly as cheap as before this flag existed.
+            // gridW/gridH: sized only when --firefly-metric needs the samples kept around --
+            // --luma-sweep alone allocates nothing extra, staying as cheap as before this flag existed.
             // ---- STRIDE 1 WHEN HUNTING FIREFLIES, 4 WHEN JUST AVERAGING ----
-            //
-            // A FIREFLY IS OFTEN A SINGLE PIXEL, and a stride-4 walk inspects one pixel in
-            // SIXTEEN -- so any given firefly had about a 1-in-16 chance of being looked at,
-            // which is not a measurement, it is a lottery. That is why the first version of this
-            // metric reported an unchanging count in a scene where fireflies were being reported
-            // by eye: the handful of cells it did sample were large sunlit windows, which are
-            // stable by nature, and the actual outliers fell between its samples.
-            //
-            // --luma-sweep keeps stride 4: a MEAN converges perfectly well on 1/16 of the pixels
-            // and that flag exists to be cheap. The firefly pass is a diagnostic that runs only
-            // when asked, so it pays full resolution to be able to see what it is looking for.
+            // A firefly is often a single pixel; a stride-4 walk inspects 1-in-16, a lottery
+            // rather than a measurement -- the first version of this metric reported an
+            // unchanging count while fireflies were visibly present, because the cells it
+            // sampled were stable sunlit windows and the actual outliers fell between samples.
+            // --luma-sweep keeps stride 4 (a mean converges fine on 1/16 of the pixels, and
+            // stays cheap); the firefly pass runs only when asked, so it pays full resolution.
             const u32 step = fireflyMetric_ ? 1u : 4u;
             const u32 gridW = (fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / step + 1 : 0;
             const u32 gridH = (fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / step + 1 : 0;
@@ -2922,13 +2821,12 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                 }
             }
             const f64 meanLin = n ? sum / (f64)n : -1.0;
-            // lumaSweepYaw_ -- CACHED AT REQUEST TIME, not read live here. yaw_ by the time this
-            // collection code runs has already been advanced by THIS tick's camWobble update
-            // (that runs earlier in onUpdate, before lumaSweepCheck), so reading yaw_ live would
-            // pair frame f's image with frame f+1's camera angle -- a one-frame mismatch that is
-            // invisible near a wobble peak (slope ~0 there) but real at a zero-crossing (slope at
-            // its max). Found by noticing matched-pose frames a period apart logged a suspiciously
-            // EXACT repeated angle instead of the expected per-frame sinusoid value.
+            // lumaSweepYaw_ is CACHED AT REQUEST TIME, not read live: yaw_ has already been
+            // advanced by THIS tick's camWobble update (runs earlier in onUpdate) by the time
+            // this code runs, so a live read would pair frame f's image with frame f+1's angle --
+            // invisible near a wobble peak (slope ~0) but real at a zero-crossing (slope at its max). Found
+            // via matched-pose frames a period apart logging a suspiciously EXACT repeated angle instead of
+            // the expected per-frame sinusoid.
             if (lumaSweep_) {
                 AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
                           "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
@@ -2938,10 +2836,8 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
             }
 
             if (fireflyMetric_ && !grid.empty()) {
-                // Summed-area table over the grid, so a windowed sum is O(1) regardless of
-                // window size instead of re-scanning a neighbourhood per candidate cell -- the
-                // grid is already built above from the mean loop's own samples, so this is one
-                // extra O(gridW*gridH) pass, not a second full-resolution image decode.
+                // Summed-area table over the grid: a windowed sum is O(1) regardless of window
+                // size (no re-scan per candidate cell) -- one extra O(gridW*gridH) pass, not a second full-res decode.
                 std::vector<f64> sat((size_t)(gridW + 1) * (gridH + 1), 0.0);
                 for (u32 gy = 0; gy < gridH; ++gy) {
                     f64 rowSum = 0.0;
@@ -2958,38 +2854,26 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                          - sat[(size_t)(by1 + 1) * (gridW + 1) + (bx0)]
                          + sat[(size_t)(by0)     * (gridW + 1) + (bx0)];
                 };
-                // SCALED WITH THE STRIDE so the ring covers the same SCREEN neighbourhood it did
-                // when a cell was 4 pixels wide -- otherwise going to stride 1 would silently
-                // shrink the reference region 4x and compare a pixel against its immediate
-                // neighbours, which a real firefly partly contaminates.
+                // SCALED WITH THE STRIDE so the ring covers the same SCREEN neighbourhood as at
+                // stride 4 -- otherwise stride 1 would shrink the reference region 4x, letting a firefly contaminate its own reference.
                 const int Ro = (step == 1u) ? 12 : 3, Ri = (step == 1u) ? 4 : 1;
-                // Absolute floor, not ratio alone: in a black region the local reference is
-                // ~0, and any nonzero noise pixel would then clear an N-times-zero threshold
-                // for free. A pixel below this linear luminance is not what anyone would call
-                // a firefly regardless of what its neighbours read.
+                // Absolute floor, not ratio alone: in a black region the local reference is ~0, so
+                // any nonzero noise pixel would clear an N-times-zero threshold for free regardless of its neighbours.
                 const f64 kAbsFloor = 0.02;
                 // ---- AND HOW MANY OF THOSE OUTLIERS ARE ACTUALLY FLICKERING ----
-                //
-                // A SPATIAL OUTLIER IS NOT THE SAME THING AS A FIREFLY, and conflating the two
-                // is what made this metric unusable on its first outing: in converged Sponza it
-                // sat at a rock-steady 56 outliers, IDENTICAL with the denoiser on and off, and
-                // that was read as a stuck readback. It was not stuck. Those 56 are sunlight
-                // through windows -- genuinely far brighter than their surroundings, genuinely
-                // there every frame, and nothing a GI denoiser touches. The count was correct and
-                // measuring the wrong population.
-                //
-                // A firefly is distinguished from a bright feature by INSTABILITY, so the subset
-                // that matters is the outliers whose own luminance changed materially since the
-                // previous sampled frame. A sunlit window sill does not; a reservoir that won a
-                // freak sample for one frame does.
-                //
-                // MEANINGFUL WITH A STILL CAMERA, and only approximately under motion -- say so
-                // rather than let someone trust it in the wrong regime. On a static scene with a
-                // static camera every temporal change IS estimator noise, which is exactly the
-                // quantity wanted. Under --cam-wobble a static highlight SLIDES across the grid,
-                // so it changes cell to cell and inflates this count; isolating that properly
-                // needs reprojection, which is more machinery than a diagnostic warrants. Measure
-                // fireflies with the camera still; use the spatial count under motion.
+                // A SPATIAL OUTLIER IS NOT A FIREFLY -- conflating the two made this metric unusable on its
+                // first outing: converged Sponza sat at a rock-steady 56 outliers, identical with the
+                // denoiser on and off -- not a stuck readback, but sunlight through windows, genuinely
+                // brighter and present every frame, nothing a GI denoiser touches. Correct count, wrong
+                // population.
+                // A firefly is distinguished by INSTABILITY: the subset that matters is outliers
+                // whose luminance changed materially since the previous sampled frame (a sunlit
+                // sill doesn't; a reservoir with one freak sample does).
+                // MEANINGFUL WITH A STILL CAMERA ONLY -- a static camera's temporal change IS estimator
+                // noise, the quantity wanted; under --cam-wobble a static highlight SLIDES across the grid
+                // and inflates this count; isolating that needs reprojection, more machinery than this
+                // diagnostic warrants. Measure fireflies with the camera still; use the spatial count under
+                // motion.
                 const bool havePrev = fireflyPrevW_ == gridW && fireflyPrevH_ == gridH &&
                                       fireflyPrevGrid_.size() == grid.size();
                 u64 outlierCount = 0; f64 outlierMax = 0.0; u64 flickerCount = 0; f64 flickerMax = 0.0;
@@ -3011,8 +2895,7 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                         if (lum > (f64)fireflyMult_ * std::max(localRef, kAbsFloor)) {
                             ++outlierCount;
                             outlierMax = std::max(outlierMax, lum);
-                            // Relative to the LARGER of the two, so a cell going bright and a
-                            // cell going dark are treated alike and neither divides by ~0.
+                            // Relative to the LARGER of the two: brightening and darkening are treated alike, and neither divides by ~0.
                             if (havePrev) {
                                 const f64 was = fireflyPrevGrid_[(size_t)gy * gridW + gx];
                                 const f64 den = std::max(std::max(was, lum), kAbsFloor);
@@ -3024,9 +2907,8 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                         }
                     }
                 }
-                // flicker=-1 rather than 0 on the first sampled frame: there is no previous grid
-                // to compare against, and reporting "no fireflies" for "could not tell" is the
-                // kind of confident zero this metric already got wrong once.
+                // flicker=-1 rather than 0 on the first sampled frame: no previous grid to compare
+                // against, and "no fireflies" for "could not tell" is the confident-zero mistake this metric already made once.
                 AVER_INFO("[FireflyMetric] frame={} outliers={} flicker={} maxLin={:.4f} "
                           "flickerMax={:.4f} meanLin={:.6f} mult={:.2f} grid={}x{} giMode={} "
                           "camWobbleDeg={:.2f} camWobblePeriod={}",

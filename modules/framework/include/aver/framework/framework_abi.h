@@ -3,10 +3,9 @@
 
 /* Gameplay framework C ABI — GameInstance, GameMode, actors, pawns and controllers.
  *
- * A P/Invoke surface: nothing but int32_t / int64_t / float / const char* crosses it, and there are
- * no function pointers, void*, structs or enums in it. The dispatch tables live in
- * framework_hooks.h. Aver.Framework links Aver.Scene, never the reverse.
- * Error convention: 1 on success, 0 on a rejected request. */
+ * A P/Invoke surface: nothing but int32_t/int64_t/float/const char* crosses it, no function
+ * pointers, void*, structs or enums. Dispatch tables live in framework_hooks.h. Aver.Framework
+ * links Aver.Scene, never the reverse. Error convention: 1 on success, 0 on a rejected request. */
 
 #include <stdint.h>
 
@@ -33,50 +32,26 @@ extern "C" {
 #  define AVER_FW_CALL
 #endif
 
-/* ABI version, as (major << 16) | minor. Versioned independently of AVER_SCENE_ABI_VERSION. */
+/* ABI version, as (major << 16) | minor. Versioned independently of AVER_SCENE_ABI_VERSION.
+ * Every minor bump below is additive only: a host built against an older minor still links and
+ * runs unchanged against a newer header. */
 #define AVER_FW_ABI_VERSION_MAJOR 1
-/* 1: added aver_fw_set_view_entity / aver_fw_view_entity. Additive only.
- * 2: added aver_fw_set_sky_clouds / aver_fw_sky_clouds / aver_fw_clear_sky_clouds. Additive only,
- *    so a host built against minor 1 links and runs unchanged against this header.
- * 3: added aver_fw_set_fluid_spawn_provider / aver_fw_fluid_spawn. Additive only, same reason.
- * 4: added aver_fw_set_fluid_spawn_material_provider / aver_fw_fluid_spawn_material -- the material
- *    layer (real density, calibrated-fit viscosity, named presets) on top of minor 3's four raw
- *    solver knobs. Additive only, same reason: minor 3's own pair is UNCHANGED, so a host built
- *    against it still links and spawns exactly as before against this header.
- * 5: added the named-action layer (aver_fw_action_register/find/bind/clear_bindings/value2/held/
- *    pressed/released), porting scripting/csharp/Aver.Framework/EnhancedInput.cs's algorithm onto
- *    this ABI so a graph node or a C++ system can finally reach it, where before only a C# script
- *    could; a raw-VK twin to the aver_fw_input_* pair above (aver_fw_input_set_vk/vk/vk_pressed/
- *    vk_released) for the Win32 VK range the named AVER_FW_KEY_* enum cannot grow to cover; and the
- *    gamepad ABI's SHAPE with deliberately no polling behind it yet (aver_fw_input_set_gamepad_
- *    button/axis, aver_fw_input_gamepad_button/axis). Additive only, same reason as every entry
- *    above: minor 4's own surface is UNCHANGED, so a host built against it still links and runs
- *    unchanged against this header.
- * 6: added AVER_FW_ACTION_SRC_GAMEPAD_BUTTON / AVER_FW_ACTION_SRC_GAMEPAD_AXIS, so aver_fw_action_bind
- *    can finally bind a named action onto the gamepad ABI minor 5 only shaped -- polling now fills it
- *    (modules/platform's Gamepad.hpp/pollGamepads, published via Runtime/src/GameInput.cpp's
- *    publishGamepad, which both hosts reach through publishInput), so a binding actually reads
- *    something a player moved. Additive
- *    only, same reason as every entry above: minor 5's own two sources and every other export are
- *    UNCHANGED, so a host built against it still links and runs unchanged against this header.
- * 7: added the INPUT SCHEME section (aver_fw_input_scheme_load/error/context_name/context_priority/
- *    action_count/action_name/action_type/binding_count/binding/binding_key) -- the C ABI loader
- *    modules/formats/include/aver/formats/OcInput.hpp's own INTEGRATION NOTE said .ocinput did not
- *    have yet, exposing that module's existing parser (aver::fmt::parseOcinput) so a C# InputScheme
- *    loader can turn a parsed .ocinput file into a live InputMappingContext without a second parser
- *    on the managed side. See that section's own comment for the one-scheme-at-a-time shape. Additive
- *    only, same reason as every entry above: minor 6's own surface is UNCHANGED, so a host built
- *    against it still links and runs unchanged against this header.
- * 8: added the HOST CONTROL section (aver_fw_set_quit_requested/aver_fw_quit_requested and
+/* 1: aver_fw_set_view_entity / aver_fw_view_entity.
+ * 2: aver_fw_set_sky_clouds / aver_fw_sky_clouds / aver_fw_clear_sky_clouds.
+ * 3: aver_fw_set_fluid_spawn_provider / aver_fw_fluid_spawn.
+ * 4: aver_fw_set_fluid_spawn_material_provider / aver_fw_fluid_spawn_material -- density/
+ *    calibrated-fit viscosity/presets layered on minor 3's four raw solver knobs.
+ * 5: named-action layer (aver_fw_action_register/find/bind/clear_bindings/value2/held/pressed/
+ *    released, see NAMED ACTIONS below); raw-VK twin (aver_fw_input_set_vk/vk/vk_pressed/
+ *    vk_released) for VK codes AVER_FW_KEY_* can't grow to cover; gamepad ABI SHAPE, no polling yet.
+ * 6: AVER_FW_ACTION_SRC_GAMEPAD_BUTTON / _AXIS, so aver_fw_action_bind can bind onto the gamepad
+ *    ABI minor 5 only shaped -- polling now fills it (see GAMEPAD section below).
+ * 7: INPUT SCHEME section (aver_fw_input_scheme_load/error/context_name/context_priority/
+ *    action_count/action_name/action_type/binding_count/binding/binding_key) -- loads .ocinput,
+ *    which nothing did before (see INPUT SCHEME below).
+ * 8: HOST CONTROL section (aver_fw_set_quit_requested/aver_fw_quit_requested and
  *    aver_fw_cursor_request/aver_fw_cursor_release/aver_fw_cursor_requested) -- a shipped game had
- *    no way to exit itself (grepping Quit/RequestExit/request_exit across scripting/csharp/Aver.*
- *    and every *_abi.h found nothing) and no way to release the mouse cursor Runtime/src/GameApp.cpp
- *    captures for the whole time play state is PLAYING (that file's own wantCapture reads ONLY
- *    aver_fw_play_state(), nothing a script can influence). See that section's own comment for why
- *    quit is a polled request rather than an exit() and why the cursor is a request COUNT rather
- *    than a bool. Additive only, same reason as every entry above: minor 7's own surface is
- *    UNCHANGED, so a host built against it still links and runs unchanged against this header --
- *    and both new controls default to exactly today's behaviour (see the section itself for how). */
+ *    no way to exit itself or release the mouse cursor (see that section below). */
 #define AVER_FW_ABI_VERSION_MINOR 8
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
@@ -135,8 +110,7 @@ AVER_FW_ABI int32_t aver_fw_class_set_flags(int32_t c, int32_t flags);
 AVER_FW_ABI int32_t aver_fw_class_get_flags(int32_t c);
 /* Sets the class's tick group and order within it. */
 AVER_FW_ABI int32_t aver_fw_class_set_tick(int32_t c, int32_t tickGroup, int32_t tickOrder);
-/* Flattens the parent chain into the resolved archetype. 0 on a cycle or an undeclared parent.
- * Spawning auto-seals. */
+/* Flattens the parent chain into the resolved archetype (0 on a cycle/undeclared parent); spawning auto-seals. */
 AVER_FW_ABI int32_t aver_fw_class_seal(int32_t c);
 
 /* Class defaults, addressed by the same dense field id the scene resolves. One setter per storable
@@ -170,28 +144,19 @@ AVER_FW_ABI int32_t aver_fw_spawn_preview(int32_t c, const char* name,
 AVER_FW_ABI int32_t aver_fw_destroy_preview(int32_t e);
 
 /* Dispatches OnBeginPlay on an actor that was spawned WITHOUT it, once its caller has finished
- * setting it up. `reason` is an AVER_FW_BEGIN_* value (framework_hooks.h).
- *
- * WHY THIS EXISTS: aver_fw_spawn is synchronous -- bind, build_models and beginPlay all run
- * inline before it returns -- so anything that must configure an actor BEFORE it begins playing
- * has no moment in which to do it. A save restore is exactly that: patch the saved fields in,
- * THEN begin play, or every actor OnBeginPlay reads its class defaults instead of the values the
- * player left it with. Pair it with aver_fw_spawn_preview.
- *
- * 0 for a stale handle, an entity that is not an actor, or one with no managed instance bound.
- * Calling it twice dispatches twice -- this ABI does not remember, and the caller that chose to
- * split the spawn is the one that knows. */
+ * setting it up. `reason` is an AVER_FW_BEGIN_* value (framework_hooks.h). WHY: aver_fw_spawn is
+ * synchronous (bind/build_models/beginPlay run inline), so a save restore must patch saved fields
+ * in BEFORE begin play, or OnBeginPlay reads class defaults instead. Pair with
+ * aver_fw_spawn_preview. 0 for a stale handle, a non-actor entity, or no managed instance bound.
+ * Calling it twice dispatches twice -- not remembered here. */
 AVER_FW_ABI int32_t aver_fw_dispatch_begin_play(int32_t e, int32_t reason);
 
 /* ---- SAVE/LOAD, RELAYED -----------------------------------------------------------------
  *
- * The framework does not know what a save file is and does not link the module that does, for
- * the same reason it does not link the animation system: Aver.Save sits at its own tier and only
- * a composition root links both. The host installs a provider and these forward -- the identical
- * shape aver_fw_set_anim_curve_provider already uses, three exports down.
- *
- * A host that installs nothing leaves both returning 0, which is what a game with no save system
- * should report rather than crashing. */
+ * The framework does not link Aver.Save, for the same reason it does not link the animation
+ * system: each sits at its own tier and only a composition root links both. The host installs a
+ * provider and these forward -- the identical shape aver_fw_set_anim_curve_provider uses below.
+ * No provider -> both return 0, what a game with no save system should report, not a crash. */
 typedef int32_t (AVER_FW_CALL* aver_fw_save_fn)(const char* utf8Path, void* user);
 /* Installs the pair. Either may be null. Always returns 1. */
 AVER_FW_ABI int32_t aver_fw_set_save_provider(aver_fw_save_fn write, aver_fw_save_fn load, void* user);
@@ -232,85 +197,46 @@ AVER_FW_ABI int32_t aver_fw_find_class_with_flags(int32_t flags);
 
 /* ---- HOST CONTROL: QUIT AND CURSOR POLICY -----------------------------------------------------
  *
- * Both pairs below plug THE DEFECT this ABI minor exists to fix: a shipped game
- * (Runtime/src/GameApp.cpp) has no way to ask its own host to exit, and no way to get the mouse
- * cursor back once play starts, because nothing under Aver.Framework or Aver.Scene ever gave a
- * script a path back into the host for either.
+ * Both pairs plug a gap: a shipped game (GameApp.cpp) had no way to ask its host to exit (grepping
+ * Quit/RequestExit/request_exit across scripting/csharp/Aver.* and every *_abi.h found nothing), or
+ * to get the mouse cursor back once play starts. QUIT is a REQUEST the host polls once a frame, not
+ * an immediate exit(): the setter can run deep inside a managed tick with a device/audio/physics
+ * world live underneath, so tearing the process down there would bypass GameApp's ordered
+ * shutdown -- the main loop decides when to act. DEFAULT: reads 0 until set(1). Plain set/get, not
+ * one-shot (same precedent as aver_fw_set_paused/aver_fw_play_state above): Play-In-Editor runs
+ * several sessions per process and must clear the flag itself (aver_fw_begin_play does NOT), so a
+ * quit near one session's end can't re-fire in the next.
  *
- * QUIT. Grepping Quit/RequestExit/request_exit across scripting/csharp/Aver.* and every *_abi.h
- * in this tree finds nothing -- a main menu's Quit button or a story's ending screen has no call
- * to make. This is modelled as a REQUEST the host polls once a frame, deliberately NOT an
- * immediate exit(): the setter can be reached from many stack frames deep inside a single frame's
- * managed tick, with a device, an audio stream and a physics world all live underneath it, and
- * tearing the process down from THERE would unwind straight through the managed/native boundary
- * mid-frame instead of through the host's own ordinary shutdown path (GameApp's own teardown
- * order, window destruction, device release). The setter only RECORDS the request; only the
- * host's main loop, which already owns that order, decides when it is safe to act on it.
- *
- * DEFAULTS TO TODAY'S BEHAVIOUR: aver_fw_quit_requested() reads 0 until something calls
- * aver_fw_set_quit_requested(1), so a project that never touches this pair keeps running exactly
- * as it does today -- nothing quits on its own. A plain set/get pair, not a one-shot "request"
- * verb with no way back, on the same precedent as aver_fw_set_paused/aver_fw_play_state a few
- * lines up: a host that runs more than one play session per process (Play-In-Editor) needs to be
- * able to clear the flag before a NEW session's first frame, and aver_fw_begin_play does NOT do
- * this for you -- it is unrelated by design, so a quit requested moments before one session ended
- * can never silently re-fire in the next. A host that only ever runs one session per process (a
- * shipped, packaged game) never needs to call the setter with 0 at all.
- *
- * CURSOR POLICY. GameApp::onUpdate's own wantCapture (Runtime/src/GameApp.cpp) derives mouse
- * capture PURELY from aver_fw_play_state() -- captured whenever PLAYING, full stop -- so no C#
- * script can hand the pointer back while the session keeps running, and a pause menu or a
- * dialogue box has no way to show a cursor without ending play entirely.
- *
- * NOT a bare SetCursorVisible(bool): one latched flag fights itself the moment two systems each
- * have an opinion -- a pause menu opens (wants the cursor), a dialogue box opens on top of it
- * (also wants the cursor), the dialogue box closes and calls its own "false", and the cursor now
- * vanishes out from under the pause menu that is STILL OPEN and never asked for it back. A shared
- * bool has no memory of who else is still holding it.
- *
- * A REQUEST COUNT instead -- the same shape Win32's own ShowCursor uses for the identical
- * problem: aver_fw_cursor_request() increments and aver_fw_cursor_release() decrements (floored
- * at 0, so one stray extra release can never go negative and flip the sign of every caller after
- * it), and aver_fw_cursor_requested() is simply "is the count > 0". Two callers that each request
- * once and release once can nest, overlap or outlive each other in any order and the cursor stays
- * exactly as visible as the highest outstanding count says it should -- the pause-menu-under-a-
- * dialogue-box case above resolves correctly with neither caller ever needing to know the other
- * exists.
- *
- * DEFAULTS TO TODAY'S BEHAVIOUR: the count starts at 0 and aver_fw_cursor_requested() reads 0
- * until something calls aver_fw_cursor_request(), so a project that never touches this trio
- * captures the cursor exactly as it does today -- only while PLAYING, decided by play state
- * alone. Resolving the two into one decision is the HOST's job, outside this file's brief (a
- * future GameApp::onUpdate reads aver_fw_cursor_requested() and frees the cursor regardless of
- * play state when it is 1, falling back to today's play-state-only rule when it is 0). */
+ * CURSOR POLICY: wantCapture (GameApp.cpp) derives capture PURELY from aver_fw_play_state(), so a
+ * pause menu or dialogue box can't show a cursor without ending play. NOT a bare
+ * SetCursorVisible(bool): a dialogue box over a still-open pause menu closing and setting "false"
+ * would vanish the cursor out from under it -- a shared bool has no memory of other holders.
+ * A REQUEST COUNT instead (Win32 ShowCursor's shape): request()/release() inc/dec (floored at 0, so
+ * a stray extra release can't go negative and flip the sign for every caller after it), requested()
+ * is "count > 0" -- callers nest/overlap in any order and the cursor stays visible as long as the
+ * highest count says it should. DEFAULT: starts at 0, today's PLAYING-only rule; combining the two
+ * is the HOST's job. */
 AVER_FW_ABI void    aver_fw_set_quit_requested(int32_t requested);
-/* 1 once something has called aver_fw_set_quit_requested(1) and nothing has since cleared it with
- * aver_fw_set_quit_requested(0); 0 otherwise -- including before the setter has ever been called,
- * which is the "never quits on its own" default this section's own comment promises. */
+/* 1 once set_quit_requested(1) has been called and not since cleared with (0); 0 otherwise -- the
+ * "never quits on its own" default the section above promises. */
 AVER_FW_ABI int32_t aver_fw_quit_requested(void);
 
-/* Increments the process-wide cursor-visibility request count and returns the new count (always
- * >= 1). Call when something starts wanting the cursor free -- a pause menu opening, a dialogue
- * box opening. */
+/* Increments the process-wide cursor-visibility request count and returns it (always >= 1); call
+ * when something starts wanting the cursor free. */
 AVER_FW_ABI int32_t aver_fw_cursor_request(void);
-/* Decrements the count, floored at 0, and returns the new count. Call when that same something
- * stops wanting it -- exactly once per aver_fw_cursor_request() call, the same discipline Win32's
- * own ShowCursor documents for its matching show/hide pair. */
+/* Decrements the count (floored at 0) and returns it; call once per matching
+ * aver_fw_cursor_request(), per the section above. */
 AVER_FW_ABI int32_t aver_fw_cursor_release(void);
-/* 1 while the request count is > 0, 0 when it is exactly 0 -- the default, meaning nothing has
- * ever asked, meaning the host is free to decide capture from play state alone (today's rule). */
+/* 1 while the count is > 0, 0 at the default -- nothing has asked, so capture follows play state
+ * alone (today's rule). */
 AVER_FW_ABI int32_t aver_fw_cursor_requested(void);
 
 /* ---- ANIMATION CURVES, RELAYED --------------------------------------------------------------
  *
- *
- * The framework does not know what an animation is and does not link the module that does. It
- * holds a function pointer the composition root installs, and forwards. That is the same shape
- * AnimSystem itself uses for asset resolution and for notifies, and it is why C# can ask "what
- * does this curve read" through the library it ALREADY binds instead of needing a new one.
- *
- * A host that installs nothing leaves aver_fw_anim_curve returning 0 for everything, which is the
- * same answer a clip with no such curve gives -- a game with no animation system is not an error. */
+ * The framework does not link the animation module. It holds a function pointer the composition
+ * root installs and forwards -- the same shape AnimSystem uses for asset resolution and notifies,
+ * so C# can ask "what does this curve read" through the library it already binds. No provider ->
+ * aver_fw_anim_curve returns 0 for everything, the same answer a clip with no such curve gives. */
 typedef int32_t (AVER_FW_CALL* aver_fw_anim_curve_fn)(int32_t entity, int64_t nameHash,
                                                       float* outValue, void* user);
 /* Installs the provider. Passing null clears it. Always returns 1. */
@@ -322,29 +248,18 @@ AVER_FW_ABI int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* 
 
 /* ---- GRAPH-LOCAL VARIABLES, RELAYED -----------------------------------------------------------
  *
- * The framework does not know what a graph is and does not link the module that does, for the
- * same reason it does not know what a save file is (aver_fw_set_save_provider, three sections up)
- * or an animation curve. A host installs a provider and these forward.
- *
- * WHY THIS EXISTS: a save must capture and restore graph-local VAR storage (Aver.Graph's own
- * GraphVarStore), which is pure managed state with no representation in the native scene at all --
- * see modules/save/include/aver/save/SaveWorld.hpp's own header for why that module cannot reach
- * Aver.Framework, let alone Aver.Graph, to get at it directly. This is the seam that lets a save
- * do it anyway, without either module gaining an edge it must not have.
- *
- * COUNT THEN INDEX, not one bulk call, and deliberately: everything else in this file is scalars
- * and const char* (see the file's own opening comment) -- a struct or an array-of-structs crossing
- * here would be the first of either. A handful of ABI calls per entity, only during a save or a
- * load, costs nothing worth avoiding that purity for.
- *
- * A host that installs nothing leaves every one of these returning 0 -- a game with no graph
- * scripting reports exactly that, the same as a clip with no such curve does for
- * aver_fw_anim_curve. */
+ * The framework does not link the graph module, same reason as save/animation above. A host
+ * installs a provider and these forward. WHY: a save must capture/restore graph-local VAR storage
+ * (Aver.Graph's GraphVarStore), pure managed state with no native-scene representation
+ * (SaveWorld.hpp) -- this is the seam that lets a save reach it without either module gaining an
+ * edge it must not have. COUNT THEN INDEX, not a bulk call: everything else in this file is
+ * scalars/const char* -- a struct or array-of-structs here would be the first of either, not
+ * worth it for a handful of calls per entity during save/load. No provider -> everything returns 0. */
 typedef int32_t (AVER_FW_CALL* aver_fw_graph_var_count_fn)(int32_t entity, void* user);
-/* Fills the name (into nameBuf, capacity nameBufLen bytes, UTF8, always NUL-terminated even when
- * truncated), kind (AVER_SCENE_KIND_F32/I32/BOOL -- scene_abi.h; a VAR is never any other kind)
- * and value (outF for F32, outI for I32/BOOL -- the same "kind decides which member" convention
- * aver::fmt::OcSaveField's own fields use) of VAR `index`, 0..count-1 in DECLARATION order. */
+/* Fills the name (nameBuf, nameBufLen bytes, UTF8, NUL-terminated even if truncated), kind
+ * (AVER_SCENE_KIND_F32/I32/BOOL, scene_abi.h; a VAR is never any other kind) and value (outF for
+ * F32, outI for I32/BOOL -- same "kind decides the member" convention as aver::fmt::OcSaveField)
+ * of VAR `index`, 0..count-1, DECLARATION order. */
 typedef int32_t (AVER_FW_CALL* aver_fw_graph_var_at_fn)(int32_t entity, int32_t index,
                                                         char* nameBuf, int32_t nameBufLen,
                                                         int32_t* outKind, float* outF,
@@ -372,20 +287,12 @@ AVER_FW_ABI int32_t aver_fw_graph_var_set(int32_t e, const char* name, int32_t k
 
 /* ---- SYNAPSE STEERING TARGET, RELAYED ---------------------------------------------------------
  *
- * The framework does not know what Synapse is and does not link the module that does, for the
- * identical reason it does not know what a graph or an animation curve is: a host installs a
- * provider and this forwards. SYNAPSE ADVISES, IT DOES NOT MOVE (see SynapseAgent.hpp's own header
- * comment) -- AgentSystem tracks a path and writes the agent's current waypoint onto its own
- * CSynapseAgent component, and this is the one seam that lets a graph's GetSynapseTarget node read
- * that value back, exactly as aver_fw_anim_curve lets a graph read an animation curve it cannot see
- * the component of directly. CSynapseAgent's fields ARE registered through the generic scene
- * reflection API (World::registerComponent), but that reflection is a C++-only surface
- * (World::fieldId/field/fieldCount/fieldAt) with no C ABI of its own -- scene_abi.h exposes typed
- * get/set by dense FIELD ID, never a lookup BY NAME, so a caller that only has "CSynapseAgent" and
- * "targetXCm" as strings (as every managed caller does) has no other way in.
- *
- * A host that installs nothing leaves this returning 0 for everything -- a game with no Synapse
- * agents is not an error, the same as a clip with no curve or a graph with no VAR. */
+ * The framework does not link Aver.Synapse; a host installs a provider and this forwards. SYNAPSE
+ * ADVISES, IT DOES NOT MOVE (SynapseAgent.hpp) -- AgentSystem writes the agent's waypoint onto its
+ * own CSynapseAgent component, and this is the seam that lets a graph's GetSynapseTarget node read
+ * it back: that component's fields ARE registered via World::registerComponent, but that
+ * reflection is C++-only with no lookup BY NAME, and a managed caller only has strings. No
+ * provider -> returns 0 for everything, same as a clip with no curve or a graph with no VAR. */
 typedef int32_t (AVER_FW_CALL* aver_fw_synapse_target_fn)(int32_t entity, float* outX, float* outY,
                                                            float* outZ, void* user);
 /* Installs the provider. Passing null clears it. Always returns 1. */
@@ -397,16 +304,12 @@ AVER_FW_ABI int32_t aver_fw_synapse_target(int32_t e, float* outX, float* outY, 
 
 /* ---- SYNAPSE PERCEPTION, RELAYED ---------------------------------------------------------------
  *
- * Same reason and same shape as the steering-target relay immediately above: Aver.Synapse.Scene
- * must not link Aver.Framework, so a host installs a provider and this forwards.
- *
- * UNLIKE aver_fw_synapse_target, 0/false here does NOT mean "nothing to report" -- "I currently
- * cannot see the target" is a real, common, meaningful answer for a perceiving agent, not an
- * absence. The RETURN VALUE distinguishes the two instead: 0 only when `e` carries no
- * CSynapsePerception at all (or there is no provider); 1 whenever it does, with *outCanSee telling
- * the caller which case applies. This is the same "false means absent, not zero" discipline
- * aver_fw_anim_curve's own comment states, applied one level up: here the OUTER call tells you
- * "there is an answer", and one of the outputs tells you what it is. */
+ * Same shape as the steering-target relay above: Aver.Synapse.Scene must not link Aver.Framework.
+ * UNLIKE aver_fw_synapse_target, 0/false here does NOT mean "nothing to report" -- "cannot
+ * currently see the target" is a real, meaningful answer, not an absence. The RETURN VALUE
+ * distinguishes the two: 0 only when `e` has no CSynapsePerception (or no provider); 1 whenever it
+ * does, with *outCanSee telling the caller which case applies -- the same "false means absent, not
+ * zero" discipline as aver_fw_anim_curve, one level up. */
 typedef int32_t (AVER_FW_CALL* aver_fw_synapse_perception_fn)(int32_t entity, int32_t* outCanSee,
                                                                int32_t* outLastTarget,
                                                                float* outTimeSinceSeen, void* user);
@@ -449,63 +352,42 @@ AVER_FW_ABI void    aver_fw_input_new_frame(void);
 AVER_FW_ABI void    aver_fw_input_set_key(int32_t key, int32_t down);
 /* Sets this frame's mouse delta (pixels) and wheel notches. */
 AVER_FW_ABI void    aver_fw_input_set_mouse(float dx, float dy, float wheel);
-/* 1 while the key is held. */
+/* key/_pressed/_released: 1 while held, 1 on the frame it went down, 1 on the frame it went up. */
 AVER_FW_ABI int32_t aver_fw_input_key(int32_t key);
-/* 1 on the frame the key went down. */
 AVER_FW_ABI int32_t aver_fw_input_key_pressed(int32_t key);
-/* 1 on the frame the key went up. */
 AVER_FW_ABI int32_t aver_fw_input_key_released(int32_t key);
 /* Writes {dx, dy, wheel} into out3. */
 AVER_FW_ABI void    aver_fw_input_mouse(float* out3);
 
 /* ---- NAMED ACTIONS (Enhanced Input), PORTED FROM Aver.Framework's EnhancedInput.cs ---------------
  *
- * scripting/csharp/Aver.Framework/EnhancedInput.cs is a complete, well-designed named-action layer
- * -- InputAction (Digital/Axis1D/Axis2D), InputBinding, InputMappingContext, priority-stacked
- * contexts with PER-LAYER KEY CONSUMPTION, a 0.15 dead zone, WasPressed/WasReleased -- with zero
- * consumers and zero tests, because it is pure C# with no way for a graph node or a C++ system to
- * reach it. Its ALGORITHM is ported here verbatim; its PLACEMENT (unreachable from anywhere but a
- * C# script) is the defect this section fixes.
+ * EnhancedInput.cs is a complete named-action layer (InputAction Digital/Axis1D/Axis2D,
+ * InputBinding, priority-stacked InputMappingContext, per-layer key consumption, 0.15 dead zone)
+ * with zero consumers and zero tests -- pure C# unreachable from a graph node or C++. Its ALGORITHM
+ * is ported verbatim; only the unreachable PLACEMENT is fixed, and the dead zone stays PINNED, not a
+ * parameter, since the algorithm isn't configurable either.
  *
- * THIS ABI HAS NO CONTEXT HANDLE. EnhancedInput.cs pushes whole InputMappingContext OBJECTS onto a
- * priority-sorted stack (AddContext/RemoveContext), and every binding inside one object shares that
- * object's priority. A C ABI has no object to push, so `contextPriority` on EVERY binding stands in
- * for it -- two bindings sharing a `contextPriority` number ARE one context for consumption
- * purposes, exactly as two bindings inside one InputMappingContext are (EnhancedInput.cs's own
- * Update() comment: "Consumption is per layer, so two bindings in one context can share a key").
- * There is consequently no partial "pop this one context" call either -- aver_fw_action_clear_
- * bindings drops every binding at once, and a caller that wants to swap contexts re-binds everything
- * after that, which is what RemoveContext+AddContext amount to from outside EnhancedInput.cs anyway.
- *
- * NO SEPARATE PER-FRAME "Update()" ENTRY POINT, unlike EnhancedInput.cs's own Update(): held/
- * pressed/released/value2 below evaluate ON DEMAND, straight out of the SAME InputState cur/prev
- * (and mouse/prevMouse) arrays aver_fw_input_key / aver_fw_input_key_pressed already read, and, for
- * the two GAMEPAD_* sources, the SAME GamepadState buttons/axes (and prevButtons/prevAxes) arrays
- * aver_fw_input_gamepad_button/axis already read (all FrameworkAbi.cpp). That is a hard requirement,
- * not a style choice: an action bound to AVER_FW_KEY_W and a script calling
- * aver_fw_input_key(AVER_FW_KEY_W) directly must NEVER be able to disagree about whether the key is
- * down, and the only way to guarantee that is to have both read the identical bytes instead of two
- * copies that could drift out of step. This is also why aver_fw_input_new_frame now rolls a
- * `prevMouse` snapshot alongside `prev` (FrameworkAbi.cpp), and, since minor 6, a GamepadState
- * prevButtons/prevAxes snapshot alongside those -- a mouse- or gamepad-sourced action needs a "was
- * this channel already active last frame" answer to detect an edge on, the same thing a keyboard
- * binding gets for free from cur/prev, and that snapshot is the one piece of state EnhancedInput.cs's
- * Raw/Prev pair carried that plain InputState (and, now, GamepadState) had no slot for.
- *
- * DEAD ZONE 0.15, PINNED to EnhancedInput.cs's own Active() check -- not a parameter, because the
- * algorithm being ported is not configurable either; a caller who needs a different threshold is
- * asking for a different feature, not a variant of this one. */
+ * NO CONTEXT HANDLE: EnhancedInput.cs pushes whole InputMappingContext objects onto a priority
+ * stack; here `contextPriority` on EVERY binding stands in for that object -- two bindings sharing
+ * a number ARE one context for consumption ("two bindings in one context can share a key" --
+ * Update()). No partial "pop one context" either -- aver_fw_action_clear_bindings drops everything
+ * and the caller re-binds. NO PER-FRAME "Update()": held/pressed/released/value2 evaluate ON
+ * DEMAND, reading the SAME InputState cur/prev (+mouse/prevMouse) arrays aver_fw_input_key already
+ * reads, and for the two GAMEPAD_* sources the same GamepadState buttons/axes
+ * (+prevButtons/prevAxes) (FrameworkAbi.cpp) -- an action on AVER_FW_KEY_W and a script reading it
+ * directly must never disagree, which only holds if both read identical bytes; a mouse/gamepad
+ * action also needs a "was this active last frame" edge answer a keyboard binding gets free from
+ * cur/prev, which is why aver_fw_input_new_frame also rolls a `prevMouse` snapshot (and, since
+ * minor 6, GamepadState prevButtons/prevAxes). */
 #define AVER_FW_ACTION_DIGITAL 0
 #define AVER_FW_ACTION_AXIS1D  1
 #define AVER_FW_ACTION_AXIS2D  2
 
-/* Where one binding reads from -- pinned to EnhancedInput.cs's own InputSource enum.
- * AVER_FW_ACTION_SRC_KEY reads an AVER_FW_KEY_* slot (the SAME enum aver_fw_input_key reads, never a
- * raw VK -- see the RAW WIN32 VK section below for that ABI instead); the three MOUSE_* sources read
- * whatever aver_fw_input_set_mouse published this frame (dx, dy, wheel respectively);
- * AVER_FW_ACTION_SRC_GAMEPAD_BUTTON and AVER_FW_ACTION_SRC_GAMEPAD_AXIS read the GAMEPAD section's own
- * pad-0 state (aver_fw_input_gamepad_button/axis) -- see that section, and aver_fw_action_bind's own
- * comment just below, for what `key` carries for each. */
+/* Where one binding reads from -- pinned to EnhancedInput.cs's InputSource enum. SRC_KEY reads an
+ * AVER_FW_KEY_* slot (never a raw VK -- see RAW WIN32 VK below); the three MOUSE_* sources read
+ * whatever aver_fw_input_set_mouse published this frame (dx, dy, wheel); GAMEPAD_BUTTON/AXIS read
+ * the GAMEPAD section's pad-0 state -- see that section and aver_fw_action_bind below for what
+ * `key` carries for each. */
 #define AVER_FW_ACTION_SRC_KEY            0
 #define AVER_FW_ACTION_SRC_MOUSE_X        1
 #define AVER_FW_ACTION_SRC_MOUSE_Y        2
@@ -514,68 +396,49 @@ AVER_FW_ABI void    aver_fw_input_mouse(float* out3);
 #define AVER_FW_ACTION_SRC_GAMEPAD_AXIS   5
 
 /* Declares a named action, or returns the existing handle for `name` unchanged -- IDEMPOTENT BY
- * NAME, the same convention aver_fw_class_declare uses above and for the same reason: a script's
- * OnBeginPlay runs every time its actor spawns, and re-registering "Jump" on every possession must
- * hand back the ORIGINAL action rather than silently multiplying it. 0 for a null/empty name or a
- * valueType outside AVER_FW_ACTION_DIGITAL..AVER_FW_ACTION_AXIS2D. */
+ * NAME (same convention as aver_fw_class_declare): a script's OnBeginPlay re-registers "Jump" on
+ * every possession and must get back the ORIGINAL action, not a duplicate. 0 for a null/empty
+ * name or a valueType outside AVER_FW_ACTION_DIGITAL..AVER_FW_ACTION_AXIS2D. */
 AVER_FW_ABI int32_t aver_fw_action_register(const char* name, int32_t valueType);
 /* The handle for a previously registered action name, or 0. */
 AVER_FW_ABI int32_t aver_fw_action_find(const char* name);
-/* Adds one binding to `action`. `key` is an AVER_FW_KEY_* slot for AVER_FW_ACTION_SRC_KEY, an
- * AVER_FW_GAMEPAD_* button for AVER_FW_ACTION_SRC_GAMEPAD_BUTTON, an AVER_FW_GAMEPAD_AXIS_* axis for
- * AVER_FW_ACTION_SRC_GAMEPAD_AXIS, and ignored for the three MOUSE_* sources (EnhancedInput.cs's own
- * BindMouseLook/BindMouseWheel likewise carry an unused Key.A placeholder on a mouse-sourced
- * InputBinding -- ported as-is rather than inventing a second binding shape just to avoid one ignored
- * parameter). `scale` multiplies the source value before it accumulates into the action -- this is
- * how EnhancedInput.cs's BindAxis1D turns two opposed keys into one -1..1 axis: +1 scale on one key,
- * -1 on the other, both landing in the same component. `component` selects which channel the value
- * lands in: 0 = X, 1 = Y, anything else = Z (Z exists only because EnhancedInput.cs's own Accumulate()
- * has a third case; nothing here binds it, and aver_fw_action_value2 does not read it back).
- * `contextPriority` is the tier this section's own opening comment describes: a STRICTLY higher
- * `contextPriority` binding on the SAME key blocks this one from ever seeing it, win or lose based on
- * which context the caller considers "in front" this frame, not on declaration order -- KEY bindings
- * only; a gamepad button binding is never consumed this way (FrameworkAbi.cpp's own comment on
- * actionKeyConsumedByHigherPriority says why), so two contexts bound to the SAME button both see it,
- * the same as two MOUSE_* bindings sharing a channel already do. Silently ignored for an invalid
- * action, an out-of-range source, or an out-of-range key/button/axis for a source that reads one --
- * matching aver_fw_input_set_key's own "out-of-range keys are ignored" convention a few lines above. */
+/* Adds one binding to `action`. `key` is an AVER_FW_KEY_* slot for SRC_KEY, an AVER_FW_GAMEPAD_*
+ * button for SRC_GAMEPAD_BUTTON, an AVER_FW_GAMEPAD_AXIS_* axis for SRC_GAMEPAD_AXIS, ignored for
+ * the three MOUSE_* sources (ported placeholder from BindMouseLook/BindMouseWheel). `scale`
+ * multiplies the source value before it accumulates -- BindAxis1D's trick for turning two opposed
+ * keys into one -1..1 axis: +1 on one key, -1 on the other, same component. `component` selects
+ * the channel: 0=X, 1=Y, anything else=Z (Z ported from EnhancedInput.cs's Accumulate() third case;
+ * nothing binds it here and aver_fw_action_value2 doesn't read it back). `contextPriority`: a
+ * STRICTLY higher-priority binding on the SAME key blocks this one, decided by priority, not
+ * declaration order -- KEY bindings only; a gamepad button is never consumed this way (see
+ * actionKeyConsumedByHigherPriority in FrameworkAbi.cpp), so two contexts on the same button both
+ * see it. Silently ignored for an invalid action, out-of-range source, or key/button/axis (same
+ * out-of-range convention as aver_fw_input_set_key). */
 AVER_FW_ABI void    aver_fw_action_bind(int32_t action, int32_t source, int32_t key, float scale,
                                         int32_t component, int32_t contextPriority);
-/* Drops every binding on every action. Registrations (and their handles) survive -- only the map
- * from keys to actions is cleared, so a caller re-establishes a whole set of contexts by calling
- * this once and then aver_fw_action_bind for each binding again, the same net effect as
- * EnhancedInput.ClearContexts() followed by fresh AddContext calls. */
+/* Drops every binding on every action; registrations (and handles) survive -- only the key-to-
+ * action map is cleared. Re-establish a set of contexts by calling this once, then
+ * aver_fw_action_bind again -- the same net effect as ClearContexts()+fresh AddContext calls. */
 AVER_FW_ABI void    aver_fw_action_clear_bindings(void);
-/* Writes {X, Y} of the action's CURRENT accumulated value into out2 -- EnhancedInput.cs's Value2D
- * without the Z channel this ABI has no consumer for. Applies NO dead zone (same as Value2D/Raw) --
- * that only gates held/pressed/released below. {0, 0} for an invalid handle. */
+/* Writes {X, Y} of the action's accumulated value into out2 (Value2D, no Z channel). Applies NO
+ * dead zone -- that only gates held/pressed/released below. {0, 0} for an invalid handle. */
 AVER_FW_ABI void    aver_fw_action_value2(int32_t action, float* out2);
-/* 1 while the action is active (any channel's magnitude exceeds the 0.15 dead zone). 0 for an
- * invalid handle. */
+/* held/pressed/released: 1 while active (magnitude exceeds the 0.15 dead zone) / on the frame it
+ * became active / on the frame it stopped. 0 for an invalid handle. */
 AVER_FW_ABI int32_t aver_fw_action_held(int32_t action);
-/* 1 on the frame the action became active. 0 for an invalid handle. */
 AVER_FW_ABI int32_t aver_fw_action_pressed(int32_t action);
-/* 1 on the frame the action stopped being active. 0 for an invalid handle. */
 AVER_FW_ABI int32_t aver_fw_action_released(int32_t action);
 
 /* ---- RAW WIN32 VK, ADDITIVE TWIN TO AVER_FW_KEY_* -------------------------------------------------
  *
- * frameworkKeyFromVk (aver/framework/InputKeys.hpp) maps Win32 virtual keys onto the AVER_FW_KEY_*
- * enum above, and that header's own comment says why most of the VK range falls through to -1: the
- * framework enum has AVER_FW_KEY_COUNT slots (50) against Win32's 256 codes, "so F-keys, the numpad
- * and every OEM key are simply unreachable by gameplay today." The SAME comment gives the reason
- * the enum above cannot just grow to cover them: "The enum cannot be renumbered to fix it -- the
- * InputKey graph node takes a literal integer, so saved graphs depend on the current numbering."
- * A saved .ocgraph's InputKey node stores (say)
- * AVER_FW_KEY_LEFT as whatever plain int that slot currently is; inserting
- * a new named key anywhere but the enum's own tail would silently repoint every saved graph's
- * InputKey node at the WRONG key, with no error at load.
- *
- * This is the escape hatch: a second, parallel cur/prev array indexed by the RAW vk code (0..255,
- * matching aver::platform::InputState::kKeyCount -- modules/platform/include/aver/platform/
- * InputState.hpp), published and read exactly like the named-slot pair above but never subject to
- * the renumbering constraint, because nothing here is a graph node's literal operand -- a caller
- * that wants F5 asks for vk 0x74 by value, not through an enum name that could move. */
+ * frameworkKeyFromVk (InputKeys.hpp) maps Win32 VKs onto AVER_FW_KEY_* above; most of the VK range
+ * falls through to -1: the enum has only AVER_FW_KEY_COUNT (50) slots against Win32's 256, so
+ * F-keys/numpad/OEM keys are unreachable today, and it can't just grow to cover them -- a saved
+ * .ocgraph's InputKey node stores a literal int, so inserting a name anywhere but the tail would
+ * silently repoint every saved graph at the WRONG key, with no error at load. Escape hatch: a
+ * second, parallel cur/prev array indexed by the RAW vk code (0..255, matching
+ * aver::platform::InputState::kKeyCount), never subject to the renumbering constraint -- F5 is
+ * asked for as vk 0x74 by value, not through a name that could move. */
 /* The Win32 VK range this twin covers, 0..(AVER_FW_VK_COUNT-1) -- Win32's own VK codes are 0..255. */
 #define AVER_FW_VK_COUNT 256
 /* Sets the held state of a raw Win32 VK. Out-of-range (outside 0..255) is ignored, matching
@@ -583,41 +446,25 @@ AVER_FW_ABI int32_t aver_fw_action_released(int32_t action);
  * AVER_FW_KEY_A slot does NOT also set raw vk 'A', and vice versa; they are two separate arrays that
  * happen to be fed the same physical key by whichever host publishes both. */
 AVER_FW_ABI void    aver_fw_input_set_vk(int32_t vk, int32_t down);
-/* 1 while the raw VK is held. */
+/* vk/_pressed/_released: 1 while held, 1 on the frame it went down, 1 on the frame it went up. */
 AVER_FW_ABI int32_t aver_fw_input_vk(int32_t vk);
-/* 1 on the frame the raw VK went down. */
 AVER_FW_ABI int32_t aver_fw_input_vk_pressed(int32_t vk);
-/* 1 on the frame the raw VK went up. */
 AVER_FW_ABI int32_t aver_fw_input_vk_released(int32_t vk);
 
 /* ---- GAMEPAD, STATE IN / STATE OUT -------------------------------------------------------------
  *
- * This ABI's OWN job stops at "state in, state out", like every other aver_fw_input_* pair above:
- * it does not open a device itself, does not detect hotplug, and applies no dead zone of its own.
- * That is by design, not an oversight -- XInput hotplug (a controller can vanish mid-frame and
- * XInputGetState keeps returning stale data for that slot, not a trustworthy error), trigger and
- * stick dead zones (XInput's own guidance is a per-stick radius, a different shape of problem than
- * the flat 0.15 the action layer above uses -- not a constant the two can share), and rumble are
- * each their own scope, better owned by whatever polls the real device than folded into this thin
- * ABI.
- *
- * POLLING NOW EXISTS: modules/platform's Gamepad.hpp (pollGamepads) opens the device, and
- * Runtime/src/GameInput.cpp's publishGamepad -- the ONE place in the tree that talks to this
- * section -- publishes what it reads through aver_fw_input_set_gamepad_button/axis below, once a
- * frame, the same as it already publishes keys and mouse state. Both hosts reach it there: the
- * editor calls game::publishInput, which calls publishGamepad from its policy, and sandbox/ makes
- * no aver_fw_input_set_gamepad_* call of its own. This section was shipped SHAPE ONLY, with
- * deliberately no polling behind it, back when minor 5 added it (this header's own changelog
- * above) -- minor 6 is this layer's first real
- * consumer: aver_fw_action_bind's own AVER_FW_ACTION_SRC_GAMEPAD_BUTTON/AXIS (NAMED ACTIONS section
- * above) read pad 0's state back out through this section, exactly as a KEY-sourced binding reads
- * aver_fw_input_key's own state.
- *
- * Buttons and axes are modelled on XInput's own XINPUT_GAMEPAD_* bitmask and XINPUT_STATE thumbstick/
- * trigger fields -- 14 buttons, 6 axes -- so that a provider is a mechanical bit-to-index and
- * int16-to-float unpack, not a redesign. `pad` is fixed at 0 for every call below, the same "only
- * player 0 exists until split-screen does" precedent aver_fw_player_controller documents above --
- * every function here rejects any other value exactly as that one rejects any other player index. */
+ * Like every other aver_fw_input_* pair above, this ABI stops at "state in, state out": no device
+ * open, no hotplug detection, no dead zone, no rumble (each its own scope, better owned by whoever
+ * polls the real device -- XInput hotplug leaves stale data rather than an error, and its per-stick
+ * dead-zone guidance differs in shape from the flat 0.15 the action layer uses). POLLING:
+ * platform/Gamepad.hpp (pollGamepads) opens the device; Runtime/src/GameInput.cpp's publishGamepad
+ * -- the ONE place in the tree reaching this section, via the editor's own publishInput policy;
+ * sandbox/ makes no such call itself -- calls aver_fw_input_set_gamepad_button/axis once a frame.
+ * Shipped SHAPE ONLY at minor 5 (no polling); minor 6 is its first consumer --
+ * aver_fw_action_bind's GAMEPAD_BUTTON/AXIS sources read pad 0's state back through here. Buttons/
+ * axes are modelled on XInput's XINPUT_GAMEPAD_* bitmask and XINPUT_STATE thumbstick/trigger
+ * fields (14 buttons, 6 axes) so a provider is a mechanical unpack. `pad` is fixed at 0, the same
+ * "only player 0 until split-screen" precedent as aver_fw_player_controller. */
 enum {
     AVER_FW_GAMEPAD_DPAD_UP = 0, AVER_FW_GAMEPAD_DPAD_DOWN, AVER_FW_GAMEPAD_DPAD_LEFT,
     AVER_FW_GAMEPAD_DPAD_RIGHT, AVER_FW_GAMEPAD_START, AVER_FW_GAMEPAD_BACK,
@@ -660,12 +507,10 @@ AVER_FW_ABI int32_t aver_fw_view_entity(void);
 /* ---- the sky's cloud layer, published by a script ------------------------------------------
  *
  * A REQUEST, NOT THE TRUTH: until a script calls the setter, aver_fw_sky_clouds returns 0 and the
- * host keeps whatever the level authored, so a project with no sky script renders exactly as it
- * did before these entry points existed.
+ * host keeps whatever the level authored -- a project with no sky script renders as before.
  *
- * Lengths are CENTIMETRES and wind is centimetres per second, like everything else in this engine.
- * featureScale is 1 / the width of one noise feature in world units.
- */
+ * Lengths are CENTIMETRES, wind is centimetres/second (as elsewhere in this engine); featureScale
+ * is 1 / the width of one noise feature in world units. */
 AVER_FW_ABI void aver_fw_set_sky_clouds(int32_t seed, float coverage, float density,
                                         float bottomCm, float topCm, float featureScale,
                                         float windXCmPerSec, float windYCmPerSec);
@@ -679,32 +524,17 @@ AVER_FW_ABI void aver_fw_clear_sky_clouds(void);
 
 /* ---- FLUID VOLUME SPAWN, RELAYED ------------------------------------------------------------
  *
- * The framework does not know what a fluid volume is and does not link the module that does --
- * Aver.Fluids sits beside Aver.Physics at its own tier (see modules/fluids/include/aver/fluids/
- * FluidVolume.hpp's own header: "this module must never learn what Jolt is", and only the
- * composition root links both). Same shape as SAVE/LOAD and ANIMATION CURVES above: a host
- * installs a provider and this forwards.
- *
- * WHY THIS EXISTS: a level's WATER record (game::GameWater::applyLevel, which both hosts run) and
- * a graph's `COMP <id> Fluid ...` component (Aver.Graph's GraphComponentTree.ApplyKind, "fluid"
- * case, via Aver.Framework's Game.SpawnFluidVolume) both need to hand a fluids::FluidVolumeDesc to
- * fluids::FluidScene::spawn. This is the one seam a graph component or a plain C# script can
- * cross to ask for that, without either of them linking Aver.Fluids or Aver.Physics directly.
- * `subdivisions` is deliberately NOT a parameter here -- nobody asked for authorable mesh
- * resolution (see FluidVolume.hpp's own FluidVolumeDesc comment); every request gets that
- * struct's own default subdivision.
- *
- * QUEUED, NOT SYNCHRONOUS. The return value says a provider accepted the request, not that a
- * volume now simulates. GameWater::applyLevel's own latch hit this exact problem first: FluidScene is
- * not ready() until after render features come up, and this relay can be reached from points
- * that run before that (an actor bound while a level loads, a script's own OnBeginPlay) just as
- * easily as from ones that run after. A provider is expected to queue the request and drain it
- * at the same frame-safe point GameWater::applyLevel's own request is drained, not spawn from inside
- * the callback -- whether it actually spawned is reported by the host's own log, not by this
- * call returning.
- *
- * A host that installs nothing leaves this returning 0 -- a build with no fluids module linked
- * reports exactly that, the same as a clip with no such curve reports for aver_fw_anim_curve. */
+ * The framework does not link Aver.Fluids (FluidVolume.hpp: "this module must never learn what
+ * Jolt is") -- same provider-relay shape as SAVE/LOAD and ANIMATION CURVES above. WHY: a level's
+ * WATER record and a graph's `COMP <id> Fluid ...` component both need to hand a
+ * fluids::FluidVolumeDesc to fluids::FluidScene::spawn; this is the seam that lets either cross
+ * without linking Aver.Fluids/Aver.Physics directly. `subdivisions` is deliberately not a
+ * parameter -- every request gets FluidVolumeDesc's own default. QUEUED, NOT SYNCHRONOUS: the
+ * return value says a provider accepted the request, not that a volume simulates -- FluidScene is
+ * not ready() until after render features come up, and this can be reached earlier (a level-load
+ * actor, OnBeginPlay); a provider should queue and drain it at the same frame-safe point as a
+ * level's own WATER record, not spawn from inside the callback -- whether it spawned shows in the
+ * host's log. No provider -> returns 0. */
 typedef int32_t (AVER_FW_CALL* aver_fw_fluid_spawn_fn)(
     float cx, float cy, float cz,          /* world centre, cm */
     float hx, float hy, float hz,          /* half-extent, cm */
@@ -723,21 +553,13 @@ AVER_FW_ABI int32_t aver_fw_fluid_spawn(float cx, float cy, float cz, float hx, 
 
 /* ---- FLUID VOLUME SPAWN, WITH A MATERIAL --------------------------------------------------
  *
- * A SECOND, ADDITIVE relay beside aver_fw_fluid_spawn above, not a replacement for it -- see this
- * header's own MINOR 4 changelog entry. Carries the same six placement floats and the same four
- * raw solver knobs PLUS the material layer (fluids::FluidPhysicsMaterial): `densityKgM3`/`viscosityPaS`
- * (< 0 means "not given", the same sentinel convention `pressure` already uses on the plain
- * relay), or `materialPreset` (a name -- "water", "lightoil", "honey", "lava", case-insensitive;
- * empty means none). A non-empty preset is resolved to its own density/viscosity by the provider,
- * which links fluids::FluidPhysicsMaterial's real presets -- this ABI carries only a name across the
- * boundary, never a duplicated set of literal numbers, so the framework still never learns what a
- * FluidPhysicsMaterial actually contains.
- *
- * `damping` HERE CAN STILL CONFLICT WITH A MATERIAL, DELIBERATELY: this relay does not itself
- * decide which one wins. An author who writes both a material (preset or density/viscosity) and a
- * non-default `damping` on the same request is forwarded through untouched, exactly as authored --
- * the refusal happens once, downstream, at fluids::FluidScene::spawn (the one place both this
- * relay and a level's own WATER record converge), not here and not twice. */
+ * A SECOND, ADDITIVE relay beside aver_fw_fluid_spawn above, not a replacement (minor 4). Same
+ * six placement floats and four raw solver knobs PLUS the material layer
+ * (fluids::FluidPhysicsMaterial): `densityKgM3`/`viscosityPaS` (< 0 = "not given", same sentinel
+ * as `pressure`), or `materialPreset` ("water"/"lightoil"/"honey"/"lava", case-insensitive; empty =
+ * none), resolved by the provider, which carries only a name, never duplicated literal numbers.
+ * `damping` CAN STILL CONFLICT WITH A MATERIAL, DELIBERATELY: this relay forwards both untouched; the refusal
+ * happens once, downstream, at fluids::FluidScene::spawn. */
 typedef int32_t (AVER_FW_CALL* aver_fw_fluid_spawn_material_fn)(
     float cx, float cy, float cz,          /* world centre, cm */
     float hx, float hy, float hz,          /* half-extent, cm */
@@ -759,32 +581,19 @@ AVER_FW_ABI int32_t aver_fw_fluid_spawn_material(float cx, float cy, float cz,
 
 /* ---- INPUT SCHEME, LOADED FROM .ocinput -------------------------------------------------------
  *
- * modules/formats/include/aver/formats/OcInput.hpp defines the .ocinput text format -- named input
- * actions and their default key/mouse/gamepad bindings -- and until now nothing loaded one: that
- * header's own INTEGRATION NOTE said so plainly ("there is no C ABI export or C# loader for it
- * yet"). This section is that loader's C surface: the ONE existing C++ parser
- * (aver::fmt::parseOcinput, via loadOcinput, in OcInput.cpp) exposed here so
- * scripting/csharp/Aver.Framework/InputScheme.cs can turn a parsed file into a real
- * InputMappingContext without a second parser on the managed side -- the same division of labour
- * this ABI already draws for a graph (aver::fmt::parseOcgraph, reached through DeclareGraphClasses)
- * and, closer still, for the NAMED ACTIONS layer three sections up (EnhancedInput.cs's algorithm,
- * ported here so something other than a C# script can reach it).
- *
- * ONE PARSED SCHEME, NOT A HANDLE TABLE, on the same precedent as the NAMED ACTIONS section having
- * no context handle: a project names exactly one scheme (OcProject.hpp's own INPUT.SCHEME /
- * inputScheme field), so this ABI holds one file-static aver::fmt::OcInputData and every getter
- * below reads out of it. A second load REPLACES the slot outright, success or failure alike -- there
- * is no "keep the old one if the new one fails to parse" behaviour, matching aver_fw_action_clear_
- * bindings' own "drop everything, the caller rebuilds" shape a few sections up.
- *
- * COUNT THEN INDEX, the same convention aver_fw_graph_var_count/_at use above and for the same
- * reason stated there: a struct or an array-of-structs crossing this boundary would be the first of
- * either in this header, and a handful of calls once per load costs nothing worth breaking that for.
- *
- * RETURNED STRINGS STAY VALID UNTIL THE NEXT aver_fw_input_scheme_load -- not merely until the next
- * call, the lifetime every other const char* in this header gets (and which the caller must still
- * never free). A caller here is expected to hold action and binding-key names across several calls
- * while it walks a whole scheme, so this section states that wider lifetime explicitly. */
+ * OcInput.hpp defines the .ocinput format (named input actions + default bindings); nothing
+ * loaded one until now. This exposes the existing parser (aver::fmt::parseOcinput, via
+ * loadOcinput) so InputScheme.cs can turn a parsed file into an InputMappingContext with no
+ * second parser managed-side -- same division of labour as the graph (parseOcgraph, via
+ * DeclareGraphClasses) and the NAMED ACTIONS layer above. ONE PARSED SCHEME, NOT A HANDLE TABLE: a
+ * project names exactly one scheme (OcProject.hpp's INPUT.SCHEME), so this ABI holds one
+ * file-static aver::fmt::OcInputData; a second load REPLACES the slot outright on either outcome --
+ * no "keep the old one on parse failure". COUNT THEN INDEX, same convention as
+ * aver_fw_graph_var_count/_at: no struct or array-of-structs crossing this boundary, and a handful
+ * of calls per load is cheap. RETURNED STRINGS STAY VALID UNTIL THE NEXT
+ * aver_fw_input_scheme_load (wider than every other const char* here, valid only until the next
+ * call, and still never to be freed by the caller) -- callers hold names across several calls while
+ * walking a whole scheme. */
 
 /* Loads and parses a scheme from an .ocinput file, replacing whatever was loaded before -- on
  * either outcome. 1 when it parsed, 0 when the path was null/empty or the file was missing,
@@ -809,13 +618,11 @@ AVER_FW_ABI int32_t     aver_fw_input_scheme_action_type(int32_t index);
 /* How many BIND records the loaded scheme declares. 0 when nothing is loaded. */
 AVER_FW_ABI int32_t     aver_fw_input_scheme_binding_count(void);
 /* Binding `index`'s fields (0..binding_count-1, declaration order). *outActionIndex is the 0-based
- * index INTO aver_fw_input_scheme_action_name/_type of the ACTION this binding names -- NOT an
- * aver_fw_action_register handle; the caller resolves that itself once it has registered the
- * action. *outSource is an AVER_FW_ACTION_SRC_* value (the NAMED ACTIONS section above), OcInputSource
- * mapped one for one: Key -> SRC_KEY, MouseX/MouseY -> SRC_MOUSE_X/SRC_MOUSE_Y, MouseWheel ->
- * SRC_MOUSE_WHEEL, GamepadButton/GamepadAxis -> SRC_GAMEPAD_BUTTON/SRC_GAMEPAD_AXIS. *outScale and
- * *outComponent are OcInputBinding::scale/component, unchanged. 1 when `index` is in range, 0 (every
- * output left untouched) otherwise. */
+ * index INTO aver_fw_input_scheme_action_name/_type -- NOT an aver_fw_action_register handle; the
+ * caller resolves that itself. *outSource is an AVER_FW_ACTION_SRC_* value, OcInputSource mapped
+ * one for one (Key->SRC_KEY, MouseX/Y->SRC_MOUSE_X/Y, MouseWheel->SRC_MOUSE_WHEEL,
+ * GamepadButton/Axis->SRC_GAMEPAD_BUTTON/AXIS). *outScale/*outComponent are
+ * OcInputBinding::scale/component, unchanged. 1 in range, 0 (outputs untouched) otherwise. */
 AVER_FW_ABI int32_t     aver_fw_input_scheme_binding(int32_t index, int32_t* outActionIndex,
                                                      int32_t* outSource, float* outScale,
                                                      int32_t* outComponent);

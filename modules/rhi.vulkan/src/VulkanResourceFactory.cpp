@@ -1,26 +1,19 @@
-// VulkanResourceFactory — the Vulkan analog of D3D12ResourceFactory (modules/rhi.d3d12/src/
-// D3D12Device.cpp, ~3607-4844). Owns every generic GPU object a render-feature module creates
-// through IResourceFactory: textures, buffers, samplers (via the pipeline-layout cache), shaders,
-// pipelines, binding sets, and acceleration structures — plus the deferred-destruction queue every
-// one of those destroy calls defers into.
+// VulkanResourceFactory -- Vulkan analog of D3D12ResourceFactory (modules/rhi.d3d12/src/
+// D3D12Device.cpp, ~3607-4844). Owns every GPU object IResourceFactory creates -- textures, buffers,
+// samplers (via the pipeline-layout cache), shaders, pipelines, binding sets, acceleration
+// structures -- and the deferred-destruction queue their destroy calls feed.
 //
-// FILE MAP: see VulkanCommon.hpp's own banner. This file owns VulkanResourceFactory in full, the
-// pipeline-layout / table-shape / sampler caches, nullFill/uploadInitialData, retireFence/retire/
-// collect, and the four createXCommitted/destroyXCommitted free functions.
+// FILE MAP: see VulkanCommon.hpp's banner. Owns VulkanResourceFactory in full, the pipeline-layout/
+// table-shape/sampler caches, nullFill/uploadInitialData, retireFence/retire/collect, and the four
+// createXCommitted/destroyXCommitted free functions.
 //
-// THE ONE STRUCTURAL PROBLEM THIS FILE HAD TO SOLVE THAT D3D12 NEVER FACES: a D3D12 root descriptor
-// TABLE range is type-erased — "N SRV descriptors starting at t0" says nothing about whether each
-// one is a Texture2D, a StructuredBuffer or an acceleration structure; the HLSL alone decides that,
-// and CreateShaderResourceView can point ANY of those kinds at ANY slot. PipelineLayout
-// (RHIResources.hpp) mirrors that: it declares SRV/UAV COUNTS per table, never per-slot KINDS.
-// Vulkan's VkDescriptorSetLayoutBinding is not type-erased — a binding commits to exactly one
-// VkDescriptorType, and building a pipeline against the wrong one is invalid. Since
-// GraphicsPipelineDesc/ComputePipelineDesc/PipelineLayout are off-limits to edit (modules/rhi/ is
-// owned by other work) and carry no per-slot kind, the only remaining source of truth for "is t3 a
-// texture or a buffer" is the shader ITSELF — which is exactly why RhiShader keeps its compiled
-// `spirv` words around after building the VkShaderModule (VulkanCommon.hpp never says why; this is
-// why). See reflectTableSlotKinds() below for the mechanism, and its own comment for the smuggling
-// trick descriptorLayout()'s FIXED, cross-file signature forced.
+// STRUCTURAL PROBLEM D3D12 NEVER FACES: its root descriptor tables are type-erased ("N SRVs at t0"
+// says nothing about Texture2D vs StructuredBuffer vs acceleration structure), and PipelineLayout
+// mirrors that with per-table COUNTS only, never per-slot kinds. Vulkan's VkDescriptorSetLayoutBinding
+// commits to one VkDescriptorType, and PipelineLayout/GraphicsPipelineDesc/ComputePipelineDesc are
+// off-limits to edit (owned by modules/rhi/), so the shader is the only source of truth for a slot's kind -- why
+// RhiShader keeps its compiled `spirv` words after building the VkShaderModule. See
+// reflectTableSlotKinds() below, and its own comment for the descriptorLayout() smuggling trick.
 #include "VulkanCommon.hpp"
 
 #include <cstdio>
@@ -32,22 +25,19 @@
 namespace aver::rhi::vkb {
 
 // ================================================================================================
-// 0. Small local helpers — Vulkan descriptor-type mapping, SPIR-V reflection, one-shot command
-//    submission, and the lazily-built "null" resources nullFill() writes into unset slots.
-//    Everything in this anonymous namespace is private to this translation unit; nothing here is
-//    declared in VulkanCommon.hpp because nothing else needs it.
+// 0. Local helpers: descriptor-type mapping, SPIR-V reflection, one-shot command submission, and
+//    the lazily-built null resources nullFill() writes into unset slots. All private to this TU.
 // ================================================================================================
 namespace {
 
 // ---- SlotKind <-> VkDescriptorType -------------------------------------------------------------
 // `rtSupported` substitutes a sampled-image descriptor for an SRV AccelerationStructure slot when
-// VK_KHR_acceleration_structure is unavailable — the direct Vulkan-side twin of D3D12ResourceFactory
-// ::nullFill's own substitution (D3D12Device.cpp ~3686-3699: "no ray tracing on this device:
-// acceleration-structure slots are filled with a null 2D view"). D3D12 can make that substitution
-// PURELY AT WRITE TIME, because a root descriptor table slot has no fixed type. Vulkan cannot: the
-// VkDescriptorSetLayoutBinding itself must already say SAMPLED_IMAGE, or vkCreateDescriptorSetLayout
-// for VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR is invalid without the extension enabled — so
-// this same substitution has to happen here too, at LAYOUT-BUILD time, not just at nullFill time.
+// VK_KHR_acceleration_structure is unavailable, mirroring D3D12ResourceFactory::nullFill's own
+// substitution (D3D12Device.cpp ~3686-3699: "no ray tracing on this device: acceleration-structure
+// slots are filled with a null 2D view"). D3D12 can do this purely at write time (root table
+// slots have no fixed type); Vulkan cannot -- the binding must already say SAMPLED_IMAGE, since
+// vkCreateDescriptorSetLayout for ACCELERATION_STRUCTURE_KHR is invalid without the extension, so
+// the substitution has to happen here too, at LAYOUT-BUILD time.
 VkDescriptorType toVkSrvDescriptorType(SlotKind kind, bool rtSupported) {
     switch (kind) {
         case SlotKind::StructuredBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -183,12 +173,10 @@ void reflectSpirvBindings(const std::vector<u32>& code, std::vector<SpvBinding>&
     }
 }
 
-// OpEntryPoint's literal name, read back from the module itself. RhiShader keeps no entry-point
-// string of its own (spirv/stage/module only — see VulkanCommon.hpp section 7), and
-// VkPipelineShaderStageCreateInfo::pName needs a live C-string naming the SPIR-V entry function;
-// the module's own OpEntryPoint instruction is the one place that name is guaranteed to survive,
-// so this decodes it rather than threading ShaderDesc::entry through an extra field the header
-// does not declare.
+// OpEntryPoint's literal name, read back from the module itself: RhiShader keeps no entry-point
+// string (spirv/stage/module only -- VulkanCommon.hpp section 7), and pName needs a live C-string;
+// the module's OpEntryPoint is the one place that name is guaranteed to survive. Decoded from
+// SPIR-V rather than threading ShaderDesc::entry through a field the header lacks.
 std::string spirvEntryPointName(const std::vector<u32>& code) {
     if (code.size() < 5 || code[0] != 0x07230203u) return {};
     usize i = 5;
@@ -218,14 +206,12 @@ SlotKind fromVkDescriptorTypeUav(VkDescriptorType t) {
     return (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) ? SlotKind::StructuredBuffer : SlotKind::Texture2D;
 }
 
-// The per-call reflected table shape, SMUGGLED from createGraphicsPipeline/createComputePipeline
-// into descriptorLayout() around each call. Necessary because descriptorLayout()'s signature is
-// FIXED by VulkanCommon.hpp — `(const PipelineLayout&, bool)`, shared across four translation
-// units, not something this file may redesign — and carries no shader information, yet building a
-// correct VkDescriptorSetLayout for table 0/1 needs exactly that (see this file's banner). Set
-// immediately before each descriptorLayout() call this file makes and cleared immediately after;
-// safe as a plain (non-thread_local) static because this factory, like D3D12ResourceFactory, takes
-// no lock and is never called concurrently with itself.
+// Per-call reflected table shape, SMUGGLED from createGraphicsPipeline/createComputePipeline into
+// descriptorLayout() around each call: descriptorLayout()'s signature is FIXED by VulkanCommon.hpp
+// (`(const PipelineLayout&, bool)`, shared across 4 TUs) and carries no shader info, yet building
+// VkDescriptorSetLayout for table 0/1 needs exactly that. Set immediately before each
+// descriptorLayout() call and cleared after; a plain static is safe since this factory takes no
+// lock and is never called concurrently with itself.
 struct PendingTableKinds {
     bool active = false;
     SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
@@ -239,21 +225,17 @@ struct PendingTableKinds {
 };
 PendingTableKinds gPendingKinds;
 
-// Reflects every given (already-resolved) shader stage and fills `out` with the REAL kind each
-// declared PipelineLayout slot needs, defaulting an UNMENTIONED slot to Texture2D (logged) rather
-// than guessing further — an unread register is a real, legal case (RHIResources.hpp's own note on
-// dispatchMeshClusters "always reserving regardless of whether a shader reads all three").
-// WHICH MODULE'S BINDINGS THIS READS IS LOAD-BEARING, and reading the wrong one was a real bug.
-//
-// The LAYOUT-AGNOSTIC module compiled by createShader has every register in set 0 at binding ==
-// register number, because that is what DXC does with a space-less register. In that module a
-// SAMPLER at s2 sits at set 0 binding 2 -- indistinguishable, here, from an SRV at t2. So this
-// function classified slot 2 from the sampler and overwrote the acceleration structure actually
-// declared there, and the layer reported the consequence three steps later:
-//     "Binding 2 ... from VkPipelineLayout is type VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE but binding 2
-//      ... trying to bind, is type VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR"
-// The PER-LAYOUT variant (moduleForLayout) has samplers in set 3 and table 1 in set 1, so its
-// set-0 bindings mean exactly what this function assumes they mean. Callers pass that.
+// Reflects every given shader stage and fills `out` with the REAL kind each declared PipelineLayout
+// slot needs, defaulting an unmentioned slot to Texture2D (logged) -- an unread register is legal
+// (RHIResources.hpp: dispatchMeshClusters always reserves 3 regardless of usage).
+// WHICH MODULE'S BINDINGS THIS READS IS LOAD-BEARING. The LAYOUT-AGNOSTIC module from createShader
+// puts every register in set 0 at binding == register number (DXC's space-less layout), so a
+// SAMPLER at s2 and an SRV at t2 collide at set 0 binding 2 -- caused a real bug (sampler
+// overwrote an acceleration structure actually declared there), reported three steps later as
+// "Binding 2 ... from VkPipelineLayout is type VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE but binding 2 ...
+// trying to bind, is type VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR".
+// The PER-LAYOUT variant (moduleForLayout) puts samplers in set 3 and table 1 in set 1, so its
+// set-0 bindings mean what this function assumes. Callers must pass that variant.
 void reflectTableSlotKinds(const std::vector<u32>* const* stageSpirv, u32 stageCount,
                            const PipelineLayout& layout, PendingTableKinds& out) {
     out.active = true;
@@ -287,12 +269,10 @@ void reflectTableSlotKinds(const std::vector<u32>* const* stageSpirv, u32 stageC
 }
 
 // ---- one-shot command submission ----------------------------------------------------------------
-// Records `fn`, submits it on the graphics queue, and blocks until it retires. D3D12's
-// CreateCommittedResource can put a resource directly into any starting D3D12_RESOURCE_STATES with
-// no extra command; a Vulkan image is ALWAYS born VK_IMAGE_LAYOUT_UNDEFINED, so "create a texture
-// already in RenderTarget state" needs a real barrier submitted and waited on before createTexture
-// can return — this generalises the one-shot pattern uploadInitialData needs anyway, since a fresh
-// texture with an initial layout (seeded or not) needs it too.
+// Records `fn` on the graphics queue and blocks until it retires. D3D12's CreateCommittedResource
+// can start a resource in any D3D12_RESOURCE_STATES directly; a Vulkan image is always born
+// UNDEFINED, so "create a texture already in RenderTarget state" needs a real barrier submitted and
+// waited on -- this generalises the pattern uploadInitialData needs too, for seeded or unseeded textures.
 bool runOneShotCommands(VulkanDevice& dev, const std::function<void(VkCommandBuffer)>& fn, const char* what) {
     const VulkanApi& api = dev.api();
     VkDevice device = dev.vkDevice();
@@ -361,16 +341,13 @@ void transitionFreshImage(VulkanDevice& dev, VkImage image, VkImageAspectFlags a
 
 // ---- lazily-built dummy resources nullFill() writes into every unset declared slot --------------
 // Tier 1 requires a valid, dimension-matched descriptor in every declared slot even when unused
-// (RHIResources.hpp's own comment; D3D12ResourceFactory::nullFill, D3D12Device.cpp ~3678-3739, does
-// the identical thing with a null SRV/UAV view). Core Vulkan has no equivalent of
-// `CreateShaderResourceView(nullptr, &desc, handle)` -- without VK_EXT_robustness2's nullDescriptor
-// feature (not in this backend's extension list), every descriptor write needs a REAL, valid
-// resource behind it. These are that resource: a 1x1 image (used for both Texture2D and Texture3D
-// null-fills; Vulkan's descriptor TYPE, not the view's declared dimensionality, is what has to
-// match the layout) and a 16-byte buffer, built once and reused for the life of the process. Kept
-// as file-local statics rather than factory members because VulkanResourceFactory's class body is
-// fixed by VulkanCommon.hpp and cannot grow a new field here; this assumes at most one live
-// VulkanResourceFactory per process, true of this engine's actual usage throughout.
+// (RHIResources.hpp; mirrors D3D12ResourceFactory::nullFill, D3D12Device.cpp ~3678-3739). Core
+// Vulkan has no equivalent of `CreateShaderResourceView(nullptr, &desc, handle)` without
+// VK_EXT_robustness2's nullDescriptor feature (not in this backend's extension list), so every
+// write needs a REAL resource: a 1x1 image (shared by Texture2D/Texture3D
+// null-fills -- the descriptor TYPE must match the layout, not the view's dimensionality) and a
+// 16-byte buffer, built once for the process. File-local statics, not factory members, because
+// VulkanResourceFactory's class body is fixed by VulkanCommon.hpp; assumes one live factory/process.
 struct NullResources {
     bool ready = false;
     VkImage image2D = VK_NULL_HANDLE, image3D = VK_NULL_HANDLE;
@@ -378,10 +355,9 @@ struct NullResources {
     VkImageView view2D = VK_NULL_HANDLE, view3D = VK_NULL_HANDLE;
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
-    // A degenerate, 0-instance TLAS, built only if the device actually has ray tracing -- the one
-    // case a dummy IMAGE cannot stand in for, since the descriptor set layout for an
-    // AccelerationStructure slot, when RT IS supported, is really VK_DESCRIPTOR_TYPE_
-    // ACCELERATION_STRUCTURE_KHR (see toVkSrvDescriptorType) and nothing else is a legal write there.
+    // A degenerate, 0-instance TLAS, built only when the device has ray tracing -- the one case a
+    // dummy IMAGE can't stand in for, since an AccelerationStructure slot's layout is really
+    // VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR (see toVkSrvDescriptorType), nothing else legal.
     VkAccelerationStructureKHR dummyTlas = VK_NULL_HANDLE;
     VkBuffer dummyTlasBuffer = VK_NULL_HANDLE;
     VkDeviceMemory dummyTlasMemory = VK_NULL_HANDLE;
@@ -534,10 +510,9 @@ VkPipelineColorBlendAttachmentState toVkBlendAttachment(BlendMode m) {
 // ================================================================================================
 PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh) {
     PushConstantLayout pc;
-    // b1 (the object block) is always present and always first -- every feature module that builds
-    // a PipelineLayout sets constantDwords[kObjectConstantRegister] = kObjectConstantDwords itself
-    // (see e.g. VoxiRenderer.cpp's giLayout()), so this is reproduced here, not re-derived from
-    // whatever the caller happened to write.
+    // b1 (object block) is always present and first -- every module building a PipelineLayout sets
+    // constantDwords[kObjectConstantRegister] = kObjectConstantDwords itself (e.g. VoxiRenderer.cpp's
+    // giLayout()), so this reproduces that rather than re-deriving it from the caller.
     pc.slotOffset[kObjectConstantRegister] = PushConstantLayout::kObjectOffset;
     pc.slotBytes[kObjectConstantRegister] = PushConstantLayout::kObjectBytes;
     u32 offset = PushConstantLayout::kObjectOffset + PushConstantLayout::kObjectBytes;
@@ -559,9 +534,8 @@ PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// 1b. pushConstantKey / patchPushConstantSlots -- declared in VulkanCommon.hpp section 4, and the
-//     reason RhiShader keeps its source. Both live here because both are defined in terms of the
-//     byte offsets pushConstantLayout() assigns directly above.
+// 1b. pushConstantKey / patchPushConstantSlots -- declared in VulkanCommon.hpp section 4; the reason
+//     RhiShader keeps its source. Both defined in terms of pushConstantLayout()'s byte offsets above.
 // ------------------------------------------------------------------------------------------------
 namespace {
 
@@ -740,62 +714,54 @@ u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 ma
     const u32 samplers = layout.samplerCount < 4 ? layout.samplerCount : 4;
     for (u32 i = 0; i < samplers; ++i) put('s', i, kVkSetSamplers, i);
 
-    // DESCRIPTOR constant buffers, because THE MAP HAS TO BE COMPLETE. Once any -fvk-bind-register
-    // is supplied DXC requires one for EVERY resource the shader declares, and says so:
-    //     error: missing -fvk-bind-register for resource
-    // That is also why patchCbuffersForLayout's [[vk::binding]] half is switched off whenever this
-    // map is in use -- the two would be two answers to the same question.
-    //
-    // Slots with a NON-ZERO constantDwords are deliberately absent: those blocks are folded into
-    // [[vk::push_constant]] and their `register(bN)` is deleted outright, so there is no resource
-    // left for DXC to want a mapping for.
+    // DESCRIPTOR constant buffers: THE MAP HAS TO BE COMPLETE. Once any -fvk-bind-register is
+    // supplied, DXC requires one for EVERY resource the shader declares ("missing -fvk-bind-register
+    // for resource"), which is also why patchCbuffersForLayout's [[vk::binding]] half is switched off
+    // whenever this map is in use -- two answers to the same question otherwise.
+    // Slots with NON-ZERO constantDwords are absent: folded into [[vk::push_constant]] with their
+    // `register(bN)` deleted, so there's no resource left for DXC to map.
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (layout.constantDwords[k] == 0) put('b', k, kVkSetConstants, k);
 
-    // gInstanceWorlds, for a GraphicsPipelineDesc::instanced pipeline only. The register number is
-    // NOT a constant: the shared HLSL takes it from AVER_INSTANCE_SRV, which VoxiRenderer.cpp defines
-    // as rhi::declaredSrvCount(layout) -- one past the last SRV the layout declares, across BOTH
-    // tables -- so it moves with the layout and has to be derived the same way here or the two
-    // disagree silently. Its own set (see kVkSetInstances) because that number can equal
-    // kVkUavBindingBase and collide with a UAV inside set 0.
+    // gInstanceWorlds, instanced pipelines only. Register is NOT constant: HLSL takes it from
+    // AVER_INSTANCE_SRV (VoxiRenderer.cpp: rhi::declaredSrvCount(layout), one past the last SRV
+    // across both tables), so it must be derived the same way here or the two disagree silently.
+    // Own set (kVkSetInstances): that number can equal kVkUavBindingBase and collide with set 0's UAVs.
     if (instanced) put('t', declaredSrvCount(layout), kVkSetInstances, 0);
 
     return n;
 }
 
 u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
-    // EVERY input the per-layout compile depends on has to be in here, or two layouts that differ
-    // only in an omitted field silently share one module. The constant-slot mask alone was enough
-    // while patchCbuffersForLayout was the only per-layout step; buildRegisterBinds made the SRV,
-    // UAV and sampler counts matter too.
-    // kMaxBindingSlots (24, raised from 16 in optimisation-wave-2) must still fit in the 5-bit field
-    // each count below gets -- 5 bits covers 0..31, so this only breaks if the constant is ever raised
-    // past 31, which would corrupt every field after the first it overflows into.
+    // EVERY input the per-layout compile depends on must be in here, or two layouts differing only
+    // in an omitted field silently share one module (buildRegisterBinds made SRV/UAV/sampler counts
+    // matter, not just the constant-slot mask). kMaxBindingSlots (24, raised from 16 in
+    // optimisation-wave-2) must fit the 5-bit field each count gets below (covers 0..31) --
+    // raising it past 31 would corrupt every field after.
     static_assert(kMaxBindingSlots <= 31, "shaderVariantKey packs each *Count into a 5-bit field below");
     u32 key = 0;
     key |= 1u << kObjectConstantRegister;      // pushConstantLayout always places b1, declared or not
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (layout.constantDwords[k]) key |= 1u << k;
-    // kMaxBindingSlots is 24, so each count needs 5 bits (covers 0..31); samplerCount is capped at 4, so 3.
+    // samplerCount is capped at 4, so needs only 3 bits.
     key |= (layout.srvCount  & 31u) << 5;
     key |= (layout.uavCount  & 31u) << 10;
     key |= (layout.srvCount1 & 31u) << 15;
     key |= (layout.uavCount1 & 31u) << 20;
     key |= (layout.samplerCount & 7u) << 25;
     if (mesh) key |= 1u << 31;
-    // Bit 30 (28..30 were the free ones): an instanced pipeline compiles a DIFFERENT module from the
-    // same source and the same layout -- one extra -fvk-bind-register -- so without this the two
-    // would alias to one cached variant and whichever compiled first would serve both.
+    // Bit 30 (28..30 were free): an instanced pipeline compiles a DIFFERENT module from the same
+    // source/layout (one extra -fvk-bind-register); without this the two would alias to one cached
+    // variant and whichever compiled first would serve both.
     if (instanced) key |= 1u << 30;
     return key;
 }
 
 bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh,
                             bool annotateDescriptors) {
-    // BEFORE ANY SCANNING. findCbufferBlock/findNextCbuffer below read the register number out of
-    // the text, and the prelude writes it as a macro now -- without this they find nothing, b1 is
-    // never folded into push constants, and the pipeline names a descriptor its layout does not
-    // declare. See expandCbufferRegisters for the whole story.
+    // BEFORE ANY SCANNING: findCbufferBlock/findNextCbuffer read the register number from text, but
+    // the prelude now writes it as a macro -- without this, b1 never folds into push constants and
+    // the pipeline names a descriptor its layout doesn't declare. See expandCbufferRegisters.
     expandCbufferRegisters(src);
     const PushConstantLayout pc = pushConstantLayout(layout, mesh);
 
@@ -807,14 +773,11 @@ bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (k != kObjectConstantRegister && layout.constantDwords[k]) order[n++] = k;
 
-    // SCAN A COMMENT-BLANKED COPY, NOT THE SOURCE. A comment that merely MENTIONS a cbuffer -- and
-    // this engine's shaders are heavily commented, several of them quoting the very declarations
-    // this function rewrites -- would otherwise be matched as a real one, and the annotation would
-    // be inserted into prose. DXC's report for that is "an attribute list cannot appear here",
-    // pointing at a line with no declaration on it at all.
-    //
-    // blankComments overwrites each comment character with a space rather than deleting it, so the
-    // copy is the same LENGTH as the source and every offset below indexes both.
+    // SCAN A COMMENT-BLANKED COPY, NOT THE SOURCE: a comment merely MENTIONING a cbuffer (shaders here
+    // are heavily commented, some quoting the declarations this function rewrites) would otherwise
+    // match as real and get an annotation inserted into prose -- DXC then reports "an attribute list
+    // cannot appear here" on a line with no declaration.
+    // blankComments overwrites each comment char with a space (same LENGTH as source), so offsets index both.
     std::string scan = blankComments(src);
 
     struct Block { u32 slot; size_t begin, end; std::string body; };
@@ -826,10 +789,9 @@ bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool
     }
 
     // ---- the DESCRIPTOR half: every cbuffer the layout does NOT make root constants -------------
-    // Skipped when the caller is supplying a -fvk-bind-register map, which places these itself.
-    // Same rule, other side of it. descriptorLayout() declares a dynamic UBO at binding == register
-    // in kVkSetConstants for each such slot, so that is exactly where the shader must name it;
-    // DXC otherwise leaves a space-less register in set 0, where nothing declares it.
+    // Skipped when the caller supplies a -fvk-bind-register map (it places these itself).
+    // descriptorLayout() declares a dynamic UBO at binding == register in kVkSetConstants for each
+    // such slot, so the shader must name it there or DXC leaves it space-less in set 0, undeclared.
     if (annotateDescriptors) {
         struct Ann { size_t at; u32 reg; };
         std::vector<Ann> anns;
@@ -839,13 +801,11 @@ bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool
         while (findNextCbuffer(scan, from, reg, b, bb, be, e)) {
             from = b + 7;
             if (reg >= kMaxConstantSlots) continue;          // outside the layout's slots entirely
-            // ANY slot the push-constant half claims, which is NOT the same as "constantDwords is
-            // non-zero": pushConstantLayout places kObjectConstantRegister unconditionally, declared
-            // or not. A layout that leaves constantDwords[1] at zero while its shader includes the
-            // prelude's PerObject block therefore has b1 folded AND, without this, annotated -- and
-            // the annotation survives the fold to land on the generated struct:
-            //     [[vk::binding(1, 2)]] struct AverPcBlock {
-            // which DXC rejects with "an attribute list cannot appear here".
+            // ANY slot the push-constant half claims -- NOT the same as "constantDwords is non-zero":
+            // pushConstantLayout places kObjectConstantRegister unconditionally. A layout leaving
+            // constantDwords[1] at zero while its shader includes the prelude's PerObject block has
+            // b1 folded AND (without this check) annotated, landing on the generated struct as
+            // `[[vk::binding(1, 2)]] struct AverPcBlock {` -- DXC rejects that attribute placement.
             bool folded = false;
             for (u32 oi = 0; oi < n; ++oi) if (order[oi] == reg) { folded = true; break; }
             if (folded) continue;
@@ -949,11 +909,10 @@ bool createBufferCommitted(VulkanDevice& dev, VkDeviceSize bytes, VkBufferUsageF
         return false;
     }
 
-    // Every buffer this factory creates carries VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-    // (toVkBufferUsage's "everything is everything" policy, or the caller's own explicit AS-buffer
-    // usage above), so its backing memory must always be allocated with the matching allocate flag
-    // -- there is no per-resource opt-out the way D3D12 simply never needs one (a GPU virtual
-    // address is always available there with no allocation-time flag at all).
+    // Every buffer here carries VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT (toVkBufferUsage's
+    // "everything is everything" policy, or the caller's explicit AS-buffer usage), so its memory
+    // must always be allocated with the matching flag -- D3D12 needs no such opt-out (GPU virtual
+    // addresses are always available there, no allocation-time flag).
     VkMemoryAllocateFlagsInfo flagsInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
     flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -1029,14 +988,12 @@ void destroyImageCommitted(VulkanDevice& dev, VkImage image, VkDeviceMemory memo
 }
 
 // ================================================================================================
-// 2b. W4: one-shot device-buffer upload. See VulkanCommon.hpp's declaration for the full contract;
-//     this is the STAGING-BUFFER half of what a Default-heap mesh needs that an Upload-heap one
-//     never did (writeBuffer refuses a non-mapped buffer -- VulkanResourceFactory::writeBuffer's own
-//     ERROR, "not BufferKind::Upload"). Sits here rather than in the anonymous namespace above
-//     because it is a VulkanResourceFactory member (declared in VulkanCommon.hpp so
-//     VulkanDevice::createMesh/createMeshSharingVertices can call it), but it calls
-//     runOneShotCommands/createBufferCommitted/destroyBufferCommitted exactly as
-//     transitionFreshImage above does, all defined in this same TU.
+// 2b. W4: one-shot device-buffer upload (VulkanCommon.hpp has the full contract). The STAGING-BUFFER
+//     half a Default-heap mesh needs that Upload-heap doesn't (writeBuffer refuses a non-mapped
+//     buffer -- its own ERROR, "not BufferKind::Upload"). A VulkanResourceFactory member
+//     (VulkanDevice::createMesh/createMeshSharingVertices
+//     call it), calling runOneShotCommands/createBufferCommitted/destroyBufferCommitted as
+//     transitionFreshImage does, all in this TU.
 // ================================================================================================
 bool VulkanResourceFactory::uploadToDeviceBuffers(const VkBuffer* dsts, const void* const* srcs,
                                                    const VkDeviceSize* sizes, u32 count, const char* what) {
@@ -1094,14 +1051,12 @@ bool VulkanResourceFactory::uploadToDeviceBuffers(const VkBuffer* dsts, const vo
 // ================================================================================================
 
 VulkanResourceFactory::~VulkanResourceFactory() {
-    // D3D12ResourceFactory's destructor is `dev_->waitForGpu(); retired_.clear();` -- ComPtr RAII,
-    // baked into every RhiTexture/RhiBuffer/... member, releases everything the handle tables still
-    // hold the moment THEIR OWN destructors run right after. A VkImage/VkBuffer/... is a plain u64,
-    // not a smart pointer, so the same "just clear the vectors" line here would leak every live GPU
-    // allocation until the whole VkDevice tears down. Wait for the GPU first (nothing below may run
-    // concurrently with a submit that still references any of this), run every already-retired
-    // destroy callback (its fence has necessarily passed once the wait returns), then walk every
-    // handle table and free whatever is still alive.
+    // D3D12ResourceFactory's destructor is just `waitForGpu(); retired_.clear()` -- ComPtr RAII on
+    // every RhiTexture/RhiBuffer/... member releases the rest. A VkImage/VkBuffer is a plain u64, not
+    // a smart pointer, so the same "clear the vectors" here would leak every live allocation until
+    // the whole VkDevice tears down. Order:
+    // wait for the GPU (nothing below may run concurrently with a live submit), run every already-
+    // retired destroy callback (its fence has passed), then walk each handle table and free what's left.
     const VulkanApi& api = dev_->api();
     VkDevice device = dev_->vkDevice();
     dev_->waitForGpu();
@@ -1114,12 +1069,11 @@ VulkanResourceFactory::~VulkanResourceFactory() {
         if (t.rtvView) api.DestroyImageView(device, t.rtvView, nullptr);
         if (t.dsvView) api.DestroyImageView(device, t.dsvView, nullptr);
         for (VkImageView v : t.uavViews) if (v) api.DestroyImageView(device, v, nullptr);
-        // externallyOwned records (today, only the depth texture adoptExternalDepthTexture builds
-        // over VulkanDevice::depthBuffer_/depthMemory_) do NOT own image/memory -- see that flag's
-        // own comment on RhiTexture. VulkanDevice::~VulkanDevice() destroys the real depth buffer
-        // itself, a few lines below this factory's own `delete rhiFactory_` in that destructor;
-        // freeing it here too would be a double-destroy of a VkImage/VkDeviceMemory Vulkan has
-        // already recycled by the time that second free ran.
+        // externallyOwned records (today only the depth texture adoptExternalDepthTexture builds
+        // over VulkanDevice::depthBuffer_/depthMemory_) do NOT own image/memory (see that flag's
+        // comment on RhiTexture). VulkanDevice::~VulkanDevice() destroys the real depth buffer itself,
+        // just below this factory's `delete rhiFactory_`; freeing it here too double-destroys a
+        // VkImage/VkDeviceMemory Vulkan may have already recycled by then.
         if (!t.externallyOwned) destroyImageCommitted(*dev_, t.image, t.memory);
     }
     textures_.clear();
@@ -1127,11 +1081,11 @@ VulkanResourceFactory::~VulkanResourceFactory() {
     for (auto& b : buffers_) destroyBufferCommitted(*dev_, b.buffer, b.memory);
     buffers_.clear();
 
-    // THE VARIANTS TOO, not just the layout-agnostic module. A shader compiled per push-constant
-    // shape owns one VkShaderModule per variant (see RhiShader::variants), and destroyShader has
-    // always freed them -- but a shader that lives to shutdown never passes through destroyShader,
-    // so every variant ever compiled leaked here. That was most of the modules the layer counted at
-    // vkDestroyDevice, and it grew with every distinct layout the frame used.
+    // THE VARIANTS TOO, not just the layout-agnostic module: a shader compiled per push-constant
+    // shape owns one VkShaderModule per variant (RhiShader::variants); a shader that lives to
+    // shutdown never passes through destroyShader, so every variant leaked here before this loop --
+    // most of the modules the validation layer counted at vkDestroyDevice, growing with every
+    // distinct layout the frame used.
     for (auto& s : shaders_) {
         for (RhiShaderVariant& v : s.variants)
             if (v.module && v.module != s.module) api.DestroyShaderModule(device, v.module, nullptr);
@@ -1193,10 +1147,9 @@ bool VulkanResourceFactory::init() {
     VkDevice device = dev_->vkDevice();
 
     // Sizing is a policy call with no D3D12 number to derive it from: D3D12's kRhiHeapSize (65536)
-    // counts individual CBV_SRV_UAV descriptor SLOTS in one heap; Vulkan counts descriptor SETS and,
-    // separately, a per-TYPE budget across the whole pool. Sized generously rather than measured,
-    // since nothing in this engine's actual usage has been profiled yet -- revisit if
-    // vkAllocateDescriptorSets/vkCreateDescriptorPool ever reports VK_ERROR_OUT_OF_POOL_MEMORY.
+    // counts descriptor SLOTS in one heap; Vulkan counts descriptor SETS plus a per-TYPE pool budget.
+    // Sized generously, unmeasured -- revisit if vkAllocateDescriptorSets/vkCreateDescriptorPool ever
+    // reports VK_ERROR_OUT_OF_POOL_MEMORY.
     constexpr u32 kMaxSets = 4096;
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16384},
@@ -1219,14 +1172,12 @@ bool VulkanResourceFactory::init() {
     pi.pPoolSizes = sizes;
     if (!vkOk(api.CreateDescriptorPool(device, &pi, nullptr, &descriptorPool_), "rhi descriptor pool")) return false;
 
-    // RhiPipeline::layoutEntry is a RAW POINTER into descriptorLayouts_ (VulkanCommon.hpp section
-    // 12's own comment: "owned by VulkanResourceFactory's cache, not by this"). A std::vector that
-    // reallocates on growth would dangle every already-built pipeline's pointer the moment a LATER,
-    // differently-shaped pipeline layout pushes past this capacity. D3D12's RootSigEntry cache has
-    // no equivalent hazard: D3D12Device.cpp's RhiPipeline stores the raw ID3D12RootSignature*
-    // straight out of the cache entry, not a pointer to the entry itself. Reserving up front is the
-    // whole mitigation; if this engine ever legitimately builds more than 256 distinct
-    // (PipelineLayout, mesh) combinations, this needs revisiting, not just a bigger number.
+    // RhiPipeline::layoutEntry is a RAW POINTER into descriptorLayouts_ (VulkanCommon.hpp section 12:
+    // "owned by VulkanResourceFactory's cache, not by this"). A vector that reallocates on growth
+    // would dangle every already-built pipeline's pointer once a later layout pushes past capacity.
+    // D3D12's RootSigEntry cache has no such hazard (RhiPipeline stores the raw ID3D12RootSignature*,
+    // not a pointer to the cache entry). Reserving up front is the whole mitigation -- past 256
+    // distinct (PipelineLayout, mesh) combinations needs a real fix, not just a bigger number.
     descriptorLayouts_.reserve(256);
 
     return true;
@@ -1278,14 +1229,12 @@ void VulkanResourceFactory::selfTest() {
     ComputePipelineDesc cd{};
     cd.cs = cs;
     cd.layout.uavCount = 1;
-    // ZERO, NOT 4, AND THAT IS THE SHADER'S CHOICE RATHER THAN A TUNING. A non-zero word count means
-    // ROOT CONSTANTS (RHIResources.hpp), which this backend lowers to Vulkan PUSH CONSTANTS -- but
-    // kSelfTestCS declares `cbuffer SelfTestCB : register(b0)`, and DXC lowers a cbuffer to a
-    // DESCRIPTOR, not a push constant, unless the HLSL says [[vk::push_constant]]. So the layout
-    // promised push constants while the shader asked for a uniform buffer at set 0 binding 0, and
-    // the validation layer said exactly that: "uses descriptor [Set 0, Binding 0, variable
-    // SelfTestCB] but the binding was not declared". Zero requests a root CBV, which IS a descriptor
-    // and is what the shader wrote.
+    // ZERO, NOT 4 -- the SHADER'S choice, not a tuning. Non-zero means ROOT CONSTANTS lowered to
+    // Vulkan PUSH CONSTANTS, but kSelfTestCS declares `cbuffer SelfTestCB : register(b0)`, which DXC
+    // lowers to a DESCRIPTOR unless the HLSL says [[vk::push_constant]]. Push constants here would
+    // promise what the shader doesn't ask for (a uniform buffer at set 0 binding 0); validation said
+    // exactly that: "uses descriptor [Set 0, Binding 0, variable SelfTestCB] but the binding was not
+    // declared". Zero requests a root CBV, a descriptor, matching what the shader wrote.
     cd.layout.constantDwords[0] = 0;
     const PipelineHandle pipe = cs ? createComputePipeline(cd) : 0;
     AVER_INFO("[RHI.Vulkan] factory self-test: compute pipeline {}", pipe ? "ok" : "FAILED");
@@ -1461,15 +1410,12 @@ VkSampler VulkanResourceFactory::getOrCreateSampler(const SamplerDesc& d) {
 }
 
 // The one descriptor-set layout every GraphicsPipelineDesc::instanced pipeline shares: a single
-// STORAGE_BUFFER_DYNAMIC at binding 0, which is gInstanceWorlds.
-//
-// SHARED RATHER THAN PER-ENTRY, deliberately. Its shape does not depend on the PipelineLayout at all
-// -- one binding, always the same type -- so one object serves every instanced pipeline, and because
-// descriptor-set compatibility in Vulkan is by LAYOUT, a set allocated once from this can be bound
-// against any of them. VulkanRenderContext::drawMeshInstanced relies on exactly that.
-//
-// DYNAMIC so the per-draw ring offset rides in pDynamicOffsets instead of forcing a fresh descriptor
-// write per draw -- the same mechanism the constants set at kVkSetConstants already uses.
+// STORAGE_BUFFER_DYNAMIC at binding 0 (gInstanceWorlds).
+// SHARED RATHER THAN PER-ENTRY: shape never depends on the PipelineLayout, and Vulkan descriptor-set
+// compatibility is by LAYOUT, so one set allocated here binds against any instanced pipeline
+// (VulkanRenderContext::drawMeshInstanced relies on this).
+// DYNAMIC so the per-draw ring offset rides in pDynamicOffsets instead of a fresh write per draw --
+// same mechanism the kVkSetConstants set already uses.
 VkDescriptorSetLayout VulkanResourceFactory::instanceSetLayout() {
     if (instanceSetLayout_ != VK_NULL_HANDLE) return instanceSetLayout_;
     VkDescriptorSetLayoutBinding b{};
@@ -1488,29 +1434,19 @@ VkDescriptorSetLayout VulkanResourceFactory::instanceSetLayout() {
 
 const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const PipelineLayout& layout, bool mesh, bool instanced) {
     // REFUSED, LOUDLY, RATHER THAN MIS-BOUND SILENTLY.
-    //
-    // PipelineLayout::constantSpace/samplerSpace are honoured by the D3D12 backend, where a register
-    // space is a free-floating tag on an independent root parameter and moving one costs a field
-    // assignment. Vulkan is not that: an HLSL register space becomes a DESCRIPTOR SET, and a set is
-    // a real allocation and layout-compatibility unit. This backend's whole binding model is the
-    // fixed five-set scheme documented above kVkSetTable0 -- tables at 0 and 1, constants at 2,
-    // samplers at 3, instances at 4 -- and honouring a non-zero space means building a different
-    // set layout AND binding it at a different index in VulkanRenderContext, which hard-codes
-    // kVkSetConstants and kVkSetSamplers at every CmdBindDescriptorSets call site.
-    //
-    // Doing that halfway is the dangerous outcome, not the incomplete one. Wire the space into the
-    // layout builder but not into the bind calls and the descriptors are built correctly and bound
-    // at the wrong set: no validation error (there are no validation-layer binaries on the machines
-    // this is developed on -- see VulkanShaderCompiler.cpp), no crash, just a shader reading the
-    // wrong memory. This engine has been bitten by that exact shape before, which is why the
-    // half-built version is not what sits here.
-    //
-    // AND IT WOULD STILL NOT RUN NRD, the only caller that wants this. NRD's SPIR-V was compiled by
-    // ShaderMake with its own -fvk register shifts, so its (set, binding) pairs are baked in and
-    // are NOT what this backend's convention produces. Consuming it needs the module's real
-    // bindings read back by reflection and a bespoke VkDescriptorSetLayout built from them -- a
-    // different mechanism from a parametric space, and one nothing here has yet. So this refusal
-    // costs the Vulkan path nothing it could otherwise have had.
+    // D3D12 honours PipelineLayout::constantSpace/samplerSpace as a free-floating root-parameter tag;
+    // Vulkan turns a register space into a DESCRIPTOR SET, a real layout-compatibility unit, and this
+    // backend's binding model is a fixed five-set scheme (tables 0/1, constants 2, samplers 3,
+    // instances 4) that VulkanRenderContext hard-codes at every CmdBindDescriptorSets call. Honouring
+    // a non-zero space needs a different set layout AND a different bind index everywhere.
+    // Doing that halfway is the dangerous outcome: descriptors built correctly but bound at the wrong
+    // set produce no validation error (no validation-layer binaries on this dev machine -- see
+    // VulkanShaderCompiler.cpp) and no crash, just a shader silently reading the wrong memory --
+    // this engine has been bitten by that exact shape before.
+    // AND IT WOULD STILL NOT RUN NRD, the only caller that wants this: NRD's SPIR-V (compiled by
+    // ShaderMake with its own -fvk register shifts) has its (set, binding) pairs baked in, needing a
+    // bespoke VkDescriptorSetLayout built from reflected bindings, not a renumbered space. This
+    // refusal costs the Vulkan path nothing it could otherwise have had.
     if (layout.constantSpace != 0 || layout.samplerSpace != 0) {
         AVER_ERROR("[RHI.Vulkan] pipeline layout asks for constants in register space {} and samplers "
                    "in space {}; this backend implements space 0 only. A shader compiled for another "
@@ -1522,15 +1458,13 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
     SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
     for (u32 i = 0; i < kMaxBindingSlots; ++i) srv0[i] = uav0[i] = srv1[i] = uav1[i] = SlotKind::Texture2D;
 
-    // WHAT THE CALLER DECLARED BEATS WHAT THE SHADER HAPPENS TO USE, and this order is the whole
-    // fix for the slot-kind class. Reflection cannot see a slot the shader does not reference --
-    // DXC eliminates it, nothing is found, and the slot silently becomes a Texture2D. That produced
-    // a pipeline declaring SAMPLED_IMAGE at set 0 binding 2 against a binding set holding an
-    // ACCELERATION_STRUCTURE there, reported only at the draw, three steps from the cause.
-    //
+    // WHAT THE CALLER DECLARED BEATS WHAT THE SHADER HAPPENS TO USE -- the whole fix for the
+    // slot-kind bug class: reflection can't see a slot the shader doesn't reference (DXC eliminates
+    // it), so it silently defaults to Texture2D, producing e.g. SAMPLED_IMAGE at set 0 binding 2
+    // against a binding set holding an ACCELERATION_STRUCTURE, caught only at the draw, three
+    // steps from the cause.
     // A declared layout goes through tableSetLayout() with the SAME kinds BindingSetDesc gives it,
-    // so both sides land on the same cached VkDescriptorSetLayout and are compatible by
-    // construction rather than by agreement.
+    // so both sides land on the same cached VkDescriptorSetLayout by construction, not agreement.
     if (layout.slotKindsDeclared) {
         std::memcpy(srv0, layout.srvKinds,  sizeof(srv0));
         std::memcpy(uav0, layout.uavKinds,  sizeof(uav0));
@@ -1565,13 +1499,12 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
     const VkDescriptorSetLayout wantTable1 = tableSetLayout(layout.srvCount1, layout.uavCount1, srv1, uav1);
     if (wantTable0 == VK_NULL_HANDLE || wantTable1 == VK_NULL_HANDLE) return nullptr;
 
-    // Cache lookup is deliberately MORE restrictive than sameLayout() alone (which VulkanCommon.hpp
-    // pins verbatim and compares only counts/constants/samplers, never SlotKind): two PipelineLayouts
-    // with identical counts but different underlying resource kinds (e.g. one compute pipeline's u0
-    // is a StructuredBuffer, another's is a Texture3D, yet both declare layout.uavCount==1) MUST NOT
-    // share a cache entry, or the second pipeline silently gets the first one's table layout. Since
-    // tableSetLayout() above already deduplicates by REAL shape, comparing its OUTPUT handles is a
-    // free, exact way to add that precision without touching DescriptorLayoutEntry's own fields.
+    // Cache lookup is deliberately MORE restrictive than sameLayout() alone (VulkanCommon.hpp pins
+    // it verbatim; counts/constants/samplers only, never SlotKind): two PipelineLayouts with
+    // identical counts but different resource kinds (e.g. one's u0 is StructuredBuffer, another's
+    // Texture3D, both uavCount==1) MUST NOT share an entry, or the second pipeline silently gets
+    // the first's table layout. tableSetLayout() already dedupes by REAL shape, so
+    // comparing its OUTPUT handles adds that precision for free, without touching this struct's fields.
     for (auto& e : descriptorLayouts_) {
         // e.instanced is part of the key for the same reason e.mesh is: it changes the SETS this
         // pipeline layout has, so two entries that differ only in it are not interchangeable.
@@ -1616,14 +1549,11 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
             return nullptr;
     }
 
-    // ---- samplers set: immutable only, VK_NULL_HANDLE (per DescriptorLayoutEntry's own comment)
-    // when this layout declares none, so the pipeline layout below can OMIT set index 3 entirely
-    // rather than bind a pointless empty set.
-    //
-    // EXCEPT WHEN SET 4 EXISTS. pSetLayouts is indexed 0..setLayoutCount-1 with no holes, so an
-    // instanced pipeline -- which needs set kVkSetInstances (4) -- cannot omit set 3 even with no
-    // samplers to put in it. An EMPTY descriptor set layout is the legal way to say "nothing at this
-    // index"; it allocates no descriptors and binds nothing.
+    // ---- samplers set: immutable only, VK_NULL_HANDLE (DescriptorLayoutEntry's own comment) when
+    // this layout declares none, so the pipeline layout below can OMIT set index 3 entirely.
+    // EXCEPT WHEN SET 4 EXISTS: pSetLayouts has no holes, so an instanced pipeline (needs set
+    // kVkSetInstances/4) can't omit set 3 even with no samplers. An EMPTY descriptor set layout is
+    // the legal way to say "nothing at this index" -- allocates no descriptors, binds nothing.
     if (layout.samplerCount == 0 && instanced) {
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         ci.bindingCount = 0;
@@ -1739,12 +1669,10 @@ void VulkanResourceFactory::collect() {
 // 7. Textures / buffers
 // ================================================================================================
 // The layout a texture<->buffer copy of one mip uses on this backend.
-//
-// TIGHTLY PACKED, unlike D3D12's. Vulkan lets a VkBufferImageCopy leave bufferRowLength and
-// bufferImageHeight at 0, which means "the rows are exactly as wide as the image", so there is no
-// 256-byte row rule to work around here and rowBytes == rowPitch always. The same arithmetic
-// uploadInitialData already uses for its staging footprint, so an upload and a readback of the same
-// mip agree by construction rather than by two functions happening to match.
+// TIGHTLY PACKED, unlike D3D12's: VkBufferImageCopy can leave bufferRowLength/bufferImageHeight at 0
+// ("rows exactly as wide as the image"), so there's no 256-byte row rule here and rowBytes ==
+// rowPitch always. Same arithmetic uploadInitialData uses for its staging footprint, so an upload
+// and readback of the same mip agree by construction, not by two functions happening to match.
 bool VulkanResourceFactory::textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const {
     const RhiTexture* tex = const_cast<VulkanResourceFactory*>(this)->texture(t);
     if (!tex || tex->image == VK_NULL_HANDLE || mip >= tex->desc.mips) return false;
@@ -1948,26 +1876,21 @@ TextureHandle VulkanResourceFactory::createTexture(const TextureDesc& d) {
     return static_cast<TextureHandle>(textures_.size());
 }
 
-// See this method's own declaration (VulkanCommon.hpp, VulkanResourceFactory class body) for what it
-// is for and how it differs from D3D12ResourceFactory::adoptExternalDepthTexture (D3D12Device.cpp:
-// 4975-5006), which this is a structural port of, NOT a line-for-line copy -- see toVkFormat's own
-// comment on Format::R32Typeless for why a Vulkan depth image needs no typeless-resource trick at
-// all: there is only ever one VkFormat (kVkDepthFormat) for this image, and the SRV/DSV split is
-// purely a difference of VkImageView object and (at bind time) VkImageLayout, not of format.
+// See this method's declaration (VulkanCommon.hpp) for what it's for; a structural, not line-for-line,
+// port of D3D12ResourceFactory::adoptExternalDepthTexture (D3D12Device.cpp:4975-5006). No
+// typeless-resource trick needed here (toVkFormat's Format::R32Typeless comment): only one VkFormat
+// (kVkDepthFormat) exists for this image, and SRV/DSV differ only by VkImageView/VkImageLayout.
 TextureHandle VulkanResourceFactory::adoptExternalDepthTexture(VkImage image, VkDeviceMemory memory,
                                                                  u32 width, u32 height, TextureHandle existing) {
     if (!image) return 0;
 
-    // The view a shader actually samples this image through -- SEPARATE from VulkanDevice's own
-    // depthView_ (which VulkanDevice creates, uses as the per-frame depth ATTACHMENT, and destroys
-    // on its own schedule: destructor, resize(), setSampleCount()) even though the two views would
-    // be created with textually identical parameters. Sharing the one VkImageView object between
-    // this record and VulkanDevice would double-destroy IT the exact same way sharing `image` itself
-    // (without RhiTexture::externallyOwned's protection) would double-free the image -- two owners
-    // for one handle either way. Same format/aspect as depthView_ (VK_FORMAT_D32_SFLOAT /
-    // VK_IMAGE_ASPECT_DEPTH_BIT): unlike D3D12's DXGI_FORMAT_R32_TYPELESS trick, Vulkan samples a
-    // depth-format image directly, through an ordinary sampled-image descriptor -- see toVkAspect's
-    // comment.
+    // The view a shader samples through -- SEPARATE from VulkanDevice's own depthView_ (created,
+    // used as the per-frame depth ATTACHMENT, destroyed on its own schedule: destructor, resize(),
+    // setSampleCount()), even with textually identical parameters. Sharing one VkImageView between
+    // this record and VulkanDevice would double-destroy it, same as sharing `image` itself would
+    // double-free it without RhiTexture::externallyOwned. Same format/aspect as depthView_
+    // (VK_FORMAT_D32_SFLOAT / VK_IMAGE_ASPECT_DEPTH_BIT); Vulkan samples depth directly, no
+    // DXGI_TYPELESS-style trick needed (see toVkAspect).
     VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vi.image = image;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -1984,22 +1907,19 @@ TextureHandle VulkanResourceFactory::adoptExternalDepthTexture(VkImage image, Vk
     t.externallyOwned = true;
     t.desc.dim = TextureDim::Tex2D;
     t.desc.width = width; t.desc.height = height; t.desc.depth = 1; t.desc.mips = 1;
-    // R32Typeless: the SAME "DSV sees D32Float, SRV sees a plain float read" generic-RHI tag
-    // D3D12ResourceFactory::adoptExternalDepthTexture uses, and the exact alias VoxiRenderer's own
-    // shadow map relies on (Format::R32Typeless's own doc comment, RHIResources.hpp) -- kept as the
-    // reported Format here even though toVkFormat/toVkAspect resolve R32Typeless and D32Float
-    // identically on this backend (both to kVkDepthFormat / VK_IMAGE_ASPECT_DEPTH_BIT), so that any
-    // caller branching on "is this the aliased-depth format" (occlusion's binding-set SlotKind
-    // selection, for one) sees the SAME answer on both backends for the SAME logical resource.
+    // R32Typeless: the SAME "DSV sees D32Float, SRV sees a plain float" generic-RHI tag
+    // D3D12ResourceFactory::adoptExternalDepthTexture uses (Format::R32Typeless doc comment,
+    // RHIResources.hpp) -- the exact alias VoxiRenderer's own shadow map relies on -- kept even
+    // though toVkFormat/toVkAspect resolve it identically to D32Float
+    // here (both -> kVkDepthFormat/VK_IMAGE_ASPECT_DEPTH_BIT), so a caller branching on "is this the
+    // aliased-depth format" (e.g. occlusion's SlotKind selection) sees the SAME answer on both backends.
     t.desc.format = Format::R32Typeless;
     t.desc.bind = ResourceBind::ShaderResource | ResourceBind::DepthStencil;
-    // Matches physical reality at the moment of adoption: createDepthBuffer() transitions a freshly
-    // created depth image to VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL the first time the render loop
-    // clears/draws into it (the swapchain-acquire barrier list in beginFrame()), and nothing
-    // transitions it away from that before every subsequent frame's scenePass() writes it again. A
-    // caller wanting to READ it (modules/occlusion) does its own DepthWrite <-> NonPixelShaderResource
-    // round trip via the ordinary textureBarrier -- this factory has no idea when that is safe to do,
-    // exactly as the D3D12 comment this mirrors says.
+    // Matches physical reality at adoption: createDepthBuffer() transitions the freshly created
+    // depth image to VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL on first use (beginFrame()'s
+    // swapchain-acquire barriers), and nothing moves it away before each frame's scenePass() writes
+    // it again. A reader (modules/occlusion) does its own DepthWrite<->NonPixelShaderResource round
+    // trip via textureBarrier -- this factory has no idea when that's safe (mirrors the D3D12 comment).
     t.desc.initialState = ResourceState::DepthWrite;
     t.desc.debugName = nullptr;
     t.debugName = "scene depth (adopted)";
@@ -2010,15 +1930,13 @@ TextureHandle VulkanResourceFactory::adoptExternalDepthTexture(VkImage image, Vk
     if (existing) {
         RhiTexture* slot = texture(existing);
         if (slot) {
-            // Re-filling the SAME slot on a resize/setSampleCount rebuild, exactly as D3D12's own
-            // `*slot = std::move(t); return existing;` does -- STABLE across a resize so a caller
-            // that cached the handle never has to notice depthBuffer_ was reallocated underneath it
-            // (see VulkanDevice::depthTexHandle_'s own comment). Unlike D3D12's ComPtr-backed
-            // RhiTexture, the plain move-assignment below does NOT release what it is replacing:
-            // the outgoing slot's own srvView (a real VkImageView this factory built and owns, even
-            // though the image/memory it viewed were never ours) has to be destroyed explicitly, or
-            // every resize leaks one VkImageView. Retired rather than destroyed immediately -- a
-            // draw recorded before this call may still be reading through it on the GPU.
+            // Re-filling the SAME slot on a resize/setSampleCount rebuild, like D3D12's own
+            // `*slot = std::move(t); return existing;` -- STABLE so a cached handle never notices
+            // depthBuffer_ was reallocated (VulkanDevice::depthTexHandle_'s comment). Unlike D3D12's
+            // ComPtr RhiTexture, move-assignment does NOT release the outgoing slot's srvView (a real
+            // VkImageView this factory owns, though the image/memory it viewed were never ours) --
+            // must destroy it explicitly or every resize leaks one.
+            // Retired, not destroyed immediately: a draw recorded before this call may still read it.
             if (slot->srvView) {
                 VkImageView old = slot->srvView;
                 retire([this, old]() { dev_->api().DestroyImageView(dev_->vkDevice(), old, nullptr); });
@@ -2055,10 +1973,9 @@ BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
             destroyBufferCommitted(*dev_, b.buffer, b.memory);
             return 0;
         }
-        b.coherent = true;   // required flags above always ask for HOST_COHERENT; findMemoryType's
-                              // own HOST_VISIBLE-only fallback (see createBufferCommitted) is the
-                              // only path that could make this untrue, and this engine's actual
-                              // hardware is not expected to need it -- flagged, not silently assumed.
+        b.coherent = true;   // required flags above always ask for HOST_COHERENT; only findMemoryType's
+                              // HOST_VISIBLE-only fallback (see createBufferCommitted) could make this
+                              // untrue, and this engine's hardware is not expected to need it -- flagged, not assumed.
     }
     b.desc.debugName = nullptr;
     if (d.debugName) b.debugName = d.debugName;
@@ -2076,18 +1993,14 @@ BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
 ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
     collect();
 
-    // THE PRECOMPILED PATH -- SPIR-V somebody else produced. See ShaderDesc::bytecode.
-    //
-    // IT LEAVES RhiShader::source EMPTY, AND THAT IS THE WHOLE INTEGRATION. moduleForLayout's very
-    // first act is `if (s.source.empty()) return s.module;`: with no HLSL there is nothing to patch
-    // and nothing to recompile, so the module goes to the pipeline exactly as handed over. That is
-    // not a special case added for this -- it is the existing answer for a shader whose source has
-    // been released, and it is the correct one here for a stronger reason: the SPIR-V's descriptor
-    // set and binding numbers are BAKED IN. This backend normally re-derives placement by
-    // recompiling with a -fvk-bind-register map (see moduleForLayout), which is exactly the one
-    // thing that cannot be done to bytecode. A caller supplying precompiled SPIR-V is therefore
-    // asserting that its bindings already match the PipelineLayout it will be used with; nothing
-    // here can check that, and Vulkan will report the mismatch at pipeline creation if it is wrong.
+    // THE PRECOMPILED PATH -- SPIR-V somebody else produced (ShaderDesc::bytecode).
+    // IT LEAVES RhiShader::source EMPTY, AND THAT IS THE WHOLE INTEGRATION: moduleForLayout's first
+    // act is `if (s.source.empty()) return s.module;`, the existing behavior for a shader whose
+    // source was released -- correct here for a stronger reason too: the SPIR-V's (set, binding)
+    // numbers are BAKED IN, and this backend normally re-derives placement via a -fvk-bind-register
+    // recompile (moduleForLayout), which cannot be done to bytecode. A caller supplying precompiled
+    // SPIR-V is asserting its bindings already match the target PipelineLayout; nothing here checks
+    // that, and Vulkan reports the mismatch at pipeline creation if wrong.
     if (d.precompiled()) {
         if ((d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification)
             && dev_->cachedCaps().meshShaderTier == 0) {
@@ -2095,11 +2008,10 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
                       "device reports as tier 0");
             return 0;
         }
-        // SPIR-V IS A STREAM OF 32-BIT WORDS, and vkCreateShaderModule requires pCode to be 4-byte
-        // aligned as well as codeSize to be a multiple of 4. Refusing a bad size here names the
-        // caller's mistake; passing it on would be undefined behaviour inside the driver. The copy
-        // into a u32 vector gives the alignment for free -- ShaderDesc::bytecode promises a copy
-        // anyway, so this costs nothing extra.
+        // SPIR-V is a stream of 32-bit words; vkCreateShaderModule requires pCode 4-byte aligned and
+        // codeSize a multiple of 4. Refusing a bad size here names the caller's mistake (passing it on
+        // would be UB in the driver); copying into a u32 vector gives the alignment for free --
+        // ShaderDesc::bytecode promises a copy anyway, so this costs nothing extra.
         if ((d.bytecodeSize % sizeof(u32)) != 0) {
             AVER_ERROR("[RHI.Vulkan] createShader (precompiled): {} bytes is not a whole number of "
                        "SPIR-V words -- this is DXIL or a truncated module, not SPIR-V", d.bytecodeSize);
@@ -2155,11 +2067,9 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
     // it supplies -- DXC would then have two answers for where b0 goes.
     s.source = src;
 
-    // The same re-bind the fixed pipelines apply, for the same reason: a caller-supplied shader
-    // that prepends sharedShaderPrelude() carries the prelude's set-0 PerFrame block, and
-    // tableSetLayout() puts SRVs there. Applied to EVERY shader rather than only those with a
-    // prelude, because patchPerFrameSet is a no-op on source that does not contain the block.
-    // This affects only the LAYOUT-AGNOSTIC module compiled just below.
+    // Same re-bind the fixed pipelines apply, same reason: a shader prepending sharedShaderPrelude()
+    // carries the prelude's set-0 PerFrame block, where tableSetLayout() puts SRVs. Applied to every
+    // shader (patchPerFrameSet no-ops without the block); affects only the LAYOUT-AGNOSTIC module below.
     patchPerFrameSet(src);
 
     s.entry = d.entry;
@@ -2182,11 +2092,9 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
 void VulkanResourceFactory::destroyShader(ShaderHandle h) {
     RhiShader* s = shader(h);
     if (!s) return;
-    // Immediate, not deferred: like a D3D12 PSO, a VkPipeline does not keep referencing the
-    // VkShaderModule it was built from after vkCreateGraphicsPipelines/vkCreateComputePipelines
-    // returns (D3D12ResourceFactory::destroyShader resets its blob immediately for the same reason).
-    // A variant whose source needed no patch ALIASES s->module (see moduleForLayout), so it must not
-    // be destroyed twice.
+    // Immediate, not deferred: a VkPipeline stops referencing its VkShaderModule once
+    // vkCreate*Pipelines returns (D3D12ResourceFactory::destroyShader resets its blob for the same
+    // reason). A variant whose source needed no patch ALIASES s->module (moduleForLayout) -- must not double-destroy.
     for (RhiShaderVariant& v : s->variants)
         if (v.module && v.module != s->module) dev_->api().DestroyShaderModule(dev_->vkDevice(), v.module, nullptr);
     s->variants.clear();
@@ -2228,10 +2136,9 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
     RhiShaderVariant var;
     var.key = key;
     if (src == s.source && bindCount == 0) {
-        // Nothing to re-place: no root-constant block, and no table or sampler register either. The
-        // layout-agnostic module already is the right one, cached under this key so the next
-        // pipeline of the same shape skips even the attempt. NOTE that var.module aliases s.module
-        // -- destroyShader relies on it.
+        // Nothing to re-place (no root-constant block, no table/sampler register): the layout-agnostic
+        // module already is the right one, cached under this key so the next pipeline of the same
+        // shape skips even the attempt. NOTE: var.module aliases s.module -- destroyShader relies on it.
         var.module = s.module;
         s.variants.push_back(std::move(var));
         return give(s.variants.back());
@@ -2249,52 +2156,32 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
         }
 
         // WHEN THE LAYOUT DOES NOT DESCRIBE THE WHOLE SHADER, FALL BACK RATHER THAN FAIL.
-        //
-        // DXC requires a -fvk-bind-register map to cover EVERY resource, and a PipelineLayout does
-        // not always name every register its shader declares. Two real cases, both of them backend
-        // features that live outside the layout:
-        //
-        //   - the INSTANCE buffer USED TO BE THE FIRST CASE HERE, and no longer is. It is mapped
-        //     now, to set kVkSetInstances binding 0, because `instanced` reaches this function and
-        //     buildRegisterBinds can therefore derive t(declaredSrvCount) exactly as the shared HLSL
-        //     does. A pipeline built WITHOUT GraphicsPipelineDesc::instanced whose shader declares
-        //     gInstanceWorlds anyway would still land here -- but that combination cannot occur:
-        //     VoxiRenderer only defines AVER_INSTANCE_SRV for the pipelines it also marks instanced,
-        //     and the declaration is inside #ifdef AVER_INSTANCE_SRV.
-        //   - MESH GEOMETRY. The fixed mesh path declares gVerts/gIndices through its own
-        //     g_meshGeomLayout, again outside the PipelineLayout.
-        //   - DECLARED-BUT-UNUSED resources. VoxiShaders.hpp declares gVoxelTex/gVoxelSamp for every
-        //     shader that includes it, and a UAV-only pipeline like CSClear (uavCount 2, nothing
-        //     else) uses neither. DXC still wants a mapping for them. For this case the fallback is
-        //     not merely acceptable but EXACTLY equivalent: the resources it leaves misplaced are
-        //     the ones DXC then eliminates, and every resource actually used lands identically
-        //     either way.
-        //
-        // Mapping those to an invented binding would turn a compile error into a validation error,
-        // which is worse: the pipeline would exist and be wrong. Retrying WITHOUT the map restores
-        // exactly the placement these shaders had before the map existed -- imperfect, but no
-        // regression, and the shaders whose layouts ARE complete still get the correct one.
-        //
-        // EXCEPT FOR MESH STAGES, WHERE THAT REASONING DOES NOT HOLD AND THE PREDICTION ABOVE COMES
-        // TRUE. The "no regression" argument depends on the misplaced resources being ones DXC then
-        // eliminates. Mesh geometry is the opposite: gVerts/gIndices/MeshCB are what a mesh shader
-        // exists to read, they survive to the SPIR-V, and the fallback lands them on set 0 bindings
-        // this layout never declares. MEASURED with --debug-layer on MSVoxel:
+        // DXC requires the -fvk-bind-register map to cover EVERY resource, but a PipelineLayout
+        // doesn't always name every register a shader declares. Real cases, both outside the layout:
+        //   - MESH GEOMETRY: the fixed mesh path declares gVerts/gIndices via its own g_meshGeomLayout.
+        //   - DECLARED-BUT-UNUSED: VoxiShaders.hpp declares gVoxelTex/gVoxelSamp for every includer;
+        //     a UAV-only pipeline like CSClear (uavCount 2, nothing else) uses neither, but DXC still
+        //     wants them mapped. Here the fallback is EXACTLY equivalent: the misplaced resources are
+        //     ones DXC eliminates anyway. (The INSTANCE buffer used to be a third case; now mapped
+        //     directly to kVkSetInstances binding 0 via buildRegisterBinds, since `instanced` reaches
+        //     here; a pipeline without `instanced` that still declares gInstanceWorlds can't occur --
+        //     VoxiRenderer only defines AVER_INSTANCE_SRV for pipelines it also marks instanced.)
+        // Inventing a binding would turn a compile error into a validation error -- worse, since the
+        // pipeline would exist and be wrong. Retrying WITHOUT the map restores the pre-map placement:
+        // imperfect but no regression, and layouts that ARE complete still get the correct one.
+        // EXCEPT MESH STAGES, where that reasoning fails: gVerts/gIndices/MeshCB are what the shader
+        // exists to read, survive to the SPIR-V, and land on set-0 bindings this layout never
+        // declares. MEASURED with --debug-layer on MSVoxel:
         //   uses descriptor [Set 0, Binding 19, variable "gVerts"] which has a VkDescriptorType mismatch
         //   uses descriptor [Set 0, Binding 20, variable "gIndices"] but the binding was not declared
         //   uses descriptor [Set 0, Binding 5,  variable "MeshCB"]  which has a VkDescriptorType mismatch
-        // and without the layer it is not a message at all -- AMD's LLPC calls abort(), so the
-        // editor dies at 0xC0000409 inside amdvlk64.dll with nothing logged.
-        //
-        // A FEATURE mesh pipeline is the only thing that reaches here: the FIXED mesh path builds in
-        // VulkanDevice.cpp against g_meshGeomLayout and is unaffected. Refusing returns a null
-        // pipeline, which every caller already treats as "this variant is unavailable" -- Voxi logs
-        // "mesh-shader voxelise variant unavailable; the GS path stands in" and draws the same
-        // picture the slower way. A missing fast path beats a dead process.
-        //
-        // THE REAL FIX is to describe mesh geometry in the PipelineLayout so buildRegisterBinds can
-        // map it, the way the instance buffer was fixed and is described two bullets up. Until then
-        // this is honest rather than lucky.
+        // and without the layer, no message at all -- AMD's LLPC calls abort() (0xC0000409, amdvlk64.dll).
+        // Only a FEATURE mesh pipeline reaches here (the FIXED mesh path builds in VulkanDevice.cpp
+        // against g_meshGeomLayout and is unaffected); refusing returns null, which every caller
+        // already treats as "unavailable" (Voxi logs "mesh-shader voxelise variant unavailable; the
+        // GS path stands in") -- a missing fast path beats a dead process.
+        // THE REAL FIX: describe mesh geometry in the PipelineLayout so buildRegisterBinds can map
+        // it, as was done for the instance buffer above. Until then, honest rather than lucky.
         if (s.stage == ShaderStage::Mesh || s.stage == ShaderStage::Amplification) {
             AVER_WARN("[RHI.Vulkan] '{}' is a mesh-stage shader whose PipelineLayout does not "
                       "describe its geometry registers; refusing the pipeline rather than building "
@@ -2586,9 +2473,9 @@ void applySlot(const VulkanApi& api, VkDevice device, VkDescriptorSet dst, u32 b
 }  // namespace
 
 void VulkanResourceFactory::writeBindingSlot(RhiBindingSet& s, bool isUav, u32 slot, const BindingSlotState& st) {
-    // THE INVARIANT THE RING RESTS ON. A ring by FRAME cannot save a set written after it was bound
-    // in the SAME frame -- the set at fault would be the one this frame is already using. Measured
-    // as zero when the ring was built; if it ever fires, the ring is not enough and this needs to
+    // THE INVARIANT THE RING RESTS ON: a ring by FRAME cannot save a set written after it was bound
+    // in the SAME frame -- the set at fault is the one this frame is already using. Measured as
+    // zero when the ring was built; if it ever fires, the ring is not enough and this needs to
     // become a per-bind allocation instead.
     if (s.lastBoundSerial == dev_->frameSerial())
         AVER_WARN("[RHI.Vulkan] binding set slot {} written AFTER the set was bound in frame {} -- the "
@@ -2687,11 +2574,9 @@ void VulkanResourceFactory::destroyBindingSet(BindingSetHandle h) {
 }
 
 // Writes a valid dummy descriptor into every DECLARED slot of every RING slot.
-//
-// All of them, and only at creation: a replay (bindingSetForFrame) rewrites only what something
-// explicitly set, so a slot nobody ever writes has to have been made valid here -- in each ring
-// slot separately, since they are distinct descriptor sets. Nothing can be referencing a set that
-// is being created, so writing them all is safe exactly here and nowhere else.
+// All of them, only at creation: a replay (bindingSetForFrame) rewrites only what was explicitly
+// set, so an unwritten slot must be made valid here, in each ring slot separately (distinct
+// descriptor sets). Safe only here: nothing can be referencing a set that is still being created.
 void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
     if (!ensureNullResources(*dev_)) {
         AVER_ERROR("[RHI.Vulkan] nullFill: dummy null resources could not be built; every declared "
@@ -2752,14 +2637,10 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
         writes.push_back(w);
     }
 
-    // NOTE: every VkDescriptorImageInfo/BufferInfo/AS-write pushed into a std::vector above via
-    // push_back can reallocate that vector and invalidate EARLIER entries' addresses that `writes[]`
-    // already captured -- reserve() at the top sizes every vector to its worst case up front
-    // specifically to rule that out; do not remove the reserve() calls without re-deriving this.
-    // ONCE PER RING SLOT. They are distinct descriptor sets, and a replay only ever rewrites slots
-    // something explicitly set -- so a slot nobody writes is valid only because it was filled here,
-    // in every one of them. Safe to touch them all only because this runs at CREATION, when nothing
-    // can be referencing any of them.
+    // NOTE: push_back above can reallocate imageInfos/bufferInfos/asInfos and invalidate EARLIER
+    // entries' addresses that `writes[]` already captured -- reserve() at the top sizes each vector
+    // to its worst case up front specifically to rule that out; do not remove those calls without
+    // re-deriving this. ONCE PER RING SLOT, for the reason in this function's own header comment above.
     if (writes.empty()) return;
     for (u32 f = 0; f < kFrameCount; ++f) {
         if (s.sets[f] == VK_NULL_HANDLE) continue;
@@ -2920,12 +2801,10 @@ void VulkanResourceFactory::destroyTexture(TextureHandle h) {
     if (!t) return;
     VkImage image = t->image;
     VkDeviceMemory memory = t->memory;
-    // See RhiTexture::externallyOwned's own comment: an adopted depth-texture record's image/memory
-    // belong to VulkanDevice, not this factory, so the retired callback below must skip
-    // destroyImageCommitted for them -- captured alongside image/memory rather than nulling those
-    // out here, so the callback's own logic (and this function's early `t->image = VK_NULL_HANDLE`
-    // below, which is this record's own bookkeeping, not the destroy call's input) stays exactly the
-    // shape every other destroy* path in this file already has.
+    // See RhiTexture::externallyOwned: an adopted depth-texture record's image/memory belong to
+    // VulkanDevice, not this factory, so the retired callback must skip destroyImageCommitted for
+    // them -- captured alongside image/memory (not nulled out here) so the callback's logic and this
+    // function's early `t->image = VK_NULL_HANDLE` bookkeeping match every other destroy* path here.
     const bool owned = !t->externallyOwned;
     VkImageView srv = t->srvView, rtv = t->rtvView, dsv = t->dsvView;
     std::vector<VkImageView> uavs = std::move(t->uavViews);
@@ -3051,14 +2930,12 @@ void VulkanResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle
     writeBindingSlot(*s, /*isUav=*/true, slot, st);
 }
 
-// Returns one SRV slot to the state nullFill gave it. See IResourceFactory::clearSrv for why this
-// exists at all: a descriptor left naming a destroyed resource is a device loss, not a wrong pixel.
-//
-// "Null" HERE MEANS THE DUMMY, NOT VK_NULL_HANDLE. Vulkan has no null descriptor without
-// robustness2, so nullFill writes gNull's 1x1 image / empty buffer / dummy TLAS into unset slots and
-// this writes exactly the same thing -- the whole point being that a cleared slot is
-// indistinguishable from one that was never bound. It goes through writeBindingSlot for the ring
-// reason that setSrv does: the write has to reach every frame's copy of the set, not just today's.
+// Returns one SRV slot to the state nullFill gave it (IResourceFactory::clearSrv): a descriptor
+// left naming a destroyed resource is a device loss, not a wrong pixel.
+// "Null" HERE MEANS THE DUMMY, NOT VK_NULL_HANDLE: Vulkan has no null descriptor without
+// robustness2, so this writes the same gNull dummy (1x1 image / empty buffer / TLAS) nullFill does,
+// so a cleared slot is indistinguishable from one never bound. Goes through writeBindingSlot for
+// the same ring reason as setSrv: the write must reach every frame's copy of the set.
 void VulkanResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
     RhiBindingSet* s = bindingSet(set);
     if (!s) { AVER_ERROR("[RHI.Vulkan] clearSrv with an invalid set"); return; }

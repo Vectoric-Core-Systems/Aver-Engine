@@ -1,30 +1,23 @@
-// Editor: the viewport -- gizmos and manipulation, picking, spawning and drops, sculpt and foliage brushes, PlayerStart authoring, overlays, editor modes.
-// Part of SandboxApp, split out of the single 29,952-line SandboxApp.cpp on 2026-09-16 by moving method bodies
-// verbatim; the class itself is declared in SandboxApp.hpp.
+// Editor: viewport -- gizmos/manipulation, picking, spawning/drops, sculpt & foliage brushes, PlayerStart authoring, overlays, editor modes.
+// Split out of the 29,952-line SandboxApp.cpp (2026-09-16), method bodies moved verbatim; class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
 #include "ViewportMarquee.hpp"
 
 namespace aver {
-// PHYSICS ALONE, matching the declaration. This draws the world-space AABB of every physics body
-// and was nested inside an AVER_MODULE_SYNAPSE block for no reason a reader could act on -- the
-// navigation overlay further down is what that guard is actually for.
+// Physics-only guard (matches the declaration): draws every body's world AABB. Previously nested
+// under AVER_MODULE_SYNAPSE by mistake -- that guard belongs to the nav overlay below.
 #if AVER_MODULE_PHYSICS
-// Twelve edges per body's world-space AABB, in world space, rebuilt each frame the toggle is on.
-//
-// AN AABB PER BODY, and the overlay says so on the toggle's tooltip rather than letting someone
-// read a box around a sphere as the sphere's own shape. See aver_phys_body_aabb for why the ABI
-// reports a bound rather than the shape tree.
+// Twelve edges per body's world AABB, rebuilt each frame the toggle is on. Tooltip clarifies this
+// is a BOUND, not the shape (see aver_phys_body_aabb for why the ABI reports a bound, not a shape tree).
 void SandboxApp::rebuildColliderOverlay(Engine& e) {
     if (colliderMesh_) { e.device()->destroyLineMesh(colliderMesh_); colliderMesh_ = 0; }
     const int32_t n = aver_phys_body_count();
     if (n <= 0) return;
 
-    // WHICH STATIC BODIES ARE TRIANGLE MESHES. The ABI does not report a body's shape, but the
-    // editor made every level body itself, by one rule (rebuildEntityBody, and world::instantiate at
-    // load): triangles whenever content_.collisionMeshFor has a mesh for the entity's CMeshRenderer,
-    // a fitted box otherwise. Asking the same cache again (a lookup -- the load already filled it)
-    // answers the question without a second bookkeeping table that could drift from the first.
+    // ABI doesn't report body shape; editor built each level body by one rule (rebuildEntityBody /
+    // world::instantiate): triangles when content_.collisionMeshFor has a mesh for the entity's
+    // CMeshRenderer, else a fitted box. Re-querying that cache avoids a second table that could drift.
     std::unordered_set<int32_t> meshBodies;
 #if AVER_MODULE_SCENE
     {
@@ -45,11 +38,9 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
         f32 lo[3], hi[3];
         if (!aver_phys_body_aabb(body, lo, hi)) continue;
 
-        // GREEN FOR A STATIC BOX, BLUE FOR A STATIC TRIANGLE MESH, AMBER FOR ANYTHING THAT MOVES.
-        // "Why is this not falling" and "why is this not stopping anything" are different
-        // questions, and this separates them at a glance. Blue matters because a mesh body's bound
-        // is NOT its shape: a merged wall's bound can span a whole courtyard the mesh itself only
-        // rings, and drawn green that reads as a solid block where there is open floor.
+        // Green = static box, blue = static triangle mesh, amber = moving (separates "why isn't this
+        // falling" from "why isn't this stopping anything" at a glance). Blue matters: a mesh body's
+        // bound can span a whole courtyard the mesh only rings, and drawn green that reads as solid floor.
         const int32_t motion = aver_phys_body_motion_type(body);
         const bool triMesh = motion == 0 && meshBodies.count(body) != 0;
         const f32 r = (motion != 0) ? 1.0f  : (triMesh ? 0.30f : 0.35f);
@@ -66,8 +57,7 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
             lines.push_back(a);
             lines.push_back(c);
         };
-        // Four along each axis: the twelve edges of a box, written out rather than looped so
-        // the shape is legible and a wrong corner is visible in the source.
+        // Twelve box edges, written out (not looped) so a wrong corner is visible in the source.
         edge(0,0,0, 1,0,0); edge(0,1,0, 1,1,0); edge(0,0,1, 1,0,1); edge(0,1,1, 1,1,1);
         edge(0,0,0, 0,1,0); edge(1,0,0, 1,1,0); edge(0,0,1, 0,1,1); edge(1,0,1, 1,1,1);
         edge(0,0,0, 0,0,1); edge(1,0,0, 1,0,1); edge(0,1,0, 0,1,1); edge(1,1,0, 1,1,1);
@@ -89,47 +79,32 @@ void SandboxApp::rebuildNavOverlay(Engine& e) {
 
 #endif
 
-// ---- the selection outline, as LINES ----------------------------------------------------------
+// ---- selection outline, as LINES (not a mesh) --------------------------------------------------
+// Used to be the mesh redrawn via drawMesh+setWireframe(true), but drawMesh is gated on
+// sceneSuppressed(), which VoxiRenderer returns true whenever ray-driven (this engine's standing
+// default) -- so the outline drew into nothing: measured with the interactive gate lifted, ONE
+// orange pixel appeared anywhere in the viewport (a leaf vein); the device log says so outright,
+// "The rasteriser draws NOTHING while this holds". drawLines uses the narrower suppressesWholeFrame(),
+// which VoxiRenderer keeps false for ray-driven -- D3D12Device::drawLines: "Gizmos and wireframes
+// belong in a ray-driven viewport as much as in a rastered one, and they depth-test against the
+// real depth the ray pass writes." The grid, gizmo, nav mesh and collider overlay already use that path.
 //
-// WHY LINES AND NOT A MESH, which is the whole bug this replaces. The outline used to be the mesh
-// redrawn through drawMesh with setWireframe(true) -- and drawMesh is gated on sceneSuppressed(),
-// which VoxiRenderer returns TRUE for whenever ray-driven primary visibility is on. Ray-driven is
-// this engine's STANDING DEFAULT, so the outline was drawn into nothing: measured on a bounded
-// capture with the interactive gate lifted, ONE orange pixel appeared anywhere in the viewport,
-// and it was a leaf vein. The device log says it outright -- "The rasteriser draws NOTHING while
-// this holds".
+// Draws boundary and crease edges only, not every edge (a wireframe of a 31k-triangle plant is an
+// orange thicket): an edge is drawn when it belongs to exactly one triangle, or its two triangles'
+// normals disagree by more than kCreaseCos. Camera-independent, so built once per mesh and cached.
 //
-// drawLines is gated on the much narrower suppressesWholeFrame(), which VoxiRenderer deliberately
-// keeps FALSE for ray-driven, and D3D12Device::drawLines says why in as many words: "Gizmos and
-// wireframes belong in a ray-driven viewport as much as in a rastered one, and they depth-test
-// against the real depth the ray pass writes." The grid, the gizmo, the nav mesh and the collider
-// overlay all already ride that path. The outline simply was not on it.
-//
-// BOUNDARY AND CREASE EDGES, NOT EVERY EDGE. A wireframe of a 31k-triangle plant is an orange
-// thicket, not an outline. An edge is drawn when it belongs to exactly ONE triangle (a true
-// boundary -- for a leaf, its rim) or when its two triangles disagree in direction by more than
-// kCreaseCos. On flat foliage cards that is precisely the silhouette; on a hard-surface prop it is
-// the shape's own edges. Camera-independent, so it is built ONCE per mesh and cached rather than
-// recomputed as the view moves.
-//
-// WHY IT READS THE .ocmesh AGAIN: loadProjectMeshes uploads to the GPU and lets the CPU-side
-// OcMeshData go, so the triangles are not in memory to walk. A selection change is a click, not a
-// frame, and the result is cached by mesh id -- so this costs one file read the first time an
-// asset is ever selected and nothing on any later selection of it.
+// Re-reads the .ocmesh because loadProjectMeshes frees the CPU-side OcMeshData after GPU upload;
+// cached by mesh id, so this costs one file read per asset, not per selection.
 rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
-// GUARDED ON THE WHOLE BODY, not just selOutlineLines_'s own two accesses below, and the call site
-// in SandboxRender.cpp stays unconditional -- the same shape drawRecoveryPrompt and the rest of the
-// functions above this one already settled for AVER_MODULE_LANDSCAPE (see "WHERE THE TERRAIN BLOCK
-// STARTS" above). selOutlineLines_ lives behind AVER_MODULE_PBR in SandboxApp.hpp because what it
-// caches is built from the material system's own mesh data; guarding only its find()/operator[]
-// calls would leave everything between them -- reading the .ocmesh, welding edges, calling
-// createLineMesh -- running with nowhere to remember the handle it hands back, which is a NEW line
-// mesh leaked on every single call rather than a degraded feature.
+// Guards the whole body (not just selOutlineLines_'s find/insert): selOutlineLines_ lives behind
+// AVER_MODULE_PBR in SandboxApp.hpp, so guarding only the cache accesses would leave the
+// .ocmesh read / edge-weld / createLineMesh in between running with nowhere to store the handle --
+// a leaked line mesh every call, not a degraded feature. Call site in SandboxRender.cpp stays
+// unconditional (same shape as the rest of this file's AVER_MODULE_LANDSCAPE guards).
 //
-// AND ON AVER_MODULE_SCENE, which AVER_MODULE_PBR does not imply in either direction -- the root
-// CMakeLists' cascade lists neither. meshPathById_ is the scene's map from mesh id to the .ocmesh
-// on disk, and it is the only thing that can turn the id this function is handed into a file to
-// read. Without it there is no outline to build, whatever the material system is doing.
+// Also needs AVER_MODULE_SCENE: PBR does not imply SCENE (root CMakeLists' cascade lists neither),
+// and meshPathById_ -- the scene's mesh-id -> .ocmesh map -- is the only way to turn the id into a
+// file to read.
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
     if (const auto it = selOutlineLines_.find(meshId); it != selOutlineLines_.end()) return it->second;
 
@@ -145,19 +120,13 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
         return 0;
     }
 
-    // ADJACENCY BY POSITION, NOT BY INDEX, and this is the whole difference between an outline
-    // and an orange thicket.
+    // Adjacency by POSITION, not index: meshes split a vertex at UV/normal seams, so keyed by index
+    // almost no edge finds its neighbour and the "outline" becomes a full wireframe (measured: one
+    // Anthurium mesh gave 31,113 edges from 15,544 triangles, more than the ~23k a closed mesh that
+    // size should have). Welding by position finds the neighbours the indices hide.
     //
-    // Game meshes split a vertex wherever a UV or a normal seam runs, so the two triangles either
-    // side of a smooth edge routinely carry DIFFERENT indices for the same corner. Keyed by index,
-    // almost no edge finds its neighbour, every edge looks like a boundary, and the "outline"
-    // becomes a full wireframe: this Anthurium reported 31,113 edges from 15,544 triangles --
-    // more than the ~23k a closed mesh of that size even has -- which is what that measurement
-    // means. Welding by position finds the neighbours the indices hide.
-    //
-    // QUANTISED TO 1/100 cm before hashing, because two authored copies of one corner are equal
-    // in intent and rarely equal in float. The engine's unit is the centimetre, so this welds
-    // anything within 10 microns and nothing a person would call two places.
+    // Quantised to 1/100 cm before hashing (engine unit is cm): welds anything within 10 microns,
+    // not what a person would call two places.
     const auto weld = [&md](u32 v) {
         const auto q = [](f32 x) { return static_cast<i64>(std::llround(static_cast<f64>(x) * 100.0)); };
         const i64 x = q(md.positions[usize(v)*3+0]);
@@ -173,8 +142,7 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
     };
 
     struct EdgeFaces { u32 a = 0xFFFFFFFFu, b = 0xFFFFFFFFu; };
-    // Keyed by the PAIR of welded position ids, order-independent, so an edge walked from either
-    // of its two triangles lands in the same bucket.
+    // Keyed by the pair of welded position ids, order-independent, so either triangle's walk lands in the same bucket.
     std::unordered_map<u64, EdgeFaces> edges;
     std::unordered_map<u64, std::pair<u32, u32>> edgeVerts;   // key -> one representative index pair
     const usize triCount = md.indices.size() / 3;
@@ -242,28 +210,23 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
     selOutlineLines_[meshId] = h;
     return h;
 #else
-    // No material system, no cache to fill -- 0 already means "this mesh yields no outline" to
-    // every caller (the selection draw in SandboxRender.cpp treats a zero handle as nothing to
-    // draw), so a PBR-less build reports exactly that instead of a half-built feature.
+    // No material system, no cache: 0 already means "no outline" to every caller (SandboxRender.cpp
+    // treats a zero handle as nothing to draw), so a PBR-less build reports exactly that.
     (void)e; (void)meshId;
     return 0;
 #endif
 }
 
-// WHERE THE TERRAIN BLOCK STARTS -- it used to start above selectionOutlineLines. That function
-// reads an .ocmesh and emits boundary/crease line vertices; it names no landscape type and no
-// landscape_ member, and it is called from the selection draw, which has nothing to do with
-// whether the tree was built with terrain. It sat inside the guard only because it is defined
-// next to the sculpt code, and an AVER_MODULE_LANDSCAPE=OFF build died on the mismatch between
-// that and its unguarded call site. Everything from here down really does read landscape_.
+// Where the terrain block starts -- it used to start above selectionOutlineLines(), which sat in
+// the guard only because it's defined next to the sculpt code. That function names no landscape_
+// member and is unrelated to whether terrain is built in; it isn't guarded because an
+// AVER_MODULE_LANDSCAPE=OFF build died on a mismatch with its unguarded call site. Everything from
+// here down reads landscape_.
 #if AVER_MODULE_LANDSCAPE
-// Replaces every height in the section with the noise parameters the panel is showing.
-// ONE UNDO ENTRY covering the whole section, using the same LandscapeStroke machinery a brush
-// stroke uses -- the difference between a generator you dare experiment with and one you only run
-// on an empty level.
-// The heights are computed into a LOCAL vector first, not written through GameLandscape until the
-// comparison against landBefore says something actually changed -- applyHeightRect is what does
-// the section write, the bounds recompute, the tree rebuild and the deferred GPU invalidation.
+// Replaces every height in the section with the noise params the panel is showing, as ONE undo
+// entry (same LandscapeStroke machinery a brush stroke uses). Heights are computed into a LOCAL
+// vector first; applyHeightRect only runs (section write, bounds/tree rebuild, GPU invalidation)
+// once the comparison against landBefore confirms something actually changed.
 void SandboxApp::generateLandscapeNoise(Engine& e) {
     (void)e;
     if (!landscape_.loaded() || landscape_.data().sampleCount == 0) return;
@@ -307,20 +270,18 @@ void SandboxApp::endSculptStroke() {
     EditCmd c;
     c.kind = EditCmd::Kind::LandscapeStroke;
     c.label = "Sculpt";
-    // A stroke that changed nothing -- clicking on terrain already at the flatten target, or a
-    // Smooth pass over a plane -- pushes no entry. Otherwise every stray click would cost the
-    // user a Ctrl+Z that appears to do nothing; endStroke() returns false for that case too.
+    // A no-op stroke (terrain already at the flatten target, a Smooth pass over a plane) pushes no
+    // entry, else every stray click would cost a Ctrl+Z that appears to do nothing; endStroke()
+    // returns false for that case too.
     if (!landscape_.endStroke(c.landBefore, c.landAfter, c.landX0, c.landY0, c.landX1, c.landY1)) return;
     pushEdit(std::move(c));
 }
 
-// Fills the foliage palette from every .ocfoliage TYPE ASSET under the project's content folder --
-// NOT one entry per loaded mesh, unlike before this format existed (see FoliageSpecies' own
-// comment). A type whose meshPath does not resolve in content_'s meshes is skipped with a warning
-// rather than added: loadProjectMeshes' own reason for keying its discovery off already-resolved
-// meshes (not a raw filesystem walk) applies here one layer up -- a type naming a mesh that
-// failed to load, or was never imported, cannot be placed without a synchronous reload, so
-// offering it would be a palette entry that silently does nothing when picked.
+// Fills the foliage palette from every .ocfoliage TYPE ASSET under the project's content folder,
+// one entry per type (see FoliageSpecies), not per loaded mesh. A type whose meshPath doesn't
+// resolve in content_'s meshes is skipped with a warning (mirrors loadProjectMeshes' own reason
+// for keying off already-resolved meshes, one layer up): offering it would be a palette entry
+// that silently does nothing when picked.
 void SandboxApp::refreshFoliagePalette() {
     foliagePalette_.clear();
     const std::string dir = project_.contentDir();
@@ -358,10 +319,8 @@ void SandboxApp::refreshFoliagePalette() {
     }
     std::sort(foliagePalette_.begin(), foliagePalette_.end(),
               [](const FoliageSpecies& a, const FoliageSpecies& b) { return a.name < b.name; });
-    // ONE SPECIES TICKED, not all of them: a project with many types would otherwise open with a
-    // brush painting a uniform random mix of every asset -- boulders, ferns and tree trunks
-    // together -- never what anyone wants and many clicks to undo. Starting from one is the right
-    // direction.
+    // Only one species ticked, else a project with many types opens with a brush painting a random
+    // mix of every asset -- never what anyone wants and many clicks to undo.
     for (size_t i = 0; i < foliagePalette_.size(); ++i) foliagePalette_[i].enabled = (i == 0);
     AVER_INFO("[Foliage] palette: {} type(s) available to scatter", foliagePalette_.size());
 }
@@ -376,11 +335,11 @@ void SandboxApp::refreshFoliagePalette() {
 
 #if AVER_MODULE_LANDSCAPE
 #if AVER_MODULE_SCENE && AVER_WITH_IMGUI
-// The foliage brush: scatter meshes across the terrain under the cursor, or erase them.
-// WHAT THIS DELIBERATELY IS NOT: the world module's procedural scatter (world::ScatterPalette /
-// GeneratedChunkSource), which is density-field driven and authored as SCATTER records -- "cover
-// this whole region by rule". This answers "put some here, by hand"; the two are complementary.
-// Placements here are ordinary scene entities: they save with the level, select, move and undo.
+// The foliage brush: scatter meshes across the terrain under the cursor, or erase them. NOT the
+// world module's procedural scatter (world::ScatterPalette / GeneratedChunkSource, density-field
+// driven, authored as SCATTER records -- "cover this region by rule") -- this is "put some here,
+// by hand"; the two are complementary. Placements are ordinary scene entities: they save, select,
+// move and undo.
 void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
     sculptCursorValid_ = false;
     if (!landscape_.loaded() || foliagePalette_.empty()) { foliageStroking_ = false; return; }
@@ -423,23 +382,20 @@ void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32
     for (int i = 0; i < attempts; ++i) foliagePlaceOne(e, hit.posCm[0], hit.posCm[1]);
 }
 
-// One placement attempt inside the brush disc. Rejected if it lands too close to something
-// already there (per the picked species' OWN collisionRadiusCm), which is what stops a held
-// brush from stacking meshes in a single spot.
+// One placement attempt inside the brush disc. Rejected if too close to something already there
+// (per the picked species' own collisionRadiusCm) -- stops a held brush from stacking meshes.
 //
-// NOT SPLIT INTO A SEPARATE "pick a species" HELPER, deliberately: a member function's own
-// signature is evaluated at its point of declaration, not deferred into the class's later
-// complete-class context the way a function BODY is -- so a helper returning `FoliageSpecies*`
-// declared up here (before FoliageSpecies itself, far below in the AVER_MODULE_LANDSCAPE member
-// block) would not compile. Everything referencing the type stays inside a function BODY instead,
-// exactly like the rest of this class already relies on for the identical reason.
+// Not split into a "pick a species" helper: a member function's signature is resolved at its
+// declaration point, not deferred to complete-class context like a body is, so a helper returning
+// `FoliageSpecies*` declared before FoliageSpecies itself (defined later in this member block)
+// wouldn't compile -- everything referencing the type stays inside a function body instead, as the
+// rest of this class already does for the same reason.
 void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     std::vector<const FoliageSpecies*> live;
     for (const auto& sp : foliagePalette_) if (sp.enabled) live.push_back(&sp);
     if (live.empty()) return;
 
-    // Uniform over the DISC, not the square: sqrt on the radius is what keeps a brush from
-    // clumping everything toward the centre.
+    // Uniform over the disc, not the square: sqrt on the radius avoids clumping toward the centre.
     const f32 ang = foliageRand(foliageSeed_) * 6.2831853f;
     const f32 rad = std::sqrt(foliageRand(foliageSeed_)) * foliageRadiusCm_;
     const f32 x = cx + std::cos(ang) * rad;
@@ -448,16 +404,12 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     f32 z = 0.0f;
     if (!landscape::surfaceHeightAt(landscape_.data(), x, y, z)) return;   // off the section
 
-    // WHICH SPECIES, weighted by its own type.weight -- mirroring
-    // aver::world::ChunkGenerator.cpp's pickSpecies, minus the density-band test that has no
-    // meaning here (see OcFoliage.hpp's own comment on why this format carries no density band
-    // at all). A species with weight <= 0 is never picked, matching ScatterSpecies' documented
-    // rule exactly; if EVERY live species happens to have weight <= 0 (a freshly zeroed
-    // palette), this falls back to a uniform pick rather than placing nothing -- ticking a
-    // species should never silently stop it from ever being chosen. Decided before the
-    // collision test below: collisionRadiusCm and the scale it is multiplied against are both
-    // per-type now, so which species this attempt is testing has to be known first, unlike the
-    // single global spacing value this replaced.
+    // Weighted by type.weight, mirroring ChunkGenerator.cpp's pickSpecies minus the density-band
+    // test (meaningless here, see OcFoliage.hpp). Weight <= 0 is never picked (matches
+    // ScatterSpecies); if EVERY live species has weight <= 0, falls back to a uniform pick rather
+    // than placing nothing -- ticking a species should never silently stop it being chosen. Decided
+    // before the collision test below because collisionRadiusCm/scale are now per-type, replacing
+    // the single global spacing value this had before.
     f32 totalWeight = 0.0f;
     for (const FoliageSpecies* s : live) if (s->type.weight > 0.0f) totalWeight += s->type.weight;
     const FoliageSpecies* picked = nullptr;
@@ -480,11 +432,9 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     const f32 sc = sp.type.scaleMin +
                    foliageRand(foliageSeed_) * (sp.type.scaleMax - sp.type.scaleMin);
 
-    // Interpenetration check, mirroring aver::world::ChunkGenerator.cpp's placedSolid exactly:
-    // SUMMED radii (this instance's own, scaled, plus whatever the neighbour was placed with),
-    // and a neighbour that was placed with collisionRadiusCm == 0 (grass and other
-    // overlap-tolerant fill) never blocks anything and is never itself blocked by it -- it simply
-    // never entered the check at all, on either side.
+    // Interpenetration check, mirroring ChunkGenerator.cpp's placedSolid: SUMMED radii (this
+    // instance's scaled radius plus the neighbour's). A neighbour placed with collisionRadiusCm ==
+    // 0 (grass, other overlap-tolerant fill) never entered the check, so it neither blocks nor is blocked.
     if (sp.type.collisionRadiusCm > 0.0f) {
         const f32 r = sp.type.collisionRadiusCm * sc;
         for (const FoliagePlaced& p : foliagePlaced_) {
@@ -497,13 +447,11 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
 
     Transform xf;
     xf.position = Vec3{x, y, z};
-    // "Align to slope" is now authored PER TYPE (sp.type.alignToNormal), not a single checkbox
-    // for the whole palette -- foliagePlacementRotation (FoliageAlign.hpp) is unchanged, only
-    // where its `alignToNormal` argument comes from. Yaw stays a random azimuth unless the type
-    // says otherwise (randomizeYaw == false means every instance faces the same way). eps of
-    // 10 cm sits comfortably inside a section's own sample spacing (see OcLandData::spacingCm's
-    // typical range), so the four extra probes stay local to this instance's own patch of ground
-    // rather than blurring across several samples.
+    // "Align to slope" is per-type (sp.type.alignToNormal), not a palette-wide checkbox --
+    // foliagePlacementRotation (FoliageAlign.hpp) is unchanged, only where alignToNormal comes from.
+    // Yaw is a random azimuth unless randomizeYaw is false (then every instance faces the same way).
+    // eps=10cm sits inside a section's sample spacing (OcLandData::spacingCm), keeping the four
+    // probes local to this instance's patch rather than blurring across samples.
     const f32 yaw = sp.type.randomizeYaw ? foliageRand(foliageSeed_) * 6.2831853f : 0.0f;
     xf.rotation = editor::foliagePlacementRotation(landscape_.data(), x, y, /*epsCm=*/10.0f, yaw,
                                                     sp.type.alignToNormal);
@@ -518,11 +466,9 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
         mr->flags |= scene::kMeshRendererVisible;
         mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
         mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
-        // MATERIAL OVERRIDE, empty means "the mesh's own cooked material" -- OcFoliageData's own
-        // documented default, and previously not honoured at all: the old ad hoc FoliageSpecies
-        // carried no material field, so a painted instance could never be anything but whatever
-        // the mesh itself cooked with. Same resolve-and-bind pair LevelInstance.cpp uses for an
-        // .ocworld PLACE's own `material` field.
+        // Material override; empty means the mesh's own cooked material (OcFoliageData's documented
+        // default) -- previously not honoured at all, since the old ad hoc FoliageSpecies had no
+        // material field. Same resolve-and-bind pair LevelInstance.cpp uses for an .ocworld PLACE's `material`.
         if (!sp.type.material.empty()) {
             mr->material = aver_scene_material(0, sp.type.material.c_str());
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
@@ -544,9 +490,8 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     (void)e;
 }
 
-// Removes painted instances within the brush. Only touches entities this brush placed, tracked
-// in foliagePlaced_, so an erase pass cannot delete level geometry that merely happens to be
-// under the cursor.
+// Removes painted instances within the brush; only entities tracked in foliagePlaced_, so an erase
+// pass cannot delete level geometry that merely happens to be under the cursor.
 void SandboxApp::foliageErase(f32 cx, f32 cy) {
     const f32 rSq = foliageRadiusCm_ * foliageRadiusCm_;
     scene::World& world = scene::World::instance();
@@ -580,35 +525,25 @@ void SandboxApp::foliageErase(f32 cx, f32 cy) {
 
 #endif
 
-// Re-finds the Player Start by NAME, which is what makes an entity one (see makePlayerStart).
+// Re-finds the Player Start by NAME (see makePlayerStart). Re-derived rather than trusted, because
+// destroying the marker, undoing that destroy (new handle) or redoing it invalidates playerStart_
+// without touching this cache -- a stale handle points at nothing (Add > Player Start then refuses
+// a second one, thinking it exists) or at a reused id the viewport draws a spawn icon on. Cheap:
+// one pass over the level's entities, only on undo/redo/delete.
 //
-// WHY IT HAS TO BE RE-DERIVED. playerStart_ is a cached handle, and three things invalidate it
-// without going anywhere near this cache: destroying the marker, undoing that destroy (which
-// recreates the entity with a DIFFERENT handle), and redoing it again. The stale handle then
-// either points at nothing -- Add > Player Start refuses to add a second one because it thinks
-// one exists -- or, worse, at whatever entity id got reused, which the viewport then draws a
-// spawn icon on. Cheap: one pass over the level's own entities, only on undo/redo and delete.
+// FIXED (was a real bug, not cosmetic): both comparisons used to be `w.name(x) == "PlayerStart"` --
+// World::name returns `const char*`, so `==` against a literal compared POINTERS, never characters;
+// playerStart_ was silently reset to kInvalidEntity on every undo/redo/delete. Now std::string_view,
+// which compares content.
 //
-// FIXED (was a real bug, not cosmetic): both comparisons here used to be
-// `w.name(x) == "PlayerStart"`. World::name returns `const char*`, and comparing that against a
-// string literal with `==` compares POINTERS, not characters -- a heap-owned name buffer never
-// lives at a string literal's address, so neither comparison could ever match. The early-out at
-// the top never fired and the loop below never found anything, so playerStart_ was silently reset
-// to kInvalidEntity on EVERY undo, redo and delete: precisely the failure this function exists to
-// prevent, per the paragraph above. Now std::string_view, which compares content.
-//
-// DELIBERATELY NOT world::find("PlayerStart"): that runs a linear scan over EVERY live entity in
-// the one process-global World, not just this level's own levelEntities_ -- a broader scope than
-// the walk below is deliberately restricted to (levelEntities_ is the level-ownership boundary
-// isLevelOwned() itself is keyed on). A same-named entity that is not part of this level would
-// make find() return the wrong handle with nothing to signal the mismatch; the loop below cannot
-// make that mistake because it only ever looks at entities this level itself owns.
+// Not world::find("PlayerStart"): that scans every live entity in the process-global World, not
+// just this level's levelEntities_ (the level-ownership boundary isLevelOwned() is keyed on) -- a
+// same-named entity outside this level would make find() return the wrong handle silently.
 void SandboxApp::refreshPlayerStart() {
 #if AVER_MODULE_SCENE
-    // The decision itself lives in editor::refreshPlayerStart (PlayerStartRefresh.hpp) -- pulled
-    // out as a free function over plain scene::World + std::vector<Entity> so a headless test can
-    // exercise it against a real scene::World. See that header for the pointer-comparison bug
-    // this used to hide.
+    // Logic lives in editor::refreshPlayerStart (PlayerStartRefresh.hpp), a free function over
+    // plain scene::World + std::vector<Entity> so a headless test can exercise it directly (see
+    // that header for the pointer-comparison bug this used to hide).
     playerStart_ = editor::refreshPlayerStart(scene::World::instance(), playerStart_, levelEntities_);
 #endif
 }
@@ -657,12 +592,10 @@ scene::Entity SandboxApp::makePlayerStart(const Vec3& at, f32 yawDeg) {
         mr->flags |= scene::kMeshRendererVisible;
         mr->aabbMin[0] = mr->aabbMin[1] = -1.0f;
         mr->aabbMax[0] = mr->aabbMax[1] =  1.0f;
-        // TALLER THAN THE CUBE IT BOUNDS, ON PURPOSE, ONLY IN +Z: this box is what ray picking
-        // tests, and the marker no longer draws as this cube -- ViewportIconRenderer's pin has its
-        // TIP at the origin and its head ~90cm above, so a box centred on the origin would leave
-        // the top half unclickable while making floor beneath it clickable instead.
-        // Still reaches -1 rather than 0 so it also contains the fallback CUBE (used when the icon
-        // renderer or PNG is unavailable); one box serves both looks.
+        // Taller than the cube it bounds, only in +Z: this box is what ray picking tests, and the
+        // marker draws as ViewportIconRenderer's pin (tip at origin, head ~90cm above) not this
+        // cube -- centred on the origin would leave the top half unclickable. Still reaches -1 (not
+        // 0) to also contain the fallback CUBE (icon renderer/PNG unavailable); one box serves both looks.
         mr->aabbMin[2] = -1.0f;
         mr->aabbMax[2] =  1.8f;
     }
@@ -686,18 +619,16 @@ void SandboxApp::addPlayerStart(Engine&) {
     }
     Vec3 at = camPos_ + camForward() * kAddDistance;
     if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
-    // Faces the way the camera is facing, which is what someone placing a spawn point means by
-    // "the player starts here": atan2 of the forward vector, in the same +X-forward/+Y-right
-    // frame the level format's yaw is authored in.
+    // Faces the camera's direction: atan2 of forward, in the +X-forward/+Y-right frame the level
+    // format's yaw is authored in.
     const Vec3 f = camForward();
     const f32 yaw = degrees(std::atan2(f.y, f.x));
     playerStart_ = makePlayerStart(at, yaw);
     if (playerStart_ == scene::kInvalidEntity) return;
     sel_ = kSelScene; selEntity_ = playerStart_;
-    // AN UNDO ENTRY, WHICH THIS ALONE AMONG THE Add ITEMS DID NOT PUSH. spawnPrimitive and
-    // spawnFromAssetDrop both end with describeEntity()+pushEdit(); this did not, so Ctrl+Z
-    // after adding a Player Start did not remove it -- it silently undid whatever edit came
-    // BEFORE, which is worse than doing nothing.
+    // An undo entry -- this was the only Add item that didn't push one (spawnPrimitive and
+    // spawnFromAssetDrop both end with describeEntity()+pushEdit(); this didn't), so Ctrl+Z after
+    // adding a Player Start silently undid whatever edit came before instead (worse than doing nothing).
     {
         EditCmd c = describeEntity(playerStart_);
         c.kind = EditCmd::Kind::Create;
@@ -710,12 +641,11 @@ void SandboxApp::addPlayerStart(Engine&) {
 #endif
 }
 
-// Spawns a cube in front of the camera, in whichever world owns the viewport, and selects it.
-// Adds one of the engine's built-in primitives. Cube and sphere are both synthesised at
-// startup (appendBox/appendSphere) and registered in content_'s meshes/bounds and meshTris_ under
-// their asset ids, so "Add > Sphere" needed no new asset, no new loader and no new bounds --
-// only for this function to stop hardcoding the cube. It was disabled in the menu for as long
-// as sphere.ocmesh had been a registered built-in.
+// Adds a built-in primitive in front of the camera and selects it. Cube and sphere are both
+// synthesised at startup (appendBox/appendSphere) and registered in content_'s meshes/bounds and
+// meshTris_, so "Add > Sphere" needed no new asset/loader/bounds, only this function to stop
+// hardcoding the cube -- it had stayed disabled in the menu as long as sphere.ocmesh was already a
+// registered built-in.
 void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const char* label) {
     (void)engine;
     const Vec3 at = camPos_ + camForward() * kAddDistance;
@@ -743,11 +673,9 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         levelEntities_.push_back(e);
         entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), kCubeAsset);
 #if AVER_MODULE_PHYSICS
-        // COLLIDES LIKE A LOADED PLACEMENT WOULD: `collide` for a fresh entity has no entry in
-        // entityCollide_, which reads as the default (true) everywhere else this map is
-        // consulted, so a primitive added from this menu gets the same body a level file's own
-        // placement gets, without a save and reload to pick it up. BEFORE describeEntity() below,
-        // so the pushed Create command's hadBody already agrees with what was actually built.
+        // Collides like a loaded placement would: a fresh entity has no entityCollide_ entry, which
+        // reads as the default (true) everywhere else consulted, so it gets the same body a level
+        // file's own placement gets. Before describeEntity() below so the pushed Create's hadBody matches what was built.
         rebuildEntityBody(e);
 #endif
         sel_ = kSelScene; selEntity_ = e;
@@ -761,15 +689,12 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         return;
     }
 #endif
-    // The placeholder world (no level loaded), which keeps its OWN cube mesh at
-    // kEditorCubeHalf rather than the unit one content_ registers.
-    //
-    // THE TWO CUBES ARE DIFFERENT SIZES, which is the trap here. cubeMesh_ is appendBox at
-    // half-extent 50 and is drawn at scale 1; content_'s "Meshes/cube.ocmesh" is the UNIT
-    // cube, because .ocworld PLACEG scales are half-extents in cm applied to a unit mesh.
-    // Looking the cube up in content_ here would silently shrink the placeholder cube 50x.
-    // So the cube keeps its own handle, and anything else comes from the registry scaled up to
-    // match it.
+    // The placeholder world (no level loaded) keeps its OWN cube mesh at kEditorCubeHalf, not the
+    // unit one content_ registers. The two cubes are different sizes -- cubeMesh_ is appendBox at
+    // half-extent 50 drawn at scale 1; content_'s "Meshes/cube.ocmesh" is the UNIT cube (.ocworld
+    // PLACEG scales are half-extents in cm applied to it). Looking it up in content_ here would
+    // silently shrink it 50x, so the cube keeps its own handle; anything else comes from the
+    // registry scaled up to match it.
     rhi::MeshHandle mesh = cubeMesh_;
     u32 tris = cubeTris_;
     Vec3 scale{1, 1, 1};
@@ -785,11 +710,9 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         const auto trisIt = meshTris_.find(assetId);
         tris = trisIt != meshTris_.end() ? trisIt->second : 0;
 #else
-        // meshTris_ is filled by onMeshLoaded, which only runs at all under AVER_MODULE_SCENE
-        // (SandboxAssets.cpp) -- a scene-less build never populates it for anything, cube included,
-        // so there is no per-mesh count to hand back here. Leaving tris at cubeTris_ from above
-        // would report the CUBE's triangle count for a sphere; 0 is honest about not knowing rather
-        // than quietly wrong.
+        // meshTris_ is filled by onMeshLoaded (SandboxAssets.cpp), which only runs under
+        // AVER_MODULE_SCENE, so a scene-less build has no per-mesh count; 0 here is honest, vs.
+        // reporting the CUBE's count for a sphere.
         tris = 0;
 #endif
         scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};   // unit mesh -> cube's size
@@ -803,9 +726,9 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     objects_.push_back(c);
     // Unguarded: the placeholder-world fallback, reached with SCENE off too.
     sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
-    // Pushes a CreateObj undo entry -- this branch used to push NOTHING, so adding a placeholder
-    // cube (the default path with no level loaded) was silently non-undoable. Mirrors the scene
-    // branch's own describeEntity()+pushEdit() tail, minus the EditId/World indirection only the scene entity needs.
+    // Pushes a CreateObj undo entry (this branch used to push none, so a placeholder cube add was
+    // silently non-undoable). Mirrors the scene branch's describeEntity()+pushEdit() tail, minus
+    // the EditId/World indirection only the scene entity needs.
     EditCmd edit;
     edit.kind = EditCmd::Kind::CreateObj;
     edit.objIndex = sel_;
@@ -819,17 +742,13 @@ void SandboxApp::spawnCube(Engine& engine) { spawnPrimitive(engine, "Meshes/cube
 
 #if AVER_WITH_IMGUI
 #if AVER_MODULE_SCENE
-// Finds a finite world point to drop an asset at, from a screen-space mouse position. Order:
-// nearest scene-entity hit, else the ground plane, else a fixed distance along the ray from the
-// camera. Z is up in this engine (see averAtmoCamAlt()), so the ground plane is Z = 0, not Y = 0.
-// The world point under the cursor for a drop, and whether it is ON SOMETHING.
+// Finds a finite world point to drop an asset at, from a screen mouse position. Order: nearest
+// scene-entity hit, else the ground plane, else a fixed distance along the ray. Z is up in this
+// engine (averAtmoCamAlt()), so the ground plane is Z = 0, not Y = 0.
 //
-// `onSurface` is what tells the caller to rest the new object on what it hit rather than leave
-// its origin buried in it -- see restOnSurface. The ground-plane and in-front-of-camera
-// fallbacks report false: there is nothing there to sit on, and a mesh authored around its own
-// middle should not float half its height above an empty floor just because it was dropped at
-// one. Z = 0 IS a surface in the sense that matters, so the ground case reports true; only the
-// "ray points at the sky" fallback does not.
+// `onSurface` tells the caller to rest the new object on what it hit rather than leave its origin
+// buried (see restOnSurface). Ground plane reports true (Z=0 IS a surface); the in-front-of-camera
+// "ray points at the sky" fallback reports false -- nothing there to sit on.
 Vec3 SandboxApp::dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface) const {
     if (onSurface) *onSurface = true;
     Vec3 ro, rd;
@@ -837,21 +756,14 @@ Vec3 SandboxApp::dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface) const
 
     f32 bestT = 1e30f; bool hit = false;
 
-    // NO TEST AGAINST THE PLACEHOLDER Floor/Cube, and that is a statement rather than an omission.
-    // They are on screen only while hideEditorScene_ is false, which is now exactly "no level is
-    // open" -- and spawnFromAssetDrop refuses a drop in that state. A loop over them here could
-    // never run. Written down because the obvious next edit is to add one.
+    // No test against the placeholder Floor/Cube, deliberately: they're on screen only while
+    // hideEditorScene_ is false ("no level open"), and spawnFromAssetDrop refuses a drop then -- a
+    // loop over them here could never run. Written down because the obvious next edit is to add one.
 
-    // THE SCENE ENTITIES, ALWAYS -- and this guard being here was the whole bug.
-    //
-    // This loop used to sit inside `if (!hideEditorScene_)`, and hideEditorScene_ is true exactly
-    // WHEN THE LEVEL HAS ENTITIES. So the drop ray tested the level's objects only while the level
-    // had none: the moment there was anything to land on, every object was ignored and the drop
-    // fell through to the ground plane at Z = 0. Aim at the top of a crate, get the floor.
-    //
-    // pick() one screen away has had it right the whole time -- placeholders under the visibility
-    // guard, scene entities unconditional -- which is what this now mirrors. Two ray loops over the
-    // same world that disagreed about which objects exist.
+    // FIXED: this loop used to sit inside `if (!hideEditorScene_)`, which is true exactly WHEN THE
+    // LEVEL HAS ENTITIES -- so it tested the level's objects only while there were none; the moment
+    // there was anything to land on, the drop fell through to the ground plane instead (aim at a
+    // crate, get the floor). Now unconditional, mirroring pick()'s placeholders-guarded/scene-unconditional split.
     {
         scene::World& w = scene::World::instance();
         const u32 n = w.count();
@@ -931,10 +843,10 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 
 #if AVER_MODULE_PARTICLES
     if (isParticle) {
-        // A drop-to-place entry point for DECIDED 3's format, mirroring the .ocmesh path below
-        // rather than growing its own copy of the drop-target/level-active checks. Loaded directly
-        // (not through content_.loadProjectParticleEffects()'s whole-tree walk) so an effect just authored
-        // resolves immediately, the same reasoning the mesh path gives for reloading synchronously.
+        // Drop-to-place for particle effects, mirroring the .ocmesh path's drop-target/level-active
+        // checks. Loaded directly (not via content_.loadProjectParticleEffects()'s whole-tree
+        // walk) so an effect just authored resolves immediately -- same reasoning the mesh path
+        // gives for reloading synchronously.
         particles::ParticleEffect fx;
         std::string err;
         if (!fmt::loadOcparticle(full, fx, nullptr, &err)) {
@@ -985,9 +897,8 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 
     const u64 meshId = fnv1a64(std::string_view(rel));
     if (content_.meshFor(meshId) == 0) {
-        // Not loaded yet -- most likely imported moments ago. Reload synchronously (the same
-        // release+load pair buildUI() runs for wantMeshReload_) rather than waiting a frame, so
-        // the drop the user just made actually lands.
+        // Not loaded yet -- likely imported moments ago. Reload synchronously (same release+load
+        // pair buildUI() runs for wantMeshReload_) rather than wait a frame, so this drop lands.
         releaseProjectMeshes(e);
         loadProjectMeshes(e);
     }
@@ -1011,11 +922,10 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     xf.rotation = Quat{0,0,0,1};
     xf.scale = Vec3{1,1,1};
 
-    // ON TOP OF WHAT IT LANDED ON, not inside it. Applied BEFORE the snap so the snap still
-    // quantises the final position rather than a value the lift then knocks off the grid.
-    // A MESH WITH NO KNOWN BOUNDS IS LEFT WHERE IT LANDED. content_'s bounds are filled at load from
-    // the .ocmesh's own header, so a miss means nothing measured this mesh -- and inventing a
-    // lift for it would move the object for a reason nobody could see.
+    // Rests on top of what it landed on, applied BEFORE the snap so the snap quantises the final
+    // position, not a value the lift then knocks off grid. A mesh with no known bounds (content_'s
+    // bounds fill at load from the .ocmesh header; a miss means nothing measured it) is left where
+    // it landed -- inventing a lift would move it for a reason nobody could see.
     f32 lift = 0.0f;
     if (onSurface) {
         if (const auto* b = content_.boundsFor(meshId))
@@ -1040,10 +950,8 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     levelEntities_.push_back(ent);
     entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
 #if AVER_MODULE_PHYSICS
-    // COLLIDES LIKE A LOADED PLACEMENT WOULD -- see spawnPrimitive's identical call for why
-    // (`collide` defaults to true, and this is the mesh-drop branch only: the .ocparticle branch
-    // above has no CMeshRenderer and stays as it was). BEFORE describeEntity() below, so the
-    // pushed Create command's hadBody already agrees with what was actually built.
+    // Collides like a loaded placement would (see spawnPrimitive's identical call); mesh-drop
+    // branch only, the .ocparticle branch above has no CMeshRenderer. Before describeEntity() so hadBody matches what was built.
     rebuildEntityBody(ent);
 #endif
     sel_ = kSelScene; selEntity_ = ent;
@@ -1084,10 +992,9 @@ bool SandboxApp::project(const Vec3& wp, f32& sx, f32& sy) const {
     return std::sqrt((px-cx)*(px-cx)+(py-cy)*(py-cy));
 }
 
-// The gizmo's three axes IN WORLD SPACE, for the current tool and the World/Local button.
-// SCALE IS ALWAYS LOCAL, whatever the button says: applyScale writes o.scale.x/y/z, the object's
-// own axes, so drawing that handle along a world axis on a rotated object meant the arrow you
-// dragged and the number that changed pointed different ways. UE hides the world option here too.
+// Gizmo's three axes in world space, for the current tool and World/Local button. Scale is ALWAYS
+// local regardless: applyScale writes o.scale.x/y/z (the object's own axes), so a world-axis handle
+// on a rotated object would drag one way while the number changed another. UE hides World here too.
 void SandboxApp::gizmoBasis(const EditXform& o, Vec3 ax[3]) const {
     if (worldSpace_ && tool_ != Tool::Scale) {
         for (int a = 0; a < 3; ++a) ax[a] = kAxisDir[a];
@@ -1144,9 +1051,8 @@ void SandboxApp::applyMove(EditXform& o, f32 dx, f32 dy) {
             if (pl2 > 1e-4f) o.pos += A * ((dx*px + dy*py) / pl2);
         }
     }
-    // Grid snap stays in WORLD space even for a local-axis drag. A grid the object is not
-    // aligned to is still the grid the level is built on, and snapping to the object's own
-    // rotated lattice would put nothing on round numbers.
+    // Grid snap stays in WORLD space even for a local-axis drag: a grid the object isn't aligned to
+    // is still the grid the level is built on; snapping to the object's own rotated lattice would put nothing on round numbers.
     if (snapMove_) for (int k=0;k<3;++k) (&o.pos.x)[k] = snapf((&o.pos.x)[k], moveSnap_);
 }
 
@@ -1166,13 +1072,11 @@ void SandboxApp::applyScale(EditXform& o, f32 dx, f32 dy) {
     if (snapScale_) for (int k=0;k<3;++k) (&o.scale.x)[k] = std::fmax(0.02f, snapf((&o.scale.x)[k], scaleSnap_));
 }
 
-// Rotates the transform about the active gizmo axis by the swept cursor angle.
-// BY QUATERNION COMPOSITION, not by adding to an Euler component: `rotDeg[axis] += angle` is only
-// correct when the other two components are zero, so on an already-rotated object it produced a
-// rotation about the wrong axis.
-// The order is `dq * q`: this Quat's operator* is the Hamilton product, so composing "q first,
-// then dq" is dq on the LEFT -- backwards rotates about the object's axes instead of the world's,
-// agreeing only at identity.
+// Rotates the transform about the active gizmo axis by the swept cursor angle, by QUATERNION
+// COMPOSITION, not by adding to an Euler component: `rotDeg[axis] += angle` is only correct when
+// the other two components are zero, so on an already-rotated object it rotated about the wrong axis.
+// Order is `dq * q` (this Quat's operator* is the Hamilton product); "q first, then dq" would put
+// dq on the LEFT, rotating about the object's axes instead of the world's (agreeing only at identity).
 void SandboxApp::applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my) {
     f32 ox, oy; if (!project(o.pos, ox, oy)) return;
     const f32 a0=std::atan2(py-oy, px-ox), a1=std::atan2(my-oy, mx-ox);
@@ -1184,8 +1088,7 @@ void SandboxApp::applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my) {
     const f32 sgn = dot(A, camForward()) >= 0.0f ? -1.0f : 1.0f;
 
     rotDragDeg_ += degrees(da) * sgn;
-    // SNAPPING IS ON THE ACCUMULATED ANGLE, not the per-frame delta. Snapping each frame's
-    // delta would round most of them to zero and the object would never turn.
+    // Snaps the ACCUMULATED angle, not the per-frame delta -- snapping each delta would round most to zero and the object would never turn.
     const f32 target = snapRot_ ? snapf(rotDragDeg_, rotSnap_) : rotDragDeg_;
     const f32 step = target - rotAppliedDeg_;
     if (std::fabs(step) < 1e-5f) return;
@@ -1203,10 +1106,9 @@ void SandboxApp::handleManip(Engine& e) {
     const ImGuiIO& io = ImGui::GetIO();
 
     if (levelFocused_ && !io.WantCaptureKeyboard) {
-        // 1..4 select a tool WITHIN the active mode, so the same keys mean "the four things this
-        // mode does" rather than a flat list that grows with every mode. Tab switches mode, the
-        // one binding meaning the same thing in both. Both halves of the 1..4 dispatch are 4
-        // commands, not 8, whose scopes never overlap since mode_ can only be one value at a time.
+        // 1..4 select a tool WITHIN the active mode (not a flat list that grows with every mode);
+        // Tab switches mode. Both halves of the 1..4 dispatch are 4 commands, not 8 -- their scopes
+        // never overlap since mode_ is single-valued.
         if (keybinds_.pressed(editor::CommandId::ModeToggleLandscape, io)) toggleEditorMode();
 #if AVER_MODULE_LANDSCAPE
         if (mode_ == EditorMode::Landscape) {
@@ -1233,9 +1135,8 @@ void SandboxApp::handleManip(Engine& e) {
 #if AVER_MODULE_LANDSCAPE
     const bool isSculptTool = editorModeIsLandscape();
 #else
-    // Unused with the module off -- the isSculptTool branch below compiles out along with it --
-    // but declared anyway so isXformTool's "everything that is not a sculpt tool" phrasing does
-    // not need its own second definition per configuration.
+    // Unused with the module off (the isSculptTool branch below compiles out too), but declared
+    // anyway so isXformTool's "not a sculpt tool" phrasing needs no second definition per configuration.
     [[maybe_unused]] const bool isSculptTool = false;
 #endif
     // Only Move/Rotate/Scale ever show or drive the transform gizmo: a sculpt tool has its own
@@ -1257,9 +1158,8 @@ void SandboxApp::handleManip(Engine& e) {
         handleSculpt(e, io, overScene, mx, my);
     } else
 #if AVER_MODULE_SCENE
-    // Foliage owns the click the same way Landscape does: no picking, no gizmo, the brush
-    // instead. It has to be tested here and not fall through to the Select branch, or painting
-    // would also be selecting whatever it painted on.
+    // Foliage owns the click like Landscape does: no picking, no gizmo, just the brush. Tested here
+    // rather than falling through to Select, or painting would also select whatever it painted on.
     if (editorModeIsFoliage()) {
         handleFoliage(e, io, overScene, mx, my);
     } else
@@ -1276,39 +1176,30 @@ void SandboxApp::handleManip(Engine& e) {
                 beginTransformEdit();
             }
             else {
-                // DRAGGING THE OBJECT ITSELF MOVES IT, not just the three hairline axis handles.
+                // Dragging the object's own body moves it too, not just the three hairline axis
+                // handles (a gizmo handle means landing within 16px of a two-pixel line, and until
+                // now that was the ONLY way to move anything -- a click on the body fell through to
+                // a re-pick, so "grab it and drag" did nothing).
                 //
-                // Reaching a gizmo handle means landing within 16px of a two-pixel line, and
-                // until now that was the ONLY way to move anything: a click anywhere on the
-                // object's own body fell straight through to a re-pick, so the obvious gesture --
-                // grab the thing and drag -- did nothing at all and read as "the editor cannot
-                // move objects".
+                // Test is ALREADY-SELECTED: pick() still decides what was hit; landing on what was
+                // already selected makes the click a grab rather than a selection change, so the
+                // first click still only selects and a click elsewhere keeps its old meaning.
                 //
-                // ALREADY-SELECTED IS THE TEST, and it is what keeps this safe. pick() is left to
-                // decide what was hit, exactly as before; if it lands on what was ALREADY
-                // selected, the click is a grab rather than a selection change. So the first
-                // click still only selects -- nothing can be nudged by the click that selected
-                // it -- and a click on empty space or on a different object keeps its old
-                // meaning entirely.
-                //
-                // AXIS 3 is applyMove's screen-plane branch, which already existed and was
-                // reachable only through a 13px invisible hotspot at the pivot. This gives it the
-                // whole silhouette to be grabbed by.
-                //
-                // No drag threshold is needed: a click that does not move produces no transform
-                // change, and endTransformEdit already drops a no-op edit (nearlySameXform).
+                // Uses axis 3, applyMove's screen-plane branch (previously reachable only via a
+                // 13px hotspot at the pivot, now the whole silhouette). No drag threshold needed:
+                // a non-moving click produces no transform change, and endTransformEdit already
+                // drops a no-op edit (nearlySameXform).
                 const int  prevSel = sel_;
 #if AVER_MODULE_SCENE
                 const scene::Entity prevEnt = selEntity_;
 #endif
                 const bool hadSel = anySelected();
                 const bool pickHit = pick(e, io);
-                // PICKHIT GATES THE DRAG, not just sel_/selEntity_ matching prevSel/prevEnt: a
-                // Ctrl-click MISS now leaves the selection exactly where it was (pick()'s own
-                // tail), so sel_==prevSel/selEntity_==prevEnt would otherwise be trivially true on
-                // a miss too, and Ctrl-clicking empty space next to a selected object would grab
-                // and drag it. Requiring pickHit means only a click that actually landed back on
-                // the already-selected thing counts as a grab.
+                // pickHit gates the drag, not just sel_/selEntity_ matching prevSel/prevEnt: a
+                // Ctrl-click MISS leaves the selection unchanged (pick()'s own tail), so that match
+                // would be trivially true on a miss too, letting a Ctrl-click on empty space next
+                // to a selection grab and drag it. Requiring pickHit means only a click that landed
+                // back on the selected thing counts.
                 const bool sameTarget = pickHit && hadSel && anySelected() && sel_ == prevSel
 #if AVER_MODULE_SCENE
                                         && selEntity_ == prevEnt
@@ -1320,15 +1211,11 @@ void SandboxApp::handleManip(Engine& e) {
                     beginTransformEdit();
                 }
 #if AVER_MODULE_SCENE
-                // MARQUEE ARMS ON A MISS, Select tool only (the brief above is about picking an
-                // OBJECT; Move/Rotate/Scale keep their old "click empty space, deselect" meaning
-                // unchanged). Two misses arm it: a plain click that cleared the selection (pick()
-                // just did that above, so arming here costs a click on empty space nothing it did
-                // not already do), and a Ctrl-click miss, which pick() left the selection alone
-                // for -- arming that one is what makes Ctrl+drag from empty space ADD the catch to
-                // an existing selection instead of only working when nothing was selected yet. A
-                // release with no further movement below the threshold reads as that exact same
-                // click, per marqueeActive_ staying false.
+                // Marquee arms on a miss, Select tool only (Move/Rotate/Scale keep "click empty
+                // space, deselect"). Two misses arm it: a plain click that cleared the selection
+                // (costs nothing extra), and a Ctrl-click miss (pick() left selection alone for it)
+                // -- arming that makes Ctrl+drag from empty space ADD to an existing selection. A
+                // release with no further movement reads as that same click (marqueeActive_ stays false).
                 else if (tool_ == Tool::Select && !pickHit && (!anySelected() || io.KeyCtrl)) {
                     marqueeArmed_ = true; marqueeActive_ = false;
                     marqueeX0_ = marqueeX1_ = mx; marqueeY0_ = marqueeY1_ = my;
@@ -1341,10 +1228,9 @@ void SandboxApp::handleManip(Engine& e) {
             dragging_=false; activeAxis_=-1;
         }
 #if AVER_MODULE_SCENE
-        // MARQUEE: continues while armed, becomes ACTIVE (and starts drawing) once the drag clears
-        // the threshold, and commits on release -- all independent of `overScene` above, since a
-        // drag that started inside the viewport must keep tracking even if the cursor strays past
-        // its edge.
+        // Marquee continues while armed, becomes ACTIVE once the drag clears the threshold, commits
+        // on release -- independent of `overScene`, since a drag that started inside the viewport
+        // must keep tracking past its edge.
         if (marqueeArmed_) {
             marqueeX1_ = mx; marqueeY1_ = my;
             if (!marqueeActive_ &&
@@ -1365,8 +1251,7 @@ void SandboxApp::handleManip(Engine& e) {
                 if (marqueeActive_) {
                     f32 loX, loY, hiX, hiY;
                     editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
-                    // Every eligible entity -- pick()'s own broadphase eligibility -- whose world
-                    // AABB, projected corner by corner, intersects the rectangle.
+                    // Every entity eligible per pick()'s broadphase, whose projected world AABB intersects the rectangle.
                     std::vector<scene::Entity> hitEnts;
                     scene::World& w = scene::World::instance();
                     const u32 n = w.count();
@@ -1408,57 +1293,37 @@ void SandboxApp::handleManip(Engine& e) {
 #endif
     }
 
-    // THE OUTLINER AND DETAILS COUNT AS "THE LEVEL", for the edit verbs.
+    // The Outliner and Details panels count as "the level" for the edit verbs too, not just
+    // levelFocused_ (true only while the 3D viewport holds keyboard focus): clicking an Outliner
+    // row -- the ordinary way to select something -- moved focus there, so Delete/Copy/Paste/
+    // Duplicate/Undo silently stopped working (reported as "deleting is a bit broken"). Not a
+    // blanket "any window": WantTextInput excludes text fields, and the Content Browser keeps its
+    // own Delete (deletes a FILE) rather than sharing this key's meaning.
     //
-    // This was `levelFocused_` alone, and levelFocused_ is only true while the 3D VIEWPORT holds
-    // ImGui's keyboard focus. Clicking a row in the World Outliner -- the ordinary way to select
-    // something, and the way that names it -- moves focus to that panel, so Delete, Copy, Paste,
-    // Duplicate and even UNDO all silently stopped working. Select in the list, press Delete,
-    // nothing happens, with no message: reported as "deleting is a bit broken".
-    //
-    // NOT a blanket "any window": a text field is excluded by WantTextInput below, and the Content
-    // Browser deliberately keeps its own Delete (which deletes a FILE) -- widening this to its
-    // panel would put two different destructive meanings on one key.
-    // NOT WHILE A GIZMO DRAG IS IN FLIGHT, and this is a correctness gate rather than a nicety.
-    //
-    // beginTransformEdit captures editBefore_ from whatever is selected AT GRAB TIME, but
-    // nothing pins the gesture to that entity: the drag block below reads and writes whatever
-    // selectedXform() resolves to THIS frame. So pressing Ctrl+A -- or Delete, or Ctrl+V --
-    // with the mouse button still held changes the selection under the gesture, and the drag
-    // silently continues on a different object. The undo record endTransformEdit then pushes
-    // describes an entity that was never dragged, which is corruption that an assertion about
-    // the anchor would pass straight through.
-    //
-    // Repro before this line: two objects, select the one that is NOT first in the Outliner,
-    // start dragging its gizmo, press Ctrl+A while still holding. The gizmo jumps to the other
-    // object and drags that instead.
-    //
-    // Gating the verbs rather than pinning a dragEntity_ through the drag update and
-    // endTransformEdit: a mouse button is already held on the gizmo, so a click cannot change
-    // the selection either, which leaves the keyboard verbs as the whole of the hole. The
-    // narrower fix is the one that cannot itself introduce a second source of truth for "what
-    // is being dragged".
+    // Also gated on !dragging_, a correctness fix, not a nicety: beginTransformEdit captures
+    // editBefore_ at grab time but nothing pins the gesture to that entity, so Ctrl+A/Delete/
+    // Ctrl+V while the mouse is still held could change the selection under the drag and
+    // endTransformEdit would push an undo record for an entity that was never dragged -- corruption
+    // an anchor-equality assert wouldn't catch. (Repro: drag a non-first Outliner object's gizmo,
+    // press Ctrl+A mid-drag -- the gizmo jumped to the other object.) Gating the verbs is narrower
+    // than pinning a dragEntity_ through the drag (that risks a second source of truth for "what is
+    // being dragged"): the mouse button already blocks a click from changing selection, so the keyboard verbs were the whole hole.
     if (!dragging_ && (levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
         if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
         if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
         if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
         if (keybinds_.pressed(editor::CommandId::EditDuplicate, io)) duplicateSelection();
-        // Guarded on the SAME emptiness the menu item greys itself on, so the key and the menu
-        // agree about when Select All does nothing.
-        //
-        // AND ALSO ON AVER_MODULE_SCENE, which is not one of the panel-focus checks above. Both
-        // outlinerOrder_ and selectAllInOutliner belong to the World Outliner's multi-selection
-        // (multiSel_ and friends, declared next to them in SandboxApp.hpp) -- "select everything"
-        // means everything the ECS world holds, which does not exist without SCENE, so there is
-        // nothing here for Ctrl+A to select all OF.
+        // Guarded on the same emptiness the menu item greys itself on (key and menu agree), and
+        // also on AVER_MODULE_SCENE (not one of the panel-focus checks above): outlinerOrder_ and
+        // selectAllInOutliner belong to the ECS world's multi-selection (multiSel_ and friends, in
+        // SandboxApp.hpp), which doesn't exist without SCENE.
 #if AVER_MODULE_SCENE
         if (!outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
             selectAllInOutliner();
 #endif
         if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
-        // Ctrl+Shift+Z: an intentionally NOT-rebindable alternate spelling of Redo (same command,
-        // not a second one) -- kept as a small hardcoded fallback next to the registry-driven
-        // checks, exactly as it was hardcoded before this file existed.
+        // Ctrl+Shift+Z: intentionally NOT-rebindable alternate spelling of Redo (same command),
+        // kept hardcoded next to the registry-driven checks as it always was.
         if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) redo();
         if (keybinds_.pressed(editor::CommandId::EditRedo, io)) redo();
 
@@ -1468,9 +1333,8 @@ void SandboxApp::handleManip(Engine& e) {
         if (keybinds_.pressed(editor::CommandId::IsolateSelected, io)) isolateSelection();
         if (keybinds_.pressed(editor::CommandId::UnhideAll, io))       unhideAll();
 
-        // NUDGE: camera-relative, snapped to whichever single world axis each direction most
-        // agrees with -- moving "left" along a camera that is not axis-aligned would otherwise
-        // nudge diagonally, which is not what a cardinal step means.
+        // Nudge is camera-relative, snapped to whichever single world axis each direction most
+        // agrees with -- else "left" on a non-axis-aligned camera would nudge diagonally.
         {
             const Vec3 rightVec = cross(Vec3{0,0,1}, camForward());
             Vec3 fwdFlat = camForward(); fwdFlat.z = 0.0f;
@@ -1490,10 +1354,9 @@ void SandboxApp::handleManip(Engine& e) {
                 const auto& ch = keybinds_.chordFor(id);
                 if (ch.isBound() && ImGui::IsKeyDown(ch.key)) { anyNudgeDown = true; break; }
             }
-            // ONE UNDO ENTRY PER HELD RUN, not one per repeat: open it the first time a nudge key is
-            // down and close it once every nudge key is back up. The run tracks ITS OWN flag rather
-            // than editBeforeValid_, because a Details panel field drag holds that one open too and
-            // this block would otherwise close the drag's entry on every frame of it.
+            // One undo entry per held run, not per repeat: opens on the first nudge key down,
+            // closes once all are up. Tracks its own flag (not editBeforeValid_, which a Details
+            // panel field drag also holds open -- this would otherwise close that entry every frame).
             if (anyNudgeDown && !nudgeEditOpen_) nudgeEditOpen_ = beginTransformEdit();
 
             if (keybinds_.pressed(CI::NudgeLeft, io))    nudgeSelection(rightAxis * -nudgeStep);
@@ -1518,25 +1381,20 @@ void SandboxApp::handleManip(Engine& e) {
             else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
             setSelectedXform(o);
 #if AVER_MODULE_SCENE
-            // THE REST OF THE SELECTION FOLLOWS, by the same world-space DELTA the anchor just
-            // moved -- which is why this reads `before` rather than recomputing anything: grid
-            // snap, axis constraint and the screen-plane projection have all already been applied
-            // to the anchor, and re-deriving them per entity would let a snapped anchor drag an
-            // unsnapped crowd, or worse, snap each one separately and change their spacing.
+            // The rest of the selection follows by the same world-space DELTA the anchor just
+            // moved (reads `before` rather than recomputing: snap/axis-constraint/projection are
+            // already applied to the anchor, so re-deriving per entity could snap each separately
+            // and change their spacing).
             //
-            // MOVE ONLY. Rotate and scale about a shared pivot need a pivot to be CHOSEN (the
-            // anchor? the centroid? each object's own?) and each answer is right for different
-            // work; picking one silently would be a worse answer than the honest gap. They still
-            // act on the anchor alone.
+            // Move only: rotate/scale about a shared pivot need a pivot CHOSEN (anchor? centroid?
+            // each object's own?), and picking one silently would be worse than the honest gap --
+            // they still act on the anchor alone.
             if (tool_ == Tool::Move) {
                 const Vec3 delta = o.pos - before;
                 if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
-                    // THROUGH THE SHARED HELPER, which also decides what beginTransformEdit
-                    // recorded. The skip rule (not the anchor, not beneath another selected
-                    // entity -- a child would otherwise move twice, once with its parent's
-                    // transform and once on its own) used to be written out here and nowhere
-                    // else; the undo record now depends on matching it exactly, so the two read
-                    // from one place.
+                    // Through the shared helper, which also decides what beginTransformEdit
+                    // recorded (skip the anchor, and anything beneath another selected entity, or
+                    // a child would move twice) -- the undo record depends on matching that rule exactly, so both read from one place.
                     scene::World& w = scene::World::instance();
                     forEachMultiMoved([&](scene::Entity ent, const Transform& xf) {
                         Transform t = xf;
@@ -1580,17 +1438,15 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
         sculptRampStartCm_[0] = hit.posCm[0];
         sculptRampStartCm_[1] = hit.posCm[1];
         sculptRampStartHeightCm_ = hit.posCm[2];
-        // Noise's seed, captured once per stroke from the stroke's own start position -- NOT the
-        // clock (see BrushParams::noiseSeed) -- so replaying the same drag always noises the same
-        // way. fnv1a64 over the two raw floats, truncated to 32 bits: plenty of entropy for a
-        // seed, and bit-for-bit reproducible across runs since it hashes the exact bit pattern
-        // rather than a printed/rounded form of the position.
+        // Noise seed captured once per stroke from the start position, not the clock (see
+        // BrushParams::noiseSeed), so replaying the same drag noises the same way. fnv1a64 over
+        // the two raw floats truncated to 32 bits: reproducible since it hashes the exact bit pattern, not a rounded position.
         const f32 seedInput[2] = {hit.posCm[0], hit.posCm[1]};
         sculptNoiseSeed_ = static_cast<u32>(fnv1a64(seedInput, sizeof(seedInput)));
     }
-    // RELEASE ENDS THE STROKE AND PUSHES THE UNDO ENTRY: before this existed, sculpting was
-    // completely invisible to Ctrl+Z, since handleSculpt mutated the heightfield in place and the
-    // undo stack only ever knew about entity transforms -- Ctrl+Z after ten minutes of terrain work silently undid a moved object instead.
+    // Release ends the stroke and pushes the undo entry: previously sculpting was invisible to
+    // Ctrl+Z (handleSculpt mutated the heightfield in place; the undo stack only knew entity
+    // transforms), so Ctrl+Z after terrain work silently undid a moved object instead.
     if (!io.MouseDown[0] && landscape_.strokeActive()) endSculptStroke();
 
     if (sculpting_ && haveHit) {
@@ -1612,16 +1468,15 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
                : sculptTool_==SculptTool::Ramp    ? landscape::BrushMode::Ramp
                                             : landscape::BrushMode::Noise;
 
-        // dt-scaled so holding the button paints at a constant rate regardless of frame rate,
-        // clamped the same way the other per-frame dt reads in this file are (see e.g. the fly
-        // camera's own dt clamp) so a stall does not apply one giant, frame-skipping stroke.
+        // dt-scaled so holding paints at a constant rate regardless of frame rate; clamped like
+        // other per-frame dt reads in this file (see the fly camera's dt clamp) so a stall doesn't
+        // apply one giant stroke.
         const f32 dt = std::fmin(e.time().dt, 0.05f);
         const f32 amount = std::fmin(1.0f, dt * 6.0f);
 
-        // GameLandscape::sculpt does the rest: grows the stroke's undo buffer BEFORE applyBrush
-        // writes (so the "before" it captures isn't already the "after"), applies the brush, and
-        // -- since LandscapeTree::build() has no incremental form -- rebuilds the WHOLE tree on
-        // any touch, invalidating just the touched GPU meshes.
+        // GameLandscape::sculpt grows the stroke's undo buffer BEFORE applyBrush writes (so
+        // "before" isn't already "after"), applies the brush, then rebuilds the WHOLE tree
+        // (LandscapeTree::build has no incremental form), invalidating only the touched GPU meshes.
         landscape_.sculpt(e.device(), p, amount);
     }
 }
@@ -1630,12 +1485,10 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
 
 // Draws the current tool's gizmo over the selection, on top of geometry.
 void SandboxApp::drawGizmo(Engine& e) {
-    // Anything but Move/Rotate/Scale has no gizmo -- Select has none, and neither do the sculpt
-    // tools, which draw their OWN cursor via drawSculptCursor(). Spelled as the allow-list the
-    // three real gizmo tools are, rather than a denylist, so a tool added later defaults to "no
-    // gizmo" instead of silently inheriting the old `: gzScale_` fallback.
-    // The gizmo belongs to Select mode: without this it would keep drawing over the terrain while
-    // a brush was active, since tool_ still holds whatever object tool was last used.
+    // Only Move/Rotate/Scale get a gizmo (Select and the sculpt tools, which draw their own cursor
+    // via drawSculptCursor(), don't) -- spelled as an allow-list so a tool added later defaults to
+    // "no gizmo" rather than inheriting `: gzScale_`. Also gated to Select mode, else the gizmo
+    // would keep drawing over the terrain during a brush (tool_ still holds the last object tool).
     if (editorModeIsLandscape()) return;
     if (tool_!=Tool::Move && tool_!=Tool::Rotate && tool_!=Tool::Scale) return;
     EditXform x;
@@ -1652,12 +1505,11 @@ void SandboxApp::drawGizmo(Engine& e) {
     const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
     const rhi::LineHandle* hi  = tool_==Tool::Move ? gzMoveHi_ : tool_==Tool::Rotate ? gzRotHi_ : gzScaleHi_;
     e.device()->setLineDepth(false);
-    // A SLIGHT GLOW ON THE HANDLES. Lines already write into the pre-tonemap HDR target and
-    // bloom runs before the tonemap, so this is real bloom, not a fake halo -- it only needed
-    // headroom above 1.0. See IDevice::setLineGlow for why the multiplier applies after the
-    // inverse tonemap, not to the authored hue.
-    // Deliberately small: a bloom wide enough to be obvious would bury the two-pixel handle you're
-    // aiming at, and axis colours are how you tell the three apart. 1.35 reads as lit, not painted.
+    // A slight glow on the handles: lines write into the pre-tonemap HDR target and bloom runs
+    // before tonemap, so this is real bloom (needs headroom above 1.0), not a fake halo (see
+    // IDevice::setLineGlow -- the multiplier applies after the inverse tonemap, not to the authored
+    // hue). Deliberately small -- a wide bloom would bury the two-pixel handle and wash out the
+    // axis colours; 1.35 reads as lit, not painted.
     static constexpr f32 kGizmoGlow = 1.35f;
     e.device()->setLineGlow(kGizmoGlow);
     for (int a=0;a<3;++a) {
@@ -1681,22 +1533,16 @@ void SandboxApp::drawSculptCursor(Engine& e) {
     e.device()->setLineDepth(false);
     e.device()->drawLines(brushRing_, &w.m[0][0]);
 
-    // THE SECOND RING IS WHERE FULL STRENGTH STOPS, and without it the Falloff slider is invisible
-    // until after a stroke. The outer ring alone says how WIDE the brush is and nothing about its
-    // SHAPE, so a falloff of 0.1 and one of 0.9 draw an identical cursor and then behave completely
-    // differently -- which makes a working parameter feel unreliable, the same way a missing cursor
-    // would make a working brush feel broken.
+    // Second ring is where full strength stops (without it the Falloff slider is invisible until
+    // after a stroke): the outer ring alone shows brush WIDTH, not SHAPE, so falloff 0.1 and 0.9
+    // would draw an identical cursor but behave completely differently.
     //
-    // (1 - falloff) IS NOT A GUESS, it is the plateau radius Sculpt.cpp's own remap uses: everything
-    // inside (1 - falloff) of the rim takes full weight and the smoothstep shoulder is compressed
-    // into what remains (see applyBrush's `t <= 1.0f - soft` branch). Reading the same expression
-    // here is what keeps the picture honest if that curve is ever retuned.
+    // (1 - falloff) is the plateau radius Sculpt.cpp's remap actually uses -- full weight inside
+    // it, the smoothstep shoulder compressed into what remains (applyBrush's `t <= 1.0f - soft`
+    // branch) -- not a guess, kept honest if that curve is retuned.
     //
-    // DRAWN ONLY WHEN IT SAYS SOMETHING. At falloff 1 the plateau has zero radius and the inner ring
-    // collapses to a dot at the cursor; at falloff 0 it coincides with the outer ring, and two rings
-    // drawn on top of each other just look like one slightly brighter one. Both extremes are already
-    // unambiguous from the outer ring alone, so the second ring appears only in between, where it is
-    // the only thing carrying the information.
+    // Drawn only when it says something: at falloff 1 the inner ring collapses to a dot, at 0 it
+    // coincides with the outer ring -- both extremes are already unambiguous without it.
     const f32 soft  = sculptFalloff_ < 0.0f ? 0.0f : (sculptFalloff_ > 1.0f ? 1.0f : sculptFalloff_);
     const f32 inner = sculptRadiusCm_ * (1.0f - soft);
     if (inner > sculptRadiusCm_ * 0.04f && inner < sculptRadiusCm_ * 0.96f) {
@@ -1709,20 +1555,16 @@ void SandboxApp::drawSculptCursor(Engine& e) {
 #endif
 
 #if AVER_WITH_IMGUI
-// Removes the selected entity or placeholder object from the world, pushing an undo entry
-// either way. Pseudo-entries (sun/sky/post) are ignored -- sel_ never lands here for them.
-// The objects_ branch below now pushes a DestroyObj entry; it used to push nothing, so deleting a
-// placeholder object (the default path with no level loaded) was silently non-undoable.
+// Removes the selected entity or placeholder object, pushing an undo entry either way (pseudo-
+// entries like sun/sky/post never land here). The objects_ branch used to push nothing, so
+// deleting a placeholder object (the default path with no level loaded) was silently non-undoable.
 void SandboxApp::deleteSelection() {
 #if AVER_MODULE_SCENE
-    // EVERY SELECTED ENTITY, not just the anchor. Selecting five rows and pressing Delete used to
-    // remove one and leave four still highlighted, which is the most confusing way for a
-    // multi-select to be half-finished.
+    // Every selected entity, not just the anchor (Delete on five rows used to remove one and leave
+    // four highlighted).
     //
-    // ONE UNDO RECORD PER ENTITY, honestly: EditCmd describes a single destroy, so undoing a
-    // five-object delete takes five Ctrl+Z. Grouping them needs a compound command the undo stack
-    // does not have, and inventing one here -- inside a delete -- is how an undo stack acquires a
-    // shape nothing else understands. Stated rather than hidden.
+    // One undo record PER ENTITY, honestly: EditCmd describes a single destroy, so undoing a
+    // five-object delete takes five Ctrl+Z -- grouping needs a compound command the undo stack doesn't have.
     {
         const std::vector<scene::Entity> victims = selectedEntities();
         if (victims.size() > 1) {
@@ -1748,9 +1590,8 @@ void SandboxApp::deleteSelection() {
             AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selEntity_, w.name(selEntity_));
             EditCmd c = describeEntity(selEntity_);
             c.kind = EditCmd::Kind::Destroy;
-            // BEFORE destroyEntity, which retires the subtree and takes the hierarchy links with
-            // it -- a capture afterwards would find an empty subtree and report a complete undo
-            // record it did not have.
+            // Before destroyEntity, which retires the subtree and its hierarchy links -- a capture
+            // afterwards would find an empty subtree and report a complete undo record it didn't have.
             captureSubtree(c, selEntity_);
             if (!c.subtree.empty())
                 AVER_INFO("[Editor] ...and {} descendant(s) with it", c.subtree.size());
@@ -1775,19 +1616,17 @@ void SandboxApp::deleteSelection() {
     }
 }
 
-// Copies the selection into the editor's own clipboard. A pure read: nothing changes in the
-// world, so nothing is pushed onto the undo stack. A non-empty `entities` and `hasObject` are
-// other, mirroring the existing loose pairing of sel_/selEntity_.
+// Copies the selection into the editor's own clipboard, a pure read (nothing pushed onto the undo
+// stack). A non-empty `entities` and `hasObject` are mutually exclusive, mirroring sel_/selEntity_.
 void SandboxApp::copySelection() {
 #if AVER_MODULE_SCENE
-    // THE WHOLE SELECTION, NOT JUST THE ANCHOR -- the same fix Ctrl+D got, in the same shape.
+    // The whole selection, not just the anchor (same fix Ctrl+D got).
     //
-    // ANCESTORS SKIPPED, and it must be DUPLICATE's version of that test, not the mover's. The
-    // mover's forEachMultiMoved also excludes `ent == selEntity_`, because a drag moves the
-    // anchor through the gizmo and the others relative to it. A copy has no anchor to exclude:
-    // dropping it would silently omit the very entity the author clicked first. Skipping a
-    // descendant of another selected entity IS still required, though -- captureSubtree already
-    // takes it along inside its parent, so keeping it would paste it twice, once orphaned.
+    // Ancestors skipped using DUPLICATE's version of that test, not the mover's: the mover also
+    // excludes `ent == selEntity_` (the drag anchor), but a copy has no anchor to exclude -- that
+    // would omit the entity the author clicked first. Descendants of another selected entity are
+    // still skipped: captureSubtree already takes them along inside their parent, so keeping them
+    // too would paste them twice, once orphaned.
     if (sel_ == kSelScene && !multiStale() && multiSel_.size() > 1) {
         scene::World& w = scene::World::instance();
         clipboard_.entities.clear();
@@ -1831,24 +1670,20 @@ void SandboxApp::copySelection() {
     }
 }
 
-// Rebuilds the clipboard's contents in front of the camera -- the SAME convention spawnCube()
-// and dropWorldPoint() use -- and pushes a FRESH Create/CreateObj entry, independent of the
-// ORIGINAL copied thing's undo entry. Silently does nothing when the clipboard is empty: the
-// keybind dispatch doesn't gate on clipboard state, so a no-op Paste is expected.
+// Rebuilds the clipboard's contents in front of the camera (same convention as spawnCube() /
+// dropWorldPoint()), pushing a FRESH Create/CreateObj entry independent of the original copied
+// thing's undo entry. No-op when the clipboard is empty (keybind dispatch doesn't gate on
+// clipboard state, so that's expected).
 void SandboxApp::pasteClipboard() {
     Vec3 at = camPos_ + camForward() * kAddDistance;
     if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
 #if AVER_MODULE_SCENE
     if (!clipboard_.entities.empty()) {
-        // RELATIVE LAYOUT IS PRESERVED, and that is the whole reason this is not just a loop
-        // pasting each item at `at`. Doing that would stack every copied entity on the same point
-        // in front of the camera -- five props arranged in a row would arrive as one heap, and the
-        // author would have to rebuild an arrangement they had already made. Duplicate gets this
-        // for free by offsetting each copy from its own original; paste has to compute the same
-        // thing, because it is moving the whole set to a NEW anchor.
-        //
-        // The FIRST clipboard entry lands exactly at `at` (the one-item case is then bit-identical
-        // to what this did before), and every other entry keeps its offset from that first one.
+        // Relative layout is preserved, not a loop pasting each item at `at` (which would stack
+        // every copied entity on one point -- five props in a row would arrive as one heap).
+        // Duplicate gets this for free by offsetting from each original; paste computes the same
+        // thing since it moves the whole set to a NEW anchor. First entry lands exactly at `at`
+        // (one-item case is bit-identical to before); every other entry keeps its offset from that one.
         const Vec3 origin = clipboard_.entities.front().xform.pos;
         std::vector<scene::Entity> made;
         for (const ClipboardEntity& ce : clipboard_.entities) {
@@ -1861,20 +1696,16 @@ void SandboxApp::pasteClipboard() {
             sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
             EditCmd c = describeEntity(e);
             c.kind = EditCmd::Kind::Create;
-            // CAPTURED FROM THE COPY, so REDO puts the children back too. Undo of a Create destroys
-            // the whole subtree (World::destroy retires it), so without this a paste-undo-redo cycle
-            // returned the root alone -- the children were destroyed by the undo and never rebuilt.
+            // Captured from the copy so REDO puts the children back too: undo of a Create destroys
+            // the whole subtree (World::destroy retires it), so without this a paste-undo-redo left only the root.
             captureSubtree(c, e);
-            // ONE RECORD PER PASTED ENTITY, which is Duplicate's and Delete's precedent: N undos
-            // for N items. This file states outright why there is no compound kind (a compound
-            // Create that recreates a whole set is a bigger change than this is worth), and
-            // inventing one here would make paste the only verb that disagreed.
+            // One record per pasted entity, matching Duplicate's/Delete's precedent (N undos for N
+            // items) -- a compound Create recreating a whole set is a bigger change than this is worth.
             pushEdit(std::move(c));
             made.push_back(e);
         }
         if (made.empty()) return;
-        // The pastes become the selection, matching Duplicate: a drag straight after Ctrl+V moves
-        // what was just made, which is what makes paste-then-place one motion.
+        // The pastes become the selection (matches Duplicate): a drag right after Ctrl+V moves what was just made, making paste-then-place one motion.
         multiSetSingle(made.front());
         for (usize i = 1; i < made.size(); ++i) multiToggle(made[i]);
         sel_ = kSelScene; selEntity_ = made.front();
@@ -1906,19 +1737,15 @@ void SandboxApp::pasteClipboard() {
 void SandboxApp::duplicateSelection() {
     const f32 delta = snapMove_ ? moveSnap_ : kDuplicateOffset;
 #if AVER_MODULE_SCENE
-    // THE WHOLE SELECTION, NOT JUST THE ANCHOR. This read selEntity_ alone, so Ctrl+D on five
-    // selected props duplicated one and silently dropped the other four -- the same
-    // "applies to the set, acts on the anchor" shape that made multi-move unundoable.
+    // The whole selection, not just the anchor (previously read selEntity_ alone, so Ctrl+D on
+    // five props duplicated one and dropped the other four).
     //
-    // ONE RECORD PER COPY, which is deleteSelection's precedent rather than multi-move's: N
-    // undos for N duplicates. A drag is one gesture whose half-undone state the author never
-    // saw; five duplicates are five objects that can reasonably be unpicked one at a time, and
-    // grouping Create commands would need a compound kind that recreates a whole set, which is
-    // a bigger change than this is worth.
+    // One record PER COPY, deleteSelection's precedent rather than multi-move's: N undos for N
+    // duplicates -- a drag is one gesture, but five duplicates are five objects reasonably unpicked
+    // one at a time, and a compound Create recreating a whole set is a bigger change than this is worth.
     //
-    // ANCESTORS SKIPPED for the reason the mover skips them: duplicating a parent already
-    // duplicates its children through captureSubtree, so a selected child would otherwise get a
-    // second, orphaned copy.
+    // Ancestors skipped like the mover skips them: duplicating a parent already duplicates its
+    // children via captureSubtree, so a selected child would get a second, orphaned copy.
     if (sel_ == kSelScene && !multiStale() && multiSel_.size() > 1) {
         scene::World& w = scene::World::instance();
         std::vector<scene::Entity> made;
@@ -1945,8 +1772,7 @@ void SandboxApp::duplicateSelection() {
             made.push_back(e);
         }
         if (made.empty()) return;
-        // The copies become the selection, so a drag straight after Ctrl+D moves what was just
-        // made -- which is what every editor does and what makes duplicate-then-place one motion.
+        // The copies become the selection, so a drag right after Ctrl+D moves what was just made (as every editor does).
         multiSetSingle(made.front());
         for (usize i = 1; i < made.size(); ++i) multiToggle(made[i]);
         sel_ = kSelScene; selEntity_ = made.front();
@@ -1955,8 +1781,8 @@ void SandboxApp::duplicateSelection() {
     }
     if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
         EditCmd src = describeEntity(selEntity_);
-        // The source's descendants, read BEFORE anything is spawned -- the copy is about to
-        // become the selection, and captureSubtree walks whatever it is handed.
+        // Descendants read BEFORE anything is spawned -- the copy is about to become the
+        // selection, and captureSubtree walks whatever it is handed.
         captureSubtree(src, selEntity_);
         EditXform x = src.after;
         x.pos.x += delta; x.pos.y += delta;
@@ -1989,25 +1815,19 @@ void SandboxApp::duplicateSelection() {
 }
 
 // Unprojects a screen-space point within the viewport rect into a world-space ray. Shared by
-// pick() and the asset drag-drop drop point so there is exactly one screen->ray conversion.
-// BOTH ENDS ARE UNPROJECTED, and the near one is not decoration.
+// pick() and the asset drag-drop drop point, so there is exactly one screen->ray conversion.
 //
-// This used to read `ro = eye_`, which is right only because a perspective frustum has one. It
-// is the SINGLE assumption in the editor's screen-to-world conversion that a projection matrix
-// has a centre of projection at all, and it is wrong the moment one does not: under an
-// orthographic view every ray is PARALLEL and starts on the near plane, so a fan converging on
-// a camera point tens of thousands of centimetres away picks along a line that is nowhere near
-// the pixel. Every caller inherits it -- pick, handleSculpt, handleFoliage, dropWorldPoint.
+// BOTH ends are unprojected; the near one isn't decoration. This used to read `ro = eye_`, the
+// only such assumption in the screen-to-world conversion, right only because a perspective
+// frustum has a centre of projection -- under orthographic every ray is PARALLEL and
+// starts on the near plane, so converging on a point far away would pick along the wrong line
+// (every caller -- pick, handleSculpt, handleFoliage, dropWorldPoint -- inherits this).
 //
-// Unprojecting ndc.z = 0 instead is CORRECT TODAY, under perspective, which is why it lands on
-// its own ahead of any ortho work: the origin moves from the eye to the near plane 2 cm in
-// front of it, along the same ray, so every hit point ro + rd*t is unchanged and only the
-// parameterisation shifts. `pick()` passes an unnormalised rd to rayAabb and compares t between
-// objects, so a uniform change of scale within one call reorders nothing.
-//
-// The two expressions differ only in the iv.m[2][*] term, which carries ndc.z: present for the
-// far plane at z = 1, absent for the near plane at z = 0. The depth range is [0,1], not
-// [-1,1] -- see Mat4::perspectiveLH.
+// Unprojecting ndc.z = 0 for the origin is correct under perspective too (ahead of any ortho
+// work): it just moves ro from the eye to the near plane 2 cm in front of it, along the same ray,
+// so every hit ro + rd*t is unchanged (pick() compares t values within one call, so the change of scale reorders nothing). The two
+// expressions differ only in the iv.m[2][*] term (ndc.z): present at the far plane (z=1), absent
+// at the near plane (z=0); depth range is [0,1], not [-1,1] (see Mat4::perspectiveLH).
 void SandboxApp::viewportRay(f32 screenX, f32 screenY, Vec3& ro, Vec3& rd) const {
     const f32 nx = (screenX - vpX_) / vpW_ * 2.f - 1.f;   // NDC within the viewport rect
     const f32 ny = 1.f - (screenY - vpY_) / vpH_ * 2.f;
@@ -2029,14 +1849,11 @@ void SandboxApp::viewportRay(f32 screenX, f32 screenY, Vec3& ro, Vec3& rd) const
 
 #if AVER_WITH_IMGUI
 #if AVER_MODULE_SCENE
-// Lazy, memoized PickGeometry for a PROJECT mesh (the built-ins are seeded at creation, :2113-2142,
-// and never reach the loading branch below). Mirrors selectionOutlineLines' own reason for reading
-// a .ocmesh a second time: loadProjectMeshes uploads to the GPU and lets OcMeshData go, so a mesh's
-// positions/normals/indices are not in memory for pick() to test a ray against. A pick is a click,
-// not a frame -- this costs one file read the first time a click ray reaches a given mesh, and
-// (like selectionOutlineLines' cache) nothing on any later click near it, success OR failure: an
-// id mapped to an empty PickGeometry IS the cached "unavailable, use the bounds" answer, so a
-// missing path or a load failure is warned about once, not on every subsequent click.
+// Lazy, memoized PickGeometry for a PROJECT mesh (built-ins are seeded at creation, :2113-2142,
+// and never reach the loading branch below). Mirrors selectionOutlineLines: loadProjectMeshes
+// frees OcMeshData after GPU upload, so this re-reads the .ocmesh once per mesh a click ever
+// reaches; an id mapped to an empty PickGeometry IS the cached "unavailable, use bounds" answer,
+// warned once, not per click.
 const aver::editor::PickGeometry& SandboxApp::pickGeometryFor(u64 meshId) {
     if (const auto it = pickGeometry_.find(meshId); it != pickGeometry_.end()) return it->second;
 
@@ -2067,23 +1884,17 @@ const aver::editor::PickGeometry& SandboxApp::pickGeometryFor(u64 meshId) {
 #if AVER_WITH_IMGUI
 // Selects whatever the cursor's ray hits first, across both the placeholder and scene worlds.
 //
-// THE NEAREST TRIANGLE WINS, DOUBLE-SIDED, because ray-driven primary visibility (the editor's
-// default render mode) traces with no cull flag and draws back faces too -- a click has to be able
-// to hit what the camera can actually see. The one exception is an entity's OWN back faces when the
-// ray starts inside ITS bounds (insideBox below, the ab3bca81 case): those are the inside walls of
-// whatever the camera is standing in, so a closed shape (a rock, a crate) cannot be selected from
-// its own inside. An enclosing SHELL (NewSponza's building) stays selectable from inside it: its
-// interior walls are authored facing INTO the room, so from in there they are front faces.
+// Nearest triangle wins, DOUBLE-SIDED, because ray-driven primary visibility (the editor's default
+// render mode) draws back faces too -- a click must hit what the camera can see. Exception: an
+// entity's OWN back faces when the ray starts inside ITS bounds (insideBox, the ab3bca81 case) --
+// those are the inside walls of whatever the camera stands in, so a closed shape can't be selected
+// from its own inside; an enclosing SHELL (NewSponza's building) stays selectable from inside since
+// its interior walls face INTO the room.
 //
-// Testing triangles rather than bounds also means a nearer wall now BLOCKS an object behind it,
-// which bounds-only picking never did: previously, clicking a wall could still select a prop
-// standing behind it whenever the prop's own box happened to win the t comparison.
-//
-// A skinned/posed entity (its drawn vertices move in a compute pass this ray never runs against)
-// and any mesh whose triangles are not resident -- pickGeometryFor came back empty: an unresolved
-// id, or a project .ocmesh that would not load -- both fall back to the bounding-box test instead,
-// keeping the ORIGINAL ab3bca81 rule: t > 0.0f, so an object whose bounds enclose the camera is not
-// auto-selected by every click (it stays reachable from the Outliner).
+// Triangle testing also means a nearer wall now BLOCKS an object behind it (bounds-only picking
+// never did this). A skinned/posed entity (vertices move in a compute pass this ray never runs
+// against) or a mesh with no resident triangles falls back to the bounding-box test, keeping the
+// original ab3bca81 rule (t > 0.0f) so bounds enclosing the camera aren't auto-selected by every click.
 bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     (void)e;
     Vec3 ro, rd;
@@ -2101,16 +1912,13 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             f32 t; if (rayAabb(lo,ld,o.aabbMin,o.aabbMax,t) && t>0.0f && t<bestT){ bestT=t; best=i; }
         }
 
-    // AvId, not scene::Entity: pick() spans both the placeholder and scene worlds, so bestEnt is
-    // read and compared unguarded below even though only the loop that can set it away from
-    // "nothing" is scene-only.
+    // AvId, not scene::Entity: pick() spans both placeholder and scene worlds, so bestEnt is read
+    // unguarded below even though only the scene-only loop can set it away from "nothing".
     AvId bestEnt = kInvalidId;
 #if AVER_MODULE_SCENE
     {
-        // (a) BROADPHASE: every eligible entity whose local-space box the ray actually enters,
-        // with the box's own hit distance tBox and whether the ray started inside it (insideBox).
-        // No selection decision is made here -- an entry is a CANDIDATE for the triangle test
-        // below, not a pick.
+        // (a) Broadphase: every eligible entity whose local-space box the ray enters, with tBox
+        // (hit distance) and insideBox (ray started inside). No decision here -- a CANDIDATE only.
         struct PickCandidate { scene::Entity ent; u64 meshId; f32 tBox; bool insideBox; Vec3 lo, ld; };
         std::vector<PickCandidate> candidates;
         scene::World& w = scene::World::instance();
@@ -2119,8 +1927,8 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             const scene::Entity ent = w.at(i);
             if (!w.valid(ent) || w.destroyPending(ent)) continue;
             // Streamed entities are not selectable: selection is the only door into the
-            // gizmo/EditCmd path, and an entity the streamer can evict out from under an in-flight
-            // edit must never go through that door (see setChunkStreamingEnabled and buildPanels).
+            // gizmo/EditCmd path, and the streamer could evict one out from under an in-flight edit
+            // (see setChunkStreamingEnabled, buildPanels).
             if (anyChunkWorldOwns(ent)) continue;
             const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
             if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
@@ -2135,19 +1943,16 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             candidates.push_back({ent, mr->mesh, tBox, tBox <= 0.0f, lo, ld});
         }
 
-        // (b) NEAREST BOX FIRST, then stop as soon as a candidate's own tBox can no longer beat
-        // bestT: rayAabb's tBox is a lower bound on any triangle hit inside that same box (a
-        // triangle cannot be nearer than the box that contains it), so every candidate after that
-        // point is provably farther than the best hit already found -- a real early-out, not a
-        // heuristic.
+        // (b) Nearest box first, stopping once a candidate's tBox can no longer beat bestT:
+        // rayAabb's tBox is a lower bound on any triangle hit inside that box, so every candidate
+        // past that point is provably farther than the best hit already found -- a real early-out.
         std::sort(candidates.begin(), candidates.end(),
                   [](const PickCandidate& a, const PickCandidate& b) { return a.tBox < b.tBox; });
 
         for (const PickCandidate& c : candidates) {
             if (c.tBox >= bestT) break;
-            // (c) A skinned/posed entity's resting geometry is not what is actually drawn (its
-            // vertices move in a compute pass this ray was never run against), so -- like a mesh
-            // whose triangles are not resident -- it keeps the bounds-only rule instead.
+            // (c) A skinned/posed entity's resting geometry isn't what's drawn (vertices move in a
+            // compute pass this ray never runs against), so -- like a non-resident mesh -- it keeps the bounds-only rule.
             const bool posedOrSkinned = skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
             const aver::editor::PickGeometry* geo = posedOrSkinned ? nullptr : &pickGeometryFor(c.meshId);
             if (!geo || geo->empty()) {
@@ -2163,26 +1968,16 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
         }
     }
 #endif
-    // CTRL-CLICK EXTENDS THE SELECTION, and without this the viewport DESTROYED one.
+    // Ctrl-click extends the selection (previously the viewport DESTROYED it): a bare assignment
+    // to selEntity_ is what multiStale() watches for, so a plain click in the 3D view silently
+    // collapsed a multi-select made in the Outliner. Only Ctrl, not Shift: Shift-range needs a
+    // defined ORDER to range across (outlinerOrder_, which a 3D view has no equivalent of) --
+    // inventing one here would be worse than no gesture.
     //
-    // A bare assignment to selEntity_ is what multiStale() watches for -- an anchor landing
-    // outside the set means "this one thing now", which is right for a plain click and wrong for
-    // every modified one. So multi-select was reachable only by clicking rows in the Outliner,
-    // and a single click anywhere in the 3D view silently collapsed it. Selecting five props in
-    // the tree and then clicking one of them in the viewport to check it dropped the other four.
-    //
-    // ONLY CTRL, NOT SHIFT. Shift-range needs a defined ORDER to range across, which the outliner
-    // has (outlinerOrder_, what multiRange walks) and a 3D view does not -- "every entity between
-    // these two" is not a question a viewport can answer. Adding it here would mean inventing an
-    // order, and an order the user cannot see is worse than no gesture.
-    //
-    // A CTRL-CLICK MISS -- nothing under the cursor in either world -- is its own case and
-    // returns FALSE without touching sel_/selEntity_/the multi-selection at all: it is what lets
-    // the caller arm the Select-tool marquee ADDITIVELY (Ctrl+drag from empty space, catching
-    // more without first losing what is already selected) instead of the Ctrl behaving like a
-    // plain miss and clearing everything first. A miss that still landed on a placeholder object
-    // (best != -1) is not "empty space" -- placeholders never joined the scene multi-select set,
-    // so that falls through to the plain-click assignment below exactly as it always has.
+    // A Ctrl-click MISS (nothing under the cursor in either world) returns FALSE without touching
+    // selection at all, so the caller can arm the Select-tool marquee ADDITIVELY instead of
+    // clearing everything first. A miss that landed on a placeholder (best != -1) is not "empty
+    // space" -- placeholders never joined the scene multi-select, so it falls through to the plain-click assignment below.
 #if AVER_MODULE_SCENE
     const bool extend = ImGui::GetIO().KeyCtrl;
     if (extend && bestEnt != kInvalidId) {
@@ -2203,15 +1998,12 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
 // End/H/Shift+H/Ctrl+H/arrows/PageUp/PageDown, dispatched from handleManip's edit-verb block.
 
 // The union of every selected entity's world-space bounds, for F (Frame Selected) to fit the WHOLE
-// set rather than just the anchor selectedXform/selectedRadius describe alone.
+// set, not just the anchor selectedXform/selectedRadius describe.
 //
-// EACH ENTITY'S OWN BOX is built the same way selectedRadius builds one for the anchor: its local
-// CMeshRenderer extent times the entity's OWN world scale, centred on its OWN world position -- not
-// a properly rotated world AABB. A rotated mesh's true world bounds run wider than this along axes
-// its local bounds do not already cover; selectedRadius already makes that exact trade for a single
-// object, and a more exact box here would let "frame this one object" and "frame a five-object
-// selection that happens to include it" size the same object two different ways for no reason a
-// user could see.
+// Each entity's own box is built like selectedRadius builds one for the anchor: local
+// CMeshRenderer extent times world scale, centred on world position (not a properly rotated world
+// AABB -- selectedRadius already makes that trade for a single object, and framing should size an
+// object the same way alone or in a selection).
 bool SandboxApp::selectionBounds(Vec3& center, f32& radius) const {
     const std::vector<scene::Entity> sel = selectedEntities();
     if (sel.empty()) return false;
@@ -2226,8 +2018,7 @@ bool SandboxApp::selectionBounds(Vec3& center, f32& radius) const {
             ey = (mr->aabbMax[1] - mr->aabbMin[1]) * std::fabs(t.scale.y);
             ez = (mr->aabbMax[2] - mr->aabbMin[2]) * std::fabs(t.scale.z);
         }
-        // A zero (or missing) extent falls back to the scale itself, exactly as selectedRadius does
-        // for the identical reason: bounds that were never filled in must not frame as a point.
+        // Zero/missing extent falls back to the scale itself, like selectedRadius: unfilled bounds must not frame as a point.
         if (ex <= 1e-3f && ey <= 1e-3f && ez <= 1e-3f) {
             const f32 s = 2.0f * std::fmax(1.0f, std::fmax(std::fabs(t.scale.x),
                                             std::fmax(std::fabs(t.scale.y), std::fabs(t.scale.z))));
@@ -2249,27 +2040,21 @@ bool SandboxApp::selectionBounds(Vec3& center, f32& radius) const {
 #if AVER_WITH_IMGUI
 // End: drops every selected entity straight down onto whatever is beneath it.
 //
-// A STRAIGHT-DOWN RAY, not a full pick()-style click ray -- +Z is up in this engine (Math.hpp's own
-// top comment, and dropRestLift's "along world +Z"), so "the floor" is unambiguously -Z from each
-// entity's own position. Reuses pick()'s own two-world broadphase (placeholder boxes,
-// then scene entities sorted nearest-box-first with rayPickGeometry/pickGeometryFor refining each
-// candidate) so a selected object rests on exactly what a click on it would have hit, minus the
-// landscape height query neither pick() nor dropWorldPoint ever learned (see this function's own
-// use of surfaceHeightAt -- a straight-down query, not raycastHeightfield's march, because the ray
-// already IS straight down).
+// A straight-down ray, not a full pick()-style click ray (+Z is up, Math.hpp's top comment /
+// dropRestLift's "along world +Z", so "the floor" is unambiguously -Z). Reuses pick()'s two-world
+// broadphase (placeholder boxes, then scene entities nearest-box-first via rayPickGeometry/
+// pickGeometryFor) plus a landscape query (surfaceHeightAt, a vertical query, not raycastHeightfield's march).
 //
-// EVERYTHING ELSE IN THE SELECTION IS INELIGIBLE GROUND: an object must not land on top of another
-// that this same command is about to move (or already has), which is why each entity's own ray
-// skips every entity in `sel`, not just itself.
+// Everything else in the selection is ineligible ground: an object mustn't land on another this
+// same command is about to move, so each entity's ray skips every entity in `sel`, not just itself.
 void SandboxApp::snapSelectionToFloor() {
     const std::vector<scene::Entity> sel = selectedEntities();
     if (sel.empty()) return;
     scene::World& w = scene::World::instance();
 
-    // ONE UNDO ENTRY FOR THE WHOLE OPERATION: beginTransformEdit captures the anchor's transform and
-    // (via forEachMultiMoved) every other selected entity's LOCAL transform before anything below
-    // writes to them; endTransformEdit reads back wherever they ended up and pushes one Transform
-    // command covering every entity that actually moved.
+    // One undo entry for the whole operation: beginTransformEdit captures the anchor and (via
+    // forEachMultiMoved) every other selected entity's LOCAL transform before any writes;
+    // endTransformEdit pushes one Transform command covering everything that moved.
     if (!beginTransformEdit()) return;
 
     for (const scene::Entity e : sel) {
@@ -2277,9 +2062,8 @@ void SandboxApp::snapSelectionToFloor() {
         const Transform before = worldTransformOf(w, e);
         const auto* selfMr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
 
-        // The ray starts clear of the entity's OWN top, not at its pivot -- starting inside a tall
-        // mesh could report a hit on its own back faces (or, worse, on itself if it were not already
-        // excluded below).
+        // Ray starts clear of the entity's OWN top, not its pivot: starting inside a tall mesh
+        // could hit its own back faces (or itself, if not already excluded below).
         f32 halfZ = 1.0f;
         if (selfMr) {
             const f32 ez = (selfMr->aabbMax[2] - selfMr->aabbMin[2]) * std::fabs(before.scale.z);
@@ -2369,10 +2153,9 @@ void SandboxApp::snapSelectionToFloor() {
 
 #endif   // AVER_WITH_IMGUI
 
-// Moves the whole selection by one world-space step. The undo lifecycle -- one entry per HELD RUN,
-// not one per repeat -- is the caller's job (handleManip's edit-verb block), exactly like the gizmo
-// drag's own beginTransformEdit/endTransformEdit pair a few lines above it: this only ever applies
-// one step and trusts a transform edit is already open around it.
+// Moves the whole selection by one world-space step. Undo lifecycle (one entry per HELD RUN, not
+// per repeat) is the caller's job (handleManip's edit-verb block); this only applies one step and
+// trusts a transform edit is already open.
 void SandboxApp::nudgeSelection(const Vec3& deltaCm) {
     EditXform o;
     if (!selectedXform(o)) return;
@@ -2386,11 +2169,10 @@ void SandboxApp::nudgeSelection(const Vec3& deltaCm) {
     });
 }
 
-// AUTHORED visibility: what saveLevel writes to the level and what the Details panel's Visible
-// checkbox shows, as distinct from the raw kMeshRendererVisible bit hideSelection/isolateSelection
-// clear below for a SESSION-ONLY hide. An entity currently H-hidden reads its bit clear but is
-// still authored visible -- editorHidden_ is exactly the record of "this bit is off because H did
-// it, not because anyone asked to hide it for real" that lets the two be told apart.
+// Authored visibility: what saveLevel writes and the Details panel's Visible checkbox shows, as
+// distinct from the raw kMeshRendererVisible bit hideSelection/isolateSelection clear for a
+// SESSION-ONLY hide. editorHidden_ records "bit is off because H did it", so an H-hidden entity
+// (bit clear) still reads as authored visible.
 bool SandboxApp::authoredVisible(scene::Entity e) const {
     scene::World& w = scene::World::instance();
     const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
@@ -2399,11 +2181,11 @@ bool SandboxApp::authoredVisible(scene::Entity e) const {
     return std::find(editorHidden_.begin(), editorHidden_.end(), e) != editorHidden_.end();
 }
 
-// Sets the AUTHORED bit directly, the Details panel's own write path (and saveLevel's read of it,
-// through this same bit). Removes `e` from editorHidden_ first: a real, authored edit supersedes
-// whatever temporary H-hide state the entity was in, so afterward the bit alone is the truth again
-// -- unchecking Visible on something H hid actually hides it for real, and checking it un-hides it
-// for real, rather than leaving a stale editorHidden_ entry to reassert itself on the next Ctrl+H.
+// Sets the AUTHORED bit directly (Details panel's write path; saveLevel reads the same bit).
+// Removes `e` from editorHidden_ first: an authored edit supersedes any temporary H-hide, so the
+// bit alone is the truth again -- unchecking Visible on something H hid actually hides it for
+// real (and checking it un-hides for real), rather than leaving a stale editorHidden_ entry to
+// reassert itself on the next Ctrl+H.
 void SandboxApp::setAuthoredVisible(scene::Entity e, bool v) {
     scene::World& w = scene::World::instance();
     auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
@@ -2414,12 +2196,11 @@ void SandboxApp::setAuthoredVisible(scene::Entity e, bool v) {
     else   mr->flags &= ~scene::kMeshRendererVisible;
 }
 
-// H: session-only visibility, off. Clears CMeshRenderer's own kMeshRendererVisible bit -- the exact
-// flag the Details panel's Visible checkbox writes, so a hidden entity reads identically everywhere
-// else that flag is already consulted (the render loop, pick()'s own eligibility test). NOT an
-// undoable edit and NOT a level edit -- H is deliberately temporary, not because a level cannot
-// store visibility (it can; see authoredVisible/setAuthoredVisible just above), so this never calls
-// pushEdit and never has to mark the level unsaved.
+// H: session-only visibility, off. Clears kMeshRendererVisible, the same flag the Details panel's
+// Visible checkbox writes, so a hidden entity reads identically everywhere that flag is consulted
+// (render loop, pick()'s eligibility). Deliberately not undoable/not a level edit -- H is
+// temporary by choice, not because a level can't store visibility (it can; see
+// authoredVisible/setAuthoredVisible above) -- so this never calls pushEdit, never marks the level unsaved.
 void SandboxApp::hideSelection() {
     scene::World& w = scene::World::instance();
     for (const scene::Entity e : selectedEntities()) {
@@ -2430,9 +2211,8 @@ void SandboxApp::hideSelection() {
     }
 }
 
-// Shift+H: hides every OTHER eligible entity -- "eligible" meaning whatever pick() itself would have
-// been willing to select, so isolate never touches something a click could not have reached either
-// (a streamed chunk entity, one with no visible mesh, one whose mesh never resolved).
+// Shift+H: hides every OTHER eligible entity ("eligible" = whatever pick() would select), so
+// isolate never touches what a click couldn't reach (streamed, no visible mesh, unresolved mesh).
 void SandboxApp::isolateSelection() {
     const std::vector<scene::Entity> sel = selectedEntities();
     scene::World& w = scene::World::instance();
@@ -2487,11 +2267,10 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    // WIREFRAME/A G-BUFFER DEBUG VIEW FORCE THE RASTERISER; A RAY-HIT/TRIANGLES DEBUG VIEW FORCES
-    // RAY-DRIVEN PRIMARY VISIBILITY -- onUpdate's own scratch-copy override (SandboxApp.cpp), never
-    // written back to the project. "authoredRayDriven" is whether that override is actually A
-    // FALLBACK from what the project asked for, which is the only case worth a "(raster)" note: a
-    // project already on the rasteriser shows Wireframe/a G-buffer view exactly as authored.
+    // Wireframe/a G-buffer debug view force the rasteriser; a ray-hit/triangles debug view forces
+    // ray-driven primary visibility -- onUpdate's scratch-copy override (SandboxApp.cpp), never
+    // written back to the project. authoredRayDriven is whether that's actually a FALLBACK, the
+    // only case worth a "(raster)" note: a project already on the rasteriser shows it as authored.
     bool authoredRayDriven = false;
 #if AVER_MODULE_VOXI
     authoredRayDriven = voxi::Renderer::get().settings().rtRenderMode == 1u;
@@ -2522,15 +2301,14 @@ void SandboxApp::buildViewportOverlay() {
     if (dropButton(viewModeLabel.c_str())) ImGui::OpenPopup("viewMode");
     if (ImGui::BeginPopup("viewMode")) {
         if (ImGui::Selectable("Lit", !wireframe_ && !unlit_)) { wireframe_=false; unlit_=false; }
-        // UNLIT IS NOT GATED ON THE RASTERISER: PSRayDriven honours gViewParams.x itself, so the
-        // mode works in the default (ray-driven) renderer as well as under Wireframe's forced fallback.
+        // Unlit is not gated on the rasteriser: PSRayDriven honours gViewParams.x itself, so it
+        // works under ray-driven as well as under Wireframe's forced fallback.
         if (ImGui::Selectable("Unlit", unlit_ && !wireframe_)) { unlit_ = true; wireframe_ = false; }
         uiReg_.track("viewMode.unlit");
-        // WIREFRAME ALWAYS SELECTABLE. It used to be BeginDisabled whenever ray-driven primary
-        // visibility suppressed the raster scene pass, with a tooltip sending the user to Settings
-        // > Rendering to turn ray tracing off -- SandboxApp::onUpdate's own scratch-copy override
-        // (needRaster in its Voxi settings block) now does that for THIS VIEWPORT ONLY, every frame,
-        // so there is nothing left to disable here.
+        // Wireframe always selectable now: it used to BeginDisabled whenever ray-driven suppressed
+        // the raster scene pass, with a tooltip pointing to Settings > Rendering, but onUpdate's
+        // scratch-copy override (needRaster in its Voxi settings block) now does that for THIS
+        // VIEWPORT ONLY every frame, so nothing is left to disable here.
         if (ImGui::Selectable("Wireframe", wireframe_)) {
             wireframe_ = true; unlit_ = false;
 #if AVER_MODULE_VOXI
@@ -2547,11 +2325,11 @@ void SandboxApp::buildViewportOverlay() {
 #if AVER_MODULE_VOXI
         ImGui::Separator();
         if (ImGui::Selectable("Voxel Radiance (GI debug)", giDebugView_)) giDebugView_ = !giDebugView_;
-        // THE SAME TWO CONSOLE-VAR-ONLY GI PAINTS Settings > Rendering exposes (SandboxSettings.cpp):
-        // raw bool slots owned by EditorConsole.hpp (consoleGiPoisonViewSlot()'s own comment there),
-        // reasserted onto the live voxiRenderer_ every frame from onUpdate. Reading and toggling the
-        // slots directly here, exactly as that page does, means this entry and the Settings checkbox
-        // are the same switch rather than two that can disagree.
+        // Same two console-var GI paints Settings > Rendering exposes (SandboxSettings.cpp): raw
+        // bool slots owned by EditorConsole.hpp (see consoleGiPoisonViewSlot()'s comment there),
+        // reasserted onto the live voxiRenderer_ every frame from onUpdate. Toggling the slots
+        // directly here keeps this entry and the Settings checkbox the same switch, not two that
+        // can disagree.
         if (ImGui::Selectable("GI Poison View (debug)", editor::consoleGiPoisonViewSlot()))
             editor::consoleGiPoisonViewSlot() = !editor::consoleGiPoisonViewSlot();
         if (ImGui::IsItemHovered())
@@ -2565,13 +2343,12 @@ void SandboxApp::buildViewportOverlay() {
                               "View above is also on.");
 #endif
         // G-buffer debug views: generic IDevice state (RHI.hpp), not gated on any module. Selecting
-        // the ALREADY-active one turns it off (same toggle-back idiom the GI entry uses);
-        // selecting a different one switches directly. Turning the G-buffer itself on is not this
-        // dropdown's job -- onUpdate ORs gbufferOverride_ with this value, so picking any entry here is already sufficient.
-        // SAME RASTER-ONLY NOTE AS WIREFRAME: these hang the GPU under ray-driven primary
-        // visibility, so onUpdate's scratch-copy override falls back to the rasteriser for these
-        // too, and engaging one here clears an active ray-hit/triangles debug view for the same
-        // "needs the ray-driven path" reason selecting Wireframe does.
+        // the active one toggles it off (same toggle-back idiom the GI entry uses); a different
+        // one switches directly. onUpdate ORs gbufferOverride_ with this value, so any pick here
+        // is sufficient to turn the G-buffer on too.
+        // Same raster-only note as Wireframe: these hang the GPU under ray-driven, so onUpdate
+        // falls back to the rasteriser for these too, and clears an active ray-hit/triangles view
+        // (which needs ray-driven) for the same reason.
         ImGui::Separator();
         {
             using GDM = GBufferDebugFeature::Mode;
@@ -2593,14 +2370,12 @@ void SandboxApp::buildViewportOverlay() {
             gbufItem("G-Buffer: Normal + Roughness (debug)", GDM::NormalRoughness);
         }
 #if AVER_MODULE_VOXI
-        // "Debug": the ray-hit/triangles views PSRayDriven alone knows how to paint (voxi.hlsl) --
-        // see ViewDebug's own comment (VoxiRenderer.hpp). Radio-like against wireframe_/
-        // gbufferDebugView_ as well as against each other: re-selecting the active one turns it
-        // off, selecting any of the four clears wireframe_ and gbufferDebugView_ (they need the
-        // rasteriser, this needs ray-driven primary visibility -- the two are mutually exclusive
-        // by construction, see onUpdate's own needRaster/needRayDriven). Disabled, with a reason
-        // tooltip, whenever ray-driven primary visibility could not actually engage even if
-        // forced -- see rayDrivenAvailable's own comment for the hardware/pipeline preconditions.
+        // Ray-hit/triangles views only PSRayDriven paints (voxi.hlsl, see ViewDebug in
+        // VoxiRenderer.hpp). Radio-like against wireframe_/gbufferDebugView_ and each other:
+        // re-selecting the active one turns it off; they need ray-driven, those need the
+        // rasteriser (mutually exclusive by construction, see onUpdate's needRaster/needRayDriven).
+        // Disabled with a reason tooltip when ray-driven can't engage even if forced (see
+        // rayDrivenAvailable).
         ImGui::Separator();
         const bool rdAvailable = voxiRenderer_.rayDrivenAvailable();
         using VD = voxi::VoxiRenderer::ViewDebug;
@@ -2627,9 +2402,8 @@ void SandboxApp::buildViewportOverlay() {
         debugItem("Triangles", VD::Triangles, "viewMode.triangles");
         debugItem("Ambient Occlusion", VD::AmbientOcclusion, "viewMode.ambientOcclusion");
 #endif
-        // UNDENOISED: independent of every mode above -- it stays on across a Lit/Unlit/Wireframe/
-        // debug-view switch, and combines with any of them. See onUpdate's own UNDENOISED comment
-        // (SandboxApp.cpp, the Voxi scratch-copy block) for the exact knobs this bundles.
+        // Undenoised is independent of every mode above (stays on across Lit/Unlit/Wireframe/
+        // debug-view, combines with any) -- see onUpdate's UNDENOISED comment for the knobs this bundles.
         ImGui::Separator();
         if (ImGui::Selectable("Undenoised", undenoised_)) undenoised_ = !undenoised_;
         uiReg_.track("viewMode.undenoised");
@@ -2646,9 +2420,9 @@ void SandboxApp::buildViewportOverlay() {
     if (ImGui::BeginPopup("showFlags")) {
         ImGui::Checkbox("Grid", &showGrid_);
         uiReg_.track("show.grid");
-        // THESE TWO USED TO SHARE A STACK-LOCAL. `bool t=true;` was re-initialised every
-        // frame and written by both boxes, so they always rendered ticked, could never be
-        // unticked, and toggled nothing. Both now drive real state that the frame reads.
+        // These two used to share a stack-local `bool t=true;`, re-initialised every frame and
+        // written by both boxes, so they always rendered ticked, could never be unticked, and
+        // toggled nothing. Now real state.
         ImGui::Checkbox("Static Meshes", &showStaticMeshes_);
         uiReg_.track("show.staticMeshes");
         ImGui::Checkbox("Atmosphere", &showAtmosphere_);
@@ -2676,18 +2450,16 @@ void SandboxApp::buildViewportOverlay() {
         return clk;
     };
 
-    // MODE FIRST, then that mode's tools. The switcher is always the leftmost thing in the
-    // toolbar so "what am I editing" is answered before "with which tool" -- previously the same
-    // flat row, which is how a brush ended up sitting next to Rotate.
-    // A DROPDOWN, not the row of buttons this used to be: two modes fit in a row, four do not, and
-    // the row would grow every time a mode is added. A combo also lets an unavailable entry carry
-    // its own explanation, which a greyed button can only deliver by hovering something that looks broken.
+    // Mode first, then that mode's tools, always leftmost ("what am I editing" before "with which
+    // tool" -- previously one flat row, how a brush ended up next to Rotate).
+    // A dropdown, not a row of buttons: two modes fit a row, four don't, and it'd grow per mode
+    // added; a combo also lets an unavailable entry carry its own explanation, which a greyed
+    // button can only deliver by hovering something that looks broken.
     {
         ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
         ImGui::PushStyleColor(ImGuiCol_Header, kAverOrangeDim);
-        // SIZED FROM THE WIDEST MODE NAME, not a constant: this toolbar is right-anchored and
-        // grows LEFTWARD, so an over-wide item does not clip, it marches across the viewport and
-        // lands on top of the left-hand toolbar. A fixed 150*dpi did exactly that at 300% DPI.
+        // Sized from the widest mode name, not a constant: this toolbar is right-anchored and
+        // grows LEFTWARD, so an over-wide item marches across the viewport onto the left toolbar (a fixed 150*dpi did this at 300% DPI).
         f32 widest = 0.0f;
         for (int i = 0; i < kEditorModeCount; ++i)
             widest = std::fmax(widest, ImGui::CalcTextSize(kEditorModeNames[i]).x);
@@ -2738,8 +2510,7 @@ void SandboxApp::buildViewportOverlay() {
         if (toolBtn("##tSNoise", 9, sculptTool_==SculptTool::Noise)) sculptTool_=SculptTool::Noise;
         uiReg_.track("tool.sculptNoise");
         ImGui::SameLine(0, gap*2);
-        // The brush settings live HERE, in the mode that owns them, rather than appearing and
-        // disappearing from a shared row depending on which tool happened to be selected.
+        // Brush settings live here, in the mode that owns them, not appearing/disappearing from a shared row by tool.
         char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
         if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
         ImGui::SameLine(0, gap);
@@ -2772,10 +2543,9 @@ void SandboxApp::buildViewportOverlay() {
     }
 
     ImGui::SameLine(0, gap);
-    // "Cam 1" at the default 800 cm/s -- %g rather than %f so the default reads as "Cam 1" and
-    // not "Cam 1.00", while the slow end, where a person placing something cares about 0.25
-    // against 0.5, keeps three significant figures. Whole numbers above 10 only: at speed 18 the
-    // decimals would be false accuracy.
+    // "Cam 1" at the default 800 cm/s: %g (not %f) so the default reads as "Cam 1" not "Cam 1.00",
+    // while slow speeds (0.25 vs 0.5 matters) keep 3 sig figs; whole numbers above 10 only -- at
+    // speed 18 decimals would be false accuracy.
     char camLbl[32];
     const f32 camDial = flySpeed_ / kCamSpeedUnit;
     std::snprintf(camLbl, sizeof camLbl, camDial < 10.0f ? "Cam %.3g" : "Cam %.0f", camDial);
@@ -2785,8 +2555,7 @@ void SandboxApp::buildViewportOverlay() {
         if (ImGui::SliderFloat("Speed", &dial, 20.0f / kCamSpeedUnit, 20000.0f / kCamSpeedUnit,
                                "%.2f", ImGuiSliderFlags_Logarithmic))
             flySpeed_ = dial * kCamSpeedUnit;
-        // The rate is still what the camera actually moves at, and somebody measuring a fly-through
-        // needs it -- so it is shown, just not as the number you steer by.
+        // Still shown (not the number you steer by) because someone measuring a fly-through needs the actual rate.
         ImGui::TextDisabled("%.0f cm/s", flySpeed_);
         ImGui::TextDisabled("Right-drag the viewport and scroll UP to speed up.");
         ImGui::EndPopup();
@@ -2812,19 +2581,17 @@ void SandboxApp::buildViewportOverlay() {
     }
     ImGui::End();
 
-    // RAISED BY THE OPEN DRAWER'S HEIGHT -- a fix, not a nicety: this hint anchors to the
-    // viewport's bottom edge, but vpH_ isn't reduced when a drawer opens (an overlay, not a dock
-    // split), so the hint sat on top of the drawer's last ~70px.
-    // Cosmetic for the Content Browser/Output Log; NOT for the Console, whose bottom row is its
-    // INPUT LINE -- invisible underneath, yet still clickable/typeable blind since the overlay is
-    // NoInputs.
-    // drawerPixelH_ is the ANIMATED height, so the hint slides with it and returns to zero when closed.
+    // Raised by the open drawer's height, a fix not a nicety: this hint anchors to the viewport's
+    // bottom edge, but vpH_ isn't reduced when a drawer opens (an overlay, not a dock split), so it
+    // used to sit on top of the drawer's last ~70px. Cosmetic for Content Browser/Output Log; the
+    // Console's bottom row is its input line, invisible underneath but still clickable/typeable
+    // blind (overlay is NoInputs). drawerPixelH_ is the ANIMATED height, so the hint slides with
+    // it, zero when closed.
     ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad-drawerPixelH_), ImGuiCond_Always, ImVec2(0,1));
     ImGui::SetNextWindowBgAlpha(0.35f);
     ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
-    // ONE ARM PER MODE. The two-arm version said "Tab to Landscape" while standing in Foliage,
-    // and called the mode "Select" while a foliage brush was armed -- a hint line that describes
-    // a different mode from the one you are in is worse than no hint at all.
+    // One arm per mode: the two-arm version said "Tab to Landscape" while in Foliage, and called
+    // the mode "Select" while a foliage brush was armed -- worse than no hint at all.
     switch (mode_) {
 #if AVER_MODULE_LANDSCAPE
         case EditorMode::Landscape:
@@ -2887,10 +2654,9 @@ bool SandboxApp::editorModeIsLandscape() const {
 #endif
 }
 
-// Whether a mode can be entered AT ALL right now, and why not if it cannot.
-// ONE PREDICATE PER MODE, in one place, because the dropdown, the keybind and setEditorMode all
-// need the same answer. Returning the reason as well as the verdict is what lets the dropdown grey
-// an entry AND say why on hover, instead of silently refusing a click.
+// Whether a mode can be entered AT ALL right now, and why not if it can't. One predicate per mode,
+// in one place (dropdown, keybind, setEditorMode all need the same answer); the reason lets the
+// dropdown grey an entry AND say why on hover, instead of silently refusing a click.
 bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
     auto no = [&](const char* why) { if (whyNot) *whyNot = why; return false; };
     switch (m) {
@@ -2898,12 +2664,11 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
             return true;
 #if AVER_MODULE_LANDSCAPE
         case EditorMode::Landscape:
-            // ENTERED WITHOUT ONE, DELIBERATELY. This used to refuse, which made the mode whose
-            // whole job is terrain the one place you could not get to in order to MAKE terrain --
-            // and the message it refused with named two workarounds, a hand-written LANDSCAPE
-            // record and a CLI flag, neither of which is in the editor. The panel now offers a
-            // Create Landscape button when none is resident; every tool inside it is still gated
-            // on landscape_.loaded() by that same early return.
+            // Entered without one, deliberately: it used to refuse, making the terrain mode the one
+            // place you couldn't reach to MAKE terrain -- and named two workarounds in the refusal
+            // (a hand-written LANDSCAPE record, a CLI flag), neither in the editor. The panel now
+            // offers a Create Landscape button when none is resident; every tool inside is still
+            // gated on landscape_.loaded().
             return true;
         case EditorMode::Foliage: {
             // See editor::foliageModeGate (FoliageTypeEditor.hpp) for why an empty palette no
@@ -2938,10 +2703,9 @@ bool SandboxApp::editorModeIsFoliage() const {
 void SandboxApp::setEditorMode(EditorMode m) {
     if (mode_ == m) return;
 #if AVER_MODULE_LANDSCAPE
-    // Refreshed here, BEFORE the availability check just below: a type authored moments ago
-    // (Content Browser's New Foliage Type, or an edit saved from a palette row's own tab) must
-    // make the mode enterable on this very click, not only after some other event happens to
-    // call refreshFoliagePalette() first.
+    // Refreshed here, BEFORE the availability check: a type authored moments ago (Content
+    // Browser's New Foliage Type, or a palette row edit) must make the mode enterable on this
+    // very click, not only after some other event calls refreshFoliagePalette() first.
     if (m == EditorMode::Foliage) refreshFoliagePalette();
 #endif
     const char* whyNot = "";
@@ -2950,9 +2714,8 @@ void SandboxApp::setEditorMode(EditorMode m) {
         return;
     }
 #if AVER_MODULE_LANDSCAPE
-    // A stroke in flight is ENDED, not abandoned: endSculptStroke pushes the undo entry for
-    // whatever was already painted. Dropping it instead would leave the terrain changed with
-    // nothing on the undo stack to reverse it, which is the worst of both.
+    // A stroke in flight is ENDED, not abandoned: endSculptStroke pushes the undo entry for what
+    // was already painted, else the terrain would change with nothing on the undo stack to reverse it.
     if (sculpting_) endSculptStroke();
     sculptCursorValid_ = false;
 #endif
@@ -2965,8 +2728,7 @@ void SandboxApp::setEditorMode(EditorMode m) {
 }
 
 // Tab. Returns to Select from anywhere, and from Select goes to the last non-Select mode used --
-// which is what makes Tab a toggle rather than a cycle. Cycling through four modes with one key
-// would mean pressing it three times to get back to where you were.
+// a toggle, not a cycle (cycling four modes would need three presses to get back).
 void SandboxApp::toggleEditorMode() {
     if (mode_ != EditorMode::Select) {
         lastNonSelectMode_ = mode_;
