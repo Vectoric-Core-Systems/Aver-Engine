@@ -78,8 +78,8 @@ struct ProjectDesc {
     int rtShadowDenoise    = -1; // RENDER.RTSHADOWDENOISE  SPATIAL filter radius in pixels, [0,3]
     int rtRenderMode       = -1; // RENDER.RTRENDERMODE     0 = raster primary, 1 = ray-driven
     // RENDER.RDSTAGES: milestone 1's A/B switch over the ray-driven primary's own internal shape --
-    // see voxi::Settings::rayDrivenStages, which owns the full explanation. 0 = single pass (today's
-    // one drawFullscreen, the default and the comparison baseline), 1 = staged visibility -> shadow
+    // see voxi::Settings::rayDrivenStages, which owns the full explanation. 0 = single pass (one
+    // drawFullscreen, the baseline and fallback), 1 = staged visibility -> shadow
     // -> shade, D3D12 only, falling back to single pass wherever the staged path is unavailable.
     // Milestone 4 adds 2 = staged + half-rate GI: the same staged path, but the ReSTIR GI stage
     // checkerboards its rays (NRD's pattern) and REBLUR reconstructs the rest -- unlike 1, this
@@ -87,11 +87,11 @@ struct ProjectDesc {
     //
     // NOT TIER-DERIVED, THE SAME SHAPE AS RESTIRHISTORY BELOW, NOT RTRENDERMODE JUST ABOVE: this
     // field has no ladder rung to fall back to (Voxi.hpp's own comment on the field says so
-    // outright), so an absent key simply leaves the engine's default (0) alone regardless of any RT
+    // outright), so an absent key simply leaves the engine's default (2) alone regardless of any RT
     // tier change -- ProjectRenderApply.hpp applies it the way it applies giMode/denoiser/
     // restirHistory, not the way it applies rtRenderMode.
-    int rdStages           = -1; // RENDER.RDSTAGES         0 = single pass (default), 1 = staged,
-                                  //                         2 = staged + half-rate GI
+    int rdStages           = -1; // RENDER.RDSTAGES         0 = single pass, 1 = staged,
+                                  //                         2 = staged + half-rate GI (default)
     // RENDER.FOGOCCLUSION: voxi::Settings::fogOcclusion -- fog in-scatter scaled by how much sky the
     // air along the view ray sees, so enclosed air stops glowing. A plain knob like RDSTAGES above:
     // no ladder rung, so an absent key leaves the engine default (on) alone.

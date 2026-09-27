@@ -194,11 +194,10 @@ void Renderer::setSettings(const Settings& s) {
     // 1 is the only mode that exists besides raster; anything else is a manifest typo, and
     // clamping to 1 rather than 0 would turn a typo into a silent renderer swap.
     n.rtRenderMode       = n.rtRenderMode > 1u ? 0u : n.rtRenderMode;
-    // Same idiom as rtRenderMode directly above: 0..2 are the only staged modes that exist
-    // (single pass, staged, staged + half-rate GI), so a typo clamps to 0 (single pass, the
-    // comparison baseline) rather than silently opting a project into an experimental split or a
-    // GI quality trade it never asked for.
-    n.rayDrivenStages    = n.rayDrivenStages > 2u ? 0u : n.rayDrivenStages;
+    // 0..2 are the only modes (single pass, staged, staged + half-rate GI); a typo clamps to the
+    // default 2 -- all three draw the same scene, so unlike rtRenderMode above a typo cannot swap
+    // renderers, and 2 is what a project without the key already gets.
+    n.rayDrivenStages    = n.rayDrivenStages > 2u ? 2u : n.rayDrivenStages;
     // Same reasoning as rtRenderMode directly above: 1 is the only mode besides the cone gather, so
     // a garbage value clamps to the DEFAULT (0, cones) rather than silently landing on ReSTIR GI.
     n.giMode             = n.giMode > 1u ? 0u : n.giMode;

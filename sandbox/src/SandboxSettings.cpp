@@ -1999,34 +1999,29 @@ void SandboxApp::buildRenderingSettings(int page) {
         // er.rtRenderMode's reason chain -- both are inert for the same reason, primary rays not active.
         // Shows REQUESTED, not the raw field, same reasoning as giRestirMaxHistory above.
         //
-        // Milestone 4 adds the third entry (value 2): unlike Staged it trades GI quality for speed
-        // rather than staying a same-image comparison against Single pass (Voxi.hpp:
-        // Settings::rayDrivenStages). Combo index equals the settings value directly (0/1/2).
+        // Value 2 (staged + half-rate GI) is the engine default since 2026-09-27; the measurements
+        // are on Voxi.hpp's Settings::rayDrivenStages. Combo index equals the settings value (0/1/2).
         const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);
         ImGui::BeginDisabled(stagesGreyed);
         int stages = static_cast<int>(er.rayDrivenStages.requested);
         if (ImGui::Combo("Ray-driven passes", &stages,
-                          "Single pass (default)\0Staged (experimental)\0"
-                          "Staged + half-rate GI (experimental)\0")) {
+                          "Single pass\0Staged\0"
+                          "Staged + half-rate GI (default)\0")) {
             s.rayDrivenStages = static_cast<u32>(stages); changed = true;
         }
         ImGui::EndDisabled();
         uiReg_.track("project.rt.rayDrivenStages");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("For comparing the split against the single pass above, nothing more:\n"
-                              "Staged runs the same primary ray, sun-shadow ray and shading in three\n"
-                              "GPU passes (a visibility pass, a shadow pass, then the existing shade)\n"
-                              "instead of one. Falls back to Single pass, logged once, wherever the\n"
-                              "staged path is unsupported (non-D3D12, or a pipeline/resource it needs\n"
-                              "is missing).\n\n"
-                              "Staged + half-rate GI is the same split, but the ReSTIR GI stage traces\n"
-                              "only half the GI rays each frame -- NRD's own checkerboard pattern -- and\n"
-                              "REBLUR reconstructs the other half from the traced half and history.\n"
-                              "Unlike Staged this is NOT a same-image comparison: it deliberately trades\n"
-                              "GI quality and latency for speed, and can smear or shimmer under motion.\n"
-                              "Needs ReSTIR GI and the NRD denoiser on; without them it behaves as Staged.\n"
-                              "Compare it against Staged, not against Single pass, to see what the trade\n"
-                              "actually costs.\n\n"
+            ImGui::SetTooltip("How the ray-driven frame is split into GPU passes.\n\n"
+                              "Staged runs the primary ray, lighting and shading as separate GPU passes\n"
+                              "instead of one giant shader: the same image, measured 40-45%% faster.\n"
+                              "Staged + half-rate GI (the default) also traces only half the GI rays each\n"
+                              "frame (NRD's checkerboard) and REBLUR rebuilds the other half: a further\n"
+                              "~1.4 ms faster, within 0.4%% of Staged when still, slightly noisier in motion.\n"
+                              "It needs ReSTIR GI and the NRD denoiser on; without them it behaves as Staged.\n\n"
+                              "Single pass is the one-shader baseline, kept as a fallback. Staged modes\n"
+                              "are D3D12-only; other backends, or a pipeline/resource that is missing,\n"
+                              "fall back to Single pass (logged once).\n\n"
                               "Round-trips as RENDER.RDSTAGES.");
         if (stagesGreyed) {
             ImGui::SameLine();

@@ -3973,11 +3973,11 @@ bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
 // a diagnostic that silently did not run because another mode outranked it would be useless.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     if (!debugViewActive() && rayDrivenActive()) {
-        // Staged ray-driven passes checked first, before any single-pass state is touched, so the
-        // default (rayDrivenStages == 0) reaches the single-pass code exactly as before this feature
-        // existed -- rdStagedActive() returns false on its first line then, `reason` stays null, and
-        // nothing below runs differently. See the header's rdStagedActive() comment for every
-        // condition it checks.
+        // Staged ray-driven passes checked first, before any single-pass state is touched, so
+        // rayDrivenStages == 0 reaches the single-pass code exactly as before this feature existed --
+        // rdStagedActive() returns false on its first line then, `reason` stays null, and nothing
+        // below runs differently. See the header's rdStagedActive() comment for every condition it
+        // checks.
         const char* stagedFallbackReason = nullptr;
         if (rdStagedActive(&stagedFallbackReason)) {
             if (!rdStagedRunLogged_) {
@@ -3991,11 +3991,18 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         }
         // Logged once, only when there WAS a reason to give: rdStagedActive() leaves `reason` null
         // when nothing was requested or nothing needs staging, which isn't a fallback worth a line.
+        // A non-D3D12 backend is an expected, known limitation (staged is not ported yet) that every
+        // Vulkan session hits now that staged is the default -- INFO, not a warning. Anything else
+        // (a pipeline that failed to compile, a missing resource) is a real fault and stays WARN.
         if (stagedFallbackReason && !rdStagedFallbackLogged_) {
             rdStagedFallbackLogged_ = true;
-            AVER_WARN("[Voxi] voxi.rayDrivenStages (1 or 2) requested the staged ray-driven passes, but "
-                      "{}; falling back to the single-pass ray-driven primary (said once)",
-                      stagedFallbackReason);
+            if (dev_ && dev_->backend() != rhi::Backend::D3D12)
+                AVER_INFO("[Voxi] staged ray-driven passes are D3D12-only; this backend runs the "
+                          "single-pass ray-driven primary (said once)");
+            else
+                AVER_WARN("[Voxi] voxi.rayDrivenStages (1 or 2) requested the staged ray-driven passes, "
+                          "but {}; falling back to the single-pass ray-driven primary (said once)",
+                          stagedFallbackReason);
         }
         // Its own marker, so the go/no-go against the rasteriser is a subtraction between two named
         // spans rather than a difference of whole frames.

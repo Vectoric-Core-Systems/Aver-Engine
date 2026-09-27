@@ -472,7 +472,7 @@ struct Settings {
     // surface, and running the sun-shadow ray, ReSTIR GI, reflections, sky occlusion and shading in a
     // single invocation. This field picks WHICH SHAPE that work runs in -- 0/1 compute the same thing;
     // 2 deliberately changes the image.
-    // 0 = SINGLE PASS (default, baseline): today's one drawFullscreen, unchanged. 1 = STAGED: split
+    // 0 = SINGLE PASS (baseline and fallback): the one drawFullscreen. 1 = STAGED: split
     // into a visibility compute pass (traces the primary ray, writes a per-pixel record), a shadow
     // compute pass (reconstructs the surface, runs the sun-shadow ray), then PSRayDriven reading both.
     // D3D12 ONLY in this milestone -- falls back to single pass and logs once if a pipeline fails to
@@ -483,10 +483,14 @@ struct Settings {
     // quality/latency for speed. Only differs from 1 while giMode==1 AND denoiser is actually
     // denoising (voxel cone gather has no GI stage to checkerboard; without NRD nothing fills the
     // untraced half), so 2 behaves as 1 in either case (logged once). Same restriction/fallback as 1.
-    // NOT TIER-DERIVED, like giRestirMaxHistory below: 1 A/Bs the split, 2 is an explicit
-    // speed/quality choice. Meaningful only while rtRenderMode resolves to primary rays
-    // (Resolution::rayDrivenStages). Console: voxi.rayDrivenStages.
-    u32 rayDrivenStages = 0;
+    // DEFAULT 2 since 2026-09-27 (was 0). MEASURED on NewSponza (RX 7800 XT, 3532x1987 capture,
+    // whole-frame GPU ms): gallery single 23.5 / staged 14.1 / half-rate 12.7; court 28.4 / 15.6 /
+    // 14.2. Image: staged vs single MAD 0.16-0.17 (same image); half-rate vs staged at fixed exposure
+    // MAD 0.22-0.24 still (-0.4%), 0.65-0.84 in motion (noise, not bias). A project's RENDER.RDSTAGES
+    // still wins; only projects without the key take this default.
+    // NOT TIER-DERIVED, like giRestirMaxHistory below. Meaningful only while rtRenderMode resolves
+    // to primary rays (Resolution::rayDrivenStages). Console: voxi.rayDrivenStages.
+    u32 rayDrivenStages = 2;
 
     // DIAGNOSTIC ONLY: times each staged lighting pass (shadow, GI, sky occlusion, reflections) in
     // its own GPU span with a UAV barrier after it, in place of the one "Voxi RD lighting stages"

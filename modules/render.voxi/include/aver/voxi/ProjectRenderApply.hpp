@@ -119,9 +119,9 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     if (project.restirHistory >= 0) s.giRestirMaxHistory = static_cast<u32>(project.restirHistory);
 
     // RENDER.RDSTAGES: the SAME plain-knob shape as RESTIRHISTORY directly above, for the identical
-    // reason -- Settings::rayDrivenStages has no ladder rung either (it exists to A/B the staged
-    // split against the single pass it replaces, not to pick a quality), so an absent key leaves the
-    // engine default (0, single pass) alone regardless of any rtRenderMode tier change just applied.
+    // reason -- Settings::rayDrivenStages has no ladder rung either, so an absent key leaves the
+    // engine default (2, staged + half-rate GI) alone regardless of any rtRenderMode tier change just
+    // applied.
     if (project.rdStages >= 0) s.rayDrivenStages = static_cast<u32>(project.rdStages);
 
     // RENDER.FOGOCCLUSION: the same plain-knob shape again -- no ladder rung, so an absent key keeps

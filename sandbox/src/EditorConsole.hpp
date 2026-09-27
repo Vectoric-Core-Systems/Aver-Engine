@@ -926,15 +926,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // meaningful once voxi.rtRenderMode resolves to 1; see RenderSettingsResolver.hpp's
     // Resolution::rayDrivenStages for the Project Settings page's greyed reason.
     t.push_back({"voxi.rayDrivenStages", VarType::U32, false,
-        "0 = single pass (default, today's one ray-driven draw -- the comparison baseline), 1 = "
-        "staged: a visibility compute pass, a shadow compute pass, then the same shading draw "
-        "(same image as 0). 2 = staged + half-rate GI: the same staged path, but the ReSTIR GI "
-        "stage traces only half the pixels per frame in NRD's checkerboard pattern and REBLUR "
-        "reconstructs the rest -- a deliberate GI quality/latency-for-speed trade, distinct from 1 "
-        "only while ReSTIR GI is the diffuse estimator and the NRD denoiser is on (otherwise 2 "
-        "behaves as 1, logged once). D3D12 only for 1 and 2; falls back to "
-        "single pass and logs once when anything staged needs is missing. Only applies when "
-        "voxi.rtRenderMode resolves to 1. Engine clamps to [0,2].",
+        "0 = single pass (one ray-driven draw; the baseline and fallback), 1 = staged: a "
+        "visibility compute pass, lighting compute passes, then the same shading draw (same image "
+        "as 0, measured 40-45% faster). 2 = staged + half-rate GI (DEFAULT): the ReSTIR GI stage "
+        "traces half the pixels per frame in NRD's checkerboard and REBLUR reconstructs the rest -- "
+        "a further ~1.4 ms, image within 0.4% of 1 still, slightly noisier in motion. 2 differs "
+        "from 1 only while ReSTIR GI and the NRD denoiser are on (otherwise it behaves as 1, logged "
+        "once). D3D12 only for 1 and 2; other backends run the single pass. Only applies when "
+        "voxi.rtRenderMode resolves to 1. Out-of-range values clamp to 2.",
         []{ return vU32(Renderer::get().settings().rayDrivenStages); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rayDrivenStages = n; }); },
         [](const VarValue& v, std::string& err) -> bool {

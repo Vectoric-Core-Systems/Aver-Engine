@@ -726,8 +726,8 @@ private:
     // producers trace the primary ray, sun-shadow ray, GI, sky occlusion and reflection into
     // dedicated resources, then the same textured ray-driven pixel shader (recompiled to READ those
     // records) composes. See recordStagedRayDriven() for recording order and rdStagedActive() for
-    // every precondition -- the default (rayDrivenStages == 0) never touches any member here, keeping
-    // the single-pass path byte-for-byte unchanged. All seven staged pipelines (this pair, the two
+    // every precondition -- rayDrivenStages == 0 (and every fallback) never touches any member here,
+    // keeping the single-pass path byte-for-byte unchanged. All seven staged pipelines (this pair, the two
     // below, rdGiCsPso_/rdSkyOccCsPso_, and rdReflCsPso_) share one root signature
     // (giLayout(kRtTextureCapacity), same as rayDrivenTexPso_/rayDrivenSplitTexPso_ -- only entry
     // point and stage differ; D3D12ResourceFactory::rootSignature dedupes on layout content, not
