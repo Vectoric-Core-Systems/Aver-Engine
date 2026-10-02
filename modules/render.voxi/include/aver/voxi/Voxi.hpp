@@ -248,13 +248,13 @@ struct Settings {
     // pay interval 1's cost for an unshown lag.
     u32 giUpdateInterval = 2;
 
-    // ---- WHICH ESTIMATOR ANSWERS THE DIFFUSE BOUNCE: the voxel cone gather, or RTXDI ReSTIR GI ----
+    // ---- WHICH ESTIMATOR ANSWERS THE DIFFUSE BOUNCE: the voxel cone gather, or ReSTIR GI ----
     // 0 = cone gather (DEFAULT, and every build before this field existed). 1 = ReSTIR GI: one traced
-    // candidate per pixel, reused via the vendored RTXDI SDK's spatio-temporal resampling
-    // (third_party/rtxdi -- RTXDI_GISpatioTemporalResampling, RTXDI_GIReservoir; see giRestirIndirect
-    // in voxi.hlsl). Runs 1-2 spatial taps alongside its temporal ones (stparams.numSamples,
-    // voxi_restir.hlsli:944-947,:969) -- an earlier revision of this comment called it temporal-only
-    // and the vendored spatial resampling "unused", which was stale.
+    // candidate per pixel, reused via Aver's own spatio-temporal resampling (giSpatioTemporalReuse
+    // in voxi_restir.hlsli, GiReservoir in voxi_reservoir.hlsli; see giRestirIndirect in voxi.hlsl
+    // -- formerly NVIDIA RTXDI, replaced by in-house code written from the published papers). One
+    // fused pass: the fresh candidate, one temporal tap and up to 8 spatial taps
+    // (reuse.numSamples), all read from last frame's reservoir slice.
     // NOT ON THE QUALITY LADDER (unlike giCones/voxelResolution/giUpdateInterval, which scale ONE
     // estimator): this SWITCHES estimators -- deterministic clipmap march vs. stochastic ray +
     // temporal reuse (far less per-frame tracing noise, at the cost of a biased, history-dependent
@@ -298,10 +298,10 @@ struct Settings {
     // Full visibility, the spatial-reuse motion discount (3dbc9a42, reverted 8daed7f1), reservoir age
     // and the moving-camera history cap (both measured WORSE). What removes the fade: giRestirMaxHistory
     // 0, and voxi.debugResetHistoryEveryFrame 1 (c08c76d2), which clears the reservoir history every
-    // frame -- disabling BOTH temporal and spatial reuse at once (RTXDI reads spatial neighbours from
-    // the same buffer temporal resampling writes). So the carrier is reuse itself; open question here
-    // and for the two thresholds below: which half, and whether the reuse tolerances
-    // (RTXDI_IsValidNeighbor, voxi_restir.hlsli) are simply too loose.
+    // frame -- disabling BOTH temporal and spatial reuse at once (spatial neighbours are read from
+    // the same reservoir slice the temporal tap reads). So the carrier is reuse itself; open
+    // question here and below: which half, and whether the reuse tolerances (giIsSimilarSurface,
+    // literals 0.1 relative depth / 0.5 normal cos in voxi_restir.hlsli) are simply too loose.
     // 15 = AUTO (today's motion-discount numSamples, unchanged -- byte-identical image, fade included).
     // 0 disables spatial reuse outright (temporal only -- isolates whether a fade is spatial). 1..8
     // pin the tap count regardless of motion, overriding the discount's lerp(2.0,1.0,motionT);
@@ -321,24 +321,21 @@ struct Settings {
     // still +6.9% (not the carrier); moving-age cap made it WORSE (+24%). Decisive: reuse off
     // entirely sits at 0.0889, the SETTLED value -- a partially-converged reservoir reads brighter
     // than both the no-reuse and converged estimates: a weighting error while M is small, not stale
-    // radiance. biasCorrection and maxHistory are RTXDI's two knobs over that weighting.
-    // biasCorrection: OFF (0, plain 1/M), BASIC (1, today's value, the only mode
-    // RTXDI_GI_ALLOWED_BIAS_CORRECTION compiles), RAY_TRACED (2, not compiled -- without also
-    // flipping that #define and adding the RAB_GetConservativeVisibility the spatial half needs, it
-    // behaves as BASIC).
-    // maxHistory: stparams.maxHistoryLength, cap on M a temporal reservoir carries into the combine;
-    // 1 was the old value (602d1b06 lowered it from 8 to kill a load-time overshoot). Both
-    // console-only, defaults reproduce today's image; packed at gAmbientParams.w bits 16-17, 18-23.
+    // radiance. maxHistory is the knob over that weighting (a former bias-correction mode
+    // knob no longer exists; giFinalizeWeight's MIS normalisation is fixed).
+    // maxHistory: reuse.maxHistory, cap on the M a neighbour reservoir carries into the combine;
+    // 1 was the old value (602d1b06 lowered it from 8 to kill a load-time overshoot). Console-only,
+    // default reproduces today's image; packed at gAmbientParams.w bits 18-22.
     // DEFAULT 0 IS THE CAMERA-MOTION FADE FIX: 1 (old default) overshoots +8% and decays over ~25
     // frames (the fade); 8 overshoots +104%; 0 does not overshoot. Everything else is innocent:
-    // spatial half, reuse tolerances, bias-correction mode, the Jacobian, reservoir age (capping it
-    // made it WORSE: +24%, or +62% while moving only) -- every restart re-forms the chain from
-    // single-sample reservoirs whose RIS weight has huge variance, which is what flashes. WHAT 0
-    // COSTS: nothing detectable -- settled brightness unchanged (0.0893 vs 0.0892), grain/flicker at
-    // rest identical (0.00597/0.00057 vs 0.00594/0.00056), mid-motion slightly better, moving image
-    // sits at settled brightness instead of 5% above it: NRD already supplies the smoothing this reuse
-    // was meant to provide. 1 restores the old behaviour for A/B. Console: voxi.giRestirMaxHistory.
-    // Packed at bits 18-22.
+    // spatial half, reuse tolerances, the (since removed) bias-correction mode, the Jacobian,
+    // reservoir age (capping it made it WORSE: +24%, or +62% while moving only) -- every restart
+    // re-forms the chain from single-sample reservoirs whose RIS weight has huge variance, which is
+    // what flashes. WHAT 0 COSTS: nothing detectable -- settled brightness unchanged (0.0893 vs
+    // 0.0892), grain/flicker at rest identical (0.00597/0.00057 vs 0.00594/0.00056), mid-motion
+    // slightly better, moving image sits at settled brightness instead of 5% above it: NRD already
+    // supplies the smoothing this reuse was meant to provide. 1 restores the old behaviour for A/B.
+    // Console: voxi.giRestirMaxHistory. Packed at bits 18-22.
     u32 giRestirMaxHistory = 0;
 
     // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----

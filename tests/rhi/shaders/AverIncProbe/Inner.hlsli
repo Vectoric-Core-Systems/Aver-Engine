@@ -1,6 +1,6 @@
 // A FIXTURE, not a shader anything renders with. It exists so ShaderIncludeResolveTest can compile
 // an `#include` whose resolution is the thing under test, without depending on a real vendored tree
-// (RTXDI's) that this module must not be coupled to.
+// that this module must not be coupled to.
 //
 // IT LIVES IN A SUBDIRECTORY ON PURPOSE. bin/shaders is one shared, flat, case-insensitively
 // collapsed directory that every module deploys into; the whole point of the include handler being

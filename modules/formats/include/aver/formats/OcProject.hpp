@@ -111,10 +111,11 @@ struct ProjectDesc {
     // TEN tier-derived GI/RT/PT knobs ProjectRenderApply.hpp's N6 rule covers: absent follows whatever
     // the GI tier's own ladder rung says, not whatever value happened to already be live.
     int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full
-    // RENDER.RESTIRHISTORY: RTXDI's stparams.maxHistoryLength -- how much weight a previous-frame
-    // reservoir may carry into the ReSTIR GI combine; see voxi::Settings::giRestirMaxHistory, which
-    // owns the full explanation and the Sponza numbers behind it (674ed667: history 0 measured no
-    // overshoot at rest or moving, 1 -- the old default -- +8%, 8 +104%, all versus settled).
+    // RENDER.RESTIRHISTORY: the ReSTIR GI reuse params' maxHistory -- how much weight a
+    // previous-frame reservoir may carry into the ReSTIR GI combine; see
+    // voxi::Settings::giRestirMaxHistory, which owns the full explanation and the Sponza numbers
+    // behind it (674ed667: history 0 measured no overshoot at rest or moving, 1 -- the old default
+    // -- +8%, 8 +104%, all versus settled).
     //
     // NOT ONE OF THE TEN TIER-DERIVED KNOBS just above (restirVisibility included): the field has no
     // ladder rung to fall back to (Voxi.hpp's own comment on giRestirMaxHistory says so outright), so

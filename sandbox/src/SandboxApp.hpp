@@ -3849,7 +3849,7 @@ private:
     f32  coatRough_=0.1f;
     f32  coatF0_=0.04f;
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
-    // --gi-mode N: indirect-diffuse estimator, 0 = voxel cones, 1 = RTXDI ReSTIR GI (Settings::giMode).
+    // --gi-mode N: indirect-diffuse estimator, 0 = voxel cones, 1 = ReSTIR GI (Settings::giMode).
     // Sentinel is -1, not 0 like its neighbour above: 0 ("voxel cones") is a real value here, so the
     // giUpdateIntervalOverride_ convention would make `--gi-mode 0` indistinguishable from unset.
     int  giModeOverride_=-1;

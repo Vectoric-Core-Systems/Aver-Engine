@@ -58,16 +58,18 @@ public:
 
         // DIRECTORY-AWARE, AND IT HAS TO BE. This used to keep only the FILENAME, which made
         // <exe>/shaders one FLAT namespace shared by every module -- and on Windows a
-        // case-insensitive one. Vendoring any third-party HLSL tree into that is unsafe: RTXDI ships
-        // Color.hlsli, this engine ships color.hlsli, and deploying both put ONE file on disk. The
-        // engine's colour helpers silently vanished and the only thing that noticed was
-        // MaterialGraphTest failing on `use of undeclared identifier 'srgbToLin'` -- because HLSL
-        // here compiles at RUNTIME, so nothing about it was a build error. RTXDI's own tree also
-        // collides with ITSELF that way (Reservoir.hlsli exists under DI/, GI/ and PT/).
+        // case-insensitive one. Vendoring any third-party HLSL tree into that is unsafe: a vendored
+        // tree that ships Color.hlsli, when this engine ships color.hlsli, and deploying both put
+        // ONE file on disk. The engine's colour helpers silently vanished and the only thing that
+        // noticed was MaterialGraphTest failing on `use of undeclared identifier 'srgbToLin'` --
+        // because HLSL here compiles at RUNTIME, so nothing about it was a build error. A vendored
+        // tree can also collide with ITSELF that way (the same filename under several
+        // subdirectories).
         //
         // SUFFIXES, LONGEST FIRST, because DXC's resolved path is not something to parse. For a bare
         // `#include "x.hlsl"` it hands back "./x.hlsl"; for a nested include it prepends the
-        // includer's own directory, so an include written against a root ("Rtxdi/Utils/Color.hlsli")
+        // includer's own directory, so an include written against a root
+        // ("Vendor/Utils/Color.hlsli")
         // can arrive with a duplicated prefix. Trying "a/b/c.hlsli", then "b/c.hlsli", then
         // "c.hlsli" resolves both shapes without the handler needing to know either convention, and
         // the LAST attempt is exactly the old basename behaviour -- so every include that worked

@@ -121,7 +121,7 @@ Application* createApplication(int argc, char** argv) {
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--lighting-legacy"))      lightingLegacyArg = std::atoi(argv[i + 1]);
-        // --gi-mode N: selects the indirect-diffuse estimator (0 = voxel cones, 1 = RTXDI ReSTIR GI).
+        // --gi-mode N: selects the indirect-diffuse estimator (0 = voxel cones, 1 = ReSTIR GI).
         if (!std::strcmp(argv[i], "--gi-mode"))              giModeArg = std::atoi(argv[i + 1]);
         // --rd-stages 0|1|2: single-pass (0), staged (1) or staged + half-rate GI (2).
         if (!std::strcmp(argv[i], "--rd-stages"))            rdStagesArg = std::atoi(argv[i + 1]);

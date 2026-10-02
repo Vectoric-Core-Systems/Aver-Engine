@@ -101,8 +101,8 @@ struct DeviceCaps {
     // Whether a shader may perform 64-bit atomics on a buffer -- needed by a lock-free hash map
     // (64-bit compare-exchange), which is what a world-space radiance cache is.
     //
-    // Queried from the device, not derived from shaderModel: SM 6.6+ does not imply this (unlike
-    // RTXGI SHaRC's auto-detect from DXC target alone) -- two independent D3D12 queries
+    // Queried from the device, not derived from shaderModel: SM 6.6+ does not imply this, so it is
+    // not inferred from the DXC target -- two independent D3D12 queries
     // (OPTIONS1::Int64ShaderOps, OPTIONS9 for typed-resource). Getting it wrong either corrupts the
     // map (assumed true, actually false) or wastes a 16 MiB spin-lock fallback buffer (assumed
     // false); hence asked, not inferred.

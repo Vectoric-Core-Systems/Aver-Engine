@@ -244,11 +244,11 @@ public:
             // A quoted `#include "x"` reaches our IDxcIncludeHandler via the including file's own
             // directory; an angled `#include <x>` needs a non-empty -I list or DXC never asks the
             // handler at all (else: `file not found with <angled> include; use "quotes" instead`).
-            // Vendored HLSL (RTXDI's Utils/RandomSamplerState.hlsli, which includes
-            // <Rtxdi/Utils/Math.hlsli>) uses angled includes and can't be rewritten (see
-            // third_party/*/AVER_README.md), hence "-I .". "." is not a real path: DxcShaderInclude
-            // strips the "./" prefix from the resulting candidate and resolves it against bin/shaders
-            // exactly like a quoted include (--shader-source, cache, hot reload all still apply) --
+            // Vendored or third-party HLSL that uses angled includes (including nested ones, e.g. a
+            // header including <Vendor/Utils/Math.hlsli>) can't be rewritten, hence "-I .". "." is
+            // not a real path: DxcShaderInclude strips the "./" prefix from the resulting candidate
+            // and resolves it against bin/shaders exactly like a quoted include (--shader-source,
+            // cache, hot reload all still apply) --
             // this only changes which includes reach the handler.
             L"-I", L".",
         };
@@ -257,8 +257,8 @@ public:
         // Opt-in per shader, not global: the switch changes what `half` MEANS (fp32-widened vs
         // genuinely 16-bit) across 93 half/min16float uses engine-wide (water, the material prelude,
         // the path tracer's denoiser among them), so a global flag would silently shift precision
-        // everywhere with no compile error. Shaders needing real fp16 TYPES (RTXGI SHaRC packs
-        // radiance as float16_t4) opt in by name; needs SM 6.2+ (target: 6.5).
+        // everywhere with no compile error. Shaders needing real fp16 TYPES (e.g. a packed
+        // float16_t4 layout) opt in by name; needs SM 6.2+ (target: 6.5).
         bool want16Bit = false;
         for (usize i = 0; i < wDefines.size();) {
             if (wDefines[i] == L"AVER_ENABLE_16BIT_TYPES") {
@@ -2724,8 +2724,8 @@ void D3D12Device::queryCaps() {
               caps_.resourceBindingTier);
     AVER_INFO("[RHI.D3D12] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
     // Logged beside the shader model on purpose: this engine compiles at SM 6.5 while the device
-    // may report 6.6, and inferring atomic support from the compile target (what RTXGI's SHaRC
-    // does by default) gives a different answer than the hardware just did -- printing both
+    // may report 6.6, and inferring atomic support from the compile target (a common shortcut)
+    // gives a different answer than the hardware just did -- printing both
     // surfaces that before it shows up as a corrupted hash map.
     AVER_INFO("[RHI.D3D12] 64-bit shader atomics: {}", caps_.shaderInt64Atomics ? "yes" : "no");
     if (capsOverride().active)

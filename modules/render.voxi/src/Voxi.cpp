@@ -61,7 +61,7 @@ void Renderer::setSettings(const Settings& s) {
     if (status(Feature::RayTracing) != Status::Ready) {
         if (n.rayTracing != Quality::Off) refuse(Feature::RayTracing);
         n.rayTracing = Quality::Off;
-        // giMode==1 (RTXDI ReSTIR GI) needs the same RayQuery hardware the shadow/reflection rays
+        // giMode==1 (ReSTIR GI) needs the same RayQuery hardware the shadow/reflection rays
         // do -- it traces its own candidate ray through the identical acceleration structure and
         // flat geometry table. THIS USED TO FORCE n.giMode TO 0 HERE, as a CONSEQUENCE of the
         // RayTracing refusal just logged above, the same way rayTracing itself is clamped.
@@ -206,18 +206,14 @@ void Renderer::setSettings(const Settings& s) {
     // to remove. Unlike giMode/rtRenderMode just above, whose typos clamp to "nothing changed" (0), a
     // typo here clamps to the tier's own safest answer instead.
     n.giRestirVisibility = n.giRestirVisibility > 3u ? 3u : n.giRestirVisibility;
-    // giRestirVisibility's typo-safety ternary immediately above, there is no "wrong" end of the
-    // range here -- 0 (legacy, always 30) through 31 are all legitimate choices -- so a plain
-    // std::clamp is enough, same idiom as giCones/giSkyOcclusionTile above. 31, not a rounder number,
-    // because givis::packAmbientW packs this into exactly five bits (bits 7-11).
     // Settings::giRestirSpatialSamples's own comment has the bisection this splits reuse for. 15
     // (AUTO) through 0 (temporal only) are all legitimate choices with nothing to typo-guard against,
-    // rounder number, because givis::packAmbientW packs this into exactly four bits (bits 12-15).
+    // so a plain std::clamp is enough. 15 because givis::packAmbientW packs this into exactly four
+    // bits (bits 12-15).
     n.giRestirSpatialSamples = std::clamp(n.giRestirSpatialSamples, 0u, 15u);
-    // giRestirMaxHistory). 2 is RTXDI's highest bias-correction mode and 63 its own documented
-    // ceiling for maxHistoryLength, which is also what the six packed bits hold.
+    // giRestirMaxHistory: the per-neighbour M cap (reuse.maxHistory). 31 is what the five packed
+    // bits (gAmbientParams.w bits 18-22) hold.
     n.giRestirMaxHistory     = std::clamp(n.giRestirMaxHistory, 0u, 31u);
-    // The boiling-filter strength the two disproven reuse tolerances used to occupy here: a
     // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
     // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);

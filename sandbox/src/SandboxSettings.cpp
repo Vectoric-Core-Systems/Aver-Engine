@@ -1669,7 +1669,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "marched with cones. It is the default and is unchanged. The\n"
                               "Voxel grid and Diffuse cones settings below apply ONLY to it.\n\n"
                               "ReSTIR resamples ray-traced indirect samples over time AND\n"
-                              "across neighbouring pixels (NVIDIA RTXDI, third_party/rtxdi).\n"
+                              "across neighbouring pixels (the engine's own implementation).\n"
                               "It has no voxel volume, so the boundary artefacts the clipmap\n"
                               "produces -- surfaces near the edge reading as unoccluded, worst\n"
                               "while the camera moves -- cannot occur.\n\n"
@@ -1742,7 +1742,7 @@ void SandboxApp::buildRenderingSettings(int page) {
             }
         }
 
-        // ---- Indirect light history: RTXDI's stparams.maxHistoryLength ----
+        // ---- Indirect light history: ReSTIR GI reuse.maxHistory ----
         // Right under Visibility because it's the other dial on the same estimator's artefact -- how
         // much a previous-frame reservoir weighs into the ReSTIR GI combine. This is what 674ed667
         // fixed: the camera-motion brightness fade was this value, not the visibility rays above.

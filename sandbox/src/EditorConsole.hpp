@@ -560,17 +560,17 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Frames between GI volume revoxelisations (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().giUpdateInterval); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giUpdateInterval = n; }); }});
-    // The switch between voxel-cone and RTXDI ReSTIR GI diffuse-bounce estimators (Settings::giMode's
-    // comment has the full writeup). NOT a tierSetter despite reading like one -- setSettings never
-    // derives it from a tier, and (since the settings-separation pass) no longer even range-checks
-    // it, so it belongs with the dials setSettings leaves alone.
+    // The switch between voxel-cone and in-house ReSTIR GI diffuse-bounce estimators
+    // (Settings::giMode's comment has the full writeup). NOT a tierSetter despite reading like one
+    // -- setSettings never derives it from a tier, and (since the settings-separation pass) no
+    // longer even range-checks it, so it belongs with the dials setSettings leaves alone.
     // The read closure no longer reads the raw field (F-d, settings-separation pass): setSettings
     // used to hard-clamp giMode back to 0 when RayQuery/RT-tier/GI-tier could not honour it, which is
     // what let a raw read double as "is it actually running"; that clamp is gone, so this now reads
     // resolve(...).giMode.effective (RenderSettingsResolver.hpp) for the same honesty -- `set
     // voxi.giMode 1` on unsupported hardware stages/commits 1, and this reads back 0.
     t.push_back({"voxi.giMode", VarType::U32, false,
-        "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware, rayTracing != Off and globalIllumination != Off -- resolves back to 0 (the stored request is kept, untouched) when any is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
+        "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = ReSTIR GI. Needs RayQuery hardware, rayTracing != Off and globalIllumination != Off -- resolves back to 0 (the stored request is kept, untouched) when any is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vU32(voxi::resolve(r.settings(), r.deviceInfo()).giMode.effective); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
     // optimisation-wave-2's U1: how much of F2 (candidate-hit sky) and F3 (reuse visibility) -- the
@@ -877,7 +877,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurAntilagSensitivity = n; }); }});
     t.push_back({"voxi.reblurMinHitDistanceWeight", VarType::F32, false,
         "REBLUR_DIFFUSE spatial hit-distance weight floor, (0,0.2]; NRD recommends smaller for "
-        "RTXDI/ReSTIR signals. NRD default 0.1",
+        "ReSTIR signals. NRD default 0.1",
         []{ return vF32(Renderer::get().settings().reblurMinHitDistanceWeight); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMinHitDistanceWeight = n; }); }});
     t.push_back({"voxi.reblurFastHistoryClampSigma", VarType::F32, false,

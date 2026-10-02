@@ -276,7 +276,8 @@ public:
         // WHAT EACH COSTS, so the measurement is not run blind: the pre-pass is a spatial pre-blur
         // that matters most for a NOISY input, and ReSTIR GI is exactly that; temporal stabilization
         // is what suppresses frame-to-frame flicker, though this signal is already resampled
-        // temporally by RTXDI before NRD ever sees it, so the two may overlap more than usual here.
+        // temporally by ReSTIR GI before NRD ever sees it, so the two may overlap more than usual
+        // here.
         float diffusePrepassBlurRadius = 30.0f;   // 0 skips the Pre-pass dispatch entirely
         // 63 is NRD's REBLUR_MAX_HISTORY_FRAME_NUM, restated because NRD's headers cannot be included
         // outside this module. 0 skips the Temporal stabilization dispatch entirely.
@@ -298,7 +299,7 @@ public:
         float antilagLuminanceSigmaScale = 2.0f;   // (> 0); NRD notes "old default was 4.0"
         float antilagLuminanceSensitivity = 3.0f;  // (> 0); smaller = more sensitive
         // (0; 0.2]. NRD: "smaller values are recommended for signals with relatively clean hit
-        // distance (like RTXDI/RESTIR)" -- which is what REBLUR_DIFFUSE is fed here.
+        // distance (like ReSTIR)" -- which is what REBLUR_DIFFUSE is fed here.
         float minHitDistanceWeight = 0.1f;
         // [1; 3]. The colour-box scale clamping main history to fast history. NRD: "2 is old
         // default, 1.5 works well even for dirty signals".

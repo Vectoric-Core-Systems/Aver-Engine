@@ -1628,9 +1628,8 @@ private:
         //                         the cone gather instead of ReSTIR
         //   bit 32    (& 32u)     backend replays translucent draws blended THIS frame (D3D12 only)
         //   bit 64    (& 64u)     setGiVisPathView's debug view
-        //   bits 7-11 (>>7 & 31u) Settings::giRestirMovingAge (0..31): moving-camera reservoir-age
-        //                         cap replacing the 30-frame maxReservoirAge while the camera moves
-        //                         (see giRestirIndirect in voxi_restir.hlsli for the override)
+        //   bits 12-15 (>>12 & 15u) Settings::giRestirSpatialSamples (15 = auto)
+        //   bits 18-22 (>>18 & 31u) Settings::giRestirMaxHistory (reuse.maxHistory)
         // Single writer: beginShadowHistory (published twice -- unconditionally near the top with
         // histBound/histValid false, then again once the giSurf block knows the sixth pair's real
         // state).
@@ -1650,14 +1649,11 @@ private:
         // field's own comment in Voxi.hpp). 0 reads as "unset", falling back to the shader's 16.0
         // default, so an all-zero block (giFrameConstants() read before the first prePass --
         // SandboxApp.cpp documents this window for the cluster-GI binder) behaves as before. A
-        // repurposed bit, packing/size unchanged, same shape as gGiRestirParams.w below. z/w =
-        // Settings::giRestirDepthThreshold/giRestirNormalThreshold, RTXDI's reuse-
-        // similarity tolerances lifted from a shader literal so the moving-camera ReSTIR GI fade
-        // bisection can sweep them without a rebuild (see either field's own comment and
-        // Settings::giRestirSpatialSamples, the sibling dial packed into gAmbientParams.w). Two
-        // floats, not packed bits, since a reuse tolerance is continuous, not an enumerable choice.
+        // repurposed bit, packing/size unchanged, same shape as gGiRestirParams.w below. z/w are
+        // unused (the reuse-similarity tolerances are now literals in giIsSimilarSurface,
+        // voxi_restir.hlsli).
         f32 viewParams[4] = {};
-        // RTXDI ReSTIR GI control (gGiRestirParams). x = 1 while giMode==1 is ACTUALLY running this
+        // ReSTIR GI control (gGiRestirParams). x = 1 while giMode==1 is ACTUALLY running this
         // frame (giRestirWanted(): hardware, tier and giMode all agree) -- not a raw copy of
         // Settings::giMode, since the reservoir/surface-history pair are only allocated when
         // giRestirWanted() is true, and branching on the raw setting would read null-filled t12/u6/u7
@@ -2083,23 +2079,21 @@ private:
     u32                   nrdSunMovingHold_ = 0;
     bool                  nrdSunClampApplied_ = false;
 
-    // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
-    // giReservoirs_ is storage the vendored SDK owns the shape of: RTXDI_PackedGIReservoir
-    // (third_party/rtxdi/Include/Rtxdi/GI/ReSTIRGIParameters.h) is 32 bytes;
-    // one RWStructuredBuffer holds BOTH ping-pong copies (rtxdi::c_NumReSTIRGIReservoirBuffers),
-    // addressed by RTXDI_ReservoirPositionToPointer's own array-index*pitch term -- one buffer, one
-    // binding (u6), never rebound mid-frame; only which array slice is read/written changes
-    // (cb_.giRestirParams.z), not a descriptor swap.
-    // Sized from giSurfPosHist_'s own resolution, not a separately-tracked width/height: both are
-    // created together in ensureShadowHistory from the same width/height, and the shader derives the
-    // identical block-pitch formula from gGiSurfHist.GetDimensions() (voxi.hlsl's
-    // giReservoirBufferParams) -- one source of truth rather
-    // than a cbuffer field that could drift from the texture it describes.
+    // ---- ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
+    // giReservoirs_ holds GiPackedReservoir (voxi_reservoir.hlsli), 32 bytes each; one
+    // RWStructuredBuffer holds BOTH ping-pong slices, row-major per slice
+    // (index = slice*(w*h) + y*w + x, giReservoirIndex) -- one buffer, one binding (u6), never
+    // rebound mid-frame; only which slice is read/written changes (cb_.giRestirParams.z), not a
+    // descriptor swap. Sized from giSurfPosHist_'s own resolution, not a separately-tracked
+    // width/height: both are created together in ensureShadowHistory from the same width/height,
+    // and the shader derives the identical w*h slice pitch from gGiSurfNrmHist.GetDimensions()
+    // (voxi_restir.hlsli's giReservoirIndex) -- one source of truth rather than a cbuffer field
+    // that could drift from the texture it describes.
     rhi::BufferHandle giReservoirs_ = 0;
-    // Element count (RTXDI_PackedGIReservoir units) the buffer was sized for -- caching this means a
-    // resize that neither outgrows it nor drops below half of it (perPixelBufferNeedsRealloc, the
-    // .cpp; most resolution changes, since it rounds up to 16-pixel blocks) skips the destroy/
-    // recreate entirely, while a render scale applied after start-up still gives the memory back.
+    // Element count (GiPackedReservoir units, w*h*2) the buffer was sized for -- caching this means
+    // a resize that neither outgrows it nor drops below half of it (perPixelBufferNeedsRealloc, the
+    // .cpp) skips the destroy/recreate entirely, while a render scale applied after start-up still
+    // gives the memory back.
     u32  giReservoirElemCapacity_ = 0;
 
     // ---- STAGED RAY-DRIVEN PASSES (milestone 1): the resources CSRdVisibility/CSRdShadow/the
@@ -2248,9 +2242,9 @@ private:
     bool rdReflSplitRunLogged_ = false;
     bool rdReflSplitFallbackLogged_ = false;
 
-    // ---- RTXDI ReSTIR GI: the previous-frame surface it resamples against (giSurfPosHist_/
+    // ---- ReSTIR GI: the previous-frame surface it resamples against (giSurfPosHist_/
     // giSurfNrmHist_) ----
-    // THE ENGINE GAP: RAB_GetGBufferSurface(idx, /*prevFrame*/true) needs a PREVIOUS frame's primary
+    // THE ENGINE GAP: giLoadPrevSurface(idx) needs a PREVIOUS frame's primary
     // surface, and nothing in Voxi carried one before this pair -- the deferred G-buffer is
     // current-frame-only, and AVER_GBUFFER_HISTORY's gGBufNormalHist (voxi.hlsl) is an unfinished
     // half-attempt at the same gap (declared, gated behind a define nothing sets to 1, never grew a
@@ -2260,24 +2254,25 @@ private:
     //
     // TWO RG32Float TEXTURES, NOT ONE RGBA32F: rhi::Format has no four-channel 32-bit float format
     // (checked against the enum directly: only RGBA16F/R32Float/RG32Float), so a single texture wasn't an option. Full 32-bit precision
-    // matters here: RTXDI_CalculateJacobian's partial-Jacobian terms are distance-squared RATIOS, and
-    // RGBA16F's ~11-bit mantissa's relative error is already comparable to that ratio at a few
+    // matters here: giReconnectionJacobian's partial-Jacobian terms are distance-squared RATIOS,
+    // and RGBA16F's ~11-bit mantissa's relative error is already comparable to that ratio at a few
     // thousand centimetres of scene extent.
     //
     // giSurfPosHist_: xy = world position x/y. giSurfNrmHist_: x = world position z, y =
-    // RTXDI_EncodeNormalizedVectorToSnorm2x16's packed uint, bit-reinterpreted with asfloat -- reuses
-    // the vendored SDK's own packing. Position/normal split across the pair (not xy/z-of-position in
-    // one, normal whole in the other) so a reader wanting just the position (RAB_GetSurfaceWorldPos)
+    // giOctEncode's packed uint (octahedral snorm16x2), bit-reinterpreted with asfloat -- the same
+    // packing the reservoir normal uses. Position/normal split across the pair (not
+    // xy/z-of-position in one, normal whole in the other) so a reader wanting just the position
     // or just validity knows which texture to touch.
     //
     // 0 in the packed-normal channel means "nothing written here" (a sky miss, or a pixel from
     // before this pair existed): the write side nudges an exact-zero encoding to 1 so the sentinel is
     // never produced by a real normal (see the write site in voxi.hlsl). An explicit sentinel rather than trusting a fresh allocation
     // to read as zero -- not a documented API guarantee (this repo's own render-scale/device-loss and
-    // stale-worktree incidents are reminders of that), and RTXDI's own 5-sample temporal search plus fallback-sampling mode
-    // already tolerates an occasional false "no surface here".
+    // stale-worktree incidents are reminders of that), and giSpatioTemporalReuse's jittered
+    // temporal retries (up to 4 within 1.5 px) already tolerate an occasional false "no surface
+    // here".
     //
-    // Depth for the RAB similarity test is not stored a third time: re-derived as
+    // Depth for the giIsSimilarSurface test is not stored a third time: re-derived as
     // `mul(float4(storedWorldPos, 1.0), gPrevViewProj).w` -- free (gPrevViewProj already exists),
     // exact, and one fewer thing that could disagree with the position it describes.
     //
@@ -2365,7 +2360,7 @@ private:
     // aoHistoryWanted()), so by the time any exists,
     // rtHistValid_ already means "been through a real cycle". giMode is an INDEPENDENT switch a user
     // can flip mid-session while rtHistValid_ is already true from the shadow/reflection pair cycling
-    // -- trusting the shared flag would feed RTXDI's resampling a "previous frame" that never existed
+    // -- trusting the shared flag would feed the resampling a "previous frame" that never existed
     // for this freshly-allocated pair. Its own flag closes exactly that gap and no other.
     bool giHistValid_ = false;
     // RESOURCE STATE, not content trust like giHistValid_ above: true once the read side was left in

@@ -22,10 +22,10 @@
 //      PSMainVoxi, PSRayDriven, VSky and VSMain together -- the entire ray-tracing feature set,
 //      including configurations that never asked for the vendored feature.
 //
-// THE FIXTURE IS THIS TEST'S OWN (tests/rhi/shaders/AverIncProbe), deliberately not RTXDI's. A test
-// that included the real vendored tree would couple Aver.RHI's test to whichever feature module
-// happens to deploy that tree, and would start SKIPping the day that module is disabled -- which is
-// the day this regression would return.
+// THE FIXTURE IS THIS TEST'S OWN (tests/rhi/shaders/AverIncProbe), deliberately not a real vendored
+// tree. A test that included one would couple Aver.RHI's test to whichever feature module happens
+// to deploy that tree, and would start SKIPping the day that module is disabled -- which is the day
+// this regression would return.
 //
 // WARP, so no GPU is required, and SKIPPED rather than failed where D3D12 is genuinely absent.
 // Vulkan takes the identical argument list through the identical handler (see
@@ -146,13 +146,13 @@ int main(int argc, char** argv) {
     // THE ONE THAT ACTUALLY BROKE, and it is not the same lookup as case 2. Here the including file
     // is itself a handler-supplied blob, so DXC has a notion of "the includer's directory" that it
     // invented rather than read off a disk -- which is what makes the resolved path DXC hands back
-    // shaped differently (a duplicated prefix) from either of the cases above. RTXDI's
-    // Utils/RandomSamplerState.hlsli including <Rtxdi/Utils/Math.hlsli> is exactly this shape.
+    // shaped differently (a duplicated prefix) from either of the cases above. A vendored
+    // header including <Vendor/Utils/Math.hlsli> is exactly this shape.
     const rhi::ShaderHandle nested = compile(res,
         "#include \"AverIncProbe/Outer.hlsli\"\n"
         "RWStructuredBuffer<float> gOut : register(u0);\n"
         "[numthreads(1,1,1)] void main() { gOut[0] = averIncProbeOuter(1.0); }\n");
-    check(nested != 0, "an ANGLED include INSIDE an included file resolves (the RTXDI shape)");
+    check(nested != 0, "an ANGLED include INSIDE an included file resolves (the nested vendored shape)");
 
     for (rhi::ShaderHandle h : {quoted, angled, nested}) if (h) res->destroyShader(h);
     rhi::destroyDevice(dev);
