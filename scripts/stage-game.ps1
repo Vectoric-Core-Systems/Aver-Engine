@@ -59,49 +59,11 @@ param(
     [string] $BuildDir,
     [switch] $Force,
     [switch] $AllowDebugCrt,
-    [switch] $Compile,
-    # See the NVIDIA clearance gate immediately below.
-    [switch] $IAcceptNvidiaRedistribution
+    [switch] $Compile
 )
 
 $ErrorActionPreference = 'Stop'
 
-# ---- PACKAGING IS BLOCKED PENDING NVIDIA CLEARANCE (2026-09-21) --------------------------------
-#
-# THIS IS DELIBERATE AND IT IS NOT A BUG. A packaged build redistributes NVIDIA SDK code, and the
-# NVIDIA RTX SDKs Licence requires a source notice, clause 6.1(c) attribution and the MIT components'
-# copyright notices to travel with it. Rather than produce packages that were not clear to
-# distribute, the packaging path refused until that was settled. The engine is in beta; nothing is
-# shipping today, so the cheap and honest answer was to stop rather than to paper over it.
-#
-# THAT WORK IS DONE -- closed 2026-09-25, docs/NVIDIA-SDK-COMPLIANCE.md section 3.
-# scripts/NvidiaNotices.ps1, dot-sourced below, appends the source notice, the clause 6.1(c)
-# attribution list and every shipped component's licence to THIRD-PARTY-NOTICES.txt: NRD and MathLib
-# whenever compiled in.
-#
-# THE BLOCK STAYS UP ANYWAY. Closing the notices gap did not remove it -- lifting the block is a
-# separate decision the compliance doc leaves to the owner (section 3.1), not a side effect of the
-# notices existing. -IAcceptNvidiaRedistribution exists so that somebody who HAS that sign-off can
-# proceed without editing the script, and it prints a loud line into the log when used so a package
-# built that way is identifiable afterwards. It is not a way to skip the work.
-#
-# TO LIFT THIS: get the owner's sign-off (section 3.1), then delete this block.
-if (-not $IAcceptNvidiaRedistribution) {
-    Write-Host ""
-    Write-Host "PACKAGING BLOCKED -- pending owner sign-off to lift NVIDIA redistribution clearance." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  A packaged build redistributes NVIDIA SDK code (NRD, compiled in; MathLib"
-    Write-Host "  comes with it). THIRD-PARTY-NOTICES.txt already carries its"
-    Write-Host "  notice, attribution and licences -- see docs/NVIDIA-SDK-COMPLIANCE.md section 3.1."
-    Write-Host ""
-    Write-Host "  This is a deliberate block while the engine is in beta, not a failure."
-    Write-Host "  Re-run with -IAcceptNvidiaRedistribution once clearance is in hand."
-    Write-Host ""
-    exit 2
-}
-Write-Host "[stage] -IAcceptNvidiaRedistribution was passed: proceeding without the owner's sign-off" -ForegroundColor Yellow
-Write-Host "[stage] to lift docs/NVIDIA-SDK-COMPLIANCE.md section 3.1's block. THIRD-PARTY-NOTICES.txt" -ForegroundColor Yellow
-Write-Host "[stage] carries the NVIDIA notice, attribution and licences either way." -ForegroundColor Yellow
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $BuildDir) {
     $BuildDir = if ($Config -eq 'Debug') { 'build' } else { "build-$($Config.ToLower())" }
@@ -114,8 +76,6 @@ function Fail([string] $msg) { $script:failures.Add($msg); Write-Host "[game] ER
 function Note([string] $msg) { Write-Host "[game] $msg" }
 
 . (Join-Path $PSScriptRoot 'PeImports.ps1')
-# The NVIDIA section of THIRD-PARTY-NOTICES.txt (step 7), shared with stage-payload.ps1.
-. (Join-Path $PSScriptRoot 'NvidiaNotices.ps1')
 
 if (-not (Test-Path -LiteralPath $bin))     { throw "[game] no build tree at $bin -- run ./scripts/build.ps1 first" }
 if (-not (Test-Path -LiteralPath $Project)) { throw "[game] no project manifest at $Project" }
@@ -565,6 +525,7 @@ $notices = [System.Text.StringBuilder]::new()
 $components = @(
     @{ Name = 'Jolt Physics'; Licence = 'MIT'; File = 'modules\physics.jolt\LICENSE'; When = { $options['AVER_MODULE_PHYSICS'] } }
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt'; When = { $true } }
+    @{ Name = 'AMD FidelityFX Denoiser'; Licence = 'MIT'; File = 'third_party\fidelityfx-denoiser\LICENSE.txt'; When = { $options['AVER_MODULE_VOXI'] } }
 )
 foreach ($c in $components) {
     if (-not (& $c.When)) { continue }
@@ -577,10 +538,6 @@ foreach ($c in $components) {
     [void]$notices.AppendLine((Get-Content -LiteralPath $p -Raw).TrimEnd())
     [void]$notices.AppendLine('')
 }
-# NRD and MathLib (compiled into the runtime) -- whichever
-# this game actually carries, with the NVIDIA notice and attribution ahead of their licences. See
-# NvidiaNotices.ps1 and docs/NVIDIA-SDK-COMPLIANCE.md.
-Add-AverNvidiaNotices -Notices $notices -Root $root -StagedDir $outFull -Options $options
 [void]$notices.AppendLine('Microsoft DirectX Shader Compiler - dxcompiler.dll, dxil.dll')
 [void]$notices.AppendLine('Redistributed from the Windows SDK under the Microsoft Windows SDK licence terms.')
 [void]$notices.AppendLine('')

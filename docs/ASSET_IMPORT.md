@@ -426,12 +426,9 @@ The importers accept anything in a supported format. The constraint is **licensi
 **This repository accepts permissively-licensed content only** — MIT, BSD, Apache-2.0, zlib, CC0,
 CC-BY with attribution.
 
-> **One exception exists, granted deliberately.** `third_party/nrd` (NVIDIA Real-Time Denoisers) is
-> under the NVIDIA RTX SDKs License, accepted by the owner on 2026-09-09 after being shown that its
-> grant is not sublicensable — so an Aver licensee shipping an application needs their own grant from
-> NVIDIA, and Aver's EULA must flow NVIDIA's terms through. See `third_party/nrd/AVER_README.md`.
-> This is a named exception for one dependency and does **not** relax the rule for anything else;
-> a second such request should be argued on its own terms, not on this precedent.
+> **There is no exception.** NVIDIA's NRD was once vendored under the NVIDIA RTX SDKs License as a named
+> exception; it has been removed and replaced by AMD FidelityFX Denoiser (MIT). No proprietary SDK
+> remains in the tree.
 
 That rules out:
 

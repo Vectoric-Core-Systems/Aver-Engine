@@ -73,7 +73,7 @@ run — every behavioural claim is a trace through source, not a screenshot.
 > `VoxiRenderer::rayDrivenAvailable()` -- allow it) the same way it forces `0` for Wireframe. This is
 > NOT the `ViewMode` enum / `ShadingOverride` / "Shader Complexity" design §2 and §4 propose below --
 > `bool wireframe_` and `bool unlit_` are both still exactly that, unchanged, sitting beside the new
-> `debugView_` and an independent `bool undenoised_` (a bundle of existing NRD/ray-tile/spatial-filter/
+> `debugView_` and an independent `bool undenoised_` (a bundle of existing denoiser/ray-tile/spatial-filter/
 > history-reset knobs, unrelated to any view mode and combinable with all of them). None of §2's
 > preference-migration or §4's Shader Complexity work has shipped; this status note only covers what
 > actually landed, not a revision of the plan below.

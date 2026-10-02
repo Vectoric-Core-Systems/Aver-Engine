@@ -5,7 +5,7 @@
 > described **nowhere below**: the editor/runtime split (the runtime library moved to `Runtime/`, the
 > standalone host came back as `AverEngineRuntime.exe`, and the editor now calls that library for
 > content, level load, water, streaming, landscape, physics/audio/tick, camera, mouse capture, input
-> publishing and the whole world draw walk); the `SandboxApp.cpp` split across ~40 files; NRD/ReSTIR
+> publishing and the whole world draw walk); the `SandboxApp.cpp` split across ~40 files; denoiser/ReSTIR
 > denoising; the packaging restore; and the four `RENDER.EXPOSURE`/`BLOOM`/`AUTOEXPOSURE`/`TONEMAP`
 > manifest keys. `README.md` points here as "where the work actually stands" — treat that as true for
 > everything up to 2026-08-17 and as **unwritten** after it. Nothing below has been re-verified

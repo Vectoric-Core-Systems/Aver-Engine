@@ -23,62 +23,42 @@ ffx_denoiser_reflections_reproject.h       368
 ffx_denoiser_reflections_resolve_temporal.h 145
 ```
 
-## Why this and not NVIDIA NRD
+## How Aver uses it
 
-Investigated 2026-08-27; the full write-up is `docs/rendering/DENOISING.md`. In short: NRD is
-technically excellent and **is** royalty-free to incorporate, but it ships under the NVIDIA RTX SDKs
-License (SPDX `NOASSERTION`), whose grant is to distribute it *"as incorporated in object code format
-into a software application"* and **"without the right to sublicense"**. Aver is not an application —
-it is an engine redistributed to licensees who build applications — so every licensee would need their
-own grant from NVIDIA and Aver's EULA would have to flow NVIDIA's terms through to each of them.
-`docs/ASSET_IMPORT.md` accepts MIT/BSD/Apache-2.0/zlib/CC0/CC-BY only.
+`modules/render.denoise` (`Aver.Render.Denoise`) runs the **reflection** pipeline — reproject,
+prefilter, temporal resolve — driven at roughness 1 as a diffuse denoiser, over Voxi's two noisy
+signals: the sky-occlusion hit distance and the ReSTIR GI radiance. The shadow denoiser
+(`ffx_denoiser_shadows_*.h`) is still unused. See `modules/render.denoise/README.md` for the host side.
 
-This is MIT. It costs nothing legally, it is the same vendor as an existing dependency, and its
-shadow denoiser is built for precisely our case: **at most one jittered shadow ray per pixel**, which
-is what `rtShadow` traces.
+It was chosen over NVIDIA NRD (investigated 2026-08-27, `docs/rendering/DENOISING.md`) because NRD
+ships under the NVIDIA RTX SDKs License, whose grant is to distribute it "as incorporated in object
+code format into a software application" and "without the right to sublicense". Aver is an engine
+redistributed to licensees, not an application, so that licence could not flow through. This is MIT,
+from the same vendor as `third_party/fidelityfx-fsr`, and `docs/ASSET_IMPORT.md` accepts MIT.
 
-## THIS CANNOT RUN YET, AND THAT IS THE POINT OF THIS SECTION
+The host-implemented accessors these headers call but never define are all satisfied now: the Voxi
+G-buffer supplies depth, octahedral normal + roughness and screen-space motion vectors, the previous
+frame's matrices and depth come from the renderer, and the denoiser owns its history textures.
+The G-buffer exists only on D3D12, so the denoiser runs only there.
 
-It is vendored ahead of the work it needs, deliberately and with that stated, rather than discovered
-later by someone wondering why it is inert. Extracted from the source itself, these are the
-accessors the **host** must implement — they are called but never defined by these headers:
+## Build and deployment
 
-| callback | what it needs | does Aver have it? |
-|---|---|---|
-| `FFX_DNSR_Shadows_ReadDepth(pos)` | depth as a readable texture | **no** |
-| `FFX_DNSR_Shadows_ReadNormals(pos)` | world normal as a readable texture | **no** |
-| `FFX_DNSR_Shadows_ReadVelocity(pos)` | **screen-space motion vectors** | **no** |
-| `FFX_DNSR_Shadows_ReadPreviousDepth(pos)` | last frame's depth | **no** |
-| `FFX_DNSR_Shadows_ReadHistory(uv)` | the denoiser's own history | yes, Voxi has one |
-| `FFX_DNSR_Shadows_GetReprojectionMatrix()` | previous view-projection | yes, `gPrevViewProj` |
+The code here is **unmodified** from upstream. It is compiled at run time by DXC, through the
+shader compilers' opt-in `AVER_HLSL_2018` flag-define: the vendored code uses a vector `?:` that
+HLSL 2021 rejects, so that one shader (`modules/render.denoise/shaders/aver_denoise.hlsl`) is built
+as HLSL 2018. The headers deploy to `bin/shaders/FidelityFX` together with `LICENSE.txt`, and the
+licence is carried into `THIRD-PARTY-NOTICES.txt` by the stagers.
 
-Aver is a **forward** renderer: `PSMainVoxi` returns a single `SV_TARGET`, and normal, roughness and
-albedo exist only in that shader's registers — never in a texture a compute pass could read. And
-nothing in this engine produces motion vectors at all; `rhi::UpscalerNeeds::MotionVectors` is declared
-in `RHIResources.hpp` and its own comment says so.
-
-So the prerequisite is a **thin G-buffer plus motion vectors** — roughly `RG16F` velocity, `R32F`
-view-space depth and `RGB10A2` normal+roughness, about 54 MB and 12 bytes per pixel at 2750x1639,
-against the ~144 MB the RT histories already cost. Dynamic objects additionally need a previous-frame
-transform per instance, which `RtInstance` does not carry today.
-
-That one piece of work also unlocks **FSR 2/3**, **TAA**, **SSR**, and fixes temporal reprojection for
-moving objects — which is broken right now, since reprojection transforms *this* frame's world
-position through *last* frame's camera and is therefore correct only for geometry that did not move.
-
-It matters more than it did: ray-driven primary visibility is now the default render path, and a
-fullscreen ray pass has **no MSAA**, so the default has no antialiasing until something temporal exists.
-
-## Two further requirements worth knowing before wiring it
+## Requirements worth knowing
 
 - **16-bit types.** The shadow filter is written in `float16_t`, so it wants SM 6.2 with native 16-bit
   support. The engine already requires SM 6.5 for `RayQuery`, so this is very likely free — but it is
-  a capability to *check*, not assume.
+  a capability to *check*, not assume. (The reflection pipeline in use does not depend on it.)
 - **The shadow denoiser expects a bitmasked hit buffer**, not a per-pixel float: one bit of visibility
   per pixel, packed 8x4 to a `uint` (`ffx_denoiser_shadows_prepare.h`). `rtShadow` returns a *fraction*
   of the sun disc reached, not a bit. Either the prepare pass is fed a thresholded mask — losing the
   penumbra the disc sampling exists to produce — or that pass is skipped and only the filter reused.
-  **This is a real design decision and it is not obviously in FFX's favour**: the engine's own
+  This is a real design decision and it is not obviously in FFX's favour: the engine's own
   `rtShadowSpatial` already consumes a fraction directly.
 
 ## Updating

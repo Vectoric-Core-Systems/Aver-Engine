@@ -1,20 +1,15 @@
-# Denoising, and why NVIDIA NRD is not the answer here
+# Denoising (originally: why NVIDIA NRD was not the answer; now FidelityFX Denoiser)
 
-> **SUPERSEDED ON THE LICENCE QUESTION, 2026-09-09.** NRD is now vendored at `third_party/nrd`. The
-> owner was shown this document's licence argument — that the NVIDIA RTX SDKs License grants
-> distribution only "as incorporated in object code format into a software application" and without
-> the right to sublicense, so every Aver licensee would need their own grant — and accepted it
-> anyway. `third_party/nrd/AVER_README.md` records the decision and the flow-through consequence for
-> Aver's own EULA.
+> **SUPERSEDED, 2026-09-09 and again later.** NRD was vendored on 2026-09-09 after the owner was
+> shown this document's licence argument and accepted it anyway. NRD was **later removed**, together
+> with MathLib and ShaderMake, which existed only for it. **AMD FidelityFX Denoiser (MIT) is now the
+> denoiser**: `third_party/fidelityfx-denoiser`, driven by `modules/render.denoise`
+> (`aver::render::denoise::Denoiser`), which runs its reflection pipeline at roughness 1 as a diffuse
+> denoiser over the sky-occlusion hit distance and the ReSTIR GI radiance, on D3D12 only.
 >
-> **Everything else on this page still stands**, including the technical analysis of what NRD needs
-> from a renderer and the description of what the hand-written filters do. Read the licence section
-> below as history rather than as current policy.
-
-**Investigated 2026-08-27.** The question was whether to vendor NVIDIA's Real-time Denoisers (NRD) to
-replace the hand-written spatial/temporal filters in `modules/render.voxi`.
-
-**The answer is no, and the licence is the least interesting reason.**
+> **The sections below are the original investigation and are kept as history.** Where they say NRD
+> is vendored or linked, that is no longer true; the technical analysis of which per-pixel inputs a
+> denoiser needs and the description of the hand-written filters are still accurate.
 
 ---
 
@@ -119,11 +114,11 @@ It requires depth, **motion vectors** and normals.
 
 So the licence is not what is actually gating this. **The G-buffer is — or rather, was; see §2's
 correction.** Any denoiser worth vendoring wants the same three buffers. We now have them declared
-and, on D3D12, implemented, and the editor turns them on behind `--gbuffer`. **Superseded again on
-2026-09-09**: NRD is vendored and linked (`modules/render.nrd`), and the fourth input it needs —
-a per-pixel hit distance from the sky-occlusion ray, which nothing produced — is now written by
-`modules/render.voxi` to its own R16Unorm target. What is still missing is the pass that records
-NRD's dispatches; see `modules/render.nrd/README.md` for the current state rather than this page.
+and, on D3D12, implemented, and the editor turns them on behind `--gbuffer`. **Superseded again
+later**: a denoiser is now vendored and linked (`modules/render.denoise`, running AMD FidelityFX
+Denoiser; NRD, which was briefly vendored, has been removed), and the fourth input it needs — a
+per-pixel hit distance from the sky-occlusion ray — is written by `modules/render.voxi` to its own
+R16Unorm target. See `modules/render.denoise` for the current state rather than this page.
 
 ## 5. What to do instead
 
@@ -198,7 +193,7 @@ tree today says that gap has since been closed for this specific knob.
 
 ## Sources
 
-- [NVIDIA-RTX/NRD](https://github.com/NVIDIA-RTX/NRD) — the library, its inputs and its denoiser set
+- [NVIDIA-RTX/NRD](https://github.com/NVIDIA-RTX/NRD) — the library, its inputs and its denoiser set (since removed)
 - [NRD LICENSE.txt](https://raw.githubusercontent.com/NVIDIA-RTX/NRD/master/LICENSE.txt) — the NVIDIA RTX SDKs License
 - [AMD FidelityFX Denoiser](https://gpuopen.com/fidelityfx-denoiser/) and its
   [1.3 manual](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/denoiser/) — MIT, and its input requirements

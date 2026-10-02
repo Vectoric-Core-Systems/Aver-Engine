@@ -32,7 +32,7 @@ work, and nothing in it may claim to be, or imply it is, FSR or DLSS.
 > non-`Off` level was measured (PTTest, 2750×1639) taking the ray-driven primary pass from 5.0ms at
 > `Off` to 2.3 / 1.7 / 1.3ms at Quality / Balanced / Performance. **SUSPECT**: that table's baseline
 > was contaminated by a second renderer running concurrently (`aver-two-renderers-at-once.md`) and
-> predates ReSTIR and NRD, both of which add their own pixel-bound cost that AverSR now also shrinks;
+> predates ReSTIR and the FidelityFX-based denoiser, both of which add their own pixel-bound cost that AverSR now also shrinks;
 > `aver-aversr-measured.md` records the figure itself as unverified, and no composed-default number
 > has replaced it (UNMEASURED). `SpatialUpscaler::execute()` has still never been proven against a
 > live swapchain by a GPU capture, per the same source.
