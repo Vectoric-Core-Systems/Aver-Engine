@@ -2347,8 +2347,6 @@ void SandboxApp::setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
 
 void SandboxApp::setDenoiser(int n) { denoiserOverride_ = n; }
 
-void SandboxApp::setReblurAccum(int n) { reblurAccumOverride_ = n; }
-
 void SandboxApp::setRenderScale(f32 s) { renderScaleOverride_ = s; }
 
 #if AVER_MODULE_SR

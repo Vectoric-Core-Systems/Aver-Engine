@@ -342,15 +342,9 @@ inline bool& consoleGiPoisonViewSlot() { static bool v = false; return v; }
 // consoleGiPoisonViewSlot() above). Bisection aid, never saved: SandboxApp's onUpdate resets every
 // history named here once a frame, so anything that still lags, smears or fades is not carried by
 // that history. Bit 1 = ReSTIR GI reservoirs + GI visibility history, 2 = RT shadow/reflection/
-// sky-occlusion history (also restarts NRD via beginShadowHistory, which resets it whenever
-// rtHistValid_ is false), 4 = NRD alone.
+// sky-occlusion history (also restarts the denoiser via beginShadowHistory, which resets it
+// whenever rtHistValid_ is false), 4 = the denoiser alone.
 inline u32& consoleResetHistoryEveryFrameSlot() { static u32 v = 0; return v; }
-
-// NRD legacy-camera A/B switch's live source of truth (same raw-slot idiom as
-// consoleGiPoisonViewSlot() above): VoxiRenderer::setNrdLegacyCamera is private renderer state (a
-// toggle on VoxiRenderer::beginShadowHistory's camera-factorisation path) with no Settings path.
-// Written by `set voxi.nrdLegacyCamera`, reasserted onto voxiRenderer_ each frame from onUpdate.
-inline bool& consoleNrdLegacyCameraSlot() { static bool v = false; return v; }
 
 // Lighting-contrast fix's legacy bitmask (contrast-fix plan F7; same raw-slot idiom as above). ONE
 // u32 backs FIVE console variables below (voxi.legacyRestirSampleRing etc.), each flipping a single
@@ -602,8 +596,8 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "stparams.maxHistoryLength: how much weight a previous-frame ReSTIR GI reservoir may carry "
         "into the combine. DEFAULT 0, which is the camera-motion fade fix -- 1 was the old value and "
         "overshoots ~8% for ~25 frames after the camera stops, 8 overshoots ~104%. 0 measured no "
-        "worse at rest or in motion (same settled brightness, same grain and flicker), because NRD "
-        "is what actually smooths this. Set 1 to get the old behaviour back. Engine clamps to [0,31].",
+        "worse at rest or in motion (same settled brightness, same grain and flicker), because the "
+        "denoiser is what actually smooths this. Set 1 to get the old behaviour back. Engine clamps to [0,31].",
         []{ return vU32(Renderer::get().settings().giRestirMaxHistory); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirMaxHistory = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
@@ -631,9 +625,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "ReSTIR-GI poison debug view: paints an unmistakable colour over any pixel where one of "
         "voxi_restir.hlsli's guards fired THIS frame -- magenta = the store-time reservoir guard (the "
         "one that matters most), cyan = a candidate-radiance clamp, yellow = the target-pdf guard, "
-        "orange = the pre-existing final-estimate guard, blue = the NRD-readback guard (these five are "
+        "orange = the pre-existing final-estimate guard, blue = the denoiser-readback guard (these five are "
         "all non-finite/NaN corruption); red = the raw estimate hit the voxi.giRadianceCeiling clamp "
-        "while still finite, green = the NRD-denoised readback hit the same ceiling -- these last two "
+        "while still finite, green = the denoised readback hit the same ceiling -- these last two "
         "are WHERE a white patch's cause lives, not a bug: a non-finite guard above always outranks "
         "them at the same pixel. These seven are giMode 1 (ReSTIR) only. An EIGHTH colour, violet, is "
         "NOT giMode-gated: it marks the ray-traced specular indirect term's own ceiling hit "
@@ -648,7 +642,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     t.push_back({"voxi.debugResetHistoryEveryFrame", VarType::U32, false,
         "Bisection aid, never saved: resets the chosen temporal histories EVERY frame, without log "
         "lines. 1 = ReSTIR GI reservoirs + GI visibility history, 2 = RT shadow/reflection/"
-        "sky-occlusion history (also restarts NRD), 4 = NRD only; add bits to combine, 0 = off. A "
+        "sky-occlusion history (also restarts the denoiser), 4 = denoiser only; add bits to combine, 0 = off. A "
         "fade or smear that still happens with a history reset every frame is not carried by that "
         "history. Expect a noisier image while it is on.",
         []{ return vU32(consoleResetHistoryEveryFrameSlot()); },
@@ -676,25 +670,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiVisPathViewSlot() = on; });
         }});
-    // NOT a Settings field, same shape as voxi.giPoisonView above -- see consoleNrdLegacyCameraSlot()'s
-    // comment. [live]: toggling resets NRD's history next frame (VoxiRenderer::setNrdLegacyCamera's
-    // comment has the mechanism), enabling an A/B with no rebuild or reload.
-    t.push_back({"voxi.nrdLegacyCamera", VarType::Bool, false,
-        "A/B switch for the NRD camera-contract fix in VoxiRenderer::beginShadowHistory (see its own "
-        "comment on the NRD block for the mechanism this reinstates). Default OFF is the FIXED "
-        "behaviour: NRD is handed this frame's camera, freshly read and factorised into a real "
-        "worldToView/viewToClip pair. ON REINSTATES A KNOWN-WRONG ENCODING FOR COMPARISON ONLY: "
-        "identity worldToView and last frame's combined viewProj standing in for viewToClip -- the "
-        "exact pre-fix behaviour, never a setting to leave on. Toggling either way resets NRD's "
-        "denoiser history on the next frame, so the two encodings are never blended into one image.",
-        []{ return vBool(consoleNrdLegacyCameraSlot()); },
-        [](ConsoleBatch& b, VarValue v){
-            const bool on = v.as.b;
-            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleNrdLegacyCameraSlot() = on; });
-        }});
     // ---- lighting-contrast fix's five legacy A/B switches (contrast-fix plan section 3), one bit
     // each of consoleLightingLegacySlot()'s u32 so one root cause can be isolated at a time. Same
-    // raw-slot/deviceSetters shape as voxi.giPoisonView/nrdLegacyCamera above. Default OFF on all
+    // raw-slot/deviceSetters shape as voxi.giPoisonView above. Default OFF on all
     // five (the fixed behaviour); ALL FIVE true must reproduce HEAD's image exactly (checklist item 12).
     auto legacyBitRead = [](u32 bit) {
         return [bit]{ return vBool((consoleLightingLegacySlot() & bit) != 0u); };
@@ -711,7 +689,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "ON reinstates the pre-fix behaviour for comparison only: the ReSTIR candidate ray and the "
         "sky-occlusion ray both sample a fixed 45-degree ring instead of a cosine-weighted hemisphere "
         "(root cause R0 of the contrast-fix plan; gAmbientParams.z bit 1). Default OFF samples the "
-        "cosine hemisphere and resets GI/NRD/AO history on either transition.",
+        "cosine hemisphere and resets GI/denoiser/AO history on either transition.",
         legacyBitRead(1u), legacyBitStage(1u)});
     t.push_back({"voxi.legacySkyDoubleCount", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: giMode 1's receiver counts its own "
@@ -721,14 +699,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     t.push_back({"voxi.legacyRestirHitSky", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: the ReSTIR candidate hit's own "
         "second-bounce sky is added with no visibility test at all (root cause R2; gAmbientParams.z "
-        "bit 4). Default OFF traces one visibility ray for it and resets GI/NRD history on either "
+        "bit 4). Default OFF traces one visibility ray for it and resets GI/denoiser history on either "
         "transition.",
         legacyBitRead(4u), legacyBitStage(4u)});
     t.push_back({"voxi.legacyRestirReuseVisibility", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: a spatio-temporally reused ReSTIR "
         "sample shades with no visibility test between the receiver and the reused sample's position "
         "(root cause R3; gAmbientParams.z bit 8). Default OFF traces that visibility ray and resets "
-        "GI/NRD history on either transition.",
+        "GI/denoiser history on either transition.",
         legacyBitRead(8u), legacyBitStage(8u)});
     t.push_back({"voxi.legacyConeWeights", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: the cone gather's directions are "
@@ -741,15 +719,15 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // and default are in the help string below; inert on Vulkan (VulkanDevice.cpp's blended=false).
     t.push_back({"voxi.legacyBlendedHistoryWrite", VarType::Bool, false,
         "ON reinstates the pre-fix behaviour for comparison only: a blended (alpha-blend or "
-        "transmissive) fragment's per-pixel GI/NRD history writes and readbacks stop being suppressed, "
+        "transmissive) fragment's per-pixel GI/denoiser history writes and readbacks stop being suppressed, "
         "so the opaque surface behind glass or water is overwritten by whichever pane covered it last "
         "(root cause W6; gAmbientParams.z bit 32; D3D12 only -- inert on Vulkan, which never marks a "
         "draw blended). Default OFF keeps W6's fix; VoxiRenderer::setLightingLegacyBits is the piece "
-        "that resets GI/NRD/RT history on this bit's transition, the same as the five bits above it.",
+        "that resets GI/denoiser/RT history on this bit's transition, the same as the five bits above it.",
         legacyBitRead(32u), legacyBitStage(32u)});
-    t.push_back({"voxi.legacyNrdReadback", VarType::Bool, false,
-        "ON reinstates the pre-fix read of NRD's denoised GI for comparison only: at THIS frame's "
-        "pixel, although NRD filtered LAST frame's -- a one-frame displacement in motion, seen as GI "
+    t.push_back({"voxi.legacyDenoisedReadback", VarType::Bool, false,
+        "ON reinstates the pre-fix read of the denoised GI for comparison only: at THIS frame's "
+        "pixel, although the denoiser filtered LAST frame's -- a one-frame displacement in motion, seen as GI "
         "leaking along edges. Default OFF reprojects the read to where the surface was last frame "
         "(gAmbientParams.z bit 64). A still frame is identical either way.",
         legacyBitRead(64u), legacyBitStage(64u)});
@@ -816,8 +794,8 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // (RenderSettingsResolver.hpp), the same honesty mechanism as voxi.giMode above --
     // denoiser was never clamped inside Settings itself (unlike giMode's old, now-removed clamp) --
     // reading raw and reading "is it actually running" only ever coincided because nothing could
-    // refuse it that Settings' own honesty didn't already cover; RequiresNrd/RequiresRayTracingEnabled/
-    // RequiresGlobalIllumination/NothingToDenoise can all now refuse it. NRD also refuses above MSAA 1
+    // refuse it that Settings' own honesty didn't already cover; RequiresDenoiserBackend/RequiresRayTracingEnabled/
+    // RequiresGlobalIllumination/NothingToDenoise can all now refuse it. The denoiser also refuses above MSAA 1
     // (D3D12 will not mix sample counts in one render-target set, so the G-buffer would be cleared and
     // never written) -- that reason is SOFT (RequiresMsaaOne): `set voxi.denoiser true` at 8x MSAA still
     // stages/commits true and reads back false; VoxiRenderer prints the matching WARN once.
@@ -828,95 +806,42 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vBool(Renderer::get().settings().fogOcclusion); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->fogOcclusion = on; }); }});
     t.push_back({"voxi.denoiser", VarType::Bool, false,
-        "NVIDIA NRD over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES RT hardware, the RT tier not Off, something to denoise, D3D12+NRD and MSAA 1; above 1x sample count the pass skips itself and says so once at WARN, and this always reads back what is ACTUALLY running, not merely what was last requested",
+        "AMD FidelityFX Denoiser over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES RT hardware, the RT tier not Off, something to denoise, D3D12 and MSAA 1; above 1x sample count the pass skips itself and says so once at WARN, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
-    // ---- REBLUR_DIFFUSE history/prepass tuning -- LIVE: VoxiRenderer re-issues NRD's own
-    // SetDenoiserSettings every frame (applyReblurTuning, VoxiRenderer.cpp), so a change takes effect
-    // next frame with no reload, unlike voxi.layeredBsdf above. Only meaningful once voxi.denoiser is
-    // on and REBLUR_DIFFUSE exists; harmless and kept otherwise. Ranges are NRD's own (NRDSettings.h).
-    t.push_back({"voxi.reblurDiffusePrepassBlurRadius", VarType::F32, false,
-        "REBLUR_DIFFUSE pre-accumulation spatial blur radius, in pixels; 0 skips the pre-pass dispatch "
-        "entirely. NRD's own default and this engine's is 30 (engine clamps to [0,100] -- NRD's header "
-        "states only the 0 lower bound, 100 is a defensive ceiling this engine adds)",
-        []{ return vF32(Renderer::get().settings().reblurDiffusePrepassBlurRadius); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurDiffusePrepassBlurRadius = n; }); }});
-    t.push_back({"voxi.reblurMaxAccumulatedFrameNum", VarType::U32, false,
-        "REBLUR_DIFFUSE main history depth, in frames -- latency/noise trade, not a dispatch toggle. "
-        "NRD's own default and this engine's is 30 (engine clamps to [0,63], NRD's own "
-        "REBLUR_MAX_HISTORY_FRAME_NUM)",
-        []{ return vU32(Renderer::get().settings().reblurMaxAccumulatedFrameNum); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxAccumulatedFrameNum = n; }); }});
-    t.push_back({"voxi.reblurMaxStabilizedFrameNum", VarType::U32, false,
-        "REBLUR_DIFFUSE temporal-stabilization history depth, in frames; 0 skips the stabilization "
-        "dispatch entirely, and a value at or above voxi.reblurMaxAccumulatedFrameNum gets REDUCED to "
-        "it by NRD ITSELF (its own header documents this), not by this engine -- today's defaults (63 "
-        "here, 30 there) are exactly such a pair, unchanged. NRD's own default and this engine's is 63 "
-        "(engine clamps to [0,63], NRD's own REBLUR_MAX_HISTORY_FRAME_NUM)",
-        []{ return vU32(Renderer::get().settings().reblurMaxStabilizedFrameNum); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxStabilizedFrameNum = n; }); }});
-    // The residual-noise dials -- see render.nrd::Denoiser::ReblurTuning for each one's NRD guidance.
-    // Same LIVE shape as the three above; NRD's own defaults.
-    t.push_back({"voxi.reblurAntiFirefly", VarType::Bool, false,
-        "REBLUR_DIFFUSE anti-firefly (NRD's enableAntiFirefly). NRD default ON",
-        []{ return vBool(Renderer::get().settings().reblurAntiFirefly); },
-        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->reblurAntiFirefly = on; }); }});
-    t.push_back({"voxi.reblurFireflySuppressorScale", VarType::F32, false,
-        "REBLUR_DIFFUSE temporal firefly suppressor: each new value is clamped to (this + 38/(history "
-        "length+1)) x the pixel's own history. NRD documents [1,3], default 2",
-        []{ return vF32(Renderer::get().settings().reblurFireflySuppressorScale); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurFireflySuppressorScale = n; }); }});
-    t.push_back({"voxi.reblurAntilagSigmaScale", VarType::F32, false,
-        "REBLUR_DIFFUSE antilag: luminance delta is discounted by local variance times this; LARGER "
-        "quietens antilag (NRD has no off switch). NRD default 2 (its old default was 4)",
-        []{ return vF32(Renderer::get().settings().reblurAntilagSigmaScale); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurAntilagSigmaScale = n; }); }});
-    t.push_back({"voxi.reblurAntilagSensitivity", VarType::F32, false,
-        "REBLUR_DIFFUSE antilag sensitivity; SMALLER is more sensitive. NRD default 3",
-        []{ return vF32(Renderer::get().settings().reblurAntilagSensitivity); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurAntilagSensitivity = n; }); }});
-    t.push_back({"voxi.reblurMinHitDistanceWeight", VarType::F32, false,
-        "REBLUR_DIFFUSE spatial hit-distance weight floor, (0,0.2]; NRD recommends smaller for "
-        "ReSTIR signals. NRD default 0.1",
-        []{ return vF32(Renderer::get().settings().reblurMinHitDistanceWeight); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMinHitDistanceWeight = n; }); }});
-    t.push_back({"voxi.reblurFastHistoryClampSigma", VarType::F32, false,
-        "REBLUR_DIFFUSE colour-box scale clamping main history to fast history, [1,3]; NRD: 1.5 "
-        "works well even for dirty signals. NRD default 2",
-        []{ return vF32(Renderer::get().settings().reblurFastHistoryClampSigma); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurFastHistoryClampSigma = n; }); }});
-    t.push_back({"voxi.reblurMaxFastAccumulatedFrameNum", VarType::U32, false,
-        "REBLUR_DIFFUSE fast-history depth in frames, at most the main depth (equal disables fast "
-        "history). NRD default 6",
-        []{ return vU32(Renderer::get().settings().reblurMaxFastAccumulatedFrameNum); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxFastAccumulatedFrameNum = n; }); }});
-    t.push_back({"voxi.reblurHistoryFixFrameNum", VarType::U32, false,
-        "REBLUR_DIFFUSE frames reconstructed spatially after a history reset, below the fast depth. "
-        "NRD default 3",
-        []{ return vU32(Renderer::get().settings().reblurHistoryFixFrameNum); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurHistoryFixFrameNum = n; }); }});
-    t.push_back({"voxi.reblurSunMovingFrameNum", VarType::U32, false,
-        "REBLUR_DIFFUSE history depth while the sun moves (and one frame after), so a drag's bounce "
-        "light does not lag the sun. 63 or at/above voxi.reblurMaxAccumulatedFrameNum turns it off. "
-        "Default 4",
-        []{ return vU32(Renderer::get().settings().reblurSunMovingFrameNum); },
-        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurSunMovingFrameNum = n; }); }});
-    t.push_back({"voxi.reblurMinBlurRadius", VarType::F32, false,
-        "REBLUR_DIFFUSE spatial radius once converged, in pixels. NRD default 1",
-        []{ return vF32(Renderer::get().settings().reblurMinBlurRadius); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMinBlurRadius = n; }); }});
-    t.push_back({"voxi.nrdCameraMatchesInputs", VarType::Bool, false,
-        "ON tells NRD its inputs were rendered with last frame's camera, which they were -- it runs "
-        "before this frame's scene pass. Default OFF (this frame's camera, the shipped wiring): the "
-        "consistent pairing measured no visible gain and ~3% more motion grain on NRD's GI. Flipping "
-        "it resets NRD's history",
-        []{ return vBool(Renderer::get().settings().nrdCameraMatchesInputs); },
-        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrdCameraMatchesInputs = on; }); }});
-    t.push_back({"voxi.reblurMaxBlurRadius", VarType::F32, false,
-        "REBLUR_DIFFUSE spatial radius on a fresh history, in pixels. Engine default 10 (NRD's is 30): "
-        "measured ~15% less grain just after camera motion, no still-frame change",
-        []{ return vF32(Renderer::get().settings().reblurMaxBlurRadius); },
-        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxBlurRadius = n; }); }});
+    // ---- denoiser tuning -- LIVE: VoxiRenderer re-issues the denoiser's tuning every frame, so a
+    // change takes effect next frame, no rebuild. Only meaningful while voxi.denoiser is on; harmless
+    // and kept otherwise. Ranges match Voxi.cpp's own clamps; out-of-range values are refused here.
+    t.push_back({"voxi.denoiserMaxSamples", VarType::U32, false,
+        "Denoiser history length, in frames -- latency/noise trade, not a dispatch toggle: higher "
+        "converges quieter but lags longer behind a moving light or camera. Default 32 (engine "
+        "clamps to [1,255])",
+        []{ return vU32(Renderer::get().settings().denoiserMaxSamples); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->denoiserMaxSamples = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u < 1 || v.as.u > 255) { err = "denoiserMaxSamples must be 1..255"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.denoiserHistoryClipWeight", VarType::F32, false,
+        "Width of the neighbourhood box the denoiser clips its history to: SMALLER rejects stale "
+        "history harder (less ghosting, more grain), LARGER trusts it longer. Default 0.5 (engine "
+        "clamps to [0.01,4])",
+        []{ return vF32(Renderer::get().settings().denoiserHistoryClipWeight); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->denoiserHistoryClipWeight = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.01f && v.as.f <= 4.0f)) { err = "denoiserHistoryClipWeight must be 0.01..4"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.denoiserSunMovingSamples", VarType::U32, false,
+        "Denoiser history cap while the sun moves (and one frame after), so a drag's bounce light "
+        "does not lag the sun. At or above voxi.denoiserMaxSamples turns it off. Default 4 (engine "
+        "clamps to [1,255])",
+        []{ return vU32(Renderer::get().settings().denoiserSunMovingSamples); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->denoiserSunMovingSamples = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u < 1 || v.as.u > 255) { err = "denoiserSunMovingSamples must be 1..255"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.rtShadowDenoise", VarType::U32, false,
         "Spatial denoise radius for the ray-traced sun shadow, in pixels (engine clamps to [0,3])",
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },
@@ -939,9 +864,9 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "0 = single pass (one ray-driven draw; the baseline and fallback), 1 = staged: a "
         "visibility compute pass, lighting compute passes, then the same shading draw (same image "
         "as 0, measured 40-45% faster). 2 = staged + half-rate GI (DEFAULT): the ReSTIR GI stage "
-        "traces half the pixels per frame in NRD's checkerboard and REBLUR reconstructs the rest -- "
+        "traces half the pixels per frame in a checkerboard and the denoiser reconstructs the rest -- "
         "a further ~1.4 ms, image within 0.4% of 1 still, slightly noisier in motion. 2 differs "
-        "from 1 only while ReSTIR GI and the NRD denoiser are on (otherwise it behaves as 1, logged "
+        "from 1 only while ReSTIR GI and the denoiser are on (otherwise it behaves as 1, logged "
         "once). D3D12 only for 1 and 2; other backends run the single pass. Only applies when "
         "voxi.rtRenderMode resolves to 1. Out-of-range values clamp to 2.",
         []{ return vU32(Renderer::get().settings().rayDrivenStages); },
@@ -1179,7 +1104,7 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
 }
 
 // Path tracer's matched-environment legacy switch (contrast-fix plan F6/F7; root cause R5), same
-// raw-slot idiom as consoleGiPoisonViewSlot()/consoleNrdLegacyCameraSlot() above but DELIBERATELY
+// raw-slot idiom as consoleGiPoisonViewSlot() above but DELIBERATELY
 // outside their AVER_MODULE_VOXI guard: PtSceneView's registration/tier selection must keep working
 // with that module off (see SandboxApp.cpp's ptSceneViewWantEnabled_ comment). Written by
 // `set pt.legacyEnvironment` (registerRhiVars below) or seeded from --pt-legacy-env (for a --frames
@@ -1575,7 +1500,7 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
     t.push_back({"set", "set <name> <value> [<name> <value> ...] -- set one or more engine variables", &handleVarSet});
     t.push_back({"vars", "vars [text] -- list every variable, or filter by name/description and group by prefix", &handleVarsList});
 #if AVER_MODULE_VOXI
-    // ---- per-history reset commands: bisect a burned-in ReSTIR-GI/RT/NRD artifact by hand, one
+    // ---- per-history reset commands: bisect a burned-in ReSTIR-GI/RT/denoiser artifact by hand, one
     // history at a time, without a resize (VoxiRenderer::resetGiHistory's comment has the same-shape
     // flag-flip cure). Each raises a one-shot request on voxi::Renderer, consumed next frame by
     // SandboxApp.cpp beside voxiRenderer_.setSettings(vs). TRY resetgihistory FIRST (see each
@@ -1612,26 +1537,26 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
                                    "shared flag, see help resetrthistory).");
             return true;
         }});
-    t.push_back({"resetnrdhistory",
-        "Force NVIDIA NRD/REBLUR to throw away its own internal temporal history on the next frame, "
-        "without a resize -- uses NRD's own resetHistory contract (NrdRecorder::forceHistoryReset). "
+    t.push_back({"resetdenoiserhistory",
+        "Force the AMD FidelityFX denoiser to throw away its own internal temporal history on the next "
+        "frame, without a resize (Denoiser::forceHistoryReset). "
         "Try this if neither resetgihistory nor resetrthistory cleared the artifact.",
         [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
-            voxi::Renderer::get().requestNrdHistoryReset();
-            print(LogLevel::Info, "Requested: NRD history reset. Watch the Output Log for "
-                                   "'[NRD] history reset' next frame.");
+            voxi::Renderer::get().requestDenoiserHistoryReset();
+            print(LogLevel::Info, "Requested: denoiser history reset. Watch the Output Log for "
+                                   "'[Denoise] history reset' next frame.");
             return true;
         }});
     t.push_back({"resetallhistory",
-        "Run every reset* command above in one call: GI reservoir, RT shadow/reflection/AO, and NRD. "
+        "Run every reset* command above in one call: GI reservoir, RT shadow/reflection/AO, and the denoiser. "
         "Do NOT run this FIRST during a bisection -- it clears everything at once and tells you "
         "nothing about which buffer was actually poisoned; try the individual commands one at a time "
         "first. The voxel-cone GI volume needs none of these -- it clears itself every rebuild.",
         [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
             voxi::Renderer::get().requestGiHistoryReset();
             voxi::Renderer::get().requestRtHistoryReset();
-            voxi::Renderer::get().requestNrdHistoryReset();
-            print(LogLevel::Info, "Requested: GI + RT/shadow/reflection/AO + NRD history reset, all "
+            voxi::Renderer::get().requestDenoiserHistoryReset();
+            print(LogLevel::Info, "Requested: GI + RT/shadow/reflection/AO + denoiser history reset, all "
                                    "next frame. Watch the Output Log for three separate lines.");
             return true;
         }});

@@ -78,7 +78,6 @@ Application* createApplication(int argc, char** argv) {
     int giModeArg = -1;
     int rdStagesArg = -1;   // --rd-stages 0|1|2
     int denoiserArg = -1;   // --denoiser 0|1
-    int reblurAccumArg = -1;   // --reblur-accum N
     // REFRACTION: the tier picks a mode, these override it. -1 is "not given" (every render override
     // here uses this sentinel, since `take()` tests for it) -- 0-means-absent would make
     // `--refraction 0` (OFF) silently undiscardable.
@@ -125,11 +124,9 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--gi-mode"))              giModeArg = std::atoi(argv[i + 1]);
         // --rd-stages 0|1|2: single-pass (0), staged (1) or staged + half-rate GI (2).
         if (!std::strcmp(argv[i], "--rd-stages"))            rdStagesArg = std::atoi(argv[i + 1]);
-        // --denoiser 0|1: NVIDIA NRD over the ReSTIR GI and the sky occlusion; needs the G-buffer,
+        // --denoiser 0|1: AMD FidelityFX denoiser over the ReSTIR GI and the sky occlusion; needs the G-buffer,
         // which for most of this pass's life meant it was reachable only by also passing --gbuffer.
         if (!std::strcmp(argv[i], "--denoiser"))              denoiserArg = std::atoi(argv[i + 1]);
-        // --reblur-accum N: REBLUR_DIFFUSE's history depth, the console's voxi.reblurMaxAccumulatedFrameNum.
-        if (!std::strcmp(argv[i], "--reblur-accum"))          reblurAccumArg = std::atoi(argv[i + 1]);
         // --rt-denoise-motion F: see VoxiRenderer::setRtDenoiseMotionTaper.
         if (!std::strcmp(argv[i], "--rt-denoise-motion"))     rtDenoiseMotionArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
@@ -1248,13 +1245,12 @@ Application* createApplication(int argc, char** argv) {
                         "(none|reconstructed|half|full)", restirVisibilityArg);
     }
     app->setDenoiser(denoiserArg);
-    if (reblurAccumArg >= 0) app->setReblurAccum(reblurAccumArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);
     // --lighting-legacy / --pt-legacy-env: seed the raw console slots directly (EditorConsole.hpp),
     // the same slots `set voxi.legacyRestirSampleRing`/etc. and `set pt.legacyEnvironment` write --
-    // no SandboxApp member backs these; per-frame reasserts beside voxiRenderer_.setNrdLegacyCamera(...)/
+    // no SandboxApp member backs these; per-frame reasserts beside voxiRenderer_.setLightingLegacyBits(...)/
     // syncPtSceneView(...) do the rest, from frame 1. consoleLightingLegacySlot() is guarded (lives in
     // EditorConsole.hpp's AVER_MODULE_VOXI block, feeding VoxiRenderer::setLightingLegacyBits and
     // nothing else); consolePtLegacyEnvSlot() is not, since its path tracer must keep working with

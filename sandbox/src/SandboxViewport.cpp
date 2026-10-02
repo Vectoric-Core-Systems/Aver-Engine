@@ -2735,8 +2735,8 @@ void SandboxApp::buildViewportOverlay() {
         if (ImGui::Selectable("Undenoised", undenoised_)) undenoised_ = !undenoised_;
         uiReg_.track("viewMode.undenoised");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Turns off NRD, the RT sun-shadow spatial filter and ReSTIR GI's spatial\n"
-                              "reuse, forces every pixel to trace every frame, and resets GI/RT/NRD\n"
+            ImGui::SetTooltip("Turns off the denoiser, the RT sun-shadow spatial filter and ReSTIR GI's spatial\n"
+                              "reuse, forces every pixel to trace every frame, and resets GI/RT/denoiser\n"
                               "history every frame (no temporal accumulation). The reflection and\n"
                               "sky-occlusion spatial filters have no runtime knob and stay on.");
         ImGui::EndPopup();

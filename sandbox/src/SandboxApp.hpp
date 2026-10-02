@@ -203,11 +203,6 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // needed here.
 #include "aver/voxi/ProjectRenderApply.hpp"
 #include "aver/voxi/FrameBudget.hpp"
-// For Denoiser::available() alone. DeviceInfo::nrdSupported below is R1's other mirror site of
-// GameApp::attachVoxi (Runtime/src/GameApp.cpp) -- same expression, `backend() == D3D12 &&
-// available()`, keep both in sync. No extra link guard needed: Aver.Render.Voxi.Renderer already
-// links Aver.Render.NRD PUBLIC (modules/render.voxi/CMakeLists.txt).
-#include "aver/render/nrd/NrdDenoiser.hpp"
 #endif
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
@@ -1630,7 +1625,6 @@ public:
     void setGiMode(int n);                             // --gi-mode N
     void setRestirVisibility(int n);
     void setDenoiser(int n);                          // --denoiser 0|1
-    void setReblurAccum(int n);                    // --reblur-accum N
     void setRenderScale(f32 s);                    // --render-scale F
 #if AVER_MODULE_SR
     void setAverSrQuality(aver::sr::Quality q);
@@ -3858,7 +3852,6 @@ private:
     // not "flag not given".
     int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
-    int  reblurAccumOverride_=-1;    // --reblur-accum N: REBLUR_DIFFUSE history depth for a --frames run; -1 is "flag not given"
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) = no AverSR: no render-scale
@@ -4226,7 +4219,7 @@ private:
     int ptSceneToggleOnAutoFrames_ = 0;
     int ptSceneToggleOffAutoFrames_ = 0;
     // --sun-set-at N ELEV AZIM and --gi-history-reset-at N: VERIFICATION ONLY. Simulates dragging the
-    // Directional Light panel's Elevation/Azimuth sliders + resetgihistory/resetnrdhistory, N frames
+    // Directional Light panel's Elevation/Azimuth sliders + resetgihistory/resetdenoiserhistory, N frames
     // into a --frames run -- the only way to capture indirect light AFTER a live sun move (a level's
     // SUN line, applied before frame 1, can't show this). Countdowns from process start, the same
     // shape as the two above.

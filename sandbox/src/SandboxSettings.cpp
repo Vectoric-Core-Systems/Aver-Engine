@@ -390,7 +390,7 @@ void SandboxApp::buildEditorPrefs() {
                               "the preset.\n"
                               "\n"
                               "The 5.0ms-at-Off / 2.3-1.7-1.3ms figure this tooltip used to quote\n"
-                              "was recorded pre-ReSTIR/pre-NRD; aver-aversr-measured.md records\n"
+                              "was recorded pre-ReSTIR/pre-denoiser; aver-aversr-measured.md records\n"
                               "this figure as unverified.");
         if (averSrMigrationNoteArmed_)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
@@ -1675,7 +1675,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "while the camera moves -- cannot occur.\n\n"
                               "EXPERIMENTAL: spatio-temporal resampling. Grainier than the\n"
                               "cone gather unless Denoiser below is on -- which is what the\n"
-                              "NRD pass is for, and it needs MSAA 1 to run at all.");
+                              "denoiser pass is for, and it needs MSAA 1 to run at all.");
         // ReSTIR is requested but not effective: named here in the page's red-reason idiom, rather
         // than left for the combo to silently read "Voxel cones" with no explanation.
         if (s.giMode != 0 && er.giMode.reason != DisableReason::None)
@@ -1779,7 +1779,7 @@ void SandboxApp::buildRenderingSettings(int page) {
         // above and the ray-tracing page's sky occlusion, and it's the only thing in the engine that
         // needs the G-buffer. Before this checkbox it was only reachable via --gbuffer on the command line.
         //
-        // Greyed for a hard reason (er.denoiser.reason -- RT hardware/tier, NRD support, nothing to
+        // Greyed for a hard reason (er.denoiser.reason -- RT hardware/tier, D3D12 backend, nothing to
         // denoise); left clickable for the soft one (RequiresMsaaOne), since the MSAA radios below
         // fix that in one click (RenderSettingsResolver.hpp's "soft reasons only warn inline").
         // Shown state is EFFECTIVE while hard-greyed (s.denoiser untouched, so a request survives a
@@ -1787,7 +1787,7 @@ void SandboxApp::buildRenderingSettings(int page) {
         const bool denoiserHardGreyed = greysControl(er.denoiser.reason);
         ImGui::BeginDisabled(denoiserHardGreyed);
         bool den = s.denoiser && !denoiserHardGreyed;
-        if (ImGui::Checkbox("Denoiser (NVIDIA NRD)", &den)) { s.denoiser = den; changed = true; }
+        if (ImGui::Checkbox("Denoiser (AMD FidelityFX)", &den)) { s.denoiser = den; changed = true; }
         ImGui::EndDisabled();
         if (denoiserHardGreyed) {
             ImGui::SameLine();
@@ -1795,12 +1795,13 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Filters the ReSTIR indirect diffuse above and the ray-traced sky\n"
-                                    "occlusion, with NVIDIA NRD's REBLUR (third_party/nrd).\n\n"
+                                    "occlusion, with the AMD FidelityFX Denoiser (MIT,\n"
+                                    "third_party/fidelityfx-denoiser).\n\n"
                                     "COSTS THE G-BUFFER: velocity, view-space depth and packed\n"
                                     "normal/roughness -- three render targets NOTHING ELSE in\n"
                                     "this engine needs, about 54 MB at 1080p. That is why it is\n"
                                     "off by default rather than something enabled for you.\n\n"
-                                    "REQUIRES MSAA 1 and D3D12. Above 1x the G-buffer is cleared\n"
+                                    "REQUIRES the G-buffer, MSAA 1 and D3D12. Above 1x the G-buffer is cleared\n"
                                     "but never written, so the pass refuses to run rather than\n"
                                     "filter blanks into a confidently wrong image.\n\n"
                                     "Round-trips as RENDER.DENOISER.");
@@ -1889,9 +1890,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                                   "  cyan     candidate-radiance clamp\n"
                                   "  yellow   target-pdf guard\n"
                                   "  orange   pre-existing final-estimate guard\n"
-                                  "  blue     NRD-readback guard\n"
+                                  "  blue     denoiser-readback guard\n"
                                   "  red      raw estimate hit voxi.giRadianceCeiling, still finite\n"
-                                  "  green    NRD-denoised readback hit the same ceiling\n"
+                                  "  green    denoised readback hit the same ceiling\n"
                                   "  violet   ray-traced specular indirect ceiling hit (either "
                                   "diffuse estimator)\n"
                                   "All colours zero means no guard is firing.");
@@ -1981,37 +1982,61 @@ void SandboxApp::buildRenderingSettings(int page) {
                                "resolves it without paying for more rays. Keeps no history, so\n"
                                "unlike amortisation above it costs nothing in lag under motion.");
 
-        // ---- A third, separate denoiser (Settings::reblurMaxAccumulatedFrameNum) ----
-        // The two above filter the ray-traced sun shadow; this tunes REBLUR_DIFFUSE, filtering the
-        // ReSTIR indirect-diffuse GI estimate behind GI page's "Denoiser (NVIDIA NRD)" checkbox.
-        // Sits here with this page's other "Denoiser: ..." rows. VoxiRenderer re-issues
-        // nrd::SetDenoiserSettings every setSettings() call, so it takes effect next frame, no rebuild.
+        // ---- A third, separate denoiser (Settings::denoiserMaxSamples) ----
+        // The two above filter the ray-traced sun shadow; this tunes the AMD FidelityFX Denoiser,
+        // filtering the ReSTIR indirect-diffuse GI estimate behind GI page's "Denoiser (AMD
+        // FidelityFX)" checkbox. Sits here with this page's other "Denoiser: ..." rows. VoxiRenderer
+        // re-issues the denoiser tuning every setSettings() call, so it takes effect next frame, no
+        // rebuild. Greyed with the checkbox's hard reason, like the rest of the denoiser.
         ImGui::Spacing();
-        ImGui::TextUnformatted("Denoiser: NRD/REBLUR history depth (indirect diffuse GI)");
+        ImGui::TextUnformatted("Denoiser: AMD FidelityFX history (indirect diffuse GI)");
         ImGui::Separator();
         {
-            int accum = static_cast<int>(s.reblurMaxAccumulatedFrameNum);
-            if (ImGui::SliderInt("History depth (frames)", &accum, 0, 63)) {
-                s.reblurMaxAccumulatedFrameNum = static_cast<u32>(accum);
+            const bool tuneGreyed = greysControl(er.denoiser.reason);
+            ImGui::BeginDisabled(tuneGreyed);
+            int maxSamples = static_cast<int>(s.denoiserMaxSamples);
+            if (ImGui::SliderInt("History depth (frames)", &maxSamples, 1, 255)) {
+                s.denoiserMaxSamples = static_cast<u32>(maxSamples);
                 changed = true;
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("REBLUR_DIFFUSE's main history depth, in frames -- a latency/\n"
-                                  "noise trade, not a dispatch toggle: higher converges quieter\n"
-                                  "but lags longer behind a moving light or camera. Filters the\n"
-                                  "indirect-diffuse GI estimate (the \"Denoiser (NVIDIA NRD)\"\n"
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("The denoiser's history length, in frames -- a latency/noise\n"
+                                  "trade, not a dispatch toggle: higher converges quieter but lags\n"
+                                  "longer behind a moving light or camera. Filters the indirect-\n"
+                                  "diffuse GI estimate (the \"Denoiser (AMD FidelityFX)\"\n"
                                   "checkbox, Global Illumination page), not the sun shadow above.\n"
-                                  "[0,63] is NRD's own REBLUR_MAX_HISTORY_FRAME_NUM.\n"
+                                  "[1,255]; default 32.\n"
                                   "NOT captured to the project manifest -- like giSkyOcclusionRays/\n"
                                   "Tile, it has no manifest key (ProjectRenderApply.hpp's own\n"
-                                  "capture rule), so it resets to the compiled default, 30, on the\n"
+                                  "capture rule), so it resets to the compiled default on the\n"
                                   "next project reload rather than round-tripping through .ocproject.");
+            float clip = s.denoiserHistoryClipWeight;
+            if (ImGui::SliderFloat("History clip width", &clip, 0.01f, 4.0f, "%.2f")) {
+                s.denoiserHistoryClipWeight = clip;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Width of the neighbourhood box the history is clipped to.\n"
+                                  "Smaller rejects stale history harder (less ghosting, more\n"
+                                  "grain); larger trusts it longer. [0.01,4]; default 0.5.\n"
+                                  "Not captured to the project manifest (see above).");
+            int sunSamples = static_cast<int>(s.denoiserSunMovingSamples);
+            if (ImGui::SliderInt("History while sun moves (frames)", &sunSamples, 1, 255)) {
+                s.denoiserSunMovingSamples = static_cast<u32>(sunSamples);
+                changed = true;
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("History cap while the sun moves (and one frame after), so a\n"
+                                  "drag's bounce light does not lag the sun. At or above the\n"
+                                  "history depth it has no effect. [1,255]; default 4.\n"
+                                  "Not captured to the project manifest (see above).");
+            ImGui::EndDisabled();
         }
 
         // ---- History resets (debug): one button per reset*history console command ----
-        // Bisection order is GI, then RT, then NRD (EditorConsole.hpp). AO has no button of its own:
+        // Bisection order is GI, then RT, then the denoiser (EditorConsole.hpp). AO has no button of its own:
         // requestAoHistoryReset() shares RT's validity flag, so it'd duplicate Reset RT history.
-        // Reset All mirrors resetallhistory: GI + RT + NRD, not a redundant fourth AO call.
+        // Reset All mirrors resetallhistory: GI + RT + denoiser, not a redundant fourth AO call.
         ImGui::Spacing();
         ImGui::TextUnformatted("History resets (debug)");
         ImGui::Separator();
@@ -2027,16 +2052,16 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "frame (all three, plus AO, share one validity flag today). Try\n"
                               "this if resetting GI history alone did not clear the artifact.");
         ImGui::SameLine();
-        if (ImGui::Button("Reset NRD history")) vx.requestNrdHistoryReset();
+        if (ImGui::Button("Reset denoiser history")) vx.requestDenoiserHistoryReset();
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Forces NVIDIA NRD/REBLUR to throw away its own internal temporal\n"
-                              "history on the next frame. Try this if neither GI nor RT history\n"
+            ImGui::SetTooltip("Forces the AMD FidelityFX denoiser to throw away its own internal\n"
+                              "temporal history on the next frame. Try this if neither GI nor RT history\n"
                               "reset cleared the artifact.");
         ImGui::SameLine();
         if (ImGui::Button("Reset All")) {
             vx.requestGiHistoryReset();
             vx.requestRtHistoryReset();
-            vx.requestNrdHistoryReset();
+            vx.requestDenoiserHistoryReset();
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Runs all three resets above at once. Not the first move during a\n"
@@ -2096,9 +2121,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "Staged runs the primary ray, lighting and shading as separate GPU passes\n"
                               "instead of one giant shader: the same image, measured 40-45%% faster.\n"
                               "Staged + half-rate GI (the default) also traces only half the GI rays each\n"
-                              "frame (NRD's checkerboard) and REBLUR rebuilds the other half: a further\n"
+                              "frame (a checkerboard) and the denoiser rebuilds the other half: a further\n"
                               "~1.4 ms faster, within 0.4%% of Staged when still, slightly noisier in motion.\n"
-                              "It needs ReSTIR GI and the NRD denoiser on; without them it behaves as Staged.\n\n"
+                              "It needs ReSTIR GI and the denoiser on; without them it behaves as Staged.\n\n"
                               "Single pass is the one-shader baseline, kept as a fallback. Staged modes\n"
                               "are D3D12-only; other backends, or a pipeline/resource that is missing,\n"
                               "fall back to Single pass (logged once).\n\n"

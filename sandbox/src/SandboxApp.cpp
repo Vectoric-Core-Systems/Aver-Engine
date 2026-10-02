@@ -1125,9 +1125,9 @@ void SandboxApp::onInit(Engine& e)  {
         di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
         di.dxcAvailable = caps.dxcAvailable;
         // R1: computed here and mirrored in GameApp::attachVoxi (same expression); see
-        // DeviceInfo::nrdSupported's comment (Voxi.hpp) for why the struct carries the answer
+        // DeviceInfo::denoiserSupported's comment (Voxi.hpp) for why the struct carries the answer
         // rather than deriving it itself.
-        di.nrdSupported = e.device()->backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available();
+        di.denoiserSupported = e.device()->backend() == rhi::Backend::D3D12;
         voxi::Renderer::get().setDeviceInfo(di);
 
         // Project manifest applied HERE: before the flags and before init(). Before init() because
@@ -1199,13 +1199,6 @@ void SandboxApp::onInit(Engine& e)  {
         if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
         // Same -1 sentinel reasoning: 0 is a real answer ("denoiser off"), not an absent flag.
         if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
-        // --reblur-accum N: console's voxi.reblurMaxAccumulatedFrameNum, for a --frames run with no
-        // console. No manifest key names it; setting it here once is enough (manifest apply starts
-        // from live settings); clamped to NRD's [0,63].
-        if (reblurAccumOverride_ >= 0) {
-            k.reblurMaxAccumulatedFrameNum = static_cast<u32>(reblurAccumOverride_);
-            AVER_INFO("[Voxi] --reblur-accum {}: REBLUR_DIFFUSE history depth", reblurAccumOverride_);
-        }
         voxi::Renderer::get().setSettings(k);
         AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -1855,11 +1848,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
     }
 #if AVER_MODULE_VOXI
-    // --gi-history-reset-at: the resetgihistory and resetnrdhistory console commands' own requests.
+    // --gi-history-reset-at: the resetgihistory and resetdenoiserhistory console commands' own requests.
     if (giHistoryResetAtFrames_ > 0 && --giHistoryResetAtFrames_ == 0) {
         voxi::Renderer::get().requestGiHistoryReset();
-        voxi::Renderer::get().requestNrdHistoryReset();
-        AVER_INFO("[Sandbox] --gi-history-reset-at: GI reservoir and NRD history reset requested");
+        voxi::Renderer::get().requestDenoiserHistoryReset();
+        AVER_INFO("[Sandbox] --gi-history-reset-at: GI reservoir and denoiser history reset requested");
     }
 #endif
     // Clears the render-scale crash cookie once this session proves the scale survivable. Thirty
@@ -2585,15 +2578,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // immediately. OR'd together: --gbuffer alone must still write with no view selected, and a
     // debug view alone must still turn it on. No module gate -- default stays OFF for the
     // render-gate oracle and the 89 headless suites.
-    // Voxi's denoiser is the third reason the G-buffer exists: NRD is its only engine consumer and
-    // reads these three targets every frame it runs, so turning NRD on has to turn them on too --
+    // Voxi's denoiser is the third reason the G-buffer exists: the denoiser is its only engine
+    // consumer and reads these three targets every frame it runs, so turning it on has to turn them on too --
     // otherwise the Project Settings checkbox silently did nothing (reachable only from CLI before).
 #if AVER_MODULE_VOXI
     // N3 fix: the raw `denoiser` checkbox no longer gates this alone -- a ticked denoiser that can
-    // never actually run (no NRD, RT tier Off, nothing to filter) must not still cost the ~54 MB
+    // never actually run (not D3D12, RT tier Off, nothing to filter) must not still cost the ~54 MB
     // G-buffer allocation every frame. See Resolution::denoiserGBufferWanted
     // (RenderSettingsResolver.hpp) for the exact rule: wanted unless only the soft MSAA reason, if
-    // even that, stands between the request and NRD actually running.
+    // even that, stands between the request and the denoiser actually running.
     voxi::Renderer& vx = voxi::Renderer::get();
     const bool wantGbufForDenoiser = voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted;
 #else
@@ -2644,13 +2637,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             voxiRenderer_.resetRtHistory(true);
             voxiRenderer_.resetAoHistory();
             voxiRenderer_.resetGiHistory(true);
-            voxiRenderer_.resetNrdHistory(true);
+            voxiRenderer_.resetDenoiserHistory(true);
             lastEffectiveRtRenderMode_ = static_cast<i32>(vs.rtRenderMode);
         }
         // Undenoised (--view-mode undenoised / the dropdown's independent toggle): existing runtime
         // knobs applied to this scratch copy only, never persisted (see undenoised_'s declaration,
         // SandboxApp.hpp). Turns off:
-        //   - NRD entirely (denoiser)
+        //   - the denoiser entirely (denoiser)
         //   - ray-tile amortisation (rtPixelsPerRayTile 1: no tiling, no reprojected history, no temporal blend)
         //   - RT sun-shadow spatial filter (rtShadowDenoise 0 -- the radius/take pair packed into
         //     cb_.rtDenoiseParams.xy)
@@ -2677,7 +2670,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
         if (voxi::Renderer::get().consumeAoHistoryResetRequest())  voxiRenderer_.resetAoHistory();
-        if (voxi::Renderer::get().consumeNrdHistoryResetRequest()) voxiRenderer_.resetNrdHistory();
+        if (voxi::Renderer::get().consumeDenoiserHistoryResetRequest()) voxiRenderer_.resetDenoiserHistory();
         // voxi.debugResetHistoryEveryFrame, OR'd with Undenoised (same "no temporal accumulation"
         // reason as above): console slot is only ever READ here, so toggling Undenoised off leaves
         // it untouched.
@@ -2685,7 +2678,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (everyFrame || undenoised_) {
             if ((everyFrame & 1u) || undenoised_) voxiRenderer_.resetGiHistory(/*quiet=*/true);
             if ((everyFrame & 2u) || undenoised_) voxiRenderer_.resetRtHistory(/*quiet=*/true);
-            if ((everyFrame & 4u) || undenoised_) voxiRenderer_.resetNrdHistory(/*quiet=*/true);
+            if ((everyFrame & 4u) || undenoised_) voxiRenderer_.resetDenoiserHistory(/*quiet=*/true);
         }
         voxiRenderer_.setVolume(c, giExtent_);
         // Where a baked volume may be remembered. Pushed every frame like everything here; empty
@@ -2696,9 +2689,6 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // voxi.giPoisonView: EditorConsole.hpp's live source of truth, reasserted every frame like
         // occlusion.debugForceWaitIdle (see consoleGiPoisonViewSlot()).
         voxiRenderer_.setGiPoisonView(editor::consoleGiPoisonViewSlot());
-        // voxi.nrdLegacyCamera: same idiom (see consoleNrdLegacyCameraSlot()/setNrdLegacyCamera) --
-        // the setter itself only acts on an actual change.
-        voxiRenderer_.setNrdLegacyCamera(editor::consoleNrdLegacyCameraSlot());
         // Lighting-contrast fix's legacy bitmask: same idiom (see consoleLightingLegacySlot()/
         // setLightingLegacyBits for the bit table).
         voxiRenderer_.setLightingLegacyBits(editor::consoleLightingLegacySlot());
