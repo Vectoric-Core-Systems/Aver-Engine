@@ -36,6 +36,18 @@
 #define AVER_DNSR_SCALAR 0
 #endif
 
+// FP32 THROUGHOUT. FidelityFX writes its maths in min16float and packs it into groupshared memory
+// with f32tof16 (FFX_DNSR_Reflections_PackFloat16). Some DXC versions fold that call's float2()
+// widening away and emit `bitcast half to i16` on the min-precision value, which the DXIL
+// validator rejects ("Bitcast on minprecison types is not allowed"), and the pipeline never
+// builds. Without -enable-16bit-types min16float is only a hint that desktop drivers mostly run
+// at fp32 anyway, so spelling it float here costs nothing, removes the min-precision values the
+// validator objects to on every DXC version, and leaves the vendored headers untouched.
+#define min16float  float
+#define min16float2 float2
+#define min16float3 float3
+#define min16float4 float4
+
 #if AVER_DNSR_SCALAR
 #define DNSR_TEX float
 #define DNSR_LOAD3(v) ((min16float3)((v).xxx))
@@ -187,7 +199,13 @@ void FFX_DNSR_Reflections_StoreAverageRadiance(int2 p, min16float3 v)     { gDns
 void FFX_DNSR_Reflections_StoreVariance(int2 p, min16float v)             { gDnsrVarianceOut[p] = v; }
 void FFX_DNSR_Reflections_StoreNumSamples(int2 p, min16float v)           { gDnsrSampleCountOut[p] = v; }
 
+// The vendored headers trip two harmless DXC warnings (an unsuffixed literal shift, an implicit
+// vector truncation) on every compile; muted around each include only, never for our own code.
+#pragma dxc diagnostic push
+#pragma dxc diagnostic ignored "-Wambig-lit-shift"
+#pragma dxc diagnostic ignored "-Wconversion"
 #include "FidelityFX/ffx_denoiser_reflections_reproject.h"
+#pragma dxc diagnostic pop
 
 [numthreads(8, 8, 1)]
 void CSDenoiseReproject(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
@@ -216,7 +234,11 @@ void FFX_DNSR_Reflections_StorePrefilteredReflections(int2 p, min16float3 radian
     gDnsrPrefilteredVarianceOut[p] = variance;
 }
 
+#pragma dxc diagnostic push
+#pragma dxc diagnostic ignored "-Wambig-lit-shift"
+#pragma dxc diagnostic ignored "-Wconversion"
 #include "FidelityFX/ffx_denoiser_reflections_prefilter.h"
+#pragma dxc diagnostic pop
 
 [numthreads(8, 8, 1)]
 void CSDenoisePrefilter(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
@@ -245,7 +267,11 @@ void FFX_DNSR_Reflections_StoreTemporalAccumulation(int2 p, min16float3 radiance
     gDnsrVarianceOut[p] = variance;
 }
 
+#pragma dxc diagnostic push
+#pragma dxc diagnostic ignored "-Wambig-lit-shift"
+#pragma dxc diagnostic ignored "-Wconversion"
 #include "FidelityFX/ffx_denoiser_reflections_resolve_temporal.h"
+#pragma dxc diagnostic pop
 
 [numthreads(8, 8, 1)]
 void CSDenoiseResolve(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
