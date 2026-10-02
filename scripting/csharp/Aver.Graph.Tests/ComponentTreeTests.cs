@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Tests for the COMP record -- a class graph's COMPONENT TREE. See Graph.cs's GraphComponent and
 // OcGraphParser.cs's "COMP" case for what these prove parses correctly.
 //

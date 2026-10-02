@@ -1,6 +1,6 @@
 ﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Aver RHI â€” the single render-hardware abstraction every GPU consumer targets. Backends
 // (D3D12/D3D11/Vulkan) implement these interfaces; a Null backend is always available as a fallback.
 #pragma once

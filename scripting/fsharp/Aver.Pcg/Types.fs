@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // The boundary types of the PCG API: what F# hands to C#.
 //
 // EVERY TYPE HERE IS DELIBERATELY BORING. Records of primitives and arrays, no F# lists, no

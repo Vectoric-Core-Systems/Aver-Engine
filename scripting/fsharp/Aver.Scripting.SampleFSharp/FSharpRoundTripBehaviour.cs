@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // The C# end of the F# round trip: call an F#-compiled function and check its answer against a
 // C#-compiled one that was written to the same spec.
 

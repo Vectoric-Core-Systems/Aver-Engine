@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 //
 // Rigid-body shapes beyond box, sphere, convex hull, mesh and heightfield (those live on Physics).
 // See physics_shapes_abi.h's own file comment for why capsule/tapered-capsule height is TOTAL (both

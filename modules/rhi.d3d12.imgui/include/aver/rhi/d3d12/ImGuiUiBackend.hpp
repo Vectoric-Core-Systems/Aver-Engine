@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 //
 // The ONE public entry point of Aver.RHI.D3D12.ImGui: a factory for the concrete Dear ImGui
 // implementation of aver::rhi::d3d12::IUiBackend (see that header, in Aver.RHI.D3D12, for the

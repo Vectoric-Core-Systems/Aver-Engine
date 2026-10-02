@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Tests for FireEvent -- GAP 3, cross-entity events: a graph can DECLARE an on-demand event (OnHit
 // already proved that, see OnHitEventTests.cs) but until this node existed nothing could FIRE one on
 // ANOTHER entity's graph. See GraphCompiler.cs's EmitExecFireEvent/IsExecCapableFireEventType

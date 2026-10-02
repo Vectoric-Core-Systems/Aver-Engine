@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Tests for Spawn -- the "spawning/destroying an entity" node-vocabulary gap: a
 // Spawn(className, x, y, z) exec node returning the new entity id as a data pin, wrapping the
 // managed Aver.Framework.Actors.Spawn (see GraphInterop.SpawnForGraph's own comment for why the class

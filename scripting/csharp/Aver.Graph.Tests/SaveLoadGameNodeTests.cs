@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Tests for SaveGame / LoadGame -- the last two Aver Node entries the persistence work left open.
 // Both wrap Game.SaveGame(path)/LoadGame(path) (Game.cs), which already exist, are already tested at
 // the C++ level (tests/save), and are already reachable from C# directly -- these nodes are the

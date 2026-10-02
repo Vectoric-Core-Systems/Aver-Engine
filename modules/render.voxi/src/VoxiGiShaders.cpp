@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 //
 // The GI/shadow slice of Voxi's HLSL a foreign pipeline may borrow. See the public header's own
 // comment for what this is and, more importantly, what it deliberately is not: PSMainVoxi and every

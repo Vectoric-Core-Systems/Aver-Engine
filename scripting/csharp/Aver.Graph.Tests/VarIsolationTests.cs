@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // INDEPENDENT adversarial pass over graph-local persistent variables (VAR/GetVar/SetVar), written as an
 // INDEPENDENT second pass, deliberately not reusing GraphVarTests.cs's own scenarios.
 // Focused entirely on THE SHARING BUG: is variable storage really per-GraphHost-instance, or does it

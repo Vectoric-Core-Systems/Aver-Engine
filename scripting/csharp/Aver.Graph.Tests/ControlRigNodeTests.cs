@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Tests for SetControlRig -- the node that makes a control rig reachable from a LEVEL.
 //
 // WHY THIS NODE MATTERS MORE THAN ITS SIZE SUGGESTS. Everything under it was already built and

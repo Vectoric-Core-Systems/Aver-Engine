@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 //
 // The seam a D3D12-native in-window UI toolkit plugs into. This is what makes the ImGui/RHI split
 // possible: Aver.RHI.D3D12 (this module) knows only this abstract shape and NOTHING about Dear ImGui

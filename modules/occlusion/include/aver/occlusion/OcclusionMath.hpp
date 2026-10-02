@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 //
 // The PURE half of HZB occlusion culling: no RHI, no texture, no device -- three free functions that
 // project a box, pick a pyramid level, and combine a handful of sampled depths into one yes/no. This

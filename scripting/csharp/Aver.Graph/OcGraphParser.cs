@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
-// Developed by Vectoric-Core-Systems. All rights reserved.
-// Proprietary. See LICENSE.md at the repository root.
+// Developed by Vectoric-Core-Systems.
+// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
 // Parser for .ocgraph text format (line-based UTF-8, OC family pattern). Strips trailing ';'
 // and '#' comments. Supports both the C++ writer format (string node IDs, dot-notation links,
 // "in"/"out") and the C# format (int IDs as strings, space-separated tokens, "input"/"output").

@@ -241,7 +241,7 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 
 | Binary | Origin | Licence | Ships? |
 |---|---|---|---|
-| `AverEngineRuntime.exe` | ours | `LICENSE.md` | yes |
+| `AverEngineRuntime.exe` | ours | **LGPL-3.0-only** (`LICENSE.md`) | yes; `COPYING.LESSER` + `COPYING` go into `THIRD-PARTY-NOTICES.txt` |
 | `Aver.Scene/Framework/Physics/Render.PBR/Render.Voxi/UI.Abi .dll` | ours | ours | yes — load-time imports of the exe |
 | *statically linked:* Jolt Physics | `modules/physics.jolt/LICENSE` | **MIT** | yes; **notice required** |
 | *statically linked:* stb | `third_party/stb/LICENSE.txt` | **MIT / public domain** | yes; **notice required** |
@@ -255,7 +255,7 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 | `Microsoft.CodeAnalysis(.CSharp).dll` + 26 satellites | `bin\Tools\` | **MIT** | **NO.** No game needs a compiler. Note in passing: these ship in the *engine* payload today and `THIRD-PARTY-NOTICES.txt` never mentioned Roslyn — MIT requires the copyright notice. **Fixed:** `stage-payload.ps1` now emits a Roslyn section whenever it finds `Microsoft.CodeAnalysis*.dll` in the staged tree, concatenating `third_party/nuget/LICENSE.roslyn.txt`. The licence file had to be written rather than vendored: the packages declare MIT by SPDX expression and carry no licence text of their own. |
 | `Aver.Audio.Abi.dll` | ours | ours | **yes, since 2026-09.** This row said NO on a "zero callers" reading that went stale; `game.allowlist` carries the entry unconditionally now and its comment records the whole episode. |
 | `Aver.Settings.dll` | ours | ours | **yes, since 2026-09-20 — and this is the row the table was missing.** See below. |
-| `AverCrashReporter.exe` | ours | `LICENSE.md` | yes. Unconditional: it links nothing from the engine, and without it the runtime's crash handler writes a full report folder and then spawns an executable that is not there. |
+| `AverCrashReporter.exe` | ours | **LGPL-3.0-only** (`LICENSE.md`) | yes. Unconditional: it links nothing from the engine, and without it the runtime's crash handler writes a full report folder and then spawns an executable that is not there. |
 | `shaders\**` | ours | ours | yes. Not a redistribution question — a correctness one. The HLSL is read from `<exeDir>\shaders` at pipeline-build time, so a package without it ships the compiler and nothing to compile. |
 
 ### The two seams no import scan can see
