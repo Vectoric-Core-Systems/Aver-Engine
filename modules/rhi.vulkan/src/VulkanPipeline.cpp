@@ -564,11 +564,13 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     depthState.depthWriteEnable = d.depth.write ? VK_TRUE : VK_FALSE;
     depthState.depthCompareOp = toVkCompareOp(d.depth.op);
 
-    // D3D12_BLEND_DESC only ever populates RenderTarget[0] and leaves IndependentBlendEnable at its
-    // default FALSE, which means D3D12 applies THAT SAME state to every active render target. Mirror
-    // that here by writing the identical VkPipelineColorBlendAttachmentState into every entry up to
-    // rtCount, rather than leaving entries 1..rtCount-1 at Vulkan's own all-zero (blend-disabled)
-    // default -- a silent behavioural divergence a naive "just fill index 0" port would introduce.
+    // D3D12's opaque pipelines apply RenderTarget[0]'s state to every active render target
+    // (IndependentBlendEnable FALSE). Mirror that here by writing the identical
+    // VkPipelineColorBlendAttachmentState into every entry up to rtCount, rather than leaving entries
+    // 1..rtCount-1 at Vulkan's own all-zero (blend-disabled) default. ONE DIVERGENCE: D3D12 masks
+    // targets 1+ of a BLENDED multi-target pipeline (see its createGraphicsPipeline); doing the same
+    // here needs the independentBlend device feature, which this backend does not enable. No such
+    // pipeline exists today -- Voxi's blended draws are one-target (VoxiRenderer::scenePipeline).
     const u32 rtCount = d.renderTargetCount < 4 ? d.renderTargetCount : 4;
     VkPipelineColorBlendAttachmentState blendAttachments[4] = {};
     for (u32 i = 0; i < rtCount; ++i) {

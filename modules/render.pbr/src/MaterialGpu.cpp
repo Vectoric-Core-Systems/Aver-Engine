@@ -29,26 +29,15 @@ static_assert(sizeof(kSlotFlag) / sizeof(kSlotFlag[0]) == kTextureSlotCount,
 // Packs the authored description into the block the GPU reads.
 MaterialConstants packMaterial(const MaterialDesc& d) {
     MaterialConstants c{};
-    // Colour is decoded, coverage is not: glTF authors baseColorFactor's rgb in sRGB and its alpha
-    // as a linear number.
+    // Colour is decoded, coverage is not: an .ocmat holds baseColorFactor's rgb sRGB-ENCODED, the
+    // way a colour picked in the editor is, and its alpha as a linear number.
     //
-    // THAT PREMISE IS PROBABLY WRONG FOR glTF, AND IS DELIBERATELY LEFT ALONE PENDING A DECISION.
-    // The glTF 2.0 specification defines pbrMetallicRoughness.baseColorFactor as LINEAR multipliers
-    // on the sampled base-colour texels -- only the TEXTURE is sRGB-encoded, not the numeric factor.
-    // If that is right, this applies a second, spurious decode to every authored factor: pow(x, 2.2)
-    // on x in (0,1) pulls toward zero, so a tinted material renders DARKER and more saturated than
-    // authored. It is a no-op for the common {1,1,1,1}, which is why nothing has noticed.
-    //
-    // WHY IT IS NOT SIMPLY FLIPPED HERE: the three importers do not agree about what they hand over.
-    // OBJ's `Kd` is conventionally authored in sRGB, so for that source the decode is CORRECT; glTF
-    // and USD (diffuseColor) are linear, so for those it is not. One blanket rule is wrong whichever
-    // way it points -- the fix belongs in each importer, converting to a single documented convention
-    // before it reaches here, and it changes the appearance of every tinted material in every
-    // existing project. That is a content decision, not a cleanup.
-    //
-    // AND NOTHING CHECKS IT: MaterialTest.cpp:587-598 packs a factor and asserts only that ALPHA is
-    // exempt -- the three decoded channels are never compared against an expected value, so the
-    // premise this comment states has never been tested in either direction.
+    // THE IMPORTERS CONVERT TO THIS, NOT THE OTHER WAY ROUND. glTF's baseColorFactor and USD's
+    // diffuseColor are LINEAR, so the import cook encodes them with the exact inverse of this decode
+    // (MaterialCook.cpp, keyed on ImportedMaterial::baseColorFactorLinear); OBJ's Kd, which .mtl gives
+    // no colour space, is treated as sRGB and crosses as it is. Before that, a glTF's linear factor arrived here unconverted
+    // and was decoded a second time: a flat 0.5 grey rendered at 0.22. Existing .ocmat files keep
+    // their meaning -- only what the importers write changed.
     for (u32 i = 0; i < 3; ++i) c.baseColorFactor[i] = srgbToLinear(d.baseColorFactor[i]);
     c.baseColorFactor[3] = d.baseColorFactor[3];
     std::memcpy(c.emissiveFactor,  d.emissiveFactor,  sizeof(c.emissiveFactor));
@@ -89,7 +78,9 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // Lamp light, forwarded verbatim for the same reason: not clamped here, only floored at 0 by
     // pbr::sanitize (Material.cpp), the way every other authored float in this block already is.
     c.lightIntensity = d.lightIntensity;
-    c._lightPad[0] = c._lightPad[1] = c._lightPad[2] = 0.0f;   // assigned, not left to the {} above
+    // The scatter tint, decoded like baseColorFactor above: it is picked as a colour, in the same
+    // swatch widget, and multiplies the same (linear) albedo.
+    for (u32 i = 0; i < 3; ++i) c.subsurfaceColor[i] = srgbToLinear(d.subsurfaceColor[i]);
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)

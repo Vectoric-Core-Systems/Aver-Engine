@@ -1,4 +1,4 @@
-﻿// The scene join: walk the world, give every soft-body entity its own simulated mesh, dispatch the
+﻿// The scene join: walk the soft-body entities, give each its own simulated mesh, dispatch the
 // staging copy, release. See SoftBodyScene.hpp for the whole design -- what follows here is only
 // softBodyPackVertices, the pure half, plus the includes and namespace the class half (appended
 // below the marker) also needs.
@@ -330,16 +330,23 @@ void SoftBodyScene::update(scene::World& world, rhi::IDevice& dev) {
 
     // ---- reconcile the living, and pack this frame's vertices ----
     simulatedLastFrame_ = 0;
-    const u32 n = world.count();
     // Reused across every resident this frame rather than allocated per-entity: its capacity only
     // ever grows to the largest soft body touched so far.
     std::vector<f32> worldXyz;
-    for (u32 i = 0; i < n; ++i) {
-        const scene::Entity e = world.at(i);
+    // THE CSoftBody POOL, NOT EVERY ENTITY. Walking world.count() paid a destroyPending and a sparse-set
+    // probe for each of a level's tens of thousands of entities every frame, to find the few that
+    // carry this component; the pool is dense over exactly those. entityAt() is the full generational
+    // handle, the same value world.at() gives, and a retired entity has already left the pool
+    // (World::flush drops it from every pool). resident() below only ever writes INTO a CSoftBody, so
+    // the pool cannot shift under the walk, and the size is re-read each pass regardless.
+    scene::ComponentPool* bodies = world.pool(scene::kComponentSoftBody);
+    if (!bodies) return;
+    for (usize i = 0; i < bodies->size(); ++i) {
+        const scene::Entity e = bodies->entityAt(i);
         if (world.destroyPending(e)) continue;
 
-        const auto* sb = world.component<scene::CSoftBody>(e, scene::kComponentSoftBody);
-        if (!sb || (sb->flags & scene::kSoftBodyDisabled)) continue;
+        const auto* sb = static_cast<const scene::CSoftBody*>(bodies->dataAt(i));
+        if (sb->flags & scene::kSoftBodyDisabled) continue;
 
         Resident* r = resident(world, e, dev);
         if (!r) continue;
@@ -378,6 +385,9 @@ void SoftBodyScene::update(scene::World& world, rhi::IDevice& dev) {
 }
 
 rhi::MeshHandle SoftBodyScene::drawHandle(scene::Entity e) const {
+    // Asked once per drawn entity by both hosts, and a level with no soft bodies has nothing
+    // resident: answer before hashing the handle.
+    if (live_.empty()) return 0;
     const auto it = live_.find(e);
     return it == live_.end() ? 0 : it->second.drawMesh;
 }

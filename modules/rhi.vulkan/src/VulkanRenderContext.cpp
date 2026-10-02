@@ -994,7 +994,51 @@ void VulkanRenderContext::buildBlas(BlasHandle h) {
         return;
     }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
+    if (!b->geometries.empty()) {
+        if (!recordBlasBuildMulti(*b))
+            AVER_ERROR("[RHI.Vulkan] buildBlas: multi-geometry BLAS {} names a mesh that is gone", h);
+        return;
+    }
     recordBlasBuild(*b, dev_->meshes_[b->mesh - 1], VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+}
+
+bool VulkanRenderContext::recordBlasBuildMulti(RhiBlas& b) {
+    std::vector<VkAccelerationStructureGeometryKHR> geoms(b.geometries.size());
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(b.geometries.size());
+    for (usize i = 0; i < b.geometries.size(); ++i) {
+        const MeshHandle h = b.geometries[i].mesh;
+        if (h == 0 || h > dev_->meshes_.size() || !dev_->meshes_[h - 1].alive) return false;
+        geoms[i] = vkMultiBlasGeometry(dev_->meshes_[h - 1], b.geometries[i].opaque);
+        ranges[i] = VkAccelerationStructureBuildRangeInfoKHR{};
+        ranges[i].primitiveCount = dev_->meshes_[h - 1].indexCount / 3;
+    }
+    VkCommandBuffer cb = cmd();
+    VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+    scratchInfo.buffer = b.scratchBuffer;
+    VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;   // createBlasMulti's size query's flags
+    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bi.dstAccelerationStructure = b.as;
+    bi.geometryCount = static_cast<u32>(geoms.size());
+    bi.pGeometries = geoms.data();
+    bi.scratchData.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo);
+    const VkAccelerationStructureBuildRangeInfoKHR* pRanges = ranges.data();
+    dev_->api().CmdBuildAccelerationStructuresKHR(cb, 1, &bi, &pRanges);
+
+    // Same post-build barrier recordBlasBuild records.
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &mb;
+    dev_->api().CmdPipelineBarrier2(cb, &dep);
+    b.built = true;
+    return true;
 }
 
 // refitBlas -- updates `h`'s BLAS from its mesh's CURRENT vertices instead of rebuilding from
@@ -1005,6 +1049,8 @@ bool VulkanRenderContext::refitBlas(BlasHandle h) {
     RhiBlas* b = res_->blas(h);
     if (!b) { AVER_ERROR("[RHI.Vulkan] refitBlas with an invalid handle"); return false; }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) { buildBlas(h); return false; }
+    // A createBlasMulti structure is never updatable: the refitBlas contract's full-build fallback.
+    if (!b->geometries.empty()) { buildBlas(h); return false; }
     const GpuMesh& m = dev_->meshes_[b->mesh - 1];
     const bool countsChanged = m.vertexCount != b->builtVertexCount || m.indexCount != b->builtIndexCount;
     // Same guard as D3D12RenderContext::refitBlas: a BUILT structure whose mesh changed counts falls back
@@ -1073,15 +1119,6 @@ u32 VulkanRenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* insta
     for (u32 i = 0; i < count && instances; ++i) {
         const RhiBlas* b = res_->blas(instances[i].blas);
         if (!b || !b->as) { AVER_WARN("[RHI.Vulkan] {}: instance {} names an invalid BLAS", caller, i); continue; }
-        VkAccelerationStructureInstanceKHR id{};
-        // Engine matrices are row-major/row-vector (v*M); VkTransformMatrixKHR is the same row-major
-        // 3x4 [R|T] layout D3D12_RAYTRACING_INSTANCE_DESC::Transform already uses, so this is the
-        // identical transpose D3D12RenderContext::buildTlas performs, not a Vulkan-specific one.
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) id.transform.matrix[r][c] = instances[i].world[c * 4 + r];
-            id.transform.matrix[r][3] = instances[i].world[12 + r];
-        }
-        id.mask = instances[i].mask;
         // Rejected rather than truncated: instanceCustomIndex is a 24-bit bitfield, so a larger
         // value would silently alias onto another instance's id and a hit would resolve to the
         // wrong geometry -- identical reasoning to D3D12's own InstanceID rejection.
@@ -1090,42 +1127,74 @@ u32 VulkanRenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* insta
                        "it is dropped rather than aliased onto another instance", caller, i, instances[i].instanceId);
             continue;
         }
-        // instanceCustomIndex (CommittedInstanceID() in HLSL), NOT
-        // instanceShaderBindingTableRecordOffset -- the latter indexes a shader binding table this
-        // backend never builds (VK_KHR_ray_query only, no VK_KHR_ray_tracing_pipeline; see the
-        // contract's note on which extension the engine's inline RayQuery shaders actually need).
-        id.instanceCustomIndex = instances[i].instanceId;
-        // MAPPED, NOT CAST. The engine's TlasInstanceFlags values were chosen to match D3D12's, and
-        // VkGeometryInstanceFlagBitsKHR happens to use the same bit positions today -- but "happens
-        // to" is not a contract between two vendors' headers, and a silent divergence here would put
-        // a wrong flag on every instance with nothing to grep for. Written out so the two are only
-        // ever equal on purpose.
-        VkGeometryInstanceFlagsKHR vkFlags = 0;
-        if (instances[i].flags & TlasInstanceFlag_TriangleCullDisable)
-            vkFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        if (instances[i].flags & TlasInstanceFlag_TriangleFrontCcw)
-            vkFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR;
-        if (instances[i].flags & TlasInstanceFlag_ForceOpaque)
-            vkFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-        if (instances[i].flags & TlasInstanceFlag_ForceNonOpaque)
-            vkFlags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
-        id.flags = vkFlags;
         VkAccelerationStructureDeviceAddressInfoKHR addrInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
         addrInfo.accelerationStructure = b->as;
-        id.accelerationStructureReference = dev_->api().GetAccelerationStructureDeviceAddressKHR(dev_->vkDevice(), &addrInfo);
+        const VkAccelerationStructureInstanceKHR id = vkInstanceFromTlas(
+            instances[i], dev_->api().GetAccelerationStructureDeviceAddressKHR(dev_->vkDevice(), &addrInfo));
         dst[written++] = id;
-        outSlots.push_back({id.accelerationStructureReference, static_cast<u32>(vkFlags), id.mask});
+        outSlots.push_back({id.accelerationStructureReference, static_cast<u32>(id.flags), id.mask});
     }
     return written;
 }
 
-void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 written, VkBuildAccelerationStructureModeKHR mode) {
+// See the declaration. The prefix's BLASes are checked here, per build, because destroyMesh can take
+// one away at any time and the prefix holds raw device addresses -- O(distinct BLASes), not O(prefix).
+u32 VulkanRenderContext::usableStaticPrefix(RhiTlas& t) {
+    if (t.staticCount == 0 || !res_->buffer(t.staticDescs)) return 0;
+    for (BlasHandle b : t.staticBlases) {
+        if (res_->blas(b)) continue;
+        if (!t.staticBrokenLogged) {
+            AVER_ERROR("[RHI.Vulkan] TLAS static prefix names BLAS {}, destroyed since it was set -- its {} "
+                       "instance(s) are left out of every build until the prefix is replaced or removed",
+                       b, t.staticCount);
+            t.staticBrokenLogged = true;
+        }
+        return 0;
+    }
+    return t.staticCount;
+}
+
+void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 staticUsed, u32 written, VkBuildAccelerationStructureModeKHR mode) {
     VkCommandBuffer cb = cmd();
     const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
 
     VkAccelerationStructureGeometryInstancesDataKHR instData{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
     VkBufferDeviceAddressInfo instBufInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     instBufInfo.buffer = t.instanceBuffers[f];
+    if (staticUsed) {
+        // THE STATIC PREFIX: this frame's instances copied in at slot staticCount, the prefix's own
+        // slots never written again. First barrier: the copy waits for whatever read the buffer last (the
+        // previous build, a shader); second: the build and this frame's shaders wait for the copy -- and,
+        // on the first build, for setTlasStaticInstances' one-shot upload, earlier on this same queue.
+        const VkBuffer descs = res_->buffer(t.staticDescs)->buffer;
+        const auto barrier = [&](VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                                 VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+            VkBufferMemoryBarrier2 bar{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+            bar.srcStageMask = srcStage;   bar.srcAccessMask = srcAccess;
+            bar.dstStageMask = dstStage;   bar.dstAccessMask = dstAccess;
+            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.buffer = descs;
+            bar.offset = 0;
+            bar.size = VK_WHOLE_SIZE;
+            VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dep.bufferMemoryBarrierCount = 1;
+            dep.pBufferMemoryBarriers = &bar;
+            dev_->api().CmdPipelineBarrier2(cb, &dep);
+        };
+        const VkPipelineStageFlags2 kReaders = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                               VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        const VkAccessFlags2 kReads = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        if (written) {
+            barrier(kReaders, kReads, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferCopy region{0, static_cast<VkDeviceSize>(staticUsed) * sizeof(VkAccelerationStructureInstanceKHR),
+                                static_cast<VkDeviceSize>(written) * sizeof(VkAccelerationStructureInstanceKHR)};
+            dev_->api().CmdCopyBuffer(cb, t.instanceBuffers[f], descs, 1, &region);
+        }
+        barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, kReaders, kReads);
+        instBufInfo.buffer = descs;
+    }
     instData.data.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &instBufInfo);
 
     VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -1150,7 +1219,7 @@ void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 written, VkBuildAccele
     bi.scratchData.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo);
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
-    range.primitiveCount = written;
+    range.primitiveCount = staticUsed + written;
     const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
     dev_->api().CmdBuildAccelerationStructuresKHR(cb, 1, &bi, &pRange);
 
@@ -1165,6 +1234,7 @@ void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 written, VkBuildAccele
     dev_->api().CmdPipelineBarrier2(cb, &dep);
 
     t.built = true;
+    t.builtStatic = staticUsed;
 }
 
 void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, u32 count) {
@@ -1183,7 +1253,7 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
     if (!t->instancePtr[f]) return;
 
     const u32 written = packTlasInstances(*t, instances, count, "buildTlas", t->pendingSlots);
-    recordTlasBuild(*t, written, VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+    recordTlasBuild(*t, usableStaticPrefix(*t), written, VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
     t->builtSlots.swap(t->pendingSlots);
 }
 
@@ -1213,15 +1283,18 @@ bool VulkanRenderContext::refitTlas(TlasHandle h, const TlasInstance* instances,
     // compare against builtSlots.
     std::vector<RhiTlasSlot>& slots = t->pendingSlots;
     const u32 written = packTlasInstances(*t, instances, count, "refitTlas", slots);
+    const u32 staticUsed = usableStaticPrefix(*t);
 
-    const bool sameShape = written == t->builtSlots.size() &&
+    // The prefix's own slots are identical build to build by construction, so only the per-frame
+    // slots are compared -- plus the prefix length itself, which a dropped prefix changes.
+    const bool sameShape = written == t->builtSlots.size() && staticUsed == t->builtStatic &&
         std::equal(slots.begin(), slots.end(), t->builtSlots.begin(),
                    [](const RhiTlasSlot& a, const RhiTlasSlot& b) {
                        return a.blasAddress == b.blasAddress && a.flags == b.flags && a.mask == b.mask;
                    });
 
-    recordTlasBuild(*t, written, sameShape ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
-                                            : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+    recordTlasBuild(*t, staticUsed, written, sameShape ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                                                        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
     t->builtSlots.swap(t->pendingSlots);
     return sameShape;
 }

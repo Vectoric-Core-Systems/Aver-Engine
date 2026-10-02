@@ -8,7 +8,8 @@
 //
 //   VulkanDevice.cpp: VulkanSwapchain (all methods); VulkanDevice -- every override, plus init(),
 //     queryCaps(), initAccelerationStructures(), initMeshShaders(), dispatchMesh(), createPipeline()
-//     (fixed scene/wire/sky/line PSOs only), createSwapchainResources/createRenderTargetViews/
+//     (fixed scene/wire/sky PSOs only -- lines are aver::rhi::EditorLines, built on the generic
+//     factory, not a fixed PSO here), createSwapchainResources/createRenderTargetViews/
 //     createDepthBuffer/createMsaaColor, waitForGpu/waitTimeline, present/resize,
 //     notifyRenderTargetsChanged, ensureViewportTexture, seedSkinTargets, packAtmosphere,
 //     toSceneReferred, the camera post chain (createPostPipelines/createPostTargets/
@@ -53,6 +54,7 @@
 #include <vulkan/vulkan.h>   // vendored at third_party/vulkan-headers/include, v1.3.296, Apache-2.0
 
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/EditorLines.hpp"
 #include "aver/rhi/FrameConstants.hpp"
 #include "VulkanRegisterMap.hpp"
 #include "aver/core/Log.hpp"
@@ -528,12 +530,6 @@ inline void meshVertexInputState(VkVertexInputBindingDescription& outBinding,
     outAttribs[1] = VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(MeshVertex, nx))};
     outAttribs[2] = VkVertexInputAttributeDescription{2, 0, VK_FORMAT_R32G32_SFLOAT,    static_cast<u32>(offsetof(MeshVertex, u))};
 }
-inline void lineVertexInputState(VkVertexInputBindingDescription& outBinding,
-                                 VkVertexInputAttributeDescription (&outAttribs)[2]) {
-    outBinding = VkVertexInputBindingDescription{0, static_cast<u32>(sizeof(LineVertex)), VK_VERTEX_INPUT_RATE_VERTEX};
-    outAttribs[0] = VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(LineVertex, px))};
-    outAttribs[1] = VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<u32>(offsetof(LineVertex, r))};
-}
 // Caller-owned VertexLayout -> Vulkan attributes at positional locations 0..attribCount-1, in
 // declaration order (only array position matters in SPIR-V). Returns the count actually written;
 // an unusable Format is skipped and logged, like D3D12's buildInputLayout.
@@ -839,12 +835,65 @@ struct GpuMesh {
     MeshHandle vbSource = 0;
     bool alive = true;
 };
-struct GpuLineMesh {
-    VkBuffer vb = VK_NULL_HANDLE;
-    VkDeviceMemory vbMemory = VK_NULL_HANDLE;
-    u32 count = 0;
-};
 
+// One createBlasMulti geometry as the size query and the build both describe it -- the same triangle
+// description createBlasImpl/recordBlasBuild give their one mesh, OPAQUE only where the part asked.
+// Shared by VulkanResourceFactory.cpp and VulkanRenderContext.cpp, which must agree or the build
+// writes past what the query sized.
+inline VkAccelerationStructureGeometryKHR vkMultiBlasGeometry(const GpuMesh& m, bool opaque) {
+    VkAccelerationStructureGeometryTrianglesDataKHR tri{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
+    tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    tri.vertexData.deviceAddress = m.vbAddress;
+    tri.vertexStride = sizeof(MeshVertex);
+    tri.maxVertex = m.vertexCount > 0 ? m.vertexCount - 1 : 0;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.indexData.deviceAddress = m.ibAddress;
+    VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.geometry.triangles = tri;
+    geom.flags = opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+    return geom;
+}
+
+// One engine instance as a Vulkan TLAS build reads it. Shared by VulkanRenderContext::
+// packTlasInstances (per frame) and VulkanResourceFactory::setTlasStaticInstances (the prefix, packed
+// once), so the two can never disagree about a transform or a flag. The caller has already refused an
+// id past 24 bits.
+inline VkAccelerationStructureInstanceKHR vkInstanceFromTlas(const TlasInstance& in, VkDeviceAddress blas) {
+    static_assert(sizeof(VkAccelerationStructureInstanceKHR) == kTlasInstanceDescBytes,
+                  "tlasStaticInstanceBuffer's element size is the Vulkan instance struct");
+    VkAccelerationStructureInstanceKHR id{};
+    // Engine matrices are row-major/row-vector (v*M); VkTransformMatrixKHR is the same row-major
+    // 3x4 [R|T] layout D3D12_RAYTRACING_INSTANCE_DESC::Transform already uses, so this is the
+    // identical transpose D3D12's toInstanceDesc performs, not a Vulkan-specific one.
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) id.transform.matrix[r][c] = in.world[c * 4 + r];
+        id.transform.matrix[r][3] = in.world[12 + r];
+    }
+    id.mask = in.mask;
+    // instanceCustomIndex (CommittedInstanceID() in HLSL), NOT
+    // instanceShaderBindingTableRecordOffset -- the latter indexes a shader binding table this
+    // backend never builds (VK_KHR_ray_query only, no VK_KHR_ray_tracing_pipeline; see the
+    // contract's note on which extension the engine's inline RayQuery shaders actually need).
+    id.instanceCustomIndex = in.instanceId;
+    // MAPPED, NOT CAST. The engine's TlasInstanceFlags values were chosen to match D3D12's, and
+    // VkGeometryInstanceFlagBitsKHR happens to use the same bit positions today -- but "happens
+    // to" is not a contract between two vendors' headers, and a silent divergence here would put
+    // a wrong flag on every instance with nothing to grep for. Written out so the two are only
+    // ever equal on purpose.
+    VkGeometryInstanceFlagsKHR vkFlags = 0;
+    if (in.flags & TlasInstanceFlag_TriangleCullDisable)
+        vkFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    if (in.flags & TlasInstanceFlag_TriangleFrontCcw)
+        vkFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR;
+    if (in.flags & TlasInstanceFlag_ForceOpaque)
+        vkFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+    if (in.flags & TlasInstanceFlag_ForceNonOpaque)
+        vkFlags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+    id.flags = vkFlags;
+    id.accelerationStructureReference = blas;
+    return id;
+}
 // Per-subresource state tracking, debug builds only; private macro, not shared cross-module state.
 #if defined(NDEBUG)
 #define AVER_RHI_TRACK_STATE 0
@@ -1031,6 +1080,9 @@ struct RhiBlas {
     // refuse a rebuild the mesh has outgrown instead of writing past them (same guard as D3D12's).
     VkDeviceSize asSize = 0;
     VkDeviceSize scratchSize = 0;
+    // Non-empty for a createBlasMulti structure: every geometry, in GeometryIndex() order. `mesh` above
+    // is then geometries[0].mesh. Mirrors D3D12ResourceFactory's RhiBlas::geometries.
+    std::vector<BlasGeometry> geometries;
 };
 
 // One instance as it was packed into a TLAS's last build or refit -- BLAS identity plus the Vulkan
@@ -1067,6 +1119,22 @@ struct RhiTlas {
     // Where each build/refit packs its NEW signature before swapping it with builtSlots -- kept, not a
     // local, so a per-frame refit reuses one allocation instead of making one per call.
     std::vector<RhiTlasSlot> pendingSlots;
+    // What asBuffer/scratchBuffer were allocated at, for tlasMemoryBytes.
+    VkDeviceSize asSize = 0;
+    VkDeviceSize scratchSize = 0;
+
+    // ---- the static prefix (IResourceFactory::setTlasStaticInstances); mirrors D3D12's RhiTlas ----
+    // Slots [0, staticCount) of staticDescs (device-local, (staticCount + maxInstances) instances, an
+    // ordinary buffer so a shader can read it by handle), packed once; each build copies its per-frame
+    // instances in at staticCount, with the barriers recordTlasBuild owns.
+    u32 staticCount = 0;
+    BufferHandle staticDescs = 0;
+    // The distinct BLASes the prefix names, checked before every build -- O(distinct), not O(prefix).
+    std::vector<BlasHandle> staticBlases;
+    // The prefix length the last build/refit used (0 with none, or a dropped broken one): an update is
+    // only legal over the same instances its build had.
+    u32 builtStatic = 0;
+    bool staticBrokenLogged = false;
 };
 
 // A destroyed object the GPU may still be reading, released once `fence` retires. Vulkan analog
@@ -1358,10 +1426,13 @@ public:
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setMeshShaders(bool enabled) override;
     bool meshShadersActive() const override { return msActive_; }
-    void setWireframe(bool on) override { wireframe_ = on; }
+    void setWireframe(bool on) override { wireframe_ = on; if (on) wireframeFrame_ = true; }
     void setUnlit(bool on) override { unlit_ = on; }
-    void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
-    void setLineGlow(f32 gain) override { lineGlow_ = gain; }
+    // Sticky state, captured per queue() call -- see aver::rhi::EditorLines::setDepthTest/setWidth.
+    // (setLineGlow is gone: lines no longer go through the HDR scene target, so there is no bloom
+    // left to make them glow -- see IDevice::setLineWidth, RHI.hpp.)
+    void setLineDepth(bool testDepth) override { editorLines_.setDepthTest(testDepth); }
+    void setLineWidth(f32 pixels) override { editorLines_.setWidth(pixels); }
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 outRGBA[4]) override;
     bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) override;
@@ -1566,8 +1637,7 @@ private:
     // Reported three times (once per site). Keeping one alive removes the whole class of bug.
     VkDescriptorSetLayout emptySetLayout_ = VK_NULL_HANDLE;   // set kVkSetConstants, binding 0 (b0) only
     VkPipelineLayout scenePipelineLayout_ = VK_NULL_HANDLE;        // push constants: b1 object block only
-    VkPipeline scenePso_ = VK_NULL_HANDLE, skyPso_ = VK_NULL_HANDLE, wirePso_ = VK_NULL_HANDLE,
-               linePso_ = VK_NULL_HANDLE, lineOverlayPso_ = VK_NULL_HANDLE;   // no depth test: editor gizmos on top
+    VkPipeline scenePso_ = VK_NULL_HANDLE, skyPso_ = VK_NULL_HANDLE;
     // Separate layout: a mesh-shader pipeline has no vertex input state and pushes the mesh-geometry
     // block too (vb/ib device addresses + triangle count), mirroring D3D12's msRootSig_ split.
     VkPipelineLayout meshPipelineLayout_ = VK_NULL_HANDLE;
@@ -1599,12 +1669,14 @@ private:
     u32                   lastSuppressClaimants_ = 0;
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
+    // Wireframe on at ANY point this frame -- see D3D12Device::wireframeFrame_.
+    bool wireframeFrame_ = false;
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is.
     bool unlit_ = false;
-    bool lineDepth_ = true;
-    // 1.0 is exactly the pre-glow behaviour; see IDevice::setLineGlow.
-    f32  lineGlow_  = 1.0f;
-    std::vector<GpuLineMesh> lineMeshes_;
+    // Editor chrome (grid, gizmos, selection outlines, collider/nav overlays), replayed in endFrame's
+    // overlay stage after the post chain -- see aver/rhi/EditorLines.hpp. Owns its own meshes/queue/
+    // pipelines; createLineMesh/destroyLineMesh/drawLines/setLineDepth/setLineWidth all delegate here.
+    EditorLines editorLines_;
     PerFrameCB frameCB_{};
 
     // ---- camera post chain ----
@@ -1813,14 +1885,20 @@ public:
     // IResourceFactory's contract comment above createBlasUpdatable/createTlasUpdatable.
     BlasHandle       createBlasUpdatable(MeshHandle mesh) override;
     TlasHandle       createTlasUpdatable(u32 maxInstances) override;
+    BlasHandle       createBlasMulti(const BlasGeometry* geometries, u32 count) override;
+    bool             setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
+    BufferHandle     tlasStaticInstanceBuffer(TlasHandle tlas) const override;
+    u64              blasMemoryBytes(BlasHandle h) const override;
+    u64              tlasMemoryBytes(TlasHandle h) const override;
 
     void destroyTexture(TextureHandle h) override;
     void destroyBuffer(BufferHandle h) override;
     void destroyBlas(BlasHandle h) override;
     MeshHandle blasMesh(BlasHandle h) const override;
     BlasHandle blasForMesh(MeshHandle mesh) const override;
-    // Destroys every acceleration structure built from `mesh`. Concrete, not part of
-    // IResourceFactory -- an implementation detail of VulkanDevice::destroyMesh, mirroring
+    // Destroys every acceleration structure built from `mesh` -- a createBlasMulti one if ANY of its
+    // geometries names it. Concrete, not part of IResourceFactory -- an implementation detail of
+    // VulkanDevice::destroyMesh, mirroring
     // D3D12ResourceFactory::destroyBlasForMesh: a BLAS left behind would keep pointing ray tracing
     // at this mesh's freed vertex/index memory.
     void destroyBlasForMesh(MeshHandle mesh);
@@ -2070,6 +2148,9 @@ private:
     // (ALLOW_UPDATE_BIT_KHR whenever `b.allowUpdate`), matching the update contract in
     // RHIResources.hpp's comment above IRenderContext::refitBlas.
     void recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildAccelerationStructureModeKHR mode);
+    // The createBlasMulti twin: one triangle geometry per b.geometries entry, opaque per entry, always
+    // a full build (never updatable). False, nothing recorded, when a part's mesh is gone.
+    bool recordBlasBuildMulti(RhiBlas& b);
     // Fills THIS frame's instance buffer for `t` from `instances` (`count` of them), applying the
     // same filtering buildTlas has always done (an instance naming a dead BLAS, or an id that does
     // not fit in 24 bits, is dropped -- logged under `caller`). Returns how many were actually
@@ -2078,10 +2159,15 @@ private:
     // refitTlas so one packing loop serves both.
     u32 packTlasInstances(RhiTlas& t, const TlasInstance* instances, u32 count, const char* caller,
                           std::vector<RhiTlasSlot>& outSlots);
-    // Records the actual TLAS build or in-place update over instances already packed by
-    // packTlasInstances, and marks `t` built. Same MODE_BUILD_KHR/MODE_UPDATE_KHR split as
-    // recordBlasBuild above.
-    void recordTlasBuild(RhiTlas& t, u32 written, VkBuildAccelerationStructureModeKHR mode);
+    // How many static-prefix slots this build may use: t.staticCount, or 0 with no prefix -- or with one
+    // naming a BLAS destroyed since it was set, which is dropped (logged once) rather than traversed.
+    u32 usableStaticPrefix(RhiTlas& t);
+    // Records the actual TLAS build or in-place update over `staticUsed` prefix instances plus the
+    // `written` ones packTlasInstances already put in this frame's instance buffer, and marks `t` built.
+    // With a prefix, first copies those `written` in behind it on the GPU (barriers included) and builds
+    // from the prefix buffer; without one, builds from the instance buffer exactly as before. Same
+    // MODE_BUILD_KHR/MODE_UPDATE_KHR split as recordBlasBuild above.
+    void recordTlasBuild(RhiTlas& t, u32 staticUsed, u32 written, VkBuildAccelerationStructureModeKHR mode);
 
     VulkanDevice* dev_;
     VulkanResourceFactory* res_;

@@ -9,7 +9,8 @@
 // entry point everything above supports).
 //
 // MUST PRECEDE THIS FILE'S #include IN voxi.hlsl: the RT scene/geometry/material decls (gScene
-// t2, RtInstance/RtMaterial, gRtInstances/gRtVerts/gRtIndices/gRtMaterials t3/t4/t5/t9, bindless
+// t2, RtInstance/RtMaterial, gRtInstances/gRtVerts/gRtIndices/gRtMaterials t3/t4/t5/t9 and the
+// instance lookup rtLoadInstance/rtPackCommitted over them and the foliage tables t20/t21, bindless
 // adapter averRtProceedSolid/averRtSampleSlot/averRtSurfaceUV/averRtUvGrad -- giTraceInitialCandidate
 // traces gScene and shades through it); rtHash/rtDiscSample (candidate-direction sampling);
 // rdLocalCarriesEmitters (voxi_rt.hlsli, AVER_RD_LAMPS); the VoxiFrame cbuffer fields this file
@@ -93,6 +94,10 @@
 // by vendoring terms) -- change both declarations together.
 #define AVER_NRD_HITDIST_A 300.0
 #define AVER_NRD_HITDIST_B 0.1
+// REBLUR's denoisingRange in cm, MIRRORING kNrdDenoisingRangeCm (VoxiRenderer.cpp, where the NRD
+// FrameSettings are filled): REBLUR writes no output texel whose viewZ is past it, so a surface that
+// far keeps its raw estimate instead of reading back a texel NRD never wrote. Change both together.
+#define AVER_NRD_DENOISING_RANGE 500000.0
 
 // ---- the reservoir buffer Reservoir.hlsli requires defined before it is included ----
 // RTXDI_GI_RESERVOIR_BUFFER must already name a declared RWStructuredBuffer<RTXDI_PackedGIReservoir>
@@ -342,7 +347,7 @@ bool RAB_GetTemporalConservativeVisibility(RAB_Surface currentSurface, RAB_Surfa
     r.TMin      = bias;
     r.TMax      = max(dist - bias, bias);
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+    q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
     return q.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
 }
@@ -627,7 +632,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     r.TMax      = max(gVoxelParams.z, 1.0);   // giMaxDistance -- the reach every other GI ray honours
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+    q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
     // ---- A MISS IS A SAMPLE OF THE SKY, NOT A FAILED SAMPLE ----
     // Used to `return false` -- the clearest reason reported darkness was ReSTIR-ONLY: a cosine ray
@@ -661,7 +666,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         return true;
     }
 
-    RtInstance inst = gRtInstances[q.CommittedInstanceID()];
+    RtInstance inst = rtLoadInstance(rtPackCommitted(q));
     uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
     uint i0 = inst.firstVertex + gRtIndices[tri + 0];
     uint i1 = inst.firstVertex + gRtIndices[tri + 1];
@@ -743,6 +748,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     s.backFace    = false;
     s.sssWeight   = 0.0;
     s.sssRadius   = 0.0;
+    s.sssColor    = float3(1.0, 1.0, 1.0);   // set, not left undefined; inert at weight 0
 #ifdef AVER_LAYERED_BSDF
     // Mirrors PSRayDriven's own hand-built surface (voxi.hlsl:1469-1477): read the hit's own
     // material instead of hardcoding the coat off, which silently meant "no material has a coat in
@@ -877,7 +883,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         RayDesc r2; const float bias2 = max(gRtParams.z, 1e-4) * (1.0 + length(hitPos - gCamPos.xyz) * 5e-4);
         r2.Origin = hitPos + s.N * bias2; r2.Direction = dir2; r2.TMin = bias2; r2.TMax = max(gVoxelParams.z, 1.0);
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q2;
-        q2.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r2); averRtProceedSolid(q2);
+        q2.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r2); averRtProceedSolid(q2);
         if (q2.CommittedStatus() != COMMITTED_TRIANGLE_HIT) indY = averSkyRadianceCheap(dir2) * gAmbient.r;
         else {
             // THE VOXEL SHELL STRADDLE: CSResolve (voxi.hlsl ~3417) stores an occupied voxel as
@@ -1435,7 +1441,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
             rv.TMin      = bias;
             rv.TMax      = max(dist - 2.0 * bias, bias);
             RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qv;
-            qv.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, rv);
+            qv.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, rv);
             averRtProceedSolid(qv);
             if (qv.CommittedStatus() == COMMITTED_TRIANGLE_HIT) visF3 = 0.0;
             f3Observed = true;
@@ -1606,11 +1612,13 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // measured identical still frames, MAD 0.01 ray-driven and 0.06 raster (run-to-run noise).
     const bool nrdReproject = gGiRestirParams.y > 0.5 &&   // a previous frame exists to reproject into
                               ((uint)gAmbientParams.z & 64u) == 0u;
+    // Only a surface inside REBLUR's range has an output texel NRD wrote -- see AVER_NRD_DENOISING_RANGE.
+    const bool nrdInRange = curLinearDepth < AVER_NRD_DENOISING_RANGE;
     float3 nrdYcocg = 0.0;
     float  nrdWsum  = 0.0;
     // gAverHistoryWrite: a blended fragment never reads NRD back (the gate below), so it skips the
     // four surface-history lookups too.
-    if (gAverHistoryWrite && nrdReproject && gw > 0u && gh > 0u) {
+    if (gAverHistoryWrite && nrdInRange && nrdReproject && gw > 0u && gh > 0u) {
         const float4 nrdPrevClip = mul(float4(wpos, 1.0), gPrevViewProj);
         if (nrdPrevClip.w > 1e-4) {
             const float3 nrdPrevNdc = nrdPrevClip.xyz / nrdPrevClip.w;
@@ -1635,7 +1643,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
             }
         }
     }
-    if (gAverHistoryWrite && gw > 0u && gh > 0u) {
+    if (gAverHistoryWrite && nrdInRange && gw > 0u && gh > 0u) {
         // _NRD_YCoCgToLinear, the matching half of the write above. REBLUR hands back what it
         // filtered, in the basis it filtered it in; NRD's own back-end unpack is this same transform
         // followed by a per-channel max against zero -- which this does NOT copy, see the gamut step

@@ -480,10 +480,12 @@ struct TlasInstance {
     // The caller's own id for this instance, read from a hit via HLSL's CommittedInstanceID(). THE
     // ONLY WAY A HIT CAN SAY WHAT IT HIT -- mesh, vertex start, material are all looked up from this;
     // without it ray tracing can only answer "is something there" (why shadows were all it could do).
-    // Do NOT use CommittedInstanceIndex(): buildTlas SKIPS instances naming an invalid acceleration
-    // structure, so one failure silently shifts every later index and its lookups read the wrong geometry --
-    // this field survives that compaction, the index does not. 24 BITS: DXR's bitfield rejects a
-    // larger value rather than truncating it.
+    // Do NOT use CommittedInstanceIndex() for buildTlas's instances: it SKIPS instances naming an
+    // invalid acceleration structure, so one failure silently shifts every later index and its lookups
+    // read the wrong geometry -- this field survives that compaction, the index does not. The one
+    // exception is a STATIC PREFIX (IResourceFactory::setTlasStaticInstances), which refuses rather
+    // than skips, so its slot index is stable. 24 BITS: DXR's bitfield rejects a larger value rather
+    // than truncating it.
     u32         instanceId = 0;
 
     // Per-instance behaviour, as TlasInstanceFlags below. AT THE INSTANCE, NOT THE GEOMETRY -- the
@@ -491,7 +493,8 @@ struct TlasInstance {
     // geometry it builds (D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE / VK_GEOMETRY_OPAQUE_BIT_KHR), so the
     // hardware may skip any-hit entirely unless ForceNonOpaque overrides it per instance -- keeping
     // the fast path untouched for opaque geometry, paid only by the panes that need interception.
-    // Changing createBlas instead would have made every mesh in the scene non-opaque.
+    // Changing createBlas instead would have made every mesh in the scene non-opaque. (createBlasMulti
+    // is the one per-geometry exception: see BlasGeometry.)
     u32         flags = 0;
 };
 
@@ -509,6 +512,26 @@ enum TlasInstanceFlags : u32 {
 };
 // The largest value TlasInstance::instanceId can carry.
 constexpr u32 kMaxTlasInstanceId = 0xFFFFFFu;
+// The most instances one TLAS may hold, static prefix included: DXR's
+// D3D12_RAYTRACING_MAX_INSTANCES_PER_TOP_LEVEL_ACCELERATION_STRUCTURE, which is also the floor Vulkan
+// guarantees for maxInstanceCount -- so neither backend has to ask its device.
+constexpr u32 kMaxTlasInstances = 1u << 24;
+// One instance as a TLAS build reads it, and as tlasStaticInstanceBuffer() hands it to a shader:
+// D3D12_RAYTRACING_INSTANCE_DESC and VkAccelerationStructureInstanceKHR, identical byte for byte --
+// a 3x4 row-major float transform (the TRANSPOSE of TlasInstance::world's upper 4x3, translation in
+// column 3), then [instanceId:24 | mask:8], [hit-group offset:24 | flags:8], the u64 BLAS address.
+constexpr u32 kTlasInstanceDescBytes = 64;
+
+// One geometry of a multi-geometry BLAS (IResourceFactory::createBlasMulti). A hit reports which one
+// through GeometryIndex(), which is its position in the array handed to createBlasMulti.
+struct BlasGeometry {
+    MeshHandle mesh = 0;
+    // OPAQUE geometry flag or none, PER GEOMETRY -- the one place a BLAS is not uniformly opaque. Pass
+    // false only for an alpha-masked part: then only ITS triangles reach a Proceed() loop as candidates,
+    // and the rest of the object keeps the hardware's any-hit skip without an instance-wide
+    // ForceNonOpaque.
+    bool opaque = true;
+};
 
 // ---------------------------------------------------------------- resource factory
 
@@ -561,6 +584,48 @@ public:
     // hands back a structure every refit call fully rebuilds, which is always correct.
     virtual BlasHandle createBlasUpdatable(MeshHandle mesh) { return createBlas(mesh); }
     virtual TlasHandle createTlasUpdatable(u32 maxInstances) { return createTlas(maxInstances); }
+
+    // ONE BLAS OVER SEVERAL MESHES, one geometry each in `geometries` order, opacity per geometry (see
+    // BlasGeometry). Allocated, not built -- IRenderContext::buildBlas builds it like any other; never
+    // updatable (refitBlas does a full build). For an object whose material parts are separate meshes but
+    // which is instanced as ONE thing (foliage: one TLAS instance per plant, not per part). NOT a
+    // blasForMesh candidate -- it is a function of the whole list, not of one mesh -- but blasMesh reports
+    // its first geometry's mesh, and destroying ANY of its meshes destroys it, exactly as destroying a
+    // mesh destroys its own BLAS. 0 when any mesh is invalid or has no indices. NOT PURE, same reason as
+    // destroyBlas.
+    virtual BlasHandle createBlasMulti(const BlasGeometry* geometries, u32 count) {
+        (void)geometries; (void)count;
+        return 0;
+    }
+
+    // THE STATIC INSTANCE PREFIX: `count` instances packed ONCE into a device-local buffer that occupies
+    // TLAS slots [0, count); every later buildTlas/refitTlas copies that frame's instances in behind it
+    // on the GPU and builds over count + n. Exists for millions of instances that never move (foliage):
+    // the per-frame path uploads and CPU-packs every instance every build, which at that count is the
+    // frame. The TLAS's structure/scratch grow to hold count + its own maxInstances (the TLAS's `as` is
+    // REALLOCATED, so every setSrvTlas naming it must be redone before the next ray traverses it, and
+    // it must be rebuilt first -- a build is due anyway, since this invalidates the last one). Slot
+    // indices ARE stable here, unlike buildTlas's filtered list: every instance must name a live BLAS and
+    // fit a 24-bit id, and a list that doesn't is REFUSED whole (false, the previous prefix kept) rather
+    // than compacted. Every BLAS named must still be live at each build; one destroyed since drops the
+    // whole prefix from that build, logged, rather than letting a ray traverse freed memory. `count` 0
+    // removes the prefix and returns the TLAS to its own size. refitTlas's eligibility ignores the prefix
+    // slots (they cannot change between builds). Everything the prefix allocated is released when it is
+    // removed or replaced, and at device shutdown. NOT PURE, same reason as destroyBlas.
+    virtual bool setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) {
+        (void)tlas; (void)instances; (void)count;
+        return false;
+    }
+    // The prefix's device-local buffer, for a shader to read as a StructuredBuffer of
+    // kTlasInstanceDescBytes-stride descs (element i is TLAS slot i -- CommittedInstanceIndex()), or 0
+    // when `tlas` has no prefix. REPLACED by every setTlasStaticInstances call: rebind after each one.
+    virtual BufferHandle tlasStaticInstanceBuffer(TlasHandle tlas) const { (void)tlas; return 0; }
+
+    // Resident bytes behind an acceleration structure -- the structure and its scratch, and for a TLAS
+    // its instance buffers and static prefix too -- or 0 for a dead handle or a backend that does not
+    // say. For memory reports, not for sizing anything.
+    virtual u64 blasMemoryBytes(BlasHandle h) const { (void)h; return 0; }
+    virtual u64 tlasMemoryBytes(TlasHandle h) const { (void)h; return 0; }
 
     // Destruction is DEFERRED BY CONTRACT: the resource retires once the GPU is past every frame
     // that could reference it.
@@ -768,7 +833,8 @@ public:
 
     // Builds a bottom-level acceleration structure.
     virtual void buildBlas(BlasHandle blas) = 0;
-    // Builds a top-level acceleration structure over `instances`.
+    // Builds a top-level acceleration structure over `instances`, placed after the TLAS's static
+    // prefix when it has one (IResourceFactory::setTlasStaticInstances).
     virtual void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) = 0;
 
     // ---- in-place updates (refit) ----
@@ -782,8 +848,11 @@ public:
     virtual bool refitBlas(BlasHandle blas) { buildBlas(blas); return false; }
     // refitTlas: updates a TLAS in place when `instances` (after the same filtering buildTlas applies)
     // has the SAME COUNT as this TLAS's last build or refit and every slot names the SAME BLAS with the
-    // same flags and mask; transforms and instance ids may differ. Anything else -- created
-    // non-updatable, never built, a count/BLAS/flags/mask change -- falls back to a full build.
+    // same flags and mask; transforms and instance ids may differ (a pure transform change is the
+    // expected case: Voxi's mover patch lane refits every frame after rewriting a few instances'
+    // worlds, and still hands over the WHOLE list -- the backend repacks it on every call). Anything else -- created
+    // non-updatable, never built, a count/BLAS/flags/mask change, a static prefix set, removed or
+    // dropped since -- falls back to a full build. The prefix's own slots never enter the comparison.
     // REQUIRED after any buildBlas/refitBlas of a BLAS this TLAS references: DXR and Vulkan both require
     // a TLAS to be rebuilt or updated before rays traverse it once a referenced BLAS was modified (the
     // TLAS caches each instance's bounds), so "the BLAS was rebuilt in place at the same address" is
@@ -876,10 +945,11 @@ public:
     // for the SAME shading via alpha-blend with depth-write off; never combined with `depthPrepassed`
     // (a blended draw writes no depth -- setDrawBlended). Returning 0 legitimately means "no blended
     // variant": the backend DROPS the draw rather than drawing it opaque, worse and harder to
-    // attribute than a missing surface.
-    virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false,
+    // attribute than a missing surface. Never asked in the wireframe view: the device queues those
+    // draws for EditorLines instead (IDevice::setWireframe).
+    virtual PipelineHandle scenePipeline(bool meshShaders, bool depthPrepassed = false,
                                          bool blended = false) const {
-        (void)meshShaders; (void)wireframe; (void)depthPrepassed; (void)blended; return 0;
+        (void)meshShaders; (void)depthPrepassed; (void)blended; return 0;
     }
 
     // The bindless texture table the pipelines above expect bound, or 0 for pipelines that declare
@@ -947,6 +1017,15 @@ public:
 
     // Draws onto the BACKBUFFER after the camera post chain, before the editor's own UI. The
     // backbuffer is already bound as the sole render target, viewport and scissor already set.
+    // DISPLAY space: what is written is what is shown -- no exposure, tonemap or bloom follows.
+    //
+    // THE SCENE DEPTH IS READABLE HERE: IDevice::sceneDepthTexture() is in a shader-resource state
+    // for the whole overlay stage (after the device's own line replay, before the UI), so a feature
+    // can occlude against the scene by sampling it -- viewport sprites do. It is SCENE-sized, which
+    // differs from width x height under a render scale: map a pixel with svPos.xy * sceneSize /
+    // (width, height), taking sceneSize from the texture's own dimensions. Multisampled when
+    // IDevice::sampleCount() > 1 (load sample 0 through a Texture2DMS slot). Standard depth
+    // (cleared to 1, LESS), the same projection the scene used.
     virtual void overlayPass(IRenderContext& ctx, u32 width, u32 height) {
         (void)ctx; (void)width; (void)height;
     }

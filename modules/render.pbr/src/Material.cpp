@@ -46,6 +46,9 @@ void sanitise(MaterialDesc& d) {
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
     d.subsurfaceWeight  = std::clamp(d.subsurfaceWeight, 0.0f, 1.0f);
     d.subsurfaceRadius  = std::clamp(d.subsurfaceRadius, 0.0f, 1.0f);
+    // Authored sRGB tint, same [0,1] range as baseColorFactor -- it is decoded through the same
+    // pow(2.2) as that field and a channel outside [0,1] has no meaning on either side of it.
+    for (f32& c : d.subsurfaceColor) c = std::clamp(c, 0.0f, 1.0f);
     // A multiplier on the light the material's own glow and size already cast, floored at 0 with no
     // ceiling. There is no upper bound the way subsurfaceWeight's [0,1] has: a lamp can legitimately
     // want to be far brighter than what its own glow and size alone would cast.
@@ -459,6 +462,18 @@ float aver_pbr_get_subsurface_radius(aver_pbr_material m) {
 }
 int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->subsurfaceRadius = v; return commit(m);
+}
+int32_t aver_pbr_get_subsurface_color(aver_pbr_material m, float* out3) {
+    const MaterialDesc* d = read(m);
+    if (!d || !out3) return 0;
+    std::memcpy(out3, d->subsurfaceColor, sizeof(d->subsurfaceColor));
+    return 1;
+}
+int32_t aver_pbr_set_subsurface_color(aver_pbr_material m, float r, float g, float b) {
+    MaterialDesc* d = edit(m);
+    if (!d) return 0;
+    d->subsurfaceColor[0] = r; d->subsurfaceColor[1] = g; d->subsurfaceColor[2] = b;
+    return commit(m);
 }
 float aver_pbr_get_coat_weight(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? d->coatWeight : 0.0f;

@@ -3,7 +3,9 @@
 // scene/material resource layer a ray hit reads, the RayQuery helpers built on it, the sampling
 // primitives, and the estimators. None of it is ReSTIR; ReSTIR calls INTO it.
 // HOLDS, in order: RT scene/geometry/material resources (gScene t2, RtVertex/RtInstance/RtMaterial,
-// gRtVerts/gRtIndices/gRtInstances t3/t4/t5, gRtMaterials t9; under AVER_RT_BINDLESS the bindless
+// gRtVerts/gRtIndices/gRtInstances t3/t4/t5, instanced foliage's gRtFoliageParts/gRtFoliageDescs t20/t21
+// and the one instance lookup every hit goes through, rtLoadInstance with rtPackCommitted/
+// rtPackCandidate, gRtMaterials t9; under AVER_RT_BINDLESS the bindless
 // texture table gRtTextures t0/space1 and the AVER_RD_ABLATE measurement enum; the material-graph
 // adapter averRtSampleSlot(Graph)/averRtUvGrad/averRtSurfaceUV/averRtPerturbNormal); the cutout-aware
 // RayQuery helpers every ray here (and in voxi_restir.hlsli) calls through: averRtCandidateOpaque,
@@ -44,6 +46,61 @@ struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; f
 StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
 StructuredBuffer<uint>       gRtIndices   : register(t4);
 StructuredBuffer<RtInstance> gRtInstances : register(t5);
+
+// ---- INSTANCED FOLIAGE: TLAS instances that are not draws (VoxiRenderer::setFoliage) ----
+// A foliage instance sits in the TLAS's STATIC PREFIX (slots [0, count), packed once) and has no
+// gRtInstances row: its InstanceID is AVER_RT_FOLIAGE_ID_BIT | the first row of its prototype's parts in
+// gRtFoliageParts (an RtInstance per part, objectToWorld unused), and its transform is read back from
+// the prefix's own instance descs, gRtFoliageDescs, at its CommittedInstanceIndex(). A draw's InstanceID
+// is its gRtInstances row, always below the bit (kMaxDraws, VoxiRenderer.cpp). MUST MATCH
+// kRtFoliageIdBit (VoxiRenderer.cpp).
+#define AVER_RT_FOLIAGE_ID_BIT 0x800000u
+// THE PACKED INSTANCE REFERENCE every lookup takes, and what CSRdVisibility stores in gRdVisBuf's x. A
+// draw's is its InstanceID unchanged (bit 31 clear). A foliage hit's is bit 31 | its part, the hit's
+// GeometryIndex() (< 16, VoxiRenderer::kMaxFoliagePartsPerPrototype), in bits 27..30 | its TLAS instance
+// INDEX in bits 0..26. The miss sentinel 0xFFFFFFFF stays unambiguous: read as a foliage reference it
+// names part 15 of instance 0x7FFFFFF, past any TLAS (rhi::kMaxTlasInstances is 2^24), and no draw id
+// comes near it. Two references are equal exactly when they name the same instance (and, for foliage,
+// the same part) -- the identity a debug view or a medium match compares.
+#define AVER_RT_REF_FOLIAGE     0x80000000u
+#define AVER_RT_REF_GEOM_SHIFT  27u
+#define AVER_RT_REF_INDEX_MASK  0x07FFFFFFu
+// One rhi::kTlasInstanceDescBytes desc (D3D12_RAYTRACING_INSTANCE_DESC == VkAccelerationStructureInstanceKHR):
+// row0..2 the 3x4 transform, the TRANSPOSE of the engine matrix's upper 4x3 (translation in .w);
+// tail.x = instanceId (low 24 bits) | mask << 24, tail.y = hit-group offset | flags << 24, tail.zw = the
+// BLAS address. t20/t21: kVoxiSrvCount's last two slots (VoxiRenderer.cpp), one-element placeholders
+// while there is no foliage.
+struct RtFoliageDesc { float4 row0; float4 row1; float4 row2; uint4 tail; };
+StructuredBuffer<RtInstance>    gRtFoliageParts : register(t20);
+StructuredBuffer<RtFoliageDesc> gRtFoliageDescs : register(t21);
+
+uint rtPackRef(uint instanceId, uint instanceIndex, uint geometryIndex) {
+    return (instanceId & AVER_RT_FOLIAGE_ID_BIT) != 0u
+        ? (AVER_RT_REF_FOLIAGE | (geometryIndex << AVER_RT_REF_GEOM_SHIFT) | instanceIndex)
+        : instanceId;
+}
+// The packed reference of a query's committed hit, or of its current candidate. By reference, like
+// averRtCandidateOpaque, against the one RayQuery template argument every trace in these files uses.
+uint rtPackCommitted(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
+    return rtPackRef(q.CommittedInstanceID(), q.CommittedInstanceIndex(), q.CommittedGeometryIndex());
+}
+uint rtPackCandidate(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
+    return rtPackRef(q.CandidateInstanceID(), q.CandidateInstanceIndex(), q.CandidateGeometryIndex());
+}
+// THE ONE INSTANCE LOOKUP: the RtInstance a packed reference names -- every hit, candidate and
+// visibility record goes through here, never gRtInstances directly. A draw's is its gRtInstances row.
+// A foliage hit's is its part's row with objectToWorld rebuilt from the instance's desc: a draw's
+// objectToWorld is the engine row-vector matrix itself (VoxiRenderer.cpp copies Draw::world in), and the
+// desc rows are that matrix's upper 4x3 transposed, so transposing them back with (0,0,0,1) as the last
+// row restores it exactly.
+RtInstance rtLoadInstance(uint ref) {
+    if ((ref & AVER_RT_REF_FOLIAGE) == 0u) return gRtInstances[ref];
+    const RtFoliageDesc d = gRtFoliageDescs[ref & AVER_RT_REF_INDEX_MASK];
+    RtInstance inst = gRtFoliageParts[(d.tail.x & (AVER_RT_FOLIAGE_ID_BIT - 1u)) +
+                                      ((ref >> AVER_RT_REF_GEOM_SHIFT) & 15u)];
+    inst.objectToWorld = transpose(float4x4(d.row0, d.row1, d.row2, float4(0.0, 0.0, 0.0, 1.0)));
+    return inst;
+}
 
 // ---- per-material data for a ray hit, keyed by RtInstance::materialIndex ----
 // materialIndex repurposes `pad`, a u32 nothing read (grep confirmed zero refs) -- zero extra bytes,
@@ -111,10 +168,11 @@ struct RtMaterial {
 
     // Lamp brightness at 1m in the sun's units, mirrors MaterialConstants::lightIntensity (offset 160,
     // taking the struct to 176 bytes). >0 sets AVER_MAT_LIGHT, turning the draw into a sphere light
-    // (gRdLocalLights, voxi.hlsl). Table uploads MaterialConstants bytes verbatim, so the pad must stay
-    // declared for the stride.
+    // (gRdLocalLights, voxi.hlsl).
     float  lightIntensity;
-    float3 _lightPad;
+    // Mirrors MaterialConstants::subsurfaceColor (the row's former pad), LINEAR; read only under
+    // AVER_MAT_SUBSURFACE.
+    float3 subsurfaceColor;
 };
 
 #ifdef AVER_RT_BINDLESS
@@ -361,11 +419,36 @@ StructuredBuffer<RtMaterial> gRtMaterials : register(t9);
 // be generic over the flags, why the loops below call this rather than inlining it six times). Guarded
 // on AVER_RT_BINDLESS, which gates the material/texture tables this reads; without it no cutout can be
 // expressed, so every candidate is as solid as its geometry.
+//
+// ---- WHAT A CUTOUT TEST COSTS, PER RAY TYPE ----
+// Dense foliage made alpha-tested candidates the dominant cost of every secondary ray: Jungle Ruins
+// with 4M instanced plants, Intel's hero camera, 112 ms GPU. Two per-thread knobs, set by the stage
+// that owns the ray (averRtCutoutPolicy) and left at the old behaviour (exact, unbounded) elsewhere:
+//   - SOLID CUTOUTS for rays that only AVERAGE what they hit -- diffuse GI, sky occlusion, rough
+//     reflections, the shadow ray at a secondary hit: RAY_FLAG_FORCE_OPAQUE (gAverRtSecondaryRayFlags),
+//     so the hardware walks the BVH with no candidate loop at all. MEASURED on that view: GI trace
+//     24.6 -> 13.2 ms, sky occlusion 10.0 -> 5.0, reflections 18.0 -> 9.4, frame 112 -> 80 ms, image
+//     mean within 1/255 (MAD 2.4): a leaf's outline is invisible in a hemisphere average. Primary
+//     visibility and the sun's shadow stay exact -- those draw the leaf.
+//   - A BUDGET of alpha tests per Proceed loop: past it, every further cutout candidate is taken as
+//     solid. A ray still in a canopy after that many leaves is almost surely blocked anyway; the
+//     bound turns an unbounded loop into a fixed worst case.
+// TRIED AND REJECTED: sampling the alpha at the mip a ray cone covers. Wide cones reached mips of a
+// few texels, where even coverage-preserving mips round a 22%-coverage leaf atlas to transparent, and
+// rays ran through the canopy: sun shadow 6 -> 57 ms, sunlight leaking through every tree.
+static uint gAverRtCutoutBudget      = 0xFFFFFFFFu;
+static uint gAverRtSecondaryRayFlags = 0u;
+
+void averRtCutoutPolicy(uint budget, bool solidCutouts) {
+    gAverRtCutoutBudget      = budget;
+    gAverRtSecondaryRayFlags = solidCutouts ? RAY_FLAG_FORCE_OPAQUE : 0u;
+}
+
 bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
 #ifndef AVER_RT_BINDLESS
     return true;
 #else
-    const RtInstance inst = gRtInstances[q.CandidateInstanceID()];
+    const RtInstance inst = rtLoadInstance(rtPackCandidate(q));
     const RtMaterial mat  = gRtMaterials[inst.materialIndex];
     // NOT ALPHA-MASKED MEANS OPAQUE. A translucent pane also arrives here as a candidate; it is not
     // this function's business and must not be committed by it -- the callers that care about
@@ -393,9 +476,10 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
         uv = averRtSurfaceUV(mat, inst, wpos, N, uv);
     }
 
-    // SampleLevel, via averRtSampleSlot -- ddx/ddy is undefined at a ray hit, and an UNBOUND slot
-    // returns opaque white, so a masked material whose atlas failed to load stays solid rather than
-    // vanishing entirely. Slot 0 is BaseColor (pbr::TextureSlot::BaseColor).
+    // Mip 0, via averRtSampleSlot -- ddx/ddy is undefined at a ray hit (and a cone-chosen mip was
+    // tried and rejected, see averRtCutoutPolicy), and an UNBOUND slot returns opaque white, so a
+    // masked material whose atlas failed to load stays solid rather than vanishing entirely. Slot 0 is
+    // BaseColor (pbr::TextureSlot::BaseColor).
     const float alpha = averRtSampleSlot(mat, 0, uv, float2(0, 0), float2(0, 0),
                                          float4(1, 1, 1, 1)).a * mat.baseColorFactor.a;
     return alpha >= mat.alphaCutoff;
@@ -407,12 +491,15 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
 // were all translucent (excluded by mask, once called "provably a no-op here") -- once an
 // alpha-masked instance could appear in the opaque lane, that flag made the hardware commit the leaf
 // card without asking.
-// Still bounded in practice: only alpha-masked instances produce candidates here, so a scene with no
-// cutout materials loops exactly as before.
+// Only alpha-masked geometry produces candidates here, so a scene with no cutout materials loops
+// exactly as before; past gAverRtCutoutBudget tests (averRtCutoutPolicy) every further cutout
+// candidate is committed untested.
 void averRtProceedSolid(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
+    uint tests = 0u;
     while (q.Proceed()) {
-        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE && averRtCandidateOpaque(q))
-            q.CommitNonOpaqueTriangleHit();
+        if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+        if (tests >= gAverRtCutoutBudget || averRtCandidateOpaque(q)) q.CommitNonOpaqueTriangleHit();
+        ++tests;
     }
 }
 
@@ -541,6 +628,23 @@ float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float st
     return float2(cos(a), sin(a)) * sqrt(u);
 }
 
+// Decodes gGiShadowParams.w's runtime bit-field (voxi.hlsl has the per-bit meaning). One accessor so
+// T1 (rtReflection/giTraceInitialCandidate), T2 (rtSkyOcclusionTemporal), T3 (rtReflectionTemporalEx,
+// voxi.hlsl) and bit 32 (rtShadowEx just below) can't drift. Declared ahead of rtShadowEx for bit 32.
+// THE SINGLE-PASS PSRayDriven COMPILE (AVER_RD_SINGLE_PASS) SEES CONSTANTS INSTEAD: T1 on, T2/T3/T4
+// and bit 32 off. Compiling every runtime bit's both paths made that megakernel (shadow+GI+reflection+
+// sky in one PS) exceed the AMD driver's limit: MEASURED 2026-09-26 RX 7800 XT, device lost on frame 1
+// at any resolution; removing any one stage, or folding bits to constants with all stages kept, fixed
+// it. Staged passes keep every bit live. Re-run (--rd-stages 0 --dred) after touching this path.
+#ifndef AVER_RD_SINGLE_PASS
+#define AVER_RD_SINGLE_PASS 0
+#endif
+#if AVER_RD_SINGLE_PASS
+uint rtGiShadowBits() { return 1u; }
+#else
+uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
+#endif
+
 // Traces occlusion rays toward the sun's DISC: 0 fully shadowed, 1 fully lit, between is a real
 // penumbra (the single ray this replaced gave a hard 0/1 edge). gRtParams.x carries the sun's angular
 // tangent (~half a degree), so softening is the sun's own property, not a tuned constant.
@@ -553,11 +657,32 @@ float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float st
 // Only rtShadowTemporal passes nonzero, only with tiling on.
 // `kFirst` (rtShadowEx only): starts at sample kFirst instead of 0, for CSRdShadowProbe (picks one of
 // this pixel's real samples). Other callers use rtShadow, which passes 0.
+//
+// ---- FIRST-HIT FAST PATH (gGiShadowParams.w bit 32, VoxiRenderer::prePass) ----
+// The walk below is for glass: RAY_FLAG_NONE against every lane, so a translucent candidate can
+// multiply transmittance. With NO translucent instance in the structure (counted C++-side as it is
+// built, rtTlasTranslucent_), every non-opaque candidate is an alpha-masked cutout, which the walk
+// only ever commits-and-stops or skips, and `through` never leaves 1: each ray's answer is binary,
+// blocked iff anything was committed. All the closest-hit search adds then is proving WHICH blocker is
+// nearest, which a binary answer never reads -- and on foliage it is the expensive part, every opaque
+// hit found letting traversal go on through the leaf candidates in front of it. MEASURED on Jungle
+// Ruins (12,494 entities: terrain tiles and thousands of alpha-masked foliage instances, no glass;
+// RX 7800 XT, staged ray-driven): the walk's shadow stage 16.2 ms and probe stage 9.8 ms at a
+// 6.7-degree sun, 7.4 / 4.3 ms at 59 degrees. The fast path's own saving is UNMEASURED.
+// So bit 32 traces ACCEPT_FIRST_HIT_AND_END_SEARCH against the opaque lanes and keeps the walk's
+// cutout rule EXACTLY -- the AVER_MAT_CAST_SHADOW test, averRtCandidateOpaque, the 8-candidate bound
+// -- NOT averRtProceedSolid (rtShadowOpaque's), which skips the cast-shadow test and has no bound, so
+// a no-shadow cutout would start casting one. Same disc sample, origin, bias and ray count, so
+// rtShadowTemporalEx and CSRdShadowProbe see the same values. The bit is cbuffer-uniform, and the
+// query gets its own RayQuery with constant flags so the driver can specialise the traversal.
 float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                   float frameJitter, uint kFirst) {
     const uint  n    = max(rays, 1u);
     const float tanR = max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+#if AVER_RD_ABLATE != AVER_RD_ABL_SHADOW_FIRSTHIT
+    const bool firstHitOnly = (rtGiShadowBits() & 32u) != 0u;
+#endif
 
     // A frame around the light direction, to spread samples across the disc.
     float3 up = abs(L.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
@@ -584,14 +709,35 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
 
         RayDesc r;
         // Offset along the NORMAL and along the ray -- the normal alone leaves acne at grazing angles.
-        r.Origin    = org + N * bias + dir * bias;
+        // gAverShadowOriginPush is zero except for a subsurface pixel lit from behind (voxi.hlsl).
+        r.Origin    = org + N * bias + dir * bias + gAverShadowOriginPush;
         r.Direction = dir;
         r.TMin      = bias;
         r.TMax      = 100000.0;
+#if AVER_RD_ABLATE != AVER_RD_ABL_SHADOW_FIRSTHIT
+        // FIRST-HIT FAST PATH (header above). Kept out of the ablation compile so that mode still
+        // prices exactly what it names.
+        if (firstHitOnly) {
+            RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qf;
+            qf.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
+            [loop] for (uint step = 0; step < 8u && qf.Proceed(); ++step) {
+                // Only cutouts are non-opaque here, so this is the walk's A CUTOUT IS NOT A MEDIUM rule
+                // on its own; committing ends the search under this flag.
+                const RtMaterial m = gRtMaterials[rtLoadInstance(rtPackCandidate(qf)).materialIndex];
+                if ((m.flags & AVER_MAT_CAST_SHADOW) && averRtCandidateOpaque(qf)) {
+                    qf.CommitNonOpaqueTriangleHit();
+                    break;
+                }
+            }
+            if (qf.CommittedStatus() != COMMITTED_TRIANGLE_HIT) vis += float3(1.0, 1.0, 1.0);
+            continue;
+        }
+#endif
         // NO ACCEPT_FIRST_HIT: right for a binary shadow, wrong for a transmissive one (glass would
         // stop the ray like a wall). Instead runs its own traversal, multiplying transmittance per
         // translucent surface crossed. COST IS REAL: every shadow ray now walks to an opaque hit or
         // the structure's end, even rays that never meet a pane -- measure before assuming it's small.
+        // Taken only while a translucent instance exists (bit 32 clear); otherwise the fast path above.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
         // BOTH LANES: this is the one ray that wants to see translucent geometry.
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW_FIRSTHIT
@@ -627,8 +773,8 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
 
             // The material of the thing we just passed through -- what RtInstance::materialIndex and
             // the t9 material table were built for, and until now never used by a shadow ray.
-            const uint iid = q.CandidateInstanceID();
-            const RtMaterial m = gRtMaterials[gRtInstances[iid].materialIndex];
+            const uint iid = rtPackCandidate(q);   // packed: the medium match below compares these
+            const RtMaterial m = gRtMaterials[rtLoadInstance(iid).materialIndex];
 
             // ---- A CUTOUT IS NOT A MEDIUM ----
             // Alpha-masked instances are non-opaque now, so they arrive here alongside glass, but
@@ -679,12 +825,12 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
         // Resolve gathered spans via the same Beer-Lambert averVolumeTransmittance the VIEW path uses
         // (reads no globals) -- keeps light going down through a medium agree with light coming up.
         if (med0Hits > 0u) {
-            const RtMaterial m0 = gRtMaterials[gRtInstances[med0Iid].materialIndex];
+            const RtMaterial m0 = gRtMaterials[rtLoadInstance(med0Iid).materialIndex];
             const float th0 = (med0Hits == 1u) ? med0Max : (med0Max - med0Min);
             through *= averVolumeTransmittance(m0.attenuationColor, m0.attenuationDistance, th0);
         }
         if (med1Hits > 0u) {
-            const RtMaterial m1 = gRtMaterials[gRtInstances[med1Iid].materialIndex];
+            const RtMaterial m1 = gRtMaterials[rtLoadInstance(med1Iid).materialIndex];
             const float th1 = (med1Hits == 1u) ? med1Max : (med1Max - med1Min);
             through *= averVolumeTransmittance(m1.attenuationColor, m1.attenuationDistance, th1);
         }
@@ -703,22 +849,6 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
                float frameJitter) {
     return rtShadowEx(wpos, N, L, pixel, dpx, dpy, rays, frameJitter, 0u);
 }
-
-// Decodes gGiShadowParams.w's runtime bit-field (voxi.hlsl has the per-bit meaning). One accessor so
-// T1 below, T2 (rtSkyOcclusionTemporal) and T3 (rtReflectionTemporalEx, voxi.hlsl) can't drift.
-// THE SINGLE-PASS PSRayDriven COMPILE (AVER_RD_SINGLE_PASS) SEES CONSTANTS INSTEAD: T1 on, T2/T3/T4
-// off. Compiling every runtime bit's both paths made that megakernel (shadow+GI+reflection+sky in one
-// PS) exceed the AMD driver's limit: MEASURED 2026-09-26 RX 7800 XT, device lost on frame 1 at any
-// resolution; removing any one stage, or folding bits to constants with all stages kept, fixed it.
-// Staged passes keep all four toggles live. Re-run (--rd-stages 0 --dred) after touching this path.
-#ifndef AVER_RD_SINGLE_PASS
-#define AVER_RD_SINGLE_PASS 0
-#endif
-#if AVER_RD_SINGLE_PASS
-uint rtGiShadowBits() { return 1u; }
-#else
-uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
-#endif
 
 // Where a shadow ray along `dir` leaves the surface at wpos: rtShadowEx's distance-scaled bias, offset
 // along the normal AND the ray (see rtShadowEx for why both). Shared with rdLocalShadow so a lamp's
@@ -753,7 +883,8 @@ void rtShadowRay0(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitt
 // through averRtProceedSolid so a leaf still casts its alpha-tested SHAPE's shadow, not its bounding rectangle.
 // THE TRADE: a translucent instance (glass, water) is excluded by mask, not walked/attenuated, so it
 // casts NO shadow for these two callers -- losing the coloured tint a pane would cast. The PRIMARY sun
-// shadow (rtShadowTemporalEx / CSRdShadow / CSRdShadowProbe) keeps the tint. Saving: up to 8 transmittance
+// shadow (rtShadowTemporalEx / CSRdShadow / CSRdShadowProbe) keeps the tint, and in a scene with no pane
+// at all takes rtShadowEx's own first-hit query instead (bit 32). Saving: up to 8 transmittance
 // steps (RAY_FLAG_NONE, AVER_RT_MASK_ALL) traded for one BVH traversal to the first opaque hit.
 // Builds the identical ray rtShadowEx(rays=1, kFirst=0, dpx=dpy=0) would, via rtShadowRay0, so
 // flipping this bit changes cost, not the ray itself. Returns float3 (0 or 1 per channel) to drop
@@ -770,7 +901,7 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
     r.TMax      = 100000.0;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
+    q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
 
     return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? float3(0, 0, 0) : float3(1, 1, 1);
@@ -1003,7 +1134,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
         //
         // Runtime flags OR with template flags: the same query as before, just spelled at the call.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-        q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
+        q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
         averRtProceedSolid(q);
 
         // ONE `if`, BOTH ANSWERS: CommittedRayT() is meaningful only on a hit; on a miss the ray ran
@@ -1822,55 +1953,74 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
     return rtShadowTemporalEx(wpos, N, L, pixel, dpx, dpy, rays, false, float3(0.0, 0.0, 0.0));
 }
 
-// Traces one reflection ray and shades what it hits. Global, unlike the cone tracer it replaced,
-// which stopped dead at the voxel volume's boundary and popped objects in/out of reflections. Shades
-// one bounce of Lambertian light plus sky ambient from the hit's own albedo -- no textures, no
-// second bounce, so a reflection reads slightly flatter than the surface seen directly.
+// A GGX microfacet normal distributed as the visible normals seen from Ve (tangent space, z = the
+// shading normal): Heitz 2018, "Sampling the GGX Distribution of Visible Normals", JCGT 7(4).
+float3 rtSampleGgxVndf(float3 Ve, float alpha, float2 u) {
+    const float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+    const float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
+    const float3 T2 = cross(Vh, T1);
+    const float r = sqrt(u.x);
+    const float phi = 6.2831853 * u.y;
+    const float t1 = r * cos(phi);
+    const float s = 0.5 * (1.0 + Vh.z);
+    const float t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * r * sin(phi);
+    const float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+    return normalize(float3(alpha * Nh.x, alpha * Nh.y, max(1e-6, Nh.z)));
+}
+
+// Traces one reflection ray and returns the radiance along it: the shaded hit, or THE SKY ALONG THE
+// SAMPLED RAY when it escapes. Global (unlike the voxel cone tracer it replaced, which popped objects
+// at the volume's edge); the hit gets one bounce of Lambertian sun plus sky ambient from its own
+// albedo. ONE RAY per pixel per frame: the lobe's variance is paid down by rtReflectionTemporal's
+// history and rtReflectionSpatial's kernel, not by more rays. frameIdx 0 (no history) is a fixed
+// per-pixel sample, so a single-frame capture is bit-exact. `hit` is true whenever the return value is that estimate (always, for
+// a traced ray) -- a miss is a sample of the lobe like any other, and the old contract (miss = 0 +
+// hit false, sharp mirror sky substituted by the caller, misses kept out of both filters) made a
+// semi-rough surface a per-pixel coin toss between a filtered hit and raw sky: the speckled lattice
+// on Jungle Ruins' ground at roughness 0.5.
 //
-// ---- THE LOBE: why `rough` is a parameter, and what it fixed ----
-// Used to trace R exactly, faking roughness by refusing reflections above 0.5 and fading the rest
-// toward flat sky at 2x roughness -- a quarter-rough surface got a half-strength mirror mixed with
-// half flat sky, neither a glossy reflection.
-// Fix: `rough` widens the ray into a cone, the same way gRtParams.x widens the shadow ray into the
-// sun's disc (same rtDiscSample sequence, per-pixel rotation, frameJitter decorrelation).
-// tan(cone) = rough*rough is the GGX alpha (standard remap; the lobe's half-angle tangent IS alpha
-// for small angles), not tuned: roughness 0.05 gets tan=0.0025 (2.5cm over a 10m reflection, still a
-// mirror), roughness 0.5 gets tan=0.25 (~14 degrees, a real blur).
-// ONE RAY, NOT A SWEEP: widening the cone costs VARIANCE, paid down by rtReflectionTemporal's
-// history and rtReflectionSpatial's roughness-scaled kernel, not by a second ray (which would double
-// the cost of the most expensive term in the path).
-// `frameJitter` is added to the per-pixel rotation, zero for callers with no history -- same
-// contract as rtShadow's. rtHash stays pure per-pixel so a single-frame capture is bit-exact.
-float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
-                    float frameJitter, out bool hit) {
+// THE LOBE IS GGX's, SAMPLED BY VISIBLE NORMAL (rtSampleGgxVndf), alpha = rough^2 -- the lobe the
+// split-sum DFG term that weights this result (averIndirectTerms) integrates. It replaced a cone of
+// one FIXED radius (0.707 * rough^2) around R: every sample on one ring, a quarter of the true lobe's
+// width at roughness 0.5, so the ground mirrored the pyramid. Random numbers: an R2 low-discrepancy
+// step per frame (frameIdx) from a per-pixel random start, so a still image converges in the history.
+//
+// `Ng` is the flat TRIANGLE's normal, facing the same way as `N`. The BVH holds flat triangles, so a
+// direction above the interpolated normal but below the facet re-hit its own triangle or a neighbour
+// -- decided per facet, which drew the triangulation of distant hills as blocks. The origin is pushed
+// along Ng and the sample kept above both planes.
+float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2 pixel, float rough,
+                    uint frameIdx, out bool hit) {
     hit = false;
 
-    // At rough=0, tanCone is exactly zero and the arithmetic reduces to `dir = R` bit-for-bit, so a
-    // mirror surface (chrome ball, glass) is untouched by this change.
-    const float tanCone = rough * rough;
+    // At rough=0 the sample is R exactly, so a mirror surface (chrome ball, glass) is untouched.
+    const float alpha = rough * rough;
+    const float tanCone = alpha;   // the hit's texture footprint below
     float3 dir = R;
-    if (tanCone > 0.0) {
-        float3 up = abs(R.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
-        float3 T  = normalize(cross(up, R));
-        float3 B  = cross(R, T);
-        // Sample index 0 always (not per-pixel): the sequence's RADIUS depends on the index, so a
-        // varying index would give neighbours systematically different cone widths and bias the
-        // spatial filter's average across lobes. One fixed radius, rotated per pixel and frame, keeps
-        // every sample on the same ring of the same lobe.
-        const float2 d = rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter);
-        dir = normalize(R + (T * d.x + B * d.y) * tanCone);
-        // A cone wide enough to swing below the surface would reflect the receiver into itself.
-        // Clamp back into the upper hemisphere rather than drop the sample -- dropping biases the
-        // estimate dark exactly where the lobe is widest.
-        if (dot(dir, N) <= 0.0) dir = normalize(dir - N * (dot(dir, N) - 1e-3));
+    if (alpha > 0.0) {
+        const float3 V  = -reflect(R, N);   // toward the viewer: R = reflect(-V, N)
+        const float3 up = abs(N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 T  = normalize(cross(up, N));
+        const float3 B  = cross(N, T);
+        const float3 Ve = float3(dot(V, T), dot(V, B), max(dot(V, N), 1e-4));
+        const float2 u  = frac(float2(rtHash(pixel), rtHash(pixel + float2(17.31, 91.7))) +
+                               (float)frameIdx * float2(0.7548776662, 0.5698402910));
+        const float3 m  = rtSampleGgxVndf(Ve, alpha, u);
+        const float3 H  = T * m.x + B * m.y + N * m.z;
+        dir = reflect(-V, H);
     }
+    // Above the shading AND the geometric plane. Clamped, not dropped: dropping biases the estimate
+    // dark exactly where the lobe is widest.
+    if (dot(dir, N)  <= 1e-3) dir = normalize(dir - N  * (dot(dir, N)  - 1e-3));
+    if (dot(dir, Ng) <= 1e-3) dir = normalize(dir - Ng * (dot(dir, Ng) - 1e-3));
 
     RayDesc r;
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
-    r.Origin    = wpos + N * bias;
+    r.Origin    = wpos + Ng * bias;
     r.Direction = dir;
     r.TMin      = bias;
-    r.TMax      = 100000.0;
+    r.TMax      = 1.0e7;   // 100 km: distant terrain is a hit, not sky
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Opaque lane only (AVER_RT_MASK_OPAQUE_ALL): wants solid surfaces, excludes translucent by mask.
@@ -1878,11 +2028,19 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     // excluded translucent lane was ever un-opaqued) and is now provably WRONG: alpha-masked instances
     // stay in the OPAQUE lane (they occlude, they cast shadow) but are non-opaque so a ray can see
     // their holes. With the flag on, the hardware would commit the leaf card unasked.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+    q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
-    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        hit = true;
+#if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+        return 0.0;   // ablated: no atmosphere march
+#else
+        return skyColor(dir);
+#endif
+    }
+    const float frameJitter = (float)frameIdx * 2.39996323;   // the secondary shadow ray's rotation
 
-    RtInstance inst = gRtInstances[q.CommittedInstanceID()];
+    RtInstance inst = rtLoadInstance(rtPackCommitted(q));
     uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
     uint i0 = inst.firstVertex + gRtIndices[tri + 0];
     uint i1 = inst.firstVertex + gRtIndices[tri + 1];

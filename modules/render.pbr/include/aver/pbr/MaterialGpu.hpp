@@ -199,7 +199,9 @@ struct MaterialConstants {
     // authored before this field existed already has in these bytes, so every such material shades
     // bit-identically and the gate baselines do not move.
     f32 lightIntensity;
-    f32 _lightPad[3];    // keeps the row 16 bytes; not read anywhere
+    // The row's other three floats, which were padding: MaterialDesc::subsurfaceColor, LINEAR
+    // (packMaterial decodes it like baseColorFactor). Read only under MaterialFlag_Subsurface.
+    f32 subsurfaceColor[3];
 };
 
 // No texture in that slot. Deliberately not 0; see MaterialConstants::texIndex.

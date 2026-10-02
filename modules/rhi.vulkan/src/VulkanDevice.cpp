@@ -807,6 +807,10 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     rhiFactory_ = new VulkanResourceFactory(this);
     if (!rhiFactory_->init()) { delete rhiFactory_; rhiFactory_ = nullptr; }
     else rhiContext_ = new VulkanRenderContext(this, rhiFactory_);
+    // Editor chrome (grid, gizmos, selection outlines, collider/nav overlays): built only on the
+    // generic factory (EditorLines.hpp), so init() failing (no factory) leaves it a harmless no-op,
+    // same as every other rhiFactory_-gated feature in this file.
+    if (rhiFactory_) editorLines_.init(*rhiFactory_);
 
     // M6: one snapshot at init, same C-7 shape as D3D12's init-time line (also read every frame by
     // the gpuTiming()-adjacent "[GPU] video memory: ..." line). MB, not raw bytes, for readability.
@@ -834,6 +838,9 @@ VulkanDevice::~VulkanDevice() {
     // GPU itself, so this is safe as teardown's first act.
     uiShutdown();
     waitForGpu();
+    // Releases its own meshes/pipelines/shaders through rhiFactory_, so it must go BEFORE that
+    // factory is deleted below.
+    editorLines_.shutdown();
     delete rhiContext_;
     delete rhiFactory_;
 
@@ -872,8 +879,6 @@ VulkanDevice::~VulkanDevice() {
         if (m.vb && m.vbBuffer == 0) destroyBufferCommitted(*this, m.vb, m.vbMemory);
         if (m.ib && m.ibOwned && m.ibBuffer == 0) destroyBufferCommitted(*this, m.ib, m.ibMemory);
     }
-    for (GpuLineMesh& lm : lineMeshes_) if (lm.vb) destroyBufferCommitted(*this, lm.vb, lm.vbMemory);
-
     for (u32 i = 0; i < kFrameCount; ++i)
         if (frameCBs_[i]) destroyBufferCommitted(*this, frameCBs_[i], frameCBMemory_[i]);
     if (sceneDescriptorPool_) api_.DestroyDescriptorPool(device_, sceneDescriptorPool_, nullptr);
@@ -882,7 +887,7 @@ VulkanDevice::~VulkanDevice() {
     if (emptySetLayout_) { api_.DestroyDescriptorSetLayout(device_, emptySetLayout_, nullptr); emptySetLayout_ = VK_NULL_HANDLE; }
     if (scenePipelineLayout_) api_.DestroyPipelineLayout(device_, scenePipelineLayout_, nullptr);
     if (meshPipelineLayout_) api_.DestroyPipelineLayout(device_, meshPipelineLayout_, nullptr);
-    for (VkPipeline* pso : {&scenePso_, &skyPso_, &wirePso_, &linePso_, &lineOverlayPso_, &meshPso_})
+    for (VkPipeline* pso : {&scenePso_, &skyPso_, &meshPso_})
         if (*pso) api_.DestroyPipeline(device_, *pso, nullptr);
 
     if (msaaColorView_) api_.DestroyImageView(device_, msaaColorView_, nullptr);
@@ -1147,14 +1152,14 @@ bool VulkanDevice::initAccelerationStructures() {
 }
 
 // ================================================================================================
-// 5. The backend's own fixed scene/sky/wire/line pipelines.
+// 5. The backend's own fixed scene/sky/wire pipelines.
 // ================================================================================================
 bool VulkanDevice::createPipeline() {
     // setSampleCount() calls this repeatedly to rebuild each PSO's baked-in rasterizationSamples --
     // unlike D3D12's ComPtr, an overwritten VkPipeline leaks without an explicit vkDestroyPipeline
     // first. Set/pipeline-LAYOUT objects are NOT re-destroyed here (only the PSOs depend on
     // sampleCount_), matching the `if (!X)` guards below.
-    for (VkPipeline* pso : {&scenePso_, &skyPso_, &wirePso_, &linePso_, &lineOverlayPso_}) {
+    for (VkPipeline* pso : {&scenePso_, &skyPso_}) {
         if (*pso) { api_.DestroyPipeline(device_, *pso, nullptr); *pso = VK_NULL_HANDLE; }
     }
 
@@ -1224,13 +1229,11 @@ bool VulkanDevice::createPipeline() {
     }
     if (!patchPushConstants(src, /*mesh=*/false)) return false;
 
-    std::vector<u32> vsSpv, psSpv, skyVsSpv, skyPsSpv, wireVsSpv, lineVsSpv, linePsSpv;
+    std::vector<u32> vsSpv, psSpv, skyVsSpv, skyPsSpv, wireVsSpv;
     if (!vulkanShaderCompiler().compile(src.c_str(), "VSMain", ShaderStage::Vertex, 60, nullptr, vsSpv)) return false;
     if (!vulkanShaderCompiler().compile(src.c_str(), "PSMainPlain", ShaderStage::Pixel, 60, nullptr, psSpv)) return false;
     if (!vulkanShaderCompiler().compile(src.c_str(), "VSky", ShaderStage::Vertex, 60, nullptr, skyVsSpv)) return false;
     if (!vulkanShaderCompiler().compile(src.c_str(), "PSky", ShaderStage::Pixel, 60, nullptr, skyPsSpv)) return false;
-    if (!vulkanShaderCompiler().compile(src.c_str(), "VSLine", ShaderStage::Vertex, 60, nullptr, lineVsSpv)) return false;
-    if (!vulkanShaderCompiler().compile(src.c_str(), "PSLine", ShaderStage::Pixel, 60, nullptr, linePsSpv)) return false;
 
     auto makeModule = [&](const std::vector<u32>& spv, VkShaderModule& out) {
         VkShaderModuleCreateInfo mci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1238,9 +1241,9 @@ bool VulkanDevice::createPipeline() {
         mci.pCode = spv.data();
         return vkOk(api_.CreateShaderModule(device_, &mci, nullptr, &out), "shader module");
     };
-    VkShaderModule vsMod{}, psMod{}, skyVsMod{}, skyPsMod{}, lineVsMod{}, linePsMod{};
+    VkShaderModule vsMod{}, psMod{}, skyVsMod{}, skyPsMod{};
     if (!makeModule(vsSpv, vsMod) || !makeModule(psSpv, psMod) || !makeModule(skyVsSpv, skyVsMod) ||
-        !makeModule(skyPsSpv, skyPsMod) || !makeModule(lineVsSpv, lineVsMod) || !makeModule(linePsSpv, linePsMod))
+        !makeModule(skyPsSpv, skyPsMod))
         return false;
 
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -1311,32 +1314,11 @@ bool VulkanDevice::createPipeline() {
     ds.depthCompareOp = VK_COMPARE_OP_LESS;
     ds.depthWriteEnable = VK_TRUE;
 
-    // ---- wireframe: same as scene, FILL_MODE_LINE ----
-    stages[0].module = vsMod; stages[0].pName = "VSMain";
-    stages[1].module = psMod; stages[1].pName = "PSMainPlain";
-    gp.pVertexInputState = &vin;
-    rs.polygonMode = VK_POLYGON_MODE_LINE;
-    if (!vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &wirePso_), "wire pso")) return false;
-    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    // Lines and the wireframe view are aver::rhi::EditorLines now -- drawn after the camera post
+    // chain, at display resolution, on the generic factory (see editorLines_'s own declaration). No
+    // fixed PSO here.
 
-    // ---- lines: LineVertex input, line-list topology ----
-    stages[0].module = lineVsMod; stages[0].pName = "VSLine";
-    stages[1].module = linePsMod; stages[1].pName = "PSLine";
-    VkVertexInputBindingDescription lineBinding{};
-    VkVertexInputAttributeDescription lineAttribs[2];
-    lineVertexInputState(lineBinding, lineAttribs);
-    VkPipelineVertexInputStateCreateInfo lvin{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    lvin.vertexBindingDescriptionCount = 1; lvin.pVertexBindingDescriptions = &lineBinding;
-    lvin.vertexAttributeDescriptionCount = 2; lvin.pVertexAttributeDescriptions = lineAttribs;
-    gp.pVertexInputState = &lvin;
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-    ds.depthWriteEnable = VK_FALSE;
-    if (!vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &linePso_), "line pso")) return false;
-    ds.depthTestEnable = VK_FALSE;
-    ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
-    if (!vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &lineOverlayPso_), "line overlay pso")) return false;
-
-    for (VkShaderModule m : {vsMod, psMod, skyVsMod, skyPsMod, lineVsMod, linePsMod}) api_.DestroyShaderModule(device_, m, nullptr);
+    for (VkShaderModule m : {vsMod, psMod, skyVsMod, skyPsMod}) api_.DestroyShaderModule(device_, m, nullptr);
     return true;
 }
 
@@ -2129,61 +2111,20 @@ bool VulkanDevice::meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius)
 }
 
 LineHandle VulkanDevice::createLineMesh(const LineVertex* verts, u32 count) {
-    if (!device_ || count == 0) return 0;
-    GpuLineMesh m;
-    m.count = count;
-    const u64 bytes = static_cast<u64>(count) * sizeof(LineVertex);
-    if (!createBufferCommitted(*this, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m.vb, m.vbMemory, nullptr, "line vb"))
-        return 0;
-    void* p = nullptr;
-    api_.MapMemory(device_, m.vbMemory, 0, VK_WHOLE_SIZE, 0, &p);
-    std::memcpy(p, verts, bytes);
-    api_.UnmapMemory(device_, m.vbMemory);
-    lineMeshes_.push_back(m);
-    return static_cast<LineHandle>(lineMeshes_.size());
+    return editorLines_.create(verts, count);
 }
 
 bool VulkanDevice::destroyLineMesh(LineHandle mesh) {
-    if (mesh == 0 || mesh > lineMeshes_.size()) return false;
-    GpuLineMesh& m = lineMeshes_[mesh - 1];
-    if (m.vb == VK_NULL_HANDLE) return false;   // already released; saying so beats reporting a second success
-    // DEFERRED, not immediate -- same reason as the D3D12 twin: a frame already submitted may still
-    // be reading this buffer, and vkDestroyBuffer on it is UB that surfaces as an unrelated
-    // validation error. VulkanResourceFactory::retire runs the deleter once the timeline semaphore
-    // passes the value this frame retires behind -- the same machinery destroyBuffer uses.
-    VkBuffer buf = m.vb;
-    VkDeviceMemory mem = m.vbMemory;
-    if (rhiFactory_) rhiFactory_->retire([this, buf, mem]() { destroyBufferCommitted(*this, buf, mem); });
-    else destroyBufferCommitted(*this, buf, mem);   // no factory: nothing was ever submitted either
-    // The slot is CLEARED AND KEPT, never recycled -- see IDevice::destroyLineMesh.
-    m.vb = VK_NULL_HANDLE;
-    m.vbMemory = VK_NULL_HANDLE;
-    m.count = 0;
-    return true;
+    return editorLines_.destroy(mesh);
 }
 
 void VulkanDevice::drawLines(LineHandle mesh, const f32 world[16]) {
-    if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
+    if (!hasSwapchain_) return;
     // suppressesWholeFrame, matching D3D12: gizmos belong in a ray-driven viewport.
     for (IRenderFeature* f : features_) if (f->suppressesWholeFrame()) return;
-    const GpuLineMesh& m = lineMeshes_[mesh - 1];
-    // A DESTROYED MESH DRAWS NOTHING -- the half that makes the kept-slot contract true.
-    if (m.vb == VK_NULL_HANDLE || m.count == 0) return;
-    VkCommandBuffer cmd = commandBuffers_[frameIndex_];
-    const u32 zeroOffset = 0;
-    api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lineDepth_ ? linePso_ : lineOverlayPso_);
-    api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, kVkSetConstants, 1,
-                               &sceneFrameSet_[frameIndex_], 1, &zeroOffset);
-    api_.CmdPushConstants(cmd, scenePipelineLayout_, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, 64, world);
-    // Byte 65 onward is gBaseColor.x, the glow multiplier (PSLine reads nothing else from it).
-    // Pushed on EVERY line draw since push constants persist -- else grid/sculpt ring would inherit
-    // the last mesh's base-colour red as brightness. Mirrors D3D12Device::drawLines.
-    api_.CmdPushConstants(cmd, scenePipelineLayout_, VK_SHADER_STAGE_ALL,
-                          PushConstantLayout::kObjectOffset + 64, 4, &lineGlow_);
-    VkDeviceSize off = 0;
-    api_.CmdBindVertexBuffers(cmd, 0, 1, &m.vb, &off);
-    api_.CmdDraw(cmd, m.count, 1, 0, 0);
+    // QUEUES for replay in endFrame's overlay stage, after the camera post chain -- see
+    // aver::rhi::EditorLines::replay. No longer an immediate draw into the scene target.
+    editorLines_.queue(mesh, world);
 }
 
 // ================================================================================================
@@ -2400,13 +2341,21 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     depthOnlyMesh_ = 0;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     if (!meshes_[mesh - 1].alive) return;
+    // THE WIREFRAME VIEW: queued for the overlay stage's unlit edges instead of shaded -- see
+    // D3D12Device::drawMesh's twin and IDevice::setWireframe.
+    if (wireframe_) {
+        for (IRenderFeature* f : features_)
+            f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
+        editorLines_.queueWire(mesh, world, meshVertexBuffer(mesh) != 0);
+        return;
+    }
     // `blended` explicit false: translucent meshes are D3D12-only (IDevice::setDrawBlended, RHI.hpp:613); VulkanDevice's setter is a no-op so drawBlended() always answers false -- both explicit `false`s below say so rather than leaning on a default.
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
     // CONCRETELY WRONG, not just unsupported: a blended glass mesh takes the same opaque path --
-    // scenePso_/wirePso_/meshPso_ each hardcode an opaque VkPipelineColorBlendAttachmentState
+    // scenePso_/meshPso_ each hardcode an opaque VkPipelineColorBlendAttachmentState
     // (createPipeline() ~1321, initMeshShaders() ~1490), with no BlendMode read anywhere; it paints
     // solid, and nothing logs or asserts it.
     // TODO: override setDrawBlended/drawBlended (sticky, like D3D12Device's); after the submitDraw
@@ -2422,7 +2371,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // gave prepassed draws the ordinary Less/write-on pipeline, rejecting the equal depth the prepass
         // just wrote -- the frame came out almost unshaded (full account/measurement: D3D12Device::drawMesh's twin).
         const bool featureMs = msActive_ && meshPso_ && !prepassed;
-        const PipelineHandle fp = f->scenePipeline(featureMs, wireframe_, prepassed, false);
+        const PipelineHandle fp = f->scenePipeline(featureMs, prepassed, false);
         if (!fp) break;
         rhiContext_->setPipeline(fp);
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
@@ -2438,8 +2387,8 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // featureMs, not msActive_: the draw call has to match the pipeline chosen above.
-        if (featureMs && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
-        else                          rhiContext_->drawMesh(mesh);
+        if (featureMs) rhiContext_->dispatchMeshFor(mesh);
+        else           rhiContext_->drawMesh(mesh);
         return;
     }
 
@@ -2450,9 +2399,9 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     }
 
     const GpuMesh& m = meshes_[mesh - 1];
-    const bool useMs = msActive_ && meshPso_ && !wireframe_;
+    const bool useMs = msActive_ && meshPso_;
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
-    VkPipeline pso = useMs ? meshPso_ : (wireframe_ ? wirePso_ : scenePso_);
+    VkPipeline pso = useMs ? meshPso_ : scenePso_;
     VkPipelineLayout layout = useMs ? meshPipelineLayout_ : scenePipelineLayout_;
     const u32 zeroOffset = 0;
     api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso);
@@ -2632,6 +2581,9 @@ void VulkanDevice::beginFrame() {
     waitTimeline(frameTimelineValues_[frameIndex_]);
     // The wait above already proved this slot's last GPU work (including any exposure-readout copy runPostChain recorded into it) is done -- see collectExposureReadout's own comment.
     collectExposureReadout();
+    // Deferred destroys, reclaimed every frame -- D3D12Device::beginFrame's twin says why (a resource
+    // freed in an idle scene otherwise waited for the next unrelated create/destroy call).
+    if (rhiFactory_) rhiFactory_->collect();
     if (meshGeomPool_[frameIndex_]) api_.ResetDescriptorPool(device_, meshGeomPool_[frameIndex_], 0);
 
     api_.ResetCommandBuffer(commandBuffers_[frameIndex_], 0);
@@ -2653,6 +2605,7 @@ void VulkanDevice::beginFrame() {
     postRing_[frameIndex_].used = 0;
     drawBinding_ = defaultDrawBinding_;
     depthOnlyMesh_ = 0;   // backstop; drawMesh consumes it -- see D3D12Device's beginFrame
+    wireframeFrame_ = wireframe_;   // re-latched by this frame's own setWireframe(true), if any
     seedSkinTargets();
 
     std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
@@ -2794,7 +2747,8 @@ void VulkanDevice::endFrame() {
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
 
     // THE DEFERRED SKY DRAW -- same timing as D3D12Device::endFrame: after every opaque drawMesh call, before the rendering scope closes (frameSuppressed_, not sceneSuppressed_ -- see D3D12's comment).
-    if (skyEnabled_ && !frameSuppressed_) {
+    // Not in the wireframe view, whose background is black (D3D12's twin says why).
+    if (skyEnabled_ && !frameSuppressed_ && !wireframeFrame_) {
         // Still inside the rendering scope over msaaColorView_/depthView_ (SCENE-sized) -- see beginFrame's fallback.
         const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
         const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
@@ -2828,8 +2782,8 @@ void VulkanDevice::endFrame() {
 
     runPostChain(swapchainImages_[imageIndex_], swapchainViews_[imageIndex_], swapchainFormat_);
 
-    // ---- overlay features, on the composited backbuffer ----
-    if (rhiContext_ && !features_.empty()) {
+    // ---- editor chrome (lines) + overlay features, on the composited backbuffer ----
+    if (rhiContext_) {
         VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         att.imageView = swapchainViews_[imageIndex_];
         att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2843,10 +2797,47 @@ void VulkanDevice::endFrame() {
         VkRect2D sc{{0, 0}, {width_, height_}};
         api_.CmdSetViewport(cmd, 0, 1, &vp);
         api_.CmdSetScissor(cmd, 0, 1, &sc);
+
+        // EDITOR LINES, BEFORE overlayPass features (grid, gizmos, selection outlines, collider/nav
+        // overlays -- see aver/rhi/EditorLines.hpp): drawn here, at display resolution, untouched by
+        // the post chain. Its own occlusion test, and any overlayPass feature sampling the scene depth
+        // (IRenderFeature::overlayPass's contract), both need it SHADER-READABLE for this whole stage
+        // -- round-tripped through the generic factory (textureBarrier), the same DepthWrite<->
+        // ShaderResource pattern modules/occlusion already uses on this same adopted handle (see
+        // VulkanResourceFactory::adoptExternalDepthTexture's comment).
+        const TextureHandle sceneDepth = sceneDepthTexture();
+        if (sceneDepth) rhiContext_->textureBarrier(sceneDepth, ResourceState::DepthWrite, ResourceState::ShaderResource,
+                                                    kAllSubresources);
+
+        // sceneViewport() answers in SCENE pixels (IDevice::sceneViewport); EditorLines::replay wants
+        // the 3D view's rect in THIS target's (display/present) pixels -- scene rect / renderScale,
+        // done with the exact scene/display ratio (matching scaleToSceneW/H's own convention) rather
+        // than the float renderScale_, since sceneWidth_/sceneHeight_ are themselves rounded from it.
+        f32 sceneRect[4];
+        sceneViewport(sceneRect);
+        if (sceneWidth_ && sceneHeight_) {
+            const f32 toDispW = static_cast<f32>(width_)  / static_cast<f32>(sceneWidth_);
+            const f32 toDispH = static_cast<f32>(height_) / static_cast<f32>(sceneHeight_);
+            sceneRect[0] *= toDispW; sceneRect[2] *= toDispW;
+            sceneRect[1] *= toDispH; sceneRect[3] *= toDispH;
+        }
+        editorLines_.replay(*rhiContext_, width_, height_, sceneRect, sceneDepth, sampleCount_, fromVkFormat(swapchainFormat_));
+
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
         // The UI paints last, over the overlay and INSIDE this scope (IUiBackend::render must not open its own); only reachable with a backend installed, which no game build does.
         if (uiBackend_ && uiUp_) uiBackend_->render(reinterpret_cast<u64>(cmd));
         popRenderScope(cmd, overlayScope);
+
+        // Back to what beginFrame's own scene-pass barrier expects next. Not load-bearing for THAT
+        // barrier (it transitions from VK_IMAGE_LAYOUT_UNDEFINED, which discards whatever layout was
+        // actually here), but it keeps this texture's generic-factory state tracking
+        // (AVER_RHI_TRACK_STATE) honest between frames, matching the round trip going in above.
+        if (sceneDepth) rhiContext_->textureBarrier(sceneDepth, ResourceState::ShaderResource, ResourceState::DepthWrite,
+                                                    kAllSubresources);
+    } else {
+        // The overlay stage did not run this frame (no render context): anything queued this frame
+        // must not survive to replay next frame with a stale world matrix -- see EditorLines::discardQueue.
+        editorLines_.discardQueue();
     }
 
     if (captureReq_ && captureBuf_) {
@@ -3566,7 +3557,8 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     }
 
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
-    const bool autoExp = post_.autoExposure && caps_.computeShaders;
+    // Frozen in the wireframe view -- D3D12Device::runPostChain's twin says why.
+    const bool autoExp = post_.autoExposure && caps_.computeShaders && !wireframeFrame_;
     // Independent of autoExp: both strengths can be nonzero with auto-exposure off (a fixed
     // post_.exposure still wants regions pulled toward middle grey). Mirrors D3D12Device's identical
     // `localExp` -- caps_.computeShaders is always true here (core 1.0 mandates a compute-capable

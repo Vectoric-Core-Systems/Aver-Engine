@@ -1,4 +1,4 @@
-// The scene join: walk the world, give every skinned entity its own posed mesh, dispatch, release.
+// The scene join: walk the skinned entities, give each its own posed mesh, dispatch, release.
 #include "aver/render/SkinnedScene.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/anim/Pose.hpp"
@@ -158,16 +158,23 @@ void SkinnedScene::update(scene::World& world, anim::AnimSystem& anim, rhi::IDev
     // ---- reconcile the living ----
     posedLastFrame_ = 0;
     boundsLastFrame_ = 0;
-    const u32 n = world.count();
-    for (u32 i = 0; i < n; ++i) {
-        const scene::Entity e = world.at(i);
+    // THE CSkeletalMesh POOL, NOT EVERY ENTITY. Walking world.count() paid a destroyPending and two
+    // sparse-set probes for each of a level's tens of thousands of entities every frame, to find the
+    // handful that carry this component; the pool is dense over exactly those. entityAt() is the full
+    // generational handle, the same value world.at() gives, and a retired entity has already left the
+    // pool (World::flush drops it from every pool). Nothing below adds or removes a component, and the
+    // size is re-read each pass regardless.
+    scene::ComponentPool* rigs = world.pool(scene::kComponentSkeletalMesh);
+    if (!rigs) return;
+    for (usize i = 0; i < rigs->size(); ++i) {
+        const scene::Entity e = rigs->entityAt(i);
         if (world.destroyPending(e)) continue;
 
         const auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
-        const auto* sm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
         // The COMPONENT'S PRESENCE declares the intent, not its skeleton field: an entity whose
-        // skeleton has not resolved yet is still a skinned entity, it is just at rest.
-        if (!mr || !sm || mr->mesh == 0) continue;
+        // skeleton has not resolved yet is still a skinned entity, it is just at rest. Presence is
+        // what membership of the pool above already says.
+        if (!mr || mr->mesh == 0) continue;
 
         Resident* r = acquire(world, anim, dev, e, mr->mesh);
         if (!r) continue;
@@ -217,6 +224,9 @@ void SkinnedScene::update(scene::World& world, anim::AnimSystem& anim, rhi::IDev
 }
 
 rhi::MeshHandle SkinnedScene::drawHandle(scene::Entity e) const {
+    // Asked once per drawn entity by both hosts, and a level with no rigs has nothing resident:
+    // answer before hashing the handle.
+    if (live_.empty()) return 0;
     const auto it = live_.find(e);
     return it == live_.end() ? 0 : it->second.drawMesh;
 }

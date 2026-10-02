@@ -173,7 +173,12 @@ struct PostSettings {
     // Bloom. Zero intensity builds no pyramid and records no pass at all.
     f32 bloomIntensity = 0.06f;
     // Luminance above which a pixel contributes, and the width of the soft knee below it.
-    f32 bloomThreshold = 1.0f;
+    //
+    // 4, not 1, since the Unreal calibration (2026-09-28, see exposureKey): exposing for the shade
+    // puts sunlit stone at 2-6 after exposure, so at 1 a sunlit floor bloomed into a white haze
+    // across half the frame at the owner's Bloom 0.366, where UE's stays crisp with a slight glow.
+    // At 4 the sun disc, lamp bulbs and specular glints still bloom; diffuse sunlight barely does.
+    f32 bloomThreshold = 4.0f;
     f32 bloomKnee      = 0.5f;
 
     // Eye adaptation, from a luminance histogram of the frame.
@@ -235,42 +240,49 @@ struct PostSettings {
     // histogramLow/HighPercent) that adaptation drives every view toward, before panel Brightness
     // (stops) on top. Not persisted or in panel; console post.exposureKey for a session.
     //
-    // 0.20, tuned with the rest of this block (2026-09-26): headless captures of seven NewSponza
-    // views, scored in display space (viewport mean 0-255, % clipped >= 250, % crushed <= 5)
-    // against targets a little under middle grey (owner: "everything should be dimmer"). MEASURED
-    // means: noon courtyard 74, shaded arcade 73, upper gallery 68, dusk 68, lamp-lit night 55,
-    // lamp close-up 55, moonless night 10 (no moon in the sky model, correctly near-black);
-    // nothing clipped. Earlier 0.03-0.04 only read bright because exposure compensation had been
-    // left at 4.05 (+2 stops).
-    f32  exposureKey    = 0.20f;
+    // 0.25, CALIBRATED AGAINST UNREAL 5 + LUMEN (2026-09-28, owner: "calibrate ... to look like the
+    // lighting in" a UE5 Sponza video) together with the metering band, tonemap and local exposure
+    // below. Display-space statistics (luma percentiles 5/25/50/75/95, mean HSV saturation) of the
+    // video's daylight shots vs headless captures of NewSponza at matching poses:
+    //   balcony  UE [30,72,109,150,204] .27   ours [42,67,90,130,250] .25
+    //   arch     UE [ 3,17, 42, 95,228] .33   ours [20,29,50,115,225] .42 (red curtains fill ours)
+    //   gallery  UE [25,46, 63, 93,190] .36   ours [34,60,77,104,157] .41
+    // (tuned before that at 0.20 for "everything should be dimmer", no clipping anywhere; UE exposes
+    // for the shade and lets sunlit stone clip, which is the look asked for now). Night level:
+    // median 53 -> 56 balcony, 60 -> 64 gallery, colour unchanged.
+    //
+    // Then HALVED to 0.125, one stop down (owner, same day, looking at it in the editor: "make the
+    // current eye exposure -1.0 the default so it would be +0.0 because default currently is too
+    // bright"). The figures above are at 0.25. SandboxSettings' post.settingsVersion 3 doubles a
+    // stored Brightness once, so an editor already at -1.0 keeps its picture and reads +0.0.
+    f32  exposureKey    = 0.125f;
     // Fraction of the histogram discarded at each end before averaging.
     //
-    // High cut is 0.95, not 0.85: discarding the brightest 15% let a sunlit wall dominating the view
-    // clip to white without pulling exposure down. The remaining top 5% still goes, so a sun disc,
-    // lamp bulb, glint or firefly can't darken the whole view. Tuned with exposureKey (0% clipped in
-    // every tuned scene); not persisted.
-    f32  histogramLowPercent  = 0.30f;
-    f32  histogramHighPercent = 0.95f;
+    // 0.10 / 0.90, Unreal's own auto-exposure defaults. The old 0.30 / 0.95 kept a sunlit floor in
+    // the average, so it set the exposure and the shaded 90% of the view sat dim around it; dropping
+    // the brightest tenth exposes for the shade, and sunlit stone clips the way it does in UE. A sun
+    // disc, lamp bulb, glint or firefly still can't darken the whole view. Not persisted.
+    f32  histogramLowPercent  = 0.10f;
+    f32  histogramHighPercent = 0.90f;
 
     // Which tone curve. 0 = original per-channel Narkowicz/Hill approximation; 1 = the same curve
     // between the ACES input/output matrices (colour.hlsli's acesFittedTonemap); 2 = acesLumaTonemap
     // (tonemaps luminance, restores original chromaticity).
     //
-    // 0 is the default again (owner's call, 2026-09-24): gentlest toe, dim indirect light stays
-    // visible. Mode 2's Hill RRT/ODT fit (x2 gain) has a hard black point at ~0.0016 and crushes
-    // anything below ~0.02 by ~0.2, reading physically-correct bounce light (NewSponza stone
-    // albedo ~0.1-0.2) as "no GI"; at the large exposures an enclosed scene needs, mode 0's trade
-    // is channels running onto the shoulder and desaturating -- the reason mode 2 was the default
-    // before.
+    // 1 is the default since the Unreal calibration (2026-09-28, see exposureKey): UE's filmic curve
+    // runs per channel in the ACES AP1 space, which is what mode 1's matrices do, and it matched
+    // UE's saturation (balcony .285 vs UE .27; mode 0 .304) with a firmer toe. Mode 0 (the owner's
+    // 2026-09-24 choice, gentlest toe so dim indirect light stays visible) is post.tonemap 0.
+    // Mode 2's Hill RRT/ODT fit (x2 gain) has a hard black point at ~0.0016 and crushes anything
+    // below ~0.02 by ~0.2, reading physically-correct bounce light (NewSponza stone albedo ~0.1-0.2)
+    // as "no GI".
     //
-    // Mode 1 desaturates less than 0 (ACES matrices rotate into a space where the curve behaves,
-    // then rotate back) but still greys out at big exposure: MEASURED chroma (mean R-B) vs exposure,
-    // mode 1: 1x->3.32, 2x->4.47, 5x->3.28, 8x->1.40 ("colours are washed out"); mode 2 at 8x holds
-    // 3.09 at the same brightness, and above 5x mode 1 also lets blue overtake green.
+    // Mode 1 still greys out at big exposure: MEASURED chroma (mean R-B) vs exposure, 1x->3.32,
+    // 2x->4.47, 5x->3.28, 8x->1.40 ("colours are washed out"); mode 2 at 8x holds 3.09 at the same
+    // brightness, and above 5x mode 1 also lets blue overtake green.
     //
-    // 1 remains correct for matching a recorded baseline; 0 is also the curve every recorded gate
-    // baseline in scripts/ was measured through, so the default reproduces them.
-    u32  tonemap = 0;
+    // The recorded gate baselines in scripts/ were measured through mode 0; they need re-recording.
+    u32  tonemap = 1;
 
     // Ceiling on scene radiance immediately before the tonemap; 0 disables it.
     //
@@ -296,14 +308,14 @@ struct PostSettings {
     // Both ride PostCB.clampRadiance[1]/[2] (gPostClamp.y/z, post.hlsl) instead of new cbuffer rows
     // (see that struct's comment on where a new post scalar lands first).
     //
-    // Tuned with exposureKey above; neither is in the panel or persisted. Shadows 0.10 (tried
-    // 0.25-0.5, up to +4 stops on a dark region): MEASURED night mean 64.5 (key 0.22, shadows 0.25)
-    // -> 55.2 (key 0.20, shadows 0.10), day scenes fell only ~12 (both changed together, not
-    // isolated). Highlights 0.5: a sunlit wall beside a shaded
-    // gallery clipped to white at 0.3; 0.5 pulls it halfway back, capped at AVER_LOCALEXP_MAX_DOWN
-    // stops (post.hlsl) -- 0% clipped in every tuned scene.
-    f32  localExposureShadows    = 0.10f;
-    f32  localExposureHighlights = 0.5f;
+    // OFF by default since the Unreal calibration (2026-09-28, see exposureKey), matching UE, whose
+    // local exposure is also off unless asked for: its images have deep shade under a sunlit
+    // courtyard, which shadows lifting works against (balcony darkest 5% 57 -> 52 turning both
+    // off, UE 30), and a sunlit wall is allowed to clip. Neither is in the panel or persisted;
+    // console post.localExposureShadows / post.localExposureHighlights turn them back on (the
+    // previous tuning was 0.10 / 0.5, for a no-clipping look).
+    f32  localExposureShadows    = 0.0f;
+    f32  localExposureHighlights = 0.0f;
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
@@ -435,8 +447,8 @@ struct GpuTimingNode {
 //     Lets a caller tell "ask again later" from "will never answer", which one bool couldn't.
 struct GpuTimingReport {
     bool supported = false;
-    // Averaged over this many frames since boot (see D3D12Device::tsAccumFrames_ for why an
-    // average, not one sample). 0 when nothing collected yet.
+    // Averaged over this many frames since boot, or since the last resetGpuTiming() (see
+    // D3D12Device::tsAccumFrames_ for why an average, not one sample). 0 when nothing collected yet.
     u32 framesAccumulated = 0;
     std::vector<GpuTimingNode> nodes;
 };
@@ -597,6 +609,17 @@ public:
     // Defaults to an unsupported/empty report (supported == false, `nodes` empty) so Vulkan (no
     // machinery yet), D3D11, Null, and every test mock are unaffected, same as deviceLost() above.
     virtual GpuTimingReport gpuTiming() const { return {}; }
+
+    // Throws away what gpuTiming() has accumulated, so the next report averages only the frames
+    // from now on. The since-boot average is the right shape for a benchmark run and the wrong one
+    // for a question like "what does Play cost": a pass that only runs in Play is divided by every
+    // edit frame before it, so a +10 ms pass reads +0.3 ms after ten minutes of editing. The
+    // editor calls this when Play starts and stops, and from the profiler panel's Reset button.
+    // The log cadence restarts too, so the next "[RHI.D3D12] GPU ..." line lands soon after.
+    //
+    // Defaulted to a no-op for the same reason gpuTiming() defaults to unsupported: Vulkan, D3D11,
+    // Null and every test mock have nothing accumulated to clear.
+    virtual void resetGpuTiming() {}
 
     // GPU self-test: clears a tiny offscreen target to `in` and reads the pixel back into
     // `outRGBA`. True if the read-back matches.
@@ -884,8 +907,23 @@ public:
     // What setDrawBlended last set, for a caller that saves and restores it around a nested draw.
     virtual bool drawBlended() const { return false; }
 
-    // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
+    // Unlit line geometry (grid, gizmos, selection outlines, collider/nav overlays): per-vertex
+    // DISPLAY colour, drawn as a line list.
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
+    // EDITOR CHROME, DRAWN AFTER THE CAMERA POST CHAIN, the way Unreal composites its editor
+    // primitives: the call QUEUES (mesh, world, the current setLineDepth / setLineWidth state) and
+    // the device replays the queue once per frame right after the tonemap, into the display-
+    // resolution target the overlay features use, before any overlayPass and the UI. So a line shows
+    // exactly its authored colour -- no exposure, tonemap, bloom or local exposure touches it, and
+    // AverSR does not resample it -- and is crisp at display resolution.
+    //
+    // Depth-tested lines (setLineDepth(true), the default) are occluded by sampling the scene depth
+    // (sceneDepthTexture) in the pixel shader, since the display target and the scene depth differ
+    // in size under a render scale: a small linear-depth tolerance keeps a line lying ON a surface
+    // (the grid on a floor, an outline on its mesh) visible. Overlay lines (false) draw on top.
+    //
+    // Used to write inverse-tonemapped radiance into the HDR scene target, which auto-exposure then
+    // multiplied (x70-150 in a lit level) and bloom haloed: every gizmo, outline and marker glowed.
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
     // Releases a line mesh's GPU memory. False for a stale or already-released handle.
     //
@@ -905,7 +943,11 @@ public:
     virtual void setMeshShaders(bool enabled) { (void)enabled; }
     virtual bool meshShadersActive() const { return false; }
 
-    // Renders subsequent meshes as wireframe until toggled off.
+    // THE WIREFRAME VIEW, Unreal's: while on, drawMesh shades nothing. Each mesh is queued for the
+    // overlay stage and drawn there as unlit edges (EditorLines::queueWire) after the post chain,
+    // every edge visible, static meshes cyan and compute-written ones magenta. The sky, particles
+    // (transparentPass) and auto-exposure metering are skipped; features still receive submitDraw.
+    // Sticky until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
     // Draws the next mesh with NO LIGHTING -- flat gBaseColor, no sun, no ambient, no fog.
     //
@@ -915,34 +957,22 @@ public:
     // to 0.
     //
     // A setter, not a wider drawMesh, matching setWireframe/setDrawBlended/setLineDepth: widening
-    // would drag IRenderFeature::submitDraw's signature along for a flag no feature ever sees (the
-    // editor's one caller draws in WIREFRAME, where VoxiRenderer already declines the pipeline, so
-    // the draw has already fallen through to the backend's own path before this matters).
+    // would drag IRenderFeature::submitDraw's signature along for a flag no feature needs to see.
     //
     // Sticky like setWireframe: nothing resets it per frame; the caller brackets its own draw.
     virtual void setUnlit(bool on) { (void)on; }
 
     // Line depth testing. Default true; false draws subsequent lines as an always-on-top overlay.
+    // Sticky; captured per drawLines call, since the draw itself is deferred (see drawLines).
     virtual void setLineDepth(bool testDepth) { (void)testDepth; }
 
-    // How much scene radiance a line writes, as a multiple of its authored colour. 1.0 = old
-    // behaviour (display colour as named); above 1.0 the line is BRIGHTER THAN WHITE in the
-    // pre-tonemap target, which the camera's own bloom picks up -- no glow shader needed, only
-    // headroom, since lines already draw HDR before the tonemap.
-    //
-    // A multiplier, not a brighter authored colour, because PSLine's
-    // averInverseTonemap(srgbToLin(col)) clamps at 1.0329 (its `2.43y - 2.51` denominator hits
-    // zero): col=1.0 (two of six baked gizmo hues sit there on a channel) -> ~7.24, col=1.4 -> ~1931
-    // (270x jump, other channels washing toward white).
-    // Scaling AFTER the inverse tonemap has no ceiling and no hue shift.
-    //
-    // Sticky like setLineDepth; drawLines writes the constant every call since it shares dword 16
-    // of the per-object block with gBaseColor.x (else a line after any mesh would inherit that
-    // mesh's red channel). Callers still bracket, so it reads 1.0 outside a bracket.
-    //
-    // NOT exposure-stable: PSLine never divides by gPostTone.x, so strength drifts with brightness
-    // under auto-exposure -- pre-existing, acceptable for a cosmetic effect.
-    virtual void setLineGlow(f32 gain) { (void)gain; }
+    // Line thickness in DISPLAY pixels for subsequent drawLines calls. Default 1; sticky like
+    // setLineDepth and captured per call the same way. The caller scales by its own DPI -- the
+    // device has no idea what a pixel means to the person looking at it. Unreal draws its gizmo
+    // handles and selection outline a few pixels wide; a 1px line at 300% DPI all but vanishes.
+    // (Replaces setLineGlow: lines no longer go through the HDR target, so there is no bloom to
+    // make them glow, which is what was asked for.)
+    virtual void setLineWidth(f32 pixels) { (void)pixels; }
 
     // Captures the backbuffer pixel at (x,y) during the next presented frame; poll getCapture().
     virtual void requestCapture(u32 x, u32 y) { (void)x; (void)y; }

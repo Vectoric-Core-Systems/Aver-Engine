@@ -20,6 +20,11 @@
 // for light injection, and DXR 1.1 inline RayQuery sun shadows. Expressed purely in generic RHI.
 namespace aver::voxi {
 
+// The most foliage instances VoxiRenderer::setFoliage places; more are dropped with a warning. Bounded
+// by what one TLAS holds (rhi::kMaxTlasInstances, prefix plus draws) with room to spare, and by the
+// static prefix's device-local desc buffer: 64 B an instance, ~512 MiB at this count.
+inline constexpr u32 kMaxFoliageInstances = 8'000'000;
+
 // Voxi's GPU side: owns the volume, the shadow atlas, the acceleration structures and the lit
 // pipelines, and runs its passes through rhi::IRenderFeature.
 // Aver.Render.Voxi (the settings DLL) must NOT gain an RHI dependency; this target is where RHI use lives.
@@ -117,7 +122,7 @@ public:
     // raster mirror RhiDevice::setUnlit).
     enum class ViewDebug : u32 {
         None           = 0,
-        RayHitInstance = 2,   // hash(TLAS instance index) -> colour
+        RayHitInstance = 2,   // hash(packed instance reference, voxi_rt.hlsli) -> colour
         RayHitMaterial = 3,   // hash(hit instance's materialIndex) -> colour
         RayHitDistance = 4,   // hit distance (cm) on a log heat ramp
         Triangles      = 5,   // hash(instance index, primitive index) -> colour
@@ -127,6 +132,13 @@ public:
     // Selects one of the debug views above (None = off). Reasserted every frame from
     // SandboxApp::onUpdate, next to setUnlit's call site.
     void setViewDebug(ViewDebug m) { viewDebug_ = m; }
+
+    // The editor's Wireframe view: nothing this feature renders is on screen (the device draws only
+    // the meshes' edges, IDevice::setWireframe), so prePass skips every pass -- shadows, voxel GI,
+    // acceleration structures, ray-driven stages, denoisers. Draws are still recorded, so the draw
+    // list and the GI rebuild gate are current the frame the view is left. Reasserted every frame
+    // from SandboxApp::onUpdate beside setViewDebug.
+    void setPaused(bool on) { paused_ = on; }
 
     // Whether forcing rtRenderMode to 1 THIS frame would engage ray-driven primary visibility --
     // rayDrivenActive()'s own preconditions minus the mode check itself. Used by the editor to grey
@@ -180,10 +192,12 @@ public:
     void setGiBoundedDispatch(bool on);
     bool giBoundedDispatch() const { return giBoundedDispatch_; }
     // W12: frees the injection accumulator (voxelResBuilt_^3*4 R32_UINT texels, 16 B/voxel, the
-    // largest idle GI resource between bakes) after kGiAccumulatorQuietTicks quiet ticks, recreating
-    // it on the next rebuild. Default false: created once at startup, kept for the renderer's life.
-    // Costs one extra tick of volume staleness the first time a still scene moves again after being
-    // freed -- only while this flag is on.
+    // largest idle GI resource between bakes -- 2048 MiB at Epic's 512) after kGiAccumulatorQuietTicks
+    // quiet ticks, recreating it on the next rebuild. DEFAULT TRUE: the recreate path is the same code
+    // a console toggle already exercised, and holding two GiB idle for a session that isn't lighting
+    // anything is real waste, not a hypothetical one -- see reportVramUsage() for where the rest of
+    // this renderer's memory goes. Costs one extra tick of volume staleness the first time a still
+    // scene moves again after being freed -- only while this flag is on.
     void setGiFreeAccumulator(bool on);
     bool giFreeAccumulator() const { return giFreeAccumulator_; }
     // M2(c): CPU cost of buildAccelerationStructures' per-draw loop over drawsPrev_ for the last build
@@ -242,7 +256,12 @@ public:
     void submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                 f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
                 const void* drawConstants, u32 drawConstantBytes, bool translucent = false,
-                bool hiddenFromOwner = false);
+                bool hiddenFromOwner = false, bool movable = false);
+    // Sticky flag for draws that arrive through submitDraw (the raster route: device.drawMesh
+    // broadcasts to every feature and carries no flag of its own). game::drawWorld sets it around a
+    // movable entity's raster draws and clears it straight after; submitDraw ORs it into what it
+    // records. See Draw::movable.
+    void setSubmitMovable(bool on) { submitMovable_ = on; }
     // `blended` must be checked BEFORE a draw reaches draws_/drawsPrev_: everything downstream treats
     // list membership as "opaque scene geometry" (voxelizePass injects it as a light, shadowPass casts
     // a hard shadow, buildAccelerationStructures puts it in the TLAS) -- a translucent pane is wrong in
@@ -273,9 +292,9 @@ public:
     // takes priority over depthPrepassed (the base class says IDevice::drawMesh never routes a blended
     // draw down the prepass path, so the two never arrive together; answering blended first avoids
     // reasoning about that combination). meshShaders IS honoured for a blended draw (its own mesh-
-    // shader blended pipeline, not a dropped draw); wireframe is NOT -- this feature has never built a
-    // wireframe scene pipeline, opaque or blended.
-    rhi::PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false,
+    // shader blended pipeline, not a dropped draw). The wireframe view never asks: the device draws
+    // those meshes itself (IDevice::setWireframe).
+    rhi::PipelineHandle scenePipeline(bool meshShaders, bool depthPrepassed = false,
                                       bool blended = false) const override;
     // The depth-only prepass pipeline: VSMain (same as scenePipeline()'s non-mesh-shader variants)
     // paired with PSDepthPrepass (alpha-tests/clips, writes no colour -- see VoxiShaders.hpp). 0
@@ -316,6 +335,43 @@ public:
     // giShaderDefines()'s frameConstantRegister; no change notification, only "read before you draw".
     const void* giFrameConstants() const { return &cb_; }
     u32 giFrameConstantBytes() const { return sizeof(cb_); }
+
+    // ---- INSTANCED FOLIAGE: ray-traced only, outside the draw list ----
+    // A level's foliage (Runtime's loadLevelFoliage, from .ocinst files) is up to millions of static
+    // instances of a few prototypes -- far past kMaxDraws, and nothing a draw is needed for. It is
+    // TRACED (primary visibility, sun shadow, reflections, GI, sky occlusion) and nothing else: never
+    // rasterised, voxelised, shadow-mapped, lit by lamps or path traced, never in draws_, no collision,
+    // not selectable. Each prototype becomes ONE multi-geometry BLAS (rhi::IResourceFactory::
+    // createBlasMulti -- a geometry per material part, alpha-masked parts non-opaque), each instance ONE
+    // TLAS instance in the TLAS's static prefix (setTlasStaticInstances), packed and uploaded once here:
+    // nothing per frame grows with the instance count. Needs ray tracing; without it the set is refused.
+    struct FoliagePart {
+        rhi::MeshHandle mesh = 0;    // one material part's GPU mesh (GameContent::MeshPart::mesh, or the whole mesh when it has no parts)
+        u32 material = 0;            // pbr::MaterialLibrary handle (GameContent::authoredFor(token)); 0 = none
+        f32 color[4] = {1, 1, 1, 1}; // resolved look (as game::drawWorld's resolveDrawLook computes it) for when material is 0 / not built
+        f32 metallic = 0.0f, roughness = 1.0f;
+    };
+    // Parts in GeometryIndex() order; at most kMaxFoliagePartsPerPrototype (a hit carries the part in 4
+    // bits -- see AVER_RT_REF_GEOM_SHIFT, voxi_rt.hlsli). The caller drops blended/translucent parts.
+    struct FoliagePrototype { std::vector<FoliagePart> parts; };
+    // world: the engine's row-vector world matrix minus its (0,0,0,1) 4th column, world[r*3 + c] =
+    // M[r][c] -- rows 0..2 the scaled basis, row 3 the translation, cm, engine world space. prototype:
+    // index into setFoliage's prototypes vector.
+    struct FoliageInstance { f32 world[12]; u32 prototype; };
+    static constexpr u32 kMaxFoliagePartsPerPrototype = 16;
+    static constexpr u32 kMaxFoliageInstances = voxi::kMaxFoliageInstances;
+    // Replaces the level's foliage (clearFoliage first). Parts with no mesh, prototypes whose BLAS
+    // cannot be made and instances naming such a prototype are dropped and counted in the log line;
+    // instances past kMaxFoliageInstances are truncated with a warning. The BLASes are built and the TLAS
+    // rebuilt on the next frame's acceleration-structure pass. A mesh a part names must outlive the set:
+    // call clearFoliage before destroying it (a set found naming a destroyed mesh is dropped whole).
+    void setFoliage(std::vector<FoliagePrototype> prototypes, std::vector<FoliageInstance> instances);
+    // Removes the foliage and releases everything it held: BLASes, the TLAS prefix, the part table.
+    void clearFoliage();
+    struct FoliageStats { u32 prototypes = 0, parts = 0, instances = 0; u64 gpuBytes = 0; };
+    // What the current set holds: prototypes/parts/instances that made it into the TLAS, and the GPU
+    // bytes it added (BLASes, the TLAS growth plus prefix, the part table ring).
+    FoliageStats foliageStats() const;
 
 private:
     // Creates the cascaded shadow atlas.
@@ -469,8 +525,6 @@ private:
     // question (dev_->gBufferEnabled()), asked fresh every call, so flipping the switch needs no
     // rebuild.
     rhi::PipelineHandle sceneGbufPso_ = 0, sceneMsGbufPso_ = 0, sceneRtGbufPso_ = 0, sceneMsRtGbufPso_ = 0;
-    rhi::PipelineHandle sceneBlendedGbufPso_ = 0, sceneMsBlendedGbufPso_ = 0,
-                        sceneRtBlendedGbufPso_ = 0, sceneMsRtBlendedGbufPso_ = 0;
     rhi::PipelineHandle scenePsoPrepassedGbuf_ = 0, sceneRtPsoPrepassedGbuf_ = 0;
     // PSRayDriven's own twin (RayDrivenGBufferOut: same three channels plus SV_DEPTH, written by
     // this pass itself). Read only from scenePass(), never scenePipeline() -- ray-driven mode isn't
@@ -478,8 +532,19 @@ private:
     rhi::PipelineHandle rayDrivenGbufPso_ = 0;
 
     // Created updatable (createTlasUpdatable) only while Settings::rtRefitAccel reads true at init();
-    // plain createTlas otherwise. See refitOrRebuildTlas.
+    // plain createTlas otherwise. See refitOrRebuildTlas. Sized for kMaxDraws draws AFTER a static
+    // prefix holding the foliage (setFoliage), which grows and shrinks the structure with the set -- the
+    // draws' instance ids stay their dense index whatever the prefix holds.
     rhi::TlasHandle tlas_ = 0;
+    // Translucent-lane (kRtMaskTranslucent) instances in what tlas_ HOLDS -- set by refitOrRebuildTlas,
+    // the one place tlas_ is written, so a frame the unchanged gate skips keeps the count of the build
+    // it skipped to. Zero turns on gGiShadowParams.w bit 32 in prePass: the primary sun shadow
+    // (rtShadowEx) traces its first-hit query instead of the transmittance walk, since with nothing to
+    // tint the walk can only answer 0 or 1 (see rtShadowEx's FIRST-HIT FAST PATH, voxi_rt.hlsli).
+    u32 rtTlasTranslucent_ = 0;
+    // Which way the fast path was last announced: 0 never, 1 on, 2 off -- one line per change, not
+    // one per frame.
+    u8 rtShadowFirstHitLogged_ = 0;
     // One BLAS per referenced mesh, kept for the run, except a mesh whose vertices are compute-
     // written (IDevice::meshVertexBuffer, gated on GpuMesh::computeWritten), which is refreshed every
     // frame -- created via createBlasUpdatable (only while Settings::rtRefitAccel was on at the time
@@ -534,7 +599,8 @@ private:
     // The gate's own refit-only pass: refits every dynamic BLAS and tlas_ in place (or rebuilds them,
     // on their own periodic schedule), then refreshes their rtVerts_ slices -- no per-draw loop.
     // Runs from buildAccelerationStructures' skip branch when the gate would otherwise plainly skip
-    // but Settings::rtRefitAccel is on and rtDynamicMeshes_ is non-empty.
+    // but Settings::rtRefitAccel is on and rtDynamicMeshes_ is non-empty, and from the mover-patch
+    // branch when a dynamic mesh exists (it ends in the same TLAS refit the patch needs).
     void refitDynamicAccelStructures(rhi::IRenderContext& ctx);
 
     // ---- THE UNCHANGED GATE (Settings::rtSkipUnchangedTlas): skip a rebuild that would be
@@ -542,7 +608,8 @@ private:
     //
     // Same trick as the GI rebuild gate further down (giSnapshotUnchanged/giDrawsKey/takeGiSnapshot,
     // modelled line for line): hash what the per-draw loop reads from drawsPrev_, and if nothing
-    // moved, leave tlas_/rtInstanceData_/their SRVs alone. Measured 0.42 ms/frame on the owner's
+    // moved, leave tlas_/rtInstanceData_/their SRVs alone -- except that a movable draw's transform is
+    // not hashed and is patched in instead (THE MOVER PATCH LANE, below). Measured 0.42 ms/frame on the owner's
     // static NewSponza scene (see Settings::rtSkipUnchangedTlas in Voxi.hpp) -- what that buys is a
     // from-scratch ctx.buildTlas plus an unconditional instance-buffer rewrite/upload every frame
     // regardless of motion.
@@ -556,7 +623,14 @@ private:
     bool rtAccelSnapshotUnchanged() const;
     bool rtAccelMustForceRebuild() const;
     // Per-draw material hash is hashDrawMaterialInto(), shared with giDrawsKey().
-    u64  rtAccelDrawsKey() const;
+    // The gate computes this once per frame and takeRtAccelSnapshot() would compute the SAME key again
+    // straight after a rebuild -- at ~42,000 draws that second pass is most of a millisecond for nothing.
+    // The draw-list half (the expensive one) is therefore remembered in rtAccelListKey_ when computed,
+    // and `reuseListKey` asks for that copy instead of a recompute. Only the list half is reused: the
+    // foliage term is a handful of parts, and resolveFoliageMaterials() runs inside the build between
+    // the gate and the snapshot (it can add a material entry foliageKey() reads), so the snapshot must
+    // still see foliage as the build LEFT it, exactly as before.
+    u64  rtAccelDrawsKey(bool reuseListKey = false) const;
     void takeRtAccelSnapshot();
     // One-time-per-reason "why" log plus the widening-interval "N rebuilt / M refit-only / M skipped"
     // report (mirrors the GI gate's own in prePass()) -- one method since the plain-skip branch, the
@@ -568,16 +642,79 @@ private:
     void updateRtParamsPerFrame();
 
     u64  rtAccelKey_ = 0;
+    // rtAccelDrawsKey()'s draw-list half as last computed, and whether it was computed THIS build.
+    // buildAccelerationStructures() clears the flag on entry, so a copy from an earlier frame can never
+    // be reused: it is only ever read by takeRtAccelSnapshot() in the same call that the gate filled it.
+    mutable u64  rtAccelListKey_ = 0;
+    mutable bool rtAccelListKeyValid_ = false;
+    // rtAccelMustForceRebuild()'s "already checked this mesh" filter: direct-mapped, mesh handles hashed
+    // into it, zeroed at the start of every call (0 is never a submitted mesh -- submit() drops it). A
+    // collision only makes a mesh get checked again, never skipped. 16384 four-byte slots hold the
+    // ~3,000 distinct meshes of a large level with few collisions; a member so the 64 KB is not
+    // re-allocated every frame.
+    static constexpr u32 kRtAccelMeshCheckSlots = 16384;
+    static_assert((kRtAccelMeshCheckSlots & (kRtAccelMeshCheckSlots - 1)) == 0,
+                  "kRtAccelMeshCheckSlots must be a power of two for the '& (kRtAccelMeshCheckSlots - 1)' mask");
+    mutable std::vector<rhi::MeshHandle> rtAccelMeshChecked_;
     // False until the first successful build (mirrors giSnapExtent_'s negative-means-unset shape, as
     // a separate bool, not a sentinel, since 0 is a legal key).
     bool rtAccelSnapValid_ = false;
     // Ticks the gate ran; report only. rtAccelRefitOnly_ is a match that ran the lighter refit-only
     // pass (Settings::rtRefitAccel, rtDynamicMeshes_ non-empty) rather than a plain skip -- see
-    // buildAccelerationStructures' skip branch.
-    u64  rtAccelSkipped_ = 0, rtAccelRebuilt_ = 0, rtAccelRefitOnly_ = 0;
+    // buildAccelerationStructures' skip branch. rtAccelMoverPatched_ is a match whose movable draws had
+    // moved and were patched into tlas_/rtInstanceData_ by the mover patch lane below.
+    u64  rtAccelSkipped_ = 0, rtAccelRebuilt_ = 0, rtAccelRefitOnly_ = 0, rtAccelMoverPatched_ = 0;
     mutable u32 rtAccelGateWhyMask_ = 0;   // one bit per rejection reason already reported, ever
     u64  rtAccelGateNextReport_ = 64;      // doubles each time, so steady state gets reported too
-    u64  rtAccelGateLastTicks_ = 0, rtAccelGateLastSkipped_ = 0, rtAccelGateLastRefitOnly_ = 0;
+    u64  rtAccelGateLastTicks_ = 0, rtAccelGateLastSkipped_ = 0, rtAccelGateLastRefitOnly_ = 0,
+         rtAccelGateLastMoverPatched_ = 0;
+
+    // ---- THE MOVER PATCH LANE: a moving draw no longer forces the whole per-draw loop ----
+    // In a Play session a level's route-animated props, the pawn and its viewmodel move every frame, and
+    // rtAccelDrawsKey() used to hash every draw's world matrix, so ONE moving draw rejected the gate and the
+    // full per-draw loop, the material and geometry tables and a TLAS pack ran over every draw (about 51,000
+    // in NeonDistrict: an ESTIMATED ~25 ms of CPU a frame, UNMEASURED). PlayMobility already marks the
+    // draws that move (Draw::movable), so for those the key leaves the world matrix OUT and keeps
+    // everything else (mesh, flags, material, the movable bit itself -- see rtDrawHash). The gate then
+    // still matches on a pure transform change, and this lane delivers the transforms instead:
+    //   - every full build records, per movable draw, the instance it became (rtMovers_);
+    //   - on a gate hit, patchRtMovers() writes each mover's CURRENT world into tlasInstScratch_ (what
+    //     tlas_ is refit from) and rtInstanceData_ (what a ray hit reads), re-uploads the instance table,
+    //     and the caller refits tlas_ (refitOrRebuildTlas, same periodic full rebuild as ever).
+    // The world matrix feeds exactly those two places (TlasInstance::world, RtInstance::objectToWorld)
+    // plus the previous-transform tracker, which is compiled out (kTrackPrevTransforms) -- and the lane
+    // is compiled out with it, rather than half-supported. Instance bounds, material rows, geometry
+    // slices and the instance mask/flags are not functions of the world, and the key still gates them.
+    // Needs the gate and Settings::rtRefitAccel both on (rtMoverPatchActive); with either off the key
+    // hashes every world as before, which is the old behaviour bit for bit.
+    //
+    // A recorded mover is matched to the CURRENT list by IDENTITY (rtDrawHash without the world), not by
+    // draw index: the key is a commutative sum, so a reshuffled draw list (occlusion culling) still
+    // matches it, and an index would then name the wrong draw. Two movers with equal identity share
+    // mesh, material set and flags, so ties break by draw order. Not covered: an authored draw's
+    // per-draw colour/metallic/roughness are not in its identity, so a per-draw tint on a mover (only
+    // the show-culled debug view does that today) keeps its last full-build value until the next one.
+    bool rtMoverPatchActive() const;
+    static constexpr u32 kRtNoInstance = 0xFFFFFFFFu;
+    struct RtMover {
+        u64 id = 0;                  // rtDrawHash(): everything the per-draw loop reads but the world
+        u32 draw = 0;                // index into drawsPrev_ (the list the entry was taken from)
+        u32 inst = kRtNoInstance;    // index into tlasInstScratch_/rtInstanceData_; none when no BLAS
+        bool operator<(const RtMover& o) const { return id != o.id ? id < o.id : draw < o.draw; }
+    };
+    // The LAST FULL BUILD's movers, sorted. Empty when the lane is off, or no mover became an instance.
+    std::vector<RtMover> rtMovers_;
+    // THIS frame's movable draws, collected by rtAccelDrawsKey()'s pass over drawsPrev_ (it already
+    // visits every draw) and sorted by patchRtMovers(). Valid exactly while rtAccelListKeyValid_ is.
+    mutable std::vector<RtMover> rtMoversNow_;
+    enum class MoverPatch : u8 {
+        Refused,     // the movers no longer line up with the recorded instances: run the full build
+        Unchanged,   // every mover is exactly where tlas_ has it: nothing to write
+        Patched,     // at least one transform was rewritten and the instance table re-uploaded
+    };
+    // Verifies rtMoversNow_ against rtMovers_ (all of it, before touching anything), then writes the
+    // moved worlds. Does NOT refit tlas_ -- the caller does, once, together with any dynamic BLAS.
+    MoverPatch patchRtMovers();
 
     // ---- W10: buildAccelerationStructures' per-build scratch, hoisted out (used to be two locals,
     // `inst` and `matConstantsByKey`, reallocated from empty every build) to avoid a heap
@@ -653,6 +790,35 @@ private:
     static constexpr u32 kFrameTimeWarmup = 30;
     // Reports the collected periods, and clears nothing: the run's whole population is the sample.
     void reportFrameTime(const char* when);
+
+    // ---- gi-memory: where this renderer's VRAM goes ----
+    // One INFO line, printed only when a category below actually changes -- so an owner watching the
+    // log sees every allocation and every free (init, a resize, W12's accumulator free/recreate, the
+    // GI cache's own free-after-use) without the line repeating once a frame forever after. Compared
+    // as raw bytes, never as the MiB the line prints, so a change too small to move the rounded figure
+    // still updates the snapshot and a category that hasn't moved never reprints. All seven reset to 0
+    // in shutdown(); the radiance volume is the one category that is never legitimately 0 once
+    // giReady_ (it exists the moment GI does, at res^3 or larger), so that alone guarantees the first
+    // report after any re-init fires, even one that rebuilds every other category at an unchanged size.
+    void reportVramUsage();
+    // The scene-mesh half of reportVramUsage()'s BLAS total, so that function need not ask the resource
+    // factory about every one of blas_'s ~3,000 structures every frame. Re-summed when blasRevision_
+    // moved (blas_ gained or lost an entry -- every site that does bumps it) and otherwise every
+    // kVramBlasResampleFrames frames: a structure the factory destroyed underneath blas_ (a mesh freed by
+    // streaming) drops to 0 bytes with no callback here, so a running total kept only at insert/erase
+    // would count it forever. A diagnostic line, so seeing that drop up to a second late costs nothing.
+    u32 blasRevision_ = 0;
+    u32 vramBlasSampledRevision_ = 0xFFFFFFFFu;   // != blasRevision_ at start: the first call samples
+    u32 vramBlasSampledFrame_ = 0;                // rtFrameIndex_ at the last sample
+    u64 vramBlasSceneBytes_ = 0;
+    static constexpr u32 kVramBlasResampleFrames = 64;
+    u64 vramReportedRadianceBytes_ = 0;
+    u64 vramReportedAccumBytes_ = 0;
+    u64 vramReportedGiCacheBytes_ = 0;
+    u64 vramReportedRdBytes_ = 0;
+    u64 vramReportedBlasBytes_ = 0;
+    u64 vramReportedTlasBytes_ = 0;
+    u64 vramReportedFoliagePrefixBytes_ = 0;
 
     // ---- flat geometry table a reflection ray reads after it hits something ----
     // A hit gives an instance id, primitive index and barycentrics; shading needs the triangle, so
@@ -754,6 +920,11 @@ private:
     // Builds or refreshes the flat table for this frame's draw list. Returns false when it could
     // not be made, which is the signal to fall back to cone-traced reflections.
     bool buildGeometryTable(rhi::IRenderContext& ctx);
+    // Writes rtInstanceData_ into the next slot of the rtInstances_ ring (growing the ring first if the
+    // table outgrew it) and binds that slot at t5. Shared by buildGeometryTable and the mover patch
+    // lane, which re-sends the table after rewriting a few transforms. True when there is nothing to
+    // send (foliage-only frame) or the slot is bound; false when a buffer could not be created.
+    bool uploadRtInstanceTable();
     bool rtLogged_ = false;
 
     // ---- dense per-frame material table a ray hit indexes into (t9, gRtMaterials) ----
@@ -791,7 +962,8 @@ private:
     rhi::PipelineHandle rayDrivenTexGbufPso_ = 0;
     // The TEXTURED blended (glass) variant: PSMainVoxi compiled with the bindless table declared,
     // so a reflection seen IN a windowpane samples the reflected surface's texture. Preferred over
-    // sceneRtBlendedPso_ whenever it built and the G-buffer is off.
+    // sceneRtBlendedPso_ whenever it built, for vertex-shader draws (there is no mesh-shader twin).
+    // Blended draws never pick a G-buffer twin -- see scenePipeline().
     rhi::PipelineHandle sceneRtBlendedTexPso_ = 0;
 
     // ---- STAGED RAY-DRIVEN PASSES (milestone 1, voxi.rayDrivenStages) ----
@@ -887,7 +1059,9 @@ private:
     u32  rtMaterialSlot_ = 0;       // which ring slot is currently bound (last written, or still valid)
     u32  rtMaterialCapacity_ = 0;   // elements the ring's buffers were sized for
     bool rtMaterialsReady_ = false;
-    bool rtMaterialLogged_ = false;   // the cost/re-upload-cadence report (buildMaterialTable), once
+    // buildMaterialTable's buffer-creation failure, said once. Its size report needs no flag: it
+    // speaks whenever the table's count changes (rtMaterialUploaded_'s size is the last one said).
+    bool rtMaterialAllocFailLogged_ = false;
     // This build's dense table (final, sorted, index-order), and a CPU-side snapshot of what's
     // actually in rtMaterials_[rtMaterialSlot_] on the GPU. Compared byte for byte every build so an
     // unchanged scene costs one memcmp instead of a re-upload -- there's no revision counter upstream
@@ -908,6 +1082,70 @@ private:
     // `matConstantsByKey`: resolved bytes for every distinct key, built by the same per-draw loop --
     // passed in rather than kept as a member so an early-exiting build leaves no stale generation.
     bool buildMaterialTable(const std::unordered_map<u64, pbr::MaterialConstants>& matConstantsByKey);
+    // One surface's key into this build's material table and -- the first time this build sees the
+    // key -- its constants into matConstantsScratch_ (textures made resident). Shared by the per-draw
+    // loop and the foliage parts (resolveFoliageMaterials), so both key and resolve a material the same
+    // way. `authoredBytes` is the surface's pbr::MaterialConstants, read only when matSet is authored.
+    u64 rtMaterialKey(rhi::BindingSetHandle matSet, const void* authoredBytes, const f32 color[4],
+                      f32 metallic, f32 roughness);
+
+    // ---- INSTANCED FOLIAGE (setFoliage): the state behind the TLAS's static prefix ----
+    // A hit on foliage never reaches rtInstanceData_: its TLAS instanceId is kRtFoliageIdBit | (the
+    // prototype's first part below), and the shader's rtLoadInstance (voxi_rt.hlsli) reads the part's
+    // record from the PART TABLE (t20, gRtFoliageParts -- an RtInstance per part, objectToWorld unused)
+    // and the instance's transform from the prefix's own desc buffer (t21, gRtFoliageDescs). Both slots
+    // hold a one-element placeholder whenever there is no foliage.
+    struct FoliagePartState {
+        rhi::MeshHandle mesh = 0;
+        u32 material = 0;
+        // materials_.bindingSet(material) as setFoliage resolved it (0 for material 0) -- the handle the
+        // material-table key and the gate's hash use, exactly as a draw's matSet is.
+        rhi::BindingSetHandle matSet = 0;
+        f32 color[4] = {1, 1, 1, 1};
+        f32 metallic = 0.0f, roughness = 1.0f;
+    };
+    // Every prototype's parts, contiguous, in each BLAS's geometry order.
+    std::vector<FoliagePartState> foliageParts_;
+    // One BLAS per prototype that got one, owned here (createBlasMulti), destroyed by clearFoliage.
+    std::vector<rhi::BlasHandle> foliageBlas_;
+    // The distinct meshes the parts name, sorted -- the geometry table must hold them even when no draw does.
+    std::vector<rhi::MeshHandle> foliageMeshes_;
+    u32 foliageInstances_ = 0;   // what the TLAS prefix holds
+    u64 foliageBlasBytes_ = 0, foliagePrefixBytes_ = 0;
+    // Bumped by every setFoliage/clearFoliage and folded into rtAccelDrawsKey(), so the unchanged gate
+    // can never skip the build that has to pick a new set up.
+    u64 foliageGeneration_ = 0;
+    // The BLASes are allocated by setFoliage (it has no render context) and built by the next
+    // buildAccelerationStructures that builds tlas_, just before that build.
+    bool foliageBlasPending_ = false;
+    // t2/t20/t21 must be rewritten before any ray reads them: setTlasStaticInstances reallocates the
+    // TLAS and replaces its desc buffer, and clearFoliage frees the part table. Written early in the
+    // next prePass, before anything binds bindings_ -- never from setFoliage itself, which can run
+    // mid-frame after the set was bound (Vulkan forbids that write; D3D12 would hand this frame an
+    // unbuilt TLAS).
+    bool foliageBindingsDirty_ = false;
+    // The part table as this build resolved it (firstIndex/firstVertex from the geometry table,
+    // materialIndex from the material table, both of which move between builds), what the GPU holds,
+    // and each part's material key -- same shapes as rtInstanceData_/rtMaterialUploaded_/rtInstanceMatKey_.
+    std::vector<RtInstance> foliagePartData_;
+    std::vector<RtInstance> foliagePartUploaded_;
+    std::vector<u64> foliagePartMatKey_;
+    // An upload-heap ring, same reason as rtMaterials_: rewritten only when content changes, but
+    // writeBuffer is unsynchronised, so a rewrite must not land on the slot an in-flight frame reads.
+    rhi::BufferHandle foliagePartBuf_[kRtInstanceRing] = {};
+    u32 foliagePartSlot_ = 0;
+    u32 foliagePartCapacity_ = 0;   // elements each ring slot was sized for
+    rhi::BufferHandle foliagePartPlaceholder_ = 0, foliageDescPlaceholder_ = 0;
+    // Resolves every part's material key into matConstantsScratch_ (textures made resident, as a
+    // draw's are) and foliagePartMatKey_ -- the per-draw loop's material half, per part. O(parts).
+    void resolveFoliageMaterials();
+    // Re-uploads foliagePartData_ when it differs from what the GPU holds, and binds t20 to it.
+    void uploadFoliagePartTable();
+    // Rewrites t2/t20/t21 when foliageBindingsDirty_ says they moved.
+    void refreshFoliageBindings();
+    // The gate's view of the foliage: its generation plus every part's live material bytes, folded like
+    // one draw. O(parts), never O(instances).
+    u64 foliageKey() const;
 
     // ---- LOCAL LIGHTS (LAMPS): the per-frame light list at t18 (gRdLocalLights) ----
     //
@@ -1087,15 +1325,58 @@ private:
         // traversal, because that ray begins inside this mesh. See AVER_RT_MASK_OWNER_HIDDEN in
         // voxi.hlsl for why the fix belongs in the instance mask.
         bool hiddenFromOwner = false;
-    };
 
-    // One draw's material identity folded into an FNV chain -- shared by rtAccelDrawsKey() and
+        // MOVABLE: moves during a play session (game::PlayMobility decides). In the TLAS, the
+        // cascades and every ray pass like any draw; out of voxelisation, the GI rebuild gate's hash
+        // and the GI shadow map. The volume is a bake, so a draw that moves every frame made the gate
+        // rebuild it every frame. The RT acceleration-structure gate leaves the transform alone out of
+        // its key (rtAccelDrawsKey) and the mover patch lane writes it into the instance list instead
+        // of rebuilding everything -- the draw stays in the structure, only how it is kept current differs.
+        bool movable = false;
+    };
+    bool submitMovable_ = false;   // see setSubmitMovable
+
+    // One binding set's answers to hashDrawMaterialInto's two MaterialSystem lookups (is it an authored
+    // material, and which textures does it hold), remembered for the length of ONE key computation. A
+    // city has ~42,000 draws over a few hundred materials, and each draw used to pay two unordered
+    // lookups per key, two or three keys a frame. LOCAL TO ONE CALL by construction (each key function
+    // declares its own), never a member: the answers are only valid while the material system is not
+    // touched, which no key loop does, and a memo outliving the call could hide a material edit -- the
+    // failure these keys exist to catch. Direct-mapped on the handle (dense small ids, so a few hundred
+    // materials never collide); a collision just repeats the lookups.
+    struct DrawMaterialMemoSlot {
+        rhi::BindingSetHandle set = 0;
+        u32 state = 0;      // 0 = empty; else bit 0 set, bit 1 = authored, bit 2 = has a texture table
+        u64 texHash = 0;    // the texture table's hash, when bit 2 is set
+    };
+    static constexpr u32 kDrawMaterialMemoSlots = 1024;
+    static_assert((kDrawMaterialMemoSlots & (kDrawMaterialMemoSlots - 1)) == 0,
+                  "kDrawMaterialMemoSlots must be a power of two for the '& (kDrawMaterialMemoSlots - 1)' mask");
+    using DrawMaterialMemo = std::array<DrawMaterialMemoSlot, kDrawMaterialMemoSlots>;
+
+    // One draw's material identity folded into the running hash `h` -- shared by rtAccelDrawsKey() and
     // giDrawsKey()/giDrawsSubKeys() so the two gates cannot drift apart (giDrawsKey() used to hash
     // only colour/metallic/roughness, so an authored edit -- a lamp's emissiveFactor in the Material
-    // Editor -- never rebuilt the voxel GI). Declared after struct Draw because it takes one.
-    void hashDrawMaterialInto(u64& h, const Draw& d) const;
+    // Editor -- never rebuilt the voxel GI). Declared after struct Draw because it takes one. `memo` is
+    // the calling key function's own DrawMaterialMemo, zero-initialised at its top.
+    void hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo) const;
+
+    // One draw's finalised term of rtAccelDrawsKey(). With `moverLane` a movable draw's term leaves its
+    // world matrix out and carries the movable bit instead, which makes it the draw's IDENTITY for the
+    // mover patch lane (RtMover::id); without it (and for every non-movable draw) it is the old
+    // world-inclusive hash bit for bit.
+    u64 rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane) const;
 
     std::vector<Draw> draws_, drawsPrev_;
+    // Two facts about the list, recorded by submit() as each draw is appended and swapped along with the
+    // list by beginScene(), so a pass that only cares about the rare draw need not test all ~42,000:
+    //   translucentDraws_     the indices, ascending, of every translucent draw (scenePass's caustic and
+    //                         camera-medium scan visits only these, in the same order it would have met them);
+    //   lightFlaggedDraws_    how many draws carry MaterialFlag_Light in a full-size material block
+    //                         (buildLocalLights skips its scan when that is 0 -- no lamp can exist then).
+    // The *Prev_ twins describe drawsPrev_, which is what every pass reads.
+    std::vector<u32> translucentDraws_, translucentDrawsPrev_;
+    u32 lightFlaggedDraws_ = 0, lightFlaggedDrawsPrev_ = 0;
 
     // ---- the blended-draw census ----
     // submitDraw() drops every `blended` draw before it reaches draws_ (see that function's own
@@ -1149,10 +1430,10 @@ private:
     // never depend on what the raster camera can see -- see submit()'s own header comment), though a
     // scene rarely has more than a few hundred distinct meshes.
     //
-    // A MEMBER, NOT A LOCAL: unlike GameRender.cpp's identically-shaped MeshLookupCacheSlot (local
-    // to one drawWorld() call), submit() runs once per entity with no enclosing call to be local to
-    // -- the only scope wide enough to span many submit() calls is this renderer's own lifetime. See
-    // beginScene()'s own comment for the clear point this settled on.
+    // A MEMBER, NOT A LOCAL: GameRender.cpp's MeshLookupCacheSlot table is emptied at the start of
+    // each drawWorld() call (a generation stamp on a reused table), but submit() runs once per entity
+    // with no enclosing call to scope it to -- the only span wide enough is this renderer's own
+    // lifetime. See beginScene()'s own comment for the clear point this settled on.
     //
     // A FIXED, DIRECT-MAPPED TABLE, MIXED BEFORE MASKING -- reusing 80730751's shape: a single
     // "last mesh" slot scored ~100% on one mesh submitted 16,000 times running but close to 0% on
@@ -1160,12 +1441,14 @@ private:
     // mixMeshId() re-mixes it (see that function's own comment for why this file's reason differs
     // from GameRender.cpp's despite the identical shape).
     //
-    // 256 SLOTS, NOT 64 -- the one deviation from 80730751's precedent: GameRender's 64 slots hold a
-    // handful of camera-relevant species, but submit() sees the renderer's WHOLE draw population
-    // (a few hundred distinct meshes), so 64 slots would reopen the same near-0% collision failure at
-    // a different slot count. 256 keeps collisions rare while costing nothing but small structs on
-    // this object -- zero allocation, like 80730751's own table.
-    static constexpr u32 kMeshSubmitCacheSlots = 256;
+    // 2048 SLOTS, NOT 64 -- the one deviation from 80730751's precedent: GameRender's 64 slots hold a
+    // handful of camera-relevant species, but submit() sees the renderer's WHOLE draw population, so
+    // 64 slots would reopen the same near-0% collision failure at a different slot count. It was 256,
+    // sized for "a few hundred" meshes; a city level submits ~42,000 draws over ~2,900 distinct meshes
+    // and 256 slots measured an ~86% hit rate on it, the other 14% re-asking depthProxyFn_ and meshBounds.
+    // 2048 slots is ~74 KB of small structs on this object -- zero allocation, like 80730751's own table,
+    // and clearing it is free (see meshSubmitCacheGen_), so the size no longer costs anything per frame.
+    static constexpr u32 kMeshSubmitCacheSlots = 2048;
     static_assert((kMeshSubmitCacheSlots & (kMeshSubmitCacheSlots - 1)) == 0,
                   "kMeshSubmitCacheSlots must be a power of two for '& (kMeshSubmitCacheSlots - 1)' "
                   "below to be equivalent to '% kMeshSubmitCacheSlots'");
@@ -1187,6 +1470,9 @@ private:
     // which the next beginScene() clear catches.
     struct MeshSubmitCacheSlot {
         rhi::MeshHandle mesh = 0;
+        // meshSubmitCacheGen_ as of the moment this slot was filled; a slot from an older generation is
+        // an empty one whatever else it holds (see dropMeshSubmitCache()).
+        u32 generation = 0;
 
         bool depthProxyResolved = false;
         rhi::MeshHandle depthProxyMesh = 0;
@@ -1196,10 +1482,21 @@ private:
         f32  localCentre[3] = {0.0f, 0.0f, 0.0f};
         f32  localRadius = 0.0f;
     };
-    // A fixed member array, never resized -- zero allocation, paid once on this object. Cleared
-    // whole, not slot by slot, at the top of every beginScene() and again inside setDepthProxy() the
-    // moment either of its arguments actually changes.
+    // A fixed member array, never resized -- zero allocation, paid once on this object. Dropped whole,
+    // not slot by slot, at the top of every beginScene() and again inside setDepthProxy() the moment
+    // either of its arguments actually changes -- by bumping meshSubmitCacheGen_, not by rewriting the
+    // table: at 2048 slots a per-frame `= {}` was ~74 KB of stores every frame to reset slots that most
+    // frames' meshes overwrite anyway.
     std::array<MeshSubmitCacheSlot, kMeshSubmitCacheSlots> meshSubmitCache_{};
+    // The current generation; starts at 1 so the all-zero slots of a fresh table read as empty.
+    u32 meshSubmitCacheGen_ = 1;
+    // Empties the table: every slot from an earlier generation now reads as never touched. On the
+    // (4-billion-call) wrap the table IS rewritten, so an ancient slot can never match a reused number.
+    void dropMeshSubmitCache() {
+        if (++meshSubmitCacheGen_ != 0) return;
+        meshSubmitCache_ = {};
+        meshSubmitCacheGen_ = 1;
+    }
 
     // Finds mesh's slot above, evicting a different mesh's leftover answers first so a hit never
     // reads a previous occupant's fields under the new key -- same hazard/fix as GameRender.cpp's
@@ -1219,6 +1516,16 @@ private:
     // The same grouping for the GI-only pass. Its own vector rather than a shared scratch buffer:
     // giShadowPass and shadowPass run in the same frame and would otherwise stamp on each other.
     std::vector<ShadowInstanceGroup> giShadowInstanceGroups_;
+    // mesh -> its group's index in the vector above. Groups are only ever appended, never erased,
+    // so an index stays valid for the renderer's lifetime. Finding a draw's group used to be a
+    // linear walk of every group, per draw, per cascade: on a city level (~3,500 distinct meshes,
+    // ~51,000 draws) that was ~90 M comparisons a cascade before a single triangle was drawn.
+    std::unordered_map<rhi::MeshHandle, u32> shadowGroupIndex_;
+    std::unordered_map<rhi::MeshHandle, u32> giShadowGroupIndex_;
+    // The group for `mesh` in `groups`, appending it (and indexing it) the first time it is seen.
+    static ShadowInstanceGroup& shadowGroupFor(std::vector<ShadowInstanceGroup>& groups,
+                                               std::unordered_map<rhi::MeshHandle, u32>& index,
+                                               rhi::MeshHandle mesh);
 
     f32 center_[3] = {0, 0, 0};
     f32 extent_ = 2000.0f;
@@ -1286,7 +1593,9 @@ private:
         // 16 is different in kind: "this frame's staged textures (gRdSunVisTex/gRdGiTex/gRdAoTex/
         // gRdReflTex) hold this frame's values AND blendedReuseStagedLighting is on" -- ORed in only
         // by recordStagedRayDriven on a staged frame; prePass's from-scratch write leaves it 0
-        // otherwise, which makes it self-clearing.
+        // otherwise, which makes it self-clearing. Bit 32 is automatic, not a toggle: ORed in by
+        // prePass right after buildAccelerationStructures when tlas_ holds no translucent instance
+        // (rtTlasTranslucent_ == 0), so rtShadowEx traces its first-hit query instead of the walk.
         f32 giShadowParams[4] = {};
         // Spatial shadow denoiser (gRtDenoiseParams). x = filter radius in pixels (0 = off), y = how
         // much of the filtered value to take (0 discards it while still paying for the taps, so cost
@@ -1478,7 +1787,12 @@ private:
     // ---- W12: free the injection accumulator after the gate has gone quiet for a while ----
     // See setGiFreeAccumulator for the contract and manageInjectionAccumulator() (.cpp) for the two
     // branches and the Vulkan ordering hazard that fixes where it's called from.
-    bool giFreeAccumulator_ = false;
+    // DEFAULT TRUE (gi-memory): was a measurement-only console toggle; promoted to the shipped default
+    // because the accumulator it frees is the single largest idle GI allocation (2048 MiB at Epic's
+    // 512, see createInjectionAccumulator) and the recreate path below is the exact code that toggle
+    // already proved out. voxi.giFreeAccumulator (EditorConsole.hpp) and --gi-free-accumulator 0 both
+    // still turn it back off for an A/B.
+    bool giFreeAccumulator_ = true;
     // Set by the rebuild gate the tick it finds voxelAccumTex_ missing and needs it -- consumed (and
     // cleared) by manageInjectionAccumulator() the NEXT prePass (the one-tick delay
     // setGiFreeAccumulator documents). !giFreeAccumulator_ alone is also enough to recreate, so this
@@ -1488,6 +1802,19 @@ private:
     // layeredBsdfWarned_/nrdWarnedMsaa_. Reset on the next successful recreate, so a later failure
     // with a different cause isn't silenced by an earlier one already reported.
     bool giAccumRecreateFailedLogged_ = false;
+    // BACKOFF for a failed recreate (gi-memory): counts down to the next retry instead of retrying
+    // every tick while it's nonzero -- see manageInjectionAccumulator's (a) branch. 0 means "try this
+    // tick", the state every successful recreate resets it to.
+    u32 giAccumRecreateBackoffTicks_ = 0;
+    // The cooldown the NEXT failure will set giAccumRecreateBackoffTicks_ to, doubling on each
+    // consecutive failure (capped at kGiAccumRecreateBackoffMax) and reset to 0 the moment a recreate
+    // succeeds -- 0 here means "start at kGiAccumRecreateBackoffMin", exactly like a session that has
+    // never failed yet -- so an isolated failure under momentary memory pressure is retried soon, but
+    // a sustained out-of-memory condition backs off instead of spinning the allocator every frame for
+    // something that keeps failing.
+    u32 giAccumRecreateBackoffNext_ = 0;
+    static constexpr u32 kGiAccumRecreateBackoffMin = 30;     // ~0.5 s at 60 Hz
+    static constexpr u32 kGiAccumRecreateBackoffMax = 1800;   // ~30 s at 60 Hz
     // Consecutive GI ticks with nothing to do: incremented while giConvergeTicks_ == 0 (a converging
     // bake is busy, whatever the snapshot gate alone would have said), reset to 0 by
     // any rebuild. Compared against kGiAccumulatorQuietTicks below to decide when to free.
@@ -1610,6 +1937,14 @@ private:
     void giCacheTick();
     // Sizes giCacheReadback_/giCacheUpload_ and giCacheMipOffsets_ for the current volume.
     bool giCacheEnsureBuffers();
+    // gi-memory: releases giCacheReadback_/giCacheUpload_ (a matched pair, together the radiance
+    // volume's own size again -- ~1170 MiB apiece at 512^3) once the copy each one exists for has been
+    // RECORDED. Safe to call immediately after recording, not after the GPU has actually run the copy:
+    // destroyBuffer is fence-deferred on both backends, the same guarantee createInjectionAccumulator's
+    // caller relies on. giCacheEnsureBuffers() already recreates from a 0 handle on demand (its own
+    // "too small, destroy and recreate" branch takes an identical path), so freeing here needs no
+    // companion change there.
+    void giCacheFreeBuffers();
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
     u32 fitCascades();
@@ -1761,19 +2096,21 @@ private:
     // giReservoirBufferParams) -- one source of truth rather
     // than a cbuffer field that could drift from the texture it describes.
     rhi::BufferHandle giReservoirs_ = 0;
-    // Element count (RTXDI_PackedGIReservoir units) the buffer was sized for -- caching this means a resize that doesn't grow the
-    // pitch (most resolution changes, since it rounds up to 16-pixel blocks) skips the destroy/
-    // recreate entirely, the same rule ensureShadowHistory applies to rtShadowHist_ itself.
+    // Element count (RTXDI_PackedGIReservoir units) the buffer was sized for -- caching this means a
+    // resize that neither outgrows it nor drops below half of it (perPixelBufferNeedsRealloc, the
+    // .cpp; most resolution changes, since it rounds up to 16-pixel blocks) skips the destroy/
+    // recreate entirely, while a render scale applied after start-up still gives the memory back.
     u32  giReservoirElemCapacity_ = 0;
 
     // ---- STAGED RAY-DRIVEN PASSES (milestone 1): the resources CSRdVisibility/CSRdShadow/the
     // AVER_RD_SPLIT pixel shader pass a record through, u11/u12 in every Voxi binding set. ----
     // rdVisBuf_: one uint4 (16 bytes) per pixel of the SCENE RENDER TARGET (PSRayDriven's i.pos.xy
     // indexes it, which can be larger than the scene-viewport sub-rect the compute dispatches cover).
-    // A StructuredBuffer, resized in ensureRdStagedResources only when the row pitch actually changes
-    // -- see rdStagedRowPitch_ for the pitch this buffer and cb_.viewParams.w both agree on.
+    // A StructuredBuffer, reallocated in ensureRdStagedResources only when it no longer fits the
+    // target or holds more than twice what it needs -- see rdStagedRowPitch_ for the pitch this
+    // buffer and cb_.viewParams.w both agree on.
     rhi::BufferHandle rdVisBuf_ = 0;
-    // Element count (uint4 units) rdVisBuf_ was sized for -- same "only rebuild when it grew" cache as
+    // Element count (uint4 units) rdVisBuf_ was sized for -- same 2x-band cache as
     // giReservoirElemCapacity_.
     u32  rdVisBufElemCapacity_ = 0;
     // rdSunVisTex_: RGBA16F, rgb = the sun ray's transmittance (CSRdShadow), same resolution as
@@ -1802,8 +2139,9 @@ private:
     // gRdReflTex's header comment (voxi.hlsl) for the full four-alpha account.
     rhi::TextureHandle rdReflTex_ = 0;
     // ---- SUB-STAGE SPLITS' OWN BUFFERS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): u17/u18,
-    // sharing rdVisBuf_'s "grown but never rebuilt" StructuredBuffer shape -- not rdSunVisTex_'s
-    // recreate-outright shape, since these buffers have no fixed view the way a Texture2D UAV has.
+    // sharing rdVisBuf_'s "reallocated only outside a 2x band" StructuredBuffer shape -- not
+    // rdSunVisTex_'s recreate-outright shape, since these buffers have no fixed view the way a
+    // Texture2D UAV has.
     // Allocated unconditionally
     // alongside every other staged resource, in lockstep with rdVisBuf_, whether or not either
     // setting is on -- so flipping the setting mid-session never finds an undersized buffer. ----
@@ -2246,6 +2584,7 @@ private:
     // See setViewDebug. None (0) is bit-identical to every build before this view existed:
     // cb_.viewParams[0]'s composition falls straight through to unlit_ below it.
     ViewDebug viewDebug_ = ViewDebug::None;
+    bool paused_ = false;   // see setPaused
     // See setConeTraceEnabled. Defaults true, bit-identical to every build before this toggle existed.
     bool coneTraceEnabled_ = true;
 };

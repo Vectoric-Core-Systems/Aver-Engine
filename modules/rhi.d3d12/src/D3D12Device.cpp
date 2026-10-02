@@ -8,6 +8,7 @@
 #include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/rhi/FrameConstants.hpp"
 #include "aver/rhi/DxcShaderInclude.hpp"
+#include "aver/rhi/EditorLines.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/CrashReport.hpp"
 
@@ -27,6 +28,7 @@
 #include <cstdlib>    // std::getenv (AVER_D3D12_ELIDE_DRAW_BINDING -- see applyDrawBinding)
 #include <cstring>
 #include <deque>      // pipelines_ -- see its declaration for why it is not a vector
+#include <functional> // D3D12ResourceFactory::uploadBufferFilled's fill callback
 #include <initializer_list>   // D3D12ResourceFactory::uploadBuffers' parameter (W4 Default-heap meshes)
 #include <string>
 #include <utility>
@@ -484,13 +486,6 @@ struct GpuMesh {
     // False once destroyMesh has released this slot. The slot itself is KEPT -- see
     // IDevice::destroyMesh for why a stale handle must address a dead mesh rather than a live one.
     bool alive = true;
-};
-
-// A line list uploaded to the GPU.
-struct GpuLineMesh {
-    ComPtr<ID3D12Resource> vb;
-    D3D12_VERTEX_BUFFER_VIEW vbv{};
-    u32 count = 0;
 };
 
 // ---------------------------------------------------------------- generic RHI mapping
@@ -1080,7 +1075,7 @@ public:
     void drawMesh(MeshHandle mesh, const f32 world[16], const f32 color[4], f32 metallic, f32 roughness) override;
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
-    void setWireframe(bool on) override { wireframe_ = on; }
+    void setWireframe(bool on) override { wireframe_ = on; if (on) wireframeFrame_ = true; }
     void setUnlit(bool on) override { unlit_ = on; }
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
         storeDrawBinding(drawBinding_, set, constants, bytes);
@@ -1109,8 +1104,8 @@ public:
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     bool drawBlended() const override { return drawBlended_; }
 
-    void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
-    void setLineGlow(f32 gain) override { lineGlow_ = gain; }
+    void setLineDepth(bool testDepth) override { editorLines_.setDepthTest(testDepth); }
+    void setLineWidth(f32 pixels) override { editorLines_.setWidth(pixels); }
     void setMeshShaders(bool enabled) override {
         const bool want = enabled && msSupported_;
         if (want != msActive_) AVER_INFO("[RHI.D3D12] geometry path: {}", want ? "mesh shaders" : "input assembler");
@@ -1147,6 +1142,7 @@ public:
         return false;
     }
     GpuTimingReport gpuTiming() const override;
+    void resetGpuTiming() override;
     void beginFrame() override;
     void endFrame() override;
     void present();
@@ -1389,9 +1385,6 @@ private:
     ComPtr<ID3D12RootSignature> rootSig_;
     ComPtr<ID3D12PipelineState> pso_;
     ComPtr<ID3D12PipelineState> skyPso_;
-    ComPtr<ID3D12PipelineState> wirePso_;
-    ComPtr<ID3D12PipelineState> linePso_;
-    ComPtr<ID3D12PipelineState> lineOverlayPso_; // no depth test: editor gizmos on top
     // Per-draw binding table 1 plus its b2 constant block, copied from the caller.
     struct DrawBinding {
         BindingSetHandle set = 0;
@@ -1465,12 +1458,12 @@ private:
     // The authored atmosphere; the frame block above holds the packed form the shader reads.
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
+    // Whether the wireframe view was on at ANY point this frame (set by setWireframe(true), cleared in
+    // beginFrame). What endFrame's whole-frame decisions -- no sky, no particles, frozen metering -- read:
+    // the editor turns wireframe_ itself back off before its chrome lines, long before endFrame runs.
+    bool wireframeFrame_ = false;
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is -- neither is reset per frame.
     bool unlit_ = false;
-    bool lineDepth_ = true;
-    // 1.0 is exactly the pre-glow behaviour; see IDevice::setLineGlow.
-    f32  lineGlow_  = 1.0f;
-    std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
@@ -1705,6 +1698,10 @@ private:
     D3D12ResourceFactory* rhiFactory_ = nullptr;
     D3D12RenderContext* rhiContext_ = nullptr;
     std::vector<IRenderFeature*> features_;   // non-owning
+    // Editor chrome (grid, gizmos, selection outlines, collider/nav overlays), replayed after the
+    // camera post chain -- see EditorLines.hpp. Built on rhiFactory_/rhiContext_ alone, so it inits
+    // and shuts down alongside them.
+    EditorLines editorLines_;
 
     // ---- AverSR ----
     // Null unless a host set one. EVERY branch below tests this handle, not a quality enum or a
@@ -1884,6 +1881,9 @@ struct RhiBlas {
     // vertex positions; a mesh that has grown or shrunk since needs a full rebuild instead.
     u32 builtVertexCount = 0;
     u32 builtIndexCount = 0;
+    // Non-empty for a createBlasMulti structure: every geometry, in GeometryIndex() order. `mesh` above
+    // is then geometries[0].mesh, so blasMesh() still reads 0 once it is destroyed.
+    std::vector<BlasGeometry> geometries;
 };
 
 // One instance as it was packed into a TLAS's last build or refit -- BLAS identity, D3D12 instance
@@ -1910,6 +1910,23 @@ struct RhiTlas {
     // Where each build/refit packs its NEW signature before swapping it with builtSlots -- kept, not a
     // local, so a per-frame refit reuses one allocation instead of making one per call.
     std::vector<RhiTlasSlot> pendingSlots;
+
+    // ---- the static prefix (IResourceFactory::setTlasStaticInstances) ----
+    // Slots [0, staticCount) of staticDescs, packed once; each build copies its per-frame descs in at
+    // staticCount. Default heap, (staticCount + maxInstances) descs, an ordinary buffer so a shader can
+    // read it by handle. Its state is this struct's, not the RHI tracker's: COMMON after the upload, then
+    // COPY_DEST around each copy and NON_PIXEL|PIXEL_SHADER_RESOURCE otherwise -- the state a build reads
+    // its instance descs in, and the one Voxi's shaders read it in.
+    u32 staticCount = 0;
+    BufferHandle staticDescs = 0;
+    D3D12_RESOURCE_STATES staticDescsState = D3D12_RESOURCE_STATE_COMMON;
+    // The distinct BLASes the prefix names, checked before every build: a handful for millions of
+    // instances, so the check is not O(prefix).
+    std::vector<BlasHandle> staticBlases;
+    // The prefix length the last build/refit actually used (0 when it had none or dropped a broken one):
+    // an update is only legal over the same descs its build had.
+    u32 builtStatic = 0;
+    bool staticBrokenLogged = false;
 };
 
 // A root signature plus the parameter indices it was built with; shared by identical layouts.
@@ -2021,6 +2038,11 @@ public:
     // RHIResources.hpp's contract.
     BlasHandle       createBlasUpdatable(MeshHandle mesh) override;
     TlasHandle       createTlasUpdatable(u32 maxInstances) override;
+    BlasHandle       createBlasMulti(const BlasGeometry* geometries, u32 count) override;
+    bool             setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
+    BufferHandle     tlasStaticInstanceBuffer(TlasHandle tlas) const override;
+    u64              blasMemoryBytes(BlasHandle h) const override;
+    u64              tlasMemoryBytes(TlasHandle h) const override;
 
     void destroyTexture(TextureHandle h) override;
     void destroyBuffer(BufferHandle h) override;
@@ -2095,6 +2117,12 @@ private:
     // False on any failure (staging alloc, list, fence wait); caller then falls back or leaves the
     // destination unpopulated.
     bool uploadBuffers(std::initializer_list<BufferUploadItem> items);
+    // uploadBuffers' shape for ONE destination whose bytes do not exist yet: `fill` writes the first
+    // `bytes` straight into the mapped staging memory, so a payload the size of a static TLAS prefix
+    // (setTlasStaticInstances: up to hundreds of MiB of instance descs) is never built twice on the CPU.
+    // Same preconditions and result as uploadBuffers: `dst` a fresh Default-heap buffer in COMMON, left
+    // in COMMON, the GPU finished before this returns.
+    bool uploadBufferFilled(ID3D12Resource* dst, u64 bytes, const std::function<void(u8*)>& fill);
 
     // Table lookups. Every one returns nullptr for an out-of-range or freed handle; callers log.
     RhiTexture*    texture(TextureHandle h);
@@ -2236,6 +2264,14 @@ private:
     // filtering or transform packing can't update only one of them.
     u32 packTlasInstances(RhiTlas& t, const TlasInstance* instances, u32 count, const char* caller,
                           std::vector<RhiTlasSlot>& outSlots);
+    // How many static-prefix slots this build may use: t.staticCount, or 0 with no prefix -- or with one
+    // naming a BLAS destroyed since it was set, which is dropped (logged once) rather than traversed.
+    u32 usableStaticPrefix(RhiTlas& t);
+    // Where a build over `staticUsed` prefix slots plus `written` freshly packed ones reads its descs.
+    // With no prefix, THIS frame's upload buffer, exactly as before prefixes existed. With one, the
+    // prefix buffer, after a GPU copy of the upload buffer's `written` descs into slot staticCount and
+    // the barriers around it (see RhiTlas::staticDescsState).
+    D3D12_GPU_VIRTUAL_ADDRESS tlasBuildDescs(RhiTlas& t, u32 staticUsed, u32 written);
 
     D3D12Device* dev_;
     D3D12ResourceFactory* res_;
@@ -2424,7 +2460,10 @@ bool D3D12Device::init(const DeviceDesc& desc) {
 
     rhiFactory_ = new D3D12ResourceFactory(this);
     if (!rhiFactory_->init()) { delete rhiFactory_; rhiFactory_ = nullptr; }
-    else rhiContext_ = new D3D12RenderContext(this, rhiFactory_);
+    else {
+        rhiContext_ = new D3D12RenderContext(this, rhiFactory_);
+        editorLines_.init(*rhiFactory_);
+    }
 
     AVER_INFO("[RHI.D3D12] device ready on adapter '{}'", adapterName_);
     // Handed to the crash reporter here, not at install() time, because the adapter isn't known
@@ -2483,6 +2522,7 @@ D3D12Device::~D3D12Device() {
         AVER_INFO("[RHI.D3D12] debug layer totals: {} corruption, {} error, {} warning",
                   dbgCorruption_, dbgError_, dbgWarning_);
     }
+    editorLines_.shutdown();
     delete rhiContext_;
     delete rhiFactory_;
     uiShutdown();
@@ -2853,42 +2893,9 @@ bool D3D12Device::createPipeline() {
     sp.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
 
-    pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&wirePso_)), "wire pso")) return false;
-    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-
-    ComPtr<ID3DBlob> vln, pln;
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "VSLine", "vs_5_1", &vln))) { return false;
-    }
-    if (FAILED(shaderCompiler().compile(sceneShaderSource().c_str(), "PSLine", "ps_5_1", &pln))) { return false;
-    }
-    D3D12_INPUT_ELEMENT_DESC lineLayout[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    };
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC lp{};
-    lp.pRootSignature = rootSig_.Get();
-    lp.VS = {vln->GetBufferPointer(), vln->GetBufferSize()};
-    lp.PS = {pln->GetBufferPointer(), pln->GetBufferSize()};
-    lp.InputLayout = {lineLayout, 2};
-    lp.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    lp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    lp.RasterizerState.MultisampleEnable = TRUE;
-    lp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    lp.DepthStencilState.DepthEnable = TRUE;
-    lp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    lp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-    lp.SampleMask = UINT_MAX;
-    lp.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-    lp.NumRenderTargets = 1;
-    lp.RTVFormats[0] = kSceneColorFormat;
-    lp.DSVFormat = kDepthFormat;
-    lp.SampleDesc.Count = sampleCount_;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&linePso_)), "line pso")) return false;
-
-    lp.DepthStencilState.DepthEnable = FALSE;
-    lp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    if (!hrOk(device_->CreateGraphicsPipelineState(&lp, IID_PPV_ARGS(&lineOverlayPso_)), "line overlay pso")) return false;
+    // Editor lines (grid, gizmos, selection outlines, collider/nav overlays) and the wireframe view no
+    // longer have a scene pipeline here -- EditorLines owns its own PSOs, built lazily from the
+    // overlay target's format, and replays after the camera post chain (endFrame's overlay stage).
 
     auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
     static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4s");
@@ -3732,7 +3739,8 @@ void D3D12Device::collectGpuTiming() {
     tsReadback_->Unmap(0, &none);
     ++tsAccumFrames_;
 
-    // Reported on a widening interval and as an AVERAGE over the frames since boot, because one
+    // Reported on a widening interval and as an AVERAGE over the frames since boot (or since the
+    // last resetGpuTiming(), which also restarts this interval), because one
     // frame's timings on a streaming world say more about what streamed in than about the renderer.
     if ((tsReports_ & (tsReports_ + 1)) == 0 && tsAccumFrames_ >= 8) {
         const f64 n = static_cast<f64>(tsAccumFrames_);
@@ -3808,6 +3816,20 @@ GpuTimingReport D3D12Device::gpuTiming() const {
     return report;
 }
 
+// Drops the running tree and its frame count (see IDevice::resetGpuTiming for why the editor wants
+// that at Play start and stop). The report cadence restarts with it: tsReports_ is the 2^n-1
+// counter the periodic log line keys on, so leaving it where a long edit session pushed it would
+// put the next line minutes away. Nothing in flight is touched -- tsSlice_ and the readback belong
+// to frames already issued and are read the same way afterwards -- and tsSpanToAccum_ is rebuilt
+// from scratch by every collectGpuTiming call, so it needs no clearing. Runs between frames on the
+// thread that owns beginFrame, never inside collectGpuTiming.
+void D3D12Device::resetGpuTiming() {
+    tsAccum_.clear();
+    tsAccumFrameMs_ = 0;
+    tsAccumFrames_ = 0;
+    tsReports_ = 0;
+}
+
 // Reads back the metered-exposure slot THIS frame's beginFrame just fenced on, if runPostChain
 // filled it the LAST time this slot came round (kFrameCount frames ago) -- see expReadback_'s own
 // comment for the pipeline and collectGpuTiming just above for the identical "the fence wait above
@@ -3864,6 +3886,8 @@ void D3D12Device::beginFrame() {
     postCBUsed_ = 0;
     drawBinding_ = defaultDrawBinding_;
     drawBlended_ = false;   // sticky per-draw state resets exactly like drawBinding_ just above
+    // Re-latched by this frame's own setWireframe(true), if any; wireframe_ itself stays sticky.
+    wireframeFrame_ = wireframe_;
     depthOnlyMesh_ = 0;     // drawMesh consumes it; this is the backstop for an unpaired depth-only draw
     // Cleared here, not right after endFrame's flush drains it: both leave an empty list (nothing
     // between a flush and the next beginFrame calls drawMesh), but clearing only here keeps ONE place
@@ -3873,6 +3897,11 @@ void D3D12Device::beginFrame() {
     blendedPipelineMissingWarned_ = false;   // said at most once per frame; see its own member comment
     nextDrawPrepassed_ = false;   // a reset command list has consumed nothing from last frame either
 
+    // DEFERRED DESTROYS, RECLAIMED EVERY FRAME. collect() otherwise ran only as a side effect of the
+    // next create/destroy call on the factory, so a resource freed in an idle scene -- the 2 GiB GI
+    // injection accumulator Voxi drops after 240 quiet ticks, exactly when nothing else is created --
+    // stayed resident indefinitely while the log said it was released.
+    if (rhiFactory_) rhiFactory_->collect();
     // The fence above has retired whatever last used this slice, so its timestamps are readable
     // now. Collect BEFORE resetting the counters that are about to be reused.
     collectGpuTiming();
@@ -4138,10 +4167,9 @@ bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 
     // Without that third gate the colour draw would take the Less/write pipeline and reject the equal
     // depth just written -- the hair would vanish instead of leaking.
     if (!allowComputeWritten && meshVertexBuffer(mesh) != 0) return false;
-    // NO RASTER COLOUR PASS TO CONSUME IT, so no raster depth either. Wireframe draws through the
-    // backend's own Less/write pipeline (scenePipeline declines it), which would reject the mesh's
-    // own edges against depth written here -- every prepassed mesh vanished in wireframe. And when a
-    // feature suppresses the scene (ray-driven primary visibility, a debug view), drawMesh returns
+    // NO RASTER COLOUR PASS TO CONSUME IT, so no raster depth either. The wireframe view draws no
+    // scene colour at all (drawMesh queues its meshes for EditorLines), so depth here is pure cost.
+    // And when a feature suppresses the scene (ray-driven primary visibility, a debug view), drawMesh returns
     // before any colour draw while that feature's own pass has already written the frame's depth;
     // writing raster depth over it wherever raster rounds nearer is wrong, not merely wasted. Both
     // mirror drawMesh's own tests, so this pass and the colour pass cannot disagree about whether a
@@ -4207,6 +4235,17 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     // it can trace, not a device removal.
     if (!meshes_[mesh - 1].alive) return;
 
+    // THE WIREFRAME VIEW: no scene colour at all -- the mesh is queued for the overlay stage, where
+    // EditorLines draws its edges unlit after the post chain (IDevice::setWireframe). Features still
+    // see the draw, so a paused renderer's draw list is current the moment the view is left.
+    if (wireframe_) {
+        for (IRenderFeature* f : features_)
+            f->submitDraw(mesh, world, color, metallic, roughness,
+                          drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, drawBlended_);
+        editorLines_.queueWire(mesh, world, meshVertexBuffer(mesh) != 0);
+        return;
+    }
+
     // Every feature still sees a blended draw; only the BACKEND's own opaque consumers don't -- see
     // IDevice::setDrawBlended (RHI.hpp).
     //
@@ -4253,8 +4292,6 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         // is hardcoded 1,1,1), so routing unlit there gave every textured mesh a white silhouette.
         // Fixed by writing gShadingModel (writeShadingConstants used to hardcode STANDARD on both
         // backends) so the feature's own shader resolves unlit via averDisplayColour/s.display.
-        // Wireframe keeps its own route (needs a different rasteriser state, not a shading branch);
-        // VoxiRenderer::scenePipeline declines it by returning 0.
         // `blended` explicit false: the opaque walk. A translucent mesh never reaches here
         // (diverted above by setDrawBlended(true)), so this says so rather than relying on the default.
         //
@@ -4273,7 +4310,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         // IA path (same vsMain, same rounding) so LessEqual keeps the visible surface; only
         // prepassed draws move, everything else keeps mesh shaders.
         const bool featureMs = msActive_ && msPso_ && !prepassed;
-        const PipelineHandle fp = f->scenePipeline(featureMs, wireframe_, prepassed, false);
+        const PipelineHandle fp = f->scenePipeline(featureMs, prepassed, false);
         if (!fp) break;
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
@@ -4304,8 +4341,8 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // featureMs, not msActive_: the draw call has to match the pipeline chosen above, and a
         // prepassed draw was just given an input-assembler pipeline. See featureMs's own comment.
-        if (featureMs && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
-        else                          rhiContext_->drawMesh(mesh);
+        if (featureMs) rhiContext_->dispatchMeshFor(mesh);
+        else           rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;
         boundPso_ = nullptr;
         return;
@@ -4317,13 +4354,13 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     }
 
     const GpuMesh& m = meshes_[mesh - 1];
-    const bool useMs = msActive_ && msPso_ && !wireframe_;
+    const bool useMs = msActive_ && msPso_;
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
     // Guarded like bindGraphicsRoot's root-signature check above: a scene is hundreds to thousands
     // of drawMesh calls sharing one PSO, so re-issuing SetPipelineState every time paid for
     // nothing. boundPso_ is invalidated everywhere boundRootSig_ is, since anything that changes
     // the root signature can just as well change which PSO is bound.
-    ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : (wireframe_ ? wirePso_.Get() : pso_.Get());
+    ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : pso_.Get();
     if (wantPso != boundPso_) { cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
     f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
@@ -4350,66 +4387,26 @@ void D3D12Device::dispatchMesh(const GpuMesh& m) {
     cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
-// Uploads a line list to the GPU and returns its handle.
+// Uploads a line list to the GPU and returns its handle. EditorLines owns the buffers and the slot
+// table now -- see its own create() for the handle/lifetime contract.
 LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
-    if (!device_ || count == 0) return 0;
-    GpuLineMesh m;
-    m.count = count;
-    const u64 bytes = static_cast<u64>(count) * sizeof(LineVertex);
-    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    auto d = bufferDesc(bytes);
-    if (!hrOk(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m.vb)), "line vb")) return 0;
-    void* p = nullptr; D3D12_RANGE none{0, 0};
-    m.vb->Map(0, &none, &p); std::memcpy(p, verts, bytes); m.vb->Unmap(0, nullptr);
-    m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
-    m.vbv.SizeInBytes = static_cast<UINT>(bytes);
-    m.vbv.StrideInBytes = sizeof(LineVertex);
-    lineMeshes_.push_back(std::move(m));
-    return static_cast<LineHandle>(lineMeshes_.size());
+    return editorLines_.create(verts, count);
 }
 
-// Releases a line mesh. The SLOT stays, marked dead -- see IDevice::destroyLineMesh for why a
-// stale handle must never be handed a live mesh.
+// Releases a line mesh. See EditorLines::destroy and IDevice::destroyLineMesh for why a stale
+// handle must never be handed a live mesh.
 bool D3D12Device::destroyLineMesh(LineHandle mesh) {
-    if (mesh == 0 || mesh > lineMeshes_.size()) return false;
-    GpuLineMesh& m = lineMeshes_[mesh - 1];
-    if (!m.vb) return false;   // already released; saying so beats pretending it worked twice
-    // DEFERRED, not immediate: the GPU may still be reading this buffer for a frame in flight, and
-    // releasing an UPLOAD-heap resource under a live command list is a use-after-free the debug layer
-    // reports somewhere else entirely, if at all. The resource factory's fence-keyed retire list
-    // (D3D12ResourceFactory::retire) already exists for this -- destroyMesh reaches it through
-    // destroyBuffer, so a line buffer joins the same list rather than growing a second mechanism.
-    if (rhiFactory_) rhiFactory_->retire(m.vb);
-    m.vb.Reset();
-    m.vbv = D3D12_VERTEX_BUFFER_VIEW{};
-    m.count = 0;
-    return true;
+    return editorLines_.destroy(mesh);
 }
 
-// Draws a line list, unless a feature has replaced the whole frame.
+// Queues a line draw for the overlay stage's replay, after endFrame's camera post chain -- see
+// EditorLines.hpp and IDevice::drawLines for the whole design.
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
-    if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
+    if (!hasSwapchain_) return;
     // Gizmos and wireframes belong in a ray-driven viewport as much as in a rastered one, and they
     // depth-test against the real depth the ray pass writes.
     for (IRenderFeature* f : features_) if (f->suppressesWholeFrame()) return;
-    const GpuLineMesh& m = lineMeshes_[mesh - 1];
-    // A DESTROYED MESH DRAWS NOTHING. The slot is kept so a stale handle names something dead
-    // rather than something live (see IDevice::destroyLineMesh); this is the half that makes that
-    // true, instead of binding a null vertex view and asking the driver for zero primitives.
-    if (!m.vb || m.count == 0) return;
-    bindGraphicsRoot(rootSig_.Get());
-    cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
-    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 16, world, 0);
-    // Dword 16 is gBaseColor.x, unread by PSLine otherwise -- so the glow multiplier rides in the
-    // per-object block a line draw already binds, no root-signature change.
-    //
-    // WRITTEN EVERY CALL, not only when it differs from 1.0: root constants persist across draws, so
-    // skipping the write would hand the grid/navmesh overlay/sculpt ring the red channel of whatever
-    // material was drawn last as their brightness. A line's glow must not depend on what preceded it.
-    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 1, &lineGlow_, 16);
-    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
-    cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
-    cmdList_->DrawInstanced(m.count, 1, 0, 0);
+    editorLines_.queue(mesh, world);
 }
 
 // ================================================================= the camera post chain
@@ -5048,7 +5045,10 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     }
 
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
-    const bool autoExp = post_.autoExposure && caps_.computeShaders;
+    // FROZEN in the wireframe view: the scene target is only its clear colour then, and metering it
+    // would push exposure to its maximum -- turning the black background grey and leaving the next
+    // lit frame blown out while the eye adapts back. The adapted value is kept, not reset.
+    const bool autoExp = post_.autoExposure && caps_.computeShaders && !wireframeFrame_;
     ID3D12Resource* scene = msaa ? sceneResolved_.Get() : msaaColor_.Get();
     // Read by COMPUTE here, not just pixel shaders: CSHistogram/CSLocalGrid meter the scene before
     // the composite samples it, so it needs both read states -- PIXEL_SHADER_RESOURCE alone (the
@@ -5528,7 +5528,8 @@ void D3D12Device::endFrame() {
     // Gated on frameSuppressed_, not sceneSuppressed_: ray-driven primary visibility suppresses the
     // scene without owning the frame and writes depth 1.0 on a miss (what EQUAL looks for), so the
     // sky still fills missed pixels -- testing the wrong flag left that mode with no sky at all.
-    if (skyEnabled_ && !frameSuppressed_) {
+    // Not in the wireframe view, whose background is black (Unreal's).
+    if (skyEnabled_ && !frameSuppressed_ && !wireframeFrame_) {
         // Nested spans, reversing an earlier decision: "sky+post+ui" measured 8.2ms, 46% of the frame
         // and the largest span in it, conflating a fullscreen atmosphere march with an editor's UI
         // compositing -- at 2750x1639 with a docked editor the UI may BE most of it. Four children
@@ -5652,7 +5653,7 @@ void D3D12Device::endFrame() {
             if (f->overridesScenePipeline()) { owner = f; break; }
         }
         const PipelineHandle blendedPso = owner
-            ? owner->scenePipeline(msActive_ && msPso_, wireframe_, false, true) : 0;
+            ? owner->scenePipeline(msActive_ && msPso_, false, true) : 0;
 
         if (!blendedPso) {
             // Returning 0 for blended=true is the documented "no blended variant" answer
@@ -5771,8 +5772,8 @@ void D3D12Device::endFrame() {
                 fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
                 writeShadingConstants(fc);
                 rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-                if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(bd.mesh);
-                else                                    rhiContext_->drawMesh(bd.mesh);
+                if (msActive_ && msPso_) rhiContext_->dispatchMeshFor(bd.mesh);
+                else                     rhiContext_->drawMesh(bd.mesh);
                 boundRootSig_ = nullptr;
                 boundPso_ = nullptr;
             }
@@ -5815,7 +5816,9 @@ void D3D12Device::endFrame() {
     // signature/viewport re-set explicitly rather than trusted from the sky draw: cheap,
     // idempotent, correct regardless of what ran between. Gated on frameSuppressed_ like the sky:
     // a ray-driven frame's particle is as real as a rastered one, and the ray pass writes real SV_DEPTH.
-    if (rhiContext_ && !frameSuppressed_) {
+    // Not in the wireframe view: it shows mesh edges only, and a lit particle would be the one
+    // shaded thing in it.
+    if (rhiContext_ && !frameSuppressed_ && !wireframeFrame_) {
         cmdList_->RSSetViewports(1, &sceneVp);
         cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());
@@ -5826,9 +5829,12 @@ void D3D12Device::endFrame() {
     runPostChain(bb);
     endGpuSpan();   // "post chain"
 
-    // ---- overlay features, on the tonemapped backbuffer ----
+    // ---- editor lines + overlay features, on the tonemapped backbuffer ----
+    // editorLines_ replays first (grid, gizmos, selection outlines, collider/nav overlays -- see
+    // EditorLines.hpp), then every overlayPass: both draw into the target this block binds, and both
+    // want the scene depth readable, so it flips to ShaderResource once for the whole stage.
     beginGpuSpan("overlay");
-    if (rhiContext_ && !features_.empty()) {
+    if (rhiContext_) {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
 
@@ -5847,7 +5853,38 @@ void D3D12Device::endFrame() {
         D3D12_RECT sc{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
         cmdList_->RSSetViewports(1, &vp);
         cmdList_->RSSetScissorRects(1, &sc);
+
+        // Readable for the whole stage (editorLines_'s own occlusion test, and any overlayPass feature
+        // sampling it, e.g. viewport sprites) -- same DepthWrite<->readable round trip modules/occlusion
+        // already does around its HZB seed pass, through the generic handle so the factory's own state
+        // tracking stays right. Flipped back before the UI/capture/present, so next frame's clear (which
+        // expects DEPTH_WRITE) is correct.
+        const TextureHandle sceneDepth = sceneDepthTexture();
+        if (sceneDepth) rhiContext_->textureBarrier(sceneDepth, ResourceState::DepthWrite, ResourceState::ShaderResource,
+                                                    kAllSubresources);
+
+        // rx/ry/rw/rh (above) are the 3D view's rect in SCENE pixels; editorLines_ wants it in THIS
+        // target's own (present) pixels -- the inverse of scaleToSceneW/H. Exact identity at
+        // renderScale() == 1.0, and correct at vpW_ == 0 too: rw is then sceneWidth_, which scales
+        // back to exactly width_.
+        const f32 toDispX = sceneWidth_  ? static_cast<f32>(width_)  / static_cast<f32>(sceneWidth_)  : 1.0f;
+        const f32 toDispY = sceneHeight_ ? static_cast<f32>(height_) / static_cast<f32>(sceneHeight_) : 1.0f;
+        const f32 displayRect[4] = {rx * toDispX, ry * toDispY, rw * toDispX, rh * toDispY};
+        // NOT IDevice::backbufferFormat(): here that names the SCENE colour target's own format (see
+        // its comment), not this stage's actual target -- the real backbuffer and the viewport texture
+        // are both created at kBackbufferFormat (createSwapchainResources, ensureViewportTexture).
+        editorLines_.replay(*rhiContext_, width_, height_, displayRect, sceneDepth, sampleCount_,
+                            fromDxgiFormat(kBackbufferFormat));
+        // replay() set pipeline/root signature/heap through the generic context, bypassing
+        // bindGraphicsRoot/setPipeline's own caches -- invalidated the way the blended replay does, so
+        // the overlay features below and the UI don't skip a rebind believing stale state is current.
+        boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
+        fovValid_ = false; dbValid_ = false;
+
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
+
+        if (sceneDepth) rhiContext_->textureBarrier(sceneDepth, ResourceState::ShaderResource, ResourceState::DepthWrite,
+                                                    kAllSubresources);
 
         if (intoTexture) {
             auto backToSrv = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -5855,6 +5892,10 @@ void D3D12Device::endFrame() {
             cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         }
+    } else {
+        // Never reached the replay this frame (no generic context) -- the queue must not carry
+        // editor-chrome draws into the next one (see EditorLines::discardQueue).
+        editorLines_.discardQueue();
     }
 
     // The installed UI backend's own draw, after every overlay feature and before capture. uiActive_
@@ -6865,6 +6906,51 @@ bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem>
     return true;
 }
 
+// uploadBuffers for one destination, filled in place -- see the declaration. Same one-shot list, same
+// explicit walk back to COMMON, same blocking wait.
+bool D3D12ResourceFactory::uploadBufferFilled(ID3D12Resource* dst, u64 bytes, const std::function<void(u8*)>& fill) {
+    if (!dst || bytes == 0) return true;
+    ID3D12Device* dev = dev_->device_.Get();
+    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    auto ud = bufferDesc(bytes);
+    ComPtr<ID3D12Resource> staging;
+    if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
+              "rhi buffer staging")) return false;
+    setDebugName(staging.Get(), "rhi buffer staging");
+    u8* mapped = nullptr;
+    D3D12_RANGE none{0, 0};
+    if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi buffer staging Map"))
+        return false;
+    fill(mapped);
+    staging->Unmap(0, nullptr);
+
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (!hrOk(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)),
+              "rhi buffer upload alloc")) return false;
+    if (!hrOk(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
+              IID_PPV_ARGS(&list)), "rhi buffer upload list")) return false;
+    list->CopyBufferRegion(dst, 0, staging.Get(), 0, bytes);
+    const D3D12_RESOURCE_BARRIER back = transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    list->ResourceBarrier(1, &back);
+    list->Close();
+    ID3D12CommandList* lists[] = {list.Get()};
+    dev_->queue_->ExecuteCommandLists(1, lists);
+
+    ComPtr<ID3D12Fence> f;
+    if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
+        return false;
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    dev_->queue_->Signal(f.Get(), 1);
+    if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+    if (ev) CloseHandle(ev);
+
+    retire(staging);
+    collect();
+    return true;
+}
+
 // Creates a texture with its views and any initial data, and returns its handle.
 TextureHandle D3D12ResourceFactory::createTexture(const TextureDesc& d) {
     collect();
@@ -7264,6 +7350,22 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
                 rt0.BlendOp   = rt0.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
                 break;
         }
+        // A BLENDED PIPELINE WRITES TARGET 0 ONLY. With IndependentBlendEnable FALSE, D3D12 applies
+        // RenderTarget[0]'s state to every bound target, so a blended draw with the G-buffer's extra
+        // targets blended its velocity/viewZ/normal into the opaque surface's (the normal's w = 0 made
+        // that an addition) and NRD denoised the room behind a window with the glass's geometry.
+        // Blending those targets has no meaning; mask them. Opaque pipelines keep the shared state.
+        if (d.blend != BlendMode::Opaque && d.renderTargetCount > 1) {
+            blend.IndependentBlendEnable = TRUE;
+            for (u32 i = 1; i < 8; ++i) {
+                blend.RenderTarget[i] = {};
+                blend.RenderTarget[i].SrcBlend = blend.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
+                blend.RenderTarget[i].DestBlend = blend.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_ZERO;
+                blend.RenderTarget[i].BlendOp = blend.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                blend.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
+                blend.RenderTarget[i].RenderTargetWriteMask = 0;
+            }
+        }
     }
 
     const u32 rtCount = d.renderTargetCount < 4 ? d.renderTargetCount : 4;
@@ -7480,6 +7582,37 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m
     return in;
 }
 
+// blasInputs for a createBlasMulti structure: one geometry per part, each described exactly as
+// blasInputs describes its one, OPAQUE only where the part asked for it. False when a part's mesh is
+// gone (destroyMesh destroys this structure too, so that is a caller holding a dead handle).
+bool blasMultiInputs(const std::vector<GpuMesh>& meshes, const std::vector<BlasGeometry>& parts,
+                     std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& geos,
+                     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& in) {
+    geos.assign(parts.size(), D3D12_RAYTRACING_GEOMETRY_DESC{});
+    for (usize i = 0; i < parts.size(); ++i) {
+        const MeshHandle h = parts[i].mesh;
+        if (h == 0 || h > meshes.size() || !meshes[h - 1].alive || meshes[h - 1].indexCount == 0) return false;
+        const GpuMesh& m = meshes[h - 1];
+        D3D12_RAYTRACING_GEOMETRY_DESC& geo = geos[i];
+        geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        geo.Flags = parts[i].opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        geo.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress();
+        geo.Triangles.VertexBuffer.StrideInBytes = sizeof(MeshVertex);
+        geo.Triangles.VertexCount = m.vbv.SizeInBytes / sizeof(MeshVertex);
+        geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        geo.Triangles.IndexBuffer = m.ib->GetGPUVirtualAddress();
+        geo.Triangles.IndexCount = m.indexCount;
+        geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+    }
+    in = {};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.NumDescs = static_cast<UINT>(geos.size());
+    in.pGeometryDescs = geos.data();
+    return true;
+}
+
 // Same role as blasInputs above, for the TLAS: shared by the prebuild query, the build and the
 // update, `NumDescs` aside (an update keeps the descs it was built with; buildTlas/refitTlas pass
 // however many instances survived filtering).
@@ -7491,6 +7624,38 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlasInputs(u32 numDescs, bo
     if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
     in.NumDescs = numDescs;
     return in;
+}
+
+// One engine instance as DXR reads it. Shared by the per-frame packTlasInstances and the static
+// prefix setTlasStaticInstances packs once, so the two can never disagree about a transform or a
+// flag. The caller has already refused an id past 24 bits.
+D3D12_RAYTRACING_INSTANCE_DESC toInstanceDesc(const TlasInstance& in, D3D12_GPU_VIRTUAL_ADDRESS blasVa) {
+    static_assert(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) == kTlasInstanceDescBytes,
+                  "tlasStaticInstanceBuffer's element size is the DXR instance desc");
+    D3D12_RAYTRACING_INSTANCE_DESC id{};
+    // Engine matrices are row-major / row-vector (v*M); DXR wants a 3x4 column-vector [R|T].
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) id.Transform[r][c] = in.world[c * 4 + r];
+        id.Transform[r][3] = in.world[12 + r];
+    }
+    id.InstanceMask = in.mask;
+    id.InstanceID = in.instanceId;
+    // The values are chosen to match D3D12_RAYTRACING_INSTANCE_FLAGS one for one, so this is a
+    // copy rather than a translation -- but it is written as an explicit mask-and-assign, not a
+    // blind cast, so that a flag added on the engine side which does NOT have a D3D12 twin
+    // fails to compile here instead of being handed to the driver as an unknown bit.
+    u32 d3dFlags = 0;
+    if (in.flags & TlasInstanceFlag_TriangleCullDisable)
+        d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+    if (in.flags & TlasInstanceFlag_TriangleFrontCcw)
+        d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE;
+    if (in.flags & TlasInstanceFlag_ForceOpaque)
+        d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
+    if (in.flags & TlasInstanceFlag_ForceNonOpaque)
+        d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
+    id.Flags = d3dFlags;
+    id.AccelerationStructure = blasVa;
+    return id;
 }
 } // namespace
 
@@ -7529,6 +7694,30 @@ BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdat
     return static_cast<BlasHandle>(blases_.size());
 }
 
+// One structure over several meshes -- see IResourceFactory::createBlasMulti. Sized by the prebuild
+// query over every geometry at once; built later by buildBlas like any other.
+BlasHandle D3D12ResourceFactory::createBlasMulti(const BlasGeometry* geometries, u32 count) {
+    collect();
+    if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] createBlasMulti without ray-tracing support"); return 0; }
+    if (!geometries || count == 0) { AVER_ERROR("[RHI.D3D12] createBlasMulti with no geometry"); return 0; }
+    RhiBlas b;
+    b.geometries.assign(geometries, geometries + count);
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    if (!blasMultiInputs(dev_->meshes_, b.geometries, geos, in)) {
+        AVER_ERROR("[RHI.D3D12] createBlasMulti: a geometry names an invalid, destroyed or index-less mesh");
+        return 0;
+    }
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+    b.mesh = geometries[0].mesh;
+    b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    b.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
+    if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
+    blases_.push_back(std::move(b));
+    return static_cast<BlasHandle>(blases_.size());
+}
+
 // Allocates a top-level acceleration structure for up to `maxInstances` instances.
 TlasHandle D3D12ResourceFactory::createTlas(u32 maxInstances) { return createTlasImpl(maxInstances, false); }
 // Same, but built with ALLOW_UPDATE and a scratch sized for an update too -- see RhiTlas::allowUpdate.
@@ -7563,6 +7752,136 @@ TlasHandle D3D12ResourceFactory::createTlasImpl(u32 maxInstances, bool allowUpda
     }
     tlases_.push_back(std::move(t));
     return static_cast<TlasHandle>(tlases_.size());
+}
+
+// The static prefix -- see IResourceFactory::setTlasStaticInstances. Everything is validated and
+// allocated BEFORE anything is replaced, so a refusal leaves the TLAS exactly as it was.
+bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstance* instances, u32 count) {
+    collect();
+    RhiTlas* t = tlas(h);
+    if (!t) { AVER_ERROR("[RHI.D3D12] setTlasStaticInstances with an invalid handle"); return false; }
+    if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] setTlasStaticInstances without ray-tracing support"); return false; }
+    if (count == 0 && t->staticCount == 0 && !t->staticDescs) return true;   // no prefix to remove
+    if (count && !instances) { AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: {} instances and no array", count); return false; }
+    if (static_cast<u64>(count) + t->maxInstances > kMaxTlasInstances) {
+        AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: {} static + {} per-frame instances is past the {} one "
+                   "TLAS may hold -- refused, the previous prefix kept", count, t->maxInstances, kMaxTlasInstances);
+        return false;
+    }
+
+    // REFUSED, NOT COMPACTED: a shader finds a prefix instance by its slot index, so dropping one would
+    // hand every later instance its neighbour's transform. The distinct BLASes are gathered for the
+    // per-build liveness check -- consecutive duplicates skipped first, so a list grouped by object
+    // collects a handful rather than one per instance.
+    std::vector<BlasHandle> distinct;
+    for (u32 i = 0; i < count; ++i) {
+        const RhiBlas* b = blas(instances[i].blas);
+        if (!b || !b->as) {
+            AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: instance {} names an invalid BLAS -- refused whole, "
+                       "the previous prefix kept", i);
+            return false;
+        }
+        if (instances[i].instanceId > kMaxTlasInstanceId) {
+            AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: instance {} has id {} which does not fit in 24 bits "
+                       "-- refused whole, the previous prefix kept", i, instances[i].instanceId);
+            return false;
+        }
+        if (distinct.empty() || distinct.back() != instances[i].blas) distinct.push_back(instances[i].blas);
+    }
+    std::sort(distinct.begin(), distinct.end());
+    distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+
+    // The structure and scratch for prefix + the TLAS's own per-frame maximum, from the prebuild query
+    // with the flags it is built with (see createTlasImpl).
+    const u32 total = count + t->maxInstances;
+    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(total, t->allowUpdate);
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+    const u64 scratchBytes = t->allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
+                                            : info.ScratchDataSizeInBytes;
+    ComPtr<ID3D12Resource> as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes,
+                                             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    ComPtr<ID3D12Resource> scratch = makeAsBuffer(dev_->device_.Get(), scratchBytes, D3D12_RESOURCE_STATE_COMMON);
+    if (!as || !scratch) {
+        AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: {:.1f} MiB structure / {:.1f} MiB scratch for {} instances "
+                   "could not be allocated -- the previous prefix kept",
+                   static_cast<f64>(info.ResultDataMaxSizeInBytes) / (1024.0 * 1024.0),
+                   static_cast<f64>(scratchBytes) / (1024.0 * 1024.0), total);
+        return false;
+    }
+
+    BufferHandle descs = 0;
+    const u64 descBytes = static_cast<u64>(total) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+    if (count) {
+        BufferDesc bd;
+        bd.bytes = descBytes;
+        bd.kind = BufferKind::Default;
+        bd.debugName = "rhi TLAS static instances";
+        descs = createBuffer(bd);
+        ID3D12Resource* descRes = bufferResource(descs);
+        const bool filled = descRes && uploadBufferFilled(descRes, static_cast<u64>(count) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
+            [&](u8* dst) {
+                auto* out = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(dst);
+                for (u32 i = 0; i < count; ++i)
+                    out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].as->GetGPUVirtualAddress());
+            });
+        if (!filled) {
+            AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
+                       "or filled -- the previous prefix kept", static_cast<f64>(descBytes) / (1024.0 * 1024.0));
+            if (descs) destroyBuffer(descs);
+            return false;
+        }
+#if AVER_RHI_TRACK_STATE
+        // Its states belong to the build (RhiTlas::staticDescsState); a caller's bufferBarrier on it is
+        // reported rather than obeyed.
+        buffers_[descs - 1].stateFixed = true;
+#endif
+    }
+
+    // Replaced, never written in place: frames still in flight traverse the old structure, which the
+    // fence releases once they retire. The new one holds nothing until the next build.
+    retire(t->as);
+    retire(t->scratch);
+    t->as = as;
+    t->scratch = scratch;
+    if (t->staticDescs) destroyBuffer(t->staticDescs);
+    t->staticDescs = descs;
+    t->staticCount = count;
+    t->staticDescsState = D3D12_RESOURCE_STATE_COMMON;
+    t->staticBlases = std::move(distinct);
+    t->staticBrokenLogged = false;
+    t->built = false;
+    t->builtStatic = 0;
+    t->builtSlots.clear();
+    AVER_INFO("[RHI.D3D12] TLAS {} static prefix: {} instance(s) over {} BLAS(es) + {} per frame -- structure "
+              "{:.1f} MiB, scratch {:.1f} MiB, instance descs {:.1f} MiB (prebuild sizes)",
+              h, count, t->staticBlases.size(), t->maxInstances,
+              static_cast<f64>(info.ResultDataMaxSizeInBytes) / (1024.0 * 1024.0),
+              static_cast<f64>(scratchBytes) / (1024.0 * 1024.0),
+              count ? static_cast<f64>(descBytes) / (1024.0 * 1024.0) : 0.0);
+    return true;
+}
+
+BufferHandle D3D12ResourceFactory::tlasStaticInstanceBuffer(TlasHandle h) const {
+    if (h == 0 || h > tlases_.size()) return 0;
+    const RhiTlas& t = tlases_[h - 1];
+    return t.staticCount ? t.staticDescs : 0;
+}
+
+u64 D3D12ResourceFactory::blasMemoryBytes(BlasHandle h) const {
+    if (h == 0 || h > blases_.size()) return 0;
+    const RhiBlas& b = blases_[h - 1];
+    return (b.as ? b.as->GetDesc().Width : 0) + (b.scratch ? b.scratch->GetDesc().Width : 0);
+}
+
+u64 D3D12ResourceFactory::tlasMemoryBytes(TlasHandle h) const {
+    if (h == 0 || h > tlases_.size()) return 0;
+    const RhiTlas& t = tlases_[h - 1];
+    u64 bytes = (t.as ? t.as->GetDesc().Width : 0) + (t.scratch ? t.scratch->GetDesc().Width : 0);
+    for (u32 i = 0; i < kFrameCount; ++i) bytes += t.instances[i] ? t.instances[i]->GetDesc().Width : 0;
+    if (t.staticDescs && t.staticDescs <= buffers_.size() && buffers_[t.staticDescs - 1].res)
+        bytes += buffers_[t.staticDescs - 1].res->GetDesc().Width;
+    return bytes;
 }
 
 // ---- destruction. Nothing is released here: it is queued behind the fence.
@@ -7606,6 +7925,7 @@ void D3D12ResourceFactory::destroyBlas(BlasHandle h) {
     b.scratch.Reset();
     b.mesh = 0;
     b.built = false;
+    b.geometries.clear();
     collect();
 }
 
@@ -7617,21 +7937,27 @@ MeshHandle D3D12ResourceFactory::blasMesh(BlasHandle h) const {
 // The same linear scan destroyBlasForMesh already does, and proportionate for the same reason: one
 // entry per distinct mesh ever ray-traced, walked when a feature first meets a mesh rather than per
 // frame. `built` is what makes the result safe to hand over -- see IResourceFactory::blasForMesh.
-// A destroyed structure clears both `mesh` and `built`, so a dead slot excludes itself here.
+// A destroyed structure clears both `mesh` and `built`, so a dead slot excludes itself here. A
+// createBlasMulti structure never qualifies: it is a function of all its meshes, not of this one.
 BlasHandle D3D12ResourceFactory::blasForMesh(MeshHandle mesh) const {
     if (mesh == 0) return 0;
     for (usize i = 0; i < blases_.size(); ++i)
-        if (blases_[i].mesh == mesh && blases_[i].built) return static_cast<BlasHandle>(i + 1);
+        if (blases_[i].mesh == mesh && blases_[i].built && blases_[i].geometries.empty())
+            return static_cast<BlasHandle>(i + 1);
     return 0;
 }
 
-// Destroys every structure built from `mesh`. A linear scan, and that is proportionate: blases_ has
-// one entry per distinct mesh ever ray-traced, which is the same order as the mesh table itself and
-// is walked once per destroy rather than once per frame.
+// Destroys every structure built from `mesh` -- a createBlasMulti one if ANY of its geometries names
+// it. A linear scan, and that is proportionate: blases_ has one entry per distinct mesh (or multi-mesh
+// object) ever ray-traced, walked once per destroy rather than once per frame.
 void D3D12ResourceFactory::destroyBlasForMesh(MeshHandle mesh) {
     if (mesh == 0) return;
-    for (usize i = 0; i < blases_.size(); ++i)
-        if (blases_[i].mesh == mesh) destroyBlas(static_cast<BlasHandle>(i + 1));
+    for (usize i = 0; i < blases_.size(); ++i) {
+        const RhiBlas& b = blases_[i];
+        bool names = b.mesh == mesh;
+        for (const BlasGeometry& g : b.geometries) names = names || g.mesh == mesh;
+        if (names) destroyBlas(static_cast<BlasHandle>(i + 1));
+    }
 }
 
 // Frees a shader's bytecode.
@@ -8235,7 +8561,7 @@ void D3D12RenderContext::setConstants(u32 slot, const void* data, u32 dwords) {
     const i32 param = pipe_->slotParam[slot];
     const u32 declared = pipe_->slotDwords[slot];
     if (param < 0 || declared == 0) {
-        AVER_ERROR("[RHI.D3D12] setConstants: slot {} declares constantDwords 0, so it is a root CBV â€” use setConstantBuffer", slot);
+        AVER_ERROR("[RHI.D3D12] setConstants: slot {} declares constantDwords 0, so it is a root CBV -- use setConstantBuffer", slot);
         return;
     }
 
@@ -8252,7 +8578,7 @@ void D3D12RenderContext::setConstantBuffer(u32 slot, const void* data, u32 bytes
     if (!pipe_ || slot >= kMaxConstantSlots || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setConstantBuffer without a pipeline"); return; }
     const i32 param = pipe_->slotParam[slot];
     if (param < 0 || pipe_->slotDwords[slot] != 0) {
-        AVER_ERROR("[RHI.D3D12] setConstantBuffer: slot {} declares {} root constants, not a CBV â€” use setConstants",
+        AVER_ERROR("[RHI.D3D12] setConstantBuffer: slot {} declares {} root constants, not a CBV -- use setConstants",
                    slot, pipe_->slotDwords[slot]);
         return;
     }
@@ -8686,6 +9012,24 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     if (!b) { AVER_ERROR("[RHI.D3D12] buildBlas with an invalid handle"); return; }
     if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] buildBlas without ray-tracing support"); return; }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
+    if (!b->geometries.empty()) {
+        // createBlasMulti: every geometry at once, into the allocation its prebuild query sized.
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+        if (!blasMultiInputs(dev_->meshes_, b->geometries, geos, bd.Inputs)) {
+            AVER_ERROR("[RHI.D3D12] buildBlas: multi-geometry BLAS {} names a mesh that is gone", h);
+            return;
+        }
+        bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
+        bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
+        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        D3D12_RESOURCE_BARRIER bar{};
+        bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        bar.UAV.pResource = b->as.Get();
+        dev_->cmdList_->ResourceBarrier(1, &bar);
+        b->built = true;
+        return;
+    }
     const GpuMesh& m = dev_->meshes_[b->mesh - 1];
 
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
@@ -8710,6 +9054,8 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
     if (!b) { AVER_ERROR("[RHI.D3D12] refitBlas with an invalid handle"); return false; }
     if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] refitBlas without ray-tracing support"); return false; }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return false;
+    // A createBlasMulti structure is never updatable: the refitBlas contract's full-build fallback.
+    if (!b->geometries.empty()) { buildBlas(h); return false; }
     const GpuMesh& m = dev_->meshes_[b->mesh - 1];
 
     // Not eligible: not created updatable, never built, or the mesh's vertex/index counts have moved
@@ -8780,13 +9126,6 @@ u32 D3D12RenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* instan
     for (u32 i = 0; i < count && instances; ++i) {
         const RhiBlas* b = res_->blas(instances[i].blas);
         if (!b || !b->as) { AVER_WARN("[RHI.D3D12] {}: instance {} names an invalid BLAS", caller, i); continue; }
-        D3D12_RAYTRACING_INSTANCE_DESC id{};
-        // Engine matrices are row-major / row-vector (v*M); DXR wants a 3x4 column-vector [R|T].
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) id.Transform[r][c] = instances[i].world[c * 4 + r];
-            id.Transform[r][3] = instances[i].world[12 + r];
-        }
-        id.InstanceMask = instances[i].mask;
         // Rejected rather than truncated: InstanceID is a 24-bit bitfield, so a larger value would
         // silently alias onto another instance's id and a hit would resolve to the wrong geometry.
         if (instances[i].instanceId > kMaxTlasInstanceId) {
@@ -8795,25 +9134,10 @@ u32 D3D12RenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* instan
                        caller, i, instances[i].instanceId);
             continue;
         }
-        id.InstanceID = instances[i].instanceId;
-        // The values are chosen to match D3D12_RAYTRACING_INSTANCE_FLAGS one for one, so this is a
-        // copy rather than a translation -- but it is written as an explicit mask-and-assign, not a
-        // blind cast, so that a flag added on the engine side which does NOT have a D3D12 twin
-        // fails to compile here instead of being handed to the driver as an unknown bit.
-        u32 d3dFlags = 0;
-        if (instances[i].flags & TlasInstanceFlag_TriangleCullDisable)
-            d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
-        if (instances[i].flags & TlasInstanceFlag_TriangleFrontCcw)
-            d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE;
-        if (instances[i].flags & TlasInstanceFlag_ForceOpaque)
-            d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
-        if (instances[i].flags & TlasInstanceFlag_ForceNonOpaque)
-            d3dFlags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
-        id.Flags = d3dFlags;
-        id.AccelerationStructure = b->as->GetGPUVirtualAddress();
+        const D3D12_RAYTRACING_INSTANCE_DESC id = toInstanceDesc(instances[i], b->as->GetGPUVirtualAddress());
         dst[written++] = id;
         // The mask as the GPU keeps it (InstanceMask is 8 bits), so bits it never sees can't defeat a refit.
-        outSlots.push_back({id.AccelerationStructure, d3dFlags, instances[i].mask & 0xFFu});
+        outSlots.push_back({id.AccelerationStructure, id.Flags, instances[i].mask & 0xFFu});
     }
     return written;
 }
@@ -8827,9 +9151,10 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
     if (!t->instancePtr[f]) return;
 
     const u32 written = packTlasInstances(*t, instances, count, "buildTlas", t->pendingSlots);
+    const u32 staticUsed = usableStaticPrefix(*t);
 
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(written, t->allowUpdate);
-    in.InstanceDescs = t->instances[f]->GetGPUVirtualAddress();
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(staticUsed + written, t->allowUpdate);
+    in.InstanceDescs = tlasBuildDescs(*t, staticUsed, written);
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
     bd.Inputs = in;
@@ -8841,7 +9166,52 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
     bar.UAV.pResource = t->as.Get();
     dev_->cmdList_->ResourceBarrier(1, &bar);
     t->built = true;
+    t->builtStatic = staticUsed;
     t->builtSlots.swap(t->pendingSlots);
+}
+
+// See the declaration. The prefix's BLASes are checked here, per build, because destroyMesh can take
+// one away at any time and the prefix holds raw GPU addresses -- O(distinct BLASes), not O(prefix).
+u32 D3D12RenderContext::usableStaticPrefix(RhiTlas& t) {
+    if (t.staticCount == 0 || !res_->bufferResource(t.staticDescs)) return 0;
+    for (BlasHandle b : t.staticBlases) {
+        if (res_->blas(b)) continue;
+        if (!t.staticBrokenLogged) {
+            AVER_ERROR("[RHI.D3D12] TLAS static prefix names BLAS {}, destroyed since it was set -- its {} "
+                       "instance(s) are left out of every build until the prefix is replaced or removed",
+                       b, t.staticCount);
+            t.staticBrokenLogged = true;
+        }
+        return 0;
+    }
+    return t.staticCount;
+}
+
+// See the declaration. The copy lands at slot staticCount, so the prefix's own slots are never written
+// after setTlasStaticInstances filled them; the barriers order this copy after whatever read the buffer
+// last (the previous build, a shader) and before this build reads it.
+D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::tlasBuildDescs(RhiTlas& t, u32 staticUsed, u32 written) {
+    const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+    if (staticUsed == 0) return t.instances[f]->GetGPUVirtualAddress();
+    ID3D12Resource* descs = res_->bufferResource(t.staticDescs);
+    const D3D12_RESOURCE_STATES kRead =
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (written) {
+        if (t.staticDescsState != D3D12_RESOURCE_STATE_COPY_DEST) {
+            const D3D12_RESOURCE_BARRIER toCopy = transition(descs, t.staticDescsState, D3D12_RESOURCE_STATE_COPY_DEST);
+            dev_->cmdList_->ResourceBarrier(1, &toCopy);
+            t.staticDescsState = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+        dev_->cmdList_->CopyBufferRegion(descs, static_cast<u64>(staticUsed) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
+                                         t.instances[f].Get(), 0,
+                                         static_cast<u64>(written) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    }
+    if (t.staticDescsState != kRead) {
+        const D3D12_RESOURCE_BARRIER toRead = transition(descs, t.staticDescsState, kRead);
+        dev_->cmdList_->ResourceBarrier(1, &toRead);
+        t.staticDescsState = kRead;
+    }
+    return descs->GetGPUVirtualAddress();
 }
 
 // Updates `h` in place when the filtered instance list matches the last build/refit's signature
@@ -8857,16 +9227,20 @@ bool D3D12RenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, 
 
     std::vector<RhiTlasSlot>& slots = t->pendingSlots;
     const u32 written = packTlasInstances(*t, instances, count, "refitTlas", slots);
+    const u32 staticUsed = usableStaticPrefix(*t);
 
-    bool eligible = t->allowUpdate && t->built && slots.size() == t->builtSlots.size();
+    // The prefix's own slots are identical build to build by construction, so only the per-frame
+    // slots are compared -- plus the prefix length itself, which a dropped prefix changes.
+    bool eligible = t->allowUpdate && t->built && slots.size() == t->builtSlots.size() &&
+                    staticUsed == t->builtStatic;
     for (size_t i = 0; eligible && i < slots.size(); ++i) {
         const RhiTlasSlot& a = slots[i];
         const RhiTlasSlot& prev = t->builtSlots[i];
         if (a.blasVa != prev.blasVa || a.flags != prev.flags || a.mask != prev.mask) eligible = false;
     }
 
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(written, t->allowUpdate);
-    in.InstanceDescs = t->instances[f]->GetGPUVirtualAddress();
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = tlasInputs(staticUsed + written, t->allowUpdate);
+    in.InstanceDescs = tlasBuildDescs(*t, staticUsed, written);
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
     bd.Inputs = in;
@@ -8883,6 +9257,7 @@ bool D3D12RenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, 
     bar.UAV.pResource = t->as.Get();
     dev_->cmdList_->ResourceBarrier(1, &bar);
     t->built = true;
+    t->builtStatic = staticUsed;
     t->builtSlots.swap(t->pendingSlots);
     return eligible;
 }

@@ -79,6 +79,13 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          textures instead of retracing (see PSMainVoxi's rdReuse). Clears itself on any frame the
     //          staged path doesn't run (RT off, or a tier below Ray-Driven), since prePass never touches
     //          it -- no separate flag needed.
+    // Bit 32 is no Settings toggle: prePass ORs it in right after the acceleration-structure build
+    // whenever that structure holds no translucent-lane instance:
+    //   bit 32 rtShadowEx traces the first-hit query (ACCEPT_FIRST_HIT_AND_END_SEARCH, opaque lanes)
+    //          instead of the transmittance walk -- the same answer when nothing can tint a shadow, see
+    //          its FIRST-HIT FAST PATH (voxi_rt.hlsli). Reaches every rtShadowEx caller: CSRdShadow,
+    //          CSRdShadowProbe, PSMainVoxi, and rtShadow's secondary-hit callers while bit 1 is off.
+    //          Never the single-pass megakernel (rtGiShadowBits() is a constant there).
     // All bits clear -> field reads 0.0, exactly as before this existed.
     float4   gGiShadowParams;
     // The SPATIAL shadow denoiser. x = filter radius in px (0 = off); y = blend weight of the filtered
@@ -213,6 +220,11 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // derived from this one number rather than each choosing its own threshold.
 #define AVER_REFL_MIRROR_ROUGH 0.1
 
+// gRtReflHist's alpha holds the reflecting surface's view depth in METRES (cm * this). The texture is
+// RGBA16F, whose largest finite value is 65504: in centimetres that overflowed past 655 m and switched
+// the reprojection and spatial depth tests off for every distant hill.
+#define AVER_REFL_HIST_DEPTH_SCALE 0.01
+
 // TLAS instance-mask lanes. MUST MATCH kRtMaskOpaque/kRtMaskTranslucent in VoxiRenderer.cpp -- no
 // shared-source mechanism ties C++ and HLSL, so a mismatch is a silent image bug, not a build error.
 //
@@ -324,6 +336,13 @@ float averCausticFocus(float3 wpos) {
 // touches it (VSMain, VSky, PSVoxel, ...).
 static bool gAverHistoryWrite = true;
 
+// ---- SUBSURFACE: where the primary sun-shadow rays start (averSubsurfaceShadowPush) ----
+// Added to the ray origin in rtShadowEx, and to nothing else, so the temporal wrapper keeps reprojecting and
+// filtering at the real surface. Zero except around a subsurface pixel's own primary sun-shadow call, which
+// sets it and puts it back straight after -- every other shadow ray (reflection hits, GI hits, lamps) must
+// start where it always did. Declared unconditionally for gAverHistoryWrite's reason just above.
+static float3 gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
+
 // Is THIS fragment a translucent (glass/water) draw, replayed blended? Mirrors pbr::isTranslucent
 // (Material.cpp:70-72) exactly: AVER_MAT_ALPHA_BLEND alone is set only for AlphaMode::Blend
 // (MaterialGpu.cpp:94), so frosted glass (transmission > 0, no alpha blend) needs the OR too, or it
@@ -352,8 +371,9 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 // u11/u12: next free UAV slots after gGiVisHistOut's u10 (kVoxiUavCount 11->13, VoxiRenderer.cpp).
 //
 // gRdVisBuf: one uint4/pixel, index = pixel.y * pitch + pixel.x, pitch = rdRowPitch() (this cbuffer's w
-// field, else 0). HIT = uint4(instanceID, primitiveIndex, asuint(bary.x), asuint(bary.y)); MISS = x ==
-// 0xFFFFFFFFu (y/z/w undefined).
+// field, else 0). HIT = uint4(ref, primitiveIndex, asuint(bary.x), asuint(bary.y)), ref being the packed
+// instance reference rtPackCommitted gives and rtLoadInstance reads back (voxi_rt.hlsli); MISS = x ==
+// 0xFFFFFFFFu (y/z/w undefined), a value no packed reference takes.
 RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
 // gRdSunVisTex: this frame's resolved sun visibility, one RGBA16F texel/pixel. rgb = the tinted
 // transmittance rtShadowTemporal returns (post temporal/spatial filters). alpha = primary surface's
@@ -764,6 +784,7 @@ struct RdSurface {
     uint       i0, i1, i2;
     float3     w;
     float3     N;
+    float3     Ng;   // the flat triangle's normal, facing the ray like N (rtReflection's origin/clamp)
     float2     hitUV;
     RtMaterial mat;
     float      hitT;
@@ -781,7 +802,7 @@ struct RdSurface {
 // tell which path produced them.
 RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     RdSurface o;
-    o.inst = gRtInstances[rec.x];
+    o.inst = rtLoadInstance(rec.x);
     const uint tri = o.inst.firstIndex + rec.y * 3;
     o.i0 = o.inst.firstVertex + gRtIndices[tri + 0];
     o.i1 = o.inst.firstVertex + gRtIndices[tri + 1];
@@ -805,7 +826,23 @@ RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     const float3 P  = p0 * o.w.x + p1 * o.w.y + p2 * o.w.z;
     o.hitT = dot(P - gCamPos.xyz, dir);
     o.wpos = gCamPos.xyz + dir * o.hitT;
+    // A degenerate (zero-area) triangle has no plane of its own; the shading normal stands in.
+    const float3 ng = cross(p1 - p0, p2 - p0);
+    o.Ng = dot(ng, ng) > 1e-12 ? normalize(ng) : o.N;
+    if (dot(o.Ng, dir) > 0.0) o.Ng = -o.Ng;
     return o;
+}
+
+// How far the reflecting surface's view depth changes per pixel along the neighbour's primary ray
+// `dirN`: that ray intersected with THIS pixel's triangle plane, not the ray itself scaled by hitT (which
+// ignored the surface's slope, so rtReflectionSpatial's depth test rejected or kept neighbours by each
+// facet's tilt). 0 when the neighbour ray runs parallel to the plane.
+float rdPlaneDepthStep(float3 wpos, float3 Ng, float3 dirN) {
+    const float denom = dot(dirN, Ng);
+    if (abs(denom) < 1e-4) return 0.0;
+    const float t = dot(wpos - gCamPos.xyz, Ng) / denom;
+    const float3 Pn = gCamPos.xyz + dirN * t;
+    return mul(float4(Pn, 1.0), gViewProj).w - mul(float4(wpos, 1.0), gViewProj).w;
 }
 
 // MILESTONE 3. The one number CSRdRefl needs from PSRayDriven's material block before deciding whether
@@ -992,8 +1029,16 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
     return lerp(uv0, uvR, saturate(gGiParams.z) * edge);
 }
 
+// `dstTerm` is the part of the returned rgb that is NOT this surface's own light but the scene behind it,
+// sampled from the backdrop copy -- already fogged, so the caller must not fog it again (see THE AIR'S
+// OWN LIGHT IS WEIGHTED BY COVERAGE at the caller). Zero when the backdrop is not used. `bgWeight` is how
+// much of the already-fogged scene the final pixel holds -- dstTerm's plus the hardware blend's
+// dst*(1-alpha) -- or negative for "the blend's own 1 - alpha".
 float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular, float3 T,
-                                 float2 screenPos, float3 wpos, float thicknessCm) {
+                                 float2 screenPos, float3 wpos, float thicknessCm,
+                                 out float3 dstTerm, out float bgWeight) {
+    dstTerm  = float3(0.0, 0.0, 0.0);
+    bgWeight = -1.0;
     float2 invSize;
     if (!averBlendBackdropValid(invSize))
         return averBlendedOutputVolume(s, diffuse, specular, T);
@@ -1032,9 +1077,15 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     // alpha=1 is correct HERE, unlike material_prelude.hlsl's post-mortem case (a PANE seen from outside,
     // where Snell forbids TIR, with no reflected image -> dark slab): this fires only when gCameraMedium
     // says the eye is inside a single-sided volume, handing back the reflected scene as radiance.
-    if (tir) return float4(specular + bgR * T, 1.0);
+    if (tir) {
+        dstTerm  = bgR * T;
+        bgWeight = 1.0;   // the reflected scene IS the pixel's scene: alpha 1, but none of it is the pane's
+        return float4(specular + dstTerm, 1.0);
+    }
 
-    return float4(specular + diffuse * alpha + (bgR * T - bg0) * (1.0 - alpha), alpha);
+    dstTerm  = (bgR * T - bg0) * (1.0 - alpha);
+    bgWeight = 1.0 - alpha;
+    return float4(specular + diffuse * alpha + dstTerm, alpha);
 }
 
 float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
@@ -1059,11 +1110,10 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
 }
 
 // Reprojects wpos through LAST frame's camera to sample the reflection history. False when unusable:
-// off-screen, behind last frame's near plane, a recorded miss (stored.a <= 0), or a disocclusion -- same
-// test as rtReprojectHistory, against the reflection's own depth channel.
-// A MISS IS NEVER REPROJECTED (the one difference from the shadow case): sky-by-direction is cheap and
-// highly VIEW dependent, so a stale miss would show the wrong patch of sky through a still surface. A
-// real hit depends on the surface and a mostly-static light, not viewing angle.
+// off-screen, behind last frame's near plane, a texel nothing traced (stored.a <= 0: the vacate
+// sentinel), or a disocclusion -- same test as rtReprojectHistory, against the reflection's own depth.
+// A RAY THAT ESCAPED TO THE SKY IS REPROJECTED LIKE A HIT: it is one sample of a rough lobe, and keeping
+// misses out of the history is what made a semi-rough surface a speckle of raw sky (rtReflection).
 bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
@@ -1079,9 +1129,10 @@ bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float
     if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
 
     const float4 stored = gRtReflHist.Load(int3(texel, 0));
-    if (stored.a <= 0.0) return false;   // a miss was recorded there -- nothing to reuse
-    const float tol = max(clip.w, stored.a) * 0.03 + 1.0;
-    if (abs(clip.w - stored.a) > tol) return false;
+    if (stored.a <= 0.0) return false;   // not traced there (vacated) -- nothing to reuse
+    const float depthM = clip.w * AVER_REFL_HIST_DEPTH_SCALE;
+    const float tol = max(depthM, stored.a) * 0.03 + 0.01;
+    if (abs(depthM - stored.a) > tol) return false;
 
     hist = stored.rgb;
     velocityPx = px - pixel;
@@ -1096,8 +1147,9 @@ bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float
 // first). Differs in three ways:
 //  1. RADIUS FROM ROUGHNESS, not a host constant: a fixed width either blurs a mirror or under-filters
 //     a rough surface. Roughness 0 returns centre untouched, no texel loaded.
-//  2. A MISSED NEIGHBOUR IS SKIPPED, not counted black: gRtReflHist's miss sentinel is a NEGATIVE alpha,
-//     and averaging it in would drag every reflected edge toward black.
+//  2. AN UNTRACED NEIGHBOUR IS SKIPPED, not counted black: gRtReflHist's vacate sentinel is a NEGATIVE
+//     alpha, and averaging it in would drag every reflected edge toward black. A neighbour whose ray
+//     reached the sky is a real sample and is averaged in.
 //  3. NO LUMINANCE WEIGHT: SVGF's colour-similarity term needs a per-pixel VARIANCE this engine doesn't
 //     track (history is rgb+depth, no second moment); without it a luminance weight would preserve
 //     exactly the noise it's meant to remove. Geometry weights only, for now.
@@ -1108,7 +1160,9 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
     // Radius tracks the lobe (tan(cone)=rough^2 grows quadratically, this grows linearly --
     // deliberately conservative: too wide smears detail, too narrow leaves noise for the temporal
     // history). Capped at 3 (7x7 gather): cost is quadratic in radius.
-    const int radius = (int)clamp(floor(rough * 6.0), 0.0, 3.0);
+    // Rounded, not floored, so roughness 0.5 (a common authored value) does not sit on a step edge where
+    // the per-triangle mip choice of roughness flips the kernel between 5x5 and 7x7 facet by facet.
+    const int radius = rough < AVER_REFL_MIRROR_ROUGH ? 0 : (int)clamp(round(rough * 5.0), 1.0, 3.0);
     if (radius <= 0 || gRtHistParams.y < 0.75) return centre;
 
     float texW, texH;
@@ -1141,9 +1195,11 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
             const int2 t = base + int2(ox, oy);
             if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
             const float4 st = gRtReflHist.Load(int3(t, 0));
-            if (st.a <= 0.0) continue;   // that neighbour's ray missed; see (2) above
-            const float predicted = curDepth + dzdx * (float)ox + dzdy * (float)oy;
-            const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
+            if (st.a <= 0.0) continue;   // not traced there; see (2) above
+            // Depths in METRES, as the history stores them (AVER_REFL_HIST_DEPTH_SCALE). dzdx/dzdy are
+            // the surface PLANE's depth step per pixel (rdPlaneDepthStep), not the ray's.
+            const float predicted = (curDepth + dzdx * (float)ox + dzdy * (float)oy) * AVER_REFL_HIST_DEPTH_SCALE;
+            const float tol = max(abs(predicted), 0.01) * 0.02 + 0.01;
             if (abs(st.a - predicted) > tol) continue;
 #if AVER_GBUFFER_HISTORY
             // THE CREASE TERM -- copied from rtShadowSpatial's identical block (see there for the
@@ -1163,14 +1219,15 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
 // Tiled/temporal wrapper around rtReflection(), mirroring rtShadowTemporal's structure/tile schedule so
 // shadow and reflection rays amortise on the same cadence. Called ONLY after the caller gates on
 // roughness (s.rough <= 0.5 in PSMainVoxi) -- not re-checked here.
-// `hit`: true for a real reflection colour (fresh or history-reused -- haveHist is already conditioned
-// on a real hit, never a miss), false when the caller should fall back to sky.
+// `hit`: true when the return value is the reflection estimate (fresh or history-reused, a surface or
+// the sky its rays reached -- see rtReflection), false only when no ray was traced and the caller should
+// fall back to sky itself.
 //
 // SUB-STAGE SPLIT C (Settings::rayDrivenReflSplit): `doSpatial` lets CSRdRefl (R1) call this for the
 // ray/history half alone and leave rtReflectionSpatial's dense 7x7 gather to CSRdReflFilter (R2) --
 // register-heavy trace and bandwidth-heavy filter no longer share a thread. false ONLY from CSRdRefl's
 // AVER_RD_REFL_SPLIT branch; every other caller goes through rtReflectionTemporal() below, always both.
-float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
+float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2 pixel, float rough,
                               float dzdx, float dzdy, bool doSpatial, out bool hit) {
     // ---- THE MIRROR CUTOFF: ONE predicate, three consumers ----
     // Below AVER_REFL_MIRROR_ROUGH a surface is a mirror throughout: no jitter, no temporal history, no
@@ -1190,15 +1247,17 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
     // NO HISTORY TEXTURE: the lobe stays closed too -- widening it with nothing to converge into would
     // trade a biased-but-stable reflection for one that flickers every frame. rough=0 reduces
     // rtReflection to the exact mirror ray it traced before this change.
-    if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, R, L, pixel, 0.0, 0.0, hit);
+    if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, Ng, R, L, pixel, 0.0, 0u, hit);
 
     const float4 curClip = mul(float4(wpos, 1.0), gViewProj);
+    // The frame count drives rtReflection's per-frame lobe sample -- a pure count, never wall-clock
+    // (reproducible capture).
     const uint frameIdx  = (uint)gRtHistParams.z;
-    // Per-frame rotation turning one ray per frame into a converging lobe estimate. Pure per-frame
-    // count, never wall-clock (reproducible capture); golden-angle multiplier keeps successive
-    // rotations from landing near each other the way a fixed increment would.
-    const float frameJitter = (float)frameIdx * 2.39996323;
     const uint tileBits = (uint)gRtHistParams.w;
+    // WHAT THE HISTORY HOLDS FOR A TRACED PIXEL, hit or miss alike: rtReflection returns the sky along
+    // an escaping ray, so a miss is reprojected and filtered with its neighbours instead of standing
+    // out as raw sky.
+    const float histDepth = curClip.w * AVER_REFL_HIST_DEPTH_SCALE;
 
     if (tileBits == 0u) {
         // THE SHIPPED PATH: rtPixelsPerRayTileForQuality returns 1 at every tier, so this always runs.
@@ -1242,7 +1301,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
             col    = skipCol;
             curHit = true;
         } else {
-            float3 fresh = rtReflection(wpos, N, R, L, pixel, lobeRough, frameJitter, curHit);
+            float3 fresh = rtReflection(wpos, N, Ng, R, L, pixel, lobeRough, frameIdx, curHit);
             col = fresh;
 
             if (lobeRough > 0.0 && curHit) {
@@ -1278,7 +1337,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
         // CSRdReflFilter (which reads this texel back) and the unsplit path agree.
         col = clamp(col, 0.0, AVER_VOX_MAXRAD);
         if (gAverHistoryWrite)
-            gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
+            gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, histDepth) : float4(0.0, 0.0, 0.0, -1.0);
         hit = curHit;
         if (curHit && doSpatial) {
             return rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy);
@@ -1299,9 +1358,8 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
     float3 col;
     bool curHit;
     if (myTurn || !haveHist) {
-        col = rtReflection(wpos, N, R, L, pixel, lobeRough, frameJitter, curHit);
-        // Same adaptive weight as rtShadowTemporal. Only blends a HIT with history: a fresh miss stays
-        // a miss (caller's sky fallback handles it) rather than dragged toward a stale colour.
+        col = rtReflection(wpos, N, Ng, R, L, pixel, lobeRough, frameIdx, curHit);
+        // Same adaptive weight as rtShadowTemporal.
         if (curHit && haveHist) {
             const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
             const float t = saturate(length(velocityPx) / budget);
@@ -1319,7 +1377,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
     // reason as the untiled branch's copy above.
     col = clamp(col, 0.0, AVER_VOX_MAXRAD);
     if (gAverHistoryWrite)
-        gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, curClip.w) : float4(0.0, 0.0, 0.0, -1.0);
+        gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, histDepth) : float4(0.0, 0.0, 0.0, -1.0);
     if (curHit && doSpatial) {
         return rtReflectionSpatial(col, wpos, N, pixel, curClip.w, lobeRough, dzdx, dzdy);
     } else {
@@ -1330,9 +1388,9 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 R, float3 L, float2 
 // The wrapper every caller but CSRdRefl's split branch uses -- always asks for the spatial gather, so
 // PSRayDriven, PSMainVoxi and CSRdRefl's unsplit path stay byte-for-byte the same call as before
 // rtReflectionTemporalEx existed.
-float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
+float3 rtReflectionTemporal(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2 pixel, float rough,
                             float dzdx, float dzdy, out bool hit) {
-    return rtReflectionTemporalEx(wpos, N, R, L, pixel, rough, dzdx, dzdy, true, hit);
+    return rtReflectionTemporalEx(wpos, N, Ng, R, L, pixel, rough, dzdx, dzdy, true, hit);
 }
 
 // THE "NO DATA" SENTINEL FOR A PIXEL THE REFLECTION GATE ROUTED AWAY FROM TRACING THIS FRAME. Every
@@ -1782,6 +1840,11 @@ GBufferOut PSMainVoxi(VSOut i) {
 float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     float3 N = normalize(i.nrmWS);
+    // FACE-FORWARDED, by averVertexOf's own rule (dot(N,V) < 0 flips), so the ray queries below --
+    // sun-shadow origin, AO/GI hemisphere, reflection origin and clamp -- work on the side the eye
+    // sees, as the shading normal does. The scene pipeline culls nothing, so a two-sided pane (glass
+    // is CULL none) seen from its back used to cast those rays into the half-space behind itself.
+    if (dot(N, gCamPos.xyz - i.wpos) < 0.0) N = -N;
 
     // ---- W6/M5: DOES THIS FRAGMENT'S HISTORY WRITE BELONG TO IT? ----
     //
@@ -1803,6 +1866,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     float3 L = normalize(gLightDir.xyz);
     float ndl = saturate(dot(N, L));
+    // SUBSURFACE LIT FROM BEHIND: this pixel's one sun-shadow query starts on the light-facing side,
+    // pushed through the surface (averSubsurfaceShadowPush) -- zero for every other material, which then
+    // queries exactly as before. The ray-traced query takes the push as a ray-origin offset only, so its
+    // history stays at the surface; the shadow map samples the pushed point, facing the light.
+    const float3 sssShadowPush = averSubsurfaceShadowPush(gMaterialFlags, gSubsurfaceRadius, N, L);
+    const bool   sssShadowBack = any(sssShadowPush != 0.0);
+    const float3 shadowMapP    = i.wpos + sssShadowPush;
+    const float3 shadowMapN    = sssShadowBack ? -N : N;
+    const float  shadowMapNdl  = sssShadowBack ? saturate(dot(-N, L)) : ndl;
 #if AVER_RT
     // View-space depth/gradient taken HERE, where control flow is uniform, and carried down to the
     // roughness-gated reflection block: a derivative inside divergent flow is undefined in HLSL (the
@@ -1851,8 +1923,29 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // Tolerance: 1 cm flat plus 0.4% of depth. gRdSunVisTex is RGBA16F, whose mantissa alone steps
     // roughly 2 cm at 30 m -- a tighter flat term would reject a true match to the texture's own
     // storage error, not to a real gap between surfaces.
+    //
+    // PLUS A PLANE TEST, for grazing views. The depth gap between a decal h above its floor and the
+    // floor grows as distance * h / camera height, so from a standing player's eye (~170 cm) the depth
+    // test failed every floor-decal pixel past a few metres and each ran the full lighting instead:
+    // blended replay 0.28 ms in the editor vs 4.09 ms in PIE on NewSponza (2026-09-28). Measured along
+    // the decal's normal the gap is h from any angle. The staged surface point on this pixel's ray is
+    // rdPf; its quad neighbours rebuild that surface's plane, which must be parallel to the decal's --
+    // along a grazing ray a differently oriented surface can be near along the decal's normal while
+    // far away. Same tolerance, projected on the normal. Unnormalised normals, so a degenerate one
+    // fails the test instead of producing a NaN.
+    bool rdOnPlane = false;
+    if (rdReuseCandidate) {   // draw-uniform, so quad-uniform: the quad reads below stay defined
+        const float3 rdV   = i.wpos - gCamPos.xyz;
+        const float3 rdPf  = gCamPos.xyz + rdV * (rdSunVisTexel.a / max(rtViewZ, 1e-3));
+        const float3 rdNs  = cross(QuadReadAcrossX(rdPf) - rdPf, QuadReadAcrossY(rdPf) - rdPf);
+        const float3 rdNd  = cross(rtDpx, rtDpy);
+        const float  rdNsL = length(rdNs), rdNdL = length(rdNd);
+        rdOnPlane = rdNsL > 1e-20 && rdNdL > 1e-20
+                 && abs(dot(rdNs, rdNd)) > 0.95 * rdNsL * rdNdL
+                 && abs(dot(i.wpos - rdPf, rdNd)) <= rdNdL + 0.004 * abs(dot(rdV, rdNd));
+    }
     const bool rdReusePx = rdReuseCandidate && rdSunVisTexel.a > 0.0
-                         && abs(rdSunVisTexel.a - rtViewZ) <= 1.0 + 0.004 * rtViewZ;
+                         && (abs(rdSunVisTexel.a - rtViewZ) <= 1.0 + 0.004 * rtViewZ || rdOnPlane);
     // QUAD-UNIFORM, NOT PER PIXEL: rtShadowTemporal/rtSkyOcclusionTemporal take screen-space
     // derivatives internally, undefined unless all four pixels of a 2x2 quad take the same branch --
     // so a quad reuses only when all four pass; one straddling a decal's edge traces as a whole. The
@@ -1860,6 +1953,14 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     const uint rdReuseBit = rdReusePx ? 1u : 0u;
     const bool rdReuse = (rdReuseBit & QuadReadAcrossX(rdReuseBit) & QuadReadAcrossY(rdReuseBit) &
                           QuadReadAcrossDiagonal(rdReuseBit)) != 0u;
+    // A PANE LIT ON ITS OWN (a blended fragment that cannot reuse the staged lighting -- window glass in
+    // front of a room or a street gap) gets the voxel-cone gather's smooth GI and occlusion, not traced
+    // ones. It writes no history and reads no NRD, and its own history reads are depth-rejected against
+    // the opaque surface behind it, so rtSkyOcclusionTemporal returned ONE binary cosine ray re-aimed
+    // every frame and giRestirIndirect one raw candidate (RESTIRHISTORY 0). Through
+    // averSpecularOcclusion that binary AO is exactly 0 or 1 at glass roughness, so a pane's whole
+    // mirror reflection switched on and off per pixel per frame, and rare emitter hits sparkled.
+    const bool paneOwnLight = blendedFragment && !rdReuse;
 
     // float3 NOW: rtShadowTemporal carries the medium's colour. shadowFactor returns a scalar and
     // promotes, so the non-RT path is unchanged.
@@ -1870,12 +1971,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // tinted sun visibility for the opaque surface this fragment sits on, not a fresh value of its
         // own.
         sunVis = rdSunVisTexel.rgb;
-    else if (gShadowParams.z > 0.5)
+    else if (gShadowParams.z > 0.5) {
+        gAverShadowOriginPush = sssShadowPush;
         sunVis = rtShadowTemporal(i.wpos, N, L, i.pos.xy, rtDpx, rtDpy,
                                   (uint)max(gRtParams.y, 1.0));
-    else                       sunVis = shadowFactor(i.wpos, N, ndl);
+        gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
+    }
+    else                       sunVis = shadowFactor(shadowMapP, shadowMapN, shadowMapNdl);
 #else
-    const float3 sunVis = shadowFactor(i.wpos, N, ndl);
+    const float3 sunVis = shadowFactor(shadowMapP, shadowMapN, shadowMapNdl);
 #endif
 #if AVER_GBUFFER
     // View-space linear depth for the G-buffer. REUSED, not recomputed, when AVER_RT already computed
@@ -1921,8 +2025,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // cost is on the blended pass against the "blended replay" GPU span (D3D12Device.cpp) -- see
         // section 4(a) of the optimisation-wave-2 plan. Default restir (this added test false): the
         // condition collapses to the original `gGiRestirParams.x > 0.5` and today's image is
-        // unchanged. blendedFragment is computed once, above, at this function's own top.
-        if (gGiRestirParams.x > 0.5 && !(blendedFragment && ((uint)gAmbientParams.w & 16u) != 0u)) {
+        // unchanged. blendedFragment is computed once, above, at this function's own top. A pane lit
+        // on its own (paneOwnLight) always takes the cone gather: see that flag.
+        if (gGiRestirParams.x > 0.5 && !paneOwnLight && !(blendedFragment && ((uint)gAmbientParams.w & 16u) != 0u)) {
             if (rdReuse) {
                 // M6: Stage G's own answer, VERBATIM (PSRayDriven's AVER_RD_SPLIT copy -- search
                 // gRdGiTex): `ao` is left untouched at its own initial 1.0, exactly what
@@ -2015,6 +2120,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
                       // or no voxel GI -- the same way PSRayDriven's AVER_RD_SPLIT read of gRdAoTex
                       // does). In CONE-GI mode CSRdSkyOcc never wrote this texel (occlusion rides the
                       // cone accumulator instead), so this falls through to the same call.
+                      //
+                      // A pane lit on its own keeps the cone gather's `ao` (1.0, fully open, when voxel
+                      // GI is off): see paneOwnLight.
+                      && !paneOwnLight
                       ? ((rdReuse && (gGiRestirParams.x > 0.5 || gVoxelParams.w <= 0.5))
                          ? gRdAoTex[uint2(i.pos.xy)].r
                          : rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao,
@@ -2052,6 +2161,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     //
     // The fade is only a seam-hider across the last quarter (0 at 0.5 rough, 1 at 0.75): nothing pops
     // crossing the cutoff, everything below 0.5 is the traced answer at full strength.
+    // The rasterised triangle's own plane (rtReflection's Ng), from the screen derivatives of its
+    // position -- taken here, in uniform control flow, not inside the per-pixel roughness branch.
+    float3 rNg = cross(ddx(i.wpos), ddy(i.wpos));
+    rNg = dot(rNg, rNg) > 1e-12 ? normalize(rNg) : N;
+    if (dot(rNg, N) < 0.0) rNg = -rNg;
     const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75;
     if (!rtReflTraced) rtReflectionHistoryVacate(i.pos.xy);   // see that function: no stale history
     if (rtReflTraced) {
@@ -2069,17 +2183,13 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             ind4.specular = rdReflTexel.rgb;
         } else {
             bool specHit = false;
-            float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, s.rough,
+            float3 refl = rtReflectionTemporal(i.wpos, N, rNg, R, L, i.pos.xy, s.rough,
                                                rtDzdx, rtDzdy, specHit);
-            // ONE skyColor(R), NOT TWO, AND NOT ALWAYS ONE: both lerp operands want the same value, and
-            // skyColor is a 32-step march too expensive to trust DXC to CSE, so it's named once, guarded
-            // below. smoothstep(0.5,0.75,rough) is EXACTLY 0 at/below 0.5, so a hit skips the march
-            // entirely for water/glass/chrome/wet stone. MEASURED on PTTest pool: blended replay
-            // 18.9 -> 15.9ms, whole frame 44.86 -> 41.78ms, nothing on screen changing. STILL ONE CALL:
-            // an earlier two-branch split cost 13% (8.15 -> 9.26ms) -- a divergent wave ran both sides.
-            const float skyW = smoothstep(0.5, 0.75, s.rough);
+            // skyColor(R) only when no ray was traced: the traced estimate already carries the sky its
+            // rays reached (rtReflection), so there is no fade toward mirror sky -- see CSRdRefl.
+            const float skyW = 0.0;
             float3 skyR = float3(0.0, 0.0, 0.0);
-            if (!specHit || skyW > 0.0) skyR = skyColor(R);
+            if (!specHit) skyR = skyColor(R);
             // The raster twin of the clamp at PSRayDriven's copy of this line. Change one, change both:
             // the two primary-visibility paths must agree how much radiance a reflection may return.
             //
@@ -2147,6 +2257,8 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // made the PTTest pool a bright opaque slab). Behind AVER_RT: without a ray, keeps today's
         // volumeless composite instead of a fabricated thickness.
         float4 outc;
+        float3 dstTerm  = float3(0.0, 0.0, 0.0);   // the backdrop's share of outc.rgb; see the fog below
+        float  bgWeight = -1.0;                     // the scene behind's weight; < 0: 1 - outc.a
 #if AVER_RT
         // FRONT FACES ONLY -- a correctness gate, not an optimisation. averVolumeThickness traces ALONG
         // THE VIEW DIRECTION and takes the nearest hit (the medium's exit), correct only when the
@@ -2170,7 +2282,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             // THE BACKDROP PATH: lets attenuationColor's HUE reach the picture -- averBlendedOutputVolume's
             // fallback can only darken absorbed channels, never tint the background (one blend alpha is
             // one number). i.pos.xy is the screen coord the copy uses.
-        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy, i.wpos, volThick);
+        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy, i.wpos, volThick, dstTerm, bgWeight);
         } else
 #endif
         outc = averBlendedOutput(s, dif, spc);
@@ -2194,7 +2306,25 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         //
         // OCCLUSION-AWARE: airVis computed once from i.wpos, same as the opaque branch below (see
         // voxiAirVisibility/gAirVis's headers for why this is a world-space volume lookup, not AO).
-        outc.rgb = averApplyFogAirVis(outc.rgb, i.wpos, true, voxiAirVisibility(i.wpos));
+        //
+        // THE AIR'S OWN LIGHT IS WEIGHTED BY COVERAGE, and this is a fix: fogging outc.rgb whole added
+        // the in-scatter at FULL weight here, while the hardware blend adds dst*(1-alpha) -- and dst,
+        // the scene behind, already carries its own in-scatter. Composited, a pane read
+        //     (pane + (1-a)*bg)*T + inscatter*(1 + (1-a))
+        // so at alpha 0.12 nearly twice the haze of the wall beside it: distant windows went milky
+        // and lighter than the facades they sit in (NeonDistrict, 750 glass placements). averApplyFog
+        // is affine, fog(x) = x*T + inscatter, so subtracting (1-a) * fog(0) leaves the extinction on
+        // the pane's own light untouched and scales only the in-scatter by its coverage:
+        //     pane*T + a*inscatter + (1-a)*(bg*T + inscatter) = (pane + (1-a)*bg)*T + inscatter.
+        // AND THE BACKDROP PATH'S SHARE (dstTerm) IS ADDED BACK UNFOGGED: it is the already-fogged scene
+        // behind tinted glass or water, re-sampled and bent, not light the pane made -- fogged with the
+        // rest it lost a second dose of extinction. In general the in-scatter is weighted by 1 - bgWeight,
+        // the share of the pixel that is NOT already-fogged scene: 1 - alpha, except on a TIR return,
+        // whose reflected scene is the whole pixel (bgWeight 1) and already carries its own.
+        if (bgWeight < 0.0) bgWeight = 1.0 - outc.a;
+        float3 airExt, airIn;
+        averFogTermsAirVis(i.wpos, true, voxiAirVisibility(i.wpos), airExt, airIn);
+        outc.rgb = (outc.rgb - dstTerm) * airExt + airIn * (1.0 - bgWeight) + dstTerm;
         // B1 (F5): applied LAST, after fog, so the marker can't be fogged or blended away -- see
         // aver_IsGiRestirPoisonColour for why a giRestirIndirect diffuse colour outranks this one.
         if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
@@ -2446,9 +2576,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     RtMaterial mat = rdS.mat;
     const float hitT = rdS.hitT;
     float3 wpos    = rdS.wpos;
-    // vmode 2/5's instance/triangle ids: CSRdVisibility packs q.CommittedInstanceID() into rdRec.x and
-    // q.CommittedPrimitiveIndex() into rdRec.y verbatim -- the array index IS the instance id,
-    // RtInstance has no id field of its own to read instead.
+    // vmode 2/5's instance/triangle ids: CSRdVisibility packs rtPackCommitted(q) into rdRec.x and
+    // q.CommittedPrimitiveIndex() into rdRec.y verbatim -- the packed reference IS the instance's
+    // identity (a foliage part's included), RtInstance has no id field of its own to read instead.
     const uint rdInstanceIndex = rdRec.x;
     const uint rdPrimIndex     = rdRec.y;
 #else
@@ -2502,7 +2632,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Surface reconstruction: same barycentric interpolation and ROTATION-ONLY normal transform as
     // rtReflection (why no inverse transpose) -- must agree or a surface shades differently direct
     // vs. in a mirror.
-    RtInstance inst = gRtInstances[q.CommittedInstanceID()];
+    RtInstance inst = rtLoadInstance(rtPackCommitted(q));
     uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
     uint i0  = inst.firstVertex + gRtIndices[tri + 0];
     uint i1  = inst.firstVertex + gRtIndices[tri + 1];
@@ -2528,7 +2658,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 wpos = gCamPos.xyz + dir * hitT;
     // vmode 2/5's instance/triangle ids -- same pair the #if AVER_RD_SPLIT branch pulls from its
     // visibility record, read here directly off the live RayQuery.
-    const uint rdInstanceIndex = q.CommittedInstanceID();
+    const uint rdInstanceIndex = rtPackCommitted(q);
     const uint rdPrimIndex     = q.CommittedPrimitiveIndex();
 #endif
     float3 L    = normalize(gLightDir.xyz);
@@ -2582,7 +2712,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     float sunVis = 1.0;   // ablated: fully lit, no ray
 #else
+    // A subsurface hit lit from behind asks from its light-facing side (PSMainVoxi's twin says why).
+    gAverShadowOriginPush = averSubsurfaceShadowPush(mat.flags, mat.subsurfaceRadius, N, L);
     float3 sunVis = rtShadowTemporal(wpos, N, L, i.pos.xy, dpx, dpy, (uint)max(gRtParams.y, 1.0));
+    gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
 #endif
 
@@ -2738,6 +2871,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.backFace  = false;
     s.sssWeight = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceWeight) : 0.0;
     s.sssRadius = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceRadius) : 0.0;
+    // Not left at the (AverSurface)0 above: a zero tint would switch subsurface off on this path alone.
+    s.sssColor  = max(mat.subsurfaceColor, 0.0);
 #ifdef AVER_LAYERED_BSDF
     // THE COAT NEEDS EXPLICIT LINES: a new field silently defaults to 0 (the right OFF state) if
     // omitted here, which would look correct while meaning "no coat in ray-driven mode ever".
@@ -2976,18 +3111,19 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #if AVER_RD_ABLATE == AVER_RD_ABL_REFL || AVER_RD_ABLATE == AVER_RD_ABL_ALL
         float3 refl = float3(0.0, 0.0, 0.0);   // ablated: no mirror ray
 #else
-        float3 refl = rtReflectionTemporal(wpos, N, R, L, i.pos.xy, s.rough,
+        // N stands in for the geometric normal here: this single-pass compile sits at the AMD driver's
+        // register limit (rtGiShadowBits' note), and rebuilding the triangle plane costs three more
+        // transformed vertices. The staged CSRdRefl, the default, passes the real one.
+        float3 refl = rtReflectionTemporal(wpos, N, N, R, L, i.pos.xy, s.rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
 #endif
-        // Same guard as PSMainVoxi's twin (13% regression there for an earlier two-call version):
-        // smoothstep(0.5,0.75,rough) is 0 at/below 0.5, so a hit skips the march entirely. THIS ONE
-        // IS THE WHOLE SCREEN: PSRayDriven answers primary visibility for every pixel by default.
-        const float skyW = smoothstep(0.5, 0.75, s.rough);
+        // skyColor(R) only when no ray was traced: see CSRdRefl's compose.
+        const float skyW = 0.0;
         float3 skyR = float3(0.0, 0.0, 0.0);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
         // ablated: no atmosphere march
 #else
-        if (!specHit || skyW > 0.0) skyR = skyColor(R);
+        if (!specHit) skyR = skyColor(R);
 #endif
         // CLAMPED: THIS WAS THE ONLY UNBOUNDED TERM LEFT IN A SHADOWED PIXEL (rtReflection returns
         // reflAlbedo*(direct+ambient) with nothing bounding it; the cone-traced twin below already does
@@ -3122,7 +3258,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
             break;
         }
 
-        RtInstance bi = gRtInstances[qb.CommittedInstanceID()];
+        RtInstance bi = rtLoadInstance(rtPackCommitted(qb));
         uint btri = bi.firstIndex + qb.CommittedPrimitiveIndex() * 3;
         uint b0 = bi.firstVertex + gRtIndices[btri + 0];
         uint b1 = bi.firstVertex + gRtIndices[btri + 1];
@@ -3243,6 +3379,16 @@ float3 rdPrimaryRayDir(uint2 pixel, out float2 ndc) {
     return averViewRayDir(ndc);
 }
 
+// THE CUTOUT POLICY PER STAGED RAY TYPE (averRtCutoutPolicy, voxi_rt.hlsli): an alpha-test budget, and
+// whether cutouts are solid. Primary visibility and the sun's shadow draw the leaf, so they test every
+// cutout (within a budget); diffuse GI and sky occlusion only average what they hit, so cutouts are
+// solid for them; a reflection is solid-cutout only once it is rough enough to blur a leaf's outline.
+#define AVER_RD_CUTOUTS_PRIMARY   24u
+#define AVER_RD_CUTOUTS_SHADOW     8u
+#define AVER_RD_CUTOUTS_DIFFUSE    4u
+#define AVER_RD_CUTOUTS_REFL       8u
+#define AVER_RD_REFL_SOLID_CUTOUT_ROUGH 0.3
+
 // ---- STAGE A: CSRdVisibility -- trace the primary ray, write the visibility record -----------------
 //
 // The visibility-only half of PSRayDriven's trace block above (AVER_RD_SPLIT==0 branch): same mask,
@@ -3273,6 +3419,9 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     r.TMin      = 0.0;
     r.TMax      = 1.0e7;
 
+    // The primary ray draws the leaf: every cutout it crosses is tested, up to AVER_RD_CUTOUTS_PRIMARY.
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_PRIMARY, false);
+
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Same lane as PSRayDriven's primary ray (AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL: leaves the
     // viewer's own head).
@@ -3285,7 +3434,7 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     }
 
     const float2 bary = q.CommittedTriangleBarycentrics();
-    gRdVisBuf[idx] = uint4(q.CommittedInstanceID(), q.CommittedPrimitiveIndex(),
+    gRdVisBuf[idx] = uint4(rtPackCommitted(q), q.CommittedPrimitiveIndex(),
                            asuint(bary.x), asuint(bary.y));
 }
 
@@ -3341,6 +3490,7 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             float2 ndc;
             const float3 dir = rdPrimaryRayDir(pixel, ndc);
             const RdSurface s = rdSurfaceFromRecord(rec, dir);
+            averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
             float3 dpx, dpy;
             rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
@@ -3362,8 +3512,12 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             // its radii at 4 and 8. The (x + 3y) step keeps row/column neighbours on different samples.
             const uint rays   = (uint)max(gRtParams.y, 1.0);
             const uint kProbe = (pixel.x + 3u * pixel.y + (uint)gRtHistParams.z) % rays;
+            // From the same side CSRdShadow will trace from, or a back-lit subsurface tile's probes would
+            // all read "blocked" and let CSRdShadow skip the rays that make it glow.
+            gAverShadowOriginPush = averSubsurfaceShadowPush(s.mat.flags, s.mat.subsurfaceRadius, s.N, L);
             const float3 fresh = rtShadowEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter,
                                             kProbe);
+            gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 
             if (all(fresh == 0.0))      bit = 1u;   // fully blocked
             else if (all(fresh == 1.0)) bit = 2u;   // fully lit
@@ -3420,6 +3574,7 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
 
     // THE SAME SHADOW-RAY FOOTPRINT PSRayDriven builds for its own shadow call (factored out, above,
     // so CSRdShadowProbe can build the identical footprint without a third copy).
@@ -3436,6 +3591,9 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     const float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray -- matches PSRayDriven's own ablated branch
 #else
+    // A subsurface hit lit from behind asks from its light-facing side (PSMainVoxi's twin says why);
+    // cleared after the call below, whichever compile it is.
+    gAverShadowOriginPush = averSubsurfaceShadowPush(s.mat.flags, s.mat.subsurfaceRadius, s.N, L);
 #if AVER_RD_SHADOW_TILES
     // A3: PROBE-GUIDED SKIP -- OR the 3x3 tile neighbourhood CSRdShadowProbe already classified around
     // this pixel's tile (tid.xy/8 is the same tile grid CSRdShadowProbe dispatches over; wave-uniform:
@@ -3464,6 +3622,7 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     const float3 sunVis = rtShadowTemporal(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
                                            (uint)max(gRtParams.y, 1.0));
 #endif
+    gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
     // M6: THE PRIMARY SURFACE'S OWN LINEAR VIEW DEPTH, same formula as PSMainVoxi's rtViewZ
     // (mul(wpos, 1, gViewProj).w) -- carried in alpha so a later blended-replay fragment can prove it
@@ -3511,6 +3670,7 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     float2 ndc;
     const float3 dir = rdPrimaryRayDir(pixel, ndc);
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
     // The pixel centre, as CSRdShadow hands rtShadowTemporal. Stage B reads the visibility back from
     // gRdLocalOut, so the return value isn't needed here.
     rdLocalLightsVisibility(s.wpos, s.N, float2(pixel) + 0.5, pixel, true);
@@ -3564,6 +3724,7 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
     float2 ndc;
     const float3 dir = rdPrimaryRayDir(pixel, ndc);
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_DIFFUSE, true);
 
     // NO gAverHistoryWrite HERE, unlike CSRdShadow/CSRdGi: this dispatch never calls giRestirIndirect
     // (only giTraceInitialCandidate, whose shadow ray is a plain rtShadow call reading no history), so
@@ -3652,6 +3813,7 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_DIFFUSE, true);
 
     // W6/M5: EXPLICITLY TRUE -- same reason as CSRdShadow's copy: every history write
     // giRestirIndirect makes below is always live for this pass.
@@ -3724,6 +3886,7 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
     float3 dir = rdPrimaryRayDir(pixel, ndc);
 
     RdSurface s = rdSurfaceFromRecord(rec, dir);
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_DIFFUSE, true);
 
     // W6/M5: EXPLICITLY TRUE -- same reason as CSRdShadow's and CSRdGi's copies.
     gAverHistoryWrite = true;
@@ -3827,6 +3990,7 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     const float3 R = reflect(dir, s.N);
     // THE ONE VALUE THIS STAGE NEEDS BEFORE IT CAN EVEN GATE -- see rdSurfaceRoughness's own header.
     const float rough = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_REFL, rough > AVER_RD_REFL_SOLID_CUTOUT_ROUGH);
 
     // W6/M5: EXPLICITLY TRUE, same reason CSRdShadow/CSRdGi/CSRdSkyOcc's own copies -- a blended
     // (glass/water) draw never reaches the ray-driven primary, so every history write below is live.
@@ -3838,8 +4002,8 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75;
     if (!rtReflTraced) rtReflectionHistoryVacate(float2(pixel) + 0.5);   // see that function
     if (rtReflTraced) {
-        const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
-        const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
+        const float rdReflDzdx = rdPlaneDepthStep(s.wpos, s.Ng, dirDx);
+        const float rdReflDzdy = rdPlaneDepthStep(s.wpos, s.Ng, dirDy);
         bool specHit = false;
         // PENDING iff R1 (AVER_RD_REFL_SPLIT) AND a history is bound to gather against; with none
         // bound, rtReflectionTemporalEx's early-out already skips rtReflectionSpatial, so R2 has
@@ -3858,24 +4022,25 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
         // not `?:`, for the same reason rtReflectionTemporalEx's own two returns spell it that way.
         float3 refl;
         if (pending) {
-            refl = rtReflectionTemporalEx(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
+            refl = rtReflectionTemporalEx(s.wpos, s.N, s.Ng, R, L, float2(pixel) + 0.5, rough,
                                           rdReflDzdx, rdReflDzdy, false, specHit);
         } else {
-            refl = rtReflectionTemporal(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
+            refl = rtReflectionTemporal(s.wpos, s.N, s.Ng, R, L, float2(pixel) + 0.5, rough,
                                         rdReflDzdx, rdReflDzdy, specHit);
         }
 #else
-        float3 refl = rtReflectionTemporal(s.wpos, s.N, R, L, float2(pixel) + 0.5, rough,
+        float3 refl = rtReflectionTemporal(s.wpos, s.N, s.Ng, R, L, float2(pixel) + 0.5, rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
 #endif
-        // Same guard as PSRayDriven's own copy (its "ENVIRONMENT SPECULAR" comment): a lerp against
-        // skyW, not a hard branch.
-        const float skyW = smoothstep(0.5, 0.75, rough);
+        // No fade toward unoccluded mirror sky between roughness 0.5 and the gate: the traced estimate
+        // already carries the sky its rays reached (rtReflection), and the fade put sharp, unshadowed
+        // sky under the pyramid on every semi-rough surface. skyR is only the ablation/no-ray fallback.
+        const float skyW = 0.0;
         float3 skyR = float3(0.0, 0.0, 0.0);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
         // ablated: no atmosphere march -- matches PSRayDriven's own copy
 #else
-        if (!specHit || skyW > 0.0) skyR = skyColor(R);
+        if (!specHit) skyR = skyColor(R);
 #endif
         if (pending) {
             // PENDING MARKER, NOT A COMPOSE: CSRdReflFilter finishes this pixel after gathering
@@ -3946,8 +4111,8 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     float3 dirDy = averViewRayDir(ndc + float2(0.0, ndcPixelStep.y));
     const float3 rdRayDx = (dirDx - dir) * s.hitT;
     const float3 rdRayDy = (dirDy - dir) * s.hitT;
-    const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
-    const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
+    const float rdReflDzdx = rdPlaneDepthStep(s.wpos, s.Ng, dirDx);
+    const float rdReflDzdy = rdPlaneDepthStep(s.wpos, s.Ng, dirDy);
 
     // ROUGHNESS AND DEPTH ARE RECOMPUTED, NOT READ BACK. The PENDING marker (gRdReflTex's header) is
     // a plain -1.0 flag with nothing else encoded, so roughness must be rebuilt. Depth reached this
@@ -3968,9 +4133,10 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     // the `col`/`curHit` rtReflectionTemporalEx would otherwise still hold in registers, had R1 not
     // already returned.
     //
-    // INVARIANT: rtReflectionTemporalEx writes gRtReflHistOut[pixel] as float4(col, curClip.w) on a
-    // hit, float4(0,0,0,-1) on a miss, identically in its untiled and tiled branches. curClip.w > 0 in
-    // front of the camera, so alpha > 0 means hit, alpha <= 0 (exactly -1) means miss.
+    // INVARIANT: rtReflectionTemporalEx writes gRtReflHistOut[pixel] as float4(col, depth in metres) for
+    // a traced pixel -- surface hit or sky alike -- identically in its untiled and tiled branches, and
+    // float4(0,0,0,-1) only when nothing was traced. The depth is > 0 in front of the camera, so alpha > 0
+    // means an estimate is there.
     const float4 h = gRtReflHistOut[pixel];
     const bool specHit = h.a > 0.0;
 
@@ -3982,9 +4148,9 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
         refl = float3(0.0, 0.0, 0.0);
     }
 
-    // Exact same compose as CSRdRefl's non-split tail (see its comments for the skyW lerp/clamp
-    // reasoning) -- repeated verbatim, not factored out, so this stage's control flow mirrors R1's.
-    const float skyW = smoothstep(0.5, 0.75, rough);
+    // Exact same compose as CSRdRefl's non-split tail (see its comments for the skyW/clamp reasoning)
+    // -- repeated verbatim, not factored out, so this stage's control flow mirrors R1's.
+    const float skyW = 0.0;
     const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
     gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
                                any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);

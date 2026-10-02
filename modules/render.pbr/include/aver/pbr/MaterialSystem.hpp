@@ -7,6 +7,7 @@
 #include <string>
 #include <array>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // The GPU residency of the material library: one binding set and one packed constant block per
@@ -32,6 +33,12 @@ public:
     struct ResolvedTexture {
         rhi::TextureHandle handle = 0;
         f32 averageLinear[3] = {1.0f, 1.0f, 1.0f};   // meaningful only when handle != 0
+        // Upload size in bytes, for the level-change eviction log below (textureRefs_'s own
+        // comment) to report "MiB freed" honestly. 0 for a resolver that predates this field or
+        // simply does not report it -- the log then undercounts rather than guesses, which is the
+        // honest answer to information this system was never given. Never read for anything that
+        // sizes an allocation; nothing here has ever needed that number.
+        usize bytes = 0;
     };
 
     // Turns a texture reference into a GPU texture; a zero handle leaves the slot on its fallback.
@@ -73,6 +80,13 @@ public:
     // cannot answer it -- any unrelated block of the same size would pass -- and nothing in the RHI
     // tags a binding with its type, so identity is the only honest test and this system is the only
     // thing that can perform it.
+    //
+    // O(1): a hash-set membership test against liveSets_, not a scan over entries_. VoxiRenderer's
+    // hashDrawMaterialInto() calls this for EVERY draw, TWICE (giDrawsKey() and rtAccelDrawsKey()),
+    // every frame -- on a 12,494-entity imported level (Intel Jungle Ruins) that is ~6,000 draws
+    // against 156-158 resident materials, a linear scan here cost on the order of 2 x 6,000 x 150
+    // comparisons per frame just to answer "did anything change". See liveSets_ for the invariant
+    // that keeps this correct.
     bool ownsBindingSet(rhi::BindingSetHandle s) const;
 
     // The average LINEAR base colour a draw of `s` actually shades with: baseColorFactor times the
@@ -185,6 +199,28 @@ private:
     // The entry for `h`, built on first use.
     Entry& entryFor(MaterialHandle h);
 
+    // ---- texture refcounting: the other half of level-scoped material residency ----
+    //
+    // GameContent::releaseMaterialsExcept destroys a pbr::MaterialHandle the moment a level stops
+    // needing it, which retires that material's Entry here (update()'s eviction loop, below) -- but
+    // a TEXTURE two materials share (the common case: one brick.png behind a dozen wall variants)
+    // must not go with the first of them, only the last. These two keep the count.
+
+    // Bumps textureRefs_ for every slot in `effective` that resolveTexture actually returned a
+    // handle for -- i.e. every entry that is NOT one of white_/flatNormal_/metalRough_, which are
+    // never counted and never evicted. Called once, right after writeSlots computes a set's
+    // effective array.
+    void retainSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective);
+    // The inverse: drops textureRefs_ for every counted handle in `effective`, and for any that
+    // reaches zero, destroys the GPU texture through the same deferred-by-contract
+    // res_->destroyTexture() path shutdown() already uses, then forgets it -- cache_, cacheAverage_,
+    // cacheKeyOf_ and cacheBytes_ alike, so a later resolve of the same reference re-reads the file
+    // rather than reusing a handle that no longer exists. Adds how many it destroyed and how many
+    // bytes they reported at upload to `outTextures`/`outBytes` (not overwrites: callers that evict
+    // more than one set in a pass accumulate into one running total).
+    void releaseSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective,
+                              u32& outTextures, usize& outBytes);
+
     rhi::IResourceFactory* res_ = nullptr;
     u32 tableBase_ = 0;
 
@@ -198,6 +234,19 @@ private:
     MaterialConstants     fallbackConstants_{};
 
     std::unordered_map<MaterialHandle, Entry> entries_;
+    // Every binding set this system currently owns -- entries_'s sets plus fallbackSet_ -- kept ONLY
+    // so ownsBindingSet() can answer in O(1) instead of walking entries_. This is a derived index,
+    // not a second source of truth: a set's real lifetime is entries_[h].set / fallbackSet_ as
+    // already created and destroyed below, and this must gain a member on every path that creates a
+    // binding set and lose it on every path that destroys one, or ownsBindingSet() goes stale in one
+    // direction or the other. The three places that do: init() (fallbackSet_), entryFor() (a fresh
+    // Entry, including the one update() triggers lazily for a material nobody has drawn yet), and the
+    // two teardown paths, update()'s eviction loop and shutdown(). A handle is never reassigned to a
+    // different set once created (update()'s dirty branch re-uploads an existing set's SRVs via
+    // writeSlots(), it never calls createBindingSet() again for a handle already in entries_), so
+    // insert-on-create/erase-on-destroy is the whole contract -- there is no rebuild path to also
+    // cover.
+    std::unordered_set<rhi::BindingSetHandle> liveSets_;
     // Keyed by the reference — the id when set, else the path — PLUS the slot's colour class, so one
     // texture uploads once per way of decoding it. See colourClass() in the .cpp for why the second
     // half of the key is not optional.
@@ -205,6 +254,24 @@ private:
     // The mean of each cached texture, same key. Kept beside cache_ rather than inside it so a
     // remembered FAILURE (a cached 0) carries no colour and cannot be mistaken for a black texture.
     std::unordered_map<std::string, std::array<f32, 3>> cacheAverage_;
+    // Upload size of each cached texture, same key as cache_/cacheAverage_ above -- 0 (absent) for
+    // a failure, same reasoning as cacheAverage_. Feeds only the level-change eviction log's "MiB
+    // freed"; see ResolvedTexture::bytes for where the number comes from.
+    std::unordered_map<std::string, usize> cacheBytes_;
+    // cache_'s reverse map (handle -> its cache_ key), needed to erase cache_/cacheAverage_/
+    // cacheBytes_ by key once textureRefs_ reaches zero for that handle and releaseSlotTextures
+    // actually destroys it. Populated and erased in lockstep with cache_ itself -- resolveTexture is
+    // the only place cache_ gains a non-zero entry, releaseSlotTextures the only place one is ever
+    // removed before shutdown().
+    std::unordered_map<rhi::TextureHandle, std::string> cacheKeyOf_;
+    // Refcount of live Entries referencing a cached (non-fallback) texture handle, keyed by the SAME
+    // handle cache_ hands out. Bumped by retainSlotTextures when writeSlots binds a resolved
+    // reference into a slot; dropped by releaseSlotTextures when the Entry (or the binding set's
+    // PREVIOUS contents, on a dirty re-upload that now points somewhere else) that held it is
+    // retired. White_/flatNormal_/metalRough_ are never inserted here -- see retainSlotTextures'
+    // own comment -- so a slot nothing ever textured can never be "evicted" out from under every
+    // material that falls back to it.
+    std::unordered_map<rhi::TextureHandle, u32> textureRefs_;
     // Per binding set: baseColorFactor times its base-colour texture's mean, filled by writeSlots.
     std::unordered_map<rhi::BindingSetHandle, std::array<f32, 3>> setAverage_;
     // Per binding set, the handle writeSlots actually bound into each slot. Same keying and same

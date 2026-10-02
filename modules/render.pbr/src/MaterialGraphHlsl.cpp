@@ -266,10 +266,19 @@ struct Emitter {
     // nothing is. Unlinked meaning (0,0) -- what every other input pin means -- would make an
     // unwired texture node sample one texel and return a flat colour, which looks like a broken
     // texture rather than like the obvious default. Every material editor makes this same
-    // exception, and it is the only place in this emitter where an unlinked pin is not a literal.
+    // exception; timeInput() below is the one other place an unlinked pin is not a literal.
     Value uvInput(const fmt::OcGraphNode& n) {
         if (linkInto(n.id, "uv")) return input(n, "uv", MatType::Float2);
         return Value{"uv", MatType::Float2};
+    }
+
+    // The `time` a time-driven node reads: whatever is wired into its `time` pin, or the Time node's
+    // own wrapped seconds when nothing is. Unlinked meaning 0 would multiply Panner's speed by zero
+    // and freeze it with no error anywhere (the Time node's own `scale` note). A typed literal on
+    // the pin is not read, as with uv.
+    Value timeInput(const fmt::OcGraphNode& n) {
+        if (linkInto(n.id, "time")) return input(n, "time", MatType::Float);
+        return Value{"gTime.x", MatType::Float};
     }
 
     // The value on one INPUT pin: whatever is linked into it, promoted; else the pin's own literal;
@@ -555,6 +564,13 @@ struct Emitter {
             return bind(n.id, pin, MatType::Float2,
                         "(" + uvInput(n).expr + ") * (" + t.expr + ") + (" + o.expr + ")");
         }
+        // Unreal's Panner: uv + speed * time, so `speed` alone scrolls it. Wrapping is Time's, an
+        // hour, so a speed whose hourly travel is not a whole number of tiles hops once per hour.
+        if (ciEquals(ty, "Panner")) {
+            const Value s = input(n, "speed", MatType::Float2);
+            return bind(n.id, pin, MatType::Float2,
+                        "(" + uvInput(n).expr + ") + (" + s.expr + ") * (" + timeInput(n).expr + ")");
+        }
         if (ciEquals(ty, "Rotator")) {
             const Value c = input(n, "centre", MatType::Float2);
             const Value a = input(n, "angle", MatType::Float);
@@ -614,25 +630,6 @@ struct Emitter {
         }
 
         // -- utility --
-        // THE CLOCK, and the node that makes a material graph able to MOVE. Without it a graph is a
-        // pure function of position and can only ever describe a still surface; with it, ripples,
-        // scrolling, flicker and pulsing are all just arithmetic on one more input.
-        //
-        // It reads gTime from the ENGINE's per-frame block (b0), not from any feature's or the
-        // material's, because a graph is emitted into every shader that shades a surface and b0 is
-        // the only block all of them agree about. See PerFrameCB::time.
-        //
-        //   Time         -- seconds, WRAPPED at an hour. This is the default and almost always the
-        //                   one wanted: sin() of an unwrapped clock degrades as the day wears on,
-        //                   because consecutive float32 values eventually skip whole periods.
-        //   Time.raw     -- unwrapped monotonic seconds, for anything that genuinely needs it and
-        //                   accepts that precision decays.
-        //   Time.delta   -- seconds since the previous frame.
-        //
-        // NO `scale` INPUT ON PURPOSE, though one is the obvious convenience. input() falls back to
-        // a pin's authored default and, for a pin nobody declared, to zero -- so an unconnected
-        // scale would multiply the clock by 0 and freeze every animation with no error anywhere.
-        // A Multiply beside this node costs one node and cannot fail that way.
         // THE WATER SURFACE, so a graph shapes it from the SAME numbers the caustics project through.
         //
         //   WaveNormal.value  -- tangent-space normal of the wave set at `position` (world XY, cm)
@@ -649,6 +646,26 @@ struct Emitter {
                 return bind(n.id, pin, MatType::Float, "averWaveFocus(" + p2.expr + ")");
             return bind(n.id, pin, MatType::Float3, "averWaveNormal(" + p2.expr + ")");
         }
+        // THE CLOCK, and the node that makes a material graph able to MOVE. Without it a graph is a
+        // pure function of position and can only ever describe a still surface; with it, ripples,
+        // scrolling, flicker and pulsing are all just arithmetic on one more input.
+        //
+        // It reads gTime from the ENGINE's per-frame block (b0), not from any feature's or the
+        // material's, because a graph is emitted into every shader that shades a surface and b0 is
+        // the only block all of them agree about. See PerFrameCB::time.
+        //
+        //   Time.time    -- seconds, WRAPPED at an hour. This is the default (every pin that is not
+        //                   raw or delta reads it) and almost always the one wanted: sin() of an
+        //                   unwrapped clock degrades as the day wears on, because consecutive
+        //                   float32 values eventually skip whole periods.
+        //   Time.raw     -- unwrapped monotonic seconds, for anything that genuinely needs it and
+        //                   accepts that precision decays.
+        //   Time.delta   -- seconds since the previous frame.
+        //
+        // NO `scale` INPUT ON PURPOSE, though one is the obvious convenience. input() falls back to
+        // a pin's authored default and, for a pin nobody declared, to zero -- so an unconnected
+        // scale would multiply the clock by 0 and freeze every animation with no error anywhere.
+        // A Multiply beside this node costs one node and cannot fail that way.
         if (ciEquals(ty, "Time")) {
             const char* src = ciEquals(pin, "raw")   ? "gTime.y"
                             : ciEquals(pin, "delta") ? "gTime.z"
@@ -706,6 +723,7 @@ constexpr OutputField kOutputFields[] = {
     {"AlphaCutoff", "alphaCutoff", MatType::Float},
     {"SubsurfaceWeight", "subsurfaceWeight", MatType::Float},
     {"SubsurfaceRadius", "subsurfaceRadius", MatType::Float},
+    {"SubsurfaceColor",  "subsurfaceColor",  MatType::Float3},
     {"Ior",          "ior",          MatType::Float},
     {"Transmission", "transmission", MatType::Float},
     // THE VOLUME. Together with Ior and Transmission above, these are what let a graph author glass

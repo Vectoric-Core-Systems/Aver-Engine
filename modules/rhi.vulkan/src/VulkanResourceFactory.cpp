@@ -2744,6 +2744,68 @@ BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpda
 
 BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) { return createBlasImpl(mesh, false); }
 
+// One structure over several meshes -- see IResourceFactory::createBlasMulti. Sized by one size query
+// over every geometry (vkMultiBlasGeometry, the description recordBlasBuildMulti builds from); built
+// later by buildBlas like any other. Mirrors D3D12ResourceFactory::createBlasMulti.
+BlasHandle VulkanResourceFactory::createBlasMulti(const BlasGeometry* geometries, u32 count) {
+    collect();
+    if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createBlasMulti without ray-tracing support"); return 0; }
+    if (!geometries || count == 0) { AVER_ERROR("[RHI.Vulkan] createBlasMulti with no geometry"); return 0; }
+    std::vector<VkAccelerationStructureGeometryKHR> geoms(count);
+    std::vector<u32> primCounts(count);
+    for (u32 i = 0; i < count; ++i) {
+        const MeshHandle h = geometries[i].mesh;
+        if (h == 0 || h > dev_->meshes_.size() || !dev_->meshes_[h - 1].alive || dev_->meshes_[h - 1].indexCount == 0) {
+            AVER_ERROR("[RHI.Vulkan] createBlasMulti: geometry {} names an invalid, destroyed or index-less mesh", i);
+            return 0;
+        }
+        geoms[i] = vkMultiBlasGeometry(dev_->meshes_[h - 1], geometries[i].opaque);
+        primCounts[i] = dev_->meshes_[h - 1].indexCount / 3;
+    }
+
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+    VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bi.geometryCount = count;
+    bi.pGeometries = geoms.data();
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, primCounts.data(), &sizeInfo);
+
+    RhiBlas b{};
+    b.mesh = geometries[0].mesh;
+    b.geometries.assign(geometries, geometries + count);
+    b.asSize = sizeInfo.accelerationStructureSize;
+    b.scratchSize = sizeInfo.buildScratchSize;
+    if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.asBuffer, b.asMemory, nullptr, "rhi BLAS buffer") ||
+        !createBufferCommitted(*dev_, sizeInfo.buildScratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.scratchBuffer, b.scratchMemory, nullptr, "rhi BLAS scratch")) {
+        AVER_ERROR("[RHI.Vulkan] createBlasMulti allocation failed");
+        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
+        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+        return 0;
+    }
+    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    aci.buffer = b.asBuffer;
+    aci.size = sizeInfo.accelerationStructureSize;
+    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (!vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &b.as), "rhi multi-geometry BLAS create")) {
+        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
+        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+        return 0;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    dai.accelerationStructure = b.as;
+    b.asAddress = api.GetAccelerationStructureDeviceAddressKHR(device, &dai);
+    blases_.push_back(std::move(b));
+    return static_cast<BlasHandle>(blases_.size());
+}
+
 // UPDATABLE twin of createBlas -- see IResourceFactory's contract comment above
 // createBlasUpdatable. Same allocation, plus ALLOW_UPDATE_BIT_KHR and a build-AND-update-sized
 // scratch, so VulkanRenderContext::refitBlas can update this BLAS in place instead of rebuilding it
@@ -2782,6 +2844,8 @@ TlasHandle VulkanResourceFactory::createTlasImpl(u32 maxInstances, bool allowUpd
     RhiTlas t{};
     t.maxInstances = maxInstances;
     t.allowUpdate = allowUpdate;
+    t.asSize = sizeInfo.accelerationStructureSize;
+    t.scratchSize = scratchSize;
     if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.asBuffer, t.asMemory, nullptr, "rhi TLAS buffer") ||
@@ -2809,7 +2873,10 @@ TlasHandle VulkanResourceFactory::createTlasImpl(u32 maxInstances, bool allowUpd
 
     const u64 bytes = static_cast<u64>(maxInstances) * sizeof(VkAccelerationStructureInstanceKHR);
     for (u32 i = 0; i < kFrameCount; ++i) {
-        if (!createBufferCommitted(*dev_, bytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        // TRANSFER_SRC: with a static prefix set, recordTlasBuild copies these in behind it instead of
+        // building from them directly.
+        if (!createBufferCommitted(*dev_, bytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                    t.instanceBuffers[i], t.instanceMemory[i], nullptr, "rhi TLAS instances")) {
             AVER_ERROR("[RHI.Vulkan] createTlas instance buffer {} failed", i);
@@ -2829,6 +2896,198 @@ TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) { return createTl
 // scratch, so VulkanRenderContext::refitTlas can update this TLAS in place instead of rebuilding it
 // from scratch every frame.
 TlasHandle VulkanResourceFactory::createTlasUpdatable(u32 maxInstances) { return createTlasImpl(maxInstances, true); }
+
+// The static prefix -- see IResourceFactory::setTlasStaticInstances; mirrors D3D12ResourceFactory's.
+// Everything is validated and allocated BEFORE anything is replaced, so a refusal leaves the TLAS
+// exactly as it was.
+bool VulkanResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstance* instances, u32 count) {
+    collect();
+    RhiTlas* t = tlas(h);
+    if (!t) { AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances with an invalid handle"); return false; }
+    if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] setTlasStaticInstances without ray-tracing support"); return false; }
+    if (count == 0 && t->staticCount == 0 && !t->staticDescs) return true;   // no prefix to remove
+    if (count && !instances) { AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: {} instances and no array", count); return false; }
+    if (static_cast<u64>(count) + t->maxInstances > kMaxTlasInstances) {
+        AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: {} static + {} per-frame instances is past the {} one "
+                   "TLAS may hold -- refused, the previous prefix kept", count, t->maxInstances, kMaxTlasInstances);
+        return false;
+    }
+
+    // REFUSED, NOT COMPACTED -- a shader finds a prefix instance by its slot index; see D3D12's twin.
+    std::vector<BlasHandle> distinct;
+    for (u32 i = 0; i < count; ++i) {
+        const RhiBlas* b = blas(instances[i].blas);
+        if (!b || !b->as) {
+            AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: instance {} names an invalid BLAS -- refused whole, "
+                       "the previous prefix kept", i);
+            return false;
+        }
+        if (instances[i].instanceId > kMaxTlasInstanceId) {
+            AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: instance {} has id {} which does not fit in 24 bits "
+                       "-- refused whole, the previous prefix kept", i, instances[i].instanceId);
+            return false;
+        }
+        if (distinct.empty() || distinct.back() != instances[i].blas) distinct.push_back(instances[i].blas);
+    }
+    std::sort(distinct.begin(), distinct.end());
+    distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+
+    // The structure and scratch for prefix + the TLAS's own per-frame maximum, queried with the flags it
+    // is built with (see createTlasImpl).
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+    u32 total = count + t->maxInstances;
+    VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    bi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+               (t->allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
+    bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bi.geometryCount = 1;
+    bi.pGeometries = &geom;
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    api.GetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bi, &total, &sizeInfo);
+    const VkDeviceSize scratchSize = t->allowUpdate ? std::max(sizeInfo.buildScratchSize, sizeInfo.updateScratchSize)
+                                                    : sizeInfo.buildScratchSize;
+
+    VkBuffer asBuffer = VK_NULL_HANDLE, scratchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory asMemory = VK_NULL_HANDLE, scratchMemory = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+    const auto releaseNew = [&]() {
+        if (as) api.DestroyAccelerationStructureKHR(device, as, nullptr);
+        destroyBufferCommitted(*dev_, asBuffer, asMemory);
+        destroyBufferCommitted(*dev_, scratchBuffer, scratchMemory);
+    };
+    if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, asBuffer, asMemory, nullptr, "rhi TLAS buffer") ||
+        !createBufferCommitted(*dev_, scratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, scratchBuffer, scratchMemory, nullptr, "rhi TLAS scratch")) {
+        AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: {:.1f} MiB structure / {:.1f} MiB scratch for {} instances "
+                   "could not be allocated -- the previous prefix kept",
+                   static_cast<f64>(sizeInfo.accelerationStructureSize) / (1024.0 * 1024.0),
+                   static_cast<f64>(scratchSize) / (1024.0 * 1024.0), total);
+        releaseNew();
+        return false;
+    }
+    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    aci.buffer = asBuffer;
+    aci.size = sizeInfo.accelerationStructureSize;
+    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    if (!vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &as), "rhi TLAS create (static prefix)")) {
+        releaseNew();
+        return false;
+    }
+
+    BufferHandle descs = 0;
+    const u64 descBytes = static_cast<u64>(total) * sizeof(VkAccelerationStructureInstanceKHR);
+    if (count) {
+        BufferDesc bd;
+        bd.bytes = descBytes;
+        bd.kind = BufferKind::Default;
+        bd.debugName = "rhi TLAS static instances";
+        descs = createBuffer(bd);
+        // Packed STRAIGHT into the mapped staging memory -- uploadToDeviceBuffers would need the whole
+        // prefix built once more on the CPU first, at up to hundreds of MiB. Same one-shot copy and wait.
+        const u64 fillBytes = static_cast<u64>(count) * sizeof(VkAccelerationStructureInstanceKHR);
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        u8* mapped = nullptr;
+        bool filled = descs &&
+            createBufferCommitted(*dev_, fillBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                  staging, stagingMemory, nullptr, "rhi TLAS static instances staging") &&
+            vkOk(api.MapMemory(device, stagingMemory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&mapped)),
+                 "rhi TLAS static instances map");
+        if (filled) {
+            auto* out = reinterpret_cast<VkAccelerationStructureInstanceKHR*>(mapped);
+            for (u32 i = 0; i < count; ++i)
+                out[i] = vkInstanceFromTlas(instances[i], blases_[instances[i].blas - 1].asAddress);
+            api.UnmapMemory(device, stagingMemory);
+            const VkBuffer dst = buffers_[descs - 1].buffer;
+            filled = runOneShotCommands(*dev_, [&](VkCommandBuffer cmd) {
+                VkBufferCopy region{0, 0, fillBytes};
+                api.CmdCopyBuffer(cmd, staging, dst, 1, &region);
+            }, "rhi TLAS static instances copy");
+        }
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        if (!filled) {
+            AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
+                       "or filled -- the previous prefix kept", static_cast<f64>(descBytes) / (1024.0 * 1024.0));
+            if (descs) destroyBuffer(descs);
+            releaseNew();
+            return false;
+        }
+#if AVER_RHI_TRACK_STATE
+        // Its synchronisation belongs to the build (recordTlasBuild); a caller's bufferBarrier on it is
+        // reported rather than obeyed.
+        buffers_[descs - 1].stateFixed = true;
+#endif
+    }
+
+    // Replaced, never written in place: frames still in flight traverse the old structure, released
+    // once they retire. The new one holds nothing until the next build.
+    {
+        VkAccelerationStructureKHR oldAs = t->as;
+        VkBuffer oldAsBuf = t->asBuffer, oldScratchBuf = t->scratchBuffer;
+        VkDeviceMemory oldAsMem = t->asMemory, oldScratchMem = t->scratchMemory;
+        retire([this, oldAs, oldAsBuf, oldScratchBuf, oldAsMem, oldScratchMem]() {
+            if (oldAs) dev_->api().DestroyAccelerationStructureKHR(dev_->vkDevice(), oldAs, nullptr);
+            destroyBufferCommitted(*dev_, oldAsBuf, oldAsMem);
+            destroyBufferCommitted(*dev_, oldScratchBuf, oldScratchMem);
+        });
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    dai.accelerationStructure = as;
+    t->as = as;
+    t->asBuffer = asBuffer;
+    t->asMemory = asMemory;
+    t->scratchBuffer = scratchBuffer;
+    t->scratchMemory = scratchMemory;
+    t->asAddress = api.GetAccelerationStructureDeviceAddressKHR(device, &dai);
+    t->asSize = sizeInfo.accelerationStructureSize;
+    t->scratchSize = scratchSize;
+    if (t->staticDescs) destroyBuffer(t->staticDescs);
+    t->staticDescs = descs;
+    t->staticCount = count;
+    t->staticBlases = std::move(distinct);
+    t->staticBrokenLogged = false;
+    t->built = false;
+    t->builtStatic = 0;
+    t->builtSlots.clear();
+    AVER_INFO("[RHI.Vulkan] TLAS {} static prefix: {} instance(s) over {} BLAS(es) + {} per frame -- structure "
+              "{:.1f} MiB, scratch {:.1f} MiB, instance descs {:.1f} MiB (build sizes)",
+              h, count, t->staticBlases.size(), t->maxInstances,
+              static_cast<f64>(sizeInfo.accelerationStructureSize) / (1024.0 * 1024.0),
+              static_cast<f64>(scratchSize) / (1024.0 * 1024.0),
+              count ? static_cast<f64>(descBytes) / (1024.0 * 1024.0) : 0.0);
+    return true;
+}
+
+BufferHandle VulkanResourceFactory::tlasStaticInstanceBuffer(TlasHandle h) const {
+    if (h == 0 || h > tlases_.size()) return 0;
+    const RhiTlas& t = tlases_[h - 1];
+    return t.staticCount ? t.staticDescs : 0;
+}
+
+u64 VulkanResourceFactory::blasMemoryBytes(BlasHandle h) const {
+    if (h == 0 || h > blases_.size()) return 0;
+    const RhiBlas& b = blases_[h - 1];
+    return b.as ? static_cast<u64>(b.asSize + b.scratchSize) : 0;
+}
+
+u64 VulkanResourceFactory::tlasMemoryBytes(TlasHandle h) const {
+    if (h == 0 || h > tlases_.size()) return 0;
+    const RhiTlas& t = tlases_[h - 1];
+    if (!t.as) return 0;
+    u64 bytes = static_cast<u64>(t.asSize + t.scratchSize) +
+                static_cast<u64>(kFrameCount) * t.maxInstances * sizeof(VkAccelerationStructureInstanceKHR);
+    if (const RhiBuffer* d = buffer(t.staticDescs)) bytes += d->desc.bytes;
+    return bytes;
+}
 
 void VulkanResourceFactory::destroyTexture(TextureHandle h) {
     // BEFORE anything is torn down: a UI toolkit may hold a descriptor pointing at this texture's
@@ -2892,6 +3151,7 @@ void VulkanResourceFactory::destroyBlas(BlasHandle h) {
     b.allowUpdate = false;
     b.builtVertexCount = 0;
     b.builtIndexCount = 0;
+    b.geometries.clear();
     collect();
 }
 
@@ -2906,14 +3166,20 @@ MeshHandle VulkanResourceFactory::blasMesh(BlasHandle h) const {
 BlasHandle VulkanResourceFactory::blasForMesh(MeshHandle mesh) const {
     if (mesh == 0) return 0;
     for (usize i = 0; i < blases_.size(); ++i)
-        if (blases_[i].mesh == mesh && blases_[i].built) return static_cast<BlasHandle>(i + 1);
+        if (blases_[i].mesh == mesh && blases_[i].built && blases_[i].geometries.empty())
+            return static_cast<BlasHandle>(i + 1);
     return 0;
 }
 
+// A createBlasMulti structure goes with ANY of its meshes -- see D3D12's twin.
 void VulkanResourceFactory::destroyBlasForMesh(MeshHandle mesh) {
     if (mesh == 0) return;
-    for (usize i = 0; i < blases_.size(); ++i)
-        if (blases_[i].mesh == mesh) destroyBlas(static_cast<BlasHandle>(i + 1));
+    for (usize i = 0; i < blases_.size(); ++i) {
+        const RhiBlas& b = blases_[i];
+        bool names = b.mesh == mesh;
+        for (const BlasGeometry& g : b.geometries) names = names || g.mesh == mesh;
+        if (names) destroyBlas(static_cast<BlasHandle>(i + 1));
+    }
 }
 
 // ================================================================================================

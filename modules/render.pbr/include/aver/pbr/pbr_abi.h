@@ -142,6 +142,12 @@ AVER_PBR_ABI float   aver_pbr_get_coat_f0(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_coat_f0(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_subsurface_radius(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v);
+/* Subsurface scatter tint, sRGB like baseColorFactor: the colour light takes INSIDE the material,
+ * multiplied onto the diffuse albedo for the subsurface terms. White (the default) scatters in the
+ * surface's own colour; skin wants a deep red, leaves a yellow-green, wax an orange. Meaningless
+ * while subsurface_weight is 0. */
+AVER_PBR_ABI int32_t aver_pbr_get_subsurface_color(aver_pbr_material m, float* out3);
+AVER_PBR_ABI int32_t aver_pbr_set_subsurface_color(aver_pbr_material m, float r, float g, float b);
 
 /* ---- blending and sidedness ---- */
 AVER_PBR_ABI int32_t aver_pbr_get_alpha_mode(aver_pbr_material m);

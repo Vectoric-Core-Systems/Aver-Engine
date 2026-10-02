@@ -603,6 +603,27 @@ float3 averApplyFogAirVis(float3 color, float3 wpos, bool aerial, float airVis) 
     return color;
 }
 
+// THE SAME AIR AS TWO TERMS, for a caller that must treat a colour's parts differently (voxi.hlsl's blended
+// panes: the pane's own light is extinguished, the in-scatter weighted by coverage, the backdrop's share
+// left alone). averApplyFogAirVis is affine in its colour -- color*T + inscatter, then a lerp toward the fog
+// in-scatter -- so it is exactly averApplyFogAirVis(c) == c * extinction + inscatter, from ONE evaluation
+// instead of the two that fog(c) and fog(0) would cost.
+void averFogTermsAirVis(float3 wpos, bool aerial, float airVis, out float3 extinction, out float3 inscatter) {
+    float3 T = 1.0;
+    extinction = 1.0;
+    inscatter  = 0.0;
+    if (aerial && averAtmoOn()) {
+        const float3 aerialIn = averAtmoAerial(wpos, T);
+        extinction = T;
+        inscatter  = aerialIn * airVis;
+    }
+    const float fogF = averFogFactor(wpos);
+    if (fogF > 0.001) {
+        extinction *= 1.0 - fogF;
+        inscatter = lerp(inscatter, averFogInscatter(wpos, T) * airVis, fogF);
+    }
+}
+
 // Byte-identical wrappers: airVis == 1.0 is today's unoccluded air, so every caller but voxi.hlsl's
 // own occlusion-aware call sites (PSMainVoxi/PSRayDriven, near their own gAirVis/voxiAirVisibility
 // use) compiles to exactly the code it did before averApplyFogAirVis existed.

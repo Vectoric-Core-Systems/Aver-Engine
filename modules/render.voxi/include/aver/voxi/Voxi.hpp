@@ -634,6 +634,14 @@ struct Settings {
     // longer attributes to its mesh) -- a compute-skinned mesh present forces it too, but only while
     // Settings::rtRefitAccel below is off; on, this gate instead runs a lighter refit-only pass for
     // it (VoxiRenderer::refitDynamicAccelStructures) rather than a plain skip.
+    // MOVER PATCH LANE (needs this and rtRefitAccel both on): a draw flagged Draw::movable (Play's
+    // animated props, the pawn) has its world matrix left OUT of the key, so moving alone no longer
+    // rejects the gate. A hit then runs VoxiRenderer::patchRtMovers(), which writes each mover's current
+    // transform into the TLAS instance list and the ray-hit instance table, and the TLAS is refit
+    // (same periodic full rebuild as rtRefitAccel). The movable bit stays in the key, so a draw that
+    // starts or stops moving, and any change to mesh, material or flags, still forces the full build.
+    // With either setting off the key hashes every world as before. The report line counts these
+    // ticks as "mover-patched".
     // ON BY DEFAULT: it only ever skips work whose output is bit-identical -- not a quality trade --
     // so turning it off costs frame time and buys nothing measurable. Console: voxi.rtSkipUnchangedTlas.
     bool rtSkipUnchangedTlas = true;

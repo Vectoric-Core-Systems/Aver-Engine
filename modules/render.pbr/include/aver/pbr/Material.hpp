@@ -136,26 +136,33 @@ struct MaterialDesc {
     f32 attenuationColor[3] = {1.0f, 1.0f, 1.0f};   // transmittance at exactly attenuationDistance
     f32 attenuationDistance = 0.0f;                 // cm; <= 0 disables volume absorption entirely
 
-    // ---- subsurface scattering ----
-    // WRAP DIFFUSE PLUS A BACK-LIGHT LOBE, AND NOT ONE PHOTON MORE. Both default to 0, so every
-    // material authored before this existed shades bit-identically and the gate baselines do not
-    // move until something opts in.
+    // ---- subsurface scattering: skin, wax, marble, leaves, curtains, paper ----
+    // Weight 0 (the default) is off, so every material authored before this existed shades
+    // bit-identically and the gate baselines do not move until something opts in.
     //
-    // WHAT THIS IS NOT, stated here rather than left to be inferred from the word "subsurface":
-    // it is not a BSSRDF. Light does not travel THROUGH the mesh -- there is no transport from where
-    // a photon enters to where it leaves, so a lit ear does not glow on the far side of a head. It
-    // is a per-pixel approximation evaluated at ONE surface point, which is why it costs two floats
-    // and no passes. What it does buy is the thing whose absence reads as "plastic": light wrapping
-    // slightly past the terminator, and a rim that brightens when the sun is behind the object.
+    // THREE TERMS, ALL PER PIXEL, NO EXTRA PASS AND NO EXTRA RAY (material_prelude.hlsl's
+    // averDirectTerms/averSubsurfaceAmbient):
+    //   - WRAP: light reaching past the terminator, tinted by subsurfaceColor -- the soft, reddened
+    //     shadow edge that stops skin reading as plastic.
+    //   - TRANSMISSION: light arriving on the FAR side and diffusing through -- a leaf, curtain or
+    //     lampshade glowing with the sun behind it -- plus a forward-scatter lobe when the viewer looks
+    //     toward the light through it. Its shadow is asked from the side FACING THE LIGHT, pushed
+    //     subsurfaceRadius's depth through the surface (averSubsurfaceDepthCm), using the same one
+    //     shadow query the pixel already makes: a sheet thinner than that depth transmits, a body
+    //     thicker than it (a head, a statue) meets its own far side and does not.
+    //   - AMBIENT TRANSMISSION: the same through-light from the sky and bounce, so thin foliage in
+    //     shade is lighter than an opaque leaf would be.
     //
-    // NO SEPARATE SCATTER TINT, deliberately. MaterialConstants had exactly 8 spare bytes (its own
-    // comment says so: "8 bytes of headroom for the next field before 96 has to become 112"), and
-    // two floats spend them exactly. A third float for an authored RGB tint would grow the block to
-    // 112 and force every one of its GPU mirrors to be re-derived. The transmitted light is tinted
-    // by baseColorFactor instead, which is right for skin, wax, marble and leaves -- the cases this
-    // is for -- and wrong only where the interior colour differs from the surface colour.
-    f32 subsurfaceWeight = 0.0f;   // [0,1] how far light wraps past the terminator; 0 = off
-    f32 subsurfaceRadius = 0.0f;   // [0,1] thickness proxy; widens the back-light lobe
+    // WHAT THIS IS NOT: a BSSRDF. There is no screen-space blur and no transport from where light
+    // enters to where it leaves along the surface; what it buys is what reads as translucency.
+    //
+    // subsurfaceColor is the colour light takes INSIDE the material, authored like baseColorFactor
+    // (sRGB, decoded by packMaterial) and multiplied onto the diffuse albedo: white (the default)
+    // scatters in the surface's own colour; skin wants a deep red, leaves a yellow-green, wax an
+    // orange. It spends the three pad floats the lamp-light row carried, so the block stays 176 bytes.
+    f32 subsurfaceWeight = 0.0f;   // [0,1] strength of all three terms; 0 = off
+    f32 subsurfaceRadius = 0.0f;   // [0,1] scatter depth 0.25-5 cm; also widens the forward lobe
+    f32 subsurfaceColor[3] = {1.0f, 1.0f, 1.0f};   // sRGB tint of the scattered light
 
     // ---- the coat: a second specular layer over everything above ----
     // A CLEAR LACQUER ON TOP OF THE BASE MATERIAL, which is what a car body, a varnished table, a

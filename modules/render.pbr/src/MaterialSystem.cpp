@@ -77,6 +77,7 @@ bool MaterialSystem::init(rhi::IDevice& device, u32 tableBaseRegister) {
         res_ = nullptr;
         return false;
     }
+    liveSets_.insert(fallbackSet_);   // see liveSets_: ownsBindingSet()'s O(1) index
     writeSlots(identity, fallbackSet_);
 
     AVER_INFO("[PBR] material system ready: {} slots based at t{}", kMaterialSrvCount, tableBase_);
@@ -109,8 +110,25 @@ void MaterialSystem::shutdown() {
     // Cached textures are owned here: the resolver handed the handle over.
     for (auto& kv : cache_) if (kv.second) res_->destroyTexture(kv.second);
     cache_.clear();
+    // EVERYTHING ELSE cache_/entries_ CARRIED ALONGSIDE THEM, cleared for the same reason
+    // gpuIndexOf_/gpuTable_ are below: left behind, a BindingSetHandle or TextureHandle number a
+    // later init() hands to something unrelated would read as whatever THIS device cycle last
+    // wrote there. cacheAverage_/setAverage_/setTextures_ predate level-scoped residency and were
+    // never cleared here before it; textureRefs_/cacheKeyOf_/cacheBytes_ are its own new state and
+    // would be just as stale left behind.
+    cacheAverage_.clear();
+    cacheBytes_.clear();
+    cacheKeyOf_.clear();
+    textureRefs_.clear();
+    setAverage_.clear();
+    setTextures_.clear();
     if (fallbackSet_) res_->destroyBindingSet(fallbackSet_);
     fallbackSet_ = 0;
+    // Every set just destroyed above (entries_'s and fallbackSet_ alike) must leave liveSets_ too, or
+    // ownsBindingSet() would keep reporting ownership of a set that no longer exists once a later
+    // init() hands the same numeric handle to something unrelated. entries_ is already cleared, so
+    // clearing outright is exact, not merely convenient.
+    liveSets_.clear();
     for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_}) {
         if (*t) res_->destroyTexture(*t);
         *t = 0;
@@ -162,7 +180,13 @@ MaterialSystem::ResolvedTexture MaterialSystem::resolveTexture(const TextureRef&
     // appears, and "restart the editor" is not an acceptable answer to "I added a PNG". So the
     // negatives are counted, and forgetFailedResolves() drops them when content changes.
     cache_.emplace(key, t);
-    if (t) cacheAverage_.emplace(key, std::array<f32, 3>{r.averageLinear[0], r.averageLinear[1], r.averageLinear[2]});
+    if (t) {
+        cacheAverage_.emplace(key, std::array<f32, 3>{r.averageLinear[0], r.averageLinear[1], r.averageLinear[2]});
+        if (r.bytes) cacheBytes_.emplace(key, r.bytes);
+        // The reverse of the emplace just above -- see cacheKeyOf_'s own comment for why
+        // releaseSlotTextures needs it and resolveTexture is the only place that can fill it in.
+        cacheKeyOf_.emplace(t, key);
+    }
     if (!t) ++failedResolves_;
     return r;
 }
@@ -221,8 +245,8 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         // the factor is a multiplier over the sampled texel, not an alternative to it. With no
         // base-colour texture the mean is 1 and this reduces to the factor alone, which is then
         // genuinely the whole answer.
-        // packMaterial(), not d.baseColorFactor: glTF authors the factor in sRGB and packMaterial
-        // decodes it. Using the raw desc value here would report a colour in a different space
+        // packMaterial(), not d.baseColorFactor: the .ocmat holds the factor sRGB-encoded and
+        // packMaterial decodes it. Using the raw desc value here would report a colour in a different space
         // from the one the pixel shader multiplies, which is a subtle wrongness rather than a
         // visible one -- the worst kind.
         const MaterialConstants packed = packMaterial(d);
@@ -230,7 +254,63 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         if (r.handle) for (int c = 0; c < 3; ++c) avg[c] *= r.averageLinear[c];
         setAverage_[set] = avg;
     }
+
+    // RETAIN BEFORE RELEASING. Two cases share this one call site: a fresh Entry (entryFor()'s call,
+    // `set` brand new -- the find below misses, nothing to release) and a DIRTY RE-UPLOAD (update()'s
+    // call, `set` already has an effective array from last time). For the dirty case, a slot that
+    // happens to resolve to the SAME handle both times -- the common case, since most edits touch a
+    // factor rather than a texture reference -- must never see its count touch zero in between:
+    // retaining the NEW array's handles FIRST means such a handle goes +1 then -1 and nets to
+    // exactly where it started. Releasing first (as an earlier version of this function did) would
+    // run it -1 then +1 instead, passing it through releaseSlotTextures while its count was
+    // (wrongly) zero and DESTROYING a texture this very call was about to keep binding into `set` --
+    // a texture already written into the descriptor table by the setSrv loop above, now retired out
+    // from under it. Only a handle that is in the OLD array and NOT the new one can ever actually
+    // reach zero from the release call below, which is the only case this is supposed to evict.
+    retainSlotTextures(effective);
+    if (const auto old = setTextures_.find(set); old != setTextures_.end()) {
+        u32 unusedTextures = 0; usize unusedBytes = 0;
+        releaseSlotTextures(old->second, unusedTextures, unusedBytes);
+        // Not logged: a live edit is not a level change, and the level-change log below (update()'s
+        // eviction loop) is what this system's "MiB freed" line exists to report.
+    }
     setTextures_[set] = effective;
+}
+
+// See textureRefs_'s own comment. Skips white_/flatNormal_/metalRough_: those slots aren't in
+// cache_ at all, and counting them would let a level with no materials resident ever "evict" the
+// fallback every OTHER material also falls back to.
+void MaterialSystem::retainSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective) {
+    for (const rhi::TextureHandle h : effective) {
+        if (!h || h == white_ || h == flatNormal_ || h == metalRough_) continue;
+        ++textureRefs_[h];
+    }
+}
+
+void MaterialSystem::releaseSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective,
+                                          u32& outTextures, usize& outBytes) {
+    for (const rhi::TextureHandle h : effective) {
+        if (!h || h == white_ || h == flatNormal_ || h == metalRough_) continue;
+        const auto rit = textureRefs_.find(h);
+        if (rit == textureRefs_.end()) continue;   // counted by nothing live -- already released
+        if (--rit->second > 0) continue;           // another material still holds it
+        textureRefs_.erase(rit);
+        // ZERO LIVE MATERIALS REFERENCE THIS TEXTURE: the moment cache_ stops being honestly
+        // describable as "cached" and starts being "leaked". Same deferred-by-contract destroy
+        // shutdown() already uses -- see IResourceFactory::destroyTexture's own comment.
+        res_->destroyTexture(h);
+        ++outTextures;
+        if (const auto kit = cacheKeyOf_.find(h); kit != cacheKeyOf_.end()) {
+            const std::string key = kit->second;
+            cacheKeyOf_.erase(kit);
+            cache_.erase(key);
+            cacheAverage_.erase(key);
+            if (const auto bit = cacheBytes_.find(key); bit != cacheBytes_.end()) {
+                outBytes += bit->second;
+                cacheBytes_.erase(bit);
+            }
+        }
+    }
 }
 
 // The effective texture in every slot of `set`; see the header for why fallbacks are included.
@@ -258,6 +338,7 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     bd.srvBaseRegister = tableBase_;
     e.set = res_->createBindingSet(bd);
     if (e.set) {
+        liveSets_.insert(e.set);   // see liveSets_: ownsBindingSet()'s O(1) index
         const MaterialDesc* d = MaterialLibrary::get().desc(h);
         if (d) { e.constants = packMaterial(*d); writeSlots(*d, e.set); }
     } else {
@@ -337,11 +418,35 @@ void MaterialSystem::update() {
     inUpdate_ = false;
 
     // Destruction is deferred by RHI contract, so retiring mid-frame is safe.
+    //
+    // LEVEL-SCOPED MATERIAL RESIDENCY LANDS HERE: GameContent::releaseMaterialsExcept destroys the
+    // pbr::MaterialHandle for every surface the newly loaded level does not need, which is exactly
+    // what makes lib.valid() start refusing it below -- this is the one place that reaction reaches
+    // the GPU. materialsReleased/texturesEvicted/bytesFreed exist only to report it: a level switch
+    // between two heavy scenes (the defect this was built for measured 17.2 GB resident against a
+    // 13.1 GB budget) is otherwise invisible in the log until something runs out of VRAM.
+    u32 materialsReleased = 0;
+    u32 texturesEvicted = 0;
+    usize bytesFreed = 0;
     for (auto it = entries_.begin(); it != entries_.end();) {
         if (lib.valid(it->first)) { ++it; continue; }
-        if (it->second.set) res_->destroyBindingSet(it->second.set);
+        if (it->second.set) {
+            liveSets_.erase(it->second.set);   // see liveSets_: ownsBindingSet()'s O(1) index
+            // The texture(s) this Entry's slots resolved to lose their last reference here, or drop
+            // to one still held by some OTHER live material -- see textureRefs_'s own comment.
+            if (const auto st = setTextures_.find(it->second.set); st != setTextures_.end()) {
+                releaseSlotTextures(st->second, texturesEvicted, bytesFreed);
+                setTextures_.erase(st);
+            }
+            setAverage_.erase(it->second.set);
+            res_->destroyBindingSet(it->second.set);
+        }
         it = entries_.erase(it);
+        ++materialsReleased;
     }
+    if (materialsReleased || texturesEvicted)
+        AVER_INFO("[PBR] level change: {} material(s) released, {} texture(s) evicted, {:.1f} MiB freed",
+                  materialsReleased, texturesEvicted, static_cast<f64>(bytesFreed) / (1024.0 * 1024.0));
 
     // The table's LAYOUT changed -- a create or a destroy since the last call, not merely an edit to
     // a material already on it -- exactly when the handle-to-row mapping itself differs from what it
@@ -394,18 +499,19 @@ rhi::BindingSetHandle MaterialSystem::bindingSet(MaterialHandle h) {
 // which builds an entry on first use -- this answers a question about sets that already exist, and
 // materialising one to answer it would be a side effect of asking.
 //
-// A linear scan over the resident materials. The caller is a per-draw path, but `entries_` holds one
-// entry per material actually drawn this level (tens, not thousands) and the alternative -- a second
-// set-keyed index to maintain -- would have to be kept in step with every create and evict for no
-// measurable gain. The fallback is checked first because the un-authored case is the common one.
+// O(1): a hash-set membership test against liveSets_, kept in step with every create/destroy of a
+// binding set -- see liveSets_'s own comment for the four mutation points. Used to be a linear scan
+// over entries_ ("tens, not thousands" of resident materials, by that comment's own reasoning), which
+// was fine until an imported level's per-draw call volume stopped matching that assumption: a 12,494-
+// entity level (Intel Jungle Ruins) with ~6,000 draws against 156-158 resident materials drove roughly
+// 2 x 6,000 x 150 comparisons per frame through this one function (VoxiRenderer::hashDrawMaterialInto
+// calls it for every draw, twice, every frame -- once for giDrawsKey(), once for rtAccelDrawsKey()) to
+// answer nothing more than "did anything change". The old comment's "no measurable gain" no longer
+// held at that draw count; measurement never actually happened here, the draw count made it obviously
+// not worth waiting to find out.
 bool MaterialSystem::ownsBindingSet(rhi::BindingSetHandle s) const {
     if (!s) return false;
-    if (s == fallbackSet_) return true;
-    for (const auto& [handle, entry] : entries_) {
-        (void)handle;
-        if (entry.set == s) return true;
-    }
-    return false;
+    return liveSets_.count(s) != 0;
 }
 
 // The constant block a draw of `h` uses. Falls back for an unknown or stale handle.

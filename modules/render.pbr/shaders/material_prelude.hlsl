@@ -79,12 +79,14 @@ cbuffer AverMaterial : register(b2) {
     float3 gAttenuationColor;
     float  gAttenuationDistance;
 
-    // Lamp light, mirroring lightIntensity/_lightPad (row 160->176 bytes). Multiplier on the light
-    // the material's glow/size physically casts at 1 m, in the sun's own units (VoxiRenderer::
+    // Lamp light, mirroring lightIntensity (row 160->176 bytes). Multiplier on the light the
+    // material's glow/size physically casts at 1 m, in the sun's own units (VoxiRenderer::
     // buildLocalLights does that math), not a brightness itself. Read only by the ray-driven
     // local-light pass (CSRdLocalLights); this prelude only transports it.
     float  gLightIntensity;
-    float3 gLightPad;
+    // Mirrors MaterialConstants::subsurfaceColor, LINEAR -- the tint light takes inside a subsurface
+    // material. Read through AverAuthored::subsurfaceColor, never directly (see that field).
+    float3 gSubsurfaceColor;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -215,9 +217,10 @@ struct AverSurface {
     // reaching for the global measured a white dielectric at 1.030 on the ray path vs 1.000 on raster
     // -- diffuse stopped being charged for the specular reflectance it takes off the top.
     float  reflectance;
-    // Subsurface, both 0 where not asked for, so averDirectTerms' term is identically zero.
+    // Subsurface, weight 0 where not asked for, so averDirectTerms' term is identically zero.
     // PSRayDriven hand-builds this struct and must set them -- HLSL does not zero one for you.
     float  sssWeight, sssRadius;
+    float3 sssColor;     // linear tint of the scattered light, multiplied onto kdAlbedo
 #ifdef AVER_LAYERED_BSDF
     // On the surface, not read from the cbuffer at the use site, for the same reason as
     // sssWeight/sssRadius: PSRayDriven has no material cbuffer bound and hand-builds this struct
@@ -450,6 +453,7 @@ struct AverAuthored {
     // driving the radius is the difference between a uniformly waxy object and thin parts that glow.
     float  subsurfaceWeight;
     float  subsurfaceRadius;
+    float3 subsurfaceColor;   // linear; the colour light takes inside the material
     // Dielectric pair, same reason. Driving transmission from a mask is how one mesh becomes a
     // window with a frosted band, or a bottle with a label.
     float  ior;
@@ -487,6 +491,7 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     // runs is not vetoed by it.
     a.subsurfaceWeight = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceWeight) : 0.0;
     a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
+    a.subsurfaceColor  = gSubsurfaceColor;
     a.ior              = gIor;
     a.transmission     = gTransmission;
     a.attenuationColor    = gAttenuationColor;
@@ -551,6 +556,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // exists to prevent.
     s.sssWeight = saturate(a.subsurfaceWeight);
     s.sssRadius = saturate(a.subsurfaceRadius);
+    s.sssColor  = max(a.subsurfaceColor, 0.0);
 #ifdef AVER_LAYERED_BSDF
     // FROM THE AUTHORED STRUCT, same reason as subsurface above (it read the cbuffer when the lobe
     // first landed, before the pins existed; fixed here rather than left as a second wrong precedent).
@@ -675,6 +681,30 @@ float averSpecularOcclusion(float ndv, float ao, float rough) {
 // draw (see the shading contract at the top of this file and averBlendedOutput) -- splitting at the
 // helper boundary, not by duplicating either lobe's arithmetic, so a future BRDF change is made once.
 
+// ---- SUBSURFACE: how deep light scatters, and which side its shadow is asked from ----
+// subsurfaceRadius [0,1] as a depth in centimetres: how far light travels inside before it is spent.
+// Leaves, paper and curtains sit near 0, an ear or a candle's wax mid-range, marble and jade at 1.
+float averSubsurfaceDepthCm(float radius) { return lerp(0.25, 5.0, saturate(radius)); }
+
+// Where a subsurface pixel's ONE sun-shadow query should start, as an offset from the surface: zero for
+// every other material, and for a subsurface pixel lit from its own side. Lit from BEHIND, the pixel's
+// only direct light is what comes through it, and the ordinary query -- leaving the surface on the side
+// `N` faces -- crosses the surface itself and always read shadowed, so transmission could never light.
+// Pushed the scatter depth through to the light-facing side instead: a sheet thinner than that (leaf,
+// curtain, ear) sees the light, a body thicker than it starts inside and meets its own far side. No
+// extra ray -- the same query from a different point. `N` is whichever normal the caller's shadow query
+// offsets along. Callers add this to the RAY ORIGIN only, so shadow history still reprojects and
+// filters at the real surface.
+float3 averSubsurfaceShadowPush(uint flags, float radius, float3 N, float3 L) {
+    if ((flags & AVER_MAT_SUBSURFACE) == 0u || dot(N, L) >= 0.0) return float3(0.0, 0.0, 0.0);
+    return -N * averSubsurfaceDepthCm(radius);
+}
+
+// How much of the light on a subsurface surface's far side comes through: thin, short-radius
+// materials pass more, a deep scatterer spends more of it inside. Shared by the direct and ambient
+// transmission terms so the two cannot disagree.
+float averSubsurfaceTransmit(AverSurface s) { return s.sssWeight * lerp(0.6, 0.3, s.sssRadius); }
+
 // Cook-Torrance GGX for one light, returned as its two UNWEIGHTED lobes (before radiance/NdotL/
 // visibility) plus the NdotL both callers need. Splitting the return here, not after the light term
 // is applied, lets averShadeDirect reconstruct the exact original expression, provably unaffected by
@@ -703,18 +733,32 @@ void averDirectTerms(AverSurface s, AverLight l, out float3 diffuseLobe, out flo
     diffuseLobe  = s.kdAlbedo / PI;
     specularLobe = spec;
 
-    // ---- subsurface: wrapped diffuse + view-dependent back-scatter ----
-    // TWO TERMS, ONLY THE EXTRA. The wrap term is the DIFFERENCE between a wrapped N.L and the plain
-    // one (the caller already pays kdAlbedo/PI * ndl); at weight 0 it is exactly 0, bit-identical to
-    // before this existed. (1+w)^2 is energy normalisation -- without it a widened lobe hands the
-    // surface more light than fell on it (skin at weight 1 would read emissive). The second term is
-    // light that entered the far side, keyed on dot(V, -L) rather than the normal -- what makes an
-    // ear or leaf light up with the sun BEHIND it; radius sharpens (thin) or widens (thick) it.
+    // ---- subsurface: wrap, transmission and forward scatter, in the scatter colour ----
+    // All three are zero at weight 0, bit-identical to a material without the feature.
+    //   WRAP, ONLY THE EXTRA: the DIFFERENCE between a wrapped N.L and the plain one (the caller already
+    //   pays kdAlbedo/PI * ndl). (1+w)^2 is energy normalisation -- without it a widened lobe hands the
+    //   surface more light than fell on it (skin at weight 1 would read emissive).
+    //   TRANSMISSION: light arriving on the FAR side (Lambert against -N) and diffusing through -- a
+    //   leaf, curtain or lampshade with the sun behind it. It lights at all only because the caller's
+    //   shadow query for this pixel was made from the light-facing side (averSubsurfaceShadowPush).
+    //   FORWARD SCATTER: keyed on dot(V, -L) rather than the normal -- the bright rim of an ear or leaf
+    //   seen against the sun; radius sharpens (thin) or widens (thick) it.
     float sssW = s.sssWeight;
     float ndlWrap = saturate((dot(s.N, l.direction) + sssW) / ((1.0 + sssW) * (1.0 + sssW)));
     float wrapExtra = max(ndlWrap - ndl, 0.0);
+    float transmit = saturate(dot(-s.N, l.direction)) * averSubsurfaceTransmit(s);
     float backScatter = pow(saturate(dot(s.V, -l.direction)), lerp(12.0, 2.0, s.sssRadius)) * s.sssRadius;
-    subsurfaceLobe = s.kdAlbedo / PI * (wrapExtra + backScatter * sssW);
+    subsurfaceLobe = s.kdAlbedo * s.sssColor / PI * (wrapExtra + transmit + backScatter * sssW);
+}
+
+// THE SKY AND THE BOUNCE, THROUGH: a thin subsurface surface is lit from its far side by roughly what
+// reaches its near side, so a share of the same diffuse irradiance comes through in the scatter colour --
+// why foliage in shade reads lighter and greener than an opaque leaf would. Halved: the far side's
+// hemisphere is not this one, and the sky is above rather than behind. Callers skip it at weight 0, so
+// no other material's sum moves.
+float3 averSubsurfaceAmbient(AverSurface s, AverIndirect ind) {
+    const float3 irradiance = ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion + ind.diffuse;
+    return s.kdAlbedo * s.sssColor * irradiance * (0.5 * averSubsurfaceTransmit(s));
 }
 
 // Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied.
@@ -868,6 +912,8 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
         radiance += diffAmbient;
         radiance += diffBounce;
         radiance += s.emissive;
+        // After the four, and skipped at weight 0, so their sum stays bit-identical for every other material.
+        if (s.sssWeight > 0.0) radiance += averSubsurfaceAmbient(s, ind);
         return radiance;
     }
     }
@@ -915,6 +961,8 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
         diffuse  += diffAmbient;
         diffuse  += diffBounce;
         diffuse  += s.emissive;
+        // Diffuse, like the direct subsurface term above.
+        if (s.sssWeight > 0.0) diffuse += averSubsurfaceAmbient(s, ind);
         return;
     }
     }
