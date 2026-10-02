@@ -136,12 +136,11 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     // y WAS SPARE; NOW the live GI radiance ceiling -- THIS PRELUDE DOES READ IT, via
     // AVER_VOX_MAXRAD above (coneTracedIndirect's own min(..., AVER_VOX_MAXRAD) call).
-    // z/w WERE ALSO SPARE; NOW the RTXDI reuse-similarity tolerances (Settings::
-    // giRestirDepthThreshold/giRestirNormalThreshold) -- see voxi.hlsl's own gViewParams comment (the
-    // field this cbuffer mirrors byte-for-byte) for the full story. NOTHING IN THIS PRELUDE READS
-    // EITHER, same as x: coneTracedIndirect below has no RTXDI reservoir of its own to reuse.
+    // z/w: the ReSTIR-chosen flag and the staged visibility-record pitch -- see voxi.hlsl's own
+    // gViewParams comment (the field this cbuffer mirrors byte-for-byte) for the full story. NOTHING
+    // IN THIS PRELUDE READS EITHER, same as x.
     float4   gViewParams;
-    // RTXDI ReSTIR GI control -- mirrors gGiRestirParams in voxi.hlsl and FrameConstants::
+    // ReSTIR GI control -- mirrors gGiRestirParams in voxi.hlsl and FrameConstants::
     // giRestirParams (VoxiRenderer.hpp), appended at the end for the same reason gViewParams was.
     // NOTHING IN THIS PRELUDE READS IT, same as gAmbientParams/gViewParams above it: this cbuffer
     // is declared as the FULL FrameConstants block so a caller can bind giFrameConstants()

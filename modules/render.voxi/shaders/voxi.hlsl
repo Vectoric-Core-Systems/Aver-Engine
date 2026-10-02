@@ -137,16 +137,11 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          no blended replay pass to protect history from.
     //   bit 64 voxi.giVisPathView: paints giRestirIndirect's F2 path colour instead of shading, suppressed
     //          under the poison view (gGiRestirParams.w).
-    //   bits 7-11  Settings::giRestirMovingAge (0..31): moving-camera ReSTIR reservoir-age cap, applied in
-    //          giRestirIndirect after the motion discount. 0 = legacy 30-frame cap (default, unchanged
-    //          image). Meant to fix a moving-camera reservoir fade; a nonzero default (3, bd6e2045) was
-    //          tried and measured no different, so kept only as a manual dial (see Settings' own comment).
-    //          NOT the spatial-reuse motion discount 3dbc9a42 targeted and 8daed7f1 reverted -- one of
-    //          three different attempts (with spatialSamples below) at this same still-open fade.
     //   bits 12-15 Settings::giRestirSpatialSamples (0..15): overrides the spatial-reuse tap count after
-    //          the same discount. 15 = AUTO (unchanged image), 0 = temporal only, 1..8 pin the count. See
-    //          Settings::giRestirSpatialSamples (Voxi.hpp); gViewParams.z/.w are the other half of this
-    //          bisection (RTXDI reuse-similarity tolerances).
+    //          the motion discount. 15 = AUTO (unchanged image), 0 = temporal only, 1..8 pin the count.
+    //          See Settings::giRestirSpatialSamples (Voxi.hpp).
+    //   bits 18-22 Settings::giRestirMaxHistory (0..31): the M cap on a reused reservoir; 0 (default)
+    //          turns reuse off and resolves each pixel from its fresh candidate.
     float4   gAmbientParams;
     // x = VIEW-DEBUG MODE (VoxiRenderer::ViewDebug): 0 normal, 1 Unlit, 2 RayHitInstance, 3 RayHitMaterial,
     // 4 RayHitDistance, 5 Triangles -- PSRayDriven's debug visualisations only (search "vmode");
@@ -157,14 +152,14 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // leave sky out of the volume -- NOT gGiRestirParams.x, which also drops to 0 when the estimator
     // merely can't run this frame (GI debug view, empty TLAS), which would rebuild the volume twice per
     // toggle. w = staged RD passes' visibility-record row pitch while recording, 0 otherwise (gRdVisBuf).
-    // (z/w briefly carried RTXDI's reuse tolerances during the ReSTIR fade bisection; moved to literals
-    // in voxi_restir.hlsli.)
+    // (z/w briefly carried the ReSTIR reuse tolerances during the fade bisection; now literals in
+    // voxi_restir.hlsli.)
     float4   gViewParams;
-    // RTXDI ReSTIR GI control (Settings::giMode); mirrors FrameConstants::giRestirParams, appended at the
+    // ReSTIR GI control (Settings::giMode); mirrors FrameConstants::giRestirParams, appended at the
     // end. x = 1 while giMode==1 is ACTUALLY running (VoxiRenderer::giRestirWanted(), never the raw
     // setting -- touching t12/t13/u6/u7/u8 on the raw setting alone would null-descriptor-read on
     // hardware that can't run this). y = 1 once gGiSurfPosHist/gGiSurfNrmHist hold a real previous frame.
-    // z = which of RTXDI's two reservoir slices this frame writes (the other is last frame's temporal
+    // z = which of the two reservoir slices this frame writes (the other is last frame's temporal
     // source). w = ReSTIR-GI poison debug view (voxi.giPoisonView): >0.5 makes giRestirIndirect paint a
     // colour per non-finite guard (see that function's POISON DEBUG VIEW legend) instead of shading. Also
     // read directly in PSMainVoxi/PSRayDriven for an eighth (violet) colour on the ray-traced SPECULAR
@@ -2619,10 +2614,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         o.normalRoughness  = averPackNormalRoughness(-dir, 1.0);
 #endif
         // A SKY MISS HAS NO SURFACE FOR NEXT FRAME TO REPROJECT EITHER -- write the same 0-packed-normal
-        // sentinel RAB_GetGBufferSurface tests for, rather than leaving this pixel's slot holding a
+        // sentinel giLoadPrevSurface tests for, rather than leaving this pixel's slot holding a
         // stale surface from before the camera panned away (only when the pair is bound this frame;
         // see giRestirIndirect's write for the sentinel's contract). Position doesn't need writing too
-        // -- the normal channel's 0 alone is what RAB_GetGBufferSurface tests before it ever reads
+        // -- the normal channel's 0 alone is what giLoadPrevSurface tests before it ever reads
         // position.
         if (gGiRestirParams.x > 0.5)
             gGiSurfNrmHistOut[uint2(i.pos.xy)] = float2(0.0, asfloat(0u));
@@ -3768,8 +3763,8 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 //
 // COMPILED AT SM 6.6, same as CSRdShadow, though giRestirIndirect uses no derivative intrinsic itself
 // (every ray-hit texture fetch goes through averRtSampleSlot with an explicit SampleLevel/gradient,
-// never implicit ddx/ddy; that also covers giTraceInitialCandidate, the RAB_* adapter, and the
-// vendored RTXDI resampling headers it calls) -- shares the staged pipeline's shader model rather than
+// never implicit ddx/ddy; that also covers giTraceInitialCandidate and the reuse pass,
+// giSpatioTemporalReuse) -- shares the staged pipeline's shader model rather than
 // inventing a fourth.
 //
 // MILESTONE 4 (voxi.rayDrivenStages == 2): this stage alone is ALSO compiled with

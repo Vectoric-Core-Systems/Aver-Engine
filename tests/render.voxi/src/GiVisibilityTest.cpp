@@ -420,8 +420,8 @@ int main() {
         check(has(t, "indY = averSkyIrradiance(s.N) * gAmbient.r;"),
               "the F2 legacy branch's body is still the unchanged single assignment");
         check(has(t, "f3Path == 3u"), "the F3 ray's own condition gates on f3Path == 3u");
-        check(has(t, "stparams.numSamples = 0u"),
-              "Reconstructed forces temporal-only reuse (stparams.numSamples = 0u)");
+        check(has(t, "reuse.numSamples = 0u"),
+              "Reconstructed forces temporal-only reuse (reuse.numSamples = 0u)");
         check(has(t, "halfBound && !tracedPx && rec.valid"),
               "the decode block's own fallback-to-Full test for a non-traced Half pixel with no valid "
               "reconstruction");
@@ -433,29 +433,36 @@ int main() {
                      "uint2(0, 1) };"),
               "kGiVisPhase's literal matches givis::tracedPixel's own mirrored table exactly");
 
-        // stparams.numSamples = 0u must come AFTER the motion-discount lerp (checklist item 9), never
+        // reuse.numSamples = 0u must come AFTER the motion-discount lerp (checklist item 9), never
         // before -- otherwise the discount's own numSamples write would silently undo Reconstructed's
         // forced temporal-only mode.
-        const std::string lerpLine = "stparams.samplingRadius = lerp(32.0, 8.0, motionT);";
+        const std::string lerpLine = "reuse.samplingRadius = lerp(32.0, 8.0, motionT);";
         const size_t lerpPos = t.find(lerpLine);
-        const size_t zeroPos = t.find("stparams.numSamples = 0u");
+        const size_t zeroPos = t.find("reuse.numSamples = 0u");
         check(lerpPos != std::string::npos && zeroPos != std::string::npos && zeroPos > lerpPos,
-              "`stparams.numSamples = 0u` appears textually AFTER the motion-discount lerp, never "
+              "`reuse.numSamples = 0u` appears textually AFTER the motion-discount lerp, never "
               "before it");
 
         // Exactly 4 gAverHistoryWrite WRITE gates (store, surface history, NRD input, the new
         // visibility write) plus the NRD readback's TWO gates: the reprojected read b6a64126 added
-        // (gAverHistoryWrite && nrdReproject ...) and the decode it falls back to (gAverHistoryWrite &&
-        // gw > 0u) -- both keep a blended fragment from reading the opaque surface's denoised answer.
+        // (gAverHistoryWrite && nrdInRange && nrdReproject ...) and the decode it falls back to
+        // (gAverHistoryWrite && nrdInRange && gw > 0u) -- both keep a blended fragment from reading the
+        // opaque surface's denoised answer.
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
-        const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && gw > 0u");
-        const int reprojectGates = countOccurrences(t, "if (gAverHistoryWrite && nrdReproject");
+        const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && nrdInRange && gw > 0u");
+        const int reprojectGates = countOccurrences(t, "if (gAverHistoryWrite && nrdInRange && nrdReproject");
         check(totalGates == 6 && readbackGates == 1 && reprojectGates == 1,
               "voxi_restir.hlsli has exactly 4 gAverHistoryWrite write gates (store/surface-history/"
               "NRD-input/visibility-write) plus the NRD readback's two gates (reprojected read, decode) -- " +
               std::to_string(totalGates) + " total `if (gAverHistoryWrite` occurrences, " +
               std::to_string(readbackGates) + " decode + " + std::to_string(reprojectGates) +
               " reprojected-read gate(s)");
+
+        // The reservoir is the engine's own (voxi_reservoir.hlsli): no vendored resampling header may
+        // come back in through this file.
+        check(has(t, "#include \"voxi_reservoir.hlsli\""), "voxi_restir.hlsli includes the in-house reservoir module");
+        check(!has(t, "Rtxdi/") && !has(t, "RTXDI_") && !has(t, "RAB_"),
+              "voxi_restir.hlsli names no RTXDI header, function or RAB_ callback");
     }
 
     // ---- 9. SOURCE ASSERTIONS: voxi_rt.hlsli's traceCone prototype and its own gate count ----
