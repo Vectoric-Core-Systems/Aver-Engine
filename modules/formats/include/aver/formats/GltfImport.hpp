@@ -1,7 +1,8 @@
 #pragma once
 // glTF 2.0 / GLB import into the engine's own formats. glTF is right-handed, +Y up, -Z forward, in
 // metres; this engine is left-handed, +Z up, +X forward, in centimetres, so positions, normals and
-// rotations are rebased, lengths scaled, and triangle winding reversed (the basis change has det -1).
+// rotations are rebased, lengths scaled, and triangle winding reversed (the basis change has det -1;
+// a node that mirrors its mesh reverses it once more). Normals take the node basis' inverse-transpose.
 #include "aver/formats/ImportedMaterial.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -35,7 +36,8 @@ using GltfImage    = ImportedImage;
 // the part that was never geometry in the first place.
 //
 // ONE ENTRY PER NODE, NOT PER MESH, so a glTF that instances one mesh from several nodes yields
-// several placements sharing a meshIndex instead of the last node silently winning.
+// several placements. Nodes that differ only by translation share a meshIndex; a node that rotates
+// or scales the mesh differently points at its own copy in `meshes`, because that basis is baked.
 struct GltfPlacement {
     i32  meshIndex = -1;                     // into GltfImportResult::meshes
     Vec3 position{0, 0, 0};                  // ENGINE space, centimetres -- already through toEngine
@@ -43,7 +45,10 @@ struct GltfPlacement {
 };
 
 struct GltfImportResult {
-    std::vector<OcMeshData> meshes;          // one per glTF mesh, submeshes per primitive
+    // One per glTF mesh, submeshes per primitive -- the first `meshes[]` of the file at their own
+    // indices -- followed by one extra copy per further basis a mesh was instanced with (see
+    // GltfPlacement). A copy is named "<name>_2", "<name>_3"... so every entry's name stays unique.
+    std::vector<OcMeshData> meshes;
     std::vector<std::string> meshNames;      // parallel to `meshes`; "" where the source had none
 
     // Every node that instanced a mesh, in scene-graph order. Empty for a file whose meshes all sit
@@ -76,6 +81,21 @@ struct GltfImportResult {
     // Clips, in the file's own order. Bone indices address `skeletons[0]`.
     std::vector<OcAnimation> animations;
     std::vector<std::string> animationNames;
+
+    // OBJECT clips: the motion of NON-JOINT nodes (a car on a route, a fan, an empty used as a route
+    // driver), one per glTF animation and moving node, flagged kOcAnimObject | kOcAnimLoop. A node
+    // moves when it has channels of its own OR is an unskinned mesh node under one that does (a static
+    // child rides on its animated parent), unless its world never changes. Each is
+    // A(t) = W(t) * Q0^-1 with W the node's world transform and Q0 the rest rotation*scale baked into
+    // its mesh copy, so a mesh at its placement plays the authored motion from t0 = 0 (see OcAnim.hpp).
+    // A collapsed (zero) scale is kept as a zero scale key. Every clip lasts its glTF animation's full
+    // length (the latest key of any channel), so the clips of one animation loop in step.
+    // Named after the node, or "<animation>_<node>" when the node moves in several animations.
+    std::vector<OcAnimation> objectAnimations;
+    std::vector<std::string> objectAnimationNames;
+    // Parallel to objectAnimations: index into `placements` of the node's mesh placement, or -1 for a
+    // node with no mesh (an empty), whose clip is a route to be applied to other meshes.
+    std::vector<i32> objectAnimationPlacement;
 
     // Index-parallel to the file's own materials[] and images[] arrays, so a TexRef's imageIndex is
     // a direct subscript into `images`. Empty when the file declared none.

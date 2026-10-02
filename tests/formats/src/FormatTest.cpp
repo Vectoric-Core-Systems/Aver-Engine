@@ -1666,6 +1666,169 @@ static void checkLevelFileIsLegacyOcmap() {
     std::filesystem::remove_all(dir);
 }
 
+// Checks PLACE's object-animation tokens: `anim <clip>` (percent-encoded, content-relative, with the
+// extension), `animspeed <f>`, `animtime <f>` and the bare `animonce`. Written only when a clip is
+// named, each companion only when it differs from its default, so an un-animated level is unchanged.
+static void checkOcworldPlacementAnim() {
+    AVER_INFO("=== .ocworld PLACE anim tokens ===");
+    using namespace fmt;
+    std::string err;
+    const auto count = [](const std::string& hay, const std::string& needle) {
+        int n = 0;
+        for (usize at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+        return n;
+    };
+
+    {
+        // ALL FOUR TOKENS beside a material, and a clip alone beside a name and an ordinary placement.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "PLACE car.ocmesh 0 0 0 0 0 0 1 M_Paint anim Anims/Route_Car.ocanim animspeed 2.5 animtime 1.25 animonce\n"
+                           "PLACE fan.ocmesh 5 0 0 0 0 0 1 anim Anims/fan.ocanim name Fan\n"
+                           "PLACE rock.ocmesh 9 0 0 0 0 0 1 M_Rock\n",
+                           w, &err), "PLACE lines with anim tokens parse: " + err);
+        check(w.placements.size() == 3, "and keep all three placements");
+        if (w.placements.size() == 3) {
+            const OcWorldPlacement& car = w.placements[0];
+            check(car.animClip == "Anims/Route_Car.ocanim" && car.animSpeed == 2.5f && car.animTime == 1.25f &&
+                  car.animOnce, "placement 0: clip, speed, time and once are all read");
+            check(car.material == "M_Paint", "without eating the material beside them");
+            const OcWorldPlacement& fan = w.placements[1];
+            check(fan.animClip == "Anims/fan.ocanim" && fan.animSpeed == 1.0f && fan.animTime == 0.0f && !fan.animOnce,
+                  "placement 1: a bare clip keeps speed 1, time 0 and loops");
+            check(fan.name == "Fan", "and its name token still reads");
+            const OcWorldPlacement& rock = w.placements[2];
+            check(rock.animClip.empty() && rock.animSpeed == 1.0f && rock.animTime == 0.0f && !rock.animOnce,
+                  "placement 2: no tokens means no animation");
+            check(rock.material == "M_Rock", "and the material is still the material");
+        }
+
+        const std::string text = writeOcworld(w);
+        check(text.find("anim Anims/Route_Car.ocanim animspeed 2.5 animtime 1.25 animonce") != std::string::npos,
+              "the written text carries the four tokens together, in that order");
+        check(count(text, "animspeed") == 1 && count(text, "animtime") == 1 && count(text, "animonce") == 1,
+              "and only the placement that set a companion writes it");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "what the writer produced parses again: " + err);
+        check(back.placements.size() == 3 && back.placements[0].animClip == "Anims/Route_Car.ocanim" &&
+              back.placements[0].animSpeed == 2.5f && back.placements[0].animTime == 1.25f &&
+              back.placements[0].animOnce && back.placements[1].animClip == "Anims/fan.ocanim" &&
+              back.placements[2].animClip.empty(), "with every animation field intact");
+        check(writeOcworld(back) == text, "and a second write reproduces the first byte for byte");
+    }
+    {
+        // A CLIP PATH WITH A SPACE goes out percent-encoded, like a name, or it would split into tokens.
+        OcWorldData w;
+        w.name = "AnimEscaping";
+        OcWorldPlacement p;
+        p.asset = "boat.ocmesh";
+        p.animClip = "Anims/My Route.ocanim";
+        p.animSpeed = 0.5f;
+        w.placements.push_back(p);
+        const std::string text = writeOcworld(w);
+        check(text.find("My Route") == std::string::npos, "the raw path never appears with its space");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "the escaped path still parses: " + err);
+        check(back.placements.size() == 1 && back.placements[0].animClip == p.animClip &&
+              back.placements[0].animSpeed == 0.5f, "and decodes back to exactly the path that was written");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // '#' AND ';' IN A NAME OR A CLIP PATH: parseOcworld cuts a line at the first '#' and drops one
+        // trailing ';' before it splits tokens, so a raw '#' lost every token after it (the clip, its
+        // speed, `animonce`) and a raw trailing ';' lost a character of the last one. Both go out escaped.
+        OcWorldData w;
+        w.name = "HashEscaping";
+        OcWorldPlacement p;
+        p.asset = "boat.ocmesh";
+        p.name = "Boat #2; fast";
+        p.animClip = "Anims/Route #1;.ocanim";
+        p.animSpeed = 0.5f;
+        p.animOnce = true;
+        w.placements.push_back(p);
+        OcWorldPlacement q;                 // the name is the LAST token here, so a raw ';' would be stripped
+        q.asset = "buoy.ocmesh";
+        q.name = "Buoy;";
+        w.placements.push_back(q);
+        const std::string text = writeOcworld(w);
+        check(text.find("Route #1") == std::string::npos && text.find("Boat #2") == std::string::npos,
+              "no raw '#' from a name or clip path reaches the written text");
+        check(text.find("%23") != std::string::npos, "the '#' is written as %23");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "the escaped text parses: " + err);
+        check(back.placements.size() == 2 && back.placements[0].name == p.name &&
+              back.placements[0].animClip == p.animClip && back.placements[0].animSpeed == 0.5f &&
+              back.placements[0].animOnce, "name, clip path and the tokens after them all come back intact");
+        check(back.placements.size() == 2 && back.placements[1].name == q.name,
+              "a name ending in ';' keeps it");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // A FILE WITH NO ANIMATION IS UNCHANGED -- no token appears, and an old save keeps round-tripping.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME NoAnim\n"
+                           "PLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
+                           "PLACE b.ocmesh 1 2 3 0 0 0 2 M_B nocollide\n",
+                           w, &err), "a world with no anim tokens parses: " + err);
+        const std::string text = writeOcworld(w);
+        check(text.find(" anim") == std::string::npos, "the written text carries no anim token at all");
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "it parses again: " + err);
+        check(writeOcworld(back) == text, "and a second write is byte-identical");
+    }
+    {
+        // COMPANIONS WITHOUT A CLIP WRITE NOTHING: with no clip there is nothing to time or hold.
+        OcWorldData w;
+        w.name = "Orphans";
+        OcWorldPlacement p;
+        p.asset = "a.ocmesh";
+        p.animSpeed = 3.0f;
+        p.animTime = 2.0f;
+        p.animOnce = true;
+        w.placements.push_back(p);
+        check(writeOcworld(w).find(" anim") == std::string::npos,
+              "speed, time and once are not written for a placement with no clip");
+    }
+}
+
+// Checks PLACE's `vehicle <preset>` token: the physics preset world::VehicleSystem builds a placement
+// into. Written only when set, so a level with no vehicles is byte-for-byte what it was.
+static void checkOcworldPlacementVehicle() {
+    AVER_INFO("=== .ocworld PLACE vehicle token ===");
+    using namespace fmt;
+    std::string err;
+
+    OcWorldData w;
+    check(parseOcworld("OCWORLD 1\nNAME T\n"
+                       "PLACE car.ocmesh 0 0 0 0 0 0 1 M_Paint vehicle sports name Taxi\n"
+                       "PLACE bus.ocmesh 5 0 0 0 0 0 1 vehicle bus\n"
+                       "PLACE rock.ocmesh 9 0 0 0 0 0 1 M_Rock\n",
+                       w, &err), "PLACE lines with a vehicle token parse: " + err);
+    check(w.placements.size() == 3, "and keep all three placements");
+    if (w.placements.size() == 3) {
+        check(w.placements[0].vehiclePreset == "sports" && w.placements[1].vehiclePreset == "bus" &&
+              w.placements[2].vehiclePreset.empty(), "the preset is read, and absent means none");
+        check(w.placements[0].material == "M_Paint" && w.placements[0].name == "Taxi",
+              "without eating the material or the name beside it");
+        check(w.placements[0].animClip.empty(), "and a vehicle is not an animation");
+    }
+
+    const std::string text = writeOcworld(w);
+    check(text.find(" vehicle sports") != std::string::npos && text.find(" vehicle bus") != std::string::npos,
+          "the written text carries both presets");
+    OcWorldData back;
+    check(parseOcworld(text, back, &err), "what the writer produced parses again: " + err);
+    check(back.placements.size() == 3 && back.placements[0].vehiclePreset == "sports" &&
+          back.placements[1].vehiclePreset == "bus" && back.placements[2].vehiclePreset.empty(),
+          "with every preset intact");
+    check(writeOcworld(back) == text, "and a second write reproduces the first byte for byte");
+
+    OcWorldData none;
+    check(parseOcworld("OCWORLD 1\nNAME NoCars\nPLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n", none, &err),
+          "a world with no vehicle token parses: " + err);
+    check(writeOcworld(none).find(" vehicle") == std::string::npos, "and writes no vehicle token at all");
+}
+
 // Runs the self-checks, then every file named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     checkFnv();
@@ -1674,6 +1837,8 @@ int main(int argc, char** argv) {
     checkOcworldNesting();
     checkOcworldPlacementName();
     checkOcworldPlacementHidden();
+    checkOcworldPlacementAnim();
+    checkOcworldPlacementVehicle();
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();

@@ -604,6 +604,10 @@ void objMaterialsToImported(const std::vector<ObjMaterial>& in, const std::strin
         o.name = m.name;
         for (int k = 0; k < 3; ++k) o.baseColorFactor[k] = m.baseColor[k];
         o.baseColorFactor[3] = m.opacity;
+        // .mtl states NO colour space for Kd. Treated as sRGB, the .ocmat's own encoding, so it crosses
+        // unconverted -- this importer's behaviour since before the flag. An ASSUMPTION: many tools do
+        // write sRGB, but Blender's exporter is believed to write its linear base colour here.
+        o.baseColorFactorLinear = false;
         for (int k = 0; k < 3; ++k) o.emissiveFactor[k] = m.emissive[k];
 
         if (m.hasPbr) {

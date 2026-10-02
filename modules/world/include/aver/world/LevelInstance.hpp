@@ -33,6 +33,9 @@ struct StaticBoxFit {
     Vec3 centre;
     Vec3 halfExtents;
     Quat rotation;
+    // `centre`'s offset from the placement's own position, in the placement's UNROTATED, scaled axes
+    // (so centre == position + rotation.rotate(pivotToCentre)). Zero for a mesh centred on its pivot.
+    Vec3 pivotToCentre;
 };
 
 // The built-in unit-cube placeholder's local bounds -- the fallback for a mesh whose bounds are
@@ -91,6 +94,14 @@ i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3&
 // caller has already checked aver_phys_ready() and owns aver_phys_set_entity.
 i32 addStaticMeshBody(const Transform& worldXf, const f32* localPositions, u32 vertexCount,
                       const u32* indices, u32 indexCount);
+
+// The fitted box of addStaticBoxBody, but as a convex hull of its eight corners around the
+// PLACEMENT'S POSITION rather than around the box's own centre: the body's origin is the entity's
+// pivot, the frame addStaticMeshBody's bodies already have. That is what lets an animated placement's
+// body be driven to its entity's world transform (driveKinematicBodies) whatever the mesh's bounds
+// look like. Returns the ABI's handle, or 0 if Jolt refused the hull; same caller contract as
+// addStaticBoxBody (physics ready, entity stamping left to the caller).
+i32 addPivotBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax);
 #endif
 
 } // namespace aver::world
@@ -168,6 +179,28 @@ struct InstantiateOptions {
     // that names the mesh.
     std::function<bool(u64 meshId, const f32*& outPositions, u32& outVertexCount,
                        const u32*& outIndices, u32& outIndexCount)> localTrianglesFor;
+
+    // How far through the placement loop instantiate() is: called with (done, w.placements.size())
+    // at least every 256th placement, and once more at the very end with done == total -- even for a
+    // level under 256 placements, so a caller never has to guess whether "no call yet" means "not
+    // started" or "nothing to report" for a small level. `done` counts every placement WALKED, class
+    // placements included, because collision-body creation (the slow part this exists to report on)
+    // is what the count is standing in for, and a host cannot know in advance which placements that
+    // will be.
+    //
+    // A HOST CALLBACK for the reason every other one in this struct is: whether progress becomes a
+    // loading bar, a log line, or nothing at all is UI policy this module has no business deciding.
+    // No callback (the default) costs nothing beyond the `done`/`total` increment already needed for
+    // the modulo test.
+    std::function<void(usize done, usize total)> progress;
+};
+
+// A moving placement's body: `body` is the physics ABI handle of `entity`'s KINEMATIC body, whose
+// origin is the entity's own position (see addPivotBoxBody), for driveKinematicBodies. "Moving" is a
+// placement with an `anim` clip or any descendant of one.
+struct AnimatedBody {
+    scene::Entity entity = scene::kInvalidEntity;
+    i32 body = -1;
 };
 
 // The result, in placement order. `entities` holds only the placements that produced an entity, so
@@ -176,11 +209,17 @@ struct LevelInstance {
     std::vector<scene::Entity> entities;
     // Parallel to `entities`: the index into OcWorldData::placements each one came from.
     std::vector<u32> placementIndex;
-    // Parallel to `entities`: the static body that placement created, or -1 if it made none.
+    // Parallel to `entities`: the body that placement created (static, or kinematic for an animated
+    // placement), or -1 if it made none.
     std::vector<i32> entityBody;
     // The bodies that were actually created, in creation order, for a host that only needs to
     // remove them again. Equal to `entityBody` with the -1s dropped.
     std::vector<i32> bodies;
+    // The placements with an `anim` clip -- and their colliding descendants, which move with them
+    // through the hierarchy -- whose body was made kinematic, for the host to hand to
+    // driveKinematicBodies once a frame. One that collides but could not be made kinematic keeps its
+    // static body and is absent here.
+    std::vector<AnimatedBody> animatedBodies;
 
     // Physics body creation, broken down by which fitter actually produced each body -- for a host's
     // own summary log line (Runtime/src/GameLevel.cpp), which is the only reason this is collected
@@ -191,6 +230,14 @@ struct LevelInstance {
     u32 boxBodyCount = 0;
     u64 meshTriangleCount = 0;       // summed across every triangle-mesh body, indexCount/3 each
     f64 bodyCreationSeconds = 0.0;   // wall time inside the collide-and-fit branch, steady_clock
+
+    // How many DISTINCT physics mesh shapes this instantiation actually built (aver_phys_create_mesh_
+    // shape calls that succeeded) -- see instantiate()'s own comment on the shared-shape path. A
+    // placement whose mesh another placement already named reuses that shape rather than building a
+    // second one, so `meshBodyCount - uniqueMeshShapeCount` is how many placements got a FREE mesh
+    // body: no triangle scaling, no second BVH. Excludes the rare zero-scale fallback to
+    // addStaticMeshBody's own baked path (below), which never touches a shape handle at all.
+    u32 uniqueMeshShapeCount = 0;
 };
 
 // Creates one entity per placement in the process-global World.
@@ -200,7 +247,27 @@ struct LevelInstance {
 // bit-exact images that depend on all three. This walks placements in file order and does, per
 // placement, exactly what the two hosts did: create, add the mesh renderer, intern the material,
 // bind it, then the body.
+//
+// A placement with an `anim` clip also gets a CAnimator (clip = fnv1a64 of the path) and, when it
+// collides, a kinematic body recorded in LevelInstance::animatedBodies; so does each colliding
+// descendant of one. `animspeed 0` means HELD at animtime (kAnimatorPaused): a CAnimator reads a speed
+// of 0 as 1, so the authored zero is turned into the pause flag rather than played at full speed.
 LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& opt = {});
+
+// Moves each animated placement's kinematic body to its entity's CURRENT world transform, so what
+// stands on it is carried by the next physics step. Call once a frame after the animation tick, with
+// the frame time as `dt`. A no-op for stale entities and dead bodies, and without the physics module.
+//
+// A JUMP IS TELEPORTED, NOT DRIVEN: when reaching the pose since the last call would take more than
+// 60 m/s (at the pivot or the far edge of a turning body), or `dt` is not positive, the body is set to
+// the pose directly and left at rest. Driving it there would give it a velocity that flings a character
+// standing on it -- a clip wrapping with a gap, a level reset, a script moving the entity.
+//
+// Returns how many bodies physics refused to drive because they are gone or are no longer kinematic. A
+// host that keeps `bodies` between frames rebuilds the list when this is not 0; one that rebuilds it
+// every frame can ignore it. An entry whose entity is gone is skipped and not counted: rebuilding the
+// list from the host's own tables would find it again.
+u32 driveKinematicBodies(scene::World& world, const std::vector<AnimatedBody>& bodies, f32 dt);
 
 } // namespace aver::world
 

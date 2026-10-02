@@ -298,6 +298,8 @@ bool OcAnimation::valid() const {
     if (!(duration >= 0.0f)) return false;                           // also rejects NaN
     for (const OcTrack& t : tracks) if (!t.valid()) return false;
     if (storage == OcAnimStorage::BakedUniform && sampleRate == 0) return false;
+    // An object clip is one transform track; playback reads no other.
+    if ((flags & kOcAnimObject) && (tracks.size() != 1 || tracks[0].boneIndex != 0)) return false;
     return true;
 }
 

@@ -13,6 +13,8 @@
 // has the moment both object files reach the same link.
 #include "stb_image_write.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace aver::fmt {
@@ -170,6 +172,97 @@ void mergeOpacityMaps(std::vector<ImportedImage>& images, std::vector<ImportedMa
                           "is lost and they will render solid", lost);
 }
 
+// Reduces each material's translucency map (ImportedMaterial::translucencyTex) to subsurfaceWeight:
+// the map's mean over the texels the cutout KEEPS. A leaf atlas is mostly transparent background, and
+// averaging that in would read every leaf as barely translucent. Runs after the opacity fold, so a
+// separate mask is already in the base colour's alpha. The map itself is never written.
+void foldTranslucencyMaps(const std::vector<ImportedImage>& images, std::vector<ImportedMaterial>& materials) {
+    struct Done { i32 tex, base; f32 weight; bool ok; };
+    std::vector<Done> done;     // several materials share one leaf atlas; decode each pair once
+    u32 folded = 0;
+    for (ImportedMaterial& m : materials) {
+        if (m.translucencyTex.empty()) continue;
+        const i32 ti = m.translucencyTex.imageIndex;
+        const bool masked = m.alphaMode == "MASK" && !m.baseColorTex.empty();
+        const i32 bi = masked ? m.baseColorTex.imageIndex : -1;
+        const usize lane = (m.translucencyTex.channel == 'g') ? 1 : (m.translucencyTex.channel == 'b') ? 2
+                         : (m.translucencyTex.channel == 'a') ? 3 : 0;
+        m.translucencyTex = {};
+
+        const Done* hit = nullptr;
+        for (const Done& d : done) if (d.tex == ti && d.base == bi) { hit = &d; break; }
+        if (!hit) {
+            Done d{ti, bi, 0.0f, false};
+            ImageData t, b;
+            std::string derr;
+            const bool haveT = usize(ti) < images.size() && images[usize(ti)].ok &&
+                               decodeImage(images[usize(ti)].bytes.data(), images[usize(ti)].bytes.size(), t, &derr);
+            const bool haveB = bi >= 0 && usize(bi) < images.size() && images[usize(bi)].ok &&
+                               decodeImage(images[usize(bi)].bytes.data(), images[usize(bi)].bytes.size(), b, &derr);
+            if (haveT && t.width && t.height) {
+                // The base colour may be a different size (the cap has not run yet, but a source can
+                // pair a 4k atlas with a 2k map); its alpha is read at the nearest texel.
+                const u8 keep = static_cast<u8>(std::lround(std::clamp(m.alphaCutoff, 0.0f, 1.0f) * 255.0f));
+                double sum = 0.0;
+                u64 n = 0;
+                for (u32 y = 0; y < t.height; ++y)
+                    for (u32 x = 0; x < t.width; ++x) {
+                        if (haveB) {
+                            const u32 bx = u32(u64(x) * b.width / t.width), by = u32(u64(y) * b.height / t.height);
+                            if (b.pixels[(usize(by) * b.width + bx) * 4 + 3] < keep) continue;
+                        }
+                        sum += t.pixels[(usize(y) * t.width + x) * 4 + lane];
+                        ++n;
+                    }
+                if (n) { d.weight = static_cast<f32>(sum / (double(n) * 255.0)); d.ok = true; }
+            }
+            if (!d.ok) AVER_WARN("translucency: '{}' could not be read ({}); it stays opaque to light",
+                                 m.name, derr.empty() ? std::string("no texels") : derr);
+            done.push_back(d);
+            hit = &done.back();
+        }
+        if (!hit->ok || hit->weight <= 0.0f) continue;
+        // Thin leaves: the shallowest scatter depth, tinted by the leaf's own albedo (colour white).
+        m.subsurfaceWeight = std::clamp(hit->weight, 0.0f, 1.0f);
+        m.subsurfaceRadius = 0.0f;
+        m.subsurfaceColor[0] = m.subsurfaceColor[1] = m.subsurfaceColor[2] = 1.0f;
+        ++folded;
+    }
+    if (folded) AVER_INFO("translucency: {} material(s) took a subsurface weight from their translucency map", folded);
+}
+
+// Points every slot at the FIRST of any byte-identical images, so the cook writes one file. The fold
+// makes a new image per material, and two materials folding the same albedo and mask produce the same
+// bytes twice; a source can also name one file by two paths.
+void collapseIdenticalImages(const std::vector<ImportedImage>& images, std::vector<ImportedMaterial>& materials) {
+    const auto hashOf = [](const std::vector<u8>& b) {
+        u64 h = 1469598103934665603ull;
+        for (const u8 v : b) { h ^= v; h *= 1099511628211ull; }
+        return h ^ (u64(b.size()) << 1);
+    };
+    std::vector<u64> hash(images.size(), 0);
+    for (usize i = 0; i < images.size(); ++i)
+        if (images[i].ok && !images[i].bytes.empty()) hash[i] = hashOf(images[i].bytes);
+    std::vector<i32> canon(images.size());
+    u32 collapsed = 0;
+    for (usize i = 0; i < images.size(); ++i) {
+        canon[i] = i32(i);
+        if (!hash[i]) continue;
+        for (usize k = 0; k < i; ++k)
+            if (canon[k] == i32(k) && hash[k] == hash[i] && images[k].ext == images[i].ext &&
+                images[k].bytes == images[i].bytes) { canon[i] = i32(k); ++collapsed; break; }
+    }
+    if (!collapsed) return;
+    const auto remap = [&](ImportedTexture& t) {
+        if (t.imageIndex >= 0 && usize(t.imageIndex) < canon.size()) t.imageIndex = canon[usize(t.imageIndex)];
+    };
+    for (ImportedMaterial& m : materials) {
+        remap(m.baseColorTex); remap(m.metalRoughTex); remap(m.normalTex);
+        remap(m.occlusionTex); remap(m.emissiveTex); remap(m.opacityTex); remap(m.translucencyTex);
+    }
+    AVER_INFO("{} image(s) were byte-identical to another and share its file", collapsed);
+}
+
 // One image, halved until neither side exceeds `cap`, and re-encoded as PNG. Returns false and
 // leaves `img` untouched when it is already small enough, cannot be decoded, or would not re-encode.
 //
@@ -268,7 +361,9 @@ bool cookImportedMaterials(std::vector<ImportedMaterial>& materials, std::vector
     // writing the full-size file and then a second one beside it. The opacity fold goes first so the
     // cap shrinks the MERGED image rather than the original it replaced.
     mergeOpacityMaps(images, materials);
+    foldTranslucencyMaps(images, materials);
     capImageSizes(images, materials, maxTexture);
+    collapseIdenticalImages(images, materials);
 
     MaterialCookOptions copt;
     copt.contentDir         = contentDir;

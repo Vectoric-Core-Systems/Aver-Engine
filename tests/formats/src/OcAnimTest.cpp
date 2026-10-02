@@ -411,6 +411,57 @@ int main() {
         std::filesystem::remove_all(dir, ec);
     }
 
+    AVER_INFO("=== an OBJECT clip: no skeleton, one bone-0 track, and its flag round-trips ===");
+    {
+        fmt::OcAnimation a;
+        a.duration = 2.0f;
+        a.flags = static_cast<u8>(fmt::kOcAnimObject | fmt::kOcAnimLoop);
+        // skeletonRef stays empty: an object clip addresses no bones.
+        fmt::OcTrack t;
+        t.boneIndex = 0;
+        t.channels = static_cast<u8>(fmt::kOcChannelTranslation | fmt::kOcChannelRotation);
+        t.interp = fmt::OcInterp::Linear;
+        t.times = {0.0f, 1.0f, 2.0f};
+        t.values = {  0, 0, 0,    0, 0, 0, 1,
+                    100, 0, 0,    0, 0, 0.70710678f, 0.70710678f,
+                    200, 50, 0,   0, 0, 1, 0};
+        a.tracks.push_back(t);
+        check(a.valid(), "an object clip with one bone-0 track is valid with no skeleton");
+
+        std::vector<u8> bytes;
+        std::string why;
+        check(fmt::writeOcAnim(a, bytes, &why), "it writes: " + why);
+        fmt::OcAnimation back;
+        check(fmt::parseOcAnim(bytes.data(), bytes.size(), back, &why), "it reads back: " + why);
+        check((back.flags & fmt::kOcAnimObject) != 0 && (back.flags & fmt::kOcAnimLoop) != 0,
+              "the object flag survives beside loop");
+        check(back.flags == a.flags, "and no other flag bit appears");
+        check(back.skeletonRef.empty(), "the skeleton reference is still empty");
+        check(back.tracks.size() == 1 && back.tracks[0].boneIndex == 0, "one track, still on bone 0");
+        if (back.tracks.size() == 1) {
+            const fmt::OcTrack& bt = back.tracks[0];
+            check(bt.channels == t.channels && bt.interp == t.interp, "channel mask and interpolation survive");
+            check(bt.times == t.times && bt.values == t.values, "and every key time and value survives bit for bit");
+        }
+        check(back.valid(), "the clip read back is valid");
+
+        // A skeletal clip is not an object clip, and the flag is not there by default.
+        fmt::OcAnimation plain = baseClip(1.0f);
+        std::vector<u8> plainBytes;
+        check(fmt::writeOcAnim(plain, plainBytes, &why), "a plain clip writes: " + why);
+        fmt::OcAnimation plainBack;
+        check(fmt::parseOcAnim(plainBytes.data(), plainBytes.size(), plainBack, &why), "and reads back: " + why);
+        check((plainBack.flags & fmt::kOcAnimObject) == 0, "it does not carry the object flag");
+
+        // An object clip is exactly one track; playback reads no other.
+        fmt::OcAnimation two = a;
+        two.tracks.push_back(t);
+        check(!two.valid(), "an object clip with two tracks is not valid");
+        fmt::OcAnimation offBone = a;
+        offBone.tracks[0].boneIndex = 3;
+        check(!offBone.valid(), "nor is one whose track is on any bone but 0");
+    }
+
     AVER_INFO(g_failures == 0 ? "OcAnimTest: {}/{} checks passed" : "OcAnimTest: {} FAILURES of {}",
               g_failures == 0 ? g_checks : g_failures, g_checks);
     return g_failures ? 1 : 0;

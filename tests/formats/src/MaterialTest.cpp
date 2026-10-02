@@ -2,6 +2,7 @@
 // the mip filter, and the C# material-script rewriter. CPU only; no GPU is touched.
 #include <cstddef>
 #include "aver/formats/OcMat.hpp"
+#include "aver/formats/GltfImport.hpp"
 #include "aver/formats/MaterialCook.hpp"
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
@@ -89,7 +90,7 @@ static const MirrorField kMirror[] = {
     {"attenuationColor",    "gAttenuationColor",   "attenuationColor"},
     {"attenuationDistance", "gAttenuationDistance", "attenuationDistance"},
     {"lightIntensity",      "gLightIntensity",     "lightIntensity"},
-    {"_lightPad",           "gLightPad",           "_lightPad"},
+    {"subsurfaceColor",     "gSubsurfaceColor",    "subsurfaceColor"},
 };
 
 // Reads a repo-relative file whole. Empty on failure, which the caller MUST treat as a failure:
@@ -484,10 +485,13 @@ static void testSubsurface() {
     std::string err;
 
     pbr::MaterialDesc d;
-    check(fmt::parseOcmat("OCMAT 1\nNAME M_Skin\nPARAM subsurfaceWeight 0.6\nPARAM subsurfaceRadius 0.35\n",
+    check(fmt::parseOcmat("OCMAT 1\nNAME M_Skin\nPARAM subsurfaceWeight 0.6\nPARAM subsurfaceRadius 0.35\n"
+                          "PARAM subsurfaceColor 0.8 0.3 0.25\n",
                           d, nullptr, &err), "a material with subsurfaceWeight/subsurfaceRadius parses: " + err);
     check(near(d.subsurfaceWeight, 0.6f), "subsurfaceWeight is read, not left at the 0.0 default");
     check(near(d.subsurfaceRadius, 0.35f), "subsurfaceRadius is read, not left at the 0.0 default");
+    check(near(d.subsurfaceColor[0], 0.8f) && near(d.subsurfaceColor[1], 0.3f) && near(d.subsurfaceColor[2], 0.25f),
+          "subsurfaceColor is read, not left at the white default");
 
     // Round trip. UNLIKE ior/transmission's unconditional emission just above in this file's other
     // test, this pair is written CONDITIONALLY -- the same convention slopeBlend uses, and for the
@@ -500,10 +504,16 @@ static void testSubsurface() {
           "the writer emits PARAM subsurfaceWeight when the material asked for it");
     check(text.find("PARAM subsurfaceRadius 0.35") != std::string::npos,
           "the writer emits PARAM subsurfaceRadius alongside it");
+    check(text.find("PARAM subsurfaceColor 0.8 0.3 0.25") != std::string::npos,
+          "...and PARAM subsurfaceColor alongside that");
     pbr::MaterialDesc back;
     check(fmt::parseOcmat(text, back, nullptr, &err), "the writer's own output re-parses: " + err);
     check(near(back.subsurfaceWeight, d.subsurfaceWeight) && near(back.subsurfaceRadius, d.subsurfaceRadius),
           "both survive the round trip");
+    check(near(back.subsurfaceColor[0], d.subsurfaceColor[0]) &&
+          near(back.subsurfaceColor[1], d.subsurfaceColor[1]) &&
+          near(back.subsurfaceColor[2], d.subsurfaceColor[2]),
+          "subsurfaceColor survives the round trip too");
 
     // A header-only file loads the feature in its OFF state -- 0.0, exactly like every material
     // authored before this pair existed (Material.hpp: "every material authored before this existed
@@ -512,6 +522,9 @@ static void testSubsurface() {
     check(fmt::parseOcmat("OCMAT 1\n", def, nullptr, &err), "a header-only file loads");
     check(near(def.subsurfaceWeight, 0.0f), "...subsurfaceWeight defaults to 0, the feature's own off switch");
     check(near(def.subsurfaceRadius, 0.0f), "...subsurfaceRadius defaults to 0 too");
+    check(near(def.subsurfaceColor[0], 1.0f) && near(def.subsurfaceColor[1], 1.0f) &&
+          near(def.subsurfaceColor[2], 1.0f),
+          "...subsurfaceColor defaults to white, scattering in the surface's own colour");
 
     // THE WRITTEN-ABSENCE CASE, which testDielectric has no equivalent of because ior/transmission
     // are unconditional: a material that never asked for the wrap term must not gain a
@@ -524,18 +537,29 @@ static void testSubsurface() {
           "a material with subsurfaceWeight 0 writes NO subsurface line at all");
     check(offText.find("subsurfaceRadius") == std::string::npos,
           "...neither half of the pair appears, not even alone");
+    // THE DISCRIMINATING PART FOR COLOUR SPECIFICALLY: def.subsurfaceColor is (1,1,1), not zero, so a
+    // writer that (wrongly) gated this line on "is the colour non-default" rather than on the weight
+    // alone would still pass a test that only checked a zeroed colour. It must stay silent regardless.
+    check(offText.find("subsurfaceColor") == std::string::npos,
+          "...nor subsurfaceColor, even though white is not itself the zero value");
 
     // Clamped from BOTH directions, same idiom as testDielectric's ior/transmission bounds: both
     // fields are [0,1] by definition (see Material.hpp), so an authored value outside that range is
     // clamped rather than kept raw -- which the assertions below would catch (1.4 != 1.0, 2.0 != 1.0).
+    // subsurfaceColor is clamped the same way, per channel, and this line exercises both of its
+    // directions at once: channel 0 and 2 are over 1, channel 1 is negative.
     // The upper bound needs no extra discriminator: 1.0 already differs from the 0.0 default, so a
     // build that dropped the PARAM entirely could not pass this by coincidence.
     pbr::MaterialDesc hi;
-    check(fmt::parseOcmat("OCMAT 1\nPARAM subsurfaceWeight 1.4\nPARAM subsurfaceRadius 2.0\n",
+    check(fmt::parseOcmat("OCMAT 1\nPARAM subsurfaceWeight 1.4\nPARAM subsurfaceRadius 2.0\n"
+                          "PARAM subsurfaceColor 1.5 -0.3 2.0\n",
                           hi, nullptr, &err),
           "an over-1 subsurfaceWeight/subsurfaceRadius parses, rather than failing the file");
     check(near(hi.subsurfaceWeight, 1.0f), "...subsurfaceWeight is clamped down to 1.0, not kept at 1.4");
     check(near(hi.subsurfaceRadius, 1.0f), "...subsurfaceRadius is clamped down to 1.0, not kept at 2.0");
+    check(near(hi.subsurfaceColor[0], 1.0f) && near(hi.subsurfaceColor[1], 0.0f) &&
+          near(hi.subsurfaceColor[2], 1.0f),
+          "...subsurfaceColor is clamped per channel into [0,1], both directions at once");
 
     // ---- the coat: written only when on, read back exactly, clamped at both ends ----
     //
@@ -577,12 +601,16 @@ static void testSubsurface() {
     // transmission case uses for the identical reason: ior 1.9 is not its 1.5 default, so it proves
     // this file was parsed line by line rather than abandoned, whatever the subsurface fields do.
     pbr::MaterialDesc lo;
-    check(fmt::parseOcmat("OCMAT 1\nPARAM ior 1.9\nPARAM subsurfaceWeight -0.3\nPARAM subsurfaceRadius -1.0\n",
+    check(fmt::parseOcmat("OCMAT 1\nPARAM ior 1.9\nPARAM subsurfaceWeight -0.3\nPARAM subsurfaceRadius -1.0\n"
+                          "PARAM subsurfaceColor -0.5 0.4 -2.0\n",
                           lo, nullptr, &err),
           "a negative subsurfaceWeight/subsurfaceRadius parses, rather than failing the file");
     check(near(lo.ior, 1.9f), "...ior alongside it still reads correctly, so the file was not simply dropped");
     check(near(lo.subsurfaceWeight, 0.0f), "...but subsurfaceWeight is clamped up to 0, not kept negative");
     check(near(lo.subsurfaceRadius, 0.0f), "...and subsurfaceRadius is clamped up to 0 too");
+    check(near(lo.subsurfaceColor[0], 0.0f) && near(lo.subsurfaceColor[1], 0.4f) &&
+          near(lo.subsurfaceColor[2], 0.0f),
+          "...and subsurfaceColor's negative channels are clamped up to 0, the positive one kept as authored");
 }
 
 // PARAM lightIntensity: turns a material into a ray-driven local light, a multiplier on the light
@@ -730,6 +758,9 @@ static void testPack() {
     // reasoning as every offset above: three hand-maintained mirrors, and a field moved in one of
     // them shades a material with its neighbour's bytes rather than failing to build.
     check(offsetof(pbr::MaterialConstants, lightIntensity)      == 160, "lightIntensity at 160");
+    // subsurfaceColor spends the row's other three floats -- the ones lightIntensity's own comment
+    // said were padding -- so the block stays 176 bytes. Same reasoning as every offset above.
+    check(offsetof(pbr::MaterialConstants, subsurfaceColor)     == 164, "subsurfaceColor at 164");
 
     // ---- AND NOW THE OTHER TWO MIRRORS, WHICH THIS BLOCK NEVER USED TO OPEN ----
     //
@@ -866,6 +897,8 @@ static void testPack() {
     check(near(c.ior, 1.52f), "ior survives packMaterial");
     check(near(c.alphaCutoff, 0.25f), "alphaCutoff survives packMaterial");
     check(near(c.baseColorFactor[3], 0.12f), "baseColorFactor.a is NOT sRGB-decoded, only rgb is");
+    check(near(c.baseColorFactor[0], std::pow(0.86f, 2.2f), 1e-4f),
+          "while baseColorFactor.rgb IS: the .ocmat holds it sRGB-encoded, decoded with pow 2.2");
     check((c.flags & pbr::MaterialFlag_AlphaBlend) != 0, "BLEND translucent sets AlphaBlend");
     check((c.flags & pbr::MaterialFlag_AlphaMask) == 0, "...and not AlphaMask");
 
@@ -890,6 +923,19 @@ static void testPack() {
     check(near(c.subsurfaceRadius, 0.35f), "subsurfaceRadius survives packMaterial");
     check((c.flags & pbr::MaterialFlag_Subsurface) != 0,
           "subsurfaceWeight > 0 sets MaterialFlag_Subsurface (bit 14)");
+
+    // subsurfaceColor is DECODED like baseColorFactor above (sRGB -> linear, pow 2.2), NOT forwarded
+    // raw the way attenuationColor and subsurfaceWeight/Radius are just above -- it is picked in the
+    // same colour swatch widget baseColorFactor is, so it needs the same gamma correction
+    // (MaterialGpu.cpp's packMaterial: "picked as a colour, in the same swatch widget"). 0 and 1 are
+    // both fixed points of pow(x, 2.2), so 0.5 is the one value that actually discriminates a decode
+    // from a pass-through: pow(0.5, 2.2) ~= 0.2176.
+    g.subsurfaceColor[0] = 0.5f; g.subsurfaceColor[1] = 1.0f; g.subsurfaceColor[2] = 0.0f;
+    c = pbr::packMaterial(g);
+    check(std::fabs(c.subsurfaceColor[0] - 0.2176f) < 0.001f,
+          "subsurfaceColor is sRGB-decoded: 0.5 -> ~0.2176, not passed through raw");
+    check(near(c.subsurfaceColor[1], 1.0f), "...1.0 decodes to 1.0 (pow(1,2.2)=1, a fixed point)");
+    check(near(c.subsurfaceColor[2], 0.0f), "...and 0.0 decodes to 0.0, the other fixed point");
 
     // KEYED ON THE WEIGHT ALONE (packMaterial's own comment): a radius with no weight scatters
     // nothing, so the flag must stay clear even though the radius is still nonzero here.
@@ -1393,6 +1439,70 @@ static void testCook() {
     std::filesystem::remove_all(dir, ec);
 }
 
+// A FLAT IMPORTED COLOUR, END TO END: glTF file -> importer -> cook -> .ocmat on disk -> parser ->
+// packed GPU block. glTF's baseColorFactor is LINEAR and the .ocmat holds it sRGB-encoded, so the cook
+// has to encode it for the pack step's decode to hand the shader the colour the file stated. It used
+// to cross unconverted and be decoded anyway: a flat 0.5 grey reached the shader as 0.5^2.2 = 0.22.
+// An OBJ-style factor (Kd, recorded as sRGB) rides alongside and must cross untouched.
+static void testImportedColour() {
+    AVER_INFO("=== an imported flat colour reaches the packed block unchanged ===");
+
+    // The smallest document the importer accepts: an accessor with no bufferView reads as zeros, so
+    // the mesh is a degenerate triangle and no buffer is needed -- only the material matters here.
+    const std::string json =
+        "{\"asset\":{\"version\":\"2.0\"},"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0}]}],"
+        "\"accessors\":[{\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}],"
+        "\"materials\":[{\"name\":\"Grey\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.5,0.5,0.5,0.25]}}]}";
+    fmt::GltfImportResult res;
+    std::string why;
+    check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+          "the glTF fixture imports: " + why);
+    if (res.materials.size() != 1) { check(false, "and has its one material"); return; }
+
+    std::vector<fmt::ImportedMaterial> mats = res.materials;
+    fmt::ImportedMaterial kd;
+    kd.name = "Kd";
+    kd.baseColorFactor[0] = kd.baseColorFactor[1] = kd.baseColorFactor[2] = 0.5f;
+    kd.baseColorFactorLinear = false;
+    mats.push_back(kd);
+
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "aver_material_colour_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fmt::MaterialCookOptions opt;
+    opt.contentDir = dir.string();
+    opt.assetBase  = "Colour";
+    opt.overwriteExisting = true;
+    fmt::MaterialCookResult cooked;
+    std::string err;
+    check(fmt::cookMaterials(mats, {}, opt, cooked, nullptr, &err), "the cook runs: " + err);
+
+    pbr::MaterialDesc grey, kdDesc;
+    check(fmt::loadOcmat((dir / "Materials" / "Colour_Grey.ocmat").string(), grey),
+          "the glTF material's .ocmat reads back");
+    check(fmt::loadOcmat((dir / "Materials" / "Colour_Kd.ocmat").string(), kdDesc),
+          "and so does the sRGB one's");
+
+    check(near(grey.baseColorFactor[0], std::pow(0.5f, 1.0f / 2.2f), 1e-4f),
+          "the .ocmat holds the linear 0.5 sRGB-encoded (0.7297), the file format's own encoding");
+    check(near(grey.baseColorFactor[3], 0.25f), "alpha is coverage and crosses as it is");
+    const pbr::MaterialConstants gc = pbr::packMaterial(grey);
+    check(near(gc.baseColorFactor[0], 0.5f, 1e-4f) && near(gc.baseColorFactor[1], 0.5f, 1e-4f) &&
+          near(gc.baseColorFactor[2], 0.5f, 1e-4f),
+          "and the shader gets the 0.5 the glTF stated -- not 0.22");
+    check(near(gc.baseColorFactor[3], 0.25f), "with alpha still 0.25");
+
+    check(near(kdDesc.baseColorFactor[0], 0.5f, 1e-5f),
+          "a factor already in sRGB (OBJ's Kd) is written unconverted");
+    const pbr::MaterialConstants kc = pbr::packMaterial(kdDesc);
+    check(near(kc.baseColorFactor[0], std::pow(0.5f, 2.2f), 1e-4f),
+          "and decodes as the sRGB colour it always was");
+
+    std::filesystem::remove_all(dir, ec);
+}
+
 // Runs every material test. Returns the failure count.
 int main() {
     testFullParse();
@@ -1409,6 +1519,7 @@ int main() {
     testGeneratedByCsharp();
     testScriptRewrite();
     testCook();
+    testImportedColour();
 
     if (g_failures == 0) AVER_INFO("=== all material tests passed ===");
     else AVER_ERROR("=== {} material assertion(s) failed ===", g_failures);

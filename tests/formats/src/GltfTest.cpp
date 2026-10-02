@@ -3,6 +3,7 @@
 #include "aver/formats/GltfImport.hpp"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -158,6 +159,125 @@ static void faceNormal(const fmt::OcMeshData& m, f32 out[3]) {
     out[2] = e1[0]*e2[1]-e1[1]*e2[0];
     const f32 len = std::sqrt(out[0]*out[0]+out[1]*out[1]+out[2]*out[2]);
     if (len > 1e-12f) { out[0]/=len; out[1]/=len; out[2]/=len; }
+}
+
+// A document around one SLANTED triangle that carries NORMALS: on the plane x + y = 1, wound (glTF
+// counter-clockwise) to face (1,1,0)/sqrt2, with that normal authored on every vertex. No
+// axis-aligned scale leaves a slanted normal alone, which is what the node-basis cases need. The
+// caller supplies the nodes array and the scene's root list; the one mesh is called "Slant".
+static std::string slantedJson(const std::string& nodes, const std::string& roots) {
+    std::vector<u8> bin;
+    const f32 p[9] = {1, 0, 0,   1, 0, -1,   0, 1, 0};
+    for (const f32 v : p) putF(bin, v);
+    for (int i = 0; i < 3; ++i) { putF(bin, 0.70710678f); putF(bin, 0.70710678f); putF(bin, 0.0f); }
+    putU16(bin, 0); putU16(bin, 1); putU16(bin, 2); putU16(bin, 0);   // the last pads to 4 bytes
+    return std::string("{")
+      + "\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      + "\"scenes\":[{\"nodes\":" + roots + "}],"
+      + "\"nodes\":" + nodes + ","
+      + "\"meshes\":[{\"name\":\"Slant\",\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1},\"indices\":2}]}],"
+      + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64(bin)
+        + "\",\"byteLength\":" + std::to_string(bin.size()) + "}],"
+      + "\"bufferViews\":["
+        + "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+        + "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36},"
+        + "{\"buffer\":0,\"byteOffset\":72,\"byteLength\":6}"
+      + "],"
+      + "\"accessors\":["
+        + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}"
+      + "]}";
+}
+
+// The placement a node of this name produced, or null.
+static const fmt::GltfPlacement* placementNamed(const fmt::GltfImportResult& r, const std::string& name) {
+    for (const fmt::GltfPlacement& p : r.placements) if (p.name == name) return &p;
+    return nullptr;
+}
+
+// The index of the object clip of this name, or -1.
+static int objectClipNamed(const fmt::GltfImportResult& r, const std::string& name) {
+    for (usize i = 0; i < r.objectAnimationNames.size(); ++i)
+        if (r.objectAnimationNames[i] == name) return static_cast<int>(i);
+    return -1;
+}
+
+// A buffer view spelled as JSON.
+static std::string viewJson(usize off, usize len) {
+    return "{\"buffer\":0,\"byteOffset\":" + std::to_string(off) + ",\"byteLength\":" + std::to_string(len) + "}";
+}
+
+// A document for object animation: the Tri triangle, and the file's own accessors 2 (two key times, 0 and
+// 1 s), 3 (two translations, (0,0,2) then (0,4,2) metres), 4 (two rotations, 90 then 180 degrees about
+// glTF Z), 5 (two identical translations, (1,2,3)), 6 (two scales, (1,1,1) then (0,0,0)) and 7 (two key
+// times, 0 and 0.5 s), for the caller's nodes and animations to use.
+static std::string objectAnimJson(const std::string& nodes, const std::string& roots, const std::string& animations) {
+    const Tri tri = makeTriangleBuffer();
+    std::vector<u8> bin = tri.bin;
+    const usize timeOff = bin.size();
+    putF(bin, 0.0f); putF(bin, 1.0f);
+    const usize transOff = bin.size();
+    putF(bin, 0); putF(bin, 0); putF(bin, 2);
+    putF(bin, 0); putF(bin, 4); putF(bin, 2);
+    const usize rotOff = bin.size();
+    putF(bin, 0); putF(bin, 0); putF(bin, 0.70710678f); putF(bin, 0.70710678f);
+    putF(bin, 0); putF(bin, 0); putF(bin, 1.0f);        putF(bin, 0.0f);
+    const usize constOff = bin.size();
+    putF(bin, 1); putF(bin, 2); putF(bin, 3);
+    putF(bin, 1); putF(bin, 2); putF(bin, 3);
+    const usize scaleOff = bin.size();
+    putF(bin, 1); putF(bin, 1); putF(bin, 1);
+    putF(bin, 0); putF(bin, 0); putF(bin, 0);
+    const usize shortTimeOff = bin.size();
+    putF(bin, 0.0f); putF(bin, 0.5f);
+    return std::string("{")
+      + "\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      + "\"scenes\":[{\"nodes\":" + roots + "}],"
+      + "\"nodes\":" + nodes + ","
+      + "\"meshes\":[{\"name\":\"Tri\",\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+      + "\"animations\":" + animations + ","
+      + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64(bin)
+        + "\",\"byteLength\":" + std::to_string(bin.size()) + "}],"
+      + "\"bufferViews\":[" + viewJson(tri.posOff, tri.posLen) + "," + viewJson(tri.idxOff, tri.idxLen) + ","
+        + viewJson(timeOff, 8) + "," + viewJson(transOff, 24) + "," + viewJson(rotOff, 32) + ","
+        + viewJson(constOff, 24) + "," + viewJson(scaleOff, 24) + "," + viewJson(shortTimeOff, 8) + "],"
+      + "\"accessors\":["
+        + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
+        + "{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"},"
+        + "{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"},"
+        + "{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":7,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"}"
+      + "]}";
+}
+
+// An object clip's transform at `t`: Linear keys, translation lerped and rotation slerped, scale when
+// the track carries it.
+static Transform objectPoseAt(const fmt::OcTrack& tr, f32 t) {
+    const usize stride = tr.componentsPerKey();
+    usize k = 0;
+    while (k + 2 < tr.times.size() && t >= tr.times[k + 1]) ++k;
+    const usize k1 = std::min(k + 1, tr.times.size() - 1);
+    const f32 span = tr.times[k1] - tr.times[k];
+    const f32 s = span > 0.0f ? std::clamp((t - tr.times[k]) / span, 0.0f, 1.0f) : 0.0f;
+    const f32* a = &tr.values[k * stride];
+    const f32* b = &tr.values[k1 * stride];
+    Transform x;
+    x.position = Vec3{a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s};
+    x.rotation = Quat::slerp(Quat{a[3], a[4], a[5], a[6]}, Quat{b[3], b[4], b[5], b[6]}, s);
+    if (tr.channels & fmt::kOcChannelScale)
+        x.scale = Vec3{a[7] + (b[7] - a[7]) * s, a[8] + (b[8] - a[8]) * s, a[9] + (b[9] - a[9]) * s};
+    return x;
+}
+
+// A point through a row-vector matrix.
+static Vec3 transformPoint(const Mat4& m, const Vec3& v) {
+    return Vec3{v.x*m.m[0][0] + v.y*m.m[1][0] + v.z*m.m[2][0] + m.m[3][0],
+                v.x*m.m[0][1] + v.y*m.m[1][1] + v.z*m.m[2][1] + m.m[3][1],
+                v.x*m.m[0][2] + v.y*m.m[1][2] + v.z*m.m[2][2] + m.m[3][2]};
 }
 
 // Runs every glTF import test. Returns 0 when they all pass.
@@ -1112,6 +1232,380 @@ int main() {
               "and the slot falls back to uv0, the only set that exists");
         check(res.materials.size() == 1 && res.materials[0].baseColorTex.imageIndex == 0,
               "the texture still binds -- an unsupported extension does not cost the texture");
+    }
+    {
+        // A FLAT baseColorFactor IS RECORDED AS THE FILE WROTE IT, AND MARKED LINEAR. glTF defines the
+        // factor as linear; the .ocmat holds it sRGB-encoded, and the cook converts on the strength of
+        // this flag (MaterialTest checks the whole chain down to the packed block). Before the flag, a
+        // 0.5 grey crossed unconverted and was decoded as sRGB at pack time: 0.5^2.2 = 0.22.
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Grey\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.5,0.5,0.5,1]}}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a flat-colour material imports: " + why);
+        if (res.materials.size() == 1) {
+            checkNear(res.materials[0].baseColorFactor[0], 0.5f, 1e-6f, "the factor is recorded verbatim");
+            check(res.materials[0].baseColorFactorLinear, "and marked LINEAR, as the glTF spec defines it");
+        }
+    }
+
+    // ---- NODE BASES: instancing, non-uniform scale, mirroring ----------------------------------
+    AVER_INFO("=== one mesh named by several nodes ===");
+    {
+        // BLENDER'S LINKED DUPLICATES. A and B instance the mesh translated only; R rotates it a
+        // quarter turn about glTF +Y. Every node used to import the mesh again INTO THE SAME ENTRY,
+        // appending: one mesh of nine vertices, drawn in full at each of the three placements, two of
+        // its copies baked with another node's rotation. Now A and B share one entry and R gets its
+        // own. Placements are looked up by node name, not order -- the scene walk is a stack.
+        const std::string json = slantedJson(
+            "[{\"name\":\"A\",\"mesh\":0,\"translation\":[5,0,0]},"
+            "{\"name\":\"B\",\"mesh\":0,\"translation\":[-5,0,0]},"
+            "{\"name\":\"R\",\"mesh\":0,\"rotation\":[0,0.70710678,0,0.70710678]}]", "[0,1,2]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a mesh instanced by three nodes imports: " + why);
+        check(res.meshes.size() == 2, "two meshes: one per distinct node basis, not one per node");
+        bool eachOnce = !res.meshes.empty();
+        for (const fmt::OcMeshData& m : res.meshes)
+            eachOnce = eachOnce && m.vertexCount() == 3 && m.indices.size() == 3 && m.submeshes.size() == 1;
+        check(eachOnce, "and each holds the triangle ONCE -- nothing appended per node");
+        check(res.meshNames.size() == res.meshes.size() && res.meshSkinIndex.size() == res.meshes.size(),
+              "the arrays parallel to meshes grew with it");
+        check(res.meshNames.size() == 2 &&
+              ((res.meshNames[0] == "Slant" && res.meshNames[1] == "Slant_2") ||
+               (res.meshNames[1] == "Slant" && res.meshNames[0] == "Slant_2")),
+              "the copy has its own name, so the editor's one-file-per-mesh import cannot overwrite the first");
+        check(res.placements.size() == 3, "one placement per node, still");
+        const fmt::GltfPlacement* a = placementNamed(res, "A");
+        const fmt::GltfPlacement* b = placementNamed(res, "B");
+        const fmt::GltfPlacement* r = placementNamed(res, "R");
+        check(a && b && r, "every node's placement is there by name");
+        if (a && b && r && usize(a->meshIndex) < res.meshes.size() && usize(r->meshIndex) < res.meshes.size()) {
+            check(a->meshIndex == b->meshIndex, "A and B, translated only, share one mesh");
+            check(r->meshIndex != a->meshIndex, "R, rotated, has its own");
+            checkNear(a->position.y, 500.0f, 1e-2f, "A's translation is in its placement (glTF +X 5 m -> engine +Y)");
+            checkNear(b->position.y, -500.0f, 1e-2f, "and B's in its own");
+            // Vertex 0 is glTF (1,0,0): unrotated it is engine +Y 100 cm; a quarter turn about +Y
+            // sends glTF +X to -Z, which is engine +X.
+            const fmt::OcMeshData& ma = res.meshes[usize(a->meshIndex)];
+            const fmt::OcMeshData& mr = res.meshes[usize(r->meshIndex)];
+            checkNear(ma.positions[1], 100.0f, 1e-2f, "A's mesh is unrotated: vertex 0 on engine +Y");
+            checkNear(mr.positions[0], 100.0f, 1e-2f, "R's mesh carries R's rotation: vertex 0 on engine +X");
+            checkNear(mr.positions[1], 0.0f, 1e-2f, "and not also A's");
+        }
+    }
+
+    AVER_INFO("=== a non-uniform scale bends normals the right way ===");
+    {
+        // Scale (2,1,1) stretches the slanted plane x + y = 1 into x/2 + y = 1, whose normal is
+        // (1,2,0)/sqrt5 -- steeper toward +Y, not toward +X. The inverse-transpose gives that; the
+        // basis itself, which normals used to take, gives (2,1,0)/sqrt5, bent the wrong way.
+        const std::string json = slantedJson("[{\"mesh\":0,\"scale\":[2,1,1]}]", "[0]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a mesh under a (2,1,1) scale imports: " + why);
+        if (res.meshes.size() == 1 && res.meshes[0].normals.size() >= 3) {
+            const fmt::OcMeshData& m = res.meshes[0];
+            checkNear(m.positions[1], 200.0f, 1e-2f, "the scale reached the vertices (glTF x 2 m -> engine +Y 200 cm)");
+            // glTF (1,2,0)/sqrt5 -> engine (-z, x, y) = (0, 0.447, 0.894).
+            checkNear(m.normals[0], 0.0f, 1e-3f, "the scaled normal: engine x");
+            checkNear(m.normals[1], 0.4472136f, 1e-3f, "engine y is the SMALLER component");
+            checkNear(m.normals[2], 0.8944272f, 1e-3f, "engine z the larger");
+            f32 f[3]; faceNormal(m, f);
+            checkNear(f[0]*m.normals[0] + f[1]*m.normals[1] + f[2]*m.normals[2], 1.0f, 1e-3f,
+                      "and the stored normal IS the stretched face's normal");
+        }
+    }
+
+    AVER_INFO("=== a mirroring node does not turn its mesh inside out ===");
+    {
+        // Scale (-1,1,1): Blender's Ctrl-M. The mirror has determinant -1, so it reverses winding just
+        // as the handedness change does, and the two must cancel -- the importer used to count only the
+        // handedness change, so a mirrored mesh's triangles faced inward while its normals faced out.
+        const std::string json = slantedJson("[{\"mesh\":0,\"scale\":[-1,1,1]}]", "[0]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a mesh under a (-1,1,1) scale imports: " + why);
+        if (res.meshes.size() == 1 && res.meshes[0].normals.size() >= 3) {
+            const fmt::OcMeshData& m = res.meshes[0];
+            // The mirror image of (1,1,0)/sqrt2 is (-1,1,0)/sqrt2 -> engine (0, -0.707, 0.707).
+            checkNear(m.normals[1], -0.70710678f, 1e-3f, "the mirrored normal: engine y");
+            checkNear(m.normals[2], 0.70710678f, 1e-3f, "engine z");
+            f32 f[3]; faceNormal(m, f);
+            checkNear(f[0]*m.normals[0] + f[1]*m.normals[1] + f[2]*m.normals[2], 1.0f, 1e-3f,
+                      "and the WINDING agrees with it -- the face points out, not in");
+        }
+
+        // The same mirror with NO authored normals: the generated ones come from the winding, so a
+        // wrong winding showed up as a floor lit from underneath. The up-facing triangle stays up.
+        std::string flat = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
+        const std::string from = "\"nodes\":[{\"mesh\":0}]";
+        const std::string to   = "\"nodes\":[{\"mesh\":0,\"scale\":[-1,1,1]}]";
+        const usize at = flat.find(from);
+        check(at != std::string::npos, "test fixture patched");
+        if (at != std::string::npos) flat.replace(at, from.size(), to);
+        fmt::GltfImportResult gen; std::string gwhy;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(flat.data()), flat.size(), "", gen, {}, &gwhy),
+              "a mirrored mesh without normals imports: " + gwhy);
+        if (gen.meshes.size() == 1 && gen.meshes[0].normals.size() >= 3)
+            checkNear(gen.meshes[0].normals[2], 1.0f, 1e-3f, "its generated normal still points up");
+    }
+
+    AVER_INFO("=== an animated mesh node becomes an object clip that plays its authored motion ===");
+    {
+        // "Car" sits under a static parent that is rotated 90 degrees about Y, scaled 2x and moved 10 m
+        // along X. The car's translation (0,0,2) -> (0,4,2) m and rotation 90 -> 180 degrees about Z are
+        // animated over one second; its own TRS is its first key, as a DCC exports it.
+        const std::string s45 = "0.70710678";
+        const std::string json = objectAnimJson(
+            "[{\"name\":\"Parent\",\"translation\":[10,0,0],\"scale\":[2,2,2],\"rotation\":[0," + s45 + ",0," + s45 + "],\"children\":[1]},"
+            "{\"name\":\"Car\",\"mesh\":0,\"translation\":[0,0,2],\"rotation\":[0,0," + s45 + "," + s45 + "]}]",
+            "[0]",
+            "[{\"name\":\"Drive\",\"channels\":["
+              "{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"translation\"}},"
+              "{\"sampler\":1,\"target\":{\"node\":1,\"path\":\"rotation\"}}],"
+              "\"samplers\":[{\"input\":2,\"output\":3,\"interpolation\":\"LINEAR\"},"
+                            "{\"input\":2,\"output\":4,\"interpolation\":\"LINEAR\"}]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "an animated mesh node under a rotated, scaled parent imports: " + why);
+        check(res.placements.size() == 1 && res.meshes.size() == 1, "one placement of one mesh");
+        check(res.animations.empty(), "there is no skeletal clip");
+        check(res.objectAnimations.size() == 1 && res.objectAnimationNames.size() == 1 &&
+              res.objectAnimationPlacement.size() == 1, "one object clip, with its name and placement index");
+        check(!noted(res, "not a joint") && !noted(res, "no skin"),
+              "its channels are not reported as dropped");
+
+        if (res.objectAnimations.size() == 1 && res.placements.size() == 1 && res.meshes.size() == 1) {
+            const fmt::OcAnimation& a = res.objectAnimations[0];
+            check(res.objectAnimationNames[0] == "Car", "named after the node, which is animated in one glTF animation");
+            check(res.objectAnimationPlacement[0] == 0, "attached to the node's placement");
+            check((a.flags & fmt::kOcAnimObject) && (a.flags & fmt::kOcAnimLoop), "flagged object and loop");
+            check(a.skeletonRef.empty(), "with no skeleton");
+            check(a.valid(), "and it is a valid clip");
+            checkNear(a.duration, 1.0f, 1e-5f, "one second long");
+            check(a.tracks.size() == 1 && a.tracks[0].boneIndex == 0, "one track, on bone 0");
+            if (a.tracks.size() == 1) {
+                const fmt::OcTrack& tr = a.tracks[0];
+                check(tr.channels == (fmt::kOcChannelTranslation | fmt::kOcChannelRotation),
+                      "translation and rotation, no scale: nothing in the chain scales over time");
+                check(tr.interp == fmt::OcInterp::Linear && tr.times.size() == 2 &&
+                      tr.times[0] == 0.0f && tr.times[1] == 1.0f,
+                      "Linear, with keys exactly at the source keys");
+
+                // F(t) = A(t) * A(0)^-1 * B in row vectors (A(t) acts first) carries the mesh's BAKED
+                // vertex to where the node really is. The expectation is worked out in glTF space from
+                // the numbers in the file above, and only then converted: (x, y, z) -> (-z, x, y) * 100.
+                const fmt::GltfPlacement& pl = res.placements[0];
+                Transform place; place.position = pl.position;
+                const Mat4 B = place.toMatrix();
+                const Mat4 a0inv = objectPoseAt(tr, 0.0f).toMatrix().inverse();
+                const fmt::OcMeshData& m = res.meshes[usize(pl.meshIndex)];
+                const Quat parentRot = Quat::fromAxisAngle(Vec3{0, 1, 0}, 1.57079633f);
+                const f32 local[3][3] = {{0, 0, 0}, {1, 0, 0}, {0, 0, -1}};   // the triangle, in the node
+                check(m.positions.size() == 9, "the triangle came through");
+                for (const f32 t : {0.0f, 0.5f, 1.0f}) {
+                    const Mat4 F = objectPoseAt(tr, t).toMatrix() * a0inv * B;
+                    const Quat carRot = Quat::fromAxisAngle(Vec3{0, 0, 1}, (90.0f + 90.0f * t) * 0.0174532925f);
+                    for (int i = 0; i < 3 && m.positions.size() == 9; ++i) {
+                        const Vec3 p{local[i][0], local[i][1], local[i][2]};
+                        const Vec3 inParent = carRot.rotate(p) + Vec3{0, 4.0f * t, 2};
+                        const Vec3 wg = parentRot.rotate(inParent) * 2.0f + Vec3{10, 0, 0};
+                        const Vec3 want{-wg.z * 100.0f, wg.x * 100.0f, wg.y * 100.0f};
+                        const Vec3 got = transformPoint(F, Vec3{m.positions[usize(i)*3], m.positions[usize(i)*3+1],
+                                                                m.positions[usize(i)*3+2]});
+                        const std::string at = " (vertex " + std::to_string(i) + " at t=" + std::to_string(t) + ")";
+                        checkNear(got.x, want.x, 0.05f, "the baked vertex lands on the node's true world x" + at);
+                        checkNear(got.y, want.y, 0.05f, "y" + at);
+                        checkNear(got.z, want.z, 0.05f, "z" + at);
+                    }
+                }
+            }
+        }
+    }
+
+    AVER_INFO("=== a route driver, animated twice: no mesh, names carry the animation, STEP survives ===");
+    {
+        // An empty ("Route") animated by two glTF animations, one LINEAR and one STEP, on a file with no
+        // skin at all. Neither used to import: a skinless file's animations were dropped unread.
+        const std::string chan = "\"channels\":[{\"sampler\":0,\"target\":{\"node\":0,\"path\":\"translation\"}}],";
+        const std::string json = objectAnimJson(
+            "[{\"name\":\"Route\"},{\"name\":\"Prop\",\"mesh\":0}]", "[0,1]",
+            "[{\"name\":\"A\"," + chan + "\"samplers\":[{\"input\":2,\"output\":3}]},"
+             "{\"name\":\"B\"," + chan + "\"samplers\":[{\"input\":2,\"output\":3,\"interpolation\":\"STEP\"}]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a skinless file with animated empties imports: " + why);
+        check(!noted(res, "no skin"), "and does not say its animations were dropped for want of a skin");
+        check(res.animations.empty(), "no skeletal clips");
+        check(res.objectAnimations.size() == 2 && res.objectAnimationNames.size() == 2 &&
+              res.objectAnimationPlacement.size() == 2, "one object clip per glTF animation");
+        if (res.objectAnimations.size() == 2 && res.objectAnimationNames.size() == 2 &&
+            res.objectAnimationPlacement.size() == 2) {
+            check(res.objectAnimationNames[0] == "A_Route" && res.objectAnimationNames[1] == "B_Route",
+                  "the node is animated in two glTF animations, so each name is <animation>_<node>");
+            check(res.objectAnimationPlacement[0] == -1 && res.objectAnimationPlacement[1] == -1,
+                  "an empty has no placement");
+            check(res.objectAnimations[0].tracks.size() == 1 && res.objectAnimations[1].tracks.size() == 1,
+                  "each is one track");
+            if (res.objectAnimations[0].tracks.size() == 1 && res.objectAnimations[1].tracks.size() == 1) {
+                const fmt::OcTrack& lin = res.objectAnimations[0].tracks[0];
+                const fmt::OcTrack& stp = res.objectAnimations[1].tracks[0];
+                check(lin.interp == fmt::OcInterp::Linear, "the LINEAR sampler gives a Linear track");
+                check(stp.interp == fmt::OcInterp::Step, "the STEP sampler gives a Step track");
+                check(lin.times.size() == 2 && lin.values.size() == 14, "two keys of translation and rotation");
+                if (lin.values.size() == 14) {
+                    // No mesh, so nothing was baked and A(t) is the node's world transform itself:
+                    // glTF (0,0,2) m -> engine (-200, 0, 0) cm and (0,4,2) m -> (-200, 0, 400) cm.
+                    checkNear(lin.values[0], -200.0f, 1e-2f, "key 0 x");
+                    checkNear(lin.values[1], 0.0f, 1e-2f, "key 0 y");
+                    checkNear(lin.values[2], 0.0f, 1e-2f, "key 0 z");
+                    checkNear(lin.values[7 + 0], -200.0f, 1e-2f, "key 1 x");
+                    checkNear(lin.values[7 + 2], 400.0f, 1e-2f, "key 1 z: 4 m along glTF Y is 400 cm up");
+                    checkNear(lin.values[6], 1.0f, 1e-5f, "an unrotated node has the identity rotation");
+                }
+            }
+        }
+    }
+
+    AVER_INFO("=== a static mesh under an animated empty follows it ===");
+    {
+        // "Pivot" is an empty turned 90 -> 180 degrees about Z over one second (its own rotation is the first
+        // key). "Prop" is a mesh node with NO channels, 2 m out from it. Prop used to get no clip and stay
+        // frozen at its placement while the pivot turned.
+        const std::string s45 = "0.70710678";
+        const std::string json = objectAnimJson(
+            "[{\"name\":\"Pivot\",\"rotation\":[0,0," + s45 + "," + s45 + "],\"children\":[1]},"
+            "{\"name\":\"Prop\",\"mesh\":0,\"translation\":[2,0,0]}]",
+            "[0]",
+            "[{\"name\":\"Spin\",\"channels\":[{\"sampler\":0,\"target\":{\"node\":0,\"path\":\"rotation\"}}],"
+              "\"samplers\":[{\"input\":2,\"output\":4,\"interpolation\":\"LINEAR\"}]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a static mesh under an animated empty imports: " + why);
+        check(res.placements.size() == 1 && res.meshes.size() == 1, "one placement of one mesh");
+        check(res.objectAnimations.size() == 2 && res.objectAnimationNames.size() == 2 &&
+              res.objectAnimationPlacement.size() == 2, "a clip for the empty AND one for the mesh that rides on it");
+        const int pivot = objectClipNamed(res, "Pivot");
+        const int prop  = objectClipNamed(res, "Prop");
+        check(pivot >= 0 && prop >= 0, "each is named after its node");
+        if (pivot >= 0 && prop >= 0 && res.placements.size() == 1 && res.meshes.size() == 1) {
+            check(res.objectAnimationPlacement[usize(pivot)] == -1, "the empty has no placement");
+            const i32 plIdx = res.objectAnimationPlacement[usize(prop)];
+            check(plIdx == 0, "the child's clip names its placement");
+            const fmt::OcAnimation& a = res.objectAnimations[usize(prop)];
+            check(a.valid() && (a.flags & fmt::kOcAnimObject), "a valid object clip");
+            checkNear(a.duration, 1.0f, 1e-5f, "as long as the animation");
+            if (a.tracks.size() == 1 && plIdx == 0) {
+                const fmt::OcTrack& tr = a.tracks[0];
+                check(tr.times.size() > 2, "sampled between the keys: the parent's turn swings the child on an arc");
+
+                // F(t) = A(t) * A(0)^-1 * B (row vectors) must carry the baked vertex to where the node
+                // really is: the triangle's point plus the node's (2,0,0) offset, turned by the pivot's
+                // (90 + 90 t) degrees about glTF Z, then (x, y, z) -> (-z, x, y) * 100.
+                const fmt::GltfPlacement& pl = res.placements[0];
+                Transform place; place.position = pl.position;
+                const Mat4 B = place.toMatrix();
+                const Mat4 a0inv = objectPoseAt(tr, 0.0f).toMatrix().inverse();
+                const fmt::OcMeshData& m = res.meshes[usize(pl.meshIndex)];
+                const f32 local[3][3] = {{0, 0, 0}, {1, 0, 0}, {0, 0, -1}};
+                check(m.positions.size() == 9, "the triangle came through");
+                for (const f32 t : {0.0f, 0.5f, 1.0f}) {
+                    const Mat4 F = objectPoseAt(tr, t).toMatrix() * a0inv * B;
+                    const Quat pivotRot = Quat::fromAxisAngle(Vec3{0, 0, 1}, (90.0f + 90.0f * t) * 0.0174532925f);
+                    for (int i = 0; i < 3 && m.positions.size() == 9; ++i) {
+                        const Vec3 p{local[i][0], local[i][1], local[i][2]};
+                        const Vec3 wg = pivotRot.rotate(p + Vec3{2, 0, 0});
+                        const Vec3 want{-wg.z * 100.0f, wg.x * 100.0f, wg.y * 100.0f};
+                        const Vec3 got = transformPoint(F, Vec3{m.positions[usize(i)*3], m.positions[usize(i)*3+1],
+                                                                m.positions[usize(i)*3+2]});
+                        const std::string at = " (vertex " + std::to_string(i) + " at t=" + std::to_string(t) + ")";
+                        checkNear(got.x, want.x, 0.05f, "the child's baked vertex lands on its true world x" + at);
+                        checkNear(got.y, want.y, 0.05f, "y" + at);
+                        checkNear(got.z, want.z, 0.05f, "z" + at);
+                    }
+                }
+            }
+        }
+    }
+
+    AVER_INFO("=== a child of a node whose channels never move gets no clip ===");
+    {
+        // "Still" has a translation channel whose two keys are equal, so "Rider" under it never moves. The
+        // empty keeps its own clip (it has channels); the mesh does not get a clip that plays nothing.
+        const std::string json = objectAnimJson(
+            "[{\"name\":\"Still\",\"children\":[1]},{\"name\":\"Rider\",\"mesh\":0}]", "[0]",
+            "[{\"name\":\"Hold\",\"channels\":[{\"sampler\":0,\"target\":{\"node\":0,\"path\":\"translation\"}}],"
+              "\"samplers\":[{\"input\":2,\"output\":5}]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a child of a constant channel imports: " + why);
+        check(res.objectAnimations.size() == 1 && objectClipNamed(res, "Still") == 0,
+              "only the node with channels gets a clip");
+        check(objectClipNamed(res, "Rider") < 0, "the child that never moves gets none");
+    }
+
+    AVER_INFO("=== a scale keyed to zero stays zero ===");
+    {
+        // A node shrunk from scale 1 to nothing over one second. The collapsed key used to be recorded as
+        // scale 1 (decomposeTrs' answer for a degenerate axis), so the object popped back to full size.
+        const std::string json = objectAnimJson(
+            "[{\"name\":\"Blob\",\"mesh\":0,\"translation\":[3,0,0]}]", "[0]",
+            "[{\"name\":\"Shrink\",\"channels\":[{\"sampler\":0,\"target\":{\"node\":0,\"path\":\"scale\"}}],"
+              "\"samplers\":[{\"input\":2,\"output\":6}]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a node scaled to zero imports: " + why);
+        check(!noted(res, "degenerate") && !noted(res, "starts with"),
+              "the collapse is kept, not reported as a loss");
+        check(res.objectAnimations.size() == 1 && res.objectAnimationPlacement.size() == 1 &&
+              res.objectAnimationPlacement[0] == 0, "one clip, on the node's placement");
+        if (res.objectAnimations.size() == 1 && res.objectAnimations[0].tracks.size() == 1) {
+            const fmt::OcAnimation& a = res.objectAnimations[0];
+            const fmt::OcTrack& tr = a.tracks[0];
+            check(a.valid(), "and it is a valid clip");
+            check((tr.channels & fmt::kOcChannelScale) != 0 && tr.times.size() == 2 && tr.values.size() == 20,
+                  "the track carries scale: two keys of translation, rotation and scale");
+            if (tr.values.size() == 20) {
+                checkNear(tr.values[7], 1.0f, 1e-5f, "key 0 scale x is 1");
+                checkNear(tr.values[9], 1.0f, 1e-5f, "key 0 scale z is 1");
+                checkNear(tr.values[17], 0.0f, 1e-6f, "key 1 scale x is ZERO");
+                checkNear(tr.values[18], 0.0f, 1e-6f, "key 1 scale y is ZERO");
+                checkNear(tr.values[19], 0.0f, 1e-6f, "key 1 scale z is ZERO");
+                checkNear(tr.values[11], 300.0f, 1e-2f, "the collapsed key keeps the node's position: 3 m along glTF X is engine +Y");
+                const f32 qn = tr.values[13]*tr.values[13] + tr.values[14]*tr.values[14] +
+                               tr.values[15]*tr.values[15] + tr.values[16]*tr.values[16];
+                checkNear(qn, 1.0f, 1e-4f, "and a unit rotation, borrowed from the neighbouring key");
+                checkNear(tr.values[16], 1.0f, 1e-5f, "the unrotated node's orientation (w = 1) rather than garbage");
+            }
+        }
+    }
+
+    AVER_INFO("=== every clip of one animation lasts the animation's full length ===");
+    {
+        // "Slow" moves over 1 s and "Quick" over 0.5 s, in ONE animation. Quick's clip used to last 0.5 s
+        // and so looped out of phase with Slow's.
+        const std::string json = objectAnimJson(
+            "[{\"name\":\"Slow\"},{\"name\":\"Quick\"}]", "[0,1]",
+            "[{\"name\":\"Both\",\"channels\":["
+              "{\"sampler\":0,\"target\":{\"node\":0,\"path\":\"translation\"}},"
+              "{\"sampler\":1,\"target\":{\"node\":1,\"path\":\"translation\"}}],"
+              "\"samplers\":[{\"input\":2,\"output\":3},{\"input\":7,\"output\":3}]}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "two nodes with different key ranges import: " + why);
+        const int slow = objectClipNamed(res, "Slow");
+        const int quick = objectClipNamed(res, "Quick");
+        check(res.objectAnimations.size() == 2 && slow >= 0 && quick >= 0, "one clip per node");
+        if (slow >= 0 && quick >= 0 && res.objectAnimations.size() == 2) {
+            const fmt::OcAnimation& sa = res.objectAnimations[usize(slow)];
+            const fmt::OcAnimation& qa = res.objectAnimations[usize(quick)];
+            checkNear(sa.duration, 1.0f, 1e-5f, "Slow lasts the animation's second");
+            checkNear(qa.duration, 1.0f, 1e-5f, "and so does Quick, whose own last key is at 0.5 s");
+            check(qa.valid() && qa.tracks.size() == 1 && qa.tracks[0].times.size() == 2 &&
+                  std::fabs(qa.tracks[0].times[1] - 0.5f) < 1e-5f,
+                  "Quick's keys stay where the file put them (it holds its last pose to the end)");
+        }
     }
 
     if (g_failures == 0) AVER_INFO("=== all glTF import tests passed ===");

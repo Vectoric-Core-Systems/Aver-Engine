@@ -47,3 +47,10 @@ target_compile_definitions(ControlRigTest PRIVATE
   AVER_DEMO_RIG="${CMAKE_SOURCE_DIR}/test-content/ControlRigDemo/Content/Rigs/ArmReach.ocrig"
   AVER_DEMO_SKEL="${CMAKE_SOURCE_DIR}/test-content/ControlRigDemo/Content/Skeletons/Character.ocskel")
 
+# ObjectAnimTest -- object animation: a transform clip (kOcAnimObject) on an entity with no rig moves
+# that entity's own CLocal, only while the host has made it live. No GPU, no assets beyond clips it
+# writes itself. It checks the playback rule numerically against plain function composition, so a
+# clip that loads and moves nothing, or composes the placement in the wrong order, fails here.
+add_executable(ObjectAnimTest src/ObjectAnimTest.cpp)
+target_link_libraries(ObjectAnimTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ObjectAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

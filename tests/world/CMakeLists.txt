@@ -8,6 +8,15 @@ target_link_libraries(LevelInstanceTest PRIVATE Aver.World Aver.Scene Aver.Forma
 set_target_properties(LevelInstanceTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# AnimatedPlacementTest -- `anim` placements: the CAnimator instantiate attaches, the kinematic body a
+# colliding one gets, driveKinematicBodies, and the physics ABI they stand on (a static body made
+# kinematic or dynamic, aver_phys_body_move_kinematic). Physics comes in through Aver.World's link
+# interface, like LevelInstanceTest's own.
+add_executable(AnimatedPlacementTest src/AnimatedPlacementTest.cpp)
+target_link_libraries(AnimatedPlacementTest PRIVATE Aver.World Aver.Scene Aver.Formats Aver.Core)
+set_target_properties(AnimatedPlacementTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ChunkCoordTest -- the region -> chunk -> local-float hierarchy.
 #
 # Core ONLY, and that is worth keeping: ChunkCoord.hpp is a value header like Vec3, so if this test
@@ -120,4 +129,15 @@ add_executable(ScatterBudgetTool src/ScatterBudgetTool.cpp)
 target_link_libraries(ScatterBudgetTool PRIVATE
   Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(ScatterBudgetTool PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# VehicleLaneTest -- the vehicle driver's lane maths (world::lanes in VehicleSystem.hpp): projection onto a
+# lane, which lane a car belongs to, looking ahead across a lane boundary, the curvature speed cap,
+# pure-pursuit steering, the leader-gap and pedal policy.
+#
+# Pure maths, so no world and no physics: the Jolt vehicle half of the system needs the physics ABI's
+# vehicle entry points and is covered where those are (tests/physics).
+add_executable(VehicleLaneTest src/VehicleLaneTest.cpp)
+target_link_libraries(VehicleLaneTest PRIVATE Aver.World Aver.Formats Aver.Core)
+set_target_properties(VehicleLaneTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

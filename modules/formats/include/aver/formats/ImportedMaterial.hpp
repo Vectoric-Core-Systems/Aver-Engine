@@ -62,6 +62,14 @@ struct ImportedMaterial {
 
     std::string name;
     f32  baseColorFactor[4] = {1, 1, 1, 1};
+    // WHAT ENCODING baseColorFactor's RGB IS IN, because the formats disagree and the .ocmat does not.
+    // An .ocmat (pbr::MaterialDesc) holds it sRGB-ENCODED -- packMaterial decodes it with pow(x, 2.2),
+    // the same as a colour picked in the editor -- while glTF's baseColorFactor and UsdPreviewSurface's
+    // diffuseColor are LINEAR; .mtl states no colour space and its Kd is treated as sRGB. The importer records what
+    // its file wrote; the cook (MaterialCook.cpp) encodes a linear factor on the way into the .ocmat.
+    // Copied across as it was, a linear 0.5 grey rendered at 0.5^2.2 = 0.22. Alpha is linear coverage
+    // in every format and is never converted. The default is glTF's, like every other default here.
+    bool baseColorFactorLinear = true;
     f32  emissiveFactor[3]  = {0, 0, 0};
     f32  metallicFactor     = 1.0f;    // glTF default is ONE, not zero
     f32  roughnessFactor    = 1.0f;    // likewise
@@ -85,6 +93,17 @@ struct ImportedMaterial {
     // cook. A material still carrying this by the time it reaches cookMaterials has an opacity map
     // that could not be folded, and the cook ignores it rather than writing a file nothing samples.
     ImportedTexture opacityTex;
+
+    // Subsurface (thin-leaf translucency), in pbr::MaterialDesc's terms; weight 0 = off.
+    f32 subsurfaceWeight    = 0.0f;
+    f32 subsurfaceRadius    = 0.0f;
+    f32 subsurfaceColor[3]  = {1.0f, 1.0f, 1.0f};
+    // A TRANSLUCENCY map (grey, R = how much light passes through). .ocmat has no slot for one, so the
+    // cook reduces it to subsurfaceWeight -- its mean over the texels the cutout keeps -- and does not
+    // write the file. UsdPreviewSurface cannot name one at all: the USD importer finds it on disk
+    // beside the base colour (`<stem>_Translucency.*`), where Intel's Jungle Ruins keeps the maps its
+    // Blender materials feed into Transmission; without them every leaf is opaque against the sun.
+    ImportedTexture translucencyTex;
 };
 
 } // namespace aver::fmt

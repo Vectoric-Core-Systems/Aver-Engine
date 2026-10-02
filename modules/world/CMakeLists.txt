@@ -12,6 +12,9 @@
 aver_add_module(Aver.World
   SOURCES
     src/LevelInstance.cpp
+    # The vehicle driver: its lane maths is plain Core + Formats and compiles in every tree; the half that
+    # builds Jolt vehicles is guarded on AVER_MODULE_SCENE and AVER_MODULE_PHYSICS like LevelInstance.cpp.
+    src/VehicleSystem.cpp
     src/ChunkPayload.cpp
     src/ChunkPartition.cpp
     src/ChunkCodec.cpp

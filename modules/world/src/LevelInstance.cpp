@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iterator>
+#include <unordered_map>
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
@@ -65,7 +67,8 @@ StaticBoxFit fitStaticBox(const Transform& worldXf, const Vec3& localMin, const 
     // The local centre, scaled (a negative scale DOES mirror an off-centre box through the pivot --
     // that is what a negative scale means) then rotated into world space. Zero for the unit cube on
     // every axis, which is exactly what makes the case below exact rather than approximate.
-    fit.centre = worldXf.position + worldXf.rotation.rotate(Vec3{s.x * lc.x, s.y * lc.y, s.z * lc.z});
+    fit.pivotToCentre = Vec3{s.x * lc.x, s.y * lc.y, s.z * lc.z};
+    fit.centre = worldXf.position + worldXf.rotation.rotate(fit.pivotToCentre);
     fit.rotation = worldXf.rotation;
     return fit;
 }
@@ -127,12 +130,35 @@ i32 addStaticMeshBody(const Transform& worldXf, const f32* localPositions, u32 v
         aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
     return body;
 }
+
+i32 addPivotBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& localMax) {
+    const StaticBoxFit fit = fitStaticBox(worldXf, localMin, localMax);
+    // The box's eight corners around the pivot, in the placement's unrotated axes: the centre offset
+    // plus or minus the half-extents, which is the hull the rotation below then turns.
+    const Vec3& o = fit.pivotToCentre;
+    const Vec3& h = fit.halfExtents;
+    f32 corners[8 * 3];
+    for (int k = 0; k < 8; ++k) {
+        corners[k * 3 + 0] = o.x + ((k & 1) ? h.x : -h.x);
+        corners[k * 3 + 1] = o.y + ((k & 2) ? h.y : -h.y);
+        corners[k * 3 + 2] = o.z + ((k & 4) ? h.z : -h.z);
+    }
+    const i32 body = aver_phys_add_convex_hull(corners, 8, worldXf.position.x, worldXf.position.y,
+                                               worldXf.position.z, /*dynamic*/ 0, 0.0f);
+    if (!body) return body;
+    // EXACTLY IDENTITY -- same guard, same reason, as addStaticBoxBody above.
+    const Quat& q = fit.rotation;
+    if (!(q.x == 0.0f && q.y == 0.0f && q.z == 0.0f && q.w == 1.0f))
+        aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
+    return body;
+}
 #endif
 
 } // namespace aver::world
 
 #if AVER_MODULE_SCENE
 
+#  include "aver/core/Hash.hpp"
 #  include "aver/scene/Components.hpp"
 #  include "aver/scene/scene_abi.h"
 
@@ -161,9 +187,34 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     // the authored numbers would sit at the child's local offset from the origin. That is silent --
     // the mesh draws correctly through the scene graph and only the collision is wrong.
     std::vector<Transform> worldXf(w.placements.size());
+    // Per placement: it, or an ancestor of it, has an `anim` clip. A parent precedes its child, so the
+    // parent's answer is final when the child asks.
+    std::vector<char> movesWithClip(w.placements.size(), 0);
+
+#if AVER_MODULE_PHYSICS
+    // MESH ID -> the shared physics shape built for it by THIS call, or 0 for "already asked and
+    // Jolt refused" (cached too, so a mesh whose triangles Jolt cannot use is not retried once per
+    // placement that names it). Released once every placement below has made its own body from it --
+    // see the end of this function -- because a body's own ScaledShape keeps the shape alive by then.
+    std::unordered_map<u64, i32> meshShapeCache;
+    // So a level of many animated placements that cannot be made kinematic logs one warning, not one each.
+    bool warnedStaticAnimated = false;
+#endif
+
+    // done == total == 0 for an empty world never runs the loop below, so it is reported here once
+    // rather than leaving a caller unable to tell "no callback yet" from "nothing to report".
+    if (opt.progress && w.placements.empty()) opt.progress(0, 0);
 
     for (usize i = 0; i < w.placements.size(); ++i) {
         const fmt::OcWorldPlacement& p = w.placements[i];
+
+        // PROGRESS, BEFORE THE CLASS-PLACEMENT `continue` BELOW so a level built mostly of class
+        // placements still reports -- see InstantiateOptions::progress's own comment for why `done`
+        // counts every placement walked rather than only the ones that produced a body.
+        if (opt.progress) {
+            const usize done = i + 1;
+            if (done % 256 == 0 || done == w.placements.size()) opt.progress(done, w.placements.size());
+        }
 
         // A CLASS INSTANCE, not an ordinary mesh placement -- see OcWorldPlacement::className's own
         // comment. Skipped here, FRAMEWORK-FREE (this module deliberately does not and should not
@@ -255,6 +306,27 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             if (mr->material && opt.bindMaterial) opt.bindMaterial(mr->material, p.material);
         }
 
+        // OBJECT ANIMATION: the clip is named by content path, and its id is fnv1a64 of that path like
+        // every other content id. addComponent hands back zero-filled storage, so every field is set.
+        const bool animated = !p.animClip.empty();
+        if (animated) {
+            if (auto* an = static_cast<scene::CAnimator*>(world.addComponent(e, scene::kComponentAnimator))) {
+                an->clip        = fnv1a64(std::string_view(p.animClip));
+                an->time        = p.animTime;
+                an->speed       = p.animSpeed;
+                an->blendWeight = 1.0f;
+                an->flags       = p.animOnce ? scene::kAnimatorOnce : 0u;
+                // AN AUTHORED `animspeed 0` MEANS HELD at animtime. CAnimator reads a speed of 0 as 1
+                // (a zero-filled component must play), so without this the level would play at full speed.
+                if (p.animSpeed == 0.0f) an->flags |= scene::kAnimatorPaused;
+            }
+        }
+        // THE SUBTREE OF AN ANIMATED PLACEMENT MOVES WITH IT, through the hierarchy: its colliding
+        // descendants need kinematic bodies too, or they stay at the load pose while the mesh drives away.
+        const bool parentMoves = isChild && parentEnt != scene::kInvalidEntity &&
+                                 movesWithClip[static_cast<usize>(p.parent)];
+        movesWithClip[i] = animated || parentMoves;
+
         out.entities.push_back(e);
         out.placementIndex.push_back(static_cast<u32>(i));
 
@@ -263,11 +335,17 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // aver_phys_ready() being false is not a failure: it is the state a host is in before it has
         // called aver_phys_init, and the count logged afterwards is what makes an
         // initPhysics-after-openProject ordering mistake visible instead of silent.
-        if (opt.createBodies && p.collide && aver_phys_ready()) {
+        //
+        // A VEHICLE PLACEMENT GETS NO BODY HERE, collide or not: play builds its dynamic chassis
+        // (VehicleSystem), and a static or kinematic box left at the placement would be a second solid
+        // car under the first, one the moving car's own wheels and chassis collide with. The generator
+        // writes these `nocollide`; this is for the one that does not.
+        if (opt.createBodies && p.collide && p.vehiclePreset.empty() && aver_phys_ready()) {
             // WORLD, NOT AUTHORED. For a root the two are the same and this is the line it always
             // was; for a child the authored numbers are parent-relative and using them would put the
             // collision somewhere the mesh is not.
             const Transform& wx = worldXf[i];
+            const bool moving = movesWithClip[i] != 0;
             const auto bodyStart = std::chrono::steady_clock::now();
 
             // TRIANGLES FIRST. A mesh's per-material-merged geometry can be concave -- an archway, a
@@ -278,13 +356,47 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             // false, or leaves the counts at 0, has made no promise about the pointers either.
             bool usedMesh = false;
             u32 meshTriCount = 0;
+            // False when the body's origin is not the entity's pivot, so driving it to the entity's
+            // transform would misplace it. Mesh bodies are pivot-framed already.
+            bool followsEntity = true;
             if (opt.localTrianglesFor) {
                 const f32* triPositions = nullptr; u32 triVertexCount = 0;
                 const u32* triIndices = nullptr;   u32 triIndexCount = 0;
                 if (opt.localTrianglesFor(p.objectId, triPositions, triVertexCount,
                                           triIndices, triIndexCount) &&
                     triVertexCount > 0 && triIndexCount >= 3) {
-                    body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount);
+                    // SHARED SHAPE FIRST: aver_phys_create_mesh_shape ONCE per unique mesh id, however
+                    // many placements name it, each wrapping it at its own transform through Jolt's
+                    // ScaledShape (aver_phys_add_mesh_shape_body) -- no per-placement triangle scaling
+                    // and no second BVH build for a mesh this level already placed once. A Banyan
+                    // tree's leaf cards, named by hundreds of placements, used to bake and BVH-build
+                    // hundreds of identical meshes; now they build one.
+                    i32 shapeHandle = 0;
+                    if (const auto cached = meshShapeCache.find(p.objectId); cached != meshShapeCache.end()) {
+                        shapeHandle = cached->second;
+                    } else {
+                        shapeHandle = aver_phys_create_mesh_shape(
+                            triPositions, static_cast<i32>(triVertexCount),
+                            reinterpret_cast<const i32*>(triIndices), static_cast<i32>(triIndexCount));
+                        meshShapeCache.emplace(p.objectId, shapeHandle);
+                        if (shapeHandle) ++out.uniqueMeshShapeCount;
+                    }
+                    if (shapeHandle) {
+                        body = aver_phys_add_mesh_shape_body(
+                            shapeHandle, wx.position.x, wx.position.y, wx.position.z,
+                            wx.rotation.x, wx.rotation.y, wx.rotation.z, wx.rotation.w,
+                            wx.scale.x, wx.scale.y, wx.scale.z);
+                    }
+                    // THE FALLBACK: a scale with a zero component, which a ScaledShape cannot
+                    // represent at all (aver_phys_add_mesh_shape_body's own comment) but
+                    // scaleMeshForBody's baking can, or a shape this mesh's own triangles never built
+                    // in the first place. Same triangles either way, so a body addStaticMeshBody
+                    // cannot make either is a body this placement was never going to get -- exactly
+                    // the pre-existing rule (below), preserved: TRIANGLES WERE OFFERED, so this
+                    // placement does not fall through to the box even if every attempt to use them
+                    // returns 0.
+                    if (!body)
+                        body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount);
                     usedMesh = true;
                     meshTriCount = triIndexCount / 3;
                 }
@@ -301,12 +413,33 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
                     Vec3 hostMin, hostMax;
                     if (opt.localBoundsFor(p.objectId, hostMin, hostMax)) { lmin = hostMin; lmax = hostMax; }
                 }
-                body = addStaticBoxBody(wx, lmin, lmax);
+                // A MOVING PLACEMENT'S BOX IS BUILT AROUND THE PIVOT, because its body gets driven to
+                // the entity's transform and a box centred elsewhere would jump by the offset. If Jolt
+                // refuses that hull the plain box still collides, but as a static body.
+                body = moving ? addPivotBoxBody(wx, lmin, lmax) : 0;
+                if (!body) {
+                    body = addStaticBoxBody(wx, lmin, lmax);
+                    if (moving) followsEntity = false;
+                }
             }
 
             out.bodyCreationSeconds +=
                 std::chrono::duration<f64>(std::chrono::steady_clock::now() - bodyStart).count();
             if (body) {
+                // KINEMATIC BEFORE THE ENTITY STAMP: only a kinematic body follows its animation, and
+                // aver_phys_body_set_motion_type rebuilds a static body underneath its handle.
+                if (moving) {
+                    if (followsEntity && aver_phys_body_set_motion_type(body, AVER_PHYS_MOTION_KINEMATIC)) {
+                        out.animatedBodies.push_back(AnimatedBody{e, body});
+                    } else if (!warnedStaticAnimated) {
+                        warnedStaticAnimated = true;
+                        AVER_WARN("[Level] animated placement '{}' (or one under an animated parent) keeps a "
+                                  "static body (its collision {}); it will not carry anything or push "
+                                  "anything as it moves",
+                                  p.asset, followsEntity ? "could not be made kinematic"
+                                                         : "could not be built around its pivot");
+                    }
+                }
                 // The one line that makes this placement's body IDENTIFIABLE later -- a raycast that
                 // hits it can now report `e`, not just an opaque physics handle nothing else understands.
                 aver_phys_set_entity(body, static_cast<i32>(e));
@@ -321,7 +454,130 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         out.entityBody.push_back(body);
     }
 
+#if AVER_MODULE_PHYSICS
+    // RELEASED HERE, NOT PER PLACEMENT: every body built from a cached shape above took its own
+    // reference (through the ScaledShape aver_phys_add_mesh_shape_body wraps it in), so this call's
+    // own claim on the handle is no longer needed once the loop is done handing them out. A shape
+    // this call built but every placement naming it refused (0 in the cache) has nothing to release.
+    for (const auto& [meshId, handle] : meshShapeCache) {
+        (void)meshId;
+        if (handle) aver_phys_release_mesh_shape(handle);
+    }
+    // A BULK ADD LEAVES THE BROAD PHASE UNBALANCED: every body above went in one at a time, and every
+    // ray, overlap and character sweep pays for the lopsided trees until they are rebuilt. Once per
+    // big instantiate (a level load), never for a handful (a chunk, a paste) -- it walks every body.
+    if (out.bodies.size() >= 256) aver_phys_optimize_broadphase();
+#endif
+
     return out;
+}
+
+#  if AVER_MODULE_PHYSICS
+namespace {
+
+// The fastest a kinematic body is DRIVEN, in cm/s (60 m/s), at its pivot or at the far edge of it as
+// it turns. Above that the pose did not move, it jumped -- a clip wrapping with a gap, a level reset, a
+// script placing the entity -- and the velocity MoveKinematic would derive flings whatever stands on it.
+constexpr f32 kMaxDriveSpeedCmS = 6000.0f;
+
+// The pose each body was last driven to, by body handle. The animation's own history is what tells a
+// jump from a fast move: the body itself cannot say, because the physics step may not have run (Play
+// paused, a project with no GameMode) and its position reads as the centre of mass, not the pivot. A
+// host may rebuild its AnimatedBody list (the editor does when a body is remade), so this lives here.
+// Entries the last call did not visit are dropped, which is also what forgets a level's bodies when it
+// unloads.
+struct Driven {
+    Transform pose;
+    // An over-estimate of the half-diagonal of the body's world AABB at ANY rotation (the first one
+    // measured x kReachTurnGrowth), or -1 until measured. See poseJumped.
+    f32 reachBound = -1.0f;
+    u32 stamp = 0;
+};
+std::unordered_map<i32, Driven> g_driven;
+u32 g_driveStamp = 0;
+
+// The most a body's reach can grow by turning, sqrt(3), with 4% over for float rounding. See poseJumped.
+constexpr f32 kReachTurnGrowth = 1.8f;
+
+// True when `body` going from the pose `from` last drove it to, to the pose `to`, in `dt` (> 0) seconds
+// needs more than kMaxDriveSpeedCmS.
+bool poseJumped(i32 body, Driven& from, const Transform& to, f32 dt) {
+    if ((to.position - from.pose.position).size() / dt > kMaxDriveSpeedCmS) return true;
+
+    // The turn is an angle, and what it costs a passenger depends on how far the body reaches from its
+    // pivot: half the diagonal of its bounds is an honest over-estimate of that.
+    const Quat& q0 = from.pose.rotation;
+    const f32 d = std::fabs(q0.x * to.rotation.x + q0.y * to.rotation.y +
+                            q0.z * to.rotation.z + q0.w * to.rotation.w);
+    const f32 angle = 2.0f * std::acos(std::min(d, 1.0f));
+    if (angle <= 0.0f) return false;
+
+    // THE BOUNDS ARE ASKED OF PHYSICS ONCE PER BODY, NOT ONCE PER TURNING FRAME. The reach is half the
+    // diagonal of the body's WORLD box, which grows and shrinks as the body turns, and a rotation that
+    // has not changed rarely compares exactly equal after a frame of float noise, so the query used to
+    // run on nearly every frame of every moving body (a locked lookup into Jolt, twice).
+    // A box side cannot be longer than the distance between two points inside it. So at ANY angle the
+    // world box has every side no longer than D, the diameter of the shape's own bounds, and a
+    // half-diagonal of at most sqrt(3)/2 * D; while the box measured at the first angle encloses those
+    // bounds, so its half-diagonal is at least D/2. The reach measured once, times kReachTurnGrowth,
+    // therefore bounds the reach at every other angle. While that bound cannot make this turn a jump,
+    // the real reach cannot either, and the answer is the same without asking; only a turn big enough
+    // for the bound to matter pays for the exact query, as before.
+    if (from.reachBound >= 0.0f && angle * from.reachBound / dt <= kMaxDriveSpeedCmS) return false;
+    f32 lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    if (!aver_phys_body_aabb(body, lo, hi)) return false;
+    const f32 reach = 0.5f * Vec3{hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]}.size();
+    if (from.reachBound < 0.0f) from.reachBound = reach * kReachTurnGrowth;
+    return angle * reach / dt > kMaxDriveSpeedCmS;
+}
+
+} // namespace
+#  endif
+
+u32 driveKinematicBodies(scene::World& world, const std::vector<AnimatedBody>& bodies, f32 dt) {
+    u32 undriven = 0;
+#  if AVER_MODULE_PHYSICS
+    if (bodies.empty() || !aver_phys_ready()) { g_driven.clear(); return 0; }
+    ++g_driveStamp;
+    // MoveKinematic sets the velocity that reaches the pose in `dt`, but the solver integrates it in
+    // whole fixed steps, so a frame shorter than one step would overshoot by their ratio.
+    const f32 driveDt = std::max(dt, aver_phys_fixed_step());
+    for (const AnimatedBody& b : bodies) {
+        if (b.body <= 0 || !world.valid(b.entity)) continue;
+        // worldMatrix composes the parent chain on demand, so it already holds the CLocal the
+        // animation tick wrote this frame -- no flush needed first.
+        const Transform xf = transformFromMatrix(world.worldMatrix(b.entity));
+        // A pose Jolt would refuse (move_kinematic returns 0 for one) must not reach the setters below.
+        if (!std::isfinite(xf.position.x) || !std::isfinite(xf.position.y) || !std::isfinite(xf.position.z) ||
+            !std::isfinite(xf.rotation.x) || !std::isfinite(xf.rotation.y) || !std::isfinite(xf.rotation.z) ||
+            !std::isfinite(xf.rotation.w))
+            continue;
+        // A JUMP, or a step with no time in it, is a teleport: set the pose and leave it at rest. The
+        // passenger is not carried, which beats being thrown across the level. The first drive of a
+        // body has no history to be a jump from.
+        const auto [slot, firstDrive] = g_driven.try_emplace(b.body);
+        Driven& mem = slot->second;
+        const bool teleport = dt <= 0.0f || (!firstDrive && poseJumped(b.body, mem, xf, dt));
+        mem.pose = xf;
+        mem.stamp = g_driveStamp;
+        if (teleport) {
+            if (!aver_phys_body_set_position(b.body, xf.position.x, xf.position.y, xf.position.z)) ++undriven;
+            aver_phys_body_set_rotation(b.body, xf.rotation.x, xf.rotation.y, xf.rotation.z, xf.rotation.w);
+            aver_phys_body_set_velocity(b.body, 0.0f, 0.0f, 0.0f);
+            aver_phys_body_set_angular_velocity(b.body, 0.0f, 0.0f, 0.0f);
+            continue;
+        }
+        if (!aver_phys_body_move_kinematic(b.body, xf.position.x, xf.position.y, xf.position.z,
+                                           xf.rotation.x, xf.rotation.y, xf.rotation.z, xf.rotation.w,
+                                           driveDt))
+            ++undriven;
+    }
+    for (auto it = g_driven.begin(); it != g_driven.end(); )
+        it = (it->second.stamp == g_driveStamp) ? std::next(it) : g_driven.erase(it);
+#  else
+    (void)world; (void)bodies; (void)dt;
+#  endif
+    return undriven;
 }
 
 } // namespace aver::world

@@ -265,10 +265,11 @@ static void attr(fmt::OcGraphNode& n, const char* keyValue) {
 //
 // Each builder below wires the node under test so its OUTPUT reaches a MaterialOutput input --
 // never a node built and left floating, which emission would simply never visit (see
-// testDeadNodesAreNotEmitted). Where a node's own result is a float2 (TilingOffset, Rotator) it is
-// routed through Length first: MaterialOutput has no float2 input and a float2 cannot widen to a
-// float3 (testWideningRules covers why), but every field accepts a float, so a magnitude is the
-// smallest already-proven node that turns "some vector" into "something any field will take".
+// testDeadNodesAreNotEmitted). Where a node's own result is a float2 (TilingOffset, Panner,
+// Rotator) it is routed through Length first: MaterialOutput has no float2 input and a float2
+// cannot widen to a float3 (testWideningRules covers why), but every field accepts a float, so a
+// magnitude is the smallest already-proven node that turns "some vector" into "something any
+// field will take".
 
 // A unary float3 -> float3 node (Sqrt/Ceil/Sign/Exp/Log/Tan all have this shape), fed a literal
 // vector and driving BaseColor.
@@ -626,6 +627,49 @@ static fmt::OcGraphData ifGraph() {
     return g;
 }
 
+// The clock: each of Time's three outputs into a different scalar field, so one graph proves every
+// pin name reaches its own gTime component (the emitted text is checked in testTimeRules).
+static fmt::OcGraphData timeGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Time";
+    fmt::OcGraphNode n = node("n", "Time");
+    addPin(n, "time", "float", true);
+    addPin(n, "raw", "float", true);
+    addPin(n, "delta", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "time", "out", "Roughness");
+    link(g, "n", "raw", "out", "Metallic");
+    link(g, "n", "delta", "out", "Occlusion");
+    return g;
+}
+
+// Panner's own result is a float2, so it takes the same Length bridge as TilingOffset. uv is left
+// unlinked always, and time unless `wireTime`: both fall back to something other than zero (the
+// surface's uv, the clock), which is exactly what makes an unwired Panner move.
+static fmt::OcGraphData pannerGraph(bool wireTime = false, const char* speedDefault = "0.25,0.5") {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Panner";
+    fmt::OcGraphNode n = node("n", "Panner");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "speed", "float2", false, speedDefault);
+    addPin(n, "time", "float", false);
+    addPin(n, "result", "float2", true);
+    g.nodes.push_back(n);
+    if (wireTime) g.nodes.push_back(constFloat("t", "2.5"));
+    fmt::OcGraphNode len = node("len", "Length");
+    addPin(len, "x", "float2", false);
+    addPin(len, "result", "float", true);
+    g.nodes.push_back(len);
+    g.nodes.push_back(materialOutput("out"));
+    if (wireTime) link(g, "t", "value", "n", "time");
+    link(g, "n", "result", "len", "x");
+    link(g, "len", "result", "out", "Roughness");
+    return g;
+}
+
 // Compiles ONE node case: to compileMaterialGraph, then (dxc permitting) to dxc, with `label` --
 // the node TYPE, not the graph's node id -- in front of every check this makes, so a failure names
 // what it was that failed to compile without the reader having to open the graph literal above to
@@ -667,12 +711,15 @@ static const NodeCase kNewNodeCases[] = {
     {"BlendNormals", []() -> fmt::OcGraphData { return blendNormalsGraph(); }},
     {"Swizzle", []() -> fmt::OcGraphData { return swizzleXyzGraph(); }},
     {"TilingOffset", []() -> fmt::OcGraphData { return tilingOffsetGraph(); }},
+    {"Panner", []() -> fmt::OcGraphData { return pannerGraph(); }},
+    {"Panner (time wired)", []() -> fmt::OcGraphData { return pannerGraph(true); }},
     {"Rotator", []() -> fmt::OcGraphData { return rotatorGraph(); }},
     {"Noise", []() -> fmt::OcGraphData { return noiseGraph(); }},
     {"Checker", []() -> fmt::OcGraphData { return checkerGraph(); }},
     {"SampleTexture", []() -> fmt::OcGraphData { return sampleTextureGraph(); }},
     {"Fresnel", []() -> fmt::OcGraphData { return fresnelGraph(); }},
     {"If", []() -> fmt::OcGraphData { return ifGraph(); }},
+    {"Time", []() -> fmt::OcGraphData { return timeGraph(); }},
 };
 
 static void testEveryNewNodeTypeCompiles(Dxc& dxc) {
@@ -744,6 +791,45 @@ static void testSwizzleRules() {
     }
 }
 
+static void testTimeRules() {
+    AVER_INFO("=== Time: each output pin reads its own gTime component ===");
+    const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(timeGraph());
+    check(r.ok, "a graph reading all three Time outputs compiles: " + r.error);
+    check(r.hlsl.find("= gTime.x;") != std::string::npos,
+          "`time` reads gTime.x, seconds wrapped at an hour: " + r.hlsl);
+    check(r.hlsl.find("= gTime.y;") != std::string::npos,
+          "`raw` reads gTime.y, the unwrapped seconds: " + r.hlsl);
+    check(r.hlsl.find("= gTime.z;") != std::string::npos,
+          "`delta` reads gTime.z, the last frame's seconds: " + r.hlsl);
+}
+
+static void testPannerRules() {
+    AVER_INFO("=== Panner: an unwired time is the clock and an unwired uv is the surface's ===");
+    {
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(pannerGraph());
+        check(r.ok, "a Panner with only speed set compiles: " + r.error);
+        check(r.hlsl.find("(uv) + (float2(0.25, 0.5)) * (gTime.x)") != std::string::npos,
+              "and emits uv + speed * time with the BARE `uv` and Time's wrapped seconds -- an "
+              "unwired time meaning a literal 0 would freeze every Panner with no error anywhere: " +
+              r.hlsl);
+    }
+    {
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(pannerGraph(true));
+        check(r.ok, "a Panner with a wired time compiles: " + r.error);
+        check(r.hlsl.find("gTime") == std::string::npos,
+              "and the wired value REPLACES the clock, which is not read at all: " + r.hlsl);
+        check(r.hlsl.find("2.5") != std::string::npos, "the wired value reaches the product");
+    }
+    {
+        // The one input allowed to mean zero is speed's own default: a Panner nobody gave a speed
+        // is a still uv, not an error.
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(pannerGraph(false, "0,0"));
+        check(r.ok, "a Panner at its default speed compiles: " + r.error);
+        check(r.hlsl.find("float2(0.0, 0.0)") != std::string::npos,
+              "and its speed is (0, 0): " + r.hlsl);
+    }
+}
+
 static void testSampleTextureBadSlotFails() {
     AVER_INFO("=== SampleTexture: an unrecognised slot= ===");
     fmt::OcGraphData g;
@@ -778,8 +864,9 @@ static void testSampleTextureUnlinkedUvUsesSurfaceUv() {
     const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
     check(r.ok, "compiles with an unlinked uv pin: " + r.error);
     check(r.hlsl.find("averSampleSlot(0u, uv)") != std::string::npos,
-          "and samples the BARE identifier `uv`, not a float2(...) literal -- the one place this "
-          "emitter treats an unlinked pin as anything other than zero: " + r.hlsl);
+          "and samples the BARE identifier `uv`, not a float2(...) literal -- one of the two places "
+          "this emitter treats an unlinked pin as anything other than zero (the other is "
+          "Panner's time): " + r.hlsl);
 }
 
 // SampleTexture's own comment (MaterialGraphHlsl.cpp) says: "the memo in resolve() means a graph
@@ -1453,6 +1540,8 @@ int main() {
     testGeneratedImportGraph(dxc);
     testEveryNewNodeTypeCompiles(dxc);
     testSwizzleRules();
+    testTimeRules();
+    testPannerRules();
     testSampleTextureBadSlotFails();
     testSampleTextureUnlinkedUvUsesSurfaceUv();
     testSampleTextureSampleMemoisation();

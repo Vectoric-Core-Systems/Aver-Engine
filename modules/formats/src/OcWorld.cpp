@@ -30,15 +30,17 @@ std::string num(f64 v) {
 // and a raw '%' would make a round trip ambiguous with an escape of this function's own making. So
 // the value goes out percent-encoded into exactly one token, matching the encoding a URL query
 // string uses for the identical reason. Escaped: whitespace, '%' itself, both quote characters (a
-// future quoted-string tokenizer extension would want those reserved too) and other control bytes.
-// Left alone: everything else, so an ordinary name stays readable in the file instead of becoming a
-// wall of %XX.
+// future quoted-string tokenizer extension would want those reserved too), other control bytes, and
+// the two characters parseOcworld reads before it splits tokens: '#' (truncateHash cuts the rest of
+// the line, so a raw one lost the tokens after it) and ';' (stripTrailingSemicolon eats one at the
+// end of the line). Left alone: everything else, so an ordinary name stays readable in the file
+// instead of becoming a wall of %XX.
 std::string percentEncode(std::string_view s) {
     static const char* const hex = "0123456789ABCDEF";
     std::string out;
     out.reserve(s.size());
     for (unsigned char c : s) {
-        if (c <= 0x20 || c == 0x7f || c == '%' || c == '"' || c == '\'') {
+        if (c <= 0x20 || c == 0x7f || c == '%' || c == '"' || c == '\'' || c == '#' || c == ';') {
             out += '%';
             out += hex[(c >> 4) & 0xF];
             out += hex[c & 0xF];
@@ -74,6 +76,10 @@ std::string percentDecode(std::string_view s) {
     }
     return out;
 }
+
+// How the comment writeOcworld puts under `OCWORLD 1` begins. parseOcworld must not keep it as a
+// header note, or every save would add one more copy of it above the author's own comments.
+constexpr std::string_view kWriterBannerPrefix = "Written by the Aver Engine editor";
 
 } // namespace
 
@@ -117,6 +123,9 @@ std::string percentDecode(std::string_view s) {
 bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     out = OcWorldData{};
     bool sawHeader = false;
+    // True once any record other than the OCWORLD/OCMAP header line has been read: header comments
+    // (OcWorldData::notes) are the full-line '#' comments before this flips.
+    bool sawRecord = false;
     // Indices into out.placements: the open BEGIN scopes, innermost last, and the most recent
     // placement a BEGIN could attach to.
     std::vector<i32> scope;
@@ -129,6 +138,26 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         std::string_view rawLine = text.substr(pos, nl - pos);
         pos = nl + 1;
 
+        // HEADER NOTES, read from the RAW line because truncateHash below throws a comment away
+        // (and would cut a NOTE at any '#' inside its text). A full-line '#' comment before the
+        // first record is kept minus the '#' and one following space; a NOTE record is kept
+        // wherever it appears. The writer's own banner line is not a note.
+        {
+            const std::string_view raw = trim(rawLine);
+            if (!raw.empty() && raw.front() == '#') {
+                if (!sawRecord) {
+                    std::string_view c = raw.substr(1);
+                    if (!c.empty() && c.front() == ' ') c.remove_prefix(1);
+                    if (!startsWithCI(c, kWriterBannerPrefix)) out.notes.emplace_back(c);
+                }
+                continue;
+            }
+            if (raw.size() >= 4 && startsWithCI(raw, "NOTE") && (raw.size() == 4 || isSpace(raw[4]))) {
+                out.notes.emplace_back(trim(raw.substr(4)));
+                continue;
+            }
+        }
+
         std::string_view line = stripTrailingSemicolon(truncateHash(rawLine));
         if (line.empty()) continue;
 
@@ -136,6 +165,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         if (t.empty()) continue;
         std::string_view key = t[0];
 
+        if (!equalsCI(key, "OCWORLD") && !equalsCI(key, "OCMAP")) sawRecord = true;
         if (equalsCI(key, "OCWORLD") || equalsCI(key, "OCMAP")) {
             out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;
             sawHeader = true;
@@ -386,6 +416,11 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "steepness")    && i + 1 < t.size()) gw.steepness    = parseF64(t[++i]);
             }
             out.waves.push_back(std::move(gw));
+        } else if (equalsCI(key, "FOLIAGE") && t.size() >= 2) {
+            // A single token, exactly like PLACE's own asset column, LANDSCAPE's `section` and
+            // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
+            // does not invent an escaping scheme none of this file's other asset references have.
+            out.foliageFiles.push_back(std::string(t[1]));
         } else if (equalsCI(key, "BEGIN")) {
             // OPENS A SCOPE ON THE MOST RECENT PLACEMENT. See the grammar note above parseOcworld.
             if (lastPlacement < 0) {
@@ -455,6 +490,17 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 // actual entity name, and it collides with a real material only if a project happens
                 // to have one called exactly that.
                 else if (equalsCI(t[i], "name") && i + 1 < t.size()) { p.name = percentDecode(t[++i]); }
+                // Object animation: `anim <clip>` (percent-encoded like `name`), `animspeed <f>`,
+                // `animtime <f>` and the bare `animonce`. All before the material fallback, for the
+                // same reason as `class` and `name`.
+                else if (equalsCI(t[i], "anim") && i + 1 < t.size()) { p.animClip = percentDecode(t[++i]); }
+                else if (equalsCI(t[i], "animspeed") && i + 1 < t.size()) { p.animSpeed = static_cast<f32>(tokF(t, ++i, 1.0)); }
+                else if (equalsCI(t[i], "animtime") && i + 1 < t.size()) { p.animTime = static_cast<f32>(tokF(t, ++i, 0.0)); }
+                else if (equalsCI(t[i], "animonce")) p.animOnce = true;
+                // `vehicle <preset>`: a keyword-plus-argument pair like `anim`, before the material
+                // fallback for the same reason. Percent-decoded though a preset is a plain word, so a
+                // hand-written odd one still survives the round trip as ONE token.
+                else if (equalsCI(t[i], "vehicle") && i + 1 < t.size()) { p.vehiclePreset = percentDecode(t[++i]); }
                 else if (p.material.empty()) p.material = std::string(t[i]);
             }
             p.objectId = fnv1a64(std::string_view(p.asset));
@@ -530,6 +576,15 @@ std::string writeOcworld(const OcWorldData& w) {
     std::string s;
     s.reserve(256 + w.placements.size() * 96);
     s += "OCWORLD 1\n";
+    // THE LEVEL'S HEADER COMMENTS come straight back out, one '#' line each. A note is one line by
+    // construction (the parser splits on newlines), but writeOcworld also serves callers that
+    // build OcWorldData by hand, so a stray CR/LF becomes a space rather than injecting a record.
+    for (const std::string& note : w.notes) {
+        s += '#';
+        if (!note.empty()) s += ' ';
+        for (const char c : note) s += (c == '\r' || c == '\n') ? ' ' : c;
+        s += '\n';
+    }
     s += "# Written by the Aver Engine editor. Centimetres, +X forward, +Y right, +Z up.\n";
 
     char idbuf[32];
@@ -742,6 +797,13 @@ std::string writeOcworld(const OcWorldData& w) {
         }
     }
 
+    if (!w.foliageFiles.empty()) {
+        s += "\n";
+        // One token, same "no escaping this file's other asset paths do not have either" rule
+        // FOLIAGE's own parse branch states -- see that comment for why.
+        for (const std::string& path : w.foliageFiles) s += "FOLIAGE " + path + "\n";
+    }
+
     s += "\n";
     // DEPTH-FIRST FROM THE ROOTS, so the nesting in the file IS the parent relation and no index is
     // ever written down. See OcWorldPlacement::parent for why that matters: a stored index has to be
@@ -789,6 +851,16 @@ std::string writeOcworld(const OcWorldData& w) {
         // tokens at all, which is what keeps an old save byte-identical to a new one. See
         // percentEncode's own comment for why the value is escaped before it goes out.
         if (!p.name.empty()) { s += " name "; s += percentEncode(p.name); }
+        // Object animation, only when a clip is named; each companion token only when it differs from
+        // its default, so an un-animated placement writes exactly what it always did.
+        if (!p.animClip.empty()) {
+            s += " anim "; s += percentEncode(p.animClip);
+            if (p.animSpeed != 1.0f) { s += " animspeed "; s += num(p.animSpeed); }
+            if (p.animTime != 0.0f)  { s += " animtime ";  s += num(p.animTime); }
+            if (p.animOnce) s += " animonce";
+        }
+        // Omitted when empty, same rule again. After the anim tokens, matching the parser's read order.
+        if (!p.vehiclePreset.empty()) { s += " vehicle "; s += percentEncode(p.vehiclePreset); }
         s += "\n";
     };
 

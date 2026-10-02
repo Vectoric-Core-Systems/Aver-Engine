@@ -7,12 +7,16 @@ three more in the session that wrote this file. That loop is entirely mechanical
 hand a dozen times. This turns it into tools an agent can call, so "open it and look" stops being the
 step that gets skipped because it is tedious.
 
-IT DRIVES THE EXISTING CLI AND CHANGES NOTHING IN THE ENGINE. The hosts already take the flags --
---frames, --screenshot, --probe-rel, --open-asset, --force-caps, --warp and the rest -- and the gates
-oracle is built entirely out of them. So there is no engine-side listener here, no socket, no named
-pipe, and no risk to a working editor. That is a deliberate first cut, not an oversight: a live control
-channel is a real feature with threading and lifetime concerns, and it should not be the thing that
-also introduces this tooling.
+THE BATCH TOOLS DRIVE THE EXISTING CLI AND CHANGE NOTHING IN THE ENGINE. The hosts already take the
+flags -- --frames, --screenshot, --probe-rel, --open-asset, --force-caps, --warp and the rest -- and the
+gates oracle is built entirely out of them. So aver_build, aver_run, aver_tests, aver_gates,
+aver_package and aver_flags need no engine-side listener, socket or named pipe, and cannot disturb a
+working editor. That was the deliberate first cut: a live control channel is a real feature with
+threading and lifetime concerns, and it should not be the thing that also introduces this tooling.
+
+THE LIVE CHANNEL CAME LATER, as modules/mcp (McpBridge), and aver_editor / aver_level are its client:
+one TCP connection per call to 127.0.0.1, into an editor the USER started with --mcp or from the
+status bar. They never start an editor or the channel, and they say how to when nothing is listening.
 
 The count used to be written out here ("already takes 43 flags"). It was 43 when that sentence was
 written and 183 when someone next checked, which is the whole reason aver_flags reads the set out of
@@ -35,6 +39,7 @@ WHAT IT WILL NOT DO, and these are refusals rather than omissions:
     its own. A windowed editor left running holds bin/*.dll open and the next build fails LNK1168 --
     and the user may have their own editor open, which this must not disturb.
   * It never kills a process it did not start.
+  * aver_level edits only the level the running editor has open, and refuses while it is playing.
 
 TRANSPORT: two, both PURE STDLIB -- no mcp package, no npm install, nothing to provision on a fresh
 machine and nothing whose licence has to be vetted against this repo's permissive-only rule.
@@ -61,6 +66,7 @@ import http.server
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -90,7 +96,8 @@ def log(msg):
 # --------------------------------------------------------------------------------------------------
 # mcp.conf: optional, developer-local port assignment. Same file, same grammar, as the one
 # sandbox/src/McpConf.cpp reads for the editor's --mcp control channel (see mcp.conf.example at the
-# repo root) -- this is the Python-side reader for the OTHER key in it, tool_server.port. Kept as a
+# repo root) -- this is the Python-side reader: tool_server.port for this server's own HTTP port, and
+# editor_bridge.port for where aver_editor and aver_level look for the editor's channel. Kept as a
 # free function rather than folded into ROOT's module-level setup so it can be called with an
 # explicit root/default in a test without touching the real mcp.conf.
 # --------------------------------------------------------------------------------------------------
@@ -847,6 +854,393 @@ def tool_flags(args):
     }
 
 
+# --------------------------------------------------------------------------------------------------
+# aver_editor / aver_level: a client of the RUNNING editor's control channel (modules/mcp, McpBridge).
+#
+# Everything above launches a fresh process, runs N frames and exits. These two talk to an editor a
+# person already has open -- started with --mcp, or Start on the MCP button of its status bar -- and
+# change what it is showing. The wire is one JSON object per line over TCP to 127.0.0.1; the ABIs a
+# request can name are registered in sandbox/src/SandboxMcp.cpp (registerMcpAbis), and "level" is the
+# one that assembles a level out of the editor's own spawn, transform, delete and save code.
+# --------------------------------------------------------------------------------------------------
+
+_EDITOR_HOST = "127.0.0.1"          # the bridge binds loopback only, hard-coded (McpBridge::start)
+_EDITOR_PORT_DEFAULT = 45123        # McpBridge::start's own default; mcp.conf's editor_bridge.port beats it
+_EDITOR_CALL_TIMEOUT = 90.0         # the bridge itself gives up on the editor's main thread after 60s
+_EDITOR_OPEN_TIMEOUT = 300.0        # a level open, load included
+_editor_seq = [0]
+
+
+class EditorError(Exception):
+    """The editor could not be reached, or answered in a way no request should get."""
+
+
+def resolve_editor_port(args):
+    """An explicit `port` > mcp.conf's editor_bridge.port > 45123: the order the editor resolves the
+    number a bare `--mcp` opens (sandbox/src/SandboxMain.cpp), so both sides agree from one file."""
+    port = args.get("port")
+    if port is not None:
+        if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+            raise EditorError("port %r is not a usable port (1-65535)" % (port,))
+        return port, "argument"
+    return read_conf_port(ROOT, "editor_bridge.port", _EDITOR_PORT_DEFAULT)
+
+
+def editor_send(port, message, timeout):
+    """One request, one reply, one connection. Returns the reply as a dict, or raises EditorError.
+
+    A NEW CONNECTION PER CALL, closed straight after: the bridge serves a single client and accepts the
+    next only when the current one disconnects, so a connection kept open would lock out every other
+    caller (a second agent, this server's own next call) until this process died.
+    """
+    _editor_seq[0] += 1
+    full = {"id": _editor_seq[0]}
+    full.update(message)
+    try:
+        # allow_nan=False: the bridge's number reader would refuse NaN and Infinity anyway, with a
+        # message that does not say which argument it was.
+        line = (json.dumps(full, allow_nan=False) + "\n").encode("ascii")
+    except ValueError as e:
+        raise EditorError("request holds a value JSON cannot carry: %s" % e)
+
+    try:
+        sock = socket.create_connection((_EDITOR_HOST, port), timeout=min(timeout, 5.0))
+    except ConnectionRefusedError:
+        raise EditorError("no editor is listening on %s:%d -- start the editor with --mcp (or --mcp <port>), "
+                          "or enable MCP in its status bar (the MCP button, then Start). The port is "
+                          "mcp.conf's editor_bridge.port, else %d, unless this call names one."
+                          % (_EDITOR_HOST, port, _EDITOR_PORT_DEFAULT))
+    except OSError as e:
+        raise EditorError("could not connect to the editor at %s:%d: %s" % (_EDITOR_HOST, port, e))
+
+    with sock:
+        try:
+            sock.settimeout(timeout)
+            sock.sendall(line)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise EditorError("the editor closed the connection without answering")
+                buf += chunk
+        except socket.timeout:
+            raise EditorError("the editor accepted the connection but did not answer within %gs -- another "
+                              "client may be holding the channel (it serves one at a time), or the editor "
+                              "is busy on something long (a level load?)" % timeout)
+        except OSError as e:
+            raise EditorError("the connection to the editor failed: %s" % e)
+    try:
+        return json.loads(buf.split(b"\n", 1)[0].decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as e:
+        raise EditorError("the editor's reply is not JSON: %s" % e)
+
+
+def editor_abi(port, module, fn, abi_args=None, text=None, timeout=_EDITOR_CALL_TIMEOUT):
+    """An `abi` request. KEY ORDER IS PART OF THE PROTOCOL: the bridge's reader takes a key at its
+    first occurrence in the line, so `text` -- arbitrary content -- goes last, after every key the
+    reader looks up by name."""
+    msg = {"cmd": "abi", "module": module, "fn": fn}
+    if abi_args:
+        msg["args"] = list(abi_args)
+    if text:
+        msg["text"] = text
+    return editor_send(port, msg, timeout)
+
+
+def _decode_result(value):
+    """An ABI's result is a string; the `level` ABI's are JSON documents, so those come back parsed and
+    the plain-text ones (`world`, `graph`) stay as they are."""
+    if isinstance(value, str) and value[:1] in ("{", "["):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+
+
+_EDITOR_CMDS = ("abi", "ping", "modules", "widgets", "shot", "move", "click", "key", "text")
+
+
+def tool_editor(args):
+    known = {"cmd", "module", "fn", "args", "text", "extra", "port", "timeout"}
+    unknown = sorted(k for k in args if k not in known)
+    if unknown:
+        return {"ok": False, "error": "unknown argument(s) %s -- this tool takes %s. Refused rather than "
+                                      "ignored." % (", ".join(unknown), ", ".join(sorted(known)))}
+    cmd = args.get("cmd", "abi")
+    if cmd not in _EDITOR_CMDS:
+        return {"ok": False, "error": "cmd %r is not one of %s" % (cmd, ", ".join(_EDITOR_CMDS))}
+
+    msg = {"cmd": cmd}
+    text = args.get("text")
+    if text is not None and not isinstance(text, str):
+        return {"ok": False, "error": "text must be a string"}
+    if cmd == "abi":
+        module, fn = args.get("module"), args.get("fn")
+        if not isinstance(module, str) or not module or not isinstance(fn, str) or not fn:
+            return {"ok": False, "error": "an abi request needs module and fn (ask cmd=modules for the "
+                                          "registered modules)"}
+        msg["module"], msg["fn"] = module, fn
+        abi_args = args.get("args") or []
+        if not isinstance(abi_args, list) or not all(_is_number(v) for v in abi_args):
+            return {"ok": False, "error": "args must be an array of numbers (a flag is 0 or 1, not a boolean)"}
+        if abi_args:
+            msg["args"] = abi_args
+    else:
+        extra = args.get("extra") or {}
+        if not isinstance(extra, dict) or any(not isinstance(k, str) or k in ("id", "cmd") for k in extra):
+            return {"ok": False, "error": "extra must be an object of the command's own fields (x, y, "
+                                          "button, widget, key, path), never id or cmd"}
+        msg.update(extra)
+    if text:
+        msg["text"] = text
+
+    try:
+        port, source = resolve_editor_port(args)
+        timeout = float(args["timeout"]) if "timeout" in args else _EDITOR_CALL_TIMEOUT
+        if not timeout > 0:
+            raise ValueError("timeout must be positive")
+        reply = editor_send(port, msg, timeout)
+    except (ValueError, EditorError) as e:
+        return {"ok": False, "error": str(e)}
+    out = {"ok": bool(reply.get("ok")), "cmd": cmd, "port": port, "port_source": source, "reply": reply}
+    if "result" in reply:
+        out["result"] = _decode_result(reply["result"])
+    if not out["ok"]:
+        out["error"] = reply.get("error", "the editor refused with no reason")
+    return out
+
+
+# The ops the "level" ABI answers (sandbox/src/SandboxMcp.cpp, SandboxApp::mcpLevelAbi), and the
+# parameters each takes. An unknown parameter is REFUSED, like aver_build's unknown arguments: a
+# misspelt `rotation` that was dropped would place the object facing the wrong way and say nothing.
+_LEVEL_PARAMS = {
+    "open": {"path", "discard"},
+    "info": set(),
+    "list": {"filter", "max"},
+    "place": {"placements"},
+    "set_transform": {"id", "position", "rotation", "scale"},
+    "set_material": {"id", "material"},
+    "set_collide": {"id", "collide"},
+    "set_visible": {"id", "visible"},
+    "set_anim": {"id", "clip", "speed", "time", "once"},
+    "remove": {"ids"},
+    "select": {"ids", "frame"},
+    "save": {"path"},
+    "player_start": {"position", "yaw"},
+}
+_LEVEL_COMMON = {"op", "port", "timeout"}
+
+
+def _level_id(v, name="id"):
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise ValueError("%s must be an entity id: a whole number >= 1 (got %r)" % (name, v))
+    return v
+
+
+def _level_vec(a, key, n, what):
+    v = a.get(key)
+    if not isinstance(v, (list, tuple)) or len(v) != n or not all(_is_number(x) for x in v):
+        raise ValueError("%s must be an array of %d numbers: %s" % (key, n, what))
+    return list(v)
+
+
+def _level_flag(v, name):
+    if isinstance(v, bool):
+        return 1 if v else 0
+    if v in (0, 1):
+        return int(v)
+    raise ValueError("%s must be true or false" % name)
+
+
+def _level_number(a, key, default):
+    v = a.get(key, default)
+    if not _is_number(v):
+        raise ValueError("%s must be a number" % key)
+    return v
+
+
+def _level_request(op, a):
+    """Maps an aver_level call onto the ABI's (fn, args, text), or raises ValueError saying what is
+    wrong with it. Everything the editor would refuse for a malformed value is caught here first, so
+    the message names the parameter the caller actually wrote."""
+    if op == "open":
+        path = a.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("open needs path: the level file, relative to the project's Content "
+                             "directory (Maps/Arena.ocworld, or just Arena) or absolute")
+        # discard THROWS AWAY UNSAVED EDITS, so it is read as a flag and never by truthiness: the string
+        # "false" (or "no", or 2) is refused instead of being taken as yes. null counts as not given.
+        discard = a.get("discard")
+        flag = 0 if discard is None else _level_flag(discard, "discard")
+        return "open", ([1] if flag else []), path.strip()
+    if op == "info":
+        return "info", [], None
+    if op == "list":
+        flt = a.get("filter", "")
+        if not isinstance(flt, str):
+            raise ValueError("filter must be a string")
+        mx = a.get("max")
+        if mx is not None and (isinstance(mx, bool) or not isinstance(mx, int) or mx < 1):
+            raise ValueError("max must be a whole number >= 1")
+        return "list", ([mx] if mx else []), flt
+    if op == "place":
+        p = a.get("placements")
+        if isinstance(p, str):
+            p = p.split("\n")
+        if not isinstance(p, list) or not all(isinstance(x, str) for x in p):
+            raise ValueError("placements must be a string of PLACE lines, or an array of them")
+        lines = [x.strip() for x in p if x.strip()]
+        if not lines:
+            raise ValueError("placements holds no line, e.g. PLACE Meshes/cube.ocmesh 0 0 0  0 0 0  100")
+        return "place", [], "\n".join(lines)
+    if op == "set_transform":
+        pos = _level_vec(a, "position", 3, "x, y, z in centimetres, world space")
+        rot = _level_vec(a, "rotation", 3, "yaw, pitch, roll in degrees")
+        abi = [_level_id(a.get("id"))] + pos + rot
+        if a.get("scale") is not None:
+            abi += _level_vec(a, "scale", 3, "sx, sy, sz")
+        return "set_transform", abi, None
+    if op == "set_material":
+        mat = a.get("material")
+        if not isinstance(mat, str) or not mat.strip():
+            raise ValueError("set_material needs material: an .ocmat stem such as M_Wood")
+        return "set_material", [_level_id(a.get("id"))], mat.strip()
+    if op == "set_collide":
+        return "set_collide", [_level_id(a.get("id")), _level_flag(a.get("collide"), "collide")], None
+    if op == "set_visible":
+        return "set_visible", [_level_id(a.get("id")), _level_flag(a.get("visible"), "visible")], None
+    if op == "set_anim":
+        clip = a.get("clip", "")
+        if not isinstance(clip, str):
+            raise ValueError("clip must be a string: a content-relative .ocanim path, or \"\" to clear")
+        abi = [_level_id(a.get("id")), _level_number(a, "speed", 1.0), _level_number(a, "time", 0.0),
+               _level_flag(a.get("once", False), "once")]
+        return "set_anim", abi, clip.strip()
+    if op == "remove":
+        ids = a.get("ids")
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("remove needs ids: an array of one or more entity ids")
+        return "remove", [_level_id(i, "ids[]") for i in ids], None
+    if op == "select":
+        ids = a.get("ids", [])
+        if not isinstance(ids, list):
+            raise ValueError("ids must be an array of entity ids (empty clears the selection)")
+        return "select", [_level_id(i, "ids[]") for i in ids], ("" if a.get("frame", True) else "noframe")
+    if op == "save":
+        path = a.get("path")
+        if path is not None and not isinstance(path, str):
+            raise ValueError("path must be a string: a name, or a path relative to Content or absolute")
+        return "save", [], (path or "")
+    if op == "player_start":
+        pos = _level_vec(a, "position", 3, "x, y, z in centimetres")
+        return "player_start", pos + [_level_number(a, "yaw", 0.0)], None
+    raise ValueError("unhandled op %r" % op)   # unreachable: tool_level checks _LEVEL_PARAMS first
+
+
+def _same_path(a, b):
+    def norm(p):
+        return os.path.normcase(os.path.normpath(p)) if isinstance(p, str) and p else ""
+    return norm(a) != "" and norm(a) == norm(b)
+
+
+def _wait_for_open(port, want, timeout):
+    """`open` only QUEUES the load (the editor drains it on its own frame, past its unsaved-changes
+    check), so this asks `info` until the level it names is the one open and nothing is loading.
+    Returns (info, None) or (last_info_or_None, why_not)."""
+    deadline = time.time() + timeout
+    mismatch, prompts, info, last_err = 0, 0, None, None
+    while time.time() < deadline:
+        try:
+            rep = editor_abi(port, "level", "info", timeout=15.0)
+        except EditorError as e:
+            last_err = str(e)            # the editor is busy loading: keep asking
+            time.sleep(0.5)
+            continue
+        if not rep.get("ok"):
+            last_err = rep.get("error")
+            time.sleep(0.5)
+            continue
+        info = _decode_result(rep.get("result"))
+        if isinstance(info, dict):
+            if info.get("pendingOpenPrompt"):
+                prompts += 1
+                if prompts >= 3:
+                    return info, ("the editor is showing its 'Unsaved changes' prompt, which nothing here "
+                                  "can answer -- answer it in the editor, or save/discard first")
+            elif not info.get("pendingOpen") and not info.get("loading"):
+                if _same_path(info.get("level"), want):
+                    return info, None
+                mismatch += 1
+                if mismatch >= 4:        # settled, and not on the level that was asked for
+                    return info, ("the editor finished without opening %s (it has %r open) -- see its log "
+                                  "for why the load failed" % (want, info.get("level")))
+        time.sleep(0.5)
+    return info, "the level was still not open after %gs%s" % (timeout, (" (%s)" % last_err) if last_err else "")
+
+
+def tool_level(args):
+    op = args.get("op")
+    if op not in _LEVEL_PARAMS:
+        return {"ok": False, "error": "op must be one of %s (got %r)" % (", ".join(_LEVEL_PARAMS), op)}
+    bad = sorted(k for k in args if k not in _LEVEL_PARAMS[op] and k not in _LEVEL_COMMON)
+    if bad:
+        return {"ok": False, "op": op,
+                "error": "unknown argument(s) %s for op %s -- it takes %s. Refused rather than ignored."
+                         % (", ".join(bad), op, ", ".join(sorted(_LEVEL_PARAMS[op])) or "no parameters")}
+    try:
+        port, source = resolve_editor_port(args)
+        timeout = float(args["timeout"]) if "timeout" in args else \
+            (_EDITOR_OPEN_TIMEOUT if op == "open" else _EDITOR_CALL_TIMEOUT)
+        if not timeout > 0:
+            raise ValueError("timeout must be positive")
+        fn, abi_args, text = _level_request(op, args)
+    except (ValueError, EditorError) as e:
+        return {"ok": False, "op": op, "error": str(e)}
+
+    try:
+        # `open`'s own request only queues the load, so it never needs the load's budget.
+        reply = editor_abi(port, "level", fn, abi_args, text,
+                           min(timeout, _EDITOR_CALL_TIMEOUT) if op == "open" else timeout)
+    except EditorError as e:
+        return {"ok": False, "op": op, "port": port, "error": str(e)}
+
+    out = {"ok": bool(reply.get("ok")), "op": op, "port": port}
+    if not out["ok"]:
+        err = reply.get("error", "the editor refused with no reason")
+        if "no ABI registered for 'level'" in err:
+            err += " -- this editor was built before the level ABI existed; rebuild it"
+        out["error"] = err
+        return out
+    value = _decode_result(reply.get("result"))
+    if isinstance(value, dict):
+        out.update(value)
+        # The level parser skips a record it does not know without a word, so the editor lists them; saying
+        # so here keeps a misspelt PLCAE from passing as a place that merely placed fewer.
+        if op == "place" and value.get("ignored"):
+            shown = "; ".join("line %s: %s" % (l.get("line"), l.get("text"))
+                              for l in (value.get("ignoredLines") or []) if isinstance(l, dict))
+            out["warning"] = ("%s line(s) of the placements were not PLACE/PLACEG/CHILD/CHILDG records and were "
+                              "ignored%s" % (value["ignored"], (" -- " + shown) if shown else ""))
+    else:
+        out["result"] = value
+    if op == "open":
+        info, why = _wait_for_open(port, out.get("path"), timeout)
+        out["info"] = info
+        if why:
+            out["ok"] = False
+            out["error"] = why
+        else:
+            out["opened"] = True
+    return out
+
+
 TOOLS = [
     {
         "name": "aver_build",
@@ -976,6 +1370,125 @@ TOOLS = [
                        "refuses and why.",
         "inputSchema": {"type": "object", "properties": {}},
         "fn": tool_flags,
+    },
+    {
+        "name": "aver_editor",
+        "description": "Send ONE raw command to a RUNNING editor's control channel (started with --mcp, or "
+                       "Start on the status bar's MCP button) and return the reply. Default cmd is abi: "
+                       "{module, fn, args: number[], text: string} calls a registered ABI on the editor's "
+                       "main thread -- editor (tool, screenshot, mouse, widgets), physics (bodyCount, "
+                       "ready), world (stream_on, stream_off, stream_stats, warp), graph (entity_pos, load, "
+                       "attach, tick), level (see aver_level, which is the friendlier way in). Other cmds: "
+                       "ping, modules (lists the registered ABIs -- ask this first), widgets, and the input "
+                       "commands move/click/key/text/shot, whose own fields go in `extra` (x, y, button, "
+                       "widget, key, path). `text` may hold newlines and quotes. The reply's `result` is "
+                       "parsed when it is JSON. Refuses with the way to start the channel when nothing is "
+                       "listening. The channel is loopback-only and drives the real editor the user may be "
+                       "looking at.",
+        "inputSchema": {"type": "object", "properties": {
+            "cmd": {"type": "string", "enum": list(_EDITOR_CMDS), "description": "default abi"},
+            "module": {"type": "string", "description": "abi only: the ABI's registered name"},
+            "fn": {"type": "string", "description": "abi only: the entry point, without any module prefix"},
+            "args": {"type": "array", "items": {"type": "number"},
+                     "description": "abi only: numeric arguments in order (a flag is 0 or 1)"},
+            "text": {"type": "string", "description": "the one string argument: an abi's text, or the "
+                                                      "typed text of cmd=text"},
+            "extra": {"type": "object", "description": "non-abi commands: their own fields, e.g. "
+                                                       "{\"x\":10,\"y\":20,\"button\":\"left\"} for click"},
+            "port": {"type": "integer", "description": "the editor's port; default mcp.conf's "
+                                                       "editor_bridge.port, else 45123"},
+            "timeout": {"type": "number", "description": "seconds to wait for the answer; default 90"},
+        }},
+        "fn": tool_editor,
+    },
+    {
+        "name": "aver_level",
+        "description": "Assemble and edit the level a RUNNING editor has open (started with --mcp, or Start on "
+                       "the status bar's MCP button), through the editor's own code paths: every edit is "
+                       "undoable with Ctrl+Z where the UI's is, dirties the level, and saves exactly as a click "
+                       "would. `op` picks the operation. Ids are entity ids (info and list report them). "
+                       "Positions are cm, Z up; rotations are degrees [yaw, pitch, roll]; transforms are WORLD "
+                       "space. Refused, with the reason, while the editor is playing, with no level open, while "
+                       "a level open is pending, and on an unknown or foreign entity id.\n"
+                       "OPS (parameters -> reply fields):\n"
+                       "open {path, discard?} -> {opened, path, info}. Level file relative to the project's "
+                       "Content dir (Maps/Arena.ocworld, or Arena) or absolute. Waits for the load. Refused "
+                       "while the open level has unsaved edits unless discard:true throws them away "
+                       "(discard must be a real boolean, or 0/1: anything else is refused, never guessed).\n"
+                       "info {} -> {level, name, entities, dirty, format, playing, loading, pendingOpen, "
+                       "pendingOpenPrompt, content, playerStart:{id,pos,yaw}|null, camera:{pos,yaw,pitch}, "
+                       "selection:[ids]}\n"
+                       "list {filter?, max?} -> {total, returned, entities:[{id, asset, label, pos:[x,y,z], "
+                       "rot:[yaw,pitch,roll], scale:[x,y,z], material, collide, visible, parent, "
+                       "anim:{clip,speed,time,once}|null}]}. filter is a case-insensitive substring of asset "
+                       "or label; max defaults to 500. Works while playing (poses are the live ones).\n"
+                       "place {placements} -> {ids, placed, requested, parsed, ignored, ignoredLines, animated, "
+                       "undoEntries, warning?}. placements is "
+                       "one string of .ocworld lines (newline-separated) or an array of lines, parsed by the "
+                       "real level parser, so every token is honoured: PLACE <asset> x y z yaw pitch roll "
+                       "<scale> [material] [nocollide] [hidden] [snap] [name <percent-encoded>] [anim "
+                       "<clip.ocanim> animspeed <f> animtime <f> animonce] [vehicle car|van|truck|bus|sports: a "
+                       "car that DRIVES in Play on the level's <name>.oclanes, and gets no static collider]; "
+                       "PLACEG takes sx sy sz instead of "
+                       "<scale>; CHILD/CHILDG lines inside BEGIN/END parent to the line above. asset is a "
+                       "content-relative .ocmesh path with forward slashes (Meshes/cube.ocmesh); it must "
+                       "exist. ids is one per placement, 0 where the world refused. requested counts the "
+                       "record lines sent, parsed the placements read from them; any other line (a misspelt "
+                       "keyword) is skipped and listed in ignoredLines, with a warning. Refused, nothing "
+                       "placed: class placements; a NaN, infinite or out-of-range number; an anim clip that "
+                       "is not an object clip in the content index, or on a legacy .ocmap level (its save "
+                       "cannot store one). One undo entry per entity (the editor keeps the last 128).\n"
+                       "set_transform {id, position, rotation, scale?} -> {id, pos, rot, scale}. Undoable. "
+                       "Refused while a drag is in flight in the editor, and for a `snap` placement (a save "
+                       "keeps its authored ground offset, so the move would be lost: remove and re-place it).\n"
+                       "set_material {id, material} -> {id, material}. material is an .ocmat stem (M_Wood). "
+                       "Not undoable, like the Details panel's picker.\n"
+                       "set_collide {id, collide} -> {id, collide, changed}. Undoable. "
+                       "set_visible {id, visible} -> {id, visible, changed}. Undoable; saved with the level.\n"
+                       "set_anim {id, clip, speed?, time?, once?} -> {id, anim, changed}. clip is a "
+                       "content-relative .ocanim OBJECT clip in the content index (\"\" clears); speed default "
+                       "1, time = the start time in seconds, once = play once and hold. Undoable. Refused on "
+                       "a legacy .ocmap level. The Player Start marker takes only set_transform, select, "
+                       "remove and player_start.\n"
+                       "remove {ids} -> {removed, requested}. One undo entry per entity.\n"
+                       "select {ids, frame?} -> {selected, framed}. Selects and frames the camera on them "
+                       "(frame:false to leave the camera); empty ids clears the selection.\n"
+                       "save {path?} -> {path, saved, savedAs}. No path saves in place. A bare name saves "
+                       "as Content/Maps/<name>.ocworld; a path (relative to Content, or absolute) is Save As.\n"
+                       "player_start {position, yaw?} -> {id, pos, yaw, created}. Moves the level's Player "
+                       "Start, or creates it (one per level).",
+        "inputSchema": {"type": "object", "properties": {
+            "op": {"type": "string", "enum": list(_LEVEL_PARAMS)},
+            "path": {"type": "string", "description": "open, save: the level file (see the op)"},
+            "discard": {"type": "boolean", "description": "open: throw away the open level's unsaved edits"},
+            "filter": {"type": "string", "description": "list: case-insensitive substring of asset or label"},
+            "max": {"type": "integer", "description": "list: most rows to return; default 500"},
+            "placements": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                           "description": "place: .ocworld PLACE/PLACEG/CHILD lines"},
+            "id": {"type": "integer", "description": "the entity: set_transform, set_material, set_collide, "
+                                                     "set_visible, set_anim"},
+            "ids": {"type": "array", "items": {"type": "integer"}, "description": "remove, select"},
+            "position": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                         "description": "[x, y, z] cm: set_transform, player_start"},
+            "rotation": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                         "description": "[yaw, pitch, roll] degrees: set_transform"},
+            "scale": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                      "description": "[sx, sy, sz]: set_transform; omitted keeps the current scale"},
+            "yaw": {"type": "number", "description": "player_start: heading in degrees; default 0"},
+            "material": {"type": "string", "description": "set_material: an .ocmat stem"},
+            "collide": {"type": "boolean", "description": "set_collide"},
+            "visible": {"type": "boolean", "description": "set_visible"},
+            "clip": {"type": "string", "description": "set_anim: content-relative .ocanim path; \"\" clears"},
+            "speed": {"type": "number", "description": "set_anim: playback rate; default 1"},
+            "time": {"type": "number", "description": "set_anim: start time in seconds; default 0"},
+            "once": {"type": "boolean", "description": "set_anim: play once and hold the end"},
+            "frame": {"type": "boolean", "description": "select: frame the camera on the selection; default true"},
+            "port": {"type": "integer", "description": "the editor's port; default mcp.conf's "
+                                                       "editor_bridge.port, else 45123"},
+            "timeout": {"type": "number", "description": "seconds to wait; default 90 (300 for open, which "
+                                                         "waits for the load)"},
+        }, "required": ["op"]},
+        "fn": tool_level,
     },
 ]
 

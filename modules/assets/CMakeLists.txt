@@ -14,6 +14,11 @@ aver_add_module(Aver.Assets
 aver_add_module(Aver.Assets.Gpu
   SOURCES
     src/TextureUpload.cpp
+    # The BC7 derived-data cache (TextureCache.hpp). HERE, NOT IN Aver.Assets ABOVE, for the same
+    # dependency-direction reason this whole second target exists: it calls fmt::encodeBc7Image and
+    # fmt::kBc7EncoderVersion (Aver.Formats), which Aver.Assets cannot link without an upward
+    # dependency on the module that already links it.
+    src/TextureCache.cpp
   DEPS
     Aver.Core
     Aver.Formats

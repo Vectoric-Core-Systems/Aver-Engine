@@ -96,13 +96,15 @@ enum class CpuSpan : u16 {
     WalkEntity,       //   loop overhead, w.at, destroyPending, CMeshRenderer sparse-set lookup,
                       //   w.worldMatrix (composeChain ancestor walk), the owner-hide walk
     WalkLookup,       //   GameContent hash probes ONLY: meshFor, boundsFor,
-                      //   meshDefaultMaterial, partsFor
+                      //   meshDefaultMaterial, partsFor -- a probe actually MADE, so with
+                      //   the walk's mesh cache on, only the misses open this span
     WalkFrustum,      //   8-corner world-box build + 6-plane test
     WalkDecide,       //   EntityDecision fill, options.decide(), chooseRoute, planEntityDraws
     WalkEmitDepth,    //   the depth-prepass delivery branch
     WalkEmitRaster,   //   the raster delivery branch
     WalkEmitDirect,   //   the culled/hidden direct route to Voxi
-    WalkResolveLook,  //   the resolveDrawLook lambda, entered from all three branches
+    WalkResolveLook,  //   the resolveDrawLook ladder, entered from all three branches -- once per
+                      //   material token per walk (its memo hits are a table read, not this span)
     VoxiSubmit,       //   VoxiRenderer::submit
     ClusterDispatch,  //   GPU cluster dispatch (converted from an existing steady_clock pair)
     WalkOther,        //   explicit remainder -- see below

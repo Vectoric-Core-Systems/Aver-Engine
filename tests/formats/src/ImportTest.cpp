@@ -443,6 +443,8 @@ int main() {
         check(mats.size() == 2, "both .mtl materials converted");
         if (mats.size() == 2) {
             check(std::fabs(mats[0].baseColorFactor[0] - 0.8f) < 1e-5f, "Kd became baseColorFactor");
+            check(!mats[0].baseColorFactorLinear,
+                  "Kd is recorded as sRGB, the .ocmat's own encoding, so the cook leaves it alone");
             check(std::fabs(mats[0].baseColorFactor[3] - 0.5f) < 1e-5f, "and d became its alpha");
             check(mats[0].alphaMode == "BLEND", "which makes it BLEND -- .mtl has no cutoff to mean MASK");
             check(std::fabs(mats[0].emissiveFactor[1] - 0.5f) < 1e-5f, "Ke became emissiveFactor");
@@ -558,6 +560,8 @@ int main() {
                   std::fabs(m.baseColorFactor[1] - 0.5f)  < 1e-5f &&
                   std::fabs(m.baseColorFactor[2] - 0.75f) < 1e-5f,
                   "diffuseColor became baseColorFactor");
+            check(m.baseColorFactorLinear,
+                  "and is recorded as LINEAR, so the cook sRGB-encodes it for the .ocmat");
             check(std::fabs(m.emissiveFactor[2] - 0.3f) < 1e-5f, "emissiveColor came across");
             check(std::fabs(m.roughnessFactor - 0.7f) < 1e-5f, "roughness came across");
             check(std::fabs(m.metallicFactor - 0.25f) < 1e-5f, "metallic came across");
@@ -1145,6 +1149,156 @@ int main() {
                   "and it is a different image from the base colour");
             check(m.opacityTex.channel == 'r',
                   "with the channel the connection named recorded, not assumed");
+        }
+        fs::remove_all(dir, ec);
+    }
+
+    // ---- corners that come out identical are welded; a crease keeps its split ----------------
+    //
+    // Two triangles sharing an edge, per-POINT normals and UVs: the corner-per-vertex build makes 6
+    // vertices, of which the two shared points' corners are identical -- 4 after the weld. The same
+    // quad with faceVarying normals that differ per face (a hard crease) must keep all 6: welding
+    // across a crease would smooth it, which is the one visible thing a weld may never do.
+    {
+        const std::string smooth =
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n    metersPerUnit = 0.01\n)\n"
+            "def Mesh \"quad\"\n{\n"
+            "    int[] faceVertexCounts = [3, 3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]\n"
+            "    point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]\n"
+            "    normal3f[] normals = [(0,0,1), (0,0,1), (0,0,1), (0,0,1)]\n"
+            "    texCoord2f[] primvars:st = [(0,0), (1,0), (1,1), (0,1)]\n"
+            "}\n";
+        fmt::UsdImportResult r;
+        const bool ok = usda(smooth, r);
+        check(ok && r.meshes.size() == 1, "a two-triangle quad imports");
+        if (ok && r.meshes.size() == 1) {
+            check(r.meshes[0].vertexCount() == 4,
+                  "its shared corners are welded: 4 vertices, not 6 (got " +
+                  std::to_string(r.meshes[0].vertexCount()) + ")");
+            check(r.meshes[0].indices.size() == 6, "and both triangles are still there");
+        }
+
+        const std::string crease =
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n    metersPerUnit = 0.01\n)\n"
+            "def Mesh \"fold\"\n{\n"
+            "    int[] faceVertexCounts = [3, 3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]\n"
+            "    point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]\n"
+            "    normal3f[] normals = [(0,0,1), (0,0,1), (0,0,1), (0,1,0), (0,1,0), (0,1,0)] (\n"
+            "        interpolation = \"faceVarying\"\n    )\n"
+            "}\n";
+        fmt::UsdImportResult r2;
+        const bool ok2 = usda(crease, r2);
+        if (ok2 && r2.meshes.size() == 1)
+            check(r2.meshes[0].vertexCount() == 6, "a crease (different normals per face) keeps all 6 corners");
+        else check(false, "the creased quad imports");
+    }
+
+    // ---- flat normals on faces sharp_face calls smooth are rebuilt smooth; sharp faces stay flat ----
+    //
+    // Jungle Ruins' terrain: Blender wrote one normal per face (every corner of a face identical)
+    // while `primvars:sharp_face` marks the faces smooth. A folded quad reproduces it: authored
+    // normals differ per face, so the shared corners cannot weld -- until the smooth rebuild gives
+    // both faces the same normal at the shared points, and they weld to 4. Marked sharp, the authored
+    // normals must survive untouched: all 6 corners stay.
+    {
+        const auto fold = [](const char* sharp) {
+            return std::string(
+                "#usda 1.0\n(\n    upAxis = \"Z\"\n    metersPerUnit = 0.01\n)\n"
+                "def Mesh \"fold\"\n{\n"
+                "    int[] faceVertexCounts = [3, 3]\n"
+                "    int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]\n"
+                "    point3f[] points = [(0,0,0), (1,0,0), (1,1,0.2), (0,1,0)]\n"
+                "    normal3f[] normals = [(0.1,0,0.995), (0.1,0,0.995), (0.1,0,0.995), "
+                "(-0.1,0,0.995), (-0.1,0,0.995), (-0.1,0,0.995)] (\n"
+                "        interpolation = \"faceVarying\"\n    )\n"
+                "    bool[] primvars:sharp_face = [") + sharp + "] (\n        interpolation = \"uniform\"\n    )\n}\n";
+        };
+        fmt::UsdImportResult smooth;
+        const bool ok = usda(fold("0, 0"), smooth);
+        check(ok && smooth.meshes.size() == 1, "a folded quad marked smooth imports");
+        if (ok && smooth.meshes.size() == 1)
+            check(smooth.meshes[0].vertexCount() == 4,
+                  "its flat per-face normals were rebuilt smooth, so the shared corners weld (4 vertices, got " +
+                  std::to_string(smooth.meshes[0].vertexCount()) + ")");
+        bool told = false;
+        for (const std::string& u : smooth.unsupported) if (u.find("sharp_face") != std::string::npos) told = true;
+        check(told, "and the rebuild is reported");
+
+        fmt::UsdImportResult sharp;
+        const bool ok2 = usda(fold("1, 1"), sharp);
+        if (ok2 && sharp.meshes.size() == 1)
+            check(sharp.meshes[0].vertexCount() == 6, "marked SHARP, the authored flat normals stay: 6 corners");
+        else check(false, "the folded quad marked sharp imports");
+    }
+
+    // ---- a CONNECTED roughness/metallic takes the texture whole: factor 1, not the default ----
+    //
+    // Jungle Ruins' terrain connects roughness to Metallic-Roughness.png's green channel (all 1.0,
+    // fully rough). Keeping UsdPreviewSurface's UNCONNECTED default of 0.5 as the .ocmat factor
+    // multiplied that to 0.5 and rendered the ground half-glossy. Material "Packed" connects both to
+    // one image (.g and .b): both factors 1. Material "GreyRough" connects only roughness, leaving
+    // metallic its literal 0 -- the one image's blue channel must NOT become metalness.
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "aver_import_connected_factor_test";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        putFile(dir / "packed_mr.png", kPng, sizeof kPng);
+        putFile(dir / "rough.png", kPng, sizeof kPng);
+
+        const std::string doc =
+            "#usda 1.0\n"
+            "(\n    defaultPrim = \"root\"\n    metersPerUnit = 0.01\n    upAxis = \"Z\"\n)\n"
+            "def Xform \"root\"\n{\n"
+            "    def Mesh \"a\" (apiSchemas = [\"MaterialBindingAPI\"])\n    {\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "        point3f[] points = [(0,0,0), (1,0,0), (0,1,0)]\n"
+            "        rel material:binding = </root/Packed>\n    }\n"
+            "    def Mesh \"b\" (apiSchemas = [\"MaterialBindingAPI\"])\n    {\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "        point3f[] points = [(2,0,0), (3,0,0), (2,1,0)]\n"
+            "        rel material:binding = </root/GreyRough>\n    }\n"
+            "    def Material \"Packed\"\n    {\n"
+            "        token outputs:surface.connect = </root/Packed/S.outputs:surface>\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            float inputs:roughness.connect = </root/Packed/MR.outputs:g>\n"
+            "            float inputs:metallic.connect = </root/Packed/MR.outputs:b>\n"
+            "        }\n"
+            "        def Shader \"MR\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @packed_mr.png@\n        }\n"
+            "    }\n"
+            "    def Material \"GreyRough\"\n    {\n"
+            "        token outputs:surface.connect = </root/GreyRough/S.outputs:surface>\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            float inputs:roughness.connect = </root/GreyRough/R.outputs:r>\n"
+            "        }\n"
+            "        def Shader \"R\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @rough.png@\n        }\n"
+            "    }\n}\n";
+        fmt::UsdImportResult r;
+        const bool ok = usda(doc, r, {}, dir.string());
+        check(ok && r.materials.size() == 2, "two materials with connected roughness import");
+        if (ok && r.materials.size() == 2) {
+            for (const fmt::ImportedMaterial& m : r.materials) {
+                check(!m.metalRoughTex.empty(), "the roughness connection bound the metal/rough slot");
+                check(std::fabs(m.roughnessFactor - 1.0f) < 1e-6f,
+                      "a CONNECTED roughness has factor 1 -- the texture is the value, not half of it");
+                if (m.name == "Packed")
+                    check(std::fabs(m.metallicFactor - 1.0f) < 1e-6f,
+                          "metallic connected to the same image's blue channel has factor 1");
+                else
+                    check(m.metallicFactor == 0.0f,
+                          "and with metallic unconnected, a greyscale roughness map is not metalness");
+            }
         }
         fs::remove_all(dir, ec);
     }

@@ -73,6 +73,27 @@ struct OcWorldPlacement {
     // had none on.
     std::string name;
 
+    // OBJECT ANIMATION: a transform clip (.ocanim flagged kOcAnimObject) this placement plays, as a
+    // content-relative path WITH the extension, the spelling `asset` uses. EMPTY = none, and then the
+    // other three are unwritten defaults. The placement is where the object sits at animTime; the clip
+    // moves it relative to that (OcAnim.hpp, kOcAnimObject). animOnce holds the last pose instead of looping.
+    std::string animClip;
+    f32  animSpeed = 1.0f;
+    f32  animTime  = 0.0f;   // start time t0, seconds
+    bool animOnce  = false;
+
+    // A DRIVEN VEHICLE: the physics preset (car, van, truck, bus or sports) world::VehicleSystem builds
+    // this placement into when play starts, so it drives the level's lanes (OcLanes.hpp) instead of
+    // sitting or following a clip. By NAME and empty meaning none, like className and animClip, and for
+    // the same reason: a vehicle's wheels, mass and engine are the preset's, not this record's, and a
+    // level written before this field existed has it empty on every placement and round-trips unchanged.
+    //
+    // THE FORMAT DOES NOT CHECK THE NAME. An unknown preset parses and writes back as it was; it is
+    // the vehicle system that decides what to do with one it has no recipe for. A placement carries a
+    // preset OR an `anim` clip, never both -- the generator writes one or the other, and nothing here
+    // enforces it, since a hand-edited level that carries both is the host's to resolve, not the parser's.
+    std::string vehiclePreset;
+
     // WHICH PLACEMENT THIS ONE HANGS FROM: an index into OcWorldData::placements, or -1 for a root.
     //
     // NESTING IS A FILE-LEVEL SHAPE ONLY. In memory the placements stay a flat vector with this
@@ -442,6 +463,15 @@ struct OcWorldData : OcWorldEnv {
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
     std::string name;
 
+    // THE LEVEL'S HEADER COMMENTS -- credits, licence lines, authoring notes -- one entry per line, WITHOUT the
+    // leading "# ". parseOcworld keeps the full-line '#' comments that sit before the first record
+    // (and any `NOTE <text>` line, wherever it is); writeOcworld re-emits them as "# <text>" lines
+    // right after `OCWORLD 1`. Before this, every editor save rewrote the file from scratch and a
+    // hand-written credit block (a CC BY level's attribution!) was erased on the first Ctrl+S.
+    // Empty is the ordinary case and writes nothing, so a level with no header comments stays
+    // byte-identical. The writer's own "Written by the Aver Engine editor" banner is never kept.
+    std::vector<std::string> notes;
+
     // The GAMEMODE this level overrides the project's default with, by CLASS NAME. Empty means "no
     // override" -- the project's own default applies, which is what every level did before this
     // existed.
@@ -509,6 +539,27 @@ struct OcWorldData : OcWorldEnv {
     std::vector<OcGerstnerWave> waves;
 
     std::vector<OcWorldPlacement> placements;
+
+    // Baked instanced foliage: one content-relative path per `FOLIAGE <path>` record, each naming an
+    // `.ocinst` file (OcInstances.hpp) -- a flat, potentially multi-million-row transform table, kept
+    // OUTSIDE `placements` entirely rather than as one OcWorldPlacement per instance. Foliage this
+    // size cannot be individual placements: a scattered USD stage can declare millions of instances
+    // (Jungle Ruins: 8.7 million), and `placements` is a std::vector<OcWorldPlacement> the editor
+    // walks, saves and diffs as ordinary entities -- one row per blade of grass would not merely be
+    // slow, it would make `placements.size()` mean something different for every level that has any.
+    //
+    // A level may name several -- one per source stage, or one per foliage density tier a project
+    // wants to stream separately -- so this is a vector, same reasoning as landscapes/pcgVolumes/
+    // waters above: a level naming two keeps both rather than silently losing one.
+    //
+    // EMPTY IS THE ORDINARY CASE for every level written before this record existed, and for every
+    // level with no instanced foliage at all: no FOLIAGE record means no baked foliage, exactly as a
+    // level parsed before this field existed already behaves. The consumer (Runtime/include/aver/
+    // game/GameFoliage.hpp's loadLevelFoliage) is what turns a path here into voxi::VoxiRenderer's
+    // ray-traced instance buffers; foliage is static, ray-traced only (never VoxiRenderer::draws_),
+    // has no collision and is not individually selectable -- this format's job is only to name the
+    // file, not to decide any of that.
+    std::vector<std::string> foliageFiles;
 };
 
 // Parses a world from memory. Unknown records are skipped, not failed.

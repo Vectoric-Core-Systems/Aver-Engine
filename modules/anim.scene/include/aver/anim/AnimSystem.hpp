@@ -1,5 +1,6 @@
 // The join between a scene and the animation sampler: advances every CAnimator's clock and keeps
-// the skinning matrices its CSkeletalMesh implies.
+// the skinning matrices its CSkeletalMesh implies. It also plays OBJECT animation: a transform clip
+// (fmt::kOcAnimObject) on an entity with no skeleton moves that entity's own CLocal.
 //
 // A SECOND TARGET, deliberately, for the reason Aver.Assets.Gpu is one. Aver.Scene links Core and
 // Assets and may not gain a Formats edge -- its components hold OPAQUE asset ids and nothing else,
@@ -82,7 +83,34 @@ public:
     // whether an "it never fires" report is about the sink or about the clip.
     u64 notifiesFired() const { return fired_; }
 
-    // Advances every playing CAnimator by `dt` and reposes the entity's skeleton.
+    // OBJECT ANIMATION: an .ocanim flagged fmt::kOcAnimObject on a CAnimator entity with NO
+    // CSkeletalMesh moves that entity's CLocal instead of posing bones. The clip's one track (bone 0)
+    // is an object transform A(t) in some fixed frame; only RELATIVE motion is played, so the entity
+    // follows F(t) = B * A(t0)^-1 * A(t) -- B its CLocal when playback began, t0 the animator's time
+    // then. A car placed at the route pose for t0 rides the route; a fan placed anywhere spins about
+    // its own pivot.
+    //
+    // LIVE is the host's call, and NOT LIVE is the default: the editor outside Play leaves objects at
+    // their placements, as Unreal does for a level sequence. While not live an object clip's clock is
+    // held too, so nothing advances behind the editor's back. Going not-live drops every captured B
+    // and A(t0): the host restores the transforms itself, and a base kept across the gap would be the
+    // previous session's placement.
+    void setObjectAnimationLive(bool live);
+    bool objectAnimationLive() const { return objectLive_; }
+    // PAUSED, for a host whose Play can be paused (and frame-stepped by lifting the pause for one
+    // tick). While live AND paused every object clock holds, every captured base is KEPT (resuming
+    // continues the same session rather than re-basing on wherever the entity was left) and nothing
+    // is written to CLocal. Skeletal animators are not affected: their previews keep their own
+    // paused flag. Going not-live also clears it, like the bases: a session that ended paused must
+    // not hold the next one.
+    void setObjectAnimationPaused(bool paused) { objectPaused_ = paused; }
+    bool objectAnimationPaused() const { return objectPaused_; }
+    // Entities whose base is currently captured. A test can assert on it, and a host can see whether
+    // object animation is actually driving anything.
+    u32 objectAnimatedEntities() const { return static_cast<u32>(objects_.size()); }
+
+    // Advances every playing CAnimator by `dt` and reposes the entity's skeleton. While object
+    // animation is live it also writes CLocal for every object-clip entity (see above).
     //
     // CALLED UNCONDITIONALLY, not from the gameplay tick. The framework's tick groups are gated on
     // PLAYING, so hanging the clock off them would freeze every preview the moment the editor was
@@ -126,7 +154,8 @@ public:
     const fmt::OcSkeleton*  skeleton(u64 objectId);
     const fmt::OcAnimation* clip(u64 objectId);
 
-    // Drops every cached asset and pose. Call when a project closes or content changes on disk.
+    // Drops every cached asset and pose, and every captured object base. Call when a project closes
+    // or content changes on disk.
     //
     // ALSO CLOSES ANY NOTIFY STATE STILL OPEN, firing its "_End" first -- the fifth way an open
     // window leaks, and the one none of stepNotifyStates' four (see its own comment) can reach: a
@@ -200,6 +229,31 @@ private:
     // run inside the same loop that is still producing them.
     void updateAttachments(scene::World& world);
 
+    // The object path, split around tick()'s clock advance: the base must be captured at the
+    // animator's START time, before the first live advance moves it, and CLocal written after.
+    // Capture only acts when the entity has no base for THIS clip, and marks the entry as driven
+    // this tick so tick() can drop the ones that stopped qualifying.
+    void captureObject(scene::World& world, scene::Entity e, const scene::CAnimator& a,
+                       const fmt::OcAnimation& c);
+    void writeObject(scene::World& world, scene::Entity e, const scene::CAnimator& a,
+                     const fmt::OcAnimation& c);
+    // A(t) from the clip's one track. Needs no skeleton: a one-bone pose is all the sampler wants.
+    Transform sampleObject(const fmt::OcAnimation& c, f32 t);
+
+    // What a live object animation composes against, captured on an entity's first live tick.
+    struct ObjectBase {
+        Transform base;      // B
+        Mat4 startInverse;   // A(t0)^-1
+        u64 clip = 0;        // the clip this was captured for; a different clip captures afresh
+        u32 seen = 0;        // objectStamp_ of the last tick that drove this entity
+    };
+    // Keyed by the full Entity handle, like posed_, and pruned every tick.
+    std::unordered_map<scene::Entity, ObjectBase> objects_;
+    Pose objectPose_;        // sampleObject's scratch, so a tick allocates nothing per entity
+    u32 objectStamp_ = 0;
+    bool objectLive_ = false;
+    bool objectPaused_ = false;
+
     // Observes one animator's clock and fires whatever it passed. Split out of tick() because it
     // is the one part of that loop with nothing to do with posing, and because its own state
     // (clocks_) has a different lifetime rule than the pose cache beside it.
@@ -239,6 +293,34 @@ private:
     void closeAllOpen(scene::Entity e, NotifyClock& clock);
 
     std::unordered_map<scene::Entity, NotifyClock> clocks_;
+
+    // WHAT tick() REMEMBERS ABOUT EACH ANIMATOR FROM THE LAST TIME, one per dense slot of the animator
+    // pool. It exists for two questions that would otherwise be re-asked of every animated entity
+    // every frame: has the set of entities changed (the prune scans), and is this held object clip
+    // already observed (the clock work). See tick() for why each answer is exact.
+    struct Slot {
+        // Who held this slot at the last pre-scan. The sequence of these, compared slot for slot, is
+        // the "did the entity set change" signal -- see tick().
+        scene::Entity e = scene::kInvalidEntity;
+        // The held-clip fast path may skip this entity: its clock is already as a held stepNotifies
+        // leaves it, for exactly the clip, time bits and loop flag below, and `objClip` is that
+        // clip. Voided by steadyEpoch_ moving on, and cleared whenever tick() takes the full path for
+        // this entity (only a held step that ran no sink re-arms it); never trusted across a change of `e`.
+        bool steady = false;
+        u32  epoch = 0;
+        u64  clip = 0;
+        u32  timeBits = 0;
+        u32  once = 0;
+        const fmt::OcAnimation* objClip = nullptr;   // borrowed from clips_, which clear() drops with the epoch
+    };
+    std::vector<Slot> slots_;
+    // Bumped whenever a slot's claim about its clock may have gone stale: a prune scan that erases a
+    // clock (and so may run sinks) and clear() (which drops clocks and clips both).
+    u32 steadyEpoch_ = 1;
+    // A kept clock or pose belongs to an entity that is alive but not in the animator pool, so its
+    // death would not show in the pool's sequence: scan every tick until none is left.
+    bool orphans_ = false;
+
     AssetPathFn resolve_ = nullptr;
     void* user_ = nullptr;
     AnimNotifyFn notify_ = nullptr;

@@ -28,7 +28,9 @@
 // module off failed on a header the merge never asked for. The same guard-scoping shape that has
 // been fixed seventeen times in this tree.
 #include <algorithm>
+#include <cctype>
 #include <string>
+#include <unordered_set>
 
 using namespace aver;
 
@@ -312,6 +314,35 @@ int main(int argc, char** argv) {
         if (!fmt::saveOcAnim(p, clip, &why)) { AVER_ERROR("save clip: {}", why); return 1; }
         AVER_INFO("wrote {} ({:.2f}s, {} tracks, skeletonRef '{}')",
                   p, clip.duration, clip.tracks.size(), clip.skeletonRef);
+    }
+
+    // ---- the object clips: the motion of a plain glTF node (a car on a route, a fan) ----
+    // Files only. This tool merges every mesh into one and writes no level, so nothing here can say
+    // WHICH mesh a clip moves; AverAssetC and the editor import bind them to their placements. Names
+    // follow the skeletal clips' and are de-duplicated against them without regard to case (NTFS).
+    if (!res.objectAnimations.empty()) {
+        const auto lowered = [](std::string s) {
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        std::unordered_set<std::string> taken;
+        for (usize i = 0; i < res.animations.size(); ++i)
+            taken.insert(lowered(safe(i < res.animationNames.size() ? res.animationNames[i] : "",
+                                      "Clip" + std::to_string(i))));
+        for (usize i = 0; i < res.objectAnimations.size(); ++i) {
+            std::string name = safe(i < res.objectAnimationNames.size() ? res.objectAnimationNames[i] : "",
+                                    "ObjectClip" + std::to_string(i));
+            if (!taken.insert(lowered(name)).second) {
+                const std::string root = name;
+                for (int n = 2; !taken.insert(lowered(name = root + "_" + std::to_string(n))).second; ++n) {}
+            }
+            const std::string p = dir + "/" + base + "_" + name + ".ocanim";
+            if (!fmt::saveOcAnim(p, res.objectAnimations[i], &why)) { AVER_ERROR("save object clip: {}", why); return 1; }
+            AVER_INFO("wrote {} (object clip, {:.2f}s)", p, res.objectAnimations[i].duration);
+        }
+        AVER_WARN("{} object clip(s) written but bound to no mesh: this tool writes no level. Import the "
+                  "file with AverAssetC or the editor to get a scene that plays them",
+                  res.objectAnimations.size());
     }
 
     return 0;

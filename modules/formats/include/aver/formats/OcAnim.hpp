@@ -95,6 +95,11 @@ inline constexpr u8 kOcChannelScale       = 1 << 2;
 inline constexpr u8 kOcAnimLoop         = 1 << 0;
 inline constexpr u8 kOcAnimAdditiveBase  = 1 << 1;
 inline constexpr u8 kOcAnimRootMotion    = 1 << 2;
+// An OBJECT clip moves a placed mesh instead of posing a skeleton: skeletonRef is empty and ONE track on
+// boneIndex 0 holds the object's transform A(t) (engine space, cm, Z up) in some fixed frame. Playback
+// uses only relative motion, F(t) = B * A(t0)^-1 * A(t), where B is the entity's own placement and t0
+// the animator's start time, so the fixed frame never matters.
+inline constexpr u8 kOcAnimObject        = 1 << 3;
 
 // One animated channel set of one bone.
 struct OcTrack {
@@ -234,7 +239,8 @@ struct OcAnimation {
     // graph node, which cannot carry one.
     const OcCurve* curveById(u64 id) const;
 
-    // True when the duration, storage and every track are consistent.
+    // True when the duration, storage and every track are consistent, and an object clip is exactly
+    // one track on bone 0.
     bool valid() const;
 };
 

@@ -3,6 +3,7 @@
 #include "aver/formats/OcMat.hpp"
 #include "aver/platform/Image.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -38,6 +39,10 @@ void warn(std::vector<std::string>* out, std::string what) {
 std::string contentRel(const std::string& sub, const std::string& file) {
     return "Textures/" + sub + "/" + file;
 }
+
+// A linear colour channel in the .ocmat's sRGB encoding: the exact inverse of packMaterial's
+// pow(x, 2.2) decode (MaterialGpu.cpp), so a linear factor comes back out of the pack unchanged.
+f32 linearToOcmatSrgb(f32 c) { return std::pow(c < 0.0f ? 0.0f : c, 1.0f / 2.2f); }
 
 } // namespace
 
@@ -139,7 +144,12 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
 
         pbr::MaterialDesc d;
         d.name = base + "_" + (gm.name.empty() ? ("Material_" + std::to_string(i)) : gm.name);
-        for (int k = 0; k < 4; ++k) d.baseColorFactor[k] = gm.baseColorFactor[k];
+        // The .ocmat holds rgb sRGB-encoded; a source that wrote it linear is encoded here (see
+        // ImportedMaterial::baseColorFactorLinear). Alpha is coverage and crosses as it is.
+        for (int k = 0; k < 3; ++k)
+            d.baseColorFactor[k] = gm.baseColorFactorLinear ? linearToOcmatSrgb(gm.baseColorFactor[k])
+                                                            : gm.baseColorFactor[k];
+        d.baseColorFactor[3] = gm.baseColorFactor[3];
         for (int k = 0; k < 3; ++k) d.emissiveFactor[k]  = gm.emissiveFactor[k];
         d.metallicFactor    = gm.metallicFactor;
         d.roughnessFactor   = gm.roughnessFactor;
@@ -147,6 +157,9 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
         d.occlusionStrength = gm.occlusionStrength;
         d.alphaCutoff       = gm.alphaCutoff;
         d.twoSided          = gm.doubleSided;
+        d.subsurfaceWeight  = gm.subsurfaceWeight;
+        d.subsurfaceRadius  = gm.subsurfaceRadius;
+        for (int k = 0; k < 3; ++k) d.subsurfaceColor[k] = gm.subsurfaceColor[k];
         d.alphaMode = gm.alphaMode == "MASK"  ? pbr::AlphaMode::Mask
                     : gm.alphaMode == "BLEND" ? pbr::AlphaMode::Blend
                                               : pbr::AlphaMode::Opaque;

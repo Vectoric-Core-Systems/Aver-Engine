@@ -108,14 +108,82 @@ ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
     return dst;
 }
 
+// The fraction of `level`'s texels at or above `refAlpha01` (normalised [0,1]) -- exactly what an
+// alpha test at that reference value would keep.
+f32 alphaCoverage(const ImageData& level, f32 refAlpha01) {
+    const usize count = static_cast<usize>(level.width) * level.height;
+    if (count == 0) return 0.0f;
+    const u8 ref = static_cast<u8>(refAlpha01 * 255.0f + 0.5f);
+    usize kept = 0;
+    for (usize i = 0; i < count; ++i)
+        if (level.pixels[i * 4 + 3] >= ref) ++kept;
+    return static_cast<f32>(kept) / static_cast<f32>(count);
+}
+
+// Rescales `level`'s alpha so ITS OWN coverage at `refAlpha01` matches `targetCoverage` (level 0's
+// coverage at the same reference) -- the standard alpha-test mip fix. Histograms the level's alpha,
+// walks it from 255 down to find the threshold t whose cumulative count already covers the target
+// fraction, then scales every alpha by refAlpha01*255 / t: a texel exactly at t lands back on the
+// reference and everything else moves proportionally with it.
+void rescaleAlphaForCoverage(ImageData& level, f32 targetCoverage, f32 refAlpha01) {
+    const usize count = static_cast<usize>(level.width) * level.height;
+    if (count == 0) return;
+
+    u32 hist[256] = {};
+    for (usize i = 0; i < count; ++i) ++hist[level.pixels[i * 4 + 3]];
+
+    const u32 wantKept = static_cast<u32>(targetCoverage * static_cast<f32>(count) + 0.5f);
+    u32 cumulative = 0;
+    i32 t = 0;
+    for (i32 v = 255; v >= 0; --v) {
+        cumulative += hist[static_cast<usize>(v)];
+        if (cumulative >= wantKept) { t = v; break; }
+    }
+    if (t <= 0) return;   // level is already all-or-nothing -- nothing to rescale against
+
+    const f32 scale = (refAlpha01 * 255.0f) / static_cast<f32>(t);
+    for (usize i = 0; i < count; ++i) {
+        u8& a = level.pixels[i * 4 + 3];
+        const f32 scaled = static_cast<f32>(a) * scale;
+        const f32 clamped = scaled < 0.0f ? 0.0f : (scaled > 255.0f ? 255.0f : scaled);
+        a = static_cast<u8>(clamped + 0.5f);
+    }
+}
+
 } // namespace
 
+// True when `img`'s alpha reads as an alpha-tested cutout. See the header for the exact rule and
+// why it is stated this way.
+bool alphaLooksLikeCutout(const ImageData& img) {
+    if (!img.valid()) return false;
+    const usize count = static_cast<usize>(img.width) * img.height;
+    if (count == 0) return false;
+
+    usize belowHalf = 0, nearBinary = 0;
+    for (usize i = 0; i < count; ++i) {
+        const u8 a = img.pixels[i * 4 + 3];
+        if (a < 128) ++belowHalf;                 // < 0.5 normalised
+        if (a <= 16 || a >= 239) ++nearBinary;     // near-fully-transparent or near-fully-opaque
+    }
+    const f32 n = static_cast<f32>(count);
+    return (static_cast<f32>(belowHalf) / n) >= 0.01f &&
+           (static_cast<f32>(nearBinary) / n) >= 0.85f;
+}
+
 // Builds levels 1..N from levels[0], replacing anything already there.
-void generateMipChain(TextureData& t, bool normalMap) {
+void generateMipChain(TextureData& t, bool normalMap, f32 preserveCoverageAt) {
     if (!t.valid()) return;
     t.levels.resize(1);
     while (t.levels.back().width > 1 || t.levels.back().height > 1) {
         t.levels.push_back(downsample(t.levels.back(), t.srgb && !normalMap, normalMap));
+    }
+    // COVERAGE-PRESERVING ALPHA, OFF BY DEFAULT (preserveCoverageAt < 0) and never for a normal
+    // map: a normal map's alpha is not a coverage channel to begin with (downsample() filters it
+    // the same as any other channel, never as a test), so there is nothing here to preserve.
+    if (preserveCoverageAt >= 0.0f && !normalMap && t.levels.size() > 1) {
+        const f32 targetCoverage = alphaCoverage(t.levels.front(), preserveCoverageAt);
+        for (usize i = 1; i < t.levels.size(); ++i)
+            rescaleAlphaForCoverage(t.levels[i], targetCoverage, preserveCoverageAt);
     }
 }
 

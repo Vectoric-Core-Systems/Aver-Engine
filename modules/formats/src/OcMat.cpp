@@ -217,6 +217,15 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.subsurfaceRadius);
                 out.subsurfaceRadius = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             }
+            // The colour light takes inside the material, authored like baseColorFactor (sRGB, decoded
+            // by packMaterial) and clamped per channel into [0,1] for the same reason as every other
+            // authored ratio in this parser. White (the default) scatters in the surface's own colour.
+            else if (equalsCI(p, "subsurfaceColor")) {
+                for (int i = 0; i < 3; ++i) {
+                    const f32 v = tokF(t, 2 + static_cast<usize>(i), out.subsurfaceColor[i]);
+                    out.subsurfaceColor[i] = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                }
+            }
             // ---- volume absorption: what the inside of a transmissive material does to light ----
             // attenuationColor is a TRANSMITTANCE per channel at exactly attenuationDistance, so it
             // belongs in [0,1] and is clamped like every other authored ratio in this parser. The low
@@ -417,11 +426,14 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     // Writing "PARAM subsurfaceWeight 0" into every pre-existing .ocmat would still parse back to the
     // same off state, but it would turn every material in this tree's test fixtures into a diff the
     // instant this field was added, for a line that carries no information beyond "not in use" --
-    // the same byte-stability argument that keeps slopeBlend opt-in. subsurfaceRadius rides along
-    // unconditionally on this one line because it is meaningless without the weight that gates it.
+    // the same byte-stability argument that keeps slopeBlend opt-in. subsurfaceRadius and
+    // subsurfaceColor ride along unconditionally on these lines because they are meaningless without
+    // the weight that gates them -- a tint with nothing to scatter describes a material this one is not.
     if (d.subsurfaceWeight > 0.0f)
         s += "PARAM subsurfaceWeight " + num(d.subsurfaceWeight) + "\n"
-             "PARAM subsurfaceRadius " + num(d.subsurfaceRadius) + "\n";
+             "PARAM subsurfaceRadius " + num(d.subsurfaceRadius) + "\n"
+             "PARAM subsurfaceColor " + num(d.subsurfaceColor[0]) + " " + num(d.subsurfaceColor[1]) + " "
+           + num(d.subsurfaceColor[2]) + "\n";
 
     // Gated on attenuationDistance for the same byte-stability reason as the block above: 0 is the
     // off state, so writing this pair into every pre-existing .ocmat would turn every material in the

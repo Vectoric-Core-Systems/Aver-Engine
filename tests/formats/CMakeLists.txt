@@ -292,6 +292,10 @@ set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 add_executable(AverAssetC ${CMAKE_SOURCE_DIR}/tools/AverAssetC.cpp)
 target_link_libraries(AverAssetC PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# The .ocworld Euler encoding (aver/world/LevelTransform.hpp) for the rotated placements a USD
+# PointInstancer produces. Header-only and Core-only, so an include directory and no link -- the
+# arrangement tests/editor already uses for it.
+target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
 # Clustering/LOD decimation is OPTIONAL, exactly like ConvertTool above.
 if(TARGET Aver.Trifactor)
   target_link_libraries(AverAssetC PRIVATE Aver.Trifactor)
@@ -350,6 +354,14 @@ set_target_properties(AverAssetCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(OcRigTest src/OcRigTest.cpp)
 target_link_libraries(OcRigTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcLanesTest -- the .oclanes traffic-lane sidecar. Text like .ocrig, so the checks are the ones a text
+# format needs: parse, round-trip (exact, with == on the floats), CRLF, forward-referencing NEXT
+# records, and a refusal with a reason for each malformed shape -- the generator that writes these
+# is a script nobody reads the output of, and a bad lane shows up as one car stopping at one junction.
+add_executable(OcLanesTest src/OcLanesTest.cpp)
+target_link_libraries(OcLanesTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcLanesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # OcFoliageTest -- the .ocfoliage foliage-type format. An AVR1 binary container like .ocland/.ocbt,
 # not a text format like .ocrig/.ocgraph, so the checks are the ones a binary chunk format needs:

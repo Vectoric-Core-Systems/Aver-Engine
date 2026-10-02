@@ -1,12 +1,23 @@
 #pragma once
 // The one place a decoded image becomes a GPU texture.
-// Stateless: no cache lives here.
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
 #include <string>
 
 namespace aver::assets {
+
+// The derived-data cache directory for BC7-compressed mip chains (TextureCache.hpp/.cpp), e.g.
+// "<project>\Saved\DerivedDataCache\Textures". Empty -- the default -- means "no cache":
+// uploadTexture decodes and uploads RGBA8 exactly as it always has, unconditionally. Declared here
+// rather than in TextureCache.hpp so a caller that only points the cache at a project need not see
+// the encoder or the on-disk format; implemented in TextureCache.cpp, which owns that state.
+//
+// Set ONCE PER PROJECT -- SandboxProject.cpp's applyProject and Runtime/src/GameApp.cpp's project
+// open both call this before any material resolves a texture -- and safe to call or read from any
+// thread meanwhile (guarded internally with a mutex, not merely documented as such).
+void setTextureCacheDir(const std::string& dir);
+std::string textureCacheDir();
 
 // What the pixels mean. Decides both the mip filter and the view format.
 enum class TextureUsage : u32 {

@@ -4,9 +4,12 @@
 
 #include "aver/formats/Json.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <map>
+#include <unordered_set>
 
 namespace aver::fmt {
 namespace {
@@ -111,6 +114,20 @@ struct AccessorF {
     u32 count = 0;
 };
 
+// The 3x3 rotation*scale basis (rows of the row-major node matrix) baked into a mesh copy.
+struct Basis3 { f32 k[9]; };
+
+// One animated property of one node, straight from the file: glTF space, unconverted. CubicSpline
+// keeps in-tangent, value and out-tangent per key.
+struct ObjChannel {
+    bool present = false;
+    OcInterp interp = OcInterp::Linear;
+    u32 width = 0;                 // 3 for translation and scale, 4 for rotation
+    std::vector<f32> times;
+    std::vector<f32> values;
+};
+struct ObjNodeAnim { ObjChannel t, r, s; };
+
 // Walks one glTF document and fills a GltfImportResult.
 class Gltf {
 public:
@@ -138,6 +155,12 @@ private:
     // association lives there, not on the mesh -- and consumed by importSkins() to know which
     // meshes to remap for each skin, and to fill in the PUBLIC, POST-DEDUP r_.meshSkinIndex.
     std::vector<i32> meshRawSkin_;
+    // Per node: its index into r_.placements (-1 for a node without one) and the basis baked into that
+    // placement's mesh copy. Object clips need both: Q0 is exactly what was baked.
+    std::vector<i32>    nodePlacement_;
+    std::vector<Basis3> nodeBasis_;
+    // Nodes that are a joint of ANY skin: their channels are skeletal, never object motion.
+    std::vector<u8>     jointOfAnySkin_;
 
     // Records an unsupported feature, once each.
     void note(const std::string& what) {
@@ -274,8 +297,11 @@ private:
     bool importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, std::string* why);
     // Builds one OcSkeleton per glTF skin, in the skin's own joint order.
     bool importSkins(std::string* why);
-    // Builds one OcAnimation per glTF animation, addressing skin 0's bones.
+    // Builds one OcAnimation per glTF animation, addressing skin 0's bones. Run before the object clips.
     bool importAnimations(std::string* why);
+    // Builds one object clip per glTF animation and moving non-joint node: one with channels of its own,
+    // or a mesh node under one.
+    bool importObjectAnimations(std::string* why);
 };
 
 // Row-vector transform of a point or direction by a 4x4 row-major matrix.
@@ -315,6 +341,32 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
     if (!hasSkin && attrs.has("JOINTS_0"))
         note("skinning on a primitive whose JOINTS_0/WEIGHTS_0 do not match its POSITION");
 
+    // NORMALS TAKE THE INVERSE-TRANSPOSE OF THE NODE BASIS, not the basis the positions take. They
+    // agree for a rotation or a uniform scale; a non-uniform scale bent every normal toward the
+    // stretched axis instead of away from it. The cofactor matrix (rows b x c, c x a, a x b for basis
+    // rows a, b, c) is det * inverse-transpose, so it is used times sign(det): the renormalise below
+    // removes the magnitude, and the sign keeps a mirrored normal pointing out of the mirrored surface.
+    const f32* ra = &node[0]; const f32* rb = &node[4]; const f32* rc = &node[8];
+    const f32 det = ra[0] * (rb[1]*rc[2] - rb[2]*rc[1]) - ra[1] * (rb[0]*rc[2] - rb[2]*rc[0])
+                  + ra[2] * (rb[0]*rc[1] - rb[1]*rc[0]);
+    f32 nrmXf[16] = {
+        rb[1]*rc[2] - rb[2]*rc[1], rb[2]*rc[0] - rb[0]*rc[2], rb[0]*rc[1] - rb[1]*rc[0], 0,
+        rc[1]*ra[2] - rc[2]*ra[1], rc[2]*ra[0] - rc[0]*ra[2], rc[0]*ra[1] - rc[1]*ra[0], 0,
+        ra[1]*rb[2] - ra[2]*rb[1], ra[2]*rb[0] - ra[0]*rb[2], ra[0]*rb[1] - ra[1]*rb[0], 0,
+        0, 0, 0, 1};
+    // Scaled to a largest entry of 1 (with the sign): the cofactor grows as scale^2, so under stacked
+    // unit scales (three nested 0.01 nodes) a normal fell under the renormalise guard and became +Z.
+    {
+        f32 big = 0.0f;
+        for (int r = 0; r < 3; ++r) for (int k = 0; k < 3; ++k) big = std::fmax(big, std::fabs(nrmXf[r*4 + k]));
+        const f32 s = (det < 0.0f ? -1.0f : 1.0f) / (big > 0.0f ? big : 1.0f);
+        for (int r = 0; r < 3; ++r) for (int k = 0; k < 3; ++k) nrmXf[r*4 + k] *= s;
+    }
+    // WINDING REVERSES ONCE PER MIRROR: the handedness change is one (det -1), a node with a negative
+    // determinant -- a scale of -1 on one axis, Blender's Ctrl-M -- is another, and two cancel. The
+    // node's own mirror used to be ignored, which turned a mirrored object inside out.
+    const bool reverseWinding = o_.convertAxes != (det < 0.0f);
+
     const u32 baseVertex = m.vertexCount();
     // A skinned primitive after an unskinned one: back-fill the earlier vertices so the streams stay
     // 1:1 with the positions. Binding them all to bone 0 leaves them rigid, which is what they were.
@@ -332,7 +384,7 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
 
         if (hasNrm && i < nrm.count) {
             f32 n[3];
-            xform(node, nrm.v[usize(i)*3+0], nrm.v[usize(i)*3+1], nrm.v[usize(i)*3+2], false, n);
+            xform(nrmXf, nrm.v[usize(i)*3+0], nrm.v[usize(i)*3+1], nrm.v[usize(i)*3+2], false, n);
             Vec3 e = toEngine(n[0], n[1], n[2], true);
             const f32 len = std::sqrt(e.x*e.x + e.y*e.y + e.z*e.z);
             if (len > 1e-12f) { e.x /= len; e.y /= len; e.z /= len; } else { e = Vec3{0,0,1}; }
@@ -374,15 +426,14 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
             const u32 a = baseVertex + u32(idx.v[i + 0]);
             const u32 b = baseVertex + u32(idx.v[i + 1]);
             const u32 c = baseVertex + u32(idx.v[i + 2]);
-            // Winding reverses with the handedness.
-            if (o_.convertAxes) { m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(b); }
+            if (reverseWinding) { m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(b); }
             else                { m.indices.push_back(a); m.indices.push_back(b); m.indices.push_back(c); }
         }
     } else {
         if (pos.count % 3 != 0) return fail(why, "glTF: unindexed primitive vertex count is not a multiple of three");
         for (u32 i = 0; i < pos.count; i += 3) {
             const u32 a = baseVertex + i, b = baseVertex + i + 1, c = baseVertex + i + 2;
-            if (o_.convertAxes) { m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(b); }
+            if (reverseWinding) { m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(b); }
             else                { m.indices.push_back(a); m.indices.push_back(b); m.indices.push_back(c); }
         }
     }
@@ -455,6 +506,16 @@ bool Gltf::importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, 
     return true;
 }
 
+// A translation/rotation/scale triple as a row-major, row-vector matrix: scale, then rotate, then translate.
+void composeTrs(const f32 t[3], const f32 r[4], const f32 s[3], f32 out[16]) {
+    const f32 x=r[0], y=r[1], z=r[2], w=r[3];
+    // Row-major, row-vector: the basis lives in rows 0-2, translation in row 3.
+    out[0] = (1-2*(y*y+z*z))*s[0]; out[1] = (2*(x*y+z*w))*s[0];   out[2] = (2*(x*z-y*w))*s[0];   out[3] = 0;
+    out[4] = (2*(x*y-z*w))*s[1];   out[5] = (1-2*(x*x+z*z))*s[1]; out[6] = (2*(y*z+x*w))*s[1];   out[7] = 0;
+    out[8] = (2*(x*z+y*w))*s[2];   out[9] = (2*(y*z-x*w))*s[2];   out[10]= (1-2*(x*x+y*y))*s[2]; out[11]= 0;
+    out[12]= t[0]; out[13]= t[1]; out[14]= t[2]; out[15]= 1;
+}
+
 // A node's local transform: either its 16-float matrix, or its TRS composed.
 void nodeLocal(const JsonValue& n, f32 out[16]) {
     static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -468,13 +529,7 @@ void nodeLocal(const JsonValue& n, f32 out[16]) {
     if (n.has("translation")) for (int i = 0; i < 3; ++i) t[i] = n["translation"][usize(i)].asFloat();
     if (n.has("rotation"))    for (int i = 0; i < 4; ++i) r[i] = n["rotation"][usize(i)].asFloat();
     if (n.has("scale"))       for (int i = 0; i < 3; ++i) s[i] = n["scale"][usize(i)].asFloat(1.0f);
-
-    const f32 x=r[0], y=r[1], z=r[2], w=r[3];
-    // Row-major, row-vector: the basis lives in rows 0-2, translation in row 3.
-    out[0] = (1-2*(y*y+z*z))*s[0]; out[1] = (2*(x*y+z*w))*s[0];   out[2] = (2*(x*z-y*w))*s[0];   out[3] = 0;
-    out[4] = (2*(x*y-z*w))*s[1];   out[5] = (1-2*(x*x+z*z))*s[1]; out[6] = (2*(y*z+x*w))*s[1];   out[7] = 0;
-    out[8] = (2*(x*z+y*w))*s[2];   out[9] = (2*(y*z-x*w))*s[2];   out[10]= (1-2*(x*x+y*y))*s[2]; out[11]= 0;
-    out[12]= t[0]; out[13]= t[1]; out[14]= t[2]; out[15]= 1;
+    composeTrs(t, r, s, out);
 }
 
 // Splits a row-major, row-vector 4x4 back into the translation/rotation/scale a glTF node could
@@ -888,7 +943,8 @@ bool Gltf::importSkins(std::string* why) {
 
 // One OcAnimation per glTF animation. One OcTrack PER CHANNEL rather than per bone: glTF gives each
 // channel its own time accessor, and merging two channels that do not share a timeline would mean
-// resampling one of them and losing exactly the fidelity .ocanim exists to keep.
+// resampling one of them and losing exactly the fidelity .ocanim exists to keep. Only channels on
+// joints of skin 0 are handled here; a plain node's motion is an object clip (importObjectAnimations).
 //
 // KNOWN LIMITATION, NOT FIXED HERE: this always resolves a channel's target node against skins[0]
 // ALONE, never against any later skin, even one importSkins() decided was a genuinely distinct
@@ -900,11 +956,22 @@ bool Gltf::importSkins(std::string* why) {
 bool Gltf::importAnimations(std::string* why) {
     const JsonValue& anims = d_["animations"];
     if (anims.size() == 0) return true;
-    if (r_.skeletons.empty()) { note("animations on a file with no skin"); return true; }
 
     const JsonValue& skins = d_["skins"];
-    const JsonValue& joints = skins[0]["joints"];
     const JsonValue& nodes = d_["nodes"];
+    // Every node of every skin: its channels are skeletal, never object motion.
+    jointOfAnySkin_.assign(nodes.size(), 0);
+    for (usize s = 0; s < skins.size(); ++s) {
+        const JsonValue& sj = skins[s]["joints"];
+        for (usize j = 0; j < sj.size(); ++j) {
+            const i64 n = sj[j].asInt(-1);
+            if (n >= 0 && usize(n) < nodes.size()) jointOfAnySkin_[usize(n)] = 1;
+        }
+    }
+    // No skeleton, no skeletal clips: what the file animates is object motion (importObjectAnimations).
+    if (r_.skeletons.empty()) return true;
+
+    const JsonValue& joints = skins[0]["joints"];
     std::vector<i32> boneOfNode(nodes.size(), -1);
     for (usize j = 0; j < joints.size(); ++j) {
         const i64 n = joints[j].asInt(-1);
@@ -922,6 +989,7 @@ bool Gltf::importAnimations(std::string* why) {
         OcAnimation clip;
         clip.storage = OcAnimStorage::Keyframed;
         clip.skeletonRef = r_.skeletonNames.empty() ? std::string() : r_.skeletonNames[0];
+        usize objectChannels = 0;   // channels left to importObjectAnimations
 
         for (usize c = 0; c < channels.size(); ++c) {
             const JsonValue& ch = channels[c];
@@ -929,8 +997,13 @@ bool Gltf::importAnimations(std::string* why) {
             const i64 nodeIdx = target["node"].asInt(-1);
             const std::string path(target["path"].asString());
             if (path == "weights") { note("morph-target animation"); continue; }
-            if (nodeIdx < 0 || usize(nodeIdx) >= boneOfNode.size() || boneOfNode[usize(nodeIdx)] < 0) {
-                note("an animation channel targeting a node that is not a joint of skin 0");
+            if (nodeIdx < 0 || usize(nodeIdx) >= boneOfNode.size()) {
+                note("an animation channel with no valid target node");
+                continue;
+            }
+            if (boneOfNode[usize(nodeIdx)] < 0) {
+                if (jointOfAnySkin_[usize(nodeIdx)]) note("an animation channel targeting a joint of a skin other than skin 0");
+                else ++objectChannels;
                 continue;
             }
             const i64 si = ch["sampler"].asInt(-1);
@@ -981,9 +1054,432 @@ bool Gltf::importAnimations(std::string* why) {
             clip.tracks.push_back(std::move(t));
         }
 
-        if (clip.tracks.empty()) { note("an animation with no usable channels"); continue; }
+        if (clip.tracks.empty()) {
+            if (objectChannels == 0) note("an animation with no usable channels");
+            continue;
+        }
         r_.animations.push_back(std::move(clip));
         r_.animationNames.push_back(an.has("name") ? std::string(an["name"].asString()) : std::string());
+    }
+    return true;
+}
+
+// ---- OBJECT ANIMATION ----------------------------------------------------------------------------
+//
+// The motion of a NON-JOINT node (a car on a route, a fan, an empty used as a route driver) becomes an
+// object clip: ONE track whose value A(t) is chosen so that playback, F(t) = B * A(t0)^-1 * A(t) with B
+// the placement, reproduces the authored motion. This importer bakes a mesh node's rest rotation*scale
+// Q0 into that node's mesh copy and exports only the rest translation as the placement, so
+//
+//     A(t) = W(t) * Q0^-1     (function order: Q0^-1 first, then W; row-vector Mat4: Q0inv * W)
+//
+// with W(t) the node's WORLD transform, every ancestor composed. Q0 is exactly the basis the mesh copy
+// was baked with (identity for a node with no mesh). Row vectors: a baked vertex is v = p*Q0 and its
+// true world position is p*W(t) = v*A(t). Playing F(t) = A(t)*A(t0)^-1*B, B being the rest translation,
+// then gives v*F(t) = p*W(t) whenever W(t0) is the rest world, so a mesh at its imported placement
+// plays the authored motion from t0 = 0.
+//
+// A mesh node with no channels of its own that sits UNDER an animated node moves with it, so it gets a
+// clip too (W(t) composes every ancestor), unless its world never changes. Every clip of one glTF
+// animation is that animation's full length, so they wrap together.
+
+// The channel's value at `time` by glTF's rules: clamped at both ends; Linear lerps (a rotation slerps
+// the short way); Step holds the key at or before `time`; CubicSpline is the cubic Hermite spline.
+// Writes `c.width` floats to `out`; a rotation comes back unit length.
+void sampleChannel(const ObjChannel& c, f32 time, f32* out) {
+    const u32 w = c.width;
+    const bool cubic = c.interp == OcInterp::CubicSpline;
+    const usize slots = cubic ? 3 : 1;
+    const auto valueAt = [&](usize k) { return &c.values[(k * slots + (cubic ? 1 : 0)) * w]; };
+    const auto finish = [&]() {
+        if (w != 4) return;
+        const Quat q = Quat{out[0], out[1], out[2], out[3]}.normalized();
+        out[0] = q.x; out[1] = q.y; out[2] = q.z; out[3] = q.w;
+    };
+
+    const usize n = c.times.size();
+    if (time <= c.times.front() || time >= c.times.back()) {
+        const f32* v = valueAt(time <= c.times.front() ? 0 : n - 1);
+        for (u32 i = 0; i < w; ++i) out[i] = v[i];
+        finish();
+        return;
+    }
+    // times[k] <= time < times[k + 1], so the span is positive and k + 1 exists.
+    const usize k = usize(std::upper_bound(c.times.begin(), c.times.end(), time) - c.times.begin()) - 1;
+    const f32 dt = c.times[k + 1] - c.times[k];
+    const f32 s = (time - c.times[k]) / dt;
+    const f32* v0 = valueAt(k);
+    const f32* v1 = valueAt(k + 1);
+
+    if (c.interp == OcInterp::Step) {
+        for (u32 i = 0; i < w; ++i) out[i] = v0[i];
+    } else if (cubic) {
+        const f32* outTan0 = v0 + w;          // out-tangent of key k, after its value
+        const f32* inTan1  = v1 - w;          // in-tangent of key k + 1, before its value
+        const f32 s2 = s * s, s3 = s2 * s;
+        const f32 h00 = 2*s3 - 3*s2 + 1, h10 = s3 - 2*s2 + s, h01 = -2*s3 + 3*s2, h11 = s3 - s2;
+        for (u32 i = 0; i < w; ++i) out[i] = h00*v0[i] + h10*dt*outTan0[i] + h01*v1[i] + h11*dt*inTan1[i];
+    } else if (w == 4) {
+        const Quat q = Quat::slerp(Quat{v0[0], v0[1], v0[2], v0[3]}, Quat{v1[0], v1[1], v1[2], v1[3]}, s);
+        out[0] = q.x; out[1] = q.y; out[2] = q.z; out[3] = q.w;
+    } else {
+        for (u32 i = 0; i < w; ++i) out[i] = v0[i] + (v1[i] - v0[i]) * s;
+    }
+    finish();
+}
+
+// One node of a chain from an animated node up to the scene root: its static local matrix and TRS, and
+// the channels that override them.
+struct ChainNode {
+    f32 local[16];
+    f32 t[3], r[4], s[3];
+    const ObjNodeAnim* anim = nullptr;
+};
+
+// One sampled object transform A(t) as translation, rotation and scale for a clip key. decomposeTrs
+// answers a collapsed axis with scale 1, right for a rest pose and wrong for a clip: an animation that
+// shrinks a node to nothing has to stay shrunk. So the scale is the measured row lengths, zero included.
+// The basis is divided by its longest row first, so a legitimately tiny one (stacked unit scales) is not
+// taken for a collapsed one. A collapsed axis has no direction of its own: with ONE gone the other two
+// give it back (a cross product), with more `rotationKnown` comes back false and the caller borrows a
+// neighbouring key's rotation. Returns false, with `why` set, only for shear; the rest is still filled in.
+bool decomposeKey(const f32 m[16], f32 t[3], f32 r[4], f32 s[3], bool& rotationKnown, std::string* why) {
+    f32 len[3], big = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        len[i] = std::sqrt(m[i*4+0]*m[i*4+0] + m[i*4+1]*m[i*4+1] + m[i*4+2]*m[i*4+2]);
+        big = std::fmax(big, len[i]);
+    }
+    t[0] = m[12]; t[1] = m[13]; t[2] = m[14];
+    for (int i = 0; i < 3; ++i) s[i] = len[i];
+    r[0] = r[1] = r[2] = 0.0f; r[3] = 1.0f;
+    rotationKnown = false;
+
+    int gone = -1, nGone = 0;
+    for (int i = 0; i < 3; ++i) if (!(len[i] > 1e-6f * big)) { gone = i; ++nGone; }
+    if (nGone > 1) return true;
+
+    f32 n[16] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1};
+    for (int i = 0; i < 3; ++i)
+        if (i != gone) for (int k = 0; k < 3; ++k) n[i*4+k] = m[i*4+k] / big;
+    if (gone >= 0) {
+        // Row c of a rotation is row (c+1) x row (c+2).
+        const f32* ra = &n[((gone + 1) % 3) * 4];
+        const f32* rb = &n[((gone + 2) % 3) * 4];
+        const f32 c[3] = {ra[1]*rb[2] - ra[2]*rb[1], ra[2]*rb[0] - ra[0]*rb[2], ra[0]*rb[1] - ra[1]*rb[0]};
+        const f32 cl = std::sqrt(c[0]*c[0] + c[1]*c[1] + c[2]*c[2]);
+        if (!(cl > 1e-12f)) return true;               // the two rows left are parallel
+        for (int k = 0; k < 3; ++k) n[gone*4 + k] = c[k] / cl;
+    }
+    f32 unusedT[3], normS[3];
+    const bool ok = decomposeTrs(n, unusedT, r, normS, why);
+    for (int i = 0; i < 3; ++i) if (i != gone && normS[i] < 0.0f) s[i] = -len[i];   // a mirror keeps its sign
+    rotationKnown = true;
+    return ok;
+}
+
+bool Gltf::importObjectAnimations(std::string* why) {
+    const JsonValue& anims = d_["animations"];
+    const JsonValue& nodes = d_["nodes"];
+    if (anims.size() == 0 || nodes.size() == 0) return true;
+
+    std::vector<i32> parentOfNode(nodes.size(), -1);
+    for (usize n = 0; n < nodes.size(); ++n) {
+        const JsonValue& kids = nodes[n]["children"];
+        for (usize k = 0; k < kids.size(); ++k) {
+            const i64 c = kids[k].asInt(-1);
+            if (c >= 0 && usize(c) < nodes.size()) parentOfNode[usize(c)] = static_cast<i32>(n);
+        }
+    }
+
+    // Pass 1: every usable TRS channel of every animation, keyed by target node. Joints are included:
+    // an object node parented to an animated bone follows that bone, so its world needs the bone's motion.
+    std::vector<std::map<i64, ObjNodeAnim>> perAnim(anims.size());
+    // Each animation's length: the latest key of any of its channels. Every clip an animation produces
+    // gets it, so nodes with shorter tracks hold their last pose instead of looping out of phase.
+    std::vector<f32> animLen(anims.size(), 0.0f);
+    for (usize a = 0; a < anims.size(); ++a) {
+        const JsonValue& channels = anims[a]["channels"];
+        const JsonValue& samplers = anims[a]["samplers"];
+        for (usize c = 0; c < channels.size(); ++c) {
+            const JsonValue& ch = channels[c];
+            const i64 nodeIdx = ch["target"]["node"].asInt(-1);
+            const std::string path(ch["target"]["path"].asString());
+            if (path == "weights") { note("morph-target animation"); continue; }
+            if (nodeIdx < 0 || usize(nodeIdx) >= nodes.size()) {
+                note("an animation channel with no valid target node");
+                continue;
+            }
+            if (path != "translation" && path != "rotation" && path != "scale") {
+                note("an animation channel with an unknown path '" + path + "'");
+                continue;
+            }
+            const i64 si = ch["sampler"].asInt(-1);
+            if (si < 0 || usize(si) >= samplers.size()) { note("an animation channel with no sampler"); continue; }
+            const JsonValue& sm = samplers[usize(si)];
+
+            // A sampler that cannot be read costs its own channel, not the meshes: a file with no skin
+            // used to skip its animations unread, so this must not start failing whole imports.
+            AccessorF in, outv;
+            std::string readWhy;
+            if (!readAccessor(sm["input"].asInt(-1), in, &readWhy) || !readAccessor(sm["output"].asInt(-1), outv, &readWhy)) {
+                note("an animation sampler that could not be read (" + readWhy + ")");
+                continue;
+            }
+            if (in.components != 1 || in.count == 0) { note("an animation sampler whose input is not scalar"); continue; }
+            for (u32 k = 0; k < in.count; ++k) animLen[a] = std::max(animLen[a], in.v[k]);
+
+            const std::string interp(sm["interpolation"].asString("LINEAR"));
+            ObjChannel oc;
+            oc.present = true;
+            oc.interp = interp == "STEP" ? OcInterp::Step
+                      : interp == "CUBICSPLINE" ? OcInterp::CubicSpline : OcInterp::Linear;
+            oc.width = path == "rotation" ? 4u : 3u;
+            const u32 slots = oc.interp == OcInterp::CubicSpline ? 3u : 1u;
+            if (outv.components != oc.width || outv.count != in.count * slots) {
+                note("an animation sampler whose output does not match its input");
+                continue;
+            }
+            oc.times.assign(in.v.begin(), in.v.begin() + in.count);
+            oc.values = std::move(outv.v);
+
+            ObjNodeAnim& na = perAnim[a][nodeIdx];
+            (path == "translation" ? na.t : path == "rotation" ? na.r : na.s) = std::move(oc);
+        }
+    }
+
+    // The nodes that MOVE in each animation, ascending: every node with a channel there, plus every plain
+    // mesh node with an ancestor that has one. A static child rides on its parent, and with no clip of
+    // its own it stayed frozen where it was placed. A skinned mesh node is left out (glTF ignores its
+    // transform), and so is a joint (its motion is skeletal).
+    std::vector<std::vector<i64>> moving(anims.size());
+    {
+        std::vector<u8> own(nodes.size(), 0);
+        for (usize a = 0; a < anims.size(); ++a) {
+            if (perAnim[a].empty()) continue;
+            std::fill(own.begin(), own.end(), u8(0));
+            for (const auto& e : perAnim[a]) own[usize(e.first)] = 1;
+            for (usize n = 0; n < nodes.size(); ++n) {
+                bool moves = own[n] != 0;
+                if (!moves && nodePlacement_[n] >= 0 && !jointOfAnySkin_[n] && !nodes[n].has("skin")) {
+                    // Bounded, so a file whose child lists loop cannot spin here.
+                    i32 p = parentOfNode[n];
+                    for (usize hops = 0; p >= 0 && hops <= nodes.size(); ++hops, p = parentOfNode[usize(p)])
+                        if (own[usize(p)]) { moves = true; break; }
+                }
+                if (moves) moving[a].push_back(static_cast<i64>(n));
+            }
+        }
+    }
+
+    // In how many animations each node moves, so a node animated only once keeps its own name.
+    std::vector<u32> animCount(nodes.size(), 0);
+    for (const auto& m : moving) for (const i64 n : m) ++animCount[usize(n)];
+
+    std::unordered_set<std::string> usedNames;
+    for (usize a = 0; a < anims.size(); ++a) {
+        const std::string animName = anims[a].has("name") && !anims[a]["name"].asString().empty()
+                                   ? std::string(anims[a]["name"].asString()) : "Animation" + std::to_string(a);
+        for (const i64 nodeIdx : moving[a]) {
+            if (jointOfAnySkin_[usize(nodeIdx)]) continue;
+            // A node that only follows an animated ancestor has no channels of its own.
+            const bool ownChannels = perAnim[a].count(nodeIdx) != 0;
+            const JsonValue& node = nodes[usize(nodeIdx)];
+            if (node.has("skin")) {
+                // glTF ignores a skinned mesh node's own transform, so there is nothing to play.
+                note("an animated node that carries a skinned mesh (glTF ignores its transform)");
+                continue;
+            }
+            const i32 placement = nodePlacement_[usize(nodeIdx)];
+
+            // Q0: what was baked into this node's mesh copy; nothing for a node with no mesh.
+            Mat4 q0 = Mat4::identity();
+            if (placement >= 0) {
+                const f32* k = nodeBasis_[usize(nodeIdx)].k;
+                for (int rr = 0; rr < 3; ++rr) for (int cc = 0; cc < 3; ++cc) q0.m[rr][cc] = k[rr * 3 + cc];
+            }
+            const f32* b = &q0.m[0][0];
+            const f32 det = b[0] * (b[5]*b[10] - b[6]*b[9]) - b[1] * (b[4]*b[10] - b[6]*b[8])
+                          + b[2] * (b[4]*b[9] - b[5]*b[8]);
+            std::string clipName = node.has("name") && !node["name"].asString().empty()
+                                 ? std::string(node["name"].asString()) : "Node" + std::to_string(nodeIdx);
+            if (animCount[usize(nodeIdx)] > 1) clipName = animName + "_" + clipName;
+            if (std::fabs(det) < 1e-30f) {
+                note("an animated node ('" + clipName + "') whose baked rotation/scale is singular; its motion was not imported");
+                continue;
+            }
+            const Mat4 q0inv = q0.inverse();
+
+            // The chain, node first, root last.
+            std::vector<ChainNode> chain;
+            for (i32 n = static_cast<i32>(nodeIdx); n >= 0 && chain.size() <= nodes.size(); n = parentOfNode[usize(n)]) {
+                ChainNode cn;
+                nodeLocal(nodes[usize(n)], cn.local);
+                nodeTrs(nodes[usize(n)], cn.t, cn.r, cn.s, nullptr);
+                const auto it = perAnim[a].find(n);
+                if (it != perAnim[a].end()) cn.anim = &it->second;
+                chain.push_back(cn);
+            }
+
+            // The sample times, and how they have to be sampled.
+            std::vector<f32> times;
+            bool allStep = true, anyCubic = false, ancestorTurns = false, anyStep = false;
+            for (usize i = 0; i < chain.size(); ++i) {
+                if (!chain[i].anim) continue;
+                for (const ObjChannel* ch : {&chain[i].anim->t, &chain[i].anim->r, &chain[i].anim->s}) {
+                    if (!ch->present) continue;
+                    times.insert(times.end(), ch->times.begin(), ch->times.end());
+                    if (ch->interp != OcInterp::Step) allStep = false; else anyStep = true;
+                    if (ch->interp == OcInterp::CubicSpline) anyCubic = true;
+                    if (i > 0 && ch != &chain[i].anim->t) ancestorTurns = true;
+                }
+            }
+            // A STEP channel in a track that is otherwise interpolated: a sample just before each jump
+            // keeps the earlier value from sliding into the new one across the whole span.
+            if (anyStep && !allStep) {
+                for (const ChainNode& cn : chain) {
+                    if (!cn.anim) continue;
+                    for (const ObjChannel* ch : {&cn.anim->t, &cn.anim->r, &cn.anim->s}) {
+                        if (!ch->present || ch->interp != OcInterp::Step) continue;
+                        for (usize k = 1; k < ch->times.size(); ++k)
+                            times.push_back(ch->times[k] - std::fmin(1e-4f, 0.5f * (ch->times[k] - ch->times[k - 1])));
+                    }
+                }
+            }
+            std::sort(times.begin(), times.end());
+            {
+                usize kept = 0;
+                for (const f32 t : times) if (kept == 0 || t - times[kept - 1] > 1e-6f) times[kept++] = t;
+                times.resize(kept);
+            }
+            // The product of several nodes, or a Hermite curve, is not linear between the source keys:
+            // a turning ancestor swings its children on an arc. Sample those at 30 Hz between the keys.
+            if (!allStep && (ancestorTurns || anyCubic)) {
+                std::vector<f32> dense;
+                for (usize i = 0; i + 1 < times.size() && dense.size() <= 200000; ++i) {
+                    const f32 t0 = times[i], t1 = times[i + 1];
+                    const int steps = std::clamp(static_cast<int>(std::ceil((t1 - t0) * 30.0f)), 1, 1024);
+                    for (int s = 0; s < steps; ++s) dense.push_back(t0 + (t1 - t0) * (f32(s) / f32(steps)));
+                }
+                // A clip too long to sample this finely keeps its source keys.
+                if (dense.size() <= 200000) {
+                    dense.push_back(times.back());
+                    times = std::move(dense);
+                }
+            }
+            if (times.empty()) continue;
+
+            std::vector<f32> pos, rot, scl;   // engine space, per sample
+            std::vector<u8> rotKnown;         // per sample: 0 when every axis had collapsed (see decomposeKey)
+            std::string lostNote;             // the first thing a sample lost that a TRS triple cannot hold
+            f32 world0[16] = {};              // the first sample's world transform, to tell whether it ever changes
+            bool worldMoves = false;
+            for (const f32 time : times) {
+                f32 world[16];
+                for (usize i = 0; i < chain.size(); ++i) {
+                    ChainNode& cn = chain[i];
+                    f32 local[16];
+                    if (cn.anim) {
+                        f32 t[3] = {cn.t[0], cn.t[1], cn.t[2]}, r[4] = {cn.r[0], cn.r[1], cn.r[2], cn.r[3]};
+                        f32 s[3] = {cn.s[0], cn.s[1], cn.s[2]};
+                        if (cn.anim->t.present) sampleChannel(cn.anim->t, time, t);
+                        if (cn.anim->r.present) sampleChannel(cn.anim->r, time, r);
+                        if (cn.anim->s.present) sampleChannel(cn.anim->s, time, s);
+                        composeTrs(t, r, s, local);
+                    } else {
+                        std::memcpy(local, cn.local, sizeof(local));
+                    }
+                    if (i == 0) { std::memcpy(world, local, sizeof(world)); }
+                    else        { f32 composed[16]; mul(world, local, composed); std::memcpy(world, composed, sizeof(world)); }
+                }
+                if (pos.empty()) {
+                    std::memcpy(world0, world, sizeof(world0));
+                } else if (!worldMoves) {
+                    for (int k = 0; k < 16; ++k)
+                        if (std::fabs(world[k] - world0[k]) > 1e-5f * (1.0f + std::fabs(world0[k]))) { worldMoves = true; break; }
+                }
+                Mat4 wm;
+                std::memcpy(&wm.m[0][0], world, sizeof(world));
+                const Mat4 am = q0inv * wm;
+
+                f32 t[3], r[4], s[3];
+                bool known = true;
+                std::string lost;
+                if (!decomposeKey(&am.m[0][0], t, r, s, known, &lost) && lostNote.empty()) lostNote = lost;
+                const Vec3 p  = toEngine(t[0], t[1], t[2], false);
+                const Quat q  = toEngineQuat(r[0], r[1], r[2], r[3]);
+                const Vec3 sc = toEngineScale(s[0], s[1], s[2]);
+                pos.insert(pos.end(), {p.x, p.y, p.z});
+                rot.insert(rot.end(), {q.x, q.y, q.z, q.w});
+                scl.insert(scl.end(), {sc.x, sc.y, sc.z});
+                rotKnown.push_back(static_cast<u8>(known ? 1 : 0));
+            }
+
+            // A node that only follows an ancestor, and whose world never changes (the ancestor's channels
+            // hold one value), has nothing to play.
+            if (!ownChannels && !worldMoves) continue;
+            if (!lostNote.empty())
+                note("an animated node ('" + clipName + "') whose motion carries " + lostNote +
+                     "; the rest of the transform was recovered");
+
+            // A key whose axes had all collapsed to zero scale has no rotation of its own: it borrows the
+            // previous key's (the first known one's before that), so the clip holds its orientation while
+            // it shrinks and grows back instead of snapping to identity.
+            {
+                usize firstKnown = 0;
+                while (firstKnown < rotKnown.size() && !rotKnown[firstKnown]) ++firstKnown;
+                if (firstKnown < rotKnown.size()) {
+                    for (usize k = 0; k < rotKnown.size(); ++k) {
+                        if (rotKnown[k]) continue;
+                        const usize from = k == 0 ? firstKnown : k - 1;   // an earlier gap was filled just before
+                        std::copy(rot.begin() + from * 4, rot.begin() + from * 4 + 4, rot.begin() + k * 4);
+                    }
+                }
+            }
+            // q and -q are one rotation; keeping neighbours in one hemisphere stops a runtime lerp
+            // from taking the long way round.
+            for (usize k = 1; k < times.size(); ++k) {
+                f32* q = &rot[k * 4];
+                const f32* prev = &rot[(k - 1) * 4];
+                if (q[0]*prev[0] + q[1]*prev[1] + q[2]*prev[2] + q[3]*prev[3] < 0.0f)
+                    for (int i = 0; i < 4; ++i) q[i] = -q[i];
+            }
+            // Playback divides by the START pose (F = B * A(t0)^-1 * A(t)), and a collapsed one has no inverse.
+            if (std::fabs(scl[0]) < 1e-6f || std::fabs(scl[1]) < 1e-6f || std::fabs(scl[2]) < 1e-6f)
+                note("an animated node ('" + clipName + "') that starts with a zero-scale axis; start it (animtime) at a time it is not collapsed");
+
+            // Scale is written only when it moves; a constant 1 is what the runtime assumes without it.
+            bool scaled = false;
+            for (const f32 v : scl) if (std::fabs(v - 1.0f) > 1e-4f) { scaled = true; break; }
+
+            OcTrack tr;
+            tr.boneIndex = 0;
+            tr.channels = static_cast<u8>(kOcChannelTranslation | kOcChannelRotation | (scaled ? kOcChannelScale : 0));
+            tr.interp = allStep ? OcInterp::Step : OcInterp::Linear;
+            tr.times = times;
+            tr.values.reserve(times.size() * (scaled ? 10 : 7));
+            for (usize k = 0; k < times.size(); ++k) {
+                tr.values.insert(tr.values.end(), pos.begin() + k * 3, pos.begin() + k * 3 + 3);
+                tr.values.insert(tr.values.end(), rot.begin() + k * 4, rot.begin() + k * 4 + 4);
+                if (scaled) tr.values.insert(tr.values.end(), scl.begin() + k * 3, scl.begin() + k * 3 + 3);
+            }
+
+            OcAnimation clip;
+            clip.storage = OcAnimStorage::Keyframed;
+            clip.flags = static_cast<u8>(kOcAnimObject | kOcAnimLoop);
+            // The animation's whole length, not this node's own last key: a track that ends early holds its
+            // last pose (the sampler clamps) and every clip of the animation wraps together.
+            clip.duration = std::max(times.back(), animLen[a]);
+            clip.tracks.push_back(std::move(tr));
+
+            // Unique among the object clips: two nodes may share a name, and each becomes a file.
+            if (!usedNames.insert(clipName).second) {
+                const std::string base = clipName;
+                for (int i = 2; !usedNames.insert(clipName = base + "_" + std::to_string(i)).second; ++i) {}
+            }
+            r_.objectAnimations.push_back(std::move(clip));
+            r_.objectAnimationNames.push_back(clipName);
+            r_.objectAnimationPlacement.push_back(placement);
+        }
     }
     return true;
 }
@@ -1134,6 +1630,8 @@ void Gltf::importMaterials() {
                 const JsonValue& v = p["baseColorFactor"];
                 for (usize k = 0; k < 4 && k < v.size(); ++k) m.baseColorFactor[k] = v[k].asFloat(1.0f);
             }
+            // LINEAR by the glTF spec -- only the texture is sRGB-encoded. The cook converts it.
+            m.baseColorFactorLinear = true;
             m.metallicFactor  = p["metallicFactor"].asFloat(1.0f);
             m.roughnessFactor = p["roughnessFactor"].asFloat(1.0f);
             if (p.has("baseColorTexture"))         m.baseColorTex  = readTexRef(p["baseColorTexture"], "baseColor", m.name);
@@ -1205,7 +1703,44 @@ bool Gltf::run(std::string* why) {
     for (usize i = 0; i < meshes.size(); ++i)
         if (meshes[i].has("name")) r_.meshNames[i] = std::string(meshes[i]["name"].asString());
 
+    // ONE glTF MESH, SEVERAL NODES: every basis (rotation/scale) a mesh has been imported under, and
+    // the r_.meshes entry holding it. A node whose basis matches one already built reuses that entry,
+    // so N translated copies are N placements of ONE mesh; a node that rotates or scales it differently
+    // gets its own entry, since the basis is baked into the vertices. Importing again into the same
+    // entry APPENDED -- every placement then drew all N copies, each baked with another node's basis.
+    // Blender writes exactly this for linked duplicates (Alt+D) and collection instances.
+    //
+    // The SKIN is part of the key too: an entry's JOINTS_0 is remapped through one skin (importSkins),
+    // so two nodes binding the same mesh to different skins cannot share it.
+    struct Built { f32 basis[9]; i32 skin; i32 index; };
+    std::vector<std::vector<Built>> built(meshes.size());
+    // Relative to the basis' own magnitude, not to 1: a model under a 0.001 unit-scale root has
+    // entries near 1e-3, where an absolute 1e-5 would merge nodes turned half a degree apart.
+    const auto sameBasis = [](const f32 a[9], const f32 b[9]) {
+        f32 mag = 0.0f;
+        for (int k = 0; k < 9; ++k) mag = std::fmax(mag, std::fmax(std::fabs(a[k]), std::fabs(b[k])));
+        for (int k = 0; k < 9; ++k)
+            if (std::fabs(a[k] - b[k]) > 1e-5f * mag) return false;
+        return true;
+    };
+    // A copy's name has to be unique among every mesh name: the editor's import names each .ocmesh
+    // after it and does not de-duplicate, so a repeat would skip or replace the first mesh's file.
+    // A set and a per-mesh counter keep a scatter of thousands of rotated instances linear.
+    std::unordered_set<std::string> usedNames;
+    for (const std::string& nm : r_.meshNames) if (!nm.empty()) usedNames.insert(nm);
+    std::vector<usize> nextSuffix(meshes.size(), 2);
+    const auto copyName = [&](usize meshIdx) {
+        const std::string& base = r_.meshNames[meshIdx];
+        if (base.empty()) return std::string();    // unnamed meshes are named by index downstream
+        for (;;) {
+            std::string cand = base + "_" + std::to_string(nextSuffix[meshIdx]++);
+            if (usedNames.insert(cand).second) return cand;
+        }
+    };
+
     const JsonValue& nodes = d_["nodes"];
+    nodePlacement_.assign(nodes.size(), -1);
+    nodeBasis_.assign(nodes.size(), Basis3{});
     struct Pending { i64 node; f32 xf[16]; };
     std::vector<Pending> stack;
     static const f32 kIdentity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -1248,19 +1783,49 @@ bool Gltf::run(std::string* why) {
             f32 basis[16];
             std::memcpy(basis, world, sizeof(basis));
             basis[12] = basis[13] = basis[14] = 0.0f;
+            const f32 key[9] = {basis[0], basis[1], basis[2], basis[4], basis[5], basis[6],
+                                basis[8], basis[9], basis[10]};
 
-            if (!importMesh(meshes[usize(meshIdx)], basis, r_.meshes[usize(meshIdx)], why)) return false;
-            visited[usize(meshIdx)] = 1;
-            if (n.has("skin")) meshRawSkin_[usize(meshIdx)] = static_cast<i32>(n["skin"].asInt(-1));
+            const i32 skin = n.has("skin") ? static_cast<i32>(n["skin"].asInt(-1)) : -1;
+
+            i32 target = -1;
+            for (const Built& b : built[usize(meshIdx)])
+                if (b.skin == skin && sameBasis(b.basis, key)) { target = b.index; break; }
+            if (target < 0) {
+                if (built[usize(meshIdx)].empty()) {
+                    target = static_cast<i32>(meshIdx);        // the first basis keeps the file's own slot
+                } else {
+                    target = static_cast<i32>(r_.meshes.size());
+                    r_.meshNames.push_back(copyName(usize(meshIdx)));
+                    r_.meshes.emplace_back();
+                    r_.meshSkinIndex.push_back(-1);
+                    meshRawSkin_.push_back(-1);
+                }
+                if (!importMesh(meshes[usize(meshIdx)], basis, r_.meshes[usize(target)], why)) return false;
+                meshRawSkin_[usize(target)] = skin;
+                Built b{};
+                std::memcpy(b.basis, key, sizeof(key));
+                b.skin = skin;
+                b.index = target;
+                built[usize(meshIdx)].push_back(b);
+                visited[usize(meshIdx)] = 1;
+            }
 
             // THROUGH toEngine, exactly as a vertex position is, so the placement lands in the same
             // space and unit as the geometry it positions -- axis-swapped and metres-to-centimetres.
             // Doing this by hand here is how a 100x or a Y/Z swap gets in.
             GltfPlacement pl;
-            pl.meshIndex = static_cast<i32>(meshIdx);
+            pl.meshIndex = target;
             pl.position  = toEngine(world[12], world[13], world[14], false);
             pl.name      = n["name"].asString("");
-            if (pl.name.empty()) pl.name = r_.meshNames[usize(meshIdx)];
+            if (pl.name.empty()) pl.name = r_.meshNames[usize(target)];
+            // What the copy was baked with, which is the first node's basis when nodes share one copy:
+            // an object clip has to undo exactly that (see importObjectAnimations).
+            Basis3 baked{};
+            for (const Built& b : built[usize(meshIdx)])
+                if (b.index == target) { std::memcpy(baked.k, b.basis, sizeof(baked.k)); break; }
+            nodePlacement_[usize(cur.node)] = static_cast<i32>(r_.placements.size());
+            nodeBasis_[usize(cur.node)] = baked;
             r_.placements.push_back(std::move(pl));
         }
         const JsonValue& kids = n["children"];
@@ -1276,13 +1841,14 @@ bool Gltf::run(std::string* why) {
             if (!importMesh(meshes[i], kIdentity, r_.meshes[i], why)) return false;
             note("a mesh referenced by no node (imported at identity)");
         }
-        r_.meshes[i].computeBounds();
     }
+    for (OcMeshData& m : r_.meshes) m.computeBounds();   // the per-basis copies too
 
     // Skins before animations: a clip addresses bones, and the bone order is not settled until the
     // skin has been sorted parents-before-children.
     if (!importSkins(why)) return false;
     if (!importAnimations(why)) return false;
+    if (!importObjectAnimations(why)) return false;
     return true;
 }
 
@@ -1327,6 +1893,7 @@ bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDi
                           GltfImportResult& out, const GltfImportOptions& opt, std::string* why) {
     if (!bytes || size < 4) return fail(why, "glTF: file is too small");
     out.meshes.clear(); out.meshNames.clear(); out.unsupported.clear();
+    out.objectAnimations.clear(); out.objectAnimationNames.clear(); out.objectAnimationPlacement.clear();
 
     std::string_view json;
     std::vector<u8> glbBin;

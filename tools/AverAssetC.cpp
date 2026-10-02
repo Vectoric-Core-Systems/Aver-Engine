@@ -22,6 +22,8 @@
 #include "aver/formats/UsdImport.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcWorld.hpp"   // the scene level a multi-node glTF now writes
+#include "aver/formats/OcInstances.hpp"   // .ocinst -- where a PointInstancer's instances go by default
+#include "aver/world/LevelTransform.hpp"   // its Euler encoding, for rotated USD instances
 #include "aver/platform/FileSystem.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/core/ErrorCodes.hpp"
@@ -80,6 +82,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace aver;
@@ -731,6 +735,9 @@ struct MeshItem {
     std::string name;
     fmt::OcMeshData data;
     i32 skinIndex = -1;
+    // A folder under the output directory to write this item into (one path component, sanitised by
+    // writeMeshItems); empty = the output directory itself.
+    std::string subdir;
 };
 
 // Merges every item into the first, following ConvertTool.cpp's exact rule: two items resolving to
@@ -815,16 +822,81 @@ fmt::OcMeshData mergeAll(const std::vector<MeshItem>& items, usize& mergedCount,
 // this needs --content-dir. Without one there is no way to express the mesh path so a level can find
 // it, and the level is skipped with a line saying so rather than written full of paths that resolve
 // to nothing.
+// One placement as the level records it, whichever importer found it. glTF and ordinary USD prims
+// carry only a translation (their rotation and scale are baked into the mesh); a USD PointInstancer
+// instance carries its own rotation and scale, because every instance shares one mesh.
+struct ScenePlacement {
+    i32  meshIndex = -1;
+    Vec3 position{0, 0, 0};
+    Quat rotation = Quat::identity();
+    Vec3 scale{1, 1, 1};
+    bool collide = true;
+    // Stem of the object clip this placement plays (an animated glTF node), "" for none. The level
+    // writer makes it content-relative and adds the extension, exactly as it does for a mesh stem.
+    std::string animClip;
+};
+
+// The viewpoint a level opens at, when the source scene named one (a USD stage's camera).
+struct SceneCamera {
+    Vec3 position{0, 0, 0};
+    f32  yawDeg = 0.0f, pitchDeg = 0.0f;
+};
+
+// The sun, when the source scene lit itself with one (a USD DistantLight, or a DomeLight's sun).
+struct SceneSun {
+    Vec3 direction{0, 0, 1};   // toward the sun, engine space
+    f32  angularDeg = 0.53f;
+};
+
+// Fills 12 contiguous floats at `out` with the row-vector world transform OcInstances.hpp's own
+// convention describes, for one kept USD PointInstancer instance being written as FOLIAGE instead of
+// a PLACE/PLACEG entity.
+//
+// THIS MUST MATCH TODAY'S ENTITY PLACEMENT EXACTLY, and that is why it is not simply
+// `Transform{position, rotation, scale}.toMatrix()`. A PLACEG line's rotation is not stored as this
+// quaternion -- writeSceneLevel converts it to degrees with world::eulerDegFromQuat first (see its
+// own `op.roll/pitch/yaw` lines, a few lines below), and world::instantiate (LevelInstance.cpp)
+// reconstructs the rotation those degrees encode with world::quatFromEulerDeg when the level loads.
+// That round trip is not always lossless -- eulerDegFromQuat's own header comment documents the one
+// gimbal-lock corner where it can only recover the rotation up to a pinned roll/yaw split -- so an
+// instance within 0.26 degrees of vertical built straight from `rotation` would end up at a visibly
+// DIFFERENT orientation than the identical prim gets today as an ordinary entity. Going through the
+// same two functions LevelInstance.cpp's instantiate() calls (both already reachable here via
+// LevelTransform.hpp) reproduces that round trip bit for bit instead of inventing a second, mismatched
+// quaternion-to-matrix path.
+//
+// Transform::toMatrix() (aver::Transform, Math.hpp) is the SAME row-vector scale*rotate*translate matrix
+// world::instantiate builds for a root placement (an instancer instance is always a root -- USD
+// PointInstancers are never nested under a level's own BEGIN/END scopes), so dropping its trailing
+// (0,0,0,1) column is exactly OcInstances.hpp's own t[r*3+c] = M.m[r][c] convention.
+void foliageInstanceTransform(const Vec3& position, const Quat& rotation, const Vec3& scale, f32* out) {
+    Transform xf;
+    xf.position = position;
+    xf.rotation = world::quatFromEulerDeg(world::eulerDegFromQuat(rotation));
+    xf.scale = scale;
+    const Mat4 m = xf.toMatrix();
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r * 3 + c] = m.m[r][c];
+}
+
 bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
                      const std::string& base,
-                     const std::vector<fmt::GltfPlacement>& placements,
-                     const std::vector<std::string>& stems) {
-    if (placements.empty()) return true;                 // a single-object file needs no level
+                     const std::vector<ScenePlacement>& placements,
+                     const std::vector<std::string>& stems,
+                     const SceneCamera* camera = nullptr, const SceneSun* sun = nullptr,
+                     // Kept USD PointInstancer instances written as FOLIAGE (the default) rather than
+                     // as PLACE/PLACEG entities -- null or empty when there are none, or when
+                     // --instances-as entities asked for the old behaviour instead (they are folded
+                     // into `placements` in that case, and this stays null).
+                     const std::vector<ScenePlacement>* foliageInstances = nullptr) {
+    const bool haveFoliage = foliageInstances && !foliageInstances->empty();
+    if (placements.empty() && !haveFoliage) return true; // a single-object file needs no level
     if (contentDir.empty()) {
         AVER_WARN("{} placement(s) were recovered from the scene graph, but --content-dir was not "
                   "given, so a mesh path cannot be made content-relative and no level was written. "
                   "The meshes are correct and centred; place them by hand, or re-run with "
-                  "--content-dir.", placements.size());
+                  "--content-dir.", placements.size() + (haveFoliage ? foliageInstances->size() : 0));
         return true;
     }
 
@@ -841,17 +913,37 @@ bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
 
     fmt::OcWorldData w;
     w.name = base;
-    for (const fmt::GltfPlacement& p : placements) {
+    for (const ScenePlacement& p : placements) {
         if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
         const std::string& stem = stems[usize(p.meshIndex)];
         if (stem.empty()) continue;                      // merged away, or failed to write
         fmt::OcWorldPlacement op;
         op.asset = prefix + stem + ".ocmesh";
         op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
-        // Rotation and scale stay baked in the geometry, so the placement is a pure translation.
+        // Through the level format's own Euler encoding, so the loader's quatFromEulerDeg gives back
+        // exactly this rotation.
+        const Vec3 e = world::eulerDegFromQuat(p.rotation);
+        op.roll = e.x; op.pitch = e.y; op.yaw = e.z;
+        op.sx = p.scale.x; op.sy = p.scale.y; op.sz = p.scale.z;
+        op.collide = p.collide;
+        if (!p.animClip.empty()) op.animClip = prefix + p.animClip + ".ocanim";
         w.placements.push_back(std::move(op));
     }
-    if (w.placements.empty()) return true;
+    if (w.placements.empty() && !haveFoliage) return true;
+    if (camera) {
+        // The editor opens the level here instead of framing the whole of it; speed 0 = the user's own.
+        w.hasCamera = true;
+        w.camX = camera->position.x; w.camY = camera->position.y; w.camZ = camera->position.z;
+        w.camYaw = camera->yawDeg; w.camPitch = camera->pitchDeg;
+        w.camSpeed = 0.0;
+    }
+    if (sun) {
+        // Direction and disc size only: colour, illuminance and the sky stay the engine's physical
+        // defaults, whose atmosphere reddens and dims a low sun by itself.
+        w.hasSun = true;
+        w.sunDir[0] = sun->direction.x; w.sunDir[1] = sun->direction.y; w.sunDir[2] = sun->direction.z;
+        w.sunAngularDeg = sun->angularDeg;
+    }
 
     // Into <content>/Maps, where the editor's level list looks, rather than beside the meshes: a
     // .ocworld sitting in a Meshes folder is findable by nothing.
@@ -872,6 +964,73 @@ bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
                   path, alt);
         path = alt;
     }
+    // THE .ocinst SITS BESIDE THE .ocworld IT WAS BUILT FOR, under the SAME (possibly suffixed) stem
+    // -- so a re-import that lands as "JungleRuins_2.ocworld" (because "JungleRuins.ocworld" already
+    // existed) gets "JungleRuins_2.ocinst" rather than a table silently misnamed after the level that
+    // did NOT get overwritten. `path` already carries that final stem, decided by the dedup loop above.
+    const std::string levelStem = stemOf(path);
+    if (haveFoliage) {
+        // GROUP BY PROTOTYPE MESH ASSET. Two passes rather than one: the first counts each prototype's
+        // instances (and records the order prototypes are first seen in, so the groups in the file
+        // read in a stable, deterministic order run after run), which is what lets the second pass
+        // write every instance straight into its final slot in ONE allocation -- no growing buffer, no
+        // second bulk copy, the same "no per-instance allocation" contract OcInstances.hpp's own
+        // fast-path comment asks of a caller building a multi-million-row table.
+        std::vector<i32> order;
+        std::unordered_map<i32, u32> counts;
+        for (const ScenePlacement& p : *foliageInstances) {
+            if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size() || stems[usize(p.meshIndex)].empty())
+                continue;                                   // merged away, or failed to write
+            auto [it, inserted] = counts.try_emplace(p.meshIndex, 0u);
+            if (inserted) order.push_back(p.meshIndex);
+            ++it->second;
+        }
+
+        fmt::OcInstanceData inst;
+        std::unordered_map<i32, u32> baseOf, cursorOf;
+        u32 running = 0;
+        for (const i32 mi : order) {
+            const u32 count = counts[mi];
+            // CAST-SHADOW BY DEFAULT: OcInstances.hpp's kOcInstanceFlagCastShadow is not yet an
+            // authorable choice anywhere in this pipeline, so every group this importer writes sets
+            // it -- foliage that could not cast a shadow at all would be a visible regression against
+            // the entities it replaces, which always could.
+            inst.groups.push_back(fmt::OcInstanceGroup{prefix + stems[usize(mi)] + ".ocmesh",
+                                                       fmt::kOcInstanceFlagCastShadow, running, count});
+            baseOf[mi] = running;
+            cursorOf[mi] = 0;
+            running += count;
+        }
+        inst.transforms.resize(usize(running) * 12);
+        for (const ScenePlacement& p : *foliageInstances) {
+            if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size() || stems[usize(p.meshIndex)].empty())
+                continue;
+            u32& cursor = cursorOf[p.meshIndex];
+            foliageInstanceTransform(p.position, p.rotation, p.scale,
+                                     &inst.transforms[usize(baseOf[p.meshIndex] + cursor) * 12]);
+            ++cursor;
+        }
+
+        const std::string instPath = mapsDir + "/" + levelStem + ".ocinst";
+        std::string instWhy;
+        if (!fmt::saveOcInstances(instPath, inst, &instWhy)) {
+            AVER_WARN("could not write the foliage instance table {}: {}", instPath, instWhy);
+            return false;
+        }
+        // Content-relative, exactly like every other asset path this function writes (`op.asset`
+        // above) -- but relative to `contentDir` directly, NOT through `prefix` (which is `outDir`'s
+        // own relative path, the Meshes folder): mapsDir is always literally `contentDir + "/Maps"`,
+        // so the .ocinst's own content-relative path is always exactly "Maps/<levelStem>.ocinst".
+        w.foliageFiles.push_back("Maps/" + levelStem + ".ocinst");
+
+        std::error_code sizeEc;
+        const std::uintmax_t bytes = std::filesystem::file_size(instPath, sizeEc);
+        AVER_INFO("wrote {}: {} group(s), {} instance(s), {:.1f} MiB -- ray-traced foliage, no "
+                  "collision, not individually selectable",
+                  instPath, inst.groups.size(), running,
+                  sizeEc ? 0.0 : static_cast<double>(bytes) / (1024.0 * 1024.0));
+    }
+
     std::string why;
     if (!fmt::saveOcworld(path, w, &why)) {
         AVER_WARN("could not write the scene level {}: {}", path, why);
@@ -911,6 +1070,12 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
         (void)lodRatio;
 #endif
         std::string stem = items.size() == 1 ? base : safe(items[i].name, base + std::to_string(i));
+        // The stem carries the subfolder, so de-duplication and the level's asset path both see it.
+        if (!items[i].subdir.empty()) {
+            const std::string sub = safe(items[i].subdir, "Group");
+            createDirectories(outDir + "/" + sub);
+            stem = sub + "/" + stem;
+        }
         std::string candidate = stem;
         int suffix = 1;
         while (std::find(used.begin(), used.end(), candidate) != used.end())
@@ -973,7 +1138,7 @@ void cookAndRewriteSlots(std::vector<fmt::ImportedMaterial>& materials,
 
 } // namespace
 
-// `convert` converts argv[2] (a glTF/GLB, OBJ, USDA, or -- when this build has audio import -- a
+// `convert` converts argv[2] (a glTF/GLB, OBJ, USD stage, or -- when this build has audio import -- a
 // WAV/MP3/M4A/FLAC) into argv following --out-dir, naming outputs after --base or the source stem.
 // `material` (when this build has material compiling) converts a whole texture SET the same way --
 // see runMaterial's own comment for why it is a separate subcommand rather than another `convert`
@@ -983,6 +1148,12 @@ void cookAndRewriteSlots(std::vector<fmt::ImportedMaterial>& materials,
 int main(int argc, char** argv) {
     static const char* kUsage =
         "usage: AverAssetC convert <input-file> --out-dir <dir> [--base <name>] [--merge] [--lod <ratio>]"
+        "\n                          [--instances-as foliage|entities]   USD PointInstancer instances as"
+        "\n                                                              baked .ocinst foliage (default) or PLACE entities"
+        "\n                          [--max-instances <n>] [--max-instance-tris <n>]   USD PointInstancer budget, 0 = none;"
+        "\n                                                              defaults depend on --instances-as (see docs/ASSET_IMPORT.md)"
+        "\n                          [--focus camera|none|<x>,<y>] [--focus-radius <cm>] [--keep-all-below <n>]"
+        "\n                          [--exclude <prim path>[,<prim path>...]]   USD prims to leave out"
 #if AVER_HAVE_MATERIAL_COMPILE
         "\n                          [--content-dir <dir>]   write materials and textures too"
         "\n                          [--max-texture <n>]     downscale imported textures to n px"
@@ -1009,6 +1180,28 @@ int main(int argc, char** argv) {
 
     std::string input, outDir, baseOverride, contentDir;
     u32 maxTexture = 0;             // 0 = every texture through at its source resolution
+    // WHERE A KEPT POINTINSTANCER INSTANCE GOES. FOLIAGE (the default) is what this comment used to
+    // call the only option: a scattered stage declares millions of instances (Jungle Ruins: 8.7
+    // million), and until .ocinst existed the level held one ENTITY per kept instance -- past ~16k
+    // entities the frame was CPU-bound, so --max-instances defaulted to a number nowhere near the
+    // stage's own count. Instanced foliage pays no such per-instance entity cost (ray-traced only,
+    // one TLAS instance and no draw, no collision, not individually selectable -- see OcInstances.hpp
+    // and docs/ASSET_IMPORT.md), so the budget below is sized for the FORMAT's own ceiling instead of
+    // the entity system's, and --instances-as entities is what asks for the old behaviour verbatim.
+    bool instancesAsEntities = false;
+    // A USD stage's PointInstancer budget (UsdImportOptions). 0 on the command line lifts a limit;
+    // left at 0 here and resolved AFTER argument parsing, once --instances-as is known, since the two
+    // modes want different defaults (see just below main's argument loop).
+    u64 maxInstances = 0;
+    u64 maxInstanceTris = 0;
+    bool maxInstancesSet = false, maxInstanceTrisSet = false;
+    // Densest around the stage's own camera -- the view it was built to be seen from -- within 100 m,
+    // and any prototype with 2000 instances or fewer kept whole (see UsdImportOptions::focus).
+    fmt::UsdInstanceFocus focusMode = fmt::UsdInstanceFocus::FirstCamera;
+    Vec3 focusPoint{0, 0, 0};
+    f32 focusRadius = 10000.0f;
+    u64 keepAllBelow = 2000;
+    std::vector<std::string> excludePrims;   // --exclude, repeatable and/or comma-separated
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -1027,6 +1220,48 @@ int main(int argc, char** argv) {
         // of mips PER TEXTURE once the engine builds the chain, so three maps on each of a dozen
         // plants is a gigabyte of VRAM before anything else is in the scene.
         else if (a == "--max-texture" && i + 1 < argc) maxTexture = u32(std::atoi(argv[++i]));
+        else if (a == "--instances-as" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "entities")     instancesAsEntities = true;
+            else if (v == "foliage") instancesAsEntities = false;
+            else {
+                AVER_ERROR("--instances-as must be 'foliage' or 'entities', not '{}'", v);
+                return exitCode(ExitCode::Usage);
+            }
+        }
+        else if (a == "--max-instances" && i + 1 < argc) {
+            maxInstances = std::strtoull(argv[++i], nullptr, 10);
+            maxInstancesSet = true;
+        }
+        else if (a == "--max-instance-tris" && i + 1 < argc) {
+            maxInstanceTris = std::strtoull(argv[++i], nullptr, 10);
+            maxInstanceTrisSet = true;
+        }
+        // --focus camera | none | <x>,<y>  (engine centimetres)
+        else if (a == "--focus" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "camera")    focusMode = fmt::UsdInstanceFocus::FirstCamera;
+            else if (v == "none") focusMode = fmt::UsdInstanceFocus::Uniform;
+            else {
+                focusMode = fmt::UsdInstanceFocus::Point;
+                const usize comma = v.find(',');
+                focusPoint.x = static_cast<f32>(std::atof(v.substr(0, comma).c_str()));
+                focusPoint.y = comma == std::string::npos ? 0.0f : static_cast<f32>(std::atof(v.substr(comma + 1).c_str()));
+            }
+        }
+        else if (a == "--focus-radius" && i + 1 < argc) focusRadius = static_cast<f32>(std::atof(argv[++i]));
+        else if (a == "--keep-all-below" && i + 1 < argc) keepAllBelow = std::strtoull(argv[++i], nullptr, 10);
+        else if (a == "--exclude" && i + 1 < argc) {
+            const std::string list = argv[++i];
+            usize start = 0;
+            while (start <= list.size()) {
+                const usize comma = list.find(',', start);
+                const std::string one = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                if (!one.empty()) excludePrims.push_back(one);
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
         else if (!haveInput) { input = a; haveInput = true; }
     }
     if (!haveInput || outDir.empty()) {
@@ -1035,6 +1270,28 @@ int main(int argc, char** argv) {
     }
     while (!outDir.empty() && (outDir.back() == '\\' || outDir.back() == '/')) outDir.pop_back();
     const std::string base = !baseOverride.empty() ? baseOverride : stemOf(input);
+
+    // THE PER-MODE DEFAULTS, applied only where the command line left a budget unset.
+    if (instancesAsEntities) {
+        // UNCHANGED from every build before --instances-as existed.
+        if (!maxInstancesSet)   maxInstances   = 12000;
+        if (!maxInstanceTrisSet) maxInstanceTris = 150000000;
+    } else {
+        // FOLIAGE: instancing shares one BLAS per prototype, so the per-instance triangle cost that
+        // motivated maxInstanceTris for entities does not apply here -- unlimited (0) is the default.
+        if (!maxInstanceTrisSet) maxInstanceTris = 0;
+        if (!maxInstancesSet) maxInstances = 4000000;
+        // THE FORMAT'S OWN HARD CEILING, aver::voxi::VoxiRenderer::kMaxFoliageInstances
+        // (modules/render.voxi/include/aver/voxi/VoxiRenderer.hpp) -- duplicated here as a literal
+        // rather than an include, since this tool does not and should not link Aver.Voxi for one
+        // constant. 0 means "no limit" on the command line (UsdImportOptions' own contract), but
+        // there is no such thing as unlimited FOLIAGE: a table past this many rows only wastes convert
+        // time and disk, since setFoliage truncates past it (with its own warning) the moment the
+        // level loads. Clamping here, rather than only at load, is what makes "what was kept" in the
+        // log below the number that actually survives.
+        constexpr u64 kMaxFoliageInstances = 8000000;
+        if (maxInstances == 0 || maxInstances > kMaxFoliageInstances) maxInstances = kMaxFoliageInstances;
+    }
 
     RunStats stats;
     const std::string ext = extOf(input);
@@ -1073,7 +1330,57 @@ int main(int argc, char** argv) {
 
         std::vector<std::string> stems;
         bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats, &stems);
-        if (!writeSceneLevel(outDir, contentDir, base, res.placements, stems)) anyFailed = true;
+        std::vector<ScenePlacement> scene;
+        scene.reserve(res.placements.size());
+        for (const fmt::GltfPlacement& p : res.placements) scene.push_back(ScenePlacement{p.meshIndex, p.position});
+
+        // ---- object clips, BEFORE the level so a placement only names a clip that was written ----
+        //
+        // The motion of a plain glTF node (a car on a route, a fan) as <base>_<node>.ocanim beside the
+        // skeletal clips. Names are taken after the skeletal clips', so a node named like an armature
+        // action cannot overwrite it.
+        {
+            // Compared lower-cased: Windows treats "Car" and "car" as ONE file, so the second clip
+            // would overwrite the first.
+            const auto fileKey = [](std::string s) {
+                for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return s;
+            };
+            std::unordered_set<std::string> taken;
+            for (usize i = 0; i < res.animations.size(); ++i)
+                taken.insert(fileKey(safe(i < res.animationNames.size() ? res.animationNames[i] : "",
+                                          "Clip" + std::to_string(i))));
+            for (usize i = 0; i < res.objectAnimations.size(); ++i) {
+                std::string name = safe(i < res.objectAnimationNames.size() ? res.objectAnimationNames[i] : "",
+                                        "ObjectClip" + std::to_string(i));
+                if (!taken.insert(fileKey(name)).second) {
+                    const std::string root = name;
+                    for (int n = 2; !taken.insert(fileKey(name = root + "_" + std::to_string(n))).second; ++n) {}
+                }
+                const fmt::OcAnimation& clip = res.objectAnimations[i];
+                const std::string p = outDir + "/" + base + "_" + name + ".ocanim";
+                if (!fmt::saveOcAnim(p, clip, &why)) {
+                    emitArtifact(input, p, "animation", false, false, why, stats);
+                    anyFailed = true;
+                    continue;
+                }
+                emitArtifact(input, p, "animation", true, true, {}, stats,
+                             "\"durationSeconds\":" + std::to_string(clip.duration));
+                const i32 pl = i < res.objectAnimationPlacement.size() ? res.objectAnimationPlacement[i] : -1;
+                if (pl >= 0 && usize(pl) < scene.size()) {
+                    // A placement plays ONE clip, so the FIRST one the file lists keeps it; a later clip
+                    // for the same node is still written (it can be picked by hand) but says so here.
+                    if (scene[usize(pl)].animClip.empty()) {
+                        scene[usize(pl)].animClip = base + "_" + name;
+                    } else {
+                        AVER_WARN("'{}' is animated by more than one glTF animation: its placement plays '{}'; "
+                                  "'{}' was written but not attached", res.placements[usize(pl)].name,
+                                  scene[usize(pl)].animClip, base + "_" + name);
+                    }
+                }
+            }
+        }
+        if (!writeSceneLevel(outDir, contentDir, base, scene, stems)) anyFailed = true;
 
         bool anySkinned = false;
         for (const fmt::OcMeshData& mesh : res.meshes) if (mesh.hasSkin()) { anySkinned = true; break; }
@@ -1156,15 +1463,50 @@ int main(int argc, char** argv) {
         return anyFailed ? 1 : 0;
     }
 
-    if (ext == ".usd" || ext == ".usda") {
+    if (ext == ".usd" || ext == ".usda" || ext == ".usdc") {
         fmt::UsdImportResult res;
         std::string why;
-        if (!fmt::importUsd(input, res, {}, &why)) {
+        // THE WHOLE STAGE: sublayers, binary layers, references and PointInstancers. A single text
+        // layer imports exactly as importUsd would read it.
+        fmt::UsdImportOptions uopt;
+        uopt.maxInstances = maxInstances;
+        uopt.maxInstanceTriangles = maxInstanceTris;
+        uopt.focus = focusMode;
+        uopt.focusPoint = focusPoint;
+        uopt.focusRadius = focusRadius;
+        uopt.keepAllBelow = keepAllBelow;
+        uopt.excludePrims = excludePrims;
+        // Instanced foliage is thinned by what can be SEEN at a distance (a tree stays dense far out,
+        // moss does not): UsdImportOptions::focusBySize. Entities keep the per-prototype share.
+        uopt.focusBySize = !instancesAsEntities;
+        if (!fmt::importUsdStage(input, res, uopt, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
             return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
+        if (res.instancing.instancers) {
+            AVER_INFO("PointInstancers: {} instancer(s), {} prototype mesh(es), {} of {} instance(s) kept "
+                      "(--max-instances {}, --max-instance-tris {}, --instances-as {})",
+                      res.instancing.instancers, res.instancing.prototypes, res.instancing.keptInstances,
+                      res.instancing.sourceInstances, maxInstances, maxInstanceTris,
+                      instancesAsEntities ? "entities" : "foliage");
+            if (res.instancing.focused)
+                AVER_INFO("  focus ({:.0f}, {:.0f}), radius {:.0f} cm: {} of {} instance(s) inside it kept",
+                          res.instancing.focusPoint.x, res.instancing.focusPoint.y, res.instancing.focusRadius,
+                          res.instancing.keptInFocus, res.instancing.sourceInFocus);
+            for (const fmt::UsdPrototypeStats& p : res.instancing.perPrototype) {
+                const std::string name = p.meshIndex >= 0 && usize(p.meshIndex) < res.meshNames.size()
+                                             ? res.meshNames[usize(p.meshIndex)] : std::string("?");
+                if (p.fullDensityRadius > 0.0f)
+                    AVER_INFO("  prototype {}: {} triangle(s), ~{:.0f} cm radius, {} of {} instance(s) kept, "
+                              "full density within {:.0f} m", name, p.triangles, p.radius, p.kept, p.instances,
+                              p.fullDensityRadius / 100.0f);
+                else
+                    AVER_INFO("  prototype {}: {} triangle(s), ~{:.0f} cm radius, {} of {} instance(s) kept", name,
+                              p.triangles, p.radius, p.kept, p.instances);
+            }
+        }
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
@@ -1176,6 +1518,13 @@ int main(int argc, char** argv) {
         // mesh whose slot stayed empty -- no binding, or one behind a reference this importer does
         // not compose -- is untouched, and the import said so under `unsupported`.
         cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
+
+        // A stage spread over several folders is written the same way, one subfolder per source
+        // folder; a single-folder stage stays flat.
+        std::vector<std::string> groups = res.meshGroups;
+        groups.resize(res.meshes.size());
+        bool grouped = false;
+        for (const std::string& g : groups) if (!g.empty() && g != groups.front()) { grouped = true; break; }
 
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
@@ -1189,9 +1538,47 @@ int main(int argc, char** argv) {
             std::string name = i < res.meshNames.size() ? res.meshNames[i] : std::string{};
             const usize leaf = name.find_last_of('/');
             if (leaf != std::string::npos) name = name.substr(leaf + 1);
-            items.push_back(MeshItem{std::move(name), res.meshes[i], -1});
+            // MOVED, not copied: a composed stage's terrain alone can be gigabytes of vertices.
+            items.push_back(MeshItem{std::move(name), std::move(res.meshes[i]), -1, grouped ? groups[i] : std::string{}});
         }
-        const bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats);
+        std::vector<std::string> stems;
+        bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats, &stems);
+        std::vector<ScenePlacement> scene;
+        std::vector<ScenePlacement> foliageInstances;
+        scene.reserve(res.placements.size());
+        for (const fmt::UsdPlacement& p : res.placements) {
+            ScenePlacement sp{p.meshIndex, p.position,
+                              Quat{p.rotation[0], p.rotation[1], p.rotation[2], p.rotation[3]}, p.scale};
+            // AN INSTANCE IS SCATTER -- grass, moss, a sapling -- and a collision body per blade would
+            // cost physics thousands of bodies for surfaces nobody should be stopped by. The stage's
+            // own meshes (terrain, ruins, water) keep the default. An empty `name` is exactly how
+            // UsdPlacement marks a PointInstancer instance (see its own header comment).
+            const bool isInstancerInstance = p.name.empty();
+            sp.collide = !isInstancerInstance;
+            // FOLIAGE, NOT AN ENTITY, unless --instances-as entities asked for the old behaviour: a
+            // kept instance goes into its own list instead of `scene`, so writeSceneLevel writes it
+            // into the level's .ocinst table and a FOLIAGE record rather than a PLACE/PLACEG line.
+            if (isInstancerInstance && !instancesAsEntities) foliageInstances.push_back(sp);
+            else scene.push_back(sp);
+        }
+        SceneCamera cam;
+        if (!res.cameras.empty()) {
+            const fmt::UsdCameraPose& c = res.cameras.front();
+            cam = SceneCamera{c.position, c.yawDeg, c.pitchDeg};
+            AVER_INFO("level camera: the stage's {} at ({:.0f}, {:.0f}, {:.0f}) yaw {:.1f} pitch {:.1f}", c.name,
+                      c.position.x, c.position.y, c.position.z, c.yawDeg, c.pitchDeg);
+        }
+        SceneSun sun;
+        if (res.sun.found) {
+            sun = SceneSun{res.sun.direction, res.sun.angularDiameterDeg};
+            const f32 elev = std::asin(std::fmax(-1.0f, std::fmin(1.0f, res.sun.direction.z))) * 57.2957795f;
+            const f32 azim = std::atan2(res.sun.direction.y, res.sun.direction.x) * 57.2957795f;
+            AVER_INFO("level sun: from {} -- elevation {:.1f}, azimuth {:.1f} degrees", res.sun.source, elev, azim);
+        }
+        if (!writeSceneLevel(outDir, contentDir, base, scene, stems, res.cameras.empty() ? nullptr : &cam,
+                             res.sun.found ? &sun : nullptr,
+                             foliageInstances.empty() ? nullptr : &foliageInstances))
+            anyFailed = true;
         emitSummary(input, stats, anyFailed ? 1 : 0);
         return anyFailed ? 1 : 0;
     }

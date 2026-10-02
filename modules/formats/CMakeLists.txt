@@ -21,6 +21,10 @@ aver_add_module(Aver.Formats
     # formats this tree parses itself, and neither pulls a licence question into the build.
     src/ObjImport.cpp
     src/UsdImport.cpp
+    # USDC (the binary crate encoding) and whole-stage composition: sublayers, references,
+    # inherits, PointInstancers. Native for the same reason as the text reader above.
+    src/UsdCrate.cpp
+    src/UsdStageImport.cpp
     # .ocland, the landscape heightfield. In the BASE target rather than a fifth one because it needs
     # nothing beyond Core/Platform/Assets -- it is the AVR1 container and arithmetic, no process, no
     # device, no .NET. That is what lets the landscape tests run on a machine with none of those.
@@ -58,7 +62,18 @@ aver_add_module(Aver.Formats
     # reason: a header record and a string table, nothing that needs Aver.Scene or Aver.Landscape --
     # see OcFoliage.hpp for why the format itself stays independent of both.
     src/OcFoliage.cpp
+    # .ocinst -- a level's baked instanced-foliage transform table. Beside .ocfoliage for the
+    # identical reason: a header, a string table and one bulk chunk, nothing that needs Aver.Scene,
+    # Aver.Voxi or a GPU device -- see OcInstances.hpp for the transform convention and why a
+    # multi-million-instance file still fits this base target.
+    src/OcInstances.cpp
+    # .oclanes -- a level's traffic lanes, the sidecar world::VehicleSystem follows. TEXT, written by the
+    # generator's Python pipeline, so it needs only the line scanner every other text reader here
+    # shares; beside .ocinst because both are level-adjacent tables no entity represents.
+    src/OcLanes.cpp
     src/Texture.cpp
+    # BC7 (mode 6) block compression for the texture derived-data cache; see Bc7.hpp.
+    src/Bc7.cpp
   DEPS
     Aver.Core
     Aver.Platform

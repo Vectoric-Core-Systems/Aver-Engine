@@ -58,7 +58,8 @@ public:
     // particles::particleSystem().tick(world, dt)'s existing pattern of an external, explicit
     // per-frame drive call -- because IRenderFeature's own hooks (beginScene, prePass,
     // transparentPass, ...) never receive a dt; nothing in the RHI's own frame loop knows what
-    // "seconds" means to a feature that keeps its own clock.
+    // "seconds" means to a feature that keeps its own clock. Both hosts get it through
+    // game::GameWater::update; without a caller the waves never leave t = 0.
     void tick(f32 dtSeconds);
 
     void setWaterLevelCm(f32 zCm) { waterLevelCm_ = zCm; }

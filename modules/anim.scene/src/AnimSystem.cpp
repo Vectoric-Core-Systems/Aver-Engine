@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <utility>
 
 namespace aver::anim {
@@ -67,6 +68,15 @@ bool crossedPoint(f32 point, f32 dur, const ClipStep& s) {
              : ((t < s.prev && t >= 0.0f) || (t >= s.now && t <= dur));
 }
 
+// A float's bits, so "the same time as last tick" means bit-for-bit the same. == would call a NaN
+// different from itself (harmless: it only costs the slow path) but a -0.0 the same as 0.0, and the
+// clock this guards records whichever of the two it was handed.
+u32 bitsOf(f32 v) {
+    u32 b;
+    std::memcpy(&b, &v, sizeof b);
+    return b;
+}
+
 } // namespace
 
 const fmt::OcSkeleton* AnimSystem::skeleton(u64 objectId) {
@@ -103,11 +113,16 @@ void AnimSystem::clear() {
     // empty map instead of one mid-iteration.
     auto closing = std::move(clocks_);
     clocks_.clear();
+    // Every clip pointer a slot caches is about to dangle, and every clock it vouches for is gone.
+    ++steadyEpoch_;
     for (auto& [e, clock] : closing) closeAllOpen(e, clock);
 
     skeletons_.clear();
     clips_.clear();
     posed_.clear();
+    objects_.clear();
+    slots_.clear();
+    orphans_ = false;   // both maps are empty, so nothing is left that the pool does not own
     // Reset AFTER the fires above, matching notifiesFired()'s own contract ("since the last
     // clear()") -- the forced Ends just delivered belong to the epoch that ended, not the one
     // starting.
@@ -116,33 +131,113 @@ void AnimSystem::clear() {
 }
 
 void AnimSystem::tick(scene::World& world, f32 dt) {
-    // Retire poses whose entity is gone. Without this the map only ever grows, and a long-running
-    // session pays for every character it has ever spawned -- the generational key stops a recycled
-    // slot INHERITING a pose, but it cannot stop the dead entry sitting there forever.
-    for (auto it = posed_.begin(); it != posed_.end(); ) {
-        if (world.valid(it->first) && !world.destroyPending(it->first)) ++it;
-        else it = posed_.erase(it);
-    }
-    // The clock history is pruned on the SAME rule and for the same reason -- an entry that outlived
-    // its entity would hand a recycled handle somebody else's playhead, and the first step measured
-    // from it could fire a burst of notifies that nothing in the new entity's clip ever passed.
-    for (auto it = clocks_.begin(); it != clocks_.end(); ) {
-        if (world.valid(it->first) && !world.destroyPending(it->first)) { ++it; continue; }
-        // LEAK (c): THE ENTITY IS GONE, mid-window or not. If a notify state was open under it,
-        // this is the only place left to close it -- there is no later tick on a dead entity to ever
-        // reach the point that would have closed it normally, so a hit window (say, a collider a
-        // graph switched on at _Begin) would otherwise stay live for the rest of the session.
-        closeAllOpen(it->first, it->second);
-        it = clocks_.erase(it);
-    }
-
     scene::ComponentPool* animators = world.pool(scene::kComponentAnimator);
-    if (!animators) return;
+    scene::ComponentPool* skeletal  = world.pool(scene::kComponentSkeletalMesh);
 
+    // THE TWO PRUNE SCANS BELOW RUN ONLY ON A TICK THAT CAN GIVE THEM SOMETHING TO FIND. Each walks a
+    // whole map (clocks_ holds an entry per animated entity, hundreds in a level of object clips) and
+    // asks the world two questions per entry, every frame, to learn nothing on all but the frames an
+    // entity died. Both maps are written only for entities that were in the animator pool at the
+    // time, and an entity leaves that pool exactly when it is retired (World::flush drops it from every
+    // pool) or loses the component -- either one changes the pool's SEQUENCE of full generational
+    // handles, which slots_ remembers from the last tick. It is the sequence and not the count that is
+    // compared, because a recycled slot is a different handle: one entity dying and another being born
+    // between two ticks leaves world.count() where it was and still reads here as a change.
+    //
+    // A destroy that is queued and not yet flushed is the one death the pool cannot show, so it is
+    // asked of each animator directly. `orphans_` covers what neither can: a kept entry whose entity is
+    // alive but is not in the pool (it lost its animator), which can die without touching the pool at
+    // all. While one exists every tick scans, exactly as every tick used to.
+    bool prune = orphans_ || !animators;
+    if (animators) {
+        const usize n = animators->size();
+        if (slots_.size() != n) { slots_.resize(n); prune = true; }
+        for (usize i = 0; i < n; ++i) {
+            const scene::Entity e = animators->entityAt(i);
+            if (slots_[i].e != e) { slots_[i] = Slot{}; slots_[i].e = e; prune = true; }
+            if (world.destroyPending(e)) prune = true;
+        }
+    }
+
+    if (prune) {
+        // Slots are voided (steadyEpoch_) only if the clock scan below ERASES something -- the one
+        // thing a scan can do to a clock a slot vouches for, and the only point where sinks run (the
+        // forced _End of closeAllOpen). A scan that only finds orphans or retires poses changes no
+        // clock, and voiding every held slot for it would switch the fast path off for as long as an
+        // orphan lives, since every tick then scans.
+        bool erasedClock = false;
+        orphans_ = false;
+        // Retire poses whose entity is gone. Without this the map only ever grows, and a long-running
+        // session pays for every character it has ever spawned -- the generational key stops a recycled
+        // slot INHERITING a pose, but it cannot stop the dead entry sitting there forever.
+        for (auto it = posed_.begin(); it != posed_.end(); ) {
+            if (world.valid(it->first) && !world.destroyPending(it->first)) {
+                if (!animators || !animators->has(it->first)) orphans_ = true;
+                ++it;
+            } else {
+                it = posed_.erase(it);
+            }
+        }
+        // The clock history is pruned on the SAME rule and for the same reason -- an entry that outlived
+        // its entity would hand a recycled handle somebody else's playhead, and the first step measured
+        // from it could fire a burst of notifies that nothing in the new entity's clip ever passed.
+        for (auto it = clocks_.begin(); it != clocks_.end(); ) {
+            if (world.valid(it->first) && !world.destroyPending(it->first)) {
+                if (!animators || !animators->has(it->first)) orphans_ = true;
+                ++it;
+                continue;
+            }
+            // LEAK (c): THE ENTITY IS GONE, mid-window or not. If a notify state was open under it,
+            // this is the only place left to close it -- there is no later tick on a dead entity to ever
+            // reach the point that would have closed it normally, so a hit window (say, a collider a
+            // graph switched on at _Begin) would otherwise stay live for the rest of the session.
+            if (!erasedClock) { erasedClock = true; ++steadyEpoch_; }   // before any sink can run
+            closeAllOpen(it->first, it->second);
+            it = clocks_.erase(it);
+        }
+    }
+
+    if (!animators) { objects_.clear(); return; }
+
+    ++objectStamp_;
     for (usize i = 0; i < animators->size(); ++i) {
         const scene::Entity e = animators->entityAt(i);
         auto* a = static_cast<scene::CAnimator*>(animators->dataAt(i));
         if (!a) continue;
+
+        // An entity the pre-scan above did not see at this slot (a sink added it mid-tick) can get a
+        // clock here that nothing has accounted for, so the next tick must scan.
+        const bool known = i < slots_.size() && slots_[i].e == e;
+        if (!known) orphans_ = true;
+
+        // THE HELD FAST PATH. An object clip that is held (outside Play, or while Play is paused) does
+        // nothing per tick but re-observe its own clock: stepNotifies with a zero step and `paused`
+        // set records the clip, the wrapped playhead and `prev`, delivers nothing, and, once it has run,
+        // running it again with the same clip, time and loop flag changes nothing at all. So an entity
+        // whose slot says its clock is already in that state, and whose inputs are bit-for-bit what
+        // they were, skips the clip lookups, the clock lookup and the fmod -- with 800 of them held
+        // that is most of this loop. What it may NOT skip is captureObject: while Play is paused the
+        // base is still marked seen here, and the sweep below drops any base nothing marked.
+        //
+        // Everything the skipped work depended on is either compared here or voided elsewhere: the clip
+        // and time and loop flag right below; the entity having gained a rig, which makes it a
+        // skeletal animator and not an object clip; a scan or clear() that may have erased the clock
+        // (steadyEpoch_).
+        if ((!objectLive_ || objectPaused_) && known) {
+            const Slot& s = slots_[i];
+            if (s.steady && s.epoch == steadyEpoch_ && s.clip == a->clip &&
+                s.timeBits == bitsOf(a->time) && s.once == (a->flags & scene::kAnimatorOnce) &&
+                !(skeletal && skeletal->has(e))) {
+                if (objectLive_) captureObject(world, e, *a, *s.objClip);
+                continue;
+            }
+        }
+        // PAST THE FAST PATH THE CLOCK MAY MOVE (a live step, a clip change, a sink), so the slot stops
+        // vouching for it here and only the settle block below can re-arm it. Without this a slot armed
+        // while held survived a whole Play session: Stop writes the authored time back bit-for-bit, the
+        // compare above matched again, and the clock was left at Play's last playhead -- so the next
+        // Play's first step measured from there and fired every notify between it and the clip end.
+        if (known) slots_[i].steady = false;
 
         // A zero-filled component is a PLAYING one at normal speed and full weight -- see the note
         // on kAnimatorPaused. addComponent zero-fills, so anything that reads 0 as "off" gives you
@@ -153,7 +248,27 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         // THE CLOCK ADVANCES EVEN WITHOUT A RIG. Time is data on the component, so a scrubbing
         // editor and a save file both work before any asset has resolved.
         const bool paused = (a->flags & scene::kAnimatorPaused) != 0;
-        if (!paused) a->time += dt * speed;
+
+        // OBJECT ANIMATION: a clip flagged kOcAnimObject on an entity with no rig. The clip lookup is
+        // the cached one the skeletal path makes, so an animator that is not one pays a map probe.
+        const fmt::OcAnimation* objClip = nullptr;
+        if (a->clip != 0 && !world.hasComponent(e, scene::kComponentSkeletalMesh)) {
+            const fmt::OcAnimation* c = clip(a->clip);
+            if (c && (c->flags & fmt::kOcAnimObject)) objClip = c;
+        }
+        const bool live = objClip && objectLive_;
+        // NOT LIVE HOLDS THE CLOCK of an object clip, so an editor sitting outside Play does not wind
+        // an animator's saved time forward behind the author's back. A clip that never resolved is not
+        // known to be an object clip and still advances, exactly as before. A paused Play holds it the
+        // same way, but stays live: the base below is still marked seen, so it survives the pause.
+        const bool held = objClip && (!objectLive_ || objectPaused_);
+        // Captured BEFORE the advance: t0 is the animator's time when playback starts.
+        if (live) captureObject(world, e, *a, *objClip);
+
+        if (!paused && !held) a->time += dt * speed;
+
+        // Before stepNotifies, so a sink that reads the entity's transform sees this frame's placement.
+        if (live && !objectPaused_) writeObject(world, e, *a, *objClip);
 
         // NOTIFIES, here rather than beside the sampling below, because a clip crosses its markers
         // whether or not a rig ever resolved -- the two `continue`s that follow are about having
@@ -161,7 +276,29 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         // bones. This is also before any weight or blend consideration for the same reason: a notify
         // is an event on a clock, not a contribution to a pose. A clip faded to zero weight still
         // reaches the moment its footstep is on.
-        stepNotifies(e, *a, dt * speed, paused);
+        //
+        // A held step that ran no sink leaves the clock exactly as the fast path above expects to find
+        // it, so what it was handed is recorded for the next tick to compare against. "Ran no sink" is
+        // read off fired_, which every path to the sink increments before calling it: a sink is
+        // arbitrary code that could have edited this animator or cleared the system, and then the
+        // values read here would not be the values the clock reflects. A clip with no length is not
+        // recorded either: stepNotifies drops its clock instead of keeping one.
+        const bool settle = held && known && objClip->duration > 0.0f;
+        const u64 firedBefore = fired_;
+        const u32 epochBefore = steadyEpoch_;
+        const u64 keyClip = a->clip;
+        const u32 keyTime = bitsOf(a->time);
+        const u32 keyOnce = a->flags & scene::kAnimatorOnce;
+        stepNotifies(e, *a, held ? 0.0f : dt * speed, paused || held);
+        if (settle && fired_ == firedBefore && steadyEpoch_ == epochBefore) {
+            Slot& s = slots_[i];
+            s.steady   = true;
+            s.epoch    = epochBefore;
+            s.clip     = keyClip;
+            s.timeBits = keyTime;
+            s.once     = keyOnce;
+            s.objClip  = objClip;
+        }
 
         const auto* sm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
         if (!sm || sm->skeleton == 0) continue;
@@ -205,7 +342,65 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         poseToSkinning(*skel, p.pose, p.skin);
     }
 
+    // Drop every base nothing drove this tick: the entity died, lost its animator or gained a rig, or
+    // was pointed at a clip that is not an object clip. A recycled handle is a different key, so it
+    // can never inherit one.
+    for (auto it = objects_.begin(); it != objects_.end(); ) {
+        if (it->second.seen == objectStamp_) ++it;
+        else it = objects_.erase(it);
+    }
+
     updateAttachments(world);
+}
+
+void AnimSystem::setObjectAnimationLive(bool live) {
+    // Every captured base goes when object animation stops: the host puts the transforms back itself,
+    // so a base kept across the gap would compose the next session against a stale placement.
+    // The pause goes with them: a session that ended paused must not hold the next one.
+    if (!live) { objects_.clear(); objectPaused_ = false; }
+    objectLive_ = live;
+}
+
+Transform AnimSystem::sampleObject(const fmt::OcAnimation& c, f32 t) {
+    // Reset every call: sampleAnimation leaves a channel the track lacks alone, and an object clip
+    // with no scale keys must read as scale 1, not as the previous sample's.
+    objectPose_.local.assign(1, Transform{});
+    sampleAnimation(c, t, objectPose_);
+    return objectPose_.local[0];
+}
+
+void AnimSystem::captureObject(scene::World& world, scene::Entity e, const scene::CAnimator& a,
+                               const fmt::OcAnimation& c) {
+    auto it = objects_.find(e);
+    if (it != objects_.end() && it->second.clip == a.clip) { it->second.seen = objectStamp_; return; }
+
+    // A different clip on an entity that already has a base captures afresh, against wherever the
+    // entity is now: the new clip's motion is relative to that, like a first play.
+    ObjectBase& ob = objects_[e];
+    ob.clip = a.clip;
+    ob.seen = objectStamp_;
+    ob.base = world.localTransform(e);
+    const f32 t0 = wrapClipTime(c, a.time, (a.flags & scene::kAnimatorOnce) != 0);
+    Transform start = sampleObject(c, t0);
+    // A start pose shrunk to nothing on an axis has no inverse (Mat4::inverse would hand back identity and
+    // the object would jump to the clip's absolute pose): measure the relative motion from its unscaled pose.
+    if (std::fabs(start.scale.x) < 1e-6f || std::fabs(start.scale.y) < 1e-6f || std::fabs(start.scale.z) < 1e-6f)
+        start.scale = Vec3{1.0f, 1.0f, 1.0f};
+    ob.startInverse = start.toMatrix().inverse();
+}
+
+void AnimSystem::writeObject(scene::World& world, scene::Entity e, const scene::CAnimator& a,
+                             const fmt::OcAnimation& c) {
+    auto it = objects_.find(e);
+    if (it == objects_.end()) return;
+
+    const f32 t = wrapClipTime(c, a.time, (a.flags & scene::kAnimatorOnce) != 0);
+    // F = B * A(t0)^-1 * A(t) reads right to left (A(t) acts on the mesh point first). Mat4 is
+    // row-vector, so the same chain is written left to right.
+    const Mat4 m = sampleObject(c, t).toMatrix() * it->second.startInverse * it->second.base.toMatrix();
+    Transform xf = transformFromMatrix(m);
+    xf.rotation = xf.rotation.normalized();
+    world.setLocalTransform(e, xf);
 }
 
 // A weapon in a hand. Reads the parent's posed rig and writes THIS entity's CLocal.
