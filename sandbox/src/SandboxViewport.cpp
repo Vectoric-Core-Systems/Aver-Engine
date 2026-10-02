@@ -8,62 +8,212 @@ namespace aver {
 // Physics-only guard (matches the declaration): draws every body's world AABB. Previously nested
 // under AVER_MODULE_SYNAPSE by mistake -- that guard belongs to the nav overlay below.
 #if AVER_MODULE_PHYSICS
-// Twelve edges per body's world AABB, rebuilt each frame the toggle is on. Tooltip clarifies this
-// is a BOUND, not the shape (see aver_phys_body_aabb for why the ABI reports a bound, not a shape tree).
-void SandboxApp::rebuildColliderOverlay(Engine& e) {
-    if (colliderMesh_) { e.device()->destroyLineMesh(colliderMesh_); colliderMesh_ = 0; }
-    const int32_t n = aver_phys_body_count();
-    if (n <= 0) return;
+namespace {
+// Green = static box, blue = static triangle mesh, amber = moving (separates "why isn't this falling"
+// from "why isn't this stopping anything" at a glance). Blue matters: a mesh body's bound can span a
+// whole courtyard the mesh only rings, and drawn green that reads as solid floor.
+constexpr f32 kColliderBoxRgb[3]   = {0.35f, 0.95f, 0.45f};
+constexpr f32 kColliderMeshRgb[3]  = {0.30f, 0.62f, 1.00f};
+constexpr f32 kColliderMoverRgb[3] = {1.00f, 0.72f, 0.25f};
 
-    // ABI doesn't report body shape; editor built each level body by one rule (rebuildEntityBody /
-    // world::instantiate): triangles when content_.collisionMeshFor has a mesh for the entity's
-    // CMeshRenderer, else a fitted box. Re-querying that cache avoids a second table that could drift.
-    std::unordered_set<int32_t> meshBodies;
+// One box's twelve edges, appended to `out` as a line list.
+void appendBoxEdges(std::vector<rhi::LineVertex>& out, const f32* lo, const f32* hi, const f32* rgb) {
+    const f32 xs[2] = {lo[0], hi[0]};
+    const f32 ys[2] = {lo[1], hi[1]};
+    const f32 zs[2] = {lo[2], hi[2]};
+    const auto edge = [&](int x0, int y0, int z0, int x1, int y1, int z1) {
+        rhi::LineVertex a{}, c{};
+        a.px = xs[x0]; a.py = ys[y0]; a.pz = zs[z0]; a.r = rgb[0]; a.g = rgb[1]; a.b = rgb[2];
+        c.px = xs[x1]; c.py = ys[y1]; c.pz = zs[z1]; c.r = rgb[0]; c.g = rgb[1]; c.b = rgb[2];
+        out.push_back(a);
+        out.push_back(c);
+    };
+    // Twelve box edges, written out (not looped) so a wrong corner is visible in the source.
+    edge(0,0,0, 1,0,0); edge(0,1,0, 1,1,0); edge(0,0,1, 1,0,1); edge(0,1,1, 1,1,1);
+    edge(0,0,0, 0,1,0); edge(1,0,0, 1,1,0); edge(0,0,1, 0,1,1); edge(1,0,1, 1,1,1);
+    edge(0,0,0, 0,0,1); edge(1,0,0, 1,0,1); edge(0,1,0, 0,1,1); edge(1,1,0, 1,1,1);
+}
+}  // namespace
+
+// Twelve edges per body's world AABB. Tooltip clarifies this is a BOUND, not the shape (see
+// aver_phys_body_aabb for why the ABI reports a bound, not a shape tree).
+//
+// TWO MESHES, EACH REMADE ONLY WHEN WHAT IT DRAWS COULD HAVE CHANGED.
+//
+// colliderMesh_ is the STATIC bodies: the 20,000-odd boxes and triangle meshes of a big level, and the
+// picture that costs. It used to be destroyed and recreated on EVERY frame the toggle was on, after an
+// O(n^2) walk of the physics world (aver_phys_body_at is a linear advance over a hash map): seconds a
+// frame on a level with tens of thousands of colliders, to redraw a picture that had not moved. A static
+// body does not move, so its picture depends only on which bodies exist and where they were placed --
+// in Play as in the editor. Every editor path that makes, remakes or drops one of its bodies bumps
+// colliderRev_ (rebuildEntityBody, destroyEntity), and a level load, unload or instantiate changes the
+// body counts and the first/last handle levelBodies_ holds -- all of that is in the stamp below. Left
+// OUT of it on purpose: the undo stacks, since a rename or a visibility toggle touches no body and must
+// not cost a rebuild of the whole overlay; and whether a play session runs, which WAS in it, so Play
+// rebuilt every static box every frame (12.7 MB of vertices, two fresh upload buffers) to animate the
+// few hundred bodies that actually move. What the stamp cannot see: a script repositioning a static
+// body, or flipping a body's motion type, with no body added or dropped. In Play that is caught by an
+// audit instead: colliderStatics_ keeps the handles and AABBs the static mesh drew, and each frame a
+// rotating slice of them (kAuditSlice, about 0.1 ms) is re-read; one that is no longer static or has
+// moved forces a full rebuild that frame. A full cycle is n / kAuditSlice frames, so a change shows
+// within about 43 frames at 22,000 bodies. Outside Play nothing runs scripts, so there is no audit.
+//
+// colliderMoverMesh_ is the bodies that MOVE (kinematic or dynamic, amber), whose handles
+// colliderMovers_ captures whenever the static mesh is rebuilt. It is refreshed then, every frame a
+// play session runs, once more on the frame it ends (the level put back), and every frame while the
+// editor does not track one of them (a rigid body Play spawned could move at any time). Even then the
+// line mesh is only remade if a box actually moved, so a paused Play or a level of sleeping bodies
+// costs a few hundred AABB queries and no GPU work.
+//
+// AND THE STATIC MESH ONLY WHEN THE EDITOR KNOWS EVERY STATIC BODY, because that is what the stamp can
+// vouch for: a static body made by something else (a streamed chunk, the landscape heightfield, a
+// script) can appear with nothing here to see it, so while any exists the static mesh is rebuilt every
+// frame, as before. "Knows every static body" is proven, not assumed: each live static handle is looked
+// up among the handles the editor tracks (levelBodies_, entityBodies_). Either way the walk is O(n):
+// the world's handles come from one aver_phys_body_handles pass instead of asking for the i-th body n
+// times.
+void SandboxApp::rebuildColliderOverlay(Engine& e) {
+    const int32_t n = aver_phys_body_count();
+
+#if AVER_MODULE_FRAMEWORK
+    const bool moving = anyPlayActive();
+#else
+    const bool moving = false;
+#endif
+    u64 sig = kFnv1a64OffsetBasis;
+    const auto mix = [&sig](u64 v) { sig = (sig ^ v) * kFnv1a64Prime; };
+    mix(static_cast<u64>(static_cast<u32>(n)));
+    mix(colliderRev_);
 #if AVER_MODULE_SCENE
-    {
-        scene::World& w = scene::World::instance();
-        for (const auto& [ent, body] : entityBodies_) {
-            const auto* mr = w.component<scene::CMeshRenderer>(static_cast<scene::Entity>(ent),
-                                                               scene::kComponentMeshRenderer);
-            if (mr && content_.collisionMeshFor(mr->mesh)) meshBodies.insert(body);
+    mix(static_cast<u64>(levelBodies_.size()));
+    mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.front())));
+    mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.back())));
+    mix(static_cast<u64>(entityBodies_.size()));
+#endif
+    bool staticStale =
+        !(colliderOverlayBuilt_ && colliderOverlayAllKnown_ && sig == colliderOverlaySig_);
+
+    // The audit (see the comment above): in Play, re-read a slice of the static handles the mesh drew.
+    // Before the rebuild below, so a change found here is redrawn this frame, not the next.
+    if (!staticStale && moving && !colliderStatics_.empty()) {
+        constexpr usize kAuditSlice = 512;
+        const usize count = colliderStatics_.size();
+        usize i = colliderAuditCursor_ < count ? colliderAuditCursor_ : 0;
+        const usize end = std::min(count, i + kAuditSlice);
+        for (; i < end; ++i) {
+            const int32_t body = colliderStatics_[i];
+            f32 lo[3], hi[3];
+            const f32* drawn = &colliderStaticBoxes_[i * 6];
+            if (aver_phys_body_motion_type(body) != 0 || !aver_phys_body_aabb(body, lo, hi) ||
+                std::memcmp(lo, drawn, sizeof lo) != 0 || std::memcmp(hi, drawn + 3, sizeof hi) != 0) {
+                staticStale = true;   // the rebuild resets the cursor
+                break;
+            }
         }
+        colliderAuditCursor_ = i >= count ? 0 : i;
     }
+
+    if (staticStale) {
+        colliderOverlaySig_ = sig;
+        colliderOverlayBuilt_ = true;
+        colliderOverlayAllKnown_ = false;
+        colliderMoversTracked_ = false;
+        colliderMovers_.clear();
+        colliderStatics_.clear();
+        colliderStaticBoxes_.clear();
+        colliderAuditCursor_ = 0;
+        colliderMoverBoxes_.clear();   // so the moving mesh below is remade even if nothing moved
+        if (colliderMesh_) { e.device()->destroyLineMesh(colliderMesh_); colliderMesh_ = 0; }
+        if (colliderMoverMesh_) { e.device()->destroyLineMesh(colliderMoverMesh_); colliderMoverMesh_ = 0; }
+
+        if (n <= 0) {
+            colliderOverlayAllKnown_ = true;
+            colliderMoversTracked_ = true;
+        } else {
+            // ABI doesn't report body shape; editor built each level body by one rule (rebuildEntityBody /
+            // world::instantiate): triangles when content_.collisionMeshFor has a mesh for the entity's
+            // CMeshRenderer, else a fitted box. Re-querying that cache avoids a second table that could drift.
+            std::unordered_set<int32_t> meshBodies;
+            // The handles the editor tracks, sorted, to tell which live bodies it knows of.
+            std::vector<int32_t> tracked;
+#if AVER_MODULE_SCENE
+            {
+                scene::World& w = scene::World::instance();
+                for (const auto& [ent, body] : entityBodies_) {
+                    const auto* mr = w.component<scene::CMeshRenderer>(static_cast<scene::Entity>(ent),
+                                                                       scene::kComponentMeshRenderer);
+                    if (mr && content_.collisionMeshFor(mr->mesh)) meshBodies.insert(body);
+                }
+                tracked.reserve(levelBodies_.size() + entityBodies_.size());
+                tracked.insert(tracked.end(), levelBodies_.begin(), levelBodies_.end());
+                for (const auto& kv : entityBodies_) tracked.push_back(kv.second);
+                std::sort(tracked.begin(), tracked.end());
+            }
 #endif
 
-    std::vector<rhi::LineVertex> lines;
-    lines.reserve(static_cast<usize>(n) * 24);
-    for (int32_t i = 0; i < n; ++i) {
-        const int32_t body = aver_phys_body_at(i);
-        if (!body) continue;
-        f32 lo[3], hi[3];
-        if (!aver_phys_body_aabb(body, lo, hi)) continue;
+            // Every live body, enumerated in ONE pass (aver_phys_body_at(i) over [0, n) was O(n^2)), and
+            // drawn -- tracked or not, so a landscape heightfield or a streamed box costs no extra pass.
+            // The static ones go into this mesh; the rest are only listed, for the moving mesh.
+            std::vector<int32_t> handles(static_cast<usize>(n));
+            handles.resize(static_cast<usize>(aver_phys_body_handles(handles.data(), n)));
+            std::vector<rhi::LineVertex> lines;
+            lines.reserve(handles.size() * 24);
+            bool staticKnown = true, moversKnown = true;
+            for (const int32_t body : handles) {
+                if (!body) continue;
+                const int32_t motion = aver_phys_body_motion_type(body);
+                if (motion < 0) continue;   // not a live body (-1; 0 is STATIC, a real answer)
+                const bool known = std::binary_search(tracked.begin(), tracked.end(), body);
+                if (motion != 0) {
+                    colliderMovers_.push_back(body);
+                    if (!known) moversKnown = false;
+                    continue;
+                }
+                if (!known) staticKnown = false;
+                f32 lo[3], hi[3];
+                if (!aver_phys_body_aabb(body, lo, hi)) continue;
+                appendBoxEdges(lines, lo, hi, meshBodies.count(body) != 0 ? kColliderMeshRgb : kColliderBoxRgb);
+                colliderStatics_.push_back(body);   // what the Play audit re-reads
+                colliderStaticBoxes_.insert(colliderStaticBoxes_.end(), lo, lo + 3);
+                colliderStaticBoxes_.insert(colliderStaticBoxes_.end(), hi, hi + 3);
+            }
+            // Whether the editor tracks every static body, which is what lets the stamp above skip the
+            // next frames; and every moving one, which is what lets the moving mesh skip them outside Play.
+            colliderOverlayAllKnown_ = staticKnown;
+            colliderMoversTracked_ = moversKnown;
 
-        // Green = static box, blue = static triangle mesh, amber = moving (separates "why isn't this
-        // falling" from "why isn't this stopping anything" at a glance). Blue matters: a mesh body's
-        // bound can span a whole courtyard the mesh only rings, and drawn green that reads as solid floor.
-        const int32_t motion = aver_phys_body_motion_type(body);
-        const bool triMesh = motion == 0 && meshBodies.count(body) != 0;
-        const f32 r = (motion != 0) ? 1.0f  : (triMesh ? 0.30f : 0.35f);
-        const f32 g = (motion != 0) ? 0.72f : (triMesh ? 0.62f : 0.95f);
-        const f32 b = (motion != 0) ? 0.25f : (triMesh ? 1.00f : 0.45f);
-
-        const f32 xs[2] = {lo[0], hi[0]};
-        const f32 ys[2] = {lo[1], hi[1]};
-        const f32 zs[2] = {lo[2], hi[2]};
-        const auto edge = [&](int x0, int y0, int z0, int x1, int y1, int z1) {
-            rhi::LineVertex a{}, c{};
-            a.px = xs[x0]; a.py = ys[y0]; a.pz = zs[z0]; a.r = r; a.g = g; a.b = b;
-            c.px = xs[x1]; c.py = ys[y1]; c.pz = zs[z1]; c.r = r; c.g = g; c.b = b;
-            lines.push_back(a);
-            lines.push_back(c);
-        };
-        // Twelve box edges, written out (not looped) so a wrong corner is visible in the source.
-        edge(0,0,0, 1,0,0); edge(0,1,0, 1,1,0); edge(0,0,1, 1,0,1); edge(0,1,1, 1,1,1);
-        edge(0,0,0, 0,1,0); edge(1,0,0, 1,1,0); edge(0,0,1, 0,1,1); edge(1,0,1, 1,1,1);
-        edge(0,0,0, 0,0,1); edge(1,0,0, 1,0,1); edge(0,1,0, 0,1,1); edge(1,1,0, 1,1,1);
+            if (!lines.empty())
+                colliderMesh_ = e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
+        }
     }
-    if (!lines.empty())
-        colliderMesh_ = e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
+
+    const bool moversMayHaveMoved =
+        staticStale || moving || colliderMoversWereLive_ || !colliderMoversTracked_;
+    colliderMoversWereLive_ = moving;
+    if (!moversMayHaveMoved || colliderMovers_.empty()) return;
+
+    // Where every mover is now, compared with where the mesh drew it: nothing moved, nothing to remake.
+    std::vector<f32>& boxes = colliderMoverBoxesNext_;
+    boxes.clear();
+    for (const int32_t body : colliderMovers_) {
+        f32 lo[3], hi[3];
+        if (!aver_phys_body_aabb(body, lo, hi)) continue;   // dead since the list was taken: draws nothing
+        // Made static again since the list was taken (a script's SetBodyMotionType): redrawn green by the
+        // next frame's full rebuild, which is also what drops it from this list.
+        if (moving && aver_phys_body_motion_type(body) == 0) colliderOverlayBuilt_ = false;
+        boxes.insert(boxes.end(), lo, lo + 3);
+        boxes.insert(boxes.end(), hi, hi + 3);
+    }
+    if (boxes == colliderMoverBoxes_) return;
+    colliderMoverBoxes_.swap(boxes);
+
+    if (colliderMoverMesh_) { e.device()->destroyLineMesh(colliderMoverMesh_); colliderMoverMesh_ = 0; }
+    colliderMoverLines_.clear();
+    for (usize i = 0; i + 6 <= colliderMoverBoxes_.size(); i += 6)
+        appendBoxEdges(colliderMoverLines_, &colliderMoverBoxes_[i], &colliderMoverBoxes_[i + 3], kColliderMoverRgb);
+    if (!colliderMoverLines_.empty())
+        colliderMoverMesh_ = e.device()->createLineMesh(colliderMoverLines_.data(),
+                                                        static_cast<u32>(colliderMoverLines_.size()));
 }
 
 #endif  // AVER_MODULE_PHYSICS
@@ -182,7 +332,6 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
     // cos(40 degrees). Chosen so a smooth cylinder's facets do not each become an edge while a
     // box's corners still do.
     constexpr f32 kCreaseCos = 0.766f;
-    static constexpr f32 kSelR = 1.0f, kSelG = 0.62f, kSelB = 0.12f;   // the selection orange
     std::vector<rhi::LineVertex> lines;
     lines.reserve(edges.size() / 2);
     for (const auto& [key, ef] : edges) {
@@ -198,9 +347,9 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
         if (vit == edgeVerts.end()) continue;
         const u32 x = vit->second.first, y = vit->second.second;
         lines.push_back({md.positions[usize(x)*3+0], md.positions[usize(x)*3+1], md.positions[usize(x)*3+2],
-                         kSelR, kSelG, kSelB});
+                         kSelectionColor.x, kSelectionColor.y, kSelectionColor.z});
         lines.push_back({md.positions[usize(y)*3+0], md.positions[usize(y)*3+1], md.positions[usize(y)*3+2],
-                         kSelR, kSelG, kSelB});
+                         kSelectionColor.x, kSelectionColor.y, kSelectionColor.z});
     }
 
     const rhi::LineHandle h = lines.empty() ? 0
@@ -592,12 +741,14 @@ scene::Entity SandboxApp::makePlayerStart(const Vec3& at, f32 yawDeg) {
         mr->flags |= scene::kMeshRendererVisible;
         mr->aabbMin[0] = mr->aabbMin[1] = -1.0f;
         mr->aabbMax[0] = mr->aabbMax[1] =  1.0f;
-        // Taller than the cube it bounds, only in +Z: this box is what ray picking tests, and the
-        // marker draws as ViewportIconRenderer's pin (tip at origin, head ~90cm above) not this
-        // cube -- centred on the origin would leave the top half unclickable. Still reaches -1 (not
-        // 0) to also contain the fallback CUBE (icon renderer/PNG unavailable); one box serves both looks.
+        // Taller than the cube it bounds, only in +Z: the marker draws as the capsule/arrow/sprite
+        // built in SandboxApp.cpp (drawn in SandboxRender.cpp), standing on the origin, and this box
+        // is what framing (F) and the other bounds readers size it by. Clicks test the drawn capsule
+        // itself (pick()). Reaches up to the capsule's own top (kPlayerStartCapsuleHalfHeight * 2,
+        // in units of this box's own scale, kEditorCubeHalf) and down to -1 (not 0) to also contain the
+        // fallback CUBE (icon renderer/PNG unavailable); one box serves both looks.
         mr->aabbMin[2] = -1.0f;
-        mr->aabbMax[2] =  1.8f;
+        mr->aabbMax[2] = (kPlayerStartCapsuleHalfHeight * 2.0f) / kEditorCubeHalf;
     }
     entityLabels_[static_cast<u32>(e)] = "Player Start";
     playerStartYaw_ = yawDeg;
@@ -801,6 +952,94 @@ Vec3 SandboxApp::dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface) const
     // underneath to rest on -- the object goes exactly where the camera is pointing.
     if (onSurface) *onSurface = false;
     return camPos_ + camForward() * kAddDistance;
+}
+
+// The first SURFACE under a screen point, for Play From Here: whichever the ray meets first of the
+// level's triangles (pick()'s own broadphase + rayPickGeometry), the landscape's heightfield and the
+// placeholder boxes. False on a miss (sky, or nothing under the cursor).
+// NOT dropWorldPoint: that tests bounding BOXES, so aiming at the floor of a room reports the top of the
+// building's box, and its Z = 0 plane and in-front-of-camera fallbacks are places to put an asset, not
+// somewhere to stand.
+// Keeps pick()'s start-inside rule (skipBackFaces = insideBox), so the walls of a room the camera is
+// standing in never block the floor it is aiming at. Streamed-chunk entities ARE tested, unlike pick():
+// selection avoids them because the streamer may evict one mid-edit, but a pawn can stand on one.
+// Skinned and posed meshes are skipped: their rest triangles are not what is drawn, and a bounding box
+// around a character is not ground.
+bool SandboxApp::pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out) {
+    Vec3 ro, rd;
+    viewportRay(screenX, screenY, ro, rd);
+    f32 bestT = 1e30f;   // along ro + rd*t: the one parameter every test below reports in
+    bool hit = false;
+
+#if AVER_MODULE_LANDSCAPE
+    if (landscape_.loaded()) {
+        const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
+        landscape::HeightfieldHit lh;
+        const f32 rr = dot(rd, rd);
+        if (rr > 0.0f && landscape::raycastHeightfield(landscape_.data(), roA, rdA, lh)) {
+            // The heightfield reports a point (and a distance along the NORMALISED ray); the tests below
+            // compare in rd's own parameter, so the point is converted back.
+            const f32 t = dot(Vec3{lh.posCm[0], lh.posCm[1], lh.posCm[2]} - ro, rd) / rr;
+            if (t > 0.0f) { bestT = t; hit = true; }
+        }
+    }
+#endif
+
+    // Placeholder Floor/Cube boxes, bounds-only -- pick()'s own placeholder loop.
+    if (!hideEditorScene_)
+        for (const MeshObj& o : objects_) {
+            if (!o.visible) continue;
+            Transform tr; tr.position = o.pos; tr.rotation = quatFromEulerDeg(o.rotDeg); tr.scale = o.scale;
+            const Mat4 iw = tr.toMatrix().inverse();
+            const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
+            f32 t;
+            if (rayAabb(lo, ld, o.aabbMin, o.aabbMax, t) && t > 0.0f && t < bestT) { bestT = t; hit = true; }
+        }
+
+    {
+        struct SurfaceCand { scene::Entity ent; u64 meshId; f32 tBox; bool insideBox; Vec3 lo, ld; };
+        std::vector<SurfaceCand> cands;
+        scene::World& w = scene::World::instance();
+        const u32 n = w.count();
+        for (u32 i = 0; i < n; ++i) {
+            const scene::Entity ent = w.at(i);
+            if (!w.valid(ent) || w.destroyPending(ent)) continue;
+            if (ent == playerStart_) continue;   // a stand-in cube around its feet, not what is drawn
+            const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+            if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+            if (content_.meshFor(mr->mesh) == 0) continue;
+            if (skinnedMeshIds_.count(mr->mesh) != 0 || posedHandle(ent) != 0) continue;
+            Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+            Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+            if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
+            const Mat4 iw = w.worldMatrix(ent).inverse();
+            const Vec3 lo = xformPoint(iw, ro), ld = xformVec(iw, rd);
+            f32 tBox;
+            if (!rayAabb(lo, ld, lmin, lmax, tBox)) continue;
+            cands.push_back({ent, mr->mesh, tBox, tBox <= 0.0f, lo, ld});
+        }
+        // Nearest box first, stopping once a box can no longer beat the best hit (pick()'s early-out).
+        std::sort(cands.begin(), cands.end(),
+                  [](const SurfaceCand& a, const SurfaceCand& b) { return a.tBox < b.tBox; });
+        for (const SurfaceCand& c : cands) {
+            if (c.tBox >= bestT) break;
+            const aver::editor::PickGeometry& geo = pickGeometryFor(c.meshId);
+            if (geo.empty()) {
+                // No triangles resident for this mesh: its box is the best surface known.
+                if (c.tBox > 0.0f) { bestT = c.tBox; hit = true; }
+                continue;
+            }
+            f32 tTri;
+            if (aver::editor::rayPickGeometry(geo, c.lo, c.ld, /*skipBackFaces=*/c.insideBox, bestT, tTri))
+                { bestT = tTri; hit = true; }
+        }
+    }
+
+    if (!hit) return false;
+    const Vec3 p = ro + rd * bestT;
+    if (!(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))) return false;
+    out = p;
+    return true;
 }
 
 // Places a content-browser asset dropped on the viewport at a screen-space position, following
@@ -1240,11 +1479,11 @@ void SandboxApp::handleManip(Engine& e) {
             if (marqueeActive_) {
                 f32 loX, loY, hiX, hiY;
                 editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
-                // The selection outline's own orange (selectionOutlineLines' kSelR/G/B, above),
-                // diluted for the fill so the scene underneath a drag stays readable.
+                // The selection outline's own orange (kSelectionColor, SandboxApp.hpp), diluted for
+                // the fill so the scene underneath a drag stays readable.
                 ImDrawList* dl = ImGui::GetForegroundDrawList();
-                dl->AddRectFilled(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(255, 158, 31, 40));
-                dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(255, 158, 31, 220), 0.0f, 0, 1.5f*dpi_);
+                dl->AddRectFilled(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 40));
+                dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 220), 0.0f, 0, 1.5f*dpi_);
             }
 
             if (!io.MouseDown[0]) {
@@ -1505,19 +1744,15 @@ void SandboxApp::drawGizmo(Engine& e) {
     const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
     const rhi::LineHandle* hi  = tool_==Tool::Move ? gzMoveHi_ : tool_==Tool::Rotate ? gzRotHi_ : gzScaleHi_;
     e.device()->setLineDepth(false);
-    // A slight glow on the handles: lines write into the pre-tonemap HDR target and bloom runs
-    // before tonemap, so this is real bloom (needs headroom above 1.0), not a fake halo (see
-    // IDevice::setLineGlow -- the multiplier applies after the inverse tonemap, not to the authored
-    // hue). Deliberately small -- a wide bloom would bury the two-pixel handle and wash out the
-    // axis colours; 1.35 reads as lit, not painted.
-    static constexpr f32 kGizmoGlow = 1.35f;
-    e.device()->setLineGlow(kGizmoGlow);
+    // Unreal draws its gizmo handles a few pixels wide, not hairline -- setLineWidth is in DISPLAY
+    // pixels (RHI.hpp), so this scales by DPI the same way the rest of the editor's own line widths do.
+    e.device()->setLineWidth(3.0f * dpi_);
     for (int a=0;a<3;++a) {
         const bool active = (dragging_ && a==activeAxis_) || (!dragging_ && a==hoverAxis_);
         e.device()->drawLines(active ? hi[a] : nrm[a], &w.m[0][0]);
     }
-    // Back to unglowed for the grid and everything else: the setter is sticky.
-    e.device()->setLineGlow(1.0f);
+    // Back to hairline for the grid and everything else: the setter is sticky.
+    e.device()->setLineWidth(1.0f);
     e.device()->setLineDepth(true);
 }
 
@@ -1531,6 +1766,9 @@ void SandboxApp::drawSculptCursor(Engine& e) {
     const Mat4 w = Mat4::scale(Vec3{sculptRadiusCm_, sculptRadiusCm_, sculptRadiusCm_}) *
                    Mat4::translation(sculptCursor_);
     e.device()->setLineDepth(false);
+    // Explicit, not relying on drawGizmo() having already reset it: these rings must stay hairline
+    // regardless of what else ran before this call.
+    e.device()->setLineWidth(1.0f);
     e.device()->drawLines(brushRing_, &w.m[0][0]);
 
     // Second ring is where full strength stops (without it the Falloff slider is invisible until
@@ -1644,6 +1882,7 @@ void SandboxApp::copySelection() {
             ce.subtree = std::move(c.subtree);
             ce.xform = c.after;
             ce.hadBody = c.hadBody;
+            ce.hadCollide = c.hadCollide; ce.hadSnapZ = c.hadSnapZ; ce.snapZ = c.snapZ; ce.hadAnim = c.hadAnim;
             clipboard_.entities.push_back(std::move(ce));
         }
         clipboard_.hasObject = false;
@@ -1658,6 +1897,7 @@ void SandboxApp::copySelection() {
         ce.subtree = std::move(c.subtree);
         ce.xform = c.after;
         ce.hadBody = c.hadBody;
+        ce.hadCollide = c.hadCollide; ce.hadSnapZ = c.hadSnapZ; ce.snapZ = c.snapZ; ce.hadAnim = c.hadAnim;
         clipboard_.entities.assign(1, std::move(ce));
         clipboard_.hasObject  = false;
         return;
@@ -1690,7 +1930,9 @@ void SandboxApp::pasteClipboard() {
             EditXform x = ce.xform;
             x.pos = at + (ce.xform.pos - origin);
             const std::string label = makeEntityLabel(std::string(), ce.snap.asset);
-            const scene::Entity e = spawnEntityFrom(ce.snap, x, label, ce.hadBody, /*restoreObjectId=*/false);
+            const scene::Entity e = spawnEntityFrom(ce.snap, x, label, ce.hadBody, /*restoreObjectId=*/false,
+                                                    scene::kInvalidEntity, ce.hadCollide, ce.hadSnapZ, ce.snapZ,
+                                                    &ce.hadAnim);
             if (e == scene::kInvalidEntity) continue;
             spawnSubtreeUnder(e, ce.subtree, /*restoreIds=*/false);
             sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
@@ -1762,7 +2004,8 @@ void SandboxApp::duplicateSelection() {
             x.pos.x += delta; x.pos.y += delta;
             const std::string label = makeEntityLabel(std::string(), src.snap.asset);
             const scene::Entity e =
-                spawnEntityFrom(src.snap, x, label, src.hadBody, /*restoreObjectId=*/false);
+                spawnEntityFrom(src.snap, x, label, src.hadBody, /*restoreObjectId=*/false,
+                                scene::kInvalidEntity, src.hadCollide, src.hadSnapZ, src.snapZ, &src.hadAnim);
             if (e == scene::kInvalidEntity) continue;
             spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
             EditCmd c = describeEntity(e);
@@ -1787,7 +2030,9 @@ void SandboxApp::duplicateSelection() {
         EditXform x = src.after;
         x.pos.x += delta; x.pos.y += delta;
         const std::string label = makeEntityLabel(std::string(), src.snap.asset);
-        const scene::Entity e = spawnEntityFrom(src.snap, x, label, src.hadBody, /*restoreObjectId=*/false);
+        const scene::Entity e = spawnEntityFrom(src.snap, x, label, src.hadBody, /*restoreObjectId=*/false,
+                                                scene::kInvalidEntity, src.hadCollide, src.hadSnapZ, src.snapZ,
+                                                &src.hadAnim);
         if (e == scene::kInvalidEntity) return;
         spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
         sel_ = kSelScene; selEntity_ = e;
@@ -1930,6 +2175,9 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             // gizmo/EditCmd path, and the streamer could evict one out from under an in-flight edit
             // (see setChunkStreamingEnabled, buildPanels).
             if (anyChunkWorldOwns(ent)) continue;
+            // The Player Start's mesh is a stand-in cube around its feet, not what is drawn; it is
+            // tested by its drawn shape below instead.
+            if (ent == playerStart_) continue;
             const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
             if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
             if (content_.meshFor(mr->mesh) == 0) continue;
@@ -1941,6 +2189,37 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             f32 tBox;
             if (!rayAabb(lo, ld, lmin, lmax, tBox)) continue;
             candidates.push_back({ent, mr->mesh, tBox, tBox <= 0.0f, lo, ld});
+        }
+
+        // THE PLAYER START, BY WHAT IS DRAWN: the capsule (which contains the sprite from every
+        // angle) and the facing arrow, in the marker's own frame -- position and rotation, no
+        // scale, the same world matrix SandboxRender.cpp draws them with. Its pick used to be the
+        // stand-in cube's triangles, a metre-wide box at the feet, so the upper capsule and the
+        // sprite were unclickable. Pickable only while the marker is drawn (the render's gate).
+        // Tested before the candidates so a nearer mesh still wins through bestT.
+#if AVER_MODULE_FRAMEWORK
+        const bool markerDrawn = !noEditorChrome_ && !anyPlayActive();
+#else
+        const bool markerDrawn = !noEditorChrome_;
+#endif
+        if (markerDrawn && playerStart_ != scene::kInvalidEntity && w.valid(playerStart_)) {
+            const Transform& psXf = w.localTransform(playerStart_);
+            const Mat4 ipw = (Mat4::fromQuat(psXf.rotation) * Mat4::translation(psXf.position)).inverse();
+            const Vec3 plo = xformPoint(ipw, ro), pld = xformVec(ipw, rd);
+            f32 tHit = bestT;
+            bool hit = aver::editor::rayUprightCapsule(plo, pld, kPlayerStartCapsuleRadius,
+                                                       kPlayerStartCapsuleHalfHeight * 2.0f, bestT, tHit);
+            // The arrow as a slab around its shaft: forward along local +X at the capsule's middle,
+            // as wide as buildPlayerStartArrow's head (0.16 of its length each side).
+            const f32 arrowHalfW = kPlayerStartArrowLength * 0.16f;
+            constexpr f32 kArrowHalfThick = 8.0f;   // cm, above and below the shaft
+            f32 tArrow;
+            if (rayAabb(plo, pld,
+                        Vec3{0.0f, -arrowHalfW, kPlayerStartCapsuleHalfHeight - kArrowHalfThick},
+                        Vec3{kPlayerStartArrowLength, arrowHalfW, kPlayerStartCapsuleHalfHeight + kArrowHalfThick},
+                        tArrow) && tArrow > 0.0f && tArrow < tHit)
+                { tHit = tArrow; hit = true; }
+            if (hit && tHit < bestT) { bestT = tHit; bestEnt = playerStart_; best = -1; }
         }
 
         // (b) Nearest box first, stopping once a candidate's tBox can no longer beat bestT:
@@ -2245,6 +2524,54 @@ void SandboxApp::unhideAll() {
 #endif   // AVER_MODULE_SCENE
 
 #if AVER_WITH_IMGUI
+// The viewport's RIGHT-CLICK MENU: Play From Here. RMB is also the fly-look button, so a press cannot
+// open anything -- it ARMS here and the RELEASE decides. Only a click that stayed put opens the menu:
+// the pointer inside ImGui's drag threshold AND the camera exactly where it was (holding RMB and
+// flying with WASD moves the camera without moving the mouse), so letting go of a fly never pops one.
+// Not BeginPopupContextWindow: it opens on the release of every fly-drag too, and it wants the item it
+// is attached to, which is the Level's image over in SandboxShell.cpp. Called at the top level of the
+// frame (after the overlay bars), where OpenPopup and BeginPopup share one ID scope.
+void SandboxApp::drawViewportContextMenu() {
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    const ImGuiIO& io = ImGui::GetIO();
+    // levelHovered_ is the fly camera's own "pointer is over the Level, not a panel or a bar" test.
+    const bool overLevel = levelHovered_ && inViewport(io.MousePos.x, io.MousePos.y);
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && overLevel) {
+        vpCtx_.armed = true;
+        vpCtx_.camPos = camPos_;
+    }
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Right) && vpCtx_.armed) {
+        vpCtx_.armed = false;
+        const ImVec2 down = io.MouseClickedPos[ImGuiMouseButton_Right];
+        const f32 dx = io.MousePos.x - down.x, dy = io.MousePos.y - down.y;
+        const bool still = dx * dx + dy * dy <= io.MouseDragThreshold * io.MouseDragThreshold &&
+                           dist(camPos_, vpCtx_.camPos) < 0.01f;
+        // Not while a session runs: the viewport is the game's then, and a second Play cannot layer.
+        if (still && overLevel && !anyPlayActive()) {
+            // Cast ONCE, at the release point, so what the tooltip shows is what the item plays at.
+            vpCtx_.hasHit = pickSurfacePoint(io.MousePos.x, io.MousePos.y, vpCtx_.hit);
+            ImGui::OpenPopup("##vpContext");
+        }
+    }
+    if (ImGui::BeginPopup("##vpContext")) {
+        const bool canPlay = vpCtx_.hasHit && !anyPlayActive();
+        if (!canPlay) ImGui::BeginDisabled();
+        if (ImGui::MenuItem(ICON_PLAY " Play From Here")) playFromHere(vpCtx_.hit);
+        uiReg_.track("viewport.context.playFromHere");
+        if (!canPlay) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (vpCtx_.hasHit)
+                ImGui::SetTooltip("Play with the player standing at (%.0f, %.0f, %.0f), facing the view.\n"
+                                  "The Play options' spawn choice is left alone.",
+                                  vpCtx_.hit.x, vpCtx_.hit.y, vpCtx_.hit.z);
+            else
+                ImGui::SetTooltip("Nothing under the cursor to stand on.");
+        }
+        ImGui::EndPopup();
+    }
+#endif
+}
+
 // Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
 // camera speed on the right.
 void SandboxApp::buildViewportOverlay() {
@@ -2289,7 +2616,7 @@ void SandboxApp::buildViewportOverlay() {
     } else
 #endif
     if (wireframe_) {
-        viewModeLabel = authoredRayDriven ? "Wireframe (raster)" : "Wireframe";
+        viewModeLabel = "Wireframe";
     } else if (gbufferDebugView_ != GBufferDebugFeature::Mode::Off) {
         using GDM = GBufferDebugFeature::Mode;
         viewModeLabel = gbufferDebugView_ == GDM::Velocity ? "G-Buffer: Velocity" :
@@ -2317,8 +2644,8 @@ void SandboxApp::buildViewportOverlay() {
         }
         uiReg_.track("viewMode.wireframe");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Switches this viewport to the rasteriser while selected, and back when\n"
-                              "you leave it. Project Settings > Rendering > Ray Tracing is unchanged.");
+            ImGui::SetTooltip("Every mesh's edges, unlit, like Unreal's Wireframe view. Lighting, GI and\n"
+                              "ray tracing pause while it is selected. Project Settings are unchanged.");
         ImGui::Selectable("Detail Lighting", false, ImGuiSelectableFlags_Disabled);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Needs a flat-albedo shading override the shader does not have yet.");
@@ -2590,6 +2917,20 @@ void SandboxApp::buildViewportOverlay() {
     ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad-drawerPixelH_), ImGuiCond_Always, ImVec2(0,1));
     ImGui::SetNextWindowBgAlpha(0.35f);
     ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
+    // Ejected reads ahead of the mode switch: the mode is still whatever it was when Play started
+    // (Simulate, usually), but the hint that matters now is "you have the editor back", not that one.
+    // playEjected() is unguarded (false with no framework), so this needs no module guard either.
+    if (playEjected()) {
+        // The Pawn to Camera clause only when that command has a chord ("none brings the pawn here"
+        // otherwise).
+        const editor::Chord& pawnChord = keybinds_.chordFor(editor::CommandId::PlayPawnToCamera);
+        const std::string pawnClause =
+            pawnChord.isBound() ? editor::chordToString(pawnChord) + " brings the pawn here, " : std::string();
+        ImGui::Text("Ejected  |  the game is running  |  %s possesses, %s%s stops",
+                    editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject)).c_str(),
+                    pawnClause.c_str(),
+                    editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStop)).c_str());
+    } else
     // One arm per mode: the two-arm version said "Tab to Landscape" while in Foliage, and called
     // the mode "Select" while a foliage brush was armed -- worse than no hint at all.
     switch (mode_) {
@@ -2610,7 +2951,8 @@ void SandboxApp::buildViewportOverlay() {
 #endif
         case EditorMode::Simulate:
             ImGui::Text("Simulate  |  the game is running in the viewport  |  "
-                        "Shift+Esc releases the mouse, Tab to Select");
+                        "%s releases the mouse, Tab to Select",
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayReleaseMouse)).c_str());
             break;
         case EditorMode::Select:
         default:
@@ -2619,6 +2961,8 @@ void SandboxApp::buildViewportOverlay() {
             break;
     }
     ImGui::End();
+
+    drawViewportContextMenu();
 }
 
 #endif

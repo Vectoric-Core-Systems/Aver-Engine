@@ -584,6 +584,12 @@ void SandboxApp::releaseProjectMaterials() {
     content_.releaseProjectMaterials(/*clearGraphRegistry=*/false);
 }
 
+// See this method's own header comment (SandboxApp.hpp) for the full A/B contract.
+bool SandboxApp::levelScopedMaterialsEnabled() {
+    const char* v = std::getenv("AVER_LEVEL_SCOPED_MATERIALS");
+    return !v || v[0] != '0';   // ON by default; "0" is the only way to ask for the old behaviour
+}
+
 #endif
 
 // Creates one actor's material and pins the actor's own metallic/roughness to the identity 1.

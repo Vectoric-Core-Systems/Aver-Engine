@@ -43,7 +43,8 @@ std::string runtimeExecutablePath() {
     return fileExists(path) ? path : std::string();
 }
 
-bool launchRuntime(const std::string& projectManifestPath, const std::string& levelPath, std::string* why) {
+bool launchRuntime(const std::string& projectManifestPath, const std::string& levelPath,
+                   const std::string& extraArgs, std::string* why) {
 #if defined(_WIN32)
     const std::string exe = runtimeExecutablePath();
     if (exe.empty()) {
@@ -61,6 +62,9 @@ bool launchRuntime(const std::string& projectManifestPath, const std::string& le
     std::wstring cmdline = quoteArg(widen(exe)) +
                            L" --project " + quoteArg(widen(absManifest.empty() ? projectManifestPath : absManifest)) +
                            L" " + quoteArg(widen(absLevel.empty() ? levelPath : absLevel));
+    // Raw, not quoted as one argument: this is the user's own command line text (e.g. "--seed 42
+    // --windowed"), appended the way a shell would continue it, not a single path or value.
+    if (!extraArgs.empty()) cmdline += L" " + widen(extraArgs);
     const std::wstring workDir = widen(executableDir());
 
     STARTUPINFOW si{};
@@ -79,6 +83,7 @@ bool launchRuntime(const std::string& projectManifestPath, const std::string& le
 #else
     (void)projectManifestPath;
     (void)levelPath;
+    (void)extraArgs;
     if (why) *why = "launching the runtime is only implemented on Windows";
     return false;
 #endif

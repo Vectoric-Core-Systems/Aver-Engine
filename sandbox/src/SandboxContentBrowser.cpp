@@ -9,7 +9,8 @@
 
 namespace aver {
 
-// Converts a glTF/GLB into one .ocmesh per mesh (+ .ocskel/.ocanim if skinned) into destDir.
+// Converts a glTF/GLB into one .ocmesh per mesh (+ .ocskel/.ocanim if skinned, an object .ocanim per
+// animated plain node, and a scene .ocworld) into destDir. Object clips count in clipsWritten.
 // Free function, not a member: shared by Content Browser Import (importModel) and --import-gltf
 // (createApplication, before any SandboxApp exists) -- the loop is pure modules/formats calls.
 // Returns false with *outWhy only on a hard parse failure; a clean parse writing nothing new still
@@ -90,23 +91,115 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         ++out.meshesWritten;
     }
 
-    // Writes placements as a scene (only when there's more than one; a single PLACE record isn't
-    // worth a file). Needed because the importer no longer welds node translations into vertices --
-    // that used to put every imported mesh's pivot metres from itself -- so without this, a
-    // multi-part import would land as correctly-centred pieces with no record of how they fit
-    // together (AverAssetC learned this at the same time; same feature on the path the editor
-    // actually uses).
-    if (res.placements.size() > 1) {
+    // Lower-cased, so names are judged as collisions the way the file system judges them: Windows
+    // holds 'Fan.ocanim' and 'fan.ocanim' to be one file.
+    const auto lower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    // The skeletal clips' file stems, decided once: the object clips below must not take one of them
+    // and the clip loop at the bottom writes under exactly these names.
+    std::vector<std::string> clipBases(res.animations.size());
+    for (usize i = 0; i < res.animations.size(); ++i) {
+        clipBases[i] = i < res.animationNames.size() && !res.animationNames[i].empty()
+                     ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
+        sanitiseAssetName(clipBases[i]);
+    }
+
+    // destDir as a content-relative prefix ("Meshes/Cars/"; empty for the Content root itself). A PLACE
+    // path resolves against the Content root, not the level's own folder, so a bare stem only worked
+    // for a level sitting AT the root. No prefix (no contentDir, or destDir outside it) = no level can
+    // be written, the same rule as AverAssetC's writeSceneLevel.
+    std::string contentPrefix;
+    bool havePrefix = false;
+    if (!contentDir.empty()) {
+        std::error_code relEc;
+        const std::string rel = std::filesystem::relative(destDir, contentDir, relEc).generic_string();
+        if (!relEc && !rel.empty() && rel != ".." && rel.rfind("../", 0) != 0) {
+            havePrefix = true;
+            contentPrefix = rel == "." ? std::string() : rel + "/";
+        }
+    }
+
+    // OBJECT CLIPS: the motion of a plain glTF node (a car on a route, a fan), written BEFORE the level
+    // so a placement only names a clip that reached disk. <stem>_<node>.ocanim, so none reads as one
+    // of the armature's own clips. They count in clipsWritten: a file with only object motion is not
+    // "nothing". placementClip[i] = destDir-relative file of the clip placement i plays, "" for none.
+    std::vector<std::string> placementClip(res.placements.size());
+    {
+        std::unordered_set<std::string> taken;
+        for (const std::string& b : clipBases) taken.insert(lower(b));
+        for (usize i = 0; i < res.objectAnimations.size(); ++i) {
+            std::string name = i < res.objectAnimationNames.size() ? res.objectAnimationNames[i] : std::string();
+            if (name.empty()) name = "ObjectClip" + std::to_string(i);
+            sanitiseAssetName(name);
+            std::string clipStem = stem + "_" + name;
+            if (!taken.insert(lower(clipStem)).second) {
+                const std::string root = clipStem;
+                for (int n = 2; !taken.insert(lower(clipStem = root + "_" + std::to_string(n))).second; ++n) {}
+            }
+
+            const std::string outFile = destDir + "\\" + clipStem + ".ocanim";
+            const bool clipExists = std::filesystem::exists(outFile, ec);
+            if (clipExists && !overwrite) {
+                // Not named by the level either, the way a skipped mesh is not placed.
+                AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", clipStem);
+                continue;
+            }
+            if (clipExists && !editor::moveToRecycleBin(outFile)) {
+                AVER_WARN("[Import] '{}.ocanim' could not be replaced", clipStem);
+                continue;
+            }
+            if (!fmt::saveOcAnim(outFile, res.objectAnimations[i], &why)) {
+                AVER_WARN("[Import] {}", why);
+                continue;
+            }
+            AVER_INFO("[Import] {} -> {}.ocanim (object clip, {:.2f}s)",
+                      std::filesystem::path(src).filename().string(), clipStem,
+                      res.objectAnimations[i].duration);
+            ++out.clipsWritten;
+
+            // First clip written for a placement wins; a node animated in several animations gets the
+            // others as files only.
+            const i32 pl = i < res.objectAnimationPlacement.size() ? res.objectAnimationPlacement[i] : -1;
+            if (pl < 0 || usize(pl) >= placementClip.size()) {
+                AVER_INFO("[Import] '{}.ocanim' animates a node with no mesh (a route): nothing plays it "
+                          "until a placement names it", clipStem);
+            } else if (placementClip[usize(pl)].empty()) {
+                placementClip[usize(pl)] = clipStem + ".ocanim";
+            } else {
+                AVER_INFO("[Import] '{}.ocanim' animates the same mesh as '{}': the level plays the first, "
+                          "assign this one by hand", clipStem, placementClip[usize(pl)]);
+            }
+        }
+    }
+    bool anyClipBound = false;
+    for (const std::string& c : placementClip) if (!c.empty()) { anyClipBound = true; break; }
+
+    // Writes placements as a scene (only when there's more than one, or one of them plays an object
+    // clip; a single static PLACE record isn't worth a file). Needed because the importer no longer
+    // welds node translations into vertices -- that used to put every imported mesh's pivot metres
+    // from itself -- so without this, a multi-part import would land as correctly-centred pieces with
+    // no record of how they fit together (AverAssetC learned this at the same time; same feature on
+    // the path the editor actually uses).
+    const bool wantLevel = res.placements.size() > 1 || anyClipBound;
+    bool levelWritten = false;
+    if (wantLevel && !havePrefix) {
+        AVER_WARN("[Import] no scene layout was written: mesh paths in a level are relative to the "
+                  "project's Content folder, and '{}' is {}", destDir,
+                  contentDir.empty() ? "not inside a project" : "outside it");
+    } else if (wantLevel) {
         fmt::OcWorldData w;
         w.name = stem;
-        for (const fmt::GltfPlacement& p : res.placements) {
+        for (usize pi = 0; pi < res.placements.size(); ++pi) {
+            const fmt::GltfPlacement& p = res.placements[pi];
             if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
             if (stems[usize(p.meshIndex)].empty()) continue;
             fmt::OcWorldPlacement op;
-            // Relative to the level's own folder, the same way every other hand-authored PLACE is
-            // relative to the content root.
-            op.asset = stems[usize(p.meshIndex)] + ".ocmesh";
+            op.asset = contentPrefix + stems[usize(p.meshIndex)] + ".ocmesh";
             op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
+            if (!placementClip[pi].empty()) op.animClip = contentPrefix + placementClip[pi];
             w.placements.push_back(std::move(op));
         }
         const std::string lvl = destDir + "\\" + stem + ".ocworld";
@@ -121,8 +214,14 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         } else {
             AVER_INFO("[Import] {} -> {}.ocworld ({} placement(s), the source scene's own layout)",
                       std::filesystem::path(src).filename().string(), stem, w.placements.size());
+            levelWritten = true;
         }
     }
+    // A clip no level names never plays. The importer notes an animation it drops, but nothing else
+    // would say that one it kept is going unused.
+    if (anyClipBound && !levelWritten)
+        AVER_WARN("[Import] the object clip(s) were written but no scene layout was, so nothing plays "
+                  "them until a placed mesh names one");
 
     // Writes the rig: previously res.skeletons/animations were dropped on the floor -- nothing ever
     // wrote them and no project could contain them -- so loadOcSkel/loadOcAnim had no caller in the
@@ -147,9 +246,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         }
     }
     for (usize i = 0; i < res.animations.size(); ++i) {
-        std::string base = i < res.animationNames.size() && !res.animationNames[i].empty()
-                         ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
-        sanitiseAssetName(base);
+        const std::string& base = clipBases[i];
         const std::string outFile = destDir + "\\" + base + ".ocanim";
         const bool animExists = std::filesystem::exists(outFile, ec);
         if (animExists && !overwrite) {
@@ -769,6 +866,54 @@ void SandboxApp::cbRewriteHistory(const std::string& from, const std::string& to
     if (cbHistoryPos_ < 0 && !cbHistory_.empty()) cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
 }
 
+namespace {
+// A DUPLICATED LEVEL STARTS AS A BYTE COPY, which carries the source's NAME and ID, so the copy
+// would claim to BE the level it was copied from (the same bug Save Level As had). Rewrites only the
+// first NAME line and the first ID line, so every record the editor does not model, every comment
+// and every unknown record survives -- a parse and rewrite through OcWorldData would lose those.
+// ID is recomputed from the new NAME (ID = FNV-1a-64(NAME)); each line keeps its own line ending.
+bool restampLevelIdentity(const std::string& file, const std::string& name) {
+    std::string text;
+    if (!readFileText(file, text)) return false;
+    char idbuf[32];
+    std::snprintf(idbuf, sizeof idbuf, "0x%016llX",
+                  static_cast<unsigned long long>(makeObjectId(std::string_view(name))));
+
+    // Whether the line's FIRST token is `want` (upper case), compared case-insensitively like the parser.
+    const auto keyIs = [](std::string_view line, std::string_view want) {
+        usize b = 0;
+        while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) ++b;
+        usize e = b;
+        while (e < line.size() && line[e] != ' ' && line[e] != '\t' && line[e] != '\r' && line[e] != '\n') ++e;
+        if (e - b != want.size()) return false;
+        for (usize i = 0; i < want.size(); ++i) {
+            char c = line[b + i];
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+            if (c != want[i]) return false;
+        }
+        return true;
+    };
+
+    std::string out;
+    out.reserve(text.size() + 32);
+    bool sawName = false, sawId = false;
+    usize pos = 0;
+    while (pos < text.size()) {
+        const usize nl = text.find('\n', pos);
+        const usize end = nl == std::string::npos ? text.size() : nl + 1;
+        const std::string_view line(text.data() + pos, end - pos);
+        pos = end;
+        std::string_view eol;
+        if (line.size() >= 2 && line.substr(line.size() - 2) == "\r\n") eol = "\r\n";
+        else if (!line.empty() && line.back() == '\n') eol = "\n";
+        if (!sawName && keyIs(line, "NAME")) { sawName = true; out += "NAME "; out += name; out += eol; continue; }
+        if (!sawId && keyIs(line, "ID"))     { sawId = true;   out += "ID ";   out += idbuf; out += eol; continue; }
+        out += line;
+    }
+    return writeFileTextAtomic(file, out);
+}
+} // namespace
+
 // Copies a file or folder alongside itself as "<name>2", "<name>3", ...
 void SandboxApp::cbDuplicateEntry(const std::string& path) {
     std::error_code ec;
@@ -784,6 +929,14 @@ void SandboxApp::cbDuplicateEntry(const std::string& path) {
     else
         std::filesystem::copy_file(src, dst, ec);
     if (ec) { cbStatus_ = "Duplicate failed: " + ec.message(); return; }
+    // A duplicated level gets its own NAME and ID -- see restampLevelIdentity. The copy is already
+    // on disk and valid, so a failure here only costs the rename and is logged, not reported as a
+    // failed duplicate.
+    const std::string lowExt = lowerExt(dst);
+    if ((lowExt == ".ocworld" || lowExt == ".ocmap") && !std::filesystem::is_directory(dst, ec) &&
+        !restampLevelIdentity(dst.string(), dst.stem().string()))
+        AVER_WARN("[Editor] duplicated '{}' but could not give the copy its own NAME/ID",
+                  dst.filename().string());
     cbInvalidate(src.parent_path().string());
     cbStatus_ = "Duplicated as " + dst.filename().string();
 }

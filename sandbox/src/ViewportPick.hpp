@@ -131,4 +131,51 @@ inline bool rayPickGeometry(const PickGeometry& g, Vec3 o, Vec3 d, bool skipBack
     return found;
 }
 
+// Nearest ENTRY of a ray into an upright capsule standing on the local origin: axis along +Z, poles
+// at z = 0 and z = height, radius `radius` -- the Player Start's shape (buildCapsuleWire). For a
+// marker drawn as lines and a sprite there are no triangles to test, and its bounding box is both
+// too wide at the corners and too short to reach the sprite.
+//
+// The capsule is the union of a finite cylinder and two spheres, and with the origin outside all
+// three the first entry into the union is the smallest entry into any one part. A ray that STARTS
+// inside is no hit, pick()'s start-inside rule: standing in the marker must not select it on every
+// click. `o`/`d` are local and `d` may be unnormalised, as for rayPickGeometry; t is in (0, tMax).
+inline bool rayUprightCapsule(Vec3 o, Vec3 d, f32 radius, f32 height, f32 tMax, f32& tHit) {
+    const f64 r = radius;
+    const f64 zLo = r, zHi = std::fmax(r, static_cast<f64>(height) - r);   // hemisphere seams
+    const f64 ox = o.x, oy = o.y, oz = o.z, dx = d.x, dy = d.y, dz = d.z;
+
+    const f64 cz = oz < zLo ? zLo : (oz > zHi ? zHi : oz);
+    if (ox*ox + oy*oy + (oz - cz)*(oz - cz) <= r*r) return false;
+
+    bool found = false;
+    f64 best = static_cast<f64>(tMax);
+    // Side wall: the infinite cylinder's entry, kept only between the seams.
+    const f64 a = dx*dx + dy*dy;
+    if (a > 0.0) {
+        const f64 hb = ox*dx + oy*dy, c = ox*ox + oy*oy - r*r;
+        const f64 disc = hb*hb - a*c;
+        if (disc >= 0.0) {
+            const f64 t = (-hb - std::sqrt(disc)) / a;
+            const f64 z = oz + t*dz;
+            if (t > 0.0 && t < best && z >= zLo && z <= zHi) { best = t; found = true; }
+        }
+    }
+    // Domes: each seam's full sphere. An entry through the half inside the cylinder can never be
+    // the nearest -- the ray crossed the side wall or the other dome first -- so no half test.
+    const f64 dd = dx*dx + dy*dy + dz*dz;
+    if (dd > 0.0) {
+        for (const f64 sz : {zLo, zHi}) {
+            const f64 qz = oz - sz;
+            const f64 hb = ox*dx + oy*dy + qz*dz, c = ox*ox + oy*oy + qz*qz - r*r;
+            const f64 disc = hb*hb - dd*c;
+            if (disc < 0.0) continue;
+            const f64 t = (-hb - std::sqrt(disc)) / dd;
+            if (t > 0.0 && t < best) { best = t; found = true; }
+        }
+    }
+    if (found) tHit = static_cast<f32>(best);
+    return found;
+}
+
 } // namespace aver::editor

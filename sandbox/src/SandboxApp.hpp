@@ -21,6 +21,10 @@
 #include "aver/game/GameStreaming.hpp"
 #include "aver/game/GameLandscape.hpp"
 #include "aver/game/MouseCapture.hpp"
+#include "aver/game/PlayMobility.hpp"
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+#include "aver/world/VehicleSystem.hpp"
+#endif
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Math.hpp"
@@ -104,6 +108,8 @@
 // see ViewportPick.hpp's top comment; a pure header for the same reason SceneSubmission.hpp is one:
 // otherwise untestable inside a 29,000-line file with no header of its own.
 #include "ViewportPick.hpp"
+// The profiler panel's Play-side numbers (smoothed frame time, per-phase CPU cost); pure std, so no guard.
+#include "PlayProfile.hpp"
 
 // The material sampler register on the cluster pipeline (materialShaderDefines() gets the same
 // number). Fixed at s0 so it never moves whether or not AVER_MODULE_VOXI is compiled in -- Voxi's own
@@ -134,6 +140,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorWidgets.hpp"
 #include "FoliageAlign.hpp"
 #include "PlayerStartRefresh.hpp"
+#include "LevelViewStore.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"
 #include "AnimEditor.hpp"
@@ -456,10 +463,14 @@ inline i32 saveLoadProvider(const char* path, void*) {
 #endif
 
 
-// Gizmo axis basis and colours: X red, Y green, Z blue, amber highlight.
+// Gizmo axis basis and colours: X red, Y green, Z blue, yellow highlight -- Unreal 5's own gizmo
+// palette, sRGB (202,38,0) / (103,169,0) / (44,126,237) / (255,255,0). Drawn with setLineWidth now,
+// not setLineGlow (RHI.hpp: the API is gone -- lines draw after the tonemap, in display colour, so
+// there is no bloom left to fake a glow from).
 static const Vec3 kAxisDir[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-static const Vec3 kAxisCol[3] = {{0.92f, 0.24f, 0.24f}, {0.36f, 0.82f, 0.30f}, {0.30f, 0.55f, 1.0f}};
-static const Vec3 kAxisHi = {1.0f, 0.80f, 0.15f};
+static const Vec3 kAxisCol[3] = {{202.0f/255.0f, 38.0f/255.0f, 0.0f}, {103.0f/255.0f, 169.0f/255.0f, 0.0f},
+                                  {44.0f/255.0f, 126.0f/255.0f, 237.0f/255.0f}};
+static const Vec3 kAxisHi = {1.0f, 1.0f, 0.0f};
 
 // Appends a cube centred at (cx,cy,cz) with half-extent h.
 static inline void appendBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 cx, f32 cy, f32 cz, f32 h) {
@@ -719,6 +730,63 @@ static inline std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) 
     return v;
 }
 
+// Builds the Player Start's wire capsule, standing on the local origin (the spawn point is the
+// pawn's FEET) -- Unreal's own capsule-component visualiser: two rings at the hemisphere seams, four
+// vertical side lines between them, and a half-circle arc over each pole in the XZ and YZ planes.
+// Local space, no yaw baked in: the caller's world matrix supplies the Player Start's own rotation.
+static inline std::vector<rhi::LineVertex> buildCapsuleWire(f32 radius, f32 halfHeight, const Vec3& c) {
+    std::vector<rhi::LineVertex> v;
+    const f32 tall = halfHeight * 2.0f;              // pole-to-pole height
+    const f32 zLo = radius, zHi = tall - radius;      // hemisphere seam heights
+    constexpr int kSeg = 24;
+    for (const f32 z : {zLo, zHi}) {
+        Vec3 prev{};
+        for (int k = 0; k <= kSeg; ++k) {
+            const f32 t = k * (kTwoPi / kSeg);
+            const Vec3 p{radius * std::cos(t), radius * std::sin(t), z};
+            if (k > 0) gzLine(v, prev, p, c);
+            prev = p;
+        }
+    }
+    for (int k = 0; k < 4; ++k) {
+        const f32 t = k * (kPi * 0.5f);
+        const f32 sx = radius * std::cos(t), sy = radius * std::sin(t);
+        gzLine(v, {sx, sy, zLo}, {sx, sy, zHi}, c);
+    }
+    // Half circles: theta 0 sits on the ring (x=radius), theta pi/2 at the pole, theta pi on the
+    // ring's far side -- a full 180-degree arc through the dome, one in each vertical plane.
+    constexpr int kHalfSeg = kSeg / 2;
+    const f32 seamZ[2] = {zLo, zHi};
+    const f32 sign[2]  = {-1.0f, 1.0f};   // bottom dome curves toward z=0, top toward z=tall
+    for (int cap = 0; cap < 2; ++cap) {
+        for (int plane = 0; plane < 2; ++plane) {   // 0 = XZ, 1 = YZ
+            Vec3 prev{};
+            for (int k = 0; k <= kHalfSeg; ++k) {
+                const f32 t = k * (kPi / kHalfSeg);
+                const f32 rx = radius * std::cos(t);
+                const f32 rz = seamZ[cap] + sign[cap] * radius * std::sin(t);
+                const Vec3 p = plane == 0 ? Vec3{rx, 0.0f, rz} : Vec3{0.0f, rx, rz};
+                if (k > 0) gzLine(v, prev, p, c);
+                prev = p;
+            }
+        }
+    }
+    return v;
+}
+// Builds the Player Start's facing arrow: a shaft along local +X (yawDeg 0's own forward -- see
+// addPlayerStart's atan2(f.y, f.x)) at height centerZ, with a two-line arrowhead. Local space, like
+// buildCapsuleWire above -- the caller's world matrix supplies position and yaw.
+static inline std::vector<rhi::LineVertex> buildPlayerStartArrow(f32 centerZ, f32 length, const Vec3& c) {
+    std::vector<rhi::LineVertex> v;
+    const Vec3 base{0.0f, 0.0f, centerZ}, tip{length, 0.0f, centerZ};
+    gzLine(v, base, tip, c);
+    const f32 headLen = length * 0.28f, headWidth = length * 0.16f;
+    const Vec3 back{tip.x - headLen, 0.0f, centerZ};
+    gzLine(v, tip, {back.x, headWidth, centerZ}, c);
+    gzLine(v, tip, {back.x, -headWidth, centerZ}, c);
+    return v;
+}
+
 // Select edits OBJECTS (pick+gizmo); Landscape edits TERRAIN (sculpt, no picking/gizmo) -- a mode,
 // not a tool (sculpt tools reuse this shape; see handleSculpt()). Previously one enum with
 // Raise/Lower/Smooth/Flatten beside Move/Rotate, so gizmo and picking ran during terrain edits with
@@ -767,9 +835,21 @@ static constexpr ImGuiWindowFlags kDrawerFlags =
 // The editor's placeholder scene dimensions, in centimetres.
 inline constexpr f32 kEditorFloorHalf = 1000.0f;   // cm
 inline constexpr f32 kEditorCubeHalf  = 50.0f;     // cm
-// Player Start marker half-size, cm. 45 not 50 (cube's): pin artwork is taller-than-wide with a
-// transparent margin, so 50 read noticeably bigger. Chosen by eye against a 100cm cube.
-inline constexpr f32 kPlayerStartIconHalfSize = 45.0f;   // cm
+// Player Start marker, like Unreal's APlayerStart: a wire capsule standing on the spawn point (the
+// pawn's FEET -- the marker's own origin), a facing arrow, and a billboard sprite at the capsule's
+// centre. Capsule/arrow colours are Unreal's own, sRGB; the sprite half-size is world units, same
+// convention the old pin icon used.
+inline constexpr f32 kPlayerStartCapsuleRadius = 40.0f;       // cm
+inline constexpr f32 kPlayerStartCapsuleHalfHeight = 92.0f;   // cm (184 cm tall, pole to pole)
+inline constexpr f32 kPlayerStartArrowLength = 80.0f;         // cm
+inline constexpr f32 kPlayerStartIconHalfSize = 24.0f;        // cm
+static const Vec3 kPlayerStartColor = {1.0f, 138.0f/255.0f, 5.0f/255.0f};                  // sRGB (255,138,5)
+static const Vec3 kPlayerStartArrowColor = {150.0f/255.0f, 200.0f/255.0f, 1.0f};           // sRGB (150,200,255)
+
+// Unreal's selection colour, sRGB (235,163,10). File-scope (not local to selectionOutlineLines,
+// which used to be its only user) since the Player Start's capsule needs the same colour when it is
+// itself the selected actor.
+static const Vec3 kSelectionColor = {235.0f/255.0f, 163.0f/255.0f, 10.0f/255.0f};
 inline constexpr f32 kEditorGridCell  = 100.0f;    // cm
 inline constexpr f32 kEditorGridHalf  = 1000.0f;   // cm
 // How far in front of the camera Add places a new object.
@@ -971,6 +1051,18 @@ struct DirEntry {
 
 // A Content Browser directory listing, refreshed on a frame stamp. Folders sort first and are counted.
 struct DirListing { int stamp = -1000; std::vector<DirEntry> entries; usize dirCount = 0; };
+
+// The object animation one placed mesh plays in Play -- what a PLACE record's anim/animspeed/animtime/
+// animonce tokens hold. AUTHORED values only: the entity's CAnimator is the live clock and Play advances
+// it, so a save reads this and never that. clip is a content-relative .ocanim path with forward slashes
+// and the extension; empty = no animation.
+struct EntityAnim {
+    std::string clip;
+    f32  speed = 1.0f;
+    f32  time  = 0.0f;     // start time t0, seconds
+    bool once  = false;
+    bool operator==(const EntityAnim&) const = default;
+};
 
 // Replaces the characters Windows refuses in a file name. Lives here, at file scope, rather than as a
 // SandboxApp member, because importGltfToDir needs it and must be callable before any SandboxApp exists.
@@ -1267,6 +1359,37 @@ public:
     void loadProjectMaterials();
 
     void releaseProjectMaterials();
+
+    // ---- level-scoped material residency (docs: PACKAGE level-materials) ----
+    //
+    // True when the editor keeps only the OPEN LEVEL's materials (and their textures) resident
+    // instead of every material under the project's Content/Binaries Materials folders -- the
+    // default. A/B switch for the change this enables: AVER_LEVEL_SCOPED_MATERIALS=0 in the
+    // environment restores the old always-everything-resident behaviour (loadProjectMaterials()
+    // called from applyProject, exactly as before this existed). No console var yet -- EditorConsole.hpp
+    // is not owned by this change; see this package's final report for the exact line a
+    // console slot would add.
+    //
+    // THE RELEASE HALF IS THE ONLY HALF THIS APP OWNS: unloadLevel() (SandboxLevelLoad.cpp) checks
+    // this and, when true, releases every non-pinned resident material before the next level even
+    // starts parsing. The BIND half needs no new code here at all -- GameLevel::load() (shared with
+    // the runtime) already resolves every surface a level actually draws through
+    // materialForSurface()/bindSurfaceMaterial() as it places entities (placement overrides via
+    // opt.bindMaterial, and every placed mesh's own material slots -- see that function's own
+    // comment in Runtime/src/GameLevel.cpp), which re-loads anything this just released the moment
+    // the level that needs it opens.
+    static bool levelScopedMaterialsEnabled();
+
+    // Every surface name that must survive a level-scoped release regardless of whether the
+    // INCOMING level needs it -- an editor tab or a selection holding a pbr::MaterialHandle open for
+    // editing, which must not go dead under it mid-edit. Empty by default: nothing in this package's
+    // owned files opens such a tab (the Details panel edits a handle it re-resolves per frame from
+    // the CURRENT level's own surfaces, which this mechanism never releases while that level stays
+    // open -- see applyMaterialDesc's own comment). A non-owned material/asset editor tab that keeps
+    // a handle open ACROSS a level change should call pinMaterialResident() when it opens a material
+    // and unpinMaterialResident() when it closes; see this package's final report for exactly where.
+    void pinMaterialResident(const std::string& name) { pinnedMaterialNames_.insert(name); }
+    void unpinMaterialResident(const std::string& name) { pinnedMaterialNames_.erase(name); }
 #endif
 
 
@@ -1412,7 +1535,9 @@ public:
     // checks"). The day Synapse gets a switch, every one of these breaks at once. Moved under the
     // guards they actually need instead.
 #if AVER_MODULE_PHYSICS
-    // Rebuilds the collider overlay's line mesh: the world-space AABB of every physics body.
+    // Rebuilds the collider overlay's two line meshes (static bodies; bodies that move): the world-space
+    // AABB of every physics body. Called every frame the toggle is on; returns at once on a frame
+    // nothing that draws could have changed.
     void rebuildColliderOverlay(Engine& e);
 #endif
 #if AVER_WITH_IMGUI
@@ -1420,6 +1545,10 @@ public:
 
     void buildProfilerPanel(Engine& e);
 #endif
+    // Restarts what the profiler panel measures: the device's since-boot GPU average always, and the
+    // CPU phase table too when Play is starting (Stop leaves the last session's phases readable).
+    // Outside the ImGui guard because startPlay/stopPlay call it in every build.
+    void resetPlayProfile(bool playStarting);
 
 #if AVER_MODULE_SYNAPSE
     void setBakeNavOnStart(f32 cellCm);   // --bake-nav [cm]
@@ -1566,6 +1695,9 @@ public:
     // once, before the first frame); logs one INFO line naming the mode applied.
     void setViewMode(const std::string& mode);
     void setPlayTest();                                       // --play-test
+    void setPlayWalk() { defaultPawnWalk_ = true; }          // --play-walk: the no-GameMode default pawn walks
+    void startDefaultPawnWalk(bool fromCamera);                // SandboxPlay.cpp: the capsule for a walking default pawn
+    void driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right);   // per frame, from the fly block
     void setProjectPath(std::string p);          // <path>.ocproject
     void setStartMode(std::string m);
     void setOpenMap(std::string p);
@@ -1598,6 +1730,25 @@ private:
             if (!on) return;
             splash.setStatus(text);
             splash.pump();
+        }
+        // Sets the stage text AND the completion fraction in one call -- the shape a staged level
+        // load actually wants (SandboxLevelLoad.cpp's parse/environment/placements/foliage/finishing
+        // bands, each a (text, fraction) pair as it starts). See progress() for what a borrowed
+        // splash does with the fraction.
+        void stage(const char* text, f32 fraction) {
+            stage(text);
+            progress(fraction);
+        }
+        // Sets the progress bar's fraction (0..1) under the status line, on whichever splash is up.
+        //
+        // NO EXPLICIT pump() HERE, unlike stage()'s: Splash::setProgress already repaints and pumps
+        // (throttled to ~30 Hz) on its own -- see that method's own comment. A second, unconditional
+        // pump() here would defeat the throttle on exactly the call site it exists for, since a level
+        // load calls this at least every 256 placements.
+        void progress(f32 fraction) {
+            if (borrowed) { borrowed->setLoadingProgress(fraction); return; }
+            if (!on) return;
+            splash.setProgress(fraction);
         }
         ~LoadingScreen() {
             // No minimum visible time here (unlike startup, where a flashing splash reads as a
@@ -1885,6 +2036,12 @@ private:
     // anything is selected, so an iterating caller sees the whole selection without adding the anchor
     // back -- forgetting that is how "delete removed all but one" bugs happen.
     std::vector<scene::Entity> multiSel_;
+    // MEMBERSHIP for multiSel_, kept equal to it by every mutator (SandboxSelection.cpp, and the one
+    // restore in SandboxMcp.cpp): multiIsSelected is asked per DRAWN entity per frame, and a linear
+    // find over a big selection made that O(entities x selected) -- minutes of work a second on a
+    // 51k-entity level after Select All. The vector stays the source of order (anchor, ranges).
+    std::unordered_set<scene::Entity> multiSet_;
+    void multiRebuildSet();                     // after any bulk rewrite of multiSel_
 
     bool multiStale() const;
     bool multiIsSelected(scene::Entity e) const;
@@ -1894,8 +2051,12 @@ private:
     void multiToggle(scene::Entity e);
     void multiRange(scene::Entity to);
     std::vector<scene::Entity> selectedEntities() const;
-    // The rows the outliner drew this frame, in draw order. Rebuilt every frame by drawOutlinerRow;
-    // read only by multiRange.
+    // The rows the outliner lists, in the order a shift-click and Select All range over. A tree
+    // rebuilds it every frame (drawOutlinerTreeRows): drawOutlinerRow records each parent root and
+    // its OPEN rows as it walks them, and a run of childless roots is copied in whole; a FLAT list
+    // (outlinerFlat_) has it built ONCE per cache rebuild instead. Both clip their childless rows
+    // (ImGuiListClipper), so a per-row push_back could never see the rest. Read by multiRange,
+    // selectAllInOutliner and the Select All enable checks (the Select menu, the viewport chord).
     std::vector<scene::Entity> outlinerOrder_;
     std::string outlinerFilter_;   // name filter box; empty = show everything
 
@@ -1931,7 +2092,7 @@ private:
     // EntitySnapshot -- see EditorEntitySnapshot.hpp for what it omits (hierarchy; CName's internal
     // blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation };
         Kind kind = Kind::Transform;
         // Which edit this is, monotonically. Identifies the document's state so a save can record
         // "clean as of here" (levelHasUnsavedEdits). Never reused, so undo/redo cross a save point correctly.
@@ -1958,6 +2119,14 @@ private:
         // something H-hidden at the time makes it visible rather than reinstating a session-only hide.
         struct VisibilityChange { EditId id = 0; bool before = true; bool after = true; };
         std::vector<VisibilityChange> visibility;
+        // COLLISION payload (Kind::Collision): the Details panel's Collides checkbox, before/after per
+        // selected entity. Same {id, before, after} shape as VisibilityChange, so it reuses the type
+        // (the bools mean "collides" here); replayed through setEntityCollide().
+        std::vector<VisibilityChange> collide;
+        // ANIMATION payload (Kind::Animation): the Details panel's Animation section, before/after per
+        // selected entity (an empty clip = none); replayed through applyEntityAnim().
+        struct AnimChange { EditId id = 0; EntityAnim before, after; };
+        std::vector<AnimChange> animation;
         std::string label;        // outliner display name; editor-owned bookkeeping, not World's
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
@@ -1973,6 +2142,12 @@ private:
         bool  hadCollide = true;      // the default saveLevel writes for an entity it has no entry for
         bool  hadSnapZ   = false;
         f32   snapZ      = 0.0f;
+        // Its object animation (empty clip = none). Not in `snap`: captureAuthored leaves the CAnimator
+        // out, since Play advances its clock and entityAnim_ holds the authored values.
+        EntityAnim hadAnim;
+        // Its `vehicle` preset (empty = not a car), held by level_ and so not in `snap` either. Restored
+        // by recreateFrom only: Copy and Duplicate make ordinary meshes.
+        std::string hadVehicle;
         MeshObj objSnapshot{};    // CreateObj/DestroyObj payload; MeshObj is trivially copyable
 #if AVER_MODULE_PBR
         // Material payload: THE WHOLE DESC, both sides, not just the slider that moved -- a
@@ -2027,6 +2202,7 @@ private:
             bool  hadCollide = true;
             bool  hadSnapZ   = false;
             f32   snapZ      = 0.0f;
+            EntityAnim hadAnim;
         };
         std::vector<DestroyedNode> subtree;
 
@@ -2072,6 +2248,30 @@ private:
     // Visibility's apply: `undoing` picks which side of each VisibilityChange to write (mirrors
     // applyXformTo's `undoing`) -- one checkbox click is one gesture, so Ctrl+Z undoes all or none.
     void applyVisibilityTo(const EditCmd& c, bool undoing);
+
+    // Collision's apply (same `undoing` rule), and the one write path for the flag: records it in
+    // entityCollide_ (which saveLevel writes as `nocollide`) and drops or remakes the static body
+    // through rebuildEntityBody, which itself honours the flag.
+    void applyCollideTo(const EditCmd& c, bool undoing);
+    void setEntityCollide(scene::Entity e, bool collide);
+
+    // ---- object animation (a transform clip a placed mesh plays in Play) ----
+    // writeEntityAnim records `a` in entityAnim_ and makes the entity's CAnimator match (an empty clip
+    // erases both); applyEntityAnim adds the body's static/kinematic switch, which is the whole of an
+    // undo/redo replay. setEntityAnim is the public one: apply + level dirty, NOT an undo entry -- the
+    // Details panel pushes Kind::Animation itself. Refused for an entity with a CSkeletalMesh, whose
+    // CAnimator is a skeletal clock. entityAnim returns nullptr when the entity has none.
+    void writeEntityAnim(scene::Entity e, const EntityAnim& a);
+    void applyEntityAnim(scene::Entity e, const EntityAnim& a);
+    void applyAnimationTo(const EditCmd& c, bool undoing);
+    void setEntityAnim(scene::Entity e, const EntityAnim& a);
+    const EntityAnim* entityAnim(scene::Entity e) const;
+    // Stop: every EntityAnim back onto its CAnimator, and each kinematic body put back at its restored
+    // transform. Play: the animated entities' kinematic bodies follow what the anim tick just moved.
+    void restoreAnimatedEntities();
+#if AVER_MODULE_PHYSICS
+    void driveAnimatedBodies(f32 dt);
+#endif
 #endif
 
     void pushEdit(EditCmd c);
@@ -2115,7 +2315,8 @@ private:
                                    const std::string& label, bool hadBody,
                                    bool restoreObjectId = true,
                                    scene::Entity parent = scene::kInvalidEntity,
-                                   bool collide = true, bool hasSnapZ = false, f32 snapZ = 0.0f);
+                                   bool collide = true, bool hasSnapZ = false, f32 snapZ = 0.0f,
+                                   const EntityAnim* authoredAnim = nullptr);
 
     void recreateFrom(const EditCmd& c);
 
@@ -2146,8 +2347,10 @@ private:
     // A body is a FUNCTION OF THE MESH AND CURRENT TRANSFORM, not carried through undo/redo/copy/
     // paste (see EditCmd::hadBody). THE ONE PLACE A BODY IS MADE: drops whatever `e` already owns in
     // entityBodies_ unconditionally (covers a replay against a since-destroyed handle, or running
-    // before aver_phys_init), then, if physics is up and `e` is live, fits a fresh one from
-    // CMeshRenderer::mesh and the CURRENT world transform. TRIANGLES FIRST via
+    // before aver_phys_init), then, if physics is up, `e` is live and entityCollide_ does not say
+    // nocollide, fits a fresh one from
+    // CMeshRenderer::mesh and the CURRENT world transform (kinematic when entityAnim_ names it, else
+    // static). TRIANGLES FIRST via
     // content_.collisionMeshFor/addStaticMeshBody; only a mesh with no cached collision mesh (a
     // built-in, or one whose .ocmesh failed to load) falls back to content_.boundsFor/addStaticBoxBody
     // (unit cube placeholder if even that's unknown).
@@ -2306,6 +2509,10 @@ private:
     bool sceneCensusDone_ = false;
 
     scene::Entity outlinerRenaming_ = scene::kInvalidEntity;
+    // The row whose right-click menu was open last frame. The flat Outliner only submits the rows
+    // its clipper hands out, and a popup lives inside its row's BeginPopupContextItem, so the clipper
+    // pins this row (like the renaming and dragged ones) or scrolling it away would strand the menu.
+    scene::Entity outlinerCtxRow_ = scene::kInvalidEntity;
     bool outlinerRenameFocus_ = false;
     char outlinerRenameBuf_[128] = {0};
 
@@ -2346,6 +2553,9 @@ private:
 // viewport's ImGui drop target; dropWorldPoint exists only to serve it. Both lean on viewportRay/lowerExt.
 #if AVER_MODULE_SCENE
     Vec3 dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface = nullptr) const;
+    // The first surface under a screen point (triangles, terrain, placeholder boxes); false on a
+    // miss. Where Play From Here stands the pawn. SandboxViewport.cpp.
+    bool pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out);
 
 
     void spawnFromAssetDrop(Engine& e, const std::string& full, f32 screenX, f32 screenY);
@@ -2868,14 +3078,28 @@ private:
     // ONE GENERIC WIDGET over (label, id) candidates, not a picker per field: the three fields differ
     // only in where candidates come from and what an id MEANS. Shaped after the graph editor's node
     // palette (search-on-open, case-insensitive filter, a capped list that says so).
-    // Candidates are built per frame by the caller and consumed in it: they come from maps a project
-    // reload clears (meshPathById_, surfaceMaterials_), so keeping them across frames would keep
-    // things that may no longer exist.
+    // Candidates come from maps a project reload clears (meshPathById_, surfaceMaterials_), so they
+    // are never kept beyond the popup that asked for them: the caller builds them only while the
+    // popup is OPEN (assetPicker draws nothing otherwise), and a PickerCands below holds them across
+    // the consecutive frames the popup stays open -- a closed popup costs nothing, and an open one
+    // does not re-read the project's Materials folders or re-sort every mesh path each frame.
     struct AssetChoice { std::string label; u64 id = 0; };
 
     bool assetPicker(const char* popupId, const std::vector<AssetChoice>& candidates,
                      u64 current, u64* picked);
     char assetPickerFilter_[64] = {};
+
+    // One picker's candidate list, valid only while it was last used on the PREVIOUS frame or this
+    // one (`lastFrame`, ImGui's frame count -- a gap means the Details panel was not drawn in
+    // between, and the list is rebuilt) and while `stamp` (the size of the map it was built from)
+    // still matches. A frame that sees the popup CLOSED calls drop(), which frees the list.
+    struct PickerCands {
+        std::vector<AssetChoice> list;
+        int   lastFrame = -2;
+        usize stamp = 0;
+        void drop() { std::vector<AssetChoice>().swap(list); lastFrame = -2; }
+    };
+    PickerCands pickMeshCands_, pickMaterialCands_, pickEffectCands_;
 
     // ---- the three assignments, each its own function since an "asset id" is three things ----
     // NOT UNDOABLE, a TESTED CONTRACT not an oversight: runSaveDirtyTest asserts a Details-panel
@@ -2946,7 +3170,7 @@ private:
 
     void buildSelectModePanel();
 
-    void buildSimulateModePanel();
+    void buildSimulateModePanel(Engine& e);
 
     // Water is NOT a terrain feature: buildWaterPanel touches levelHeader_.waters/waves/water_,
     // names no landscape type, and its call site (level-properties panel, beside Sky/Fog) is guarded
@@ -2967,8 +3191,10 @@ private:
     void buildPanels(Engine& e);
 
 #if AVER_MODULE_SCENE
-    // One Outliner row, resolved once per frame. `par` is the RAW engine parent; whether that
-    // parent is itself listed is a separate question, decided in buildOutlinerPanel's second pass.
+    // One Outliner row. Built by rebuildOutlinerCache() and kept in outlinerRows_ ACROSS frames --
+    // see outlinerSignature() for what has to hold steady for the cache to stay valid. `par` is
+    // the RAW engine parent; whether that parent is itself listed is a separate question, decided
+    // in rebuildOutlinerCache()'s second pass.
     struct OutlinerRow { scene::Entity ent; scene::Entity par; std::string shown; };
 
     static std::string lowerCopy(std::string v);
@@ -2979,9 +3205,77 @@ private:
 
     void drawOutlinerDropTarget(scene::Entity ent);
 
+    // `recordOrder` false: the caller has already put this row in outlinerOrder_ (a row the clipper
+    // draws), so it must not be pushed again.
     void drawOutlinerRow(const OutlinerRow& row,
                          const std::unordered_map<u32, std::vector<const OutlinerRow*>>& children,
-                         int depth);
+                         int depth, bool recordOrder = true);
+
+    // A flat cache's rows, only the ones on screen (ImGuiListClipper); see the .cpp.
+    void drawOutlinerFlatRows();
+    // A tree cache's rows: the roots that have children and their open rows in full, the childless
+    // roots between them only the ones on screen (a clipper per run); see the .cpp.
+    void drawOutlinerTreeRows();
+
+    // OUTLINER ROW CACHE, measured against a 12k+-entity import (Jungle Ruins: terrain tiles plus
+    // thousands of alpha-masked foliage instances, no glass/water in it): buildOutlinerPanel used
+    // to redo three passes over every entity PLUS a string-compare sort unconditionally, on every
+    // single ImGui frame, even an idle one -- two std::string constructions per entity
+    // (w.name(ent) just to test emptiness, then outlinerLabelFor(ent) again) and two UNRESERVED
+    // hash containers that rehash repeatedly as they grow. outlinerRows_ owns the rows;
+    // outlinerChildren_/outlinerRoots_ point INTO it, so rebuildOutlinerCache() always replaces
+    // all three together (swaps a freshly-built vector into outlinerRows_) and never appends to
+    // outlinerRows_ in place, which would invalidate those pointers.
+    std::vector<OutlinerRow> outlinerRows_;
+    std::unordered_map<u32, std::vector<const OutlinerRow*>> outlinerChildren_;
+    std::vector<const OutlinerRow*> outlinerRoots_;
+    // Found by the rebuild so the per-frame draws never dereference a row to learn them (the roots
+    // are alphabetical, so their rows are scattered through outlinerRows_): the entity of each
+    // outlinerRoots_ entry in the same order, and the ascending indices into outlinerRoots_ of the
+    // roots that have listed children (empty for a flat list). The childless roots between two such
+    // indices are what drawOutlinerTreeRows clips.
+    std::vector<scene::Entity> outlinerRootEnts_;
+    std::vector<u32> outlinerParentRoots_;
+    // The signature the cache above was last built from, and whether it has been built at all --
+    // kept separate from outlinerCacheSig_ because a default-constructed 0 is a value
+    // outlinerSignature() can legitimately return, so it cannot double as "not built yet".
+    u64  outlinerCacheSig_ = 0;
+    bool outlinerCacheValid_ = false;
+
+    // WHEN THE CACHE IS STALE, WITHOUT WALKING EVERY ENTITY EVERY FRAME (that walk was itself the
+    // biggest cost of an idle 50k-entity level). Two halves, see the .cpp for what feeds each:
+    //  - outlinerSignature(): an O(1) stamp of what the editor itself can see change (entity count,
+    //    filter, label-map size, the level's entity list); refreshOutlinerCache() rebuilds when it
+    //    moves.
+    //  - outlinerAuditDiverged(): dense slots re-fingerprinted against outlinerSlotSigs_ (one
+    //    fingerprint per dense slot, recorded by the rebuild): a SLICE per frame, so everything the
+    //    stamp cannot see (a script rename, a reparent, a mesh added) is still caught within one
+    //    audit cycle at a bounded cost per frame, and ALL of them the frame the editor's own edit
+    //    stamp (outlinerEditMark) moves, so an edit made in the UI shows up at once.
+    u64  outlinerSignature() const;
+    u64  outlinerEditMark() const;
+    u64  outlinerSlotSignature(u32 slot) const;
+    bool outlinerAuditDiverged(bool full);
+    // Rebuilds when either half above says the cache is stale; a no-op otherwise.
+    void refreshOutlinerCache();
+    // Redoes the three passes and the sort that used to run unconditionally in
+    // buildOutlinerPanel every frame, filling outlinerRows_/outlinerChildren_/outlinerRoots_.
+    void rebuildOutlinerCache();
+    // True when the cache holds no parent/child pair (a level imported flat, tens of thousands of
+    // scene ROOTS): every row is then a uniform-height leaf, so buildOutlinerPanel submits only the
+    // rows on screen through ImGuiListClipper and outlinerOrder_ is built once by the rebuild. A tree
+    // takes drawOutlinerTreeRows. Set by rebuildOutlinerCache, read by the panel.
+    bool outlinerFlat_ = false;
+    // One fingerprint per dense slot (World::at index) as of the last rebuild, and where the next
+    // audit slice starts. Sized to the entity count the rebuild saw.
+    std::vector<u64> outlinerSlotSigs_;
+    u32  outlinerAuditCursor_ = 0;
+    // outlinerEditMark() as of the last refresh, to tell a frame the editor issued a command in.
+    u64  outlinerEditMark_ = 0;
+    // ImGui::GetTime() of the last rebuild, and whether any Play is running: while one is, a rebuild
+    // waits for half a second since the last (refreshOutlinerCache). False without the framework.
+    double outlinerRebuiltAt_ = 0.0;
+    bool outlinerPlaying() const;
 #endif
 
     void buildOutlinerPanel();
@@ -3002,6 +3296,12 @@ private:
 
 
     void buildEditorPrefs();
+    // The centred Play group of the main toolbar: Play (repeats playMode_), the options dropdown,
+    // Pause/Resume, Frame Skip, Eject/Possess, Stop. SandboxShell.cpp.
+    void drawPlayToolbar(Engine& e);
+    // Editor Preferences > Play, the page the dropdown's "Advanced Settings..." opens.
+    // SandboxSettings.cpp.
+    void buildPlayPrefsSection();
 
     void buildWorldSettings();
 
@@ -3033,6 +3333,11 @@ private:
 #endif
 
     void buildViewportOverlay();
+    // The viewport's right-click menu (Play From Here). RMB is also fly-look, so it is ARMED on the
+    // press and DECIDED on the release: only a click that stayed put opens it. SandboxViewport.cpp.
+    void drawViewportContextMenu();
+    struct ViewportCtx { bool armed = false; bool hasHit = false; Vec3 camPos{}; Vec3 hit{}; };
+    ViewportCtx vpCtx_;
 #endif
 
     // Requests the probe pixel and the screenshot on a capture run, then reports what was read.
@@ -3094,7 +3399,7 @@ private:
     // Outliner display names. Not scene::World::name(), which holds the asset path.
     std::unordered_map<u32, std::string> entityLabels_;
     std::unordered_map<std::string, int> labelCounts_;
-    std::unordered_map<u32, int32_t> entityBodies_;   // the static body an entity owns
+    std::unordered_map<u32, int32_t> entityBodies_;   // the body an entity owns (kinematic if animated, else static)
 
     static constexpr std::size_t kUndoDepth = 128;
     std::vector<EditCmd> undoStack_, redoStack_;
@@ -3121,6 +3426,13 @@ private:
 #endif
         EditXform xform{};
         bool hadBody = false;   // see EditCmd::hadBody's own comment -- no shape rides along with it
+        // The root's non-component flags and object animation, as EditCmd carries them (its children
+        // already keep theirs through `subtree`): without these a pasted/duplicated ROOT came back
+        // solid, unsnapped and unanimated.
+        bool  hadCollide = true;
+        bool  hadSnapZ   = false;
+        f32   snapZ      = 0.0f;
+        EntityAnim hadAnim;
     };
 
     struct EditorClipboard {
@@ -3298,11 +3610,46 @@ private:
     // can't only exist when the solver does); the line mesh is what's genuinely built from bodies.
     bool showColliders_=false;
 #if AVER_MODULE_PHYSICS
+    // Two meshes: colliderMesh_ the STATIC bodies, colliderMoverMesh_ the kinematic and dynamic ones
+    // (see rebuildColliderOverlay's .cpp comment for why they are separate).
     rhi::LineHandle colliderMesh_=0;
+    rhi::LineHandle colliderMoverMesh_=0;
+    // What colliderMesh_ was built from, so rebuildColliderOverlay can skip an unchanged frame (see
+    // its .cpp comment). Built = the mesh reflects colliderOverlaySig_; AllKnown = every STATIC physics
+    // body was one the editor tracks (levelBodies_/entityBodies_), so the sig covers all the ways the
+    // static set can change. colliderRev_ is bumped wherever the editor remakes or drops a body of its
+    // own (rebuildEntityBody, destroyEntity).
+    bool colliderOverlayBuilt_ = false;
+    bool colliderOverlayAllKnown_ = false;
+    u64  colliderOverlaySig_ = 0;
+    u64  colliderRev_ = 0;
+    // The moving mesh's state. colliderMovers_ = the non-static handles, captured whenever
+    // colliderMesh_ is rebuilt; colliderMoversTracked_ = the editor tracks every one of them (so,
+    // outside Play, none can move unseen); colliderMoversWereLive_ = a play session ran at the last
+    // call (one more refresh when it ends); colliderMoverBoxes_ = the AABBs (lo xyz, hi xyz per
+    // mover) colliderMoverMesh_ was built from, compared with colliderMoverBoxesNext_ (scratch) to
+    // skip a frame where nothing moved; colliderMoverLines_ = scratch for the mesh's vertices.
+    std::vector<int32_t> colliderMovers_;
+    std::vector<f32> colliderMoverBoxes_, colliderMoverBoxesNext_;
+    std::vector<rhi::LineVertex> colliderMoverLines_;
+    bool colliderMoversTracked_ = false;
+    bool colliderMoversWereLive_ = false;
+    // The static audit: the handles colliderMesh_ drew, with the AABB each was drawn at (lo xyz, hi xyz,
+    // parallel to colliderStatics_). In Play a rotating slice of them is re-read each frame, and any
+    // that is no longer static or has moved forces one full rebuild (a script's SetBodyMotionType or
+    // body teleport changes neither the body count nor colliderRev_). colliderAuditCursor_ = where the
+    // next slice starts.
+    std::vector<int32_t> colliderStatics_;
+    std::vector<f32> colliderStaticBoxes_;
+    usize colliderAuditCursor_ = 0;
 #endif
+    // Frame time and the Play-only CPU phases, fed by onUpdate's begin()/end() brackets and folded
+    // once a frame in the status bar. Unguarded: onUpdate brackets it in every configuration.
+    editor::PlayProfile playProf_;
 #if AVER_WITH_IMGUI
-    // The GPU profiler panel. A view over GpuTimingReport, which the device has always
-    // produced and only the console ever read.
+    // The profiler panel (Window > GPU Profiler): the GPU pass table, a view over GpuTimingReport
+    // that the device has always produced and only the console used to read, above which sit
+    // playProf_'s frame time and Play CPU phases.
     bool showProfiler_=false;
     // The References panel. refPanelScanned_ distinguishes "opened but never asked" from "asked and
     // found nothing" -- two states an empty list cannot tell apart, and the second is the useful one.
@@ -3955,13 +4302,41 @@ private:
     editor::ViewportIconRenderer viewportIcons_;
     bool viewportIconsReady_ = false;
     editor::ViewportIconRenderer::IconHandle playerStartIcon_ = editor::ViewportIconRenderer::kNoIcon;
+    // The capsule/arrow line meshes, built once like the gizmo handles (gzMove_ etc.) and placed with
+    // a world matrix per frame. Independent of viewportIconsReady_ above -- that flag gates only the
+    // SPRITE (it needs the icon renderer and its texture); these are ordinary line meshes, drawn
+    // through IDevice::drawLines like every other piece of chrome, so they never fall back to the
+    // marker's pick cube the way the sprite does.
+    rhi::LineHandle playerStartCapsule_ = 0, playerStartCapsuleSel_ = 0, playerStartArrow_ = 0;
     fmt::OcWorldData levelHeader_;
+#if AVER_MODULE_PBR
+    // pinMaterialResident()/unpinMaterialResident()'s own storage -- see their comment for the
+    // contract. Checked by bindMaterialsForLevel()/unloadLevel() so a level-scoped release never
+    // destroys a material an open tab or the current selection still holds.
+    std::unordered_set<std::string> pinnedMaterialNames_;
+#endif
     // Whether each level entity's placement said `nocollide`. No component for this: it's a
     // load-time instruction that nothing on the entity records afterwards, so without it the save
     // forced `collide = true` on everything and `nocollide` never survived a round trip.
     std::unordered_map<u32, bool> entityCollide_;
+    // Each entity's authored object animation; absent = none. The CAnimator on the entity is only the
+    // live clock, so saveLevel reads this map, never the component -- Play must not leak into a save.
+    std::unordered_map<u32, EntityAnim> entityAnim_;
+    // The Details panel's Animation drag in flight: every selected entity's EntityAnim from the frame
+    // the widget was grabbed, so the whole drag is one undo entry (see the Animation section there).
+    std::vector<EditCmd::AnimChange> animEditBefore_;
     // Entities placed with `snap`, and the AUTHORED z offset each was placed at. Absent = not snapped.
     std::unordered_map<u32, f64> entitySnapZ_;
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+    // driveAnimatedBodies' list, kept between frames and rebuilt only when it can have changed: the
+    // three counts below are what it was built from, and the flag is dropped whenever Play is not
+    // driving (editing, paused, stopped) or physics reports a listed body gone.
+    std::vector<world::AnimatedBody> animatedBodies_;
+    bool animatedBodiesBuilt_ = false;
+    usize animatedBodiesFromAnim_ = 0;
+    usize animatedBodiesFromBodies_ = 0;
+    u64 animatedBodiesFromRev_ = 0;
+#endif
 
     // True while the open level loaded through the legacy OCMAP path, not the ordinary OCWORLD one --
     // decided by which RECORDS the file uses, not its header/extension. saveLevel reads it to choose
@@ -4088,6 +4463,22 @@ private:
     // Frames the editor camera on the loaded level's bounds (level_.placementBounds).
     void frameCameraOnLevel();
 
+    // WHERE THE CAMERA WAS WHEN THE LEVEL WAS LEFT (LevelViewStore.hpp), per level, per user, in
+    // <project>/Saved/LevelViews.ini. storeLevelView records the editor view under levelPath_ on
+    // every way out of a level -- another level, New Level, closing the editor -- saved or not;
+    // lookupLevelView finds `levelPath`'s entry, and it outranks the level's CAMERA record, which
+    // is only as new as the last save. Both do nothing in a bounded (--frames) run, so captures and
+    // gates still open at the level's own record.
+    void storeLevelView();
+    bool lookupLevelView(const std::string& levelPath, editor::LevelView& out) const;
+    // Moves the camera to `v`, with the clamps the mouse-look and wheel paths enforce.
+    void applyLevelView(const editor::LevelView& v);
+    std::string levelViewsPath() const;
+    // The editor view at the moment Play started: while a session drives the camera from the pawn,
+    // that, not camPos_, is where the user left the EDITOR camera.
+    bool preplayViewValid_ = false;
+    editor::LevelView preplayView_{};
+
     bool requestOpenLevel(const std::string& path, const char* why);
 
     void applyPendingOpen(Engine& eng);
@@ -4119,6 +4510,17 @@ private:
     struct PlaySavedTransform { scene::Entity e; Transform xf; bool visible = true; };
     std::vector<PlaySavedTransform> playWorldSnapshot_;
     bool playWorldCaptured_ = false;
+    // What moved during this session, so Voxi keeps it out of the GI bake (PlayMobility.hpp).
+    // Begun in capturePlayWorld, before anything spawns; ended in stopPlay.
+    game::PlayMobility playMobility_;
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+    // The level's `vehicle` placements as physics cars while Play runs (world::VehicleSystem), built
+    // from level_'s vehicle placements in capturePlayWorld -- after the transform snapshot, like a
+    // CRigidBody, so editing never has one settling on its suspension -- driven around
+    // tickGameplayGroups in onUpdate, and ended in stopPlay before restorePlayWorld puts the
+    // placements back.
+    world::VehicleSystem vehicles_;
+#endif
 
     std::vector<scene::Entity> levelEntities_;
     bool hasLevelSun_ = false;
@@ -4214,6 +4616,15 @@ private:
 
     void registerMcpAbis();
 
+    // The "level" ABI (SandboxMcp.cpp): assembles a level through the editor's own spawn, transform,
+    // material, collide, visibility, animation, delete, selection and save paths, so a scripted edit
+    // is undoable and dirties the level exactly as a click does. Each refuses with a reason in `why`.
+    bool mcpLevelAbi(const mcp::AbiCall& a, std::string& result, std::string& why);
+    bool mcpLevelPlace(const std::string& text, std::string& result, std::string& why);
+    bool mcpLevelSave(const std::string& target, std::string& result, std::string& why);
+    bool mcpLevelMove(AvId e, const EditXform& x, std::string& why);
+    bool mcpLevelEntity(f64 id, AvId& out, std::string& why) const;
+
     // STARTS THE CHANNEL, WHOLE: register the ABIs, install the widget hooks, then listen -- a
     // button doing only the last would bring up a channel that answers ping and nothing else. onInit
     // calls this too, rather than keeping its own copy.
@@ -4225,6 +4636,57 @@ private:
     bool mcpAbisRegistered_ = false;
 #endif // AVER_MODULE_MCP
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
+
+    // ---- PLAY OPTIONS: the Play button's dropdown, laid out like Unreal's ----
+    // Declared unguarded so the toolbar compiles in every configuration; the bodies (SandboxPlay.cpp)
+    // guard themselves on AVER_MODULE_FRAMEWORK. Persisted in editor.ini by load/saveEditorPreferences
+    // under play.mode / play.spawnAt / play.gameGetsMouse / play.standaloneArgs.
+    //
+    // No "New Editor Window", Mobile/VR preview or multiplayer net modes: the renderer has one
+    // swapchain, there are no mobile/VR targets, and modules/net is a skeleton not in the build.
+    enum class PlayMode : u8 {
+        SelectedViewport = 0,   // play in the Level viewport, possessing the player (Alt+P)
+        Simulate         = 1,   // the game runs, the player is not possessed, the editor keeps the camera (Alt+S)
+        Standalone       = 2,   // a separate AverEngineRuntime.exe on the saved level (launchInRuntime)
+    };
+    enum class PlaySpawnAt : u8 { PlayerStart = 0, CameraLocation = 1 };
+    PlayMode    playMode_ = PlayMode::SelectedViewport;    // last launched; the main button repeats it
+    PlaySpawnAt playSpawnAt_ = PlaySpawnAt::PlayerStart;
+    // WITH NO GAMEMODE THE DEFAULT PAWN CAN WALK (Play options > "Walk"; pref play.defaultPawnWalk; --play-walk):
+    // a physics capsule character -- gravity, 40 cm stair steps, Space jumps, Shift runs, eye at 1.6 m -- so a
+    // level's stairs, decks and bridges can be walked by hand without writing a GameMode. Off (the default) is the
+    // flying spectator. walkCapsule_ is that character while Play runs, 0 otherwise.
+    bool        defaultPawnWalk_ = false;
+    int32_t     walkCapsule_ = 0;
+    bool        playGameGetsMouse_ = true;   // capture the mouse the moment a viewport session starts
+    std::string playStandaloneArgs_;         // extra command line appended for Standalone Game
+    // Ejected (F8): the session keeps running but the editor has the camera, input and tools back;
+    // the camera stops following the pawn and the pawn's owner-hidden body shows. Possess (F8 again)
+    // snaps back. Simulate is a session that starts ejected. Cleared by stopPlay.
+    bool        playEjected_ = false;
+    // Frame Skip while paused: unpause for exactly one gameplay tick, then pause again.
+    bool        playFrameStepPending_ = false;
+    bool        scrollPrefsToPlay_ = false;  // "Advanced Settings..." scrolls Preferences to Play, once
+    // Starts `m` (refused while any play is active, like the Play button) and remembers it as the
+    // main button's mode. Standalone goes through launchInRuntime and its unsaved-changes prompt.
+    void launchPlay(Engine& e, PlayMode m);
+    // PLAY FROM HERE (viewport right-click): a viewport Play whose pawn's feet start at `surface` (+ a
+    // few cm) facing the camera's yaw. playFromHere_ is the ONE-SHOT startPlay consumes; it never
+    // touches playSpawnAt_ or playMode_.
+    void playFromHere(const Vec3& surface);
+    std::optional<Vec3> playFromHere_;
+    // F8. Only meaningful in a real framework session (playSessionActive()); a no-op otherwise.
+    void togglePlayEject();
+    // Shift+F while ejected: the possessed pawn comes to the editor camera (a standing pawn's feet one
+    // eye height below it, capsule included), so F8 resumes play where the camera flew to. A no-op in
+    // any other state.
+    void teleportPawnToCamera();
+    // Frame Skip. Only while the session is paused.
+    void requestPlayFrameStep();
+    // True while a real session runs ejected.
+    bool playEjected() const;
+    // True while controller 0 possesses a pawn that is a live entity (Pawn to Camera's precondition).
+    bool hasPossessedPawn() const;
 
     void setMouseCaptured(bool on);
     void pollCapturedMouse();
@@ -4377,7 +4839,8 @@ private:
     // PickGeometry means "tried and unavailable" -- pick() falls back to the bounding box, and the
     // empty entry stops a failed load from being retried on every later click.
     std::unordered_map<u64, aver::editor::PickGeometry> pickGeometry_;
-    int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
+    int lastSceneDrawn_=-1;           // last scene-entity draw count (startupComplete's settle input; the
+                                      // scene-render log line's own throttle is g_sceneRenderLog)
     // startupComplete's settle detector; see it for why these are mutable and why a frame count.
     mutable int startupSettleCount_ = -2;   // -2 so it cannot match lastSceneDrawn_'s -1 start
     mutable int startupSettleFrames_ = 0;

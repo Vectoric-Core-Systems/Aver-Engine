@@ -126,7 +126,10 @@ int main() {
             "tool.select", "tool.move", "tool.rotate", "tool.scale",
             "sculpt.raise", "sculpt.lower", "sculpt.smooth", "sculpt.flatten",
             "mode.toggleLandscape", "view.frameSelected",
-            "play.start", "play.releaseMouse", "play.stop",
+            "play.start", "play.simulate", "play.releaseMouse", "play.eject",
+            // 2026-09-30: Pawn to Camera, beside Eject because ejected is the only state it fires in.
+            "play.pawnToCamera", "play.pause",
+            "play.frameSkip", "play.stop",
             "drawer.dismiss", "drawer.toggleContent", "drawer.toggleConsole",
             "edit.delete", "edit.undo", "edit.redo", "edit.copy", "edit.paste",
             "edit.duplicate", "edit.selectAll",

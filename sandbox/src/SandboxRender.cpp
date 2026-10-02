@@ -36,6 +36,50 @@ static bool g_noWalkCacheArg = false;
 // it feeds.
 void setNoWalkCacheArg(bool on) { g_noWalkCacheArg = on; }
 
+#if AVER_MODULE_SCENE
+// THE ENTITY-LEVEL RESOLVE'S "ALREADY DONE THIS WALK" FILTER (colourDecide). A small direct-mapped
+// table of material tokens, one per ColourWalk, so it starts empty every frame. A miss just means
+// "resolve it", which is what colourDecide did for EVERY entity before this existed, so a slot that a
+// colliding token keeps evicting costs speed and never a skipped resolve. TRANSLATION-UNIT-LOCAL for
+// the same reason as g_noWalkCacheArg: SandboxApp.hpp is not part of this change.
+// SIZED FOR A CITY, NOT A ROOM: a level names hundreds of distinct tokens (NeonDistrict: ~650
+// materials), and at 128 direct-mapped slots they evicted one another so often that most entities
+// resolved anyway. 4,096 slots with a 4-slot probe keeps "once per token per walk" true at that scale
+// for ~20 KB zeroed per frame.
+struct EntityTokenMemo {
+    static constexpr u32 kBits = 12;
+    static constexpr u32 kSlots = 1u << kBits;
+    static constexpr u32 kProbe = 4;
+    i32 token[kSlots] = {};
+    bool seen[kSlots] = {};
+    // True the first time `t` is offered this walk (or since it lost its slot); the caller resolves
+    // on true.
+    bool first(i32 t) {
+        u32 slot = (static_cast<u32>(t) * 2654435761u) >> (32u - kBits);
+        for (u32 p = 0; p < kProbe; ++p, slot = (slot + 1) & (kSlots - 1)) {
+            if (!seen[slot]) { seen[slot] = true; token[slot] = t; return true; }
+            if (token[slot] == t) return false;
+        }
+        token[slot] = t;          // window full: take the slot past it, as the direct map always did
+        seen[slot] = true;
+        return true;
+    }
+};
+
+// WHEN THE "[Sandbox] scene-render:" LINE WAS LAST PRINTED, and what it said. Kept apart from
+// SandboxApp's lastSceneDrawn_/Culled_/OwnerHidden_ on purpose: those are STATE other code reads
+// (startupComplete's settle detector compares lastSceneDrawn_ frame to frame), so they must follow
+// every frame; this only decides whether to WRITE the line. Translation-unit-local like
+// g_noWalkCacheArg -- one SandboxApp per process, and SandboxApp.hpp is not part of this change.
+struct SceneRenderLogState {
+    int drawn = -1;
+    int culled = -1;
+    int ownerHidden = -1;
+    std::chrono::steady_clock::time_point at{};
+};
+static SceneRenderLogState g_sceneRenderLog;
+#endif  // AVER_MODULE_SCENE
+
 // Submits the frame: the editor scene, the level world, gizmos, and the overlays.
 void SandboxApp::onRender(Engine& e)  {
     handleManip(e);
@@ -141,6 +185,19 @@ void SandboxApp::onRender(Engine& e)  {
     // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
     {
         scene::World& w = scene::World::instance();
+        // One frame of the Play mobility tracker (PlayMobility.hpp), before either walk asks it
+        // anything. The possessed pawn's whole tree is movable from its first frame: the viewmodel
+        // hangs off its camera and moves whenever the player looks around.
+        {
+            scene::Entity movableRoot = scene::kInvalidEntity;
+#if AVER_MODULE_FRAMEWORK
+            if (playSessionActive()) {
+                const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                if (pn > 0) movableRoot = static_cast<scene::Entity>(static_cast<u32>(pn));
+            }
+#endif
+            playMobility_.beginFrame(movableRoot);
+        }
         // The three drawn/culled/owner-hidden counters belong to game::drawWorld now: it fills a
         // SceneDrawStats the editor reads back (`colourStats` below) rather than incrementing
         // locals itself. 3B's per-frame direct-route tallies (draws delivered, multi-part count for
@@ -216,7 +273,8 @@ void SandboxApp::onRender(Engine& e)  {
         //
         // NO visitOrder: occlusionOrder_ reorders the COLOUR walk for buildPyramid(); this pass has
         // no pyramid and no pass-1/pass-2 boundary, so world order (null) is correct.
-        if (e.device()->depthPrepassEnabled()) {
+        // Not in Wireframe: it draws no scene colour, so there is nothing for depth to save.
+        if (e.device()->depthPrepassEnabled() && !wireframe_) {
             if (rhi::IRenderContext* pctx = e.device()->renderContext()) {
                 rhi::ScopedGpuStat prepassScope(*pctx, "depth prepass");
 
@@ -297,6 +355,7 @@ void SandboxApp::onRender(Engine& e)  {
                 // hole in the shape of the character you're playing. Both passes must agree on
                 // "is this entity drawn" or the prepass writes depth for something that never appears.
                 popt.ownerHideRoot = firstPersonPawn_;
+                popt.mobility = &playMobility_;
                 // --no-walk-cache, negated (g_noWalkCacheArg true = cache OFF). MUST MATCH the
                 // colour call site's copt.useMeshLookupCache below -- both passes resolve the same
                 // mesh ids, so caching one and not the other would measure two different things
@@ -715,6 +774,17 @@ void SandboxApp::onRender(Engine& e)  {
             // could disagree with it), filled once per throttled print -- see the scene-walk log block
             // below -- so it stays at its constructed 0.0 on any frame that log block does not run.
             f64 dispatchMs = 0.0;
+            // Entity-level material tokens colourDecide has already resolved THIS walk; see
+            // EntityTokenMemo and the resolve in colourDecide.
+            EntityTokenMemo entityTokens;
+            // Entities colourSkipped saw for the first time this walk that carry a level placement
+            // record (authored hidden, or hidden in the editor) and so are skipped by design; told
+            // once, as a single line, after the walk -- see colourSkipped.
+            u32 authoredHiddenNew = 0;
+            // The first few of them, named in that line: a script that zero-fills the renderer of an
+            // entity that happens to carry a record lands in this count too, and an id is what lets
+            // that case still be found.
+            u64 authoredHiddenIds[3] = {};
         } walk;
         walk.self = this;
         walk.engine = &e;
@@ -855,7 +925,24 @@ void SandboxApp::onRender(Engine& e)  {
             // matConstants through the CONTEXT (setDrawBinding only forwards from inside drawMesh(),
             // which that path skips), and resolveSurface()'s once-per-token warning sets still need
             // filling for the ENTITY's token, which a multi-part mesh resolves nowhere else.
-            const SandboxApp::ResolvedSurface rsEntity = self.resolveSurface(d.material);
+            //
+            // THE RESULT IS READ BY THE GPU CLUSTER PATH ALONE -- col/metallic/roughness/blended
+            // below and rsEntity.matSet/matConstants/matBytes inside its dispatch, all behind
+            // lodMeshShaderEnabled_ -- so only with that path on does every entity need its own
+            // answer. Without it the only reason left is the warning/lazy-entry side effects, and
+            // those are per TOKEN: resolveSurface's warning sets are function-local statics, and
+            // the MaterialSystem entry it builds on first ask stays built. So the resolve runs once
+            // per token per walk instead of once per rasterised entity (roughly seven hash lookups
+            // each), a token first met this walk still gets exactly the call it always got, and an
+            // unread `rsEntity` stays the default look.
+#if AVER_MODULE_TRIFACTOR
+            const bool entityLookRead = self.lodMeshShaderEnabled_;
+#else
+            const bool entityLookRead = false;
+#endif
+            SandboxApp::ResolvedSurface rsEntity;
+            if (entityLookRead || c.entityTokens.first(d.material))
+                rsEntity = self.resolveSurface(d.material);
 
             // A posed entity's vertices live in a different MeshHandle sharing this one's index
             // buffer, so substituting the handle reaches every pass at once. Zero = "not posed",
@@ -894,8 +981,10 @@ void SandboxApp::onRender(Engine& e)  {
             // breaking the shadow/GI/TLAS exclusion `blended` exists to enforce. A blended instance
             // still reaches the ordinary drawMesh() call via the CPU per-cluster/discrete-LOD
             // paths, or the unmodified mesh -- the only place that draws glass correctly.
+            // NOR IN WIREFRAME: this path shades straight into the scene target, and the wireframe
+            // view draws only what reaches drawMesh (IDevice::setWireframe).
             if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ && !d.skinned &&
-                d.haveWorldBox && !blended) {
+                d.haveWorldBox && !blended && !self.wireframe_) {
                 if (const auto git = self.meshClusterGpu_.find(d.meshId); git != self.meshClusterGpu_.end()) {
                     const auto& gpu = git->second;
                     if (rhi::IRenderContext* ctx = c.engine->device()->renderContext();
@@ -1259,8 +1348,8 @@ void SandboxApp::onRender(Engine& e)  {
             // CPU per-cluster): an entity that walk skipped wrote no depth, so testing against the
             // LessEqual/no-write pipeline here would test against whatever depth was already there.
             {
-                bool eligible =
-                    c.engine->device()->depthPrepassEnabled() && !clusterDispatched && !d.skinned;
+                bool eligible = c.engine->device()->depthPrepassEnabled() && !self.wireframe_ &&
+                                !clusterDispatched && !d.skinned;
 #if AVER_MODULE_TRIFACTOR
                 if (eligible && self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ &&
                     self.meshClusterGpu_.count(d.meshId)) eligible = false;
@@ -1349,19 +1438,39 @@ void SandboxApp::onRender(Engine& e)  {
         // separate keys.
         auto colourSkipped = [](scene::Entity ent, u64 meshId, aver::game::DrawSkipReason reason,
                                 void* user) {
-            SandboxApp& self = *static_cast<ColourWalk*>(user)->self;
+            ColourWalk& c = *static_cast<ColourWalk*>(user);
+            SandboxApp& self = *c.self;
             if (reason == aver::game::DrawSkipReason::NotVisible) {
                 // A mesh is named and the visible bit is clear -- the zero-fill trap:
                 // World::addComponent hands back zeroed storage and kMeshRendererVisible is
                 // positive-sense, so a renderer attached directly is attached, correct, and
                 // invisible (GraphComponentTree.cs:100-103 dodges the same trap via SetVisible).
                 // Once per entity: unthrottled would flood the log.
-                if (self.undrawnInvisible_.insert(static_cast<u64>(ent)).second)
-                    AVER_WARN("[Sandbox] entity {} names mesh id {} but its kMeshRendererVisible "
-                              "bit is clear, so the scene walk skips it and it draws nothing. A "
-                              "component attached directly arrives zero-filled -- attach through "
-                              "Entity.SetVisible (EnsureMeshRenderer), which seeds the bit.",
-                              static_cast<u64>(ent), meshId);
+                //
+                // NOT EVERY CLEAR BIT IS THE TRAP. A level placement that asked to be hidden
+                // (OcWorldPlacement::visible false -- a collision volume, a proxy) never had the bit
+                // seeded on purpose (LevelInstance.cpp), and an editor H-hide clears it too. Both kinds
+                // of entity have an entityLabels_ record -- level load, paste, duplicate, spawn and MCP
+                // placement all write one (SandboxLevelLoad.cpp, SandboxSelection.cpp,
+                // SandboxViewport.cpp, SandboxMcp.cpp) -- while an entity a script built with
+                // World::addComponent, the entity this warning is FOR, never gets one. The level that
+                // motivated this had 8,765 authored-hidden colliders, and warning about each (one
+                // flushed line apiece, on the first frame) buried every real fault in the log.
+                //
+                // Decided on the first sighting only, behind the same once-per-entity set as before, so
+                // the per-frame cost for a hidden entity is what it was: one set lookup. An entity that
+                // has a record is counted, not warned about, and reported in one line after the walk.
+                if (self.undrawnInvisible_.insert(static_cast<u64>(ent)).second) {
+                    if (self.entityLabels_.find(static_cast<u32>(ent)) != self.entityLabels_.end()) {
+                        if (c.authoredHiddenNew < 3) c.authoredHiddenIds[c.authoredHiddenNew] = static_cast<u64>(ent);
+                        ++c.authoredHiddenNew;
+                    } else
+                        AVER_WARN("[Sandbox] entity {} names mesh id {} but its kMeshRendererVisible "
+                                  "bit is clear, so the scene walk skips it and it draws nothing. A "
+                                  "component attached directly arrives zero-filled -- attach through "
+                                  "Entity.SetVisible (EnsureMeshRenderer), which seeds the bit.",
+                                  static_cast<u64>(ent), meshId);
+                }
                 return;
             }
             // An id that resolves to nothing, said once per id (not per entity): the id identifies
@@ -1381,6 +1490,7 @@ void SandboxApp::onRender(Engine& e)  {
         // The possessed first-person pawn; a COMP tree can nest, so the pawn's body may be several
         // hops below it. World::setParent already refuses a cycle, so this walk terminates.
         copt.ownerHideRoot = firstPersonPawn_;
+        copt.mobility = &playMobility_;
         // Worded differently from the library's line on purpose: "spawned CMeshRenderer entities"
         // names a concept a packaged game has no vocabulary for, and "culled" deliberately covers
         // occlusion as well as the frustum (see SceneDrawStats' comment for why the two can't be
@@ -1423,6 +1533,17 @@ void SandboxApp::onRender(Engine& e)  {
         aver::game::SceneDrawStats colourStats;
         aver::game::drawWorld(*e.device(), viewProj_, content_, colourStats, colourMaterials,
                               skinnedScene_.get(), copt);
+        // The one line that stands in for colourSkipped's old per-entity warning on entities that
+        // carry a level placement record: how many were newly seen this walk, so a level that
+        // authors thousands of hidden colliders says so once (on its first frame, and again only if
+        // more entities go hidden later) instead of once per entity.
+        if (walk.authoredHiddenNew)
+            AVER_INFO("[Sandbox] {} entit{} with a level placement record newly seen with "
+                      "kMeshRendererVisible clear (first: {} {} {}) -- authored-hidden placements "
+                      "(collision volumes, proxies) or hidden in the editor; the scene walk skips them by "
+                      "design. The zero-fill warning stays for an entity that has no placement record.",
+                      walk.authoredHiddenNew, walk.authoredHiddenNew == 1 ? "y" : "ies",
+                      walk.authoredHiddenIds[0], walk.authoredHiddenIds[1], walk.authoredHiddenIds[2]);
         // Closes "raster scene draws" here, at the end of the draw walk: the occlusion reporting
         // and pass-2 fallback below are not scene shading and don't belong in the number.
         rasterScope.reset();
@@ -1551,10 +1672,24 @@ void SandboxApp::onRender(Engine& e)  {
         }
         // Read back out of SceneDrawStats, not counted here: suppressLog above stops the library
         // writing its own "[Game] scene-render:" line so the editor can write this one instead.
-        // Compared against SandboxApp's own previous-frame copies, not colourStats' `last*` trio,
+        // Compared against the last line PRINTED (g_sceneRenderLog), not colourStats' `last*` trio,
         // since drawWorld updates that trio before returning.
-        if (colourStats.drawn != lastSceneDrawn_ || colourStats.culled != lastSceneCulled_ ||
-            colourStats.ownerHidden != lastSceneOwnerHidden_) {
+        //
+        // THE LINE IS THROTTLED, THE STATE IS NOT. lastSceneDrawn_ is read every frame by
+        // startupComplete()'s settle detector, so it (and its two siblings) follow the counts on
+        // every frame exactly as before, whether or not a line is written. What is throttled is the
+        // WRITE: over a big level a moving camera changes these counts nearly every frame, and each
+        // AVER_* line takes the log mutex, flushes and feeds the Output Log. The line is compared
+        // against what the LAST PRINTED line said (not against last frame), so a change that is held
+        // back is still owed: once the camera settles, the next line is at most a second away and says
+        // the final numbers. The first line always prints, and so does every change in a bounded run
+        // (--frames N, the gates and captures), where frames are not one-to-one with wall time and the
+        // log is what a script reads.
+        const auto sceneNow = std::chrono::steady_clock::now();
+        if ((colourStats.drawn != g_sceneRenderLog.drawn || colourStats.culled != g_sceneRenderLog.culled ||
+             colourStats.ownerHidden != g_sceneRenderLog.ownerHidden) &&
+            (g_sceneRenderLog.drawn < 0 || maxFrames_ != 0 ||
+             sceneNow - g_sceneRenderLog.at >= std::chrono::seconds(1))) {
             // F4 (occlusion-fix-plan.md): `culled` now counts an occlusion-culled entity too, not
             // only frustum-culled -- previously the occlusion branch incremented no counter at all,
             // so its contribution was invisible here. Relabelled from "frustum-culled" to plain
@@ -1563,10 +1698,14 @@ void SandboxApp::onRender(Engine& e)  {
             AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} culled, {} owner-hidden",
                       colourStats.drawn, colourStats.drawn == 1 ? "y" : "ies", colourStats.culled,
                       colourStats.ownerHidden);
-            lastSceneDrawn_ = colourStats.drawn;
-            lastSceneCulled_ = colourStats.culled;
-            lastSceneOwnerHidden_ = colourStats.ownerHidden;
+            g_sceneRenderLog.drawn = colourStats.drawn;
+            g_sceneRenderLog.culled = colourStats.culled;
+            g_sceneRenderLog.ownerHidden = colourStats.ownerHidden;
+            g_sceneRenderLog.at = sceneNow;
         }
+        lastSceneDrawn_ = colourStats.drawn;
+        lastSceneCulled_ = colourStats.culled;
+        lastSceneOwnerHidden_ = colourStats.ownerHidden;
 #if AVER_MODULE_TRIFACTOR
         // Greppable `[LOD-SELECT]`, only when the tuple changed. trianglesBeforeLod0 vs
         // trianglesAfterLevel predicts frame time; the cluster-cull counters are real telemetry
@@ -1664,32 +1803,58 @@ void SandboxApp::onRender(Engine& e)  {
 #else
     const bool anyPlaying = false;
 #endif
-    if (hasSelection_ && maxFrames_ == 0 && !anyPlaying && !noEditorChrome_) {
+    // Ejected shows the outline again (UE shows selection in Simulate): anyPlaying itself must stay
+    // the union every OTHER play-chrome gate (including the Player Start marker below) relies on.
+    if (hasSelection_ && maxFrames_ == 0 && (!anyPlaying || playEjected()) && !noEditorChrome_) {
+        // Unreal's selection outline width, scaled by DPI like the gizmo handles below.
+        e.device()->setLineWidth(2.0f * dpi_);
         // One drawLines per selected entity. selectionOutlineLines caches per MESH id, so N
         // copies of the same asset share one line buffer and this costs N draws, not N buffers.
         for (const auto& [xf, meshId] : selectionOutlines_)
             if (const rhi::LineHandle lh = selectionOutlineLines(e, meshId))
                 e.device()->drawLines(lh, &xf.m[0][0]);
+        e.device()->setLineWidth(1.0f);   // sticky: back to hairline before the marker/grid below
     }
     hasSelection_ = false;
     selectionOutlines_.clear();
 
-    // ---- THE PLAYER START'S MARKER ----
+    // ---- THE PLAYER START'S MARKER: a wire capsule, a facing arrow and a billboard sprite, like
+    // Unreal's APlayerStart ----
     // Queued every frame rather than kept as scene state, matching the rest of the editor's chrome.
     // Hidden by the same anyPlaying the outline above computes, so the two can't drift apart.
     // NOT gated on maxFrames_, unlike the outline: the outline responds to a click (meaningless in
     // a bounded run); the marker is part of what the level looks like.
+    //
+    // viewportIconsReady_ gates only the SPRITE below (it needs the icon renderer and its texture);
+    // the capsule/arrow are ordinary line meshes and draw whenever the marker itself should be
+    // visible, the same as the gizmo or the grid.
 #if AVER_MODULE_SCENE
-    if (viewportIconsReady_ && !noEditorChrome_ && !anyPlaying &&
-        playerStart_ != scene::kInvalidEntity) {
+    if (!noEditorChrome_ && !anyPlaying && playerStart_ != scene::kInvalidEntity) {
         const scene::World& psw = scene::World::instance();
         if (psw.valid(playerStart_)) {
-            // Raised by its own half-height so the pin's TIP lands on the marker's origin
-            // rather than its middle -- the quad is centred on the position it is given, and
-            // the artwork points down (see scripts/make-editor-icons.py).
-            const Vec3 at = psw.localTransform(playerStart_).position;
-            viewportIcons_.addIcon(Vec3{at.x, at.y, at.z + kPlayerStartIconHalfSize},
-                                   kPlayerStartIconHalfSize, playerStartIcon_);
+            const Transform& psXf = psw.localTransform(playerStart_);
+            // No scale: psXf.scale is the marker's PICK CUBE size (makePlayerStart), unrelated to
+            // the capsule/arrow's own real-world centimetre dimensions.
+            const Mat4 psWorld = Mat4::fromQuat(psXf.rotation) * Mat4::translation(psXf.position);
+            // Unreal highlights the selected actor's own shape rather than a separate outline on top
+            // of it; the Player Start's mesh draw is skipped by identity (the colour walk above), so
+            // selectionOutlines_ never carries it -- checked directly here instead, the same
+            // selection test colourDelivered uses for every other entity.
+            const bool psSelected = sel_ == kSelScene &&
+                (playerStart_ == selEntity_ || multiIsSelected(playerStart_));
+            e.device()->setLineDepth(true);
+            e.device()->setLineWidth(1.5f * dpi_);
+            e.device()->drawLines(psSelected ? playerStartCapsuleSel_ : playerStartCapsule_, &psWorld.m[0][0]);
+            e.device()->drawLines(playerStartArrow_, &psWorld.m[0][0]);
+            e.device()->setLineWidth(1.0f);
+
+            if (viewportIconsReady_) {
+                // Billboard at the capsule's own centre height -- no longer a pin with its tip on
+                // the origin (see kPlayerStartIconHalfSize's own comment).
+                viewportIcons_.addIcon(Vec3{psXf.position.x, psXf.position.y,
+                                            psXf.position.z + kPlayerStartCapsuleHalfHeight},
+                                       kPlayerStartIconHalfSize, playerStartIcon_);
+            }
         }
     }
 #endif
@@ -1699,6 +1864,9 @@ void SandboxApp::onRender(Engine& e)  {
     // unlit on here would flatten the grid, the gizmo and every other piece of chrome drawn
     // after the scene.
     e.device()->setUnlit(false);
+    // Explicit, not relying on the selection outline/marker above resetting it themselves: the grid,
+    // nav mesh and collider overlay below must stay hairline-thin regardless of what drew before them.
+    e.device()->setLineWidth(1.0f);
     if (showGrid_ && !noEditorChrome_) {
         const Mat4 g = Mat4::identity();
         e.device()->drawLines(gridMesh_, &g.m[0][0]);
@@ -1715,13 +1883,15 @@ void SandboxApp::onRender(Engine& e)  {
 #if AVER_MODULE_PHYSICS
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
-    // already here for the navmesh. REBUILT EVERY FRAME, unlike the navmesh's cached overlay: a
-    // dynamic body moves, so a cached mesh would draw last frame's boxes. Costs one line mesh per
-    // frame while the toggle is on, nothing when off.
+    // already here for the navmesh. TWO MESHES: the static bodies, rebuilt only when the bodies
+    // change, and the few that move, remade each frame a play session runs and some box moved.
+    // rebuildColliderOverlay keeps the last of each while its stamp holds. See it for the stamp and
+    // the fallback to a full per-frame walk when untracked static bodies exist.
     if (showColliders_ && !noEditorChrome_) rebuildColliderOverlay(e);
-    if (showColliders_ && !noEditorChrome_ && colliderMesh_) {
+    if (showColliders_ && !noEditorChrome_ && (colliderMesh_ || colliderMoverMesh_)) {
         const Mat4 cm = Mat4::identity();   // world space already, same as the navmesh
-        e.device()->drawLines(colliderMesh_, &cm.m[0][0]);
+        if (colliderMesh_) e.device()->drawLines(colliderMesh_, &cm.m[0][0]);
+        if (colliderMoverMesh_) e.device()->drawLines(colliderMoverMesh_, &cm.m[0][0]);
     }
 #endif
     // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since

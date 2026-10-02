@@ -12,8 +12,11 @@ namespace aver::editor {
 std::string runtimeExecutablePath();
 
 // Launches AverEngineRuntime.exe on `levelPath` within `projectManifestPath`'s project, detached:
-// the editor neither waits for the process nor holds a handle to it afterwards. False on failure,
-// with `*why` (when non-null) set to what went wrong.
-bool launchRuntime(const std::string& projectManifestPath, const std::string& levelPath, std::string* why);
+// the editor neither waits for the process nor holds a handle to it afterwards. `extraArgs`, when
+// non-empty, is appended to the command line verbatim after --project and the level path -- the
+// Standalone launch's own arguments, not a single argument to quote. False on failure, with `*why`
+// (when non-null) set to what went wrong.
+bool launchRuntime(const std::string& projectManifestPath, const std::string& levelPath,
+                   const std::string& extraArgs, std::string* why);
 
 } // namespace aver::editor

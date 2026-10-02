@@ -13,6 +13,11 @@
 // through its Aver.Assets dependency, so this resolves with PBR on or off. #pragma once makes the
 // second arrival a no-op, so the default build sees exactly what it saw before.
 #include "aver/assets/LevelSky.hpp"
+// loadLevel's afterInstantiate hook loads the level's instanced foliage once placements exist --
+// see the header for the contract three packages implement parts of.
+#if AVER_MODULE_VOXI
+#include "aver/game/GameFoliage.hpp"
+#endif
 
 namespace aver {
 #if AVER_MODULE_SYNAPSE
@@ -266,7 +271,8 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         levelPcgVolumes_ = w.pcgVolumes;
         // ...and the rest of the header, for exactly the same reason. Placements and PCG volumes are
         // stripped because they are already held elsewhere; what is left is identity, BUILD, ALGO,
-        // SPAWN and the environment numbers the editor does not expose.
+        // SPAWN, the environment numbers the editor does not expose, and the header comments
+        // (w.notes: credits/licence lines), which saveLevel writes straight back out.
         levelHeader_ = w;
         levelHeader_.placements.clear();
         levelHeader_.pcgVolumes.clear();
@@ -315,9 +321,34 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     // a metre apart agree about where the ground is.
     hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
 #endif
+    // STAGED PROGRESS (GameLevel::LoadHooks::progress): forwarded into whichever LoadingScreen is
+    // currently active -- openLevelDirect's own for a Content Browser open, applyProject's own when
+    // this is the start level -- so both hosts share the identical parse/environment/placements
+    // bands with no second rule. A load with no active screen (--play-test, a forwarded open with no
+    // window) pays one null check per stage and nothing else.
+    hooks.progress = [this](const std::string& stage, f32 fraction) {
+        if (projectLoading_) projectLoading_->stage(stage.c_str(), fraction);
+    };
     hooks.afterInstantiate = [this](const game::GameLevel::LoadedLevel& loaded) {
         if (loaded.legacy) onLegacyOcmapInstantiated(loaded);
         else               onLevelInstantiated(loaded);
+#if AVER_MODULE_VOXI
+        // FOLIAGE, AFTER PLACEMENTS -- the 75-90% band of the shared level-open contract, mirroring
+        // Runtime/src/GameApp.cpp's installLevelHooks so the two hosts load it the same way. Runs for
+        // a legacy .ocmap too (loaded.world is level_'s synthesised OcWorldData there, whose
+        // foliageFiles is always empty -- loadLevelFoliage's own empty-list branch is then a no-op
+        // that still clears whatever the previous level left). GATED ON voxiAttached_, same as
+        // GameApp's identical call: setFoliage builds GPU-side tables and must not run before init()
+        // has given the renderer a device.
+        if (voxiAttached_) {
+            if (projectLoading_) projectLoading_->stage("Loading foliage", 0.75f);
+            const game::FoliageLoadResult fr = game::loadLevelFoliage(
+                loaded.world, content_, &voxiRenderer_, project_.contentDir(),
+                [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); });
+            if (!fr.error.empty()) AVER_WARN("[Foliage] {}", fr.error);
+        }
+        if (projectLoading_) projectLoading_->stage("Finishing", 0.90f);
+#endif
     };
     level_.setLoadHooks(std::move(hooks));
     level_.load(path, content_);
@@ -348,6 +379,11 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         // instruction nothing records afterwards. Inferring it from entityBodies_ would be wrong:
         // a level opened before aver_phys_init has no bodies for ANY placement.
         entityCollide_[static_cast<u32>(e)] = p.collide;
+        // THE AUTHORED ANIMATION, remembered for the same reason: world::instantiate has already given
+        // the entity a CAnimator, but that is the live clock Play advances, and the save must write what
+        // the level said, not where a session left it.
+        if (!p.animClip.empty())
+            entityAnim_[static_cast<u32>(e)] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
         // AND `snap`, FOR THE SAME REASON AND A WORSE FAILURE. snapToGround has no component
         // either, but unlike nocollide it also changes what z MEANS: with it set, the authored z
         // is an offset ABOVE the terrain, and world::instantiate resolves it to ground + offset
@@ -411,22 +447,22 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // BOTH WRITERS ARE SKIPPED, not just the restore: the frameCameraOnLevel fallback below is the
     // other way this function moves the camera, and letting it run would replace one silent
     // override with another.
+    //
+    // WHERE THE USER LEFT THE CAMERA OUTRANKS THE CAMERA RECORD: the record is only as new as the
+    // level's last save, the remembered view is from the last time the level was left, saved or
+    // not (storeLevelView).
+    editor::LevelView leftView;
     if (camOverride_) {
         if (w.hasCamera) AVER_INFO("[Level] CAMERA record ignored -- --cam was given and outranks it");
+    } else if (lookupLevelView(loaded.path, leftView)) {
+        applyLevelView(leftView);
+        levelCameraRestored_ = true;
+        AVER_INFO("[Level] camera back where it was left: ({:.0f},{:.0f},{:.0f}) yaw {:.1f} pitch {:.1f} "
+                  "(Saved/LevelViews.ini)", camPos_.x, camPos_.y, camPos_.z, leftView.yawDeg, leftView.pitchDeg);
     } else if (w.hasCamera) {
-        constexpr f32 kRad = 3.14159265358979323846f / 180.0f;
-        camPos_ = Vec3{static_cast<f32>(w.camX), static_cast<f32>(w.camY), static_cast<f32>(w.camZ)};
-        yaw_    = static_cast<f32>(w.camYaw) * kRad;
-        pitch_  = static_cast<f32>(w.camPitch) * kRad;
-        // Clamped to the same limits the mouse-look path enforces, so a hand-edited or
-        // corrupted file cannot put the camera somewhere the controls can never recover from.
-        pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
-        // 0 means UNSTATED -- a level that carried no speed leaves the user's preference alone
-        // rather than resetting the camera to a stored zero and appearing to freeze.
-        if (w.camSpeed > 0.0) {
-            flySpeed_ = static_cast<f32>(w.camSpeed);
-            flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
-        }
+        applyLevelView(editor::LevelView{static_cast<f32>(w.camX), static_cast<f32>(w.camY),
+                                         static_cast<f32>(w.camZ), static_cast<f32>(w.camYaw),
+                                         static_cast<f32>(w.camPitch), static_cast<f32>(w.camSpeed)});
         levelCameraRestored_ = true;
         // LOGGED because this is otherwise invisible: a restored camera and an auto-framed one
         // look the same from outside the process, and the difference is exactly what a person
@@ -511,9 +547,16 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     sel_ = -1;
     selEntity_ = scene::kInvalidEntity;
 
+    // Where the camera was left, else framed on the level (an .ocmap has no CAMERA record).
+    editor::LevelView leftView;
+    if (!camOverride_ && lookupLevelView(loaded.path, leftView)) {
+        applyLevelView(leftView);
+        levelCameraRestored_ = true;
+    } else if (!loaded.world.placements.empty()) {
+        frameCameraOnLevel();
+    }
     // The legacy .ocmap path fitted the GI volume through the camera framing's old side effect too,
     // so it gets the explicit call for the same reason the OCWORLD path above does.
-    if (!loaded.world.placements.empty()) frameCameraOnLevel();
 #if AVER_MODULE_VOXI
     if (!loaded.world.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeToLevel();
 #endif
@@ -663,6 +706,76 @@ void SandboxApp::frameCameraOnLevel() {
     streaming_.resetVelocityTracking();
 }
 
+// Moves the editor camera to a stored view -- the level's CAMERA record or where it was last left.
+void SandboxApp::applyLevelView(const editor::LevelView& v) {
+    constexpr f32 kRad = 3.14159265358979323846f / 180.0f;
+    camPos_ = Vec3{v.x, v.y, v.z};
+    yaw_    = v.yawDeg * kRad;
+    // Clamped to the same limits the mouse-look path enforces, so a hand-edited or corrupted file
+    // cannot put the camera somewhere the controls can never recover from.
+    pitch_  = std::fmax(-1.54f, std::fmin(1.54f, v.pitchDeg * kRad));
+    // 0 means UNSTATED -- no stored speed leaves the user's preference alone rather than resetting
+    // the camera to a stored zero and appearing to freeze.
+    if (v.speed > 0.0f) flySpeed_ = std::fmax(20.0f, std::fmin(40000.0f, v.speed));
+    streaming_.resetVelocityTracking();   // a teleport; see frameCameraOnLevel
+}
+
+// <project>/Saved/LevelViews.ini, or empty with no project: editor.ini deliberately holds nothing
+// about a project, so a level outside one has nowhere to be remembered.
+std::string SandboxApp::levelViewsPath() const {
+    return project_.valid() ? project_.dir + "\\Saved\\LevelViews.ini" : std::string();
+}
+
+bool SandboxApp::lookupLevelView(const std::string& levelPath, editor::LevelView& out) const {
+    if (maxFrames_ != 0) return false;
+    const std::string file = levelViewsPath();
+    const std::string key = editor::levelViewKey(levelPath, project_.dir);
+    if (file.empty() || key.empty()) return false;
+    std::string text;
+    if (!readFileText(file, text)) return false;   // no file yet: nothing remembered
+    const editor::LevelViewMap views = editor::parseLevelViews(text);
+    const auto it = views.find(key);
+    if (it == views.end()) return false;
+    out = it->second;
+    return true;
+}
+
+// Read-modify-write, so the other levels' entries (and a second editor's) survive. Skipped when the
+// entry already says the same thing, so switching levels without moving never touches the file.
+void SandboxApp::storeLevelView() {
+    if (maxFrames_ != 0 || levelPath_.empty()) return;
+    const std::string file = levelViewsPath();
+    const std::string key = editor::levelViewKey(levelPath_, project_.dir);
+    if (file.empty() || key.empty()) return;
+
+    editor::LevelView v{camPos_.x, camPos_.y, camPos_.z, degrees(yaw_), degrees(pitch_), flySpeed_};
+#if AVER_MODULE_FRAMEWORK
+    // While a session drives the camera from the pawn, camPos_ is the pawn's eye, not the editor's.
+    if (preplayViewValid_ && anyPlayActive() && !playEjected()) v = preplayView_;
+#endif
+
+    std::string text;
+    readFileText(file, text);   // missing is fine: this is the first entry
+    editor::LevelViewMap views = editor::parseLevelViews(text);
+    if (const auto it = views.find(key); it != views.end()) {
+        const editor::LevelView& o = it->second;
+        if (o.x == v.x && o.y == v.y && o.z == v.z && o.yawDeg == v.yawDeg &&
+            o.pitchDeg == v.pitchDeg && o.speed == v.speed)
+            return;
+    }
+    views[key] = v;
+    createDirectories(project_.dir + "\\Saved");
+    // DirectWrite fallback, editor.ini's trade: a remembered camera is cache-grade, and a locked
+    // file falling back to a plain write beats the view silently never reaching disk.
+    AtomicWriteError err;
+    if (!writeFileTextAtomic(file, editor::formatLevelViews(views), AtomicFallback::DirectWrite, &err)) {
+        AVER_WARN("[Level] could not remember the camera for '{}' in {} ({})", key, file,
+                  err.op.empty() ? "write failed" : err.op);
+        return;
+    }
+    AVER_INFO("[Level] camera for '{}' remembered at ({:.0f},{:.0f},{:.0f})", key, v.x, v.y, v.z);
+}
+
 void SandboxApp::loadStartMap(Engine& eng) {
     // A MAP NAMED ON THE COMMAND LINE OUTRANKS THE PROJECT'S START MAP, loaded even when the
     // project has no start map at all -- the whole point of naming one. Checked before
@@ -688,6 +801,14 @@ void SandboxApp::loadStartMap(Engine& eng) {
 // Destroys the loaded level's entities and everything keyed to them: labels, bodies, undo.
 void SandboxApp::unloadLevel(Engine& eng) {
     (void)eng;   // only read under AVER_MODULE_LANDSCAPE, at the end of this function
+#if AVER_MODULE_FRAMEWORK
+    // Every way out of a level (open, New, a project switch) ends a running session first, so object
+    // animation stops and the Play snapshot is restored before the entities it names go away.
+    if (anyPlayActive()) stopPlay();
+#endif
+    // FIRST, while levelPath_ still names the level being left: every way out of a level (another
+    // level, New Level) comes through here. Closing the editor does not; onShutdown calls it too.
+    storeLevelView();
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy() --
     // see GameLevel::unload's identical comment for why (the managed-dispatch unbind hook is what
@@ -720,6 +841,8 @@ void SandboxApp::unloadLevel(Engine& eng) {
     levelPcgVolumes_.clear();
     levelHeader_ = fmt::OcWorldData{};
     entityCollide_.clear();
+    entityAnim_.clear();
+    animEditBefore_.clear();
     entitySnapZ_.clear();
     // The legacy OCMAP state, cleared with the rest -- see levelIsLegacyOcmap_'s own comment
     // for why a stale `true` here would be worse than a stale levelHeader_: it would route the
@@ -755,6 +878,35 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // slider had never been touched. With one member, leaving it alone would carry one level's
     // weather into the next one that declares none.
     fogDensity_ = 4e-6f;
+#if AVER_MODULE_VOXI
+    // FOLIAGE LIVES OUTSIDE levelEntities_ ENTIRELY (no entity, no draw-list membership -- see
+    // GameFoliage.hpp's own header comment), so nothing above this line touches it. Cleared here
+    // rather than left for the next loadLevel's afterInstantiate to replace: New Level and a load
+    // that fails after this point must not leave the PREVIOUS level's trees standing in an
+    // otherwise-empty world. Gated on voxiAttached_ like every other post-init voxiRenderer_ call
+    // this function's neighbours make (e.g. GameApp's identical hooks.afterUnload).
+    if (voxiAttached_) voxiRenderer_.clearFoliage();
+#endif
+#if AVER_MODULE_PBR
+    // LEVEL-SCOPED MATERIAL RESIDENCY (docs: PACKAGE level-materials): every way OUT of a level goes
+    // through this function (this function's own opening comment), so it is the one place that can
+    // release what the level being left needed without also having to know whether another one is
+    // about to replace it. Releasing HERE, before the caller (loadLevel, startNewLevel) goes on to
+    // load or not load a next level, is deliberately the "simplest correct order" rather than the
+    // most efficient one: a name both the outgoing and incoming level share is released here and
+    // reloaded a moment later by GameLevel::load()'s own materialForSurface() calls, which is a
+    // redundant file read and texture upload for anything both levels use, traded for not needing
+    // this function to know what "the next level" even is (unloadLevel() runs standalone from
+    // startNewLevel() too, with no next level at all).
+    //
+    // pinnedMaterialNames_ is every name that must survive regardless -- see
+    // pinMaterialResident()'s own comment for who is expected to populate it.
+    if (levelScopedMaterialsEnabled()) {
+        const usize released = content_.releaseMaterialsExcept(pinnedMaterialNames_);
+        if (released)
+            AVER_INFO("[Material] level-scoped residency: {} material(s) released on unload", released);
+    }
+#endif
     // AND level_'s OWN STATE: its environment, spawn record, PCG volumes, class placements and bounds.
     // Its entity and body lists are the load-time subset of the editor's own, already destroyed and
     // removed above; destroying an entity already destroyed and removing a removed body are no-ops.

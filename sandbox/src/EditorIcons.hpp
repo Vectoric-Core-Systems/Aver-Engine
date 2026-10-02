@@ -38,6 +38,9 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_PLAY        "\xEE\x80\xB7"   // U+E037 play_arrow
 #define ICON_PAUSE       "\xEE\x80\xB4"   // U+E034 pause
 #define ICON_STOP        "\xEE\x81\x87"   // U+E047 stop
+#define ICON_SKIP_NEXT   "\xEE\x81\x84"   // U+E044 skip_next (Play: Frame Skip)
+#define ICON_EJECT       "\xEE\xA3\xBB"   // U+E8FB eject (Play: Eject)
+#define ICON_GAMEPAD     "\xEE\x8C\xB8"   // U+E338 videogame_asset (Play: Possess)
 
 // ---- editing ----------------------------------------------------------------------------------
 #define ICON_ADD         "\xEE\x85\x85"   // U+E145 add

@@ -34,6 +34,9 @@ constexpr KeyName kKeyNames[] = {
     {ImGuiKey_F9,"F9"},{ImGuiKey_F10,"F10"},{ImGuiKey_F11,"F11"},{ImGuiKey_F12,"F12"},
     {ImGuiKey_Delete,"Delete"},{ImGuiKey_Tab,"Tab"},{ImGuiKey_Space,"Space"},
     {ImGuiKey_Escape,"Escape"},{ImGuiKey_GraveAccent,"`"},
+    // Pause/Resume (Play) wants the literal Pause key, so it needs a name despite the exclusion
+    // below -- everything else there (CapsLock, NumLock, ScrollLock, PrintScreen) still has none.
+    {ImGuiKey_Pause,"Pause"},
     // NAVIGATION AND EDITING, added because their absence was a hard ceiling rather than a
     // preference: a key missing from this table cannot be displayed, parsed OR captured, so no
     // amount of UI work could bind one. GraphEditor's Home->frameAll could not be promoted into the
@@ -61,9 +64,9 @@ constexpr KeyName kKeyNames[] = {
     {ImGuiKey_Backslash,"Backslash"},{ImGuiKey_Semicolon,"Semicolon"},
     {ImGuiKey_Apostrophe,"Apostrophe"},{ImGuiKey_Comma,"Comma"},
     {ImGuiKey_Period,"Period"},{ImGuiKey_Slash,"Slash"},
-    // DELIBERATELY ABSENT: CapsLock, NumLock, ScrollLock, PrintScreen and Pause, which are OS-level
-    // traps on Windows rather than shortcuts; and the bare modifiers, which Chord has no way to
-    // represent -- it holds one key plus three booleans, so "Ctrl" alone is not expressible.
+    // DELIBERATELY ABSENT: CapsLock, NumLock, ScrollLock and PrintScreen, which are OS-level traps
+    // on Windows rather than shortcuts; and the bare modifiers, which Chord has no way to represent
+    // -- it holds one key plus three booleans, so "Ctrl" alone is not expressible.
 };
 
 
@@ -92,7 +95,24 @@ ImGuiKey nameToKey(std::string_view s) {
 //   PlayStart                 -- NEW command (2026-09-16): Play had only its toolbar button and the
 //                                Simulate panel's. Alt+P, Unreal's chord for the same thing. Viewport
 //                                scope, so it cannot fire during the session it would start.
+//   PlaySimulate              -- NEW command: Alt+S, same scope/flags as PlayStart -- launches
+//                                PlayMode::Simulate instead of SelectedViewport.
 //   PlayReleaseMouse          -- `IsKeyPressed(ImGuiKey_F1,false) && io.KeyShift` (Ctrl unchecked)
+//   PlayEject                 -- NEW command: F8, Unreal's Eject/Possess. Fires while possessed AND
+//                                while ejected, so its scope covers both live masks -- the viewport's
+//                                (own_.activeScopeMask drops kScopePlaySession once ic.playing reads
+//                                false for an ejected session) as well as the play session's own.
+//   PlayPawnToCamera          -- NEW command (2026-09-30): Shift+F in an EJECTED session puts the possessed
+//                                pawn where the editor camera is (SandboxApp::teleportPawnToCamera).
+//                                Viewport scope only: ejected is the one state it fires in, and that
+//                                state's live mask is the viewport's. Exact modifiers, because it
+//                                shares F with Frame Selected -- whose row never checked Shift, so
+//                                that handler stands down for this chord in code (SandboxApp.cpp).
+//   PlayPause                 -- NEW command: the Pause key, toggling aver_fw_set_paused. Same dual
+//                                scope as PlayEject -- pausing must still work ejected.
+//   PlayFrameSkip             -- NEW command, unbound by default (ImGuiKey_None): the toolbar's
+//                                Frame Skip button calls requestPlayFrameStep() directly; this row
+//                                exists so a user CAN bind a key to it, not because one ships.
 //   PlayStop                  -- `IsKeyPressed(ImGuiKey_Escape,false)`, gated on a play session
 //   DrawerDismiss             -- `IsKeyPressed(ImGuiKey_Escape,false)`, gated on a drawer being open
 //   DrawerToggleContent       -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Space,false)`
@@ -140,6 +160,11 @@ ImGuiKey nameToKey(std::string_view s) {
 //                                table on purpose: it selects FILES, and is gated on that panel
 //                                holding focus -- two meanings on one key, exactly as Delete has.
 constexpr u32 kViewportScope = kScopeObjectMode | kScopeLandscapeMode;
+// EJECT AND PAUSE LIVE IN BOTH MASKS THEY CAN ACTUALLY FIRE UNDER: a possessed session's is
+// kScopePlaySession, but an ejected one's is kViewportScope (own_.activeScopeMask drops
+// kScopePlaySession once InputConditions.playing reads false for it) -- see SandboxApp.cpp's F8/
+// Pause handlers, which gate on playSessionActive() in code rather than on this mask at all.
+constexpr u32 kPlaySessionOrEjected = kScopePlaySession | kViewportScope;
 // THE SAME COMMAND, IN THE CANVAS TOO. Delete/Undo/Redo/Copy/Paste/Duplicate and Frame Selected
 // were hardcoded a second time inside GraphEditor, so rebinding Copy on the Preferences page
 // changed it everywhere EXCEPT the place a node author spends their day. Widening the scope is
@@ -163,7 +188,12 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::ModeToggleLandscape, "mode.toggleLandscape", "Toggle Landscape Mode", {ImGuiKey_Tab, false,false,false}, kViewportScope, false,false, true},
     {CommandId::ViewFrameSelected,   "view.frameSelected",   "Frame Selected",        {ImGuiKey_F,   false,false,false}, kEditScope | kScopeActorEditor, false,false, true},
     {CommandId::PlayStart,        "play.start",        "Play",                 {ImGuiKey_P,      false,false,true }, kViewportScope,    true, true,  false},
+    {CommandId::PlaySimulate,     "play.simulate",     "Simulate",             {ImGuiKey_S,      false,false,true }, kViewportScope,    true, true,  false},
     {CommandId::PlayReleaseMouse, "play.releaseMouse", "Release Mouse (Play)", {ImGuiKey_F1,     false,true, false}, kScopePlaySession, false,true,  false},
+    {CommandId::PlayEject,        "play.eject",        "Eject / Possess (Play)", {ImGuiKey_F8,   false,false,false}, kPlaySessionOrEjected, false,false, false},
+    {CommandId::PlayPawnToCamera, "play.pawnToCamera", "Pawn to Camera (Ejected)", {ImGuiKey_F,  false,true, false}, kViewportScope,    true, true,  false},
+    {CommandId::PlayPause,        "play.pause",        "Pause / Resume (Play)",  {ImGuiKey_Pause,false,false,false}, kPlaySessionOrEjected, false,false, false},
+    {CommandId::PlayFrameSkip,    "play.frameSkip",    "Frame Skip (Play)",      {ImGuiKey_None, false,false,false}, kPlaySessionOrEjected, false,false, false},
     {CommandId::PlayStop,         "play.stop",         "Stop Play Session",    {ImGuiKey_Escape, false,false,false}, kScopePlaySession, false,false, false},
     {CommandId::DrawerDismiss,       "drawer.dismiss",       "Dismiss Drawer",          {ImGuiKey_Escape, false,false,false}, kScopeDrawerOpen, false,false, false},
     {CommandId::DrawerToggleContent, "drawer.toggleContent", "Toggle Content Browser",  {ImGuiKey_Space,  true, false,false}, kScopeGlobalUI,   true, false, false},
@@ -291,6 +321,16 @@ bool KeybindRegistry::pressed(CommandId id, const ImGuiIO& io) const {
     // changes are "the key while Alt happens to be held" (e.g. Alt+Tab no longer toggles Landscape mode).
     if (io.KeyAlt != c.alt) return false;
     return ImGui::IsKeyPressed(c.key, def.repeatAllowed);
+}
+
+bool KeybindRegistry::held(CommandId id, const ImGuiIO& io) const {
+    const KeybindDef& def = keybindDef(id);
+    const Chord& c = current_[static_cast<usize>(id)];
+    if (!c.isBound()) return false;
+    if (def.checkCtrl  && io.KeyCtrl  != c.ctrl)  return false;
+    if (def.checkShift && io.KeyShift != c.shift) return false;
+    if (io.KeyAlt != c.alt) return false;
+    return ImGui::IsKeyDown(c.key);
 }
 
 void KeybindRegistry::loadFromPrefs() {

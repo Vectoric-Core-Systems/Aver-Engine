@@ -39,7 +39,7 @@ enum class CommandId : u8 {
     ToolSelect, ToolMove, ToolRotate, ToolScale,
     SculptRaise, SculptLower, SculptSmooth, SculptFlatten,
     ModeToggleLandscape, ViewFrameSelected,
-    PlayStart, PlayReleaseMouse, PlayStop,
+    PlayStart, PlaySimulate, PlayReleaseMouse, PlayEject, PlayPawnToCamera, PlayPause, PlayFrameSkip, PlayStop,
     DrawerDismiss, DrawerToggleContent, DrawerToggleConsole,
     EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate, EditSelectAll,
     AssetSave, LevelSave, SaveAll, GraphCommentBox, GraphFrameAll,
@@ -145,6 +145,11 @@ public:
     // checkShift/repeatAllowed. A drop-in replacement for the ImGui::IsKeyPressed(...) call each
     // site used to make directly.
     bool pressed(CommandId id, const ImGuiIO& io) const;
+    // The same chord and modifier test, but true for as long as the key is DOWN rather than on the
+    // frames pressed() fires. For a site that must stand down for another command's chord: a
+    // repeating command sharing its key fires again on every auto-repeat pulse, after pressed() for a
+    // non-repeating one has gone false.
+    bool held(CommandId id, const ImGuiIO& io) const;
 
     // Loads every chord from editor.ini (a missing key keeps its compiled-in default, so upgrading
     // from a build without this file needs no migration) / writes every chord back. Mirrors

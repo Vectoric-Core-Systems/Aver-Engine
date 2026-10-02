@@ -941,11 +941,17 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         {attr("mask", "Mask")}, kDomainMaterial});
 
     // -- UV: coordinate transforms, reading THE SURFACE'S OWN UV when `uv` is left unwired --
-    //    emitNode's uvInput(), the one place an unlinked pin isn't simply its literal default. The
-    //    `uv` pin still needs to exist, named exactly "uv", for a LINK to land on; its default is
-    //    never read.
+    //    emitNode's uvInput() (and Panner's timeInput()), the only places an unlinked pin isn't
+    //    simply its literal default. The `uv` pin still needs to exist, named exactly "uv", for a
+    //    LINK to land on; its default is never read.
     t.push_back({"TilingOffset", "Tiling / Offset", "UV", {
         pin("uv", "float2", false), pin("tiling", "float2", false, "1,1"), pin("offset", "float2", false, "0,0"),
+        pin("result", "float2", true)}, {}, kDomainMaterial});
+    // Panner: uv + speed * time. Leave `time` unwired to read the Time node's wrapped seconds
+    // (emitNode's timeInput(), the one other unwired-pin exception besides uv) so `speed` alone
+    // scrolls it; speed's (0,0) default is the one input allowed to mean "still".
+    t.push_back({"Panner", "Panner", "UV", {
+        pin("uv", "float2", false), pin("speed", "float2", false, "0,0"), pin("time", "float", false),
         pin("result", "float2", true)}, {}, kDomainMaterial});
     t.push_back({"Rotator", "Rotator", "UV", {
         pin("uv", "float2", false), pin("centre", "float2", false, "0.5,0.5"), pin("angle", "float", false, "0"),
@@ -979,12 +985,17 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("a", "float", false), pin("b", "float", false),
         pin("ifTrue", "float3", false), pin("ifFalse", "float3", false),
         pin("result", "float3", true)}, {}, kDomainMaterial});
+    // Time: the engine clock (b0), no inputs -- emitNode picks the pin by NAME: `raw` is unwrapped
+    // seconds, `delta` the last frame's, and anything else (`time`) seconds wrapped at an hour.
+    t.push_back({"Time", "Time", "Utility", {
+        pin("time", "float", true), pin("raw", "float", true), pin("delta", "float", true)},
+        {}, kDomainMaterial});
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
     //    MaterialOutput, since it's where the backward walk starts. NO DEFAULT on any of its
-    //    seventeen inputs, load-bearing not an oversight: compileMaterialGraph treats an input as
+    //    eighteen inputs, load-bearing not an oversight: compileMaterialGraph treats an input as
     //    DRIVEN when linked OR carrying a NON-EMPTY literal, so a default would make a fresh node
-    //    drive all seventeen fields immediately, destroying partial-graph behaviour (a graph saying
+    //    drive all eighteen fields immediately, destroying partial-graph behaviour (a graph saying
     //    only "base colour is red" leaving roughness/normal/alpha at the stock material's values --
     //    see compileMaterialGraph's "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE"). Do not add a "0"
     //    defaultValue here without reading that comment first.
@@ -994,8 +1005,11 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("Opacity", "float", false), pin("AlphaCutoff", "float", false),
         // Subsurface: worth a pin, not just a material constant, since a MASK -- thin parts scatter
         // more than thick ones -- is what makes it read correctly (a texture-driven SubsurfaceRadius
-        // vs. a uniformly waxy object). Same no-default rule as every pin above.
+        // vs. a uniformly waxy object). SubsurfaceColor is the tint light takes inside the surface,
+        // driveable per pixel for the same reason a skin material wants red at the ears and not at
+        // the nails. Same no-default rule as every pin above.
         pin("SubsurfaceWeight", "float", false), pin("SubsurfaceRadius", "float", false),
+        pin("SubsurfaceColor", "float3", false),
         // The dielectric pair: a mask-driven Transmission makes one mesh a clear window with a
         // frosted band instead of two materials. Ior is per-pixel for the same reason, moving less often.
         pin("Ior", "float", false), pin("Transmission", "float", false),
@@ -1064,7 +1078,7 @@ inline const GraphNodeDesc* findGraphNodeDescIn(const std::string& typeId, Graph
 
 // ---- searching the palette ---------------------------------------------------------------------
 //
-// WHY A SEARCH EXISTS: this catalog holds 240 node types across 23 categories, previously reachable
+// WHY A SEARCH EXISTS: this catalog holds hundreds of node types across two dozen categories, previously reachable
 // only through a right-click submenu-per-category with no filter (finding `VecAdd` meant knowing
 // it's filed under Vector, not Math). A palette usable only by whoever already knows the layout.
 //

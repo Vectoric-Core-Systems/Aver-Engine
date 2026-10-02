@@ -128,6 +128,19 @@ bool SandboxApp::assignMaterialToken(scene::Entity ent, i32 token) {
     mr->material = token;
     mr->dirty = 1;
     markLevelUnsaved();
+#if AVER_MODULE_PBR
+    // ON-DEMAND LOAD: the Details material picker below now lists every project material stem
+    // (editor::projectMaterialStems), not only whichever ones level-scoped residency currently keeps
+    // resident, so a pick can name a surface nothing has bound yet -- content_.authoredFor(token)
+    // would otherwise keep reporting it unbound until some later level happened to need it too.
+    if (!content_.authoredFor(token)) {
+        const char* nameForLoad = aver_scene_material_name(token);
+        if (nameForLoad && *nameForLoad) {
+            const pbr::MaterialHandle h = content_.materialForSurface(nameForLoad);
+            if (h) content_.bindSurfaceMaterial(token, h);
+        }
+    }
+#endif
     const char* nm = aver_scene_material_name(token);
     cbStatus_ = std::string("Assigned surface ") + (nm && *nm ? nm : "(unnamed)");
     AVER_INFO("[Editor] entity {} material set to token {} ('{}')", ent, token, nm ? nm : "");
@@ -255,14 +268,30 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
             ImGui::SetTooltip("Transmission still dims the diffuse lobe here, but this material is\n"
                               "not BLEND translucent, so nothing will be visible THROUGH it.");
     }
-    // WEIGHT is the on/off: 0 skips the wrap-diffuse/back-scatter terms, so RADIUS has nothing to
-    // widen until Weight > 0 -- disabled at 0 to avoid offering a control that does nothing.
+    // WEIGHT is the on/off: 0 skips the wrap-diffuse/back-scatter terms, so RADIUS and COLOR have
+    // nothing to widen or tint until Weight > 0 -- disabled at 0 to avoid offering controls that do
+    // nothing.
     changed |= track(ImGui::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Subsurface strength: light wraps past the shadow edge, passes through "
+                          "thin parts lit from behind (leaves, curtains, ears) and through them from "
+                          "the sky. 0 = off.");
     ImGui::BeginDisabled(d->subsurfaceWeight <= 0.0f);
     changed |= track(ImGui::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f));
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How deep light scatters, 0.25-5 cm: thin parts under it glow when lit "
+                          "from behind, thicker ones do not. Also widens the glow seen looking "
+                          "toward the light.");
+    else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
+    changed |= track(ImGui::ColorEdit3("Subsurface Color", d->subsurfaceColor));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The colour light takes inside the material, multiplied onto the base "
+                          "colour. White keeps the surface colour; skin wants a deep red, leaves "
+                          "yellow-green, wax orange.");
+    else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
+    ImGui::EndDisabled();
     changed |= track(ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
     changed |= track(ImGui::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 20.0f));
     if (ImGui::IsItemHovered())
@@ -352,7 +381,6 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
 // previously absent or buried in a popup behind a numbered button. A panel shows its whole
 // surface at once.
 void SandboxApp::buildModePanel(Engine& e) {
-    (void)e;
     ImGui::Begin("Mode");
 
     ImGui::PushStyleColor(ImGuiCol_Text, kAverOrange);
@@ -373,7 +401,7 @@ void SandboxApp::buildModePanel(Engine& e) {
             ImGui::TextWrapped("This build has the landscape module switched off.");
             break;
 #endif
-        case EditorMode::Simulate:  buildSimulateModePanel();  break;
+        case EditorMode::Simulate:  buildSimulateModePanel(e);  break;
     }
     ImGui::End();
 }
@@ -425,12 +453,13 @@ void SandboxApp::buildSelectModePanel() {
     ImGui::TextDisabled("Selected: %s", selectionLabel().c_str());
 }
 
-void SandboxApp::buildSimulateModePanel() {
-    ImGui::TextDisabled("PLAY");
-    ImGui::TextWrapped("Runs the game in the viewport: physics ticks, gameplay scripts run, and "
-                       "input goes to the game instead of the editor.");
+void SandboxApp::buildSimulateModePanel(Engine& e) {
+    ImGui::TextDisabled("SIMULATE");
+    ImGui::TextWrapped("Runs the game in the viewport without possessing the player: physics and "
+                       "gameplay scripts tick while the editor keeps the camera, selection and "
+                       "gizmos. Possess takes control of the player; Eject gives it back.");
     ImGui::Spacing();
-    // startPlay/stopPlay are AVER_MODULE_FRAMEWORK entry points (spawn a pawn under a GameMode,
+    // launchPlay/stopPlay are AVER_MODULE_FRAMEWORK entry points (spawn a pawn under a GameMode,
     // drive aver_fw_play_state); without this guard the button still links (playSessionActive()
     // has its own #else returning false) but calls into code a
     // framework-off tree never compiled -- the mismatch module-matrix.ps1 exists to catch. The
@@ -439,14 +468,17 @@ void SandboxApp::buildSimulateModePanel() {
 #if AVER_MODULE_FRAMEWORK
     const bool active = playSessionActive();
     if (!active) {
-        if (ImGui::Button("Play", ImVec2(-1, 0))) startPlay();
+        if (ImGui::Button("Play", ImVec2(-1, 0))) launchPlay(e, PlayMode::Simulate);
     } else {
+        if (ImGui::Button(playEjected() ? "Possess" : "Eject", ImVec2(-1, 0))) togglePlayEject();
         if (ImGui::Button("Stop", ImVec2(-1, 0))) stopPlay();
     }
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::TextDisabled("Shift+Esc releases the mouse back to the editor.");
+    ImGui::TextDisabled("%s releases the mouse back to the editor.",
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayReleaseMouse)).c_str());
 #else
+    (void)e;
     ImGui::TextWrapped("This build has the gameplay framework module switched off, so there is no "
                        "game mode to run and Play does nothing here.");
 #endif
@@ -836,10 +868,11 @@ void SandboxApp::drawOutlinerDropTarget(scene::Entity ent) {
     ImGui::EndDragDropTarget();
 }
 
-// Draws one row and, when it is open, its children beneath it.
+// Draws one row and, when it is open, its children beneath it. `recordOrder` is false for a row
+// whose place in outlinerOrder_ the caller has already recorded (see below).
 void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
                      const std::unordered_map<u32, std::vector<const OutlinerRow*>>& children,
-                     int depth) {
+                     int depth, bool recordOrder) {
     const auto it = children.find(static_cast<u32>(row.ent));
     const bool hasKids = it != children.end() && !it->second.empty();
 
@@ -888,8 +921,12 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
 
     // Every drawn row, in order, so a shift-click has a range to walk: recorded here because only
     // this walk knows the filtered/sorted/expanded shape (same reason the Content Browser ranges
-    // over its `shown` list, not the folder's contents).
-    outlinerOrder_.push_back(row.ent);
+    // over its `shown` list, not the folder's contents). NOT FOR A ROW THE CLIPPER DRAWS: only the
+    // rows on screen are drawn there, so the walk would record a window of the list. A flat list's
+    // whole order was recorded by rebuildOutlinerCache (root order IS the visual order when nothing
+    // nests); a tree's leaf roots are copied in a run at a time by drawOutlinerTreeRows. Both pass
+    // recordOrder = false.
+    if (recordOrder) outlinerOrder_.push_back(row.ent);
 
     const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
     const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
@@ -915,6 +952,7 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         beginOutlinerRename(row.ent);
     }
     if (ImGui::BeginPopupContextItem(("##ctx" + std::to_string((u32)row.ent)).c_str())) {
+        outlinerCtxRow_ = row.ent;   // re-marked every frame it stays open; see drawOutlinerFlatRows
         // Right-click on a row already in the selection keeps the whole set (otherwise "select
         // five, right-click, Delete" deletes one); right-click outside it selects just that row.
         if (!multiIsSelected(row.ent)) multiSetSingle(row.ent);
@@ -932,7 +970,10 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         }
         ImGui::EndPopup();
     }
-    uiReg_.track(("outliner.row." + std::to_string((u32)row.ent)).c_str());
+    // Only a row that is on screen: a scrolled-out row of an open subtree has no rect a click
+    // could reach, and naming it cost a heap string per row per frame.
+    if (ImGui::IsItemVisible())
+        uiReg_.track(("outliner.row." + std::to_string((u32)row.ent)).c_str());
 
     drawOutlinerDragSource(row.ent);
     drawOutlinerDropTarget(row.ent);
@@ -943,14 +984,435 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     }
 }
 
+// THE ROOTS THE CLIPPED DRAWS KEEP SUBMITTED WHEREVER THEY SCROLL: the one being renamed, the one
+// being dragged (read from the drag payload) and the one whose context menu was open last frame.
+// Writes the index into `roots` of each of those that is a root and returns how many it found (0-3);
+// the scan stops at the last distinct one, and is skipped outright when nothing is pinned, which is
+// nearly always.
+static int outlinerPinnedRoots(const std::vector<scene::Entity>& roots, scene::Entity renaming,
+                               scene::Entity ctxRow, int (&out)[3]) {
+    scene::Entity dragged = scene::kInvalidEntity;
+    if (const ImGuiPayload* peek = ImGui::GetDragDropPayload())
+        if (peek->IsDataType(kOutlinerReparentDragDropType) &&
+            peek->DataSize == static_cast<int>(sizeof(scene::Entity)))
+            dragged = *static_cast<const scene::Entity*>(peek->Data);
+    const scene::Entity pins[3] = {renaming, dragged, ctxRow};
+    int pinned = 0;                      // distinct pins, so the scan below stops at the last one
+    for (int a = 0; a < 3; ++a) {
+        bool dup = pins[a] == scene::kInvalidEntity;
+        for (int b = 0; b < a && !dup; ++b) dup = pins[b] == pins[a];
+        if (!dup) ++pinned;
+    }
+    int found = 0;
+    const int count = static_cast<int>(roots.size());
+    for (int i = 0; pinned > 0 && i < count; ++i) {
+        const scene::Entity ent = roots[static_cast<usize>(i)];
+        if (ent != renaming && ent != dragged && ent != ctxRow) continue;
+        out[found++] = i;
+        --pinned;
+    }
+    return found;
+}
+
+// DRAWS A FLAT CACHE (no row has a parent listed) WITH ONLY THE ROWS ON SCREEN SUBMITTED. Every row
+// is then a leaf of one uniform height, so ImGuiListClipper can skip straight to the visible window.
+// Against a 51k-root level the per-row work (a label string, an ID string, a context-popup ID, a
+// UI-registry name, a children-map lookup, a selection test) used to run for ALL of the rows every
+// frame; it is now paid for the few dozen on screen. The clipper's row pitch is the FLOOR of the
+// text line height with spacing, because that is what ItemSize advances a leaf TreeNodeEx by (it
+// truncates the cursor to whole pixels), so the rows the clipper positions and the rows drawn under
+// them agree at any DPI scale.
+//
+// THREE ROWS STAY SUBMITTED WHEREVER THEY SCROLL: the one being renamed, the one being dragged and
+// the one whose context menu was open last frame (see outlinerPinnedRoots).
+// ImGui only keeps an item's ACTIVE state (a text field's focus, a drag source) alive while the
+// item is submitted every frame -- an item ImGui clips itself still counts, a row the clipper never
+// submits does not -- so wheel-scrolling toward a far drop target mid-drag would cancel the drag,
+// and scrolling away from a rename would orphan its text field.
+void SandboxApp::drawOutlinerFlatRows() {
+    const int count = static_cast<int>(outlinerRoots_.size());
+    ImGuiListClipper clipper;
+    clipper.Begin(count, std::floor(ImGui::GetTextLineHeightWithSpacing()));
+
+    // The row whose context menu was open last frame is pinned too; drawing it re-marks it if the
+    // menu is still open, so the mark lapses one frame after the menu closes.
+    const scene::Entity ctxRow = outlinerCtxRow_;
+    outlinerCtxRow_ = scene::kInvalidEntity;
+    int pinAt[3] = {-1, -1, -1};
+    const int pinCount = outlinerPinnedRoots(outlinerRootEnts_, outlinerRenaming_, ctxRow, pinAt);
+    for (int p = 0; p < pinCount; ++p) clipper.IncludeItemByIndex(pinAt[p]);
+
+    while (clipper.Step())
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+            drawOutlinerRow(*outlinerRoots_[static_cast<usize>(i)], outlinerChildren_, 0, false);
+}
+
+// DRAWS A TREE CACHE (some row has a parent listed) WITHOUT SUBMITTING THE LEAF ROOTS THAT ARE OFF
+// SCREEN. A tree used to draw EVERY root every frame, unclipped, because its rows are not one
+// uniform list; but a level with tens of thousands of roots and a handful of parents (NeonDistrict
+// in Play: 52.8k placements, plus the pawn with its body, view node and gun as children) is almost
+// all uniform leaves. So the roots are split at the roots that HAVE listed children
+// (outlinerParentRoots_, found once by the rebuild): each maximal run of leaf roots between two
+// parents goes through its own ImGuiListClipper, exactly as drawOutlinerFlatRows does for a whole
+// flat list, and each parent is drawn by drawOutlinerRow with its open subtree, as before. Roots
+// keep their alphabetical order, so the rows come out in the same places as they always did; the
+// clipper only declines to build the ones nobody can see. Per frame that is the rows on screen, the
+// parents and their subtrees, plus one memcpy of the root entities into outlinerOrder_.
+//
+// outlinerOrder_ is the DRAW order, as for any tree: a leaf run's entities are copied in whole
+// (the clipper only submits a window of the run, so a per-row push could not see the rest), and a
+// parent's row records itself and its open rows when drawOutlinerRow draws it. The one deliberate
+// difference from the unclipped walk: a leaf root being renamed is now listed in the order, as it
+// always was in a flat list (drawOutlinerRow returns before recording a row that is a text field).
+//
+// THE SAME THREE ROWS STAY SUBMITTED WHEREVER THEY SCROLL as in the flat path (see
+// drawOutlinerFlatRows), each included in the clipper of the run it falls in. A parent and its
+// subtree are always submitted, so a pin there needs nothing.
+void SandboxApp::drawOutlinerTreeRows() {
+    const int count = static_cast<int>(outlinerRoots_.size());
+    outlinerOrder_.clear();
+    outlinerOrder_.reserve(outlinerRootEnts_.size());
+
+    const scene::Entity ctxRow = outlinerCtxRow_;
+    outlinerCtxRow_ = scene::kInvalidEntity;
+    int pinAt[3] = {-1, -1, -1};
+    const int pinCount = outlinerPinnedRoots(outlinerRootEnts_, outlinerRenaming_, ctxRow, pinAt);
+    const float rowPitch = std::floor(ImGui::GetTextLineHeightWithSpacing());
+
+    const auto drawLeafRun = [&](int from, int to) {
+        if (from >= to) return;
+        outlinerOrder_.insert(outlinerOrder_.end(), outlinerRootEnts_.begin() + from,
+                              outlinerRootEnts_.begin() + to);
+        ImGuiListClipper clipper;
+        clipper.Begin(to - from, rowPitch);
+        for (int p = 0; p < pinCount; ++p)
+            if (pinAt[p] >= from && pinAt[p] < to) clipper.IncludeItemByIndex(pinAt[p] - from);
+        while (clipper.Step())
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+                drawOutlinerRow(*outlinerRoots_[static_cast<usize>(from + i)], outlinerChildren_, 0,
+                                false);
+    };
+
+    int next = 0;
+    for (const u32 parentAt : outlinerParentRoots_) {
+        drawLeafRun(next, static_cast<int>(parentAt));
+        drawOutlinerRow(*outlinerRoots_[parentAt], outlinerChildren_, 0);
+        next = static_cast<int>(parentAt) + 1;
+    }
+    drawLeafRun(next, count);
+}
+
+// THE O(1) HALF OF "IS THE OUTLINER CACHE STALE", read every frame. refreshOutlinerCache() rebuilds
+// (two std::string constructions per entity, two unreserved hash containers, a string-compare sort)
+// when this moves, and outlinerAuditDiverged() covers what it cannot see.
+//
+// WHY NOT A HASH OVER EVERY ENTITY, WHICH THIS WAS: that walk (valid, destroyPending, a chunk-
+// ownership lookup, a component lookup, a name hash, parent and childCount per entity) ran on every
+// frame to learn that nothing changed, and against a 50k-entity level it cost more than the rest of
+// an idle frame put together. And it cannot be replaced by a revision counter bumped where things
+// change: spawn, destroy, rename, reparent, component add/remove, chunk streaming and PIE spawns live
+// in World.cpp, SandboxLevelLoad.cpp, SandboxMcp.cpp and the world module, none of which this cache
+// may touch, and scene::World carries no revision of its own that fits (worldRevision() is
+// per-entity and tracks the TRANSFORM). So nothing can TELL this cache when they happen. What it can
+// read for free is:
+//   - w.count(): every create, destroy and chunk stream in/out moves it. A create and a destroy in
+//     the same frame net to the same count; that, and every other change below the stamp, is the
+//     audit's job, not this function's;
+//   - the filter text and the drone handle, which change which rows are listed;
+//   - entityLabels_.size(): the load/paste/spawn/rename override map outlinerLabelFor() reads;
+//   - the level's own entity list (size, first and last handle): a level load or reload can leave
+//     the entity count and the label map exactly where they were, but it cannot reuse a handle.
+// What is NOT in it, on purpose: the edit stamp (see outlinerEditMark). Nearly every editor command
+// is a transform, a visibility toggle or a material pick, none of which changes a row, so folding it
+// in here would rebuild the whole tree (a string per entity, a sort) on every gizmo release.
+u64 SandboxApp::outlinerSignature() const {
+    const scene::World& w = scene::World::instance();
+    u64 h = kFnv1a64OffsetBasis;
+    const auto mix = [&h](u64 v) { h = (h ^ v) * kFnv1a64Prime; };
+    mix(w.count());
+    mix(fnv1a64(outlinerFilter_));
+    mix(static_cast<u64>(droneEntity_));
+    mix(static_cast<u64>(entityLabels_.size()));
+    mix(static_cast<u64>(levelEntities_.size()));
+    mix(levelEntities_.empty() ? 0u : static_cast<u64>(levelEntities_.front()));
+    mix(levelEntities_.empty() ? 0u : static_cast<u64>(levelEntities_.back()));
+    return h;
+}
+
+// EVERYTHING rebuildOutlinerCache() READS ABOUT THE ENTITY IN ONE DENSE SLOT, as one fingerprint.
+// The rebuild records one per slot; the audit recomputes a slice of them each frame and compares.
+// Same fields, and the same early-outs, as the filters in the rebuild's pass one: what the row
+// would show (the name, or the label that overrides it), whether it is listed at all (valid, not
+// pending destroy, not chunk-streamed, not the drone, has a mesh or a name or a child), and where
+// it hangs (parent).
+//
+// DESTROY SWAPS THE LAST LIVE ENTITY INTO A FREED SLOT (w.at()'s dense order), so a destroy shows up
+// as a mismatch at that slot too -- an extra rebuild the audit did not strictly need, accepted on
+// purpose: an unnecessary rebuild costs one frame, a missed one shows a stale tree.
+u64 SandboxApp::outlinerSlotSignature(u32 slot) const {
+    const scene::World& w = scene::World::instance();
+    u64 h = kFnv1a64OffsetBasis;
+    const auto mix = [&h](u64 v) { h = (h ^ v) * kFnv1a64Prime; };
+    const scene::Entity ent = w.at(slot);
+    mix(static_cast<u64>(ent));
+    const bool valid = w.valid(ent);
+    mix(valid ? 1u : 0u);
+    if (!valid) return h;
+    const bool pending = w.destroyPending(ent);
+    mix(pending ? 1u : 0u);
+    if (pending) return h;
+    const bool chunkOwned = anyChunkWorldOwns(ent);
+    mix(chunkOwned ? 1u : 0u);
+    if (chunkOwned) return h;
+    if (ent == droneEntity_) return h;   // the stamp folds the drone handle in already
+    const bool hasMesh = w.hasComponent(ent, scene::kComponentMeshRenderer);
+    const char* nm = w.name(ent);
+    mix(hasMesh ? 1u : 0u);
+    mix(fnv1a64(std::string_view(nm)));
+    mix(static_cast<u64>(w.parent(ent)));
+    // childCount only changes the drawn rows through the pivot-keep rule (an unnamed, mesh-less
+    // entity survives once it has a child), so it only needs hashing for the entities that rule
+    // could apply to.
+    if (!hasMesh && *nm == '\0') mix(static_cast<u64>(w.childCount(ent)));
+    // The row's label, when entityLabels_ overrides the name: looked up per slot rather than by
+    // walking the whole map, since a slice only needs the labels of ITS entities.
+    const auto lit = entityLabels_.find(static_cast<u32>(ent));
+    mix(lit != entityLabels_.end() ? 1u + fnv1a64(lit->second) : 0u);
+    return h;
+}
+
+// WHERE THE EDITOR'S OWN COMMANDS LEAVE A TRACE: editSerialNext_ and both undo stack sizes. Every
+// command the editor issues (rename, reparent, spawn, delete, paste, a component edit, a transform)
+// goes through pushEdit, undo or redo, and each of those moves at least one of the three -- so
+// when this moves, the change MAY have been to a row. Only "may": most commands are transforms,
+// visibility toggles and material picks that change none, so refreshOutlinerCache answers a move
+// with one full audit pass (outlinerAuditDiverged(true), a hash per slot) and rebuilds only if that
+// finds a difference. A rename or reparent made in the UI is thus reflected the same frame; a
+// gizmo release costs one cheap pass, not a rebuild of the tree.
+u64 SandboxApp::outlinerEditMark() const {
+    u64 h = kFnv1a64OffsetBasis;
+    const auto mix = [&h](u64 v) { h = (h ^ v) * kFnv1a64Prime; };
+    mix(editSerialNext_);
+    mix(static_cast<u64>(undoStack_.size()));
+    mix(static_cast<u64>(redoStack_.size()));
+    return h;
+}
+
+// THE OTHER HALF: catches whatever outlinerSignature() cannot see -- a script or the MCP renaming
+// or reparenting, a mesh added or removed, a same-frame create+destroy -- by re-fingerprinting dense
+// slots against what the last rebuild recorded. True when one differs. A SLICE per frame normally;
+// `full` checks every slot (see outlinerEditMark for when).
+//
+// WHAT THIS PROVES: every slot is re-checked at least once per cycle (kAuditCycleFrames frames, four
+// times that while Play runs; the slice is ceil(n / cycle) slots, advancing round the array), so any
+// change to a slot's fingerprint that lasts that long is caught, at a per-frame cost bounded by the
+// slice. A level under kAuditMinSlice slots is re-checked in FULL every frame, which is the old
+// behaviour exactly. A change that reverts before its slot's turn comes round is one the tree never
+// needed to show.
+bool SandboxApp::outlinerAuditDiverged(bool full) {
+    const u32 n = scene::World::instance().count();
+    // The stamp holds the count, so a mismatch here means the rebuild has not run since it moved.
+    if (outlinerSlotSigs_.size() != n) return true;
+    // FOUR TIMES AS LONG A CYCLE WHILE PLAYING: a spawn or destroy moves the stamp's entity count and
+    // is not the audit's job, and a Play frame is many times an idle one, so the slice (n / cycle
+    // slots of hashing, about 0.2 ms at 52.8k entities) is not worth paying at the idle rate.
+    constexpr u32 kAuditCycleFrames = 32;
+    constexpr u32 kAuditMinSlice    = 256;
+    const u32 cycle = outlinerPlaying() ? kAuditCycleFrames * 4 : kAuditCycleFrames;
+    const u32 slice = full ? n
+        : std::min(n, std::max(kAuditMinSlice, (n + cycle - 1) / cycle));
+    u32 i = outlinerAuditCursor_ < n ? outlinerAuditCursor_ : 0;
+    for (u32 k = 0; k < slice; ++k) {
+        if (outlinerSlotSignature(i) != outlinerSlotSigs_[i]) return true;
+        if (++i == n) i = 0;
+    }
+    outlinerAuditCursor_ = i;
+    return false;
+}
+
+// True while any kind of Play is running. A build without the framework has no Play, so it is false.
+bool SandboxApp::outlinerPlaying() const {
+#if AVER_MODULE_FRAMEWORK
+    return anyPlayActive();
+#else
+    return false;
+#endif
+}
+
+// Rebuilds the cache when the stamp moved or an audit found a slot that no longer matches.
+//
+// WHILE PLAY RUNS THE REBUILD IS RATE-LIMITED to one per kPlayRebuildInterval. A rebuild is one
+// string per entity plus a string-compare sort (about 45 ms at 52.8k entities), and every spawn or
+// destroy moves the stamp's entity count: the pawn, its controller, its camera node and its gun
+// arrive over the first frames of a session and each one cost a full rebuild. The first change
+// after the interval goes through at once (a Play press right after a load pays one at the start),
+// the rest wait for the interval to run out and are then caught in one rebuild, because nothing
+// below the early-out touches the cache or its stamp. The tree may show a row for an entity that is
+// gone, or miss one, for up to the interval; a row's entity is handle-checked wherever it is acted
+// on (renameEntity, pushReparent, selectedEntities, the deferred delete), and the audit already left
+// a rename or reparent unseen for up to a cycle. NOT THROTTLED: when no Play is running (so Stop
+// rebuilds on the very next frame), and the frame an editor command moved the edit mark (a rename
+// made in the UI still shows at once).
+void SandboxApp::refreshOutlinerCache() {
+    constexpr double kPlayRebuildInterval = 0.5;   // seconds
+    const u64 editMark = outlinerEditMark();
+    const bool edited = editMark != outlinerEditMark_;
+    if (outlinerCacheValid_ && !edited && outlinerPlaying() &&
+        ImGui::GetTime() - outlinerRebuiltAt_ < kPlayRebuildInterval)
+        return;
+    const u64 sig = outlinerSignature();
+    outlinerEditMark_ = editMark;
+    if (outlinerCacheValid_ && sig == outlinerCacheSig_ && !outlinerAuditDiverged(edited)) return;
+    rebuildOutlinerCache();
+    outlinerCacheSig_ = sig;
+    outlinerCacheValid_ = true;
+    outlinerRebuiltAt_ = ImGui::GetTime();
+}
+
+// Redoes the three passes and the sort that buildOutlinerPanel used to run unconditionally every
+// frame, filling outlinerRows_/outlinerChildren_/outlinerRoots_. Called only when
+// refreshOutlinerCache() finds the cached result stale (the stamp moved, or the audit caught a slot).
+void SandboxApp::rebuildOutlinerCache() {
+    scene::World& w = scene::World::instance();
+    const u32 n = w.count();
+
+    // PASS ONE: which entities are listed at all. The three filters are unchanged.
+    std::vector<OutlinerRow> rows;
+    std::unordered_set<u32> survived;
+    // One fingerprint per dense slot, recorded as the rows are decided, for outlinerAuditDiverged().
+    std::vector<u64> slotSigs(n);
+    rows.reserve(n);
+    survived.reserve(n);
+    for (u32 i = 0; i < n; ++i) {
+        slotSigs[i] = outlinerSlotSignature(i);
+        const scene::Entity ent = w.at(i);
+        if (!w.valid(ent) || w.destroyPending(ent)) continue;
+        // Chunk-streamed entities are excluded on purpose: hundreds can come and go as the
+        // camera moves; this list is what a designer placed (live count: buildChunkStreamingPanel).
+        if (anyChunkWorldOwns(ent)) continue;
+        // The drone is excluded for the same reason: transient, not authored (tracked via the
+        // [Drone] AVER_INFO lines instead; it has no Details entry either).
+        if (ent == droneEntity_) continue;
+        const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+        // A RAW POINTER, NOT A std::string: this only needs to test emptiness, and the label
+        // below (outlinerLabelFor) reads the name again anyway -- building a std::string here
+        // just to throw it away was one of two per-entity allocations this cache exists to avoid.
+        const char* nm = w.name(ent);
+        // Anything drawable or named is kept, plus an unnamed mesh-less entity once it HAS a
+        // child (else hiding a pivot the instant something reparents onto it looks like a
+        // failed reparent). childCount is the raw engine count, so a pivot whose children are
+        // all filtered shows as an empty leaf -- accepted over a third pass on survivors.
+        if (!mr && *nm == '\0' && w.childCount(ent) == 0) continue;
+        rows.push_back(OutlinerRow{ent, w.parent(ent), outlinerLabelFor(ent)});
+        survived.insert(static_cast<u32>(ent));
+    }
+
+    // PASS 1b: the name filter, applied after rows exist so ancestors can be kept. Matches a
+    // case-insensitive substring of the label; ancestors are kept too (a dropped parent's row
+    // is never visited by the root-down walk below) but descendants of a match are NOT --
+    // "show me the thing I named" shouldn't unfold its subtree.
+    if (!outlinerFilter_.empty()) {
+        const std::string needle = lowerCopy(outlinerFilter_);
+        std::unordered_map<u32, const OutlinerRow*> byEnt;
+        byEnt.reserve(rows.size());
+        for (const OutlinerRow& r : rows) byEnt[static_cast<u32>(r.ent)] = &r;
+
+        std::unordered_set<u32> keep;
+        keep.reserve(rows.size());
+        for (const OutlinerRow& r : rows) {
+            if (lowerCopy(r.shown).find(needle) == std::string::npos) continue;
+            keep.insert(static_cast<u32>(r.ent));
+            // Walk up through the rows we actually have, not through World: an ancestor that
+            // was already excluded by the filters above is not a row and must not be revived.
+            for (scene::Entity p = r.par; p != scene::kInvalidEntity;) {
+                const auto it = byEnt.find(static_cast<u32>(p));
+                if (it == byEnt.end()) break;
+                if (!keep.insert(static_cast<u32>(p)).second) break;   // already walked
+                p = it->second->par;
+            }
+        }
+        std::vector<OutlinerRow> kept;
+        kept.reserve(keep.size());
+        for (const OutlinerRow& r : rows)
+            if (keep.count(static_cast<u32>(r.ent))) kept.push_back(r);
+        rows.swap(kept);
+        survived.clear();
+        for (const OutlinerRow& r : rows) survived.insert(static_cast<u32>(r.ent));
+    }
+
+    // outlinerRows_ TAKES OWNERSHIP FIRST, before outlinerChildren_/outlinerRoots_ are built: both
+    // point INTO outlinerRows_, so it must reach its final address before anything takes a
+    // pointer into it. The swap moves rows in without copying every OutlinerRow::shown string.
+    outlinerRows_.swap(rows);
+
+    // PASS TWO, and it has to be separate: w.at() walks the dense array (swap-with-last on
+    // destroy, no ordering guarantee), so a child can appear before its parent -- testing
+    // membership against a still-filling set would wrongly promote children to roots.
+    outlinerChildren_.clear();
+    outlinerChildren_.reserve(outlinerRows_.size());
+    outlinerRoots_.clear();
+    for (const OutlinerRow& r : outlinerRows_) {
+        if (r.par != scene::kInvalidEntity && survived.count(static_cast<u32>(r.par)))
+            outlinerChildren_[static_cast<u32>(r.par)].push_back(&r);
+        else
+            outlinerRoots_.push_back(&r);   // true root, or one whose parent was filtered out or
+                                            // gone -- promoted so it stays reachable.
+    }
+    // ALPHABETICAL, not scan order: linkToParent PREPENDS, so the engine's child order is
+    // newest-first and the list would visibly reshuffle every time anything is attached.
+    const auto byLabel = [](const OutlinerRow* a, const OutlinerRow* b) { return a->shown < b->shown; };
+    std::sort(outlinerRoots_.begin(), outlinerRoots_.end(), byLabel);
+    for (auto& kv : outlinerChildren_) std::sort(kv.second.begin(), kv.second.end(), byLabel);
+
+    // What the audit compares against, and where it starts: a fresh cycle from slot 0.
+    outlinerSlotSigs_.swap(slotSigs);
+    outlinerAuditCursor_ = 0;
+
+    // THE ROOTS AS A PLAIN ARRAY, and which of them have children, both found HERE so the per-frame
+    // draws never touch a row to learn them: the roots are alphabetical, so their rows sit all over
+    // outlinerRows_ and a pass over them is a cache miss per root (52k of them every frame).
+    // outlinerParentRoots_ is empty for a flat list, which skips the lookups.
+    outlinerRootEnts_.clear();
+    outlinerRootEnts_.reserve(outlinerRoots_.size());
+    outlinerParentRoots_.clear();
+    for (usize i = 0; i < outlinerRoots_.size(); ++i) {
+        const scene::Entity ent = outlinerRoots_[i]->ent;
+        outlinerRootEnts_.push_back(ent);
+        if (!outlinerChildren_.empty() && outlinerChildren_.count(static_cast<u32>(ent)))
+            outlinerParentRoots_.push_back(static_cast<u32>(i));
+    }
+
+    // A FLAT LIST'S ORDER IS RECORDED HERE, ONCE. Nothing nests (no row has a listed parent), so the
+    // roots ARE the rows in visual order, and buildOutlinerPanel submits only the ones on screen
+    // (drawOutlinerFlatRows) -- so drawOutlinerRow cannot be what fills outlinerOrder_ any more, and
+    // multiRange/selectAllInOutliner/the Select All enable checks all need the whole list. A tree
+    // rebuilds its order each frame (drawOutlinerTreeRows): the open rows move with the folders.
+    outlinerFlat_ = outlinerChildren_.empty();
+    if (outlinerFlat_) outlinerOrder_ = outlinerRootEnts_;
+}
+
 #endif
 #endif
 
 #if AVER_WITH_IMGUI
 void SandboxApp::buildOutlinerPanel() {
-    ImGui::Begin("World Outliner", &showOutliner_);
+    const bool visible = ImGui::Begin("World Outliner", &showOutliner_);
     // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
     outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    // COLLAPSED, OR BEHIND ANOTHER DOCK TAB: Begin returned false, so nothing below would be seen
+    // (its items are all skipped), yet this used to walk every row anyway. Same early-out as
+    // buildProfilerPanel. The one thing still owed is outlinerOrder_: Select All (the Select menu,
+    // the viewport chord) ranges over it, and it used to be refreshed by this very walk even with
+    // the window hidden -- roots only, since a skipped TreeNodeEx never opens. The cache refresh is
+    // cheap now (see outlinerSignature), so keep that promise here.
+    if (!visible) {
+#if AVER_MODULE_SCENE
+        refreshOutlinerCache();
+        if (!outlinerFlat_) outlinerOrder_ = outlinerRootEnts_;
+#endif
+        ImGui::End();
+        return;
+    }
 
     // A FILTER: an alphabetical tree of six thousand entities is scrolled past, not searched
     // (Sponza alone lists a few hundred).
@@ -976,91 +1438,33 @@ void SandboxApp::buildOutlinerPanel() {
         }
 #if AVER_MODULE_SCENE
     {
-        scene::World& w = scene::World::instance();
-        const u32 n = w.count();
+        // REBUILT ONLY WHEN refreshOutlinerCache() FINDS IT STALE. Against a 12k+-entity import
+        // (Jungle Ruins: terrain tiles plus thousands of alpha-masked foliage instances) the three
+        // passes and the std::sort() below used to run unconditionally here, on every single ImGui
+        // frame, even an idle one. See outlinerSignature() and outlinerAuditDiverged() for what
+        // says stale, and rebuildOutlinerCache() for what this used to do unconditionally.
+        refreshOutlinerCache();
 
-        // PASS ONE: which entities are listed at all. The three filters are unchanged.
-        std::vector<OutlinerRow> rows;
-        std::unordered_set<u32> survived;
-        rows.reserve(n);
-        for (u32 i = 0; i < n; ++i) {
-            const scene::Entity ent = w.at(i);
-            if (!w.valid(ent) || w.destroyPending(ent)) continue;
-            // Chunk-streamed entities are excluded on purpose: hundreds can come and go as the
-            // camera moves; this list is what a designer placed (live count: buildChunkStreamingPanel).
-            if (anyChunkWorldOwns(ent)) continue;
-            // The drone is excluded for the same reason: transient, not authored (tracked via the
-            // [Drone] AVER_INFO lines instead; it has no Details entry either).
-            if (ent == droneEntity_) continue;
-            const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
-            const std::string nm = w.name(ent);
-            // Anything drawable or named is kept, plus an unnamed mesh-less entity once it HAS a
-            // child (else hiding a pivot the instant something reparents onto it looks like a
-            // failed reparent). childCount is the raw engine count, so a pivot whose children are
-            // all filtered shows as an empty leaf -- accepted over a third pass on survivors.
-            if (!mr && nm.empty() && w.childCount(ent) == 0) continue;
-            rows.push_back(OutlinerRow{ent, w.parent(ent), outlinerLabelFor(ent)});
-            survived.insert(static_cast<u32>(ent));
-        }
-
-        // PASS 1b: the name filter, applied after rows exist so ancestors can be kept. Matches a
-        // case-insensitive substring of the label; ancestors are kept too (a dropped parent's row
-        // is never visited by the root-down walk below) but descendants of a match are NOT --
-        // "show me the thing I named" shouldn't unfold its subtree.
-        if (!outlinerFilter_.empty()) {
-            const std::string needle = lowerCopy(outlinerFilter_);
-            std::unordered_map<u32, const OutlinerRow*> byEnt;
-            for (const OutlinerRow& r : rows) byEnt[static_cast<u32>(r.ent)] = &r;
-
-            std::unordered_set<u32> keep;
-            for (const OutlinerRow& r : rows) {
-                if (lowerCopy(r.shown).find(needle) == std::string::npos) continue;
-                keep.insert(static_cast<u32>(r.ent));
-                // Walk up through the rows we actually have, not through World: an ancestor that
-                // was already excluded by the filters above is not a row and must not be revived.
-                for (scene::Entity p = r.par; p != scene::kInvalidEntity;) {
-                    const auto it = byEnt.find(static_cast<u32>(p));
-                    if (it == byEnt.end()) break;
-                    if (!keep.insert(static_cast<u32>(p)).second) break;   // already walked
-                    p = it->second->par;
-                }
-            }
-            std::vector<OutlinerRow> kept;
-            kept.reserve(keep.size());
-            for (const OutlinerRow& r : rows)
-                if (keep.count(static_cast<u32>(r.ent))) kept.push_back(r);
-            rows.swap(kept);
-            survived.clear();
-            for (const OutlinerRow& r : rows) survived.insert(static_cast<u32>(r.ent));
-        }
-
-        // PASS TWO, and it has to be separate: w.at() walks the dense array (swap-with-last on
-        // destroy, no ordering guarantee), so a child can appear before its parent -- testing
-        // membership against a still-filling set would wrongly promote children to roots.
-        std::unordered_map<u32, std::vector<const OutlinerRow*>> children;
-        std::vector<const OutlinerRow*> roots;
-        for (const OutlinerRow& r : rows) {
-            if (r.par != scene::kInvalidEntity && survived.count(static_cast<u32>(r.par)))
-                children[static_cast<u32>(r.par)].push_back(&r);
-            else
-                roots.push_back(&r);   // true root, or one whose parent was filtered out or
-                                       // gone -- promoted so it stays reachable.
-        }
-        // ALPHABETICAL, not scan order: linkToParent PREPENDS, so the engine's child order is
-        // newest-first and the list would visibly reshuffle every time anything is attached.
-        const auto byLabel = [](const OutlinerRow* a, const OutlinerRow* b) { return a->shown < b->shown; };
-        std::sort(roots.begin(), roots.end(), byLabel);
-        for (auto& kv : children) std::sort(kv.second.begin(), kv.second.end(), byLabel);
-
-        if (!roots.empty() && !hideEditorScene_) ImGui::Separator();
-        // Rebuilt from scratch every frame: rows appear and vanish as folders expand and the
-        // filter changes, and a stale order would range over rows that are no longer on screen.
-        outlinerOrder_.clear();
-        for (const OutlinerRow* r : roots) drawOutlinerRow(*r, children, 0);
+        if (!outlinerRoots_.empty() && !hideEditorScene_) ImGui::Separator();
+        // A FLAT LIST submits only the rows on screen, and its order was recorded by the rebuild;
+        // see drawOutlinerFlatRows.
+        // A TREE submits the roots that have children and their open rows, and only the on-screen
+        // rows of each run of childless roots between them (drawOutlinerTreeRows). Its order is the
+        // DRAW order, not the cache above: rebuilt every frame because rows appear and vanish as
+        // folders expand and collapse, and a stale order would range over rows no longer on screen.
+        // Cheap regardless of cache state -- a copy of the childless roots' entities plus one push
+        // per open row of a parent, and selection highlighting inside drawOutlinerRow reads
+        // sel_/selEntity_/multiSel_ live, so a selection change needs no cache invalidation either.
+        if (outlinerFlat_) drawOutlinerFlatRows();
+        else               drawOutlinerTreeRows();
 
         // The deferred delete, answered here: the tree is fully drawn, every TreePop is paired,
         // and nothing below reads the row structures. Routed through deleteSelection so it
-        // captures the subtree for undo too.
+        // captures the subtree for undo too. destroyEntity() flips destroyPending() and erases
+        // entityLabels_ (which moves outlinerSignature()'s size) synchronously, deleteSelection
+        // pushes an undo entry (which moves outlinerEditMark(), so the next refresh audits every
+        // slot and sees the pending destroy), and the flush that retires the entity moves the entity
+        // count -- so the cache rebuilds on its own next frame, no cache poke needed here.
         if (outlinerDeleteRequest_ != scene::kInvalidEntity) {
             const scene::Entity doomed = outlinerDeleteRequest_;
             outlinerDeleteRequest_ = scene::kInvalidEntity;
@@ -1084,6 +1488,27 @@ void SandboxApp::buildOutlinerPanel() {
             ImGui::EndDragDropTarget();
         }
     }
+#if AVER_MODULE_VOXI
+    // FOLIAGE: one INFORMATIONAL row when the level has any, never a per-instance one -- foliage
+    // lives outside the entity/draw system entirely (ray-traced only, no collision, GameFoliage.hpp's
+    // own header comment), so there is nothing here to select, reparent or drag, and
+    // voxiRenderer_.foliageStats() is an O(1) read of numbers setFoliage already computed, not a
+    // walk over however many million instances a level scattered.
+    if (const voxi::VoxiRenderer::FoliageStats fs = voxiRenderer_.foliageStats(); fs.instances > 0) {
+        ImGui::Separator();
+        ImGui::TextDisabled("  Foliage  (%u type%s, %u instance%s)", fs.prototypes,
+                             fs.prototypes == 1 ? "" : "s", fs.instances, fs.instances == 1 ? "" : "s");
+        if (ImGui::IsItemHovered()) {
+            const std::string files = levelHeader_.foliageFiles.empty()
+                ? std::string("an unknown file")
+                : levelHeader_.foliageFiles.size() == 1
+                    ? levelHeader_.foliageFiles.front()
+                    : std::to_string(levelHeader_.foliageFiles.size()) + " files";
+            ImGui::SetTooltip("Ray-traced instanced foliage from %s -- static, not individually "
+                              "selectable or editable per instance.", files.c_str());
+        }
+    }
+#endif
 #endif
     ImGui::Separator();
     // Unguarded: the sun/sky/post-process pseudo-entries exist whether or not there is a scene.
@@ -1311,6 +1736,217 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         ImGui::SetTooltip("Saved with the level.\n"
                                           "H hides it in the editor only, without changing this.");
                 }
+                // COLLIDES: the .ocworld `nocollide` flag, which until now could only be authored by
+                // editing the file. Whole-selection and one undo entry per click, exactly like
+                // Visible above (EditCmd::Collision). Off removes each entity's static body on the
+                // spot; on fits a fresh one -- both inside setEntityCollide.
+                {
+                    const auto collides = [&](scene::Entity ent) {
+                        const auto it = entityCollide_.find(static_cast<u32>(ent));
+                        return it == entityCollide_.end() ? true : it->second;   // absent = the default
+                    };
+                    // Disabled for an entity the level does not own (a class instance, a preview): saveLevel
+                    // writes nocollide per level placement only, so the edit would dirty the level and be lost.
+                    const bool levelOwned = isLevelOwned(selEntity_);
+                    ImGui::BeginDisabled(!levelOwned);
+                    bool col = collides(selEntity_);
+                    if (ImGui::Checkbox("Collides", &col)) {
+                        EditCmd c;
+                        c.kind = EditCmd::Kind::Collision;
+                        for (const scene::Entity ent : multiSelected) {
+                            if (!w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer)) continue;
+                            if (!isLevelOwned(ent)) continue;   // a mixed selection edits only what would be saved
+                            const bool before = collides(ent);
+                            if (before == col) continue;   // already there: no dead entry for it
+                            setEntityCollide(ent, col);
+                            c.collide.push_back({editIdFor(ent), before, col});
+                        }
+                        if (!c.collide.empty()) pushEdit(std::move(c));
+                    }
+                    uiReg_.track("details.mesh.collides");
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        if (levelOwned)
+                            ImGui::SetTooltip("Saved with the level (off writes nocollide).\n"
+                                              "Off removes its static body, so nothing collides with it.");
+                        else
+                            ImGui::SetTooltip("This entity is not one of the level's own placements, so\n"
+                                              "the level would not save this setting.");
+                    }
+                    ImGui::EndDisabled();
+                }
+                // ANIMATION: the .ocworld anim/animspeed/animtime/animonce tokens -- a transform clip
+                // this placement plays in Play (a car on its route, a fan). Whole-selection and one undo
+                // entry per change, like Collides above (EditCmd::Animation). A skeletal mesh is left
+                // out (its CAnimator is a skeletal clock), and nothing is editable while Play has object
+                // animation live: it has already captured each entity's base.
+                if (!w.hasComponent(selEntity_, scene::kComponentSkeletalMesh)) {
+                    ImGui::SeparatorText("Animation");
+                    if (levelIsLegacyOcmap_) {
+                        ImGui::TextDisabled("The legacy .ocmap format cannot store an animation.");
+                    } else {
+                        std::vector<scene::Entity> targets;   // the selected meshes this section applies to
+                        for (const scene::Entity ent : multiSelected)
+                            if (w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer) &&
+                                !w.hasComponent(ent, scene::kComponentSkeletalMesh))
+                                targets.push_back(ent);
+                        const auto animOf = [&](scene::Entity ent) {
+                            const EntityAnim* a = entityAnim(ent);
+                            return a ? *a : EntityAnim{};
+                        };
+                        const EntityAnim cur = animOf(selEntity_);
+                        const bool live = anim::animSystem().objectAnimationLive();
+                        // Only the level's own placements save an animation (saveLevel writes the tokens
+                        // per levelEntities_ entry); on a class instance or preview an edit would be lost.
+                        const bool levelOwned = isLevelOwned(selEntity_);
+                        if (live) {
+                            ImGui::TextDisabled("Stop Play to edit the animation.");
+                        } else if (!levelOwned) {
+                            ImGui::TextDisabled("Not saved: not one of the level's placements.");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("This entity is not one of the level's own placements (a class\n"
+                                                  "instance or a preview), so the level would not save an animation on it.");
+                        }
+                        ImGui::BeginDisabled(live || !levelOwned);
+
+                        // The clip, and why it would not move this mesh if it would not.
+                        ImGui::TextDisabled("clip  %s", cur.clip.empty() ? "(none)" : cur.clip.c_str());
+                        if (!cur.clip.empty()) {
+                            const u64 clipId = fnv1a64(std::string_view(cur.clip));
+                            const bool indexed = !content_.pathFor(clipId).empty();
+                            const fmt::OcAnimation* clip = indexed ? anim::animSystem().clip(clipId) : nullptr;
+                            if (!indexed)
+                                ImGui::TextDisabled(ICON_WARNING " not found under the project's Content");
+                            else if (!clip)
+                                ImGui::TextDisabled(ICON_WARNING " the clip could not be loaded");
+                            else if (!(clip->flags & fmt::kOcAnimObject))
+                                ImGui::TextDisabled(ICON_WARNING " a skeletal clip: it will not move this mesh");
+                            else
+                                ImGui::TextDisabled("%.2f s", static_cast<double>(clip->duration));
+                        }
+                        if (ImGui::Button("Change Clip...")) ImGui::OpenPopup("##pickAnim");
+                        uiReg_.track("details.anim.clip");
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("A transform clip this mesh plays in Play: a car on a route, a fan.\n"
+                                              "The placement is where it sits at the start time; the clip\n"
+                                              "moves it from there. Saved with the level (anim).");
+                        // Built only while the popup is open: listing means reading every project .ocanim
+                        // once (AnimSystem caches them) to keep the object clips and drop the skeletal ones.
+                        if (ImGui::IsPopupOpen("##pickAnim")) {
+                            std::vector<AssetChoice> clips;
+                            for (const auto& kv : content_.index()) {
+                                if (lowerExt(std::filesystem::path(kv.second)) != ".ocanim") continue;
+                                const fmt::OcAnimation* c = anim::animSystem().clip(kv.first);
+                                if (c && (c->flags & fmt::kOcAnimObject))
+                                    clips.push_back({cbRelativeToContent(kv.second), kv.first});
+                            }
+                            std::sort(clips.begin(), clips.end(),
+                                      [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                            std::vector<AssetChoice> cands;
+                            cands.push_back({"(None)", 0});
+                            cands.insert(cands.end(), clips.begin(), clips.end());
+                            u64 picked = 0;
+                            const u64 currentId = cur.clip.empty() ? 0 : fnv1a64(std::string_view(cur.clip));
+                            if (assetPicker("##pickAnim", cands, currentId, &picked)) {
+                                // The path is the identity (id = fnv1a64 of it), so it is derived from the
+                                // index's file and checked to hash back to the pick.
+                                const std::string rel = picked ? cbRelativeToContent(content_.pathFor(picked))
+                                                               : std::string();
+                                if (picked && fnv1a64(std::string_view(rel)) != picked) {
+                                    cbStatus_ = "Could not resolve the clip to a project-relative path";
+                                } else {
+                                    EditCmd c;
+                                    c.kind = EditCmd::Kind::Animation;
+                                    for (const scene::Entity ent : targets) {
+                                        if (!isLevelOwned(ent)) continue;   // a mixed selection edits only what would be saved
+                                        const EntityAnim before = animOf(ent);
+                                        EntityAnim after = before;
+                                        after.clip = rel;
+                                        if (rel.empty()) after = EntityAnim{};   // None: back to the defaults
+                                        if (before == after) continue;           // already there: no dead entry
+                                        applyEntityAnim(ent, after);
+                                        c.animation.push_back({editIdFor(ent), before, after});
+                                    }
+                                    if (!c.animation.empty()) pushEdit(std::move(c));
+                                }
+                            }
+                        }
+
+                        // Speed, start time and Play once tune the clips already on the selection (nothing
+                        // to tune on an entity without one). A drag is ONE undo entry: animEditBefore_ is the
+                        // selection as it stood when the widget was grabbed, before that frame's edit lands.
+                        const auto snapshot = [&] {
+                            animEditBefore_.clear();
+                            for (const scene::Entity ent : targets)
+                                if (const EntityAnim* a = entityAnim(ent))
+                                    animEditBefore_.push_back({editIdFor(ent), *a, *a});
+                        };
+                        const auto commit = [&] {
+                            EditCmd c;
+                            c.kind = EditCmd::Kind::Animation;
+                            for (EditCmd::AnimChange& ch : animEditBefore_) {
+                                const scene::Entity ent = entityForEdit(ch.id);
+                                const EntityAnim* now = w.valid(ent) ? entityAnim(ent) : nullptr;
+                                if (!now || *now == ch.before) continue;
+                                ch.after = *now;
+                                c.animation.push_back(ch);
+                            }
+                            animEditBefore_.clear();
+                            if (!c.animation.empty()) pushEdit(std::move(c));
+                        };
+                        const auto tune = [&](auto&& set) {
+                            for (const scene::Entity ent : targets) {
+                                const EntityAnim* a = entityAnim(ent);
+                                if (!a) continue;
+                                EntityAnim next = *a;
+                                set(next);
+                                applyEntityAnim(ent, next);
+                            }
+                        };
+                        ImGui::BeginDisabled(cur.clip.empty());
+                        f32 speed = cur.speed;
+                        const bool speedEdited = ImGui::DragFloat("Speed##animSpeed", &speed, 0.01f, 0.01f, 100.0f, "%.2f");
+                        if (ImGui::IsItemActivated() || (speedEdited && animEditBefore_.empty())) snapshot();
+                        if (speedEdited) tune([&](EntityAnim& n) { n.speed = speed; });
+                        if (ImGui::IsItemDeactivatedAfterEdit()) commit();
+                        uiReg_.track("details.anim.speed");
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Playback speed. Saved with the level (animspeed).");
+                        f32 startTime = cur.time;
+                        const bool timeEdited = ImGui::DragFloat("Start time (s)##animTime", &startTime, 0.01f, 0.0f, 100000.0f, "%.2f");
+                        if (ImGui::IsItemActivated() || (timeEdited && animEditBefore_.empty())) snapshot();
+                        if (timeEdited) tune([&](EntityAnim& n) { n.time = startTime; });
+                        if (ImGui::IsItemDeactivatedAfterEdit()) commit();
+                        uiReg_.track("details.anim.time");
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Where in the clip the placement stands, in seconds.\n"
+                                              "The mesh sits at its placement at this time and moves relative\n"
+                                              "to it. Saved with the level (animtime).");
+                        bool once = cur.once;
+                        if (ImGui::Checkbox("Play once##animOnce", &once)) {
+                            snapshot();
+                            tune([&](EntityAnim& n) { n.once = once; });
+                            commit();
+                        }
+                        uiReg_.track("details.anim.once");
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Play through once and hold the last pose, instead of looping.\n"
+                                              "Saved with the level (animonce).");
+                        ImGui::EndDisabled();
+                        ImGui::EndDisabled();
+                    }
+                }
+#if AVER_MODULE_PHYSICS
+                // VEHICLE: the `vehicle <preset>` token of a placement that drives in Play. Read-only, the
+                // way the file's other authored-elsewhere tokens are shown: the generator writes it, and
+                // the preset is not edited here.
+                if (const std::string* vehicle = level_.vehiclePresetOf(selEntity_)) {
+                    ImGui::TextDisabled("vehicle  %s", vehicle->c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("A physics car in Play (suspension, tyres, gravity, collisions), driven along\n"
+                                          "the level's lanes (<level>.oclanes). Sized from this mesh's bounds and the\n"
+                                          "preset. Set by the vehicle token on the placement; not editable here.");
+                }
+#endif
                 // Now reassignable: previously just a printed hex id, with no picker and not even
                 // a drop target -- the only mesh drag-drop in the editor lands on the 3D viewport
                 // and spawns a NEW entity, a different verb.
@@ -1319,18 +1955,28 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                                     ? "(unloaded)" : meshIt->second.c_str());
                 if (ImGui::Button("Change Mesh...")) ImGui::OpenPopup("##pickMesh");
                 uiReg_.track("details.mesh.pick");
-                {
+                // BUILT ONLY WHILE THE POPUP IS OPEN, like the animation picker above: this used to
+                // copy and sort every loaded mesh path (thousands, in a big level) on every frame
+                // the Details panel showed a mesh, with the popup shut. Kept across the frames it
+                // stays open; see PickerCands.
+                if (ImGui::IsPopupOpen("##pickMesh")) {
                     // Candidates are meshes actually loaded (from the map populated for this --
                     // "the foliage palette, a future asset picker"); listing every .ocmesh in the
                     // content index could offer one the device refused or never loaded, blanking
                     // the entity if picked.
-                    std::vector<AssetChoice> cands;
-                    cands.reserve(meshPathById_.size());
-                    for (const auto& kv : meshPathById_) cands.push_back({kv.second, kv.first});
-                    std::sort(cands.begin(), cands.end(),
-                              [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                    PickerCands& pc = pickMeshCands_;
+                    const int frame = ImGui::GetFrameCount();
+                    if (pc.lastFrame < frame - 1 || pc.stamp != meshPathById_.size()) {
+                        pc.list.clear();
+                        pc.list.reserve(meshPathById_.size());
+                        for (const auto& kv : meshPathById_) pc.list.push_back({kv.second, kv.first});
+                        std::sort(pc.list.begin(), pc.list.end(),
+                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                        pc.stamp = meshPathById_.size();
+                    }
+                    pc.lastFrame = frame;
                     u64 picked = 0;
-                    if (assetPicker("##pickMesh", cands, mr->mesh, &picked)) {
+                    if (assetPicker("##pickMesh", pc.list, mr->mesh, &picked)) {
                         if (multiSelected.size() <= 1) {
                             assignMeshId(selEntity_, picked);
                         } else {
@@ -1352,6 +1998,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                             }
                         }
                     }
+                } else {
+                    pickMeshCands_.drop();
                 }
             }
 
@@ -1373,24 +2021,56 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 // change WHICH material.
                 if (ImGui::Button("Change Material...")) ImGui::OpenPopup("##pickMaterial");
                 uiReg_.track("details.material.pick");
-                {
-                    // Tokens, not path hashes: content_'s surface map is keyed on the interned
-                    // token mr->material holds; an fnv1a64 here could resolve to nothing, or worse,
-                    // to an unrelated surface by coincidence.
-                    std::vector<AssetChoice> cands;
-                    cands.reserve(content_.surfaceMaterials().size());
-                    for (const auto& kv : content_.surfaceMaterials()) {
-                        if (!kv.second) continue;   // interned but no .ocmat loaded behind it
-                        // `matName`, not `nm`: the entity-name `nm` set above is still in scope
-                        // here and would be shadowed (C4456) by an unrelated MATERIAL name.
-                        const char* matName = aver_scene_material_name(kv.first);
-                        cands.push_back({matName && *matName ? matName : "(unnamed)",
-                                         static_cast<u64>(static_cast<u32>(kv.first))});
+                // BUILT ONLY WHILE THE POPUP IS OPEN: editor::projectMaterialStems below ENUMERATES
+                // the project's Materials directories, which this used to do on every frame the
+                // Details panel showed a mesh entity, popup or not. Kept across the frames it stays
+                // open (see PickerCands), so an open picker does not re-read the disk per frame.
+                if (ImGui::IsPopupOpen("##pickMaterial")) {
+                    // EVERY PROJECT MATERIAL STEM, not only the ones level-scoped residency
+                    // (levelScopedMaterialsEnabled()) currently keeps bound: with that on, a level
+                    // holds only its OWN surfaces in content_.surfaceMaterials(), and listing just
+                    // that map here would make every other material in the project unreachable from
+                    // this picker. editor::projectMaterialStems() is the same Binaries-then-Content
+                    // enumeration loadProjectMaterials() used to drive; picking one that is not yet
+                    // resident loads it on demand -- see assignMaterialToken()'s own comment.
+                    //
+                    // Tokens, not path hashes: content_'s surface map is keyed on the interned token
+                    // mr->material holds; an fnv1a64 here could resolve to nothing, or worse, to an
+                    // unrelated surface by coincidence. aver_scene_material() interns (or reuses) the
+                    // token for a name without loading anything, so every stem gets one whether or
+                    // not a .ocmat is behind it yet.
+                    PickerCands& pc = pickMaterialCands_;
+                    const int frame = ImGui::GetFrameCount();
+                    if (pc.lastFrame < frame - 1 || pc.stamp != content_.surfaceMaterials().size()) {
+                        std::unordered_set<i32> seen;
+                        std::vector<AssetChoice>& cands = pc.list;
+                        cands.clear();
+                        const std::vector<std::string> stems =
+                            editor::projectMaterialStems(project_.binariesDir(), project_.contentDir());
+                        cands.reserve(stems.size());
+                        for (const std::string& stem : stems) {
+                            const i32 stemToken = aver_scene_material(0, stem.c_str());
+                            if (!seen.insert(stemToken).second) continue;
+                            cands.push_back({stem, static_cast<u64>(static_cast<u32>(stemToken))});
+                        }
+                        // A surface already bound (foliage, landscape, a placement override) whose name
+                        // is not a bare stem under either Materials folder -- rare, but not listing it
+                        // would make an already-assigned material vanish from its own picker.
+                        for (const auto& kv : content_.surfaceMaterials()) {
+                            if (!kv.second || !seen.insert(kv.first).second) continue;
+                            // `matName`, not `nm`: the entity-name `nm` set above is still in scope
+                            // here and would be shadowed (C4456) by an unrelated MATERIAL name.
+                            const char* matName = aver_scene_material_name(kv.first);
+                            cands.push_back({matName && *matName ? matName : "(unnamed)",
+                                             static_cast<u64>(static_cast<u32>(kv.first))});
+                        }
+                        std::sort(cands.begin(), cands.end(),
+                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                        pc.stamp = content_.surfaceMaterials().size();
                     }
-                    std::sort(cands.begin(), cands.end(),
-                              [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                    pc.lastFrame = frame;
                     u64 picked = 0;
-                    if (assetPicker("##pickMaterial", cands,
+                    if (assetPicker("##pickMaterial", pc.list,
                                     static_cast<u64>(static_cast<u32>(shown)), &picked)) {
                         if (multiSelected.size() <= 1) {
                             assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
@@ -1409,6 +2089,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                             }
                         }
                     }
+                } else {
+                    pickMaterialCands_.drop();
                 }
                 const pbr::MaterialHandle authored = content_.authoredFor(shown);
                 if (!authored) {
@@ -1464,7 +2146,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 // And the same assignment without needing the Content Browser open at all.
                 if (ImGui::Button("Change Effect...")) ImGui::OpenPopup("##pickEffect");
                 uiReg_.track("details.effect.pick");
-                {
+                // BUILT ONLY WHILE THE POPUP IS OPEN: the scan below walks the WHOLE content index
+                // (every asset in the project) with a path parse per entry, and this used to run on
+                // every frame the Details panel showed an emitter. Kept across the frames it stays
+                // open (see PickerCands).
+                if (ImGui::IsPopupOpen("##pickEffect")) {
                     // Candidates come from the content index, not a loaded-effects map: an effect
                     // resolves on ASSIGNMENT (unlike a mesh), so listing only loaded ones would
                     // hide the file the author just made.
@@ -1475,15 +2161,22 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     // the two disagree, which is why the label is derived rather than used as-is.
                     // Labelled relative, so this popup reads like the Mesh/Material ones above
                     // instead of the developer's whole local directory tree.
-                    std::vector<AssetChoice> cands;
-                    for (const auto& kv : content_.index()) {
-                        if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
-                        cands.push_back({cbRelativeToContent(kv.second), kv.first});
+                    PickerCands& pc = pickEffectCands_;
+                    const int frame = ImGui::GetFrameCount();
+                    if (pc.lastFrame < frame - 1 || pc.stamp != content_.index().size()) {
+                        std::vector<AssetChoice>& cands = pc.list;
+                        cands.clear();
+                        for (const auto& kv : content_.index()) {
+                            if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
+                            cands.push_back({cbRelativeToContent(kv.second), kv.first});
+                        }
+                        std::sort(cands.begin(), cands.end(),
+                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                        pc.stamp = content_.index().size();
                     }
-                    std::sort(cands.begin(), cands.end(),
-                              [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                    pc.lastFrame = frame;
                     u64 picked = 0;
-                    if (assetPicker("##pickEffect", cands, pe->effect, &picked)) {
+                    if (assetPicker("##pickEffect", pc.list, pe->effect, &picked)) {
                         // Assigned by path, not by writing the id directly, so it goes through the
                         // same resolve/validate the drop does -- extension check and project-
                         // relative normalisation included (writing pe->effect would duplicate it).
@@ -1496,6 +2189,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         if (!path.empty())
                             assignParticleEffect(selEntity_, path);
                     }
+                } else {
+                    pickEffectCands_.drop();
                 }
                 ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
             }

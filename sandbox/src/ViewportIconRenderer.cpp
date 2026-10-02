@@ -43,9 +43,10 @@ void cameraBasis(const f32 invViewProjRel[16], Vec3& outRight, Vec3& outUp) {
 }
 
 // STRAIGHT alpha, unlike ParticleRenderer's packPremultiplied twin -- viewport_icon.hlsl does the
-// premultiply itself, after its inverse tonemap, because doing it before a non-linear curve puts a
-// dark fringe on every transparent edge. Byte order R,G,B,A from the low byte up (0xAABBGGRR), the
-// same convention UiDrawList and the particle renderer both use for an RGBA8Unorm vertex colour.
+// premultiply itself, after the optional sRGB-to-linear step (IconPS), because doing it before a
+// non-linear curve puts a dark fringe on every transparent edge. Byte order R,G,B,A from the low
+// byte up (0xAABBGGRR), the same convention UiDrawList and the particle renderer both use for an
+// RGBA8Unorm vertex colour.
 u32 packStraight(const f32 rgba[4]) {
     auto b = [](f32 v) -> u32 {
         const f32 c = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
@@ -53,6 +54,41 @@ u32 packStraight(const f32 rgba[4]) {
     };
     return b(rgba[0]) | (b(rgba[1]) << 8) | (b(rgba[2]) << 16) | (b(rgba[3]) << 24);
 }
+
+// The overlay/display target's REAL colour format -- NOT IDevice::backbufferFormat(), which (despite
+// its name) returns the SCENE colour target's own HDR format (RGBA16F): see that method's own
+// comment in RHI.hpp, and D3D12Device.cpp's own overlayPass call site ("NOT IDevice::backbufferFormat
+// (): here that names the SCENE colour target's own format ... the real backbuffer and the viewport
+// texture are both created at kBackbufferFormat"). Both shipping backends' actual swapchain surface is
+// an 8-bit UNORM format (D3D12Device.cpp's kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+// VulkanDevice.cpp negotiates VK_FORMAT_R8G8B8A8_UNORM or VK_FORMAT_B8G8R8A8_UNORM, both
+// Format::RGBA8Unorm here) -- there is no generic IDevice accessor for it today (EditorLines is
+// handed it directly by the device instead of asking, since it isn't a generic IRenderFeature), so
+// this is hardcoded rather than queried.
+constexpr rhi::Format kOverlayTargetFormat = rhi::Format::RGBA8Unorm;
+
+// sRGB render-target formats decode on read and encode on write; IconPS needs to know so it can
+// write LINEAR when the hardware is about to re-encode, the same convention editor_lines.hlsl's
+// gMaterial.x follows. Always false against kOverlayTargetFormat today (a plain UNORM backbuffer --
+// the composite shader gamma-encodes by hand, per docs/STATUS.md's "ACES -> gamma -> backbuffer"),
+// kept dynamic rather than assumed for the same reason editor_lines.hlsl's replay() checks its own
+// targetFormat argument instead of assuming: it costs nothing and stays right if that ever changes.
+bool isSrgbTargetFormat(rhi::Format f) { return f == rhi::Format::RGBA8UnormSrgb; }
+
+// Mirrors shared_prelude.hlsl's PerObject cbuffer field-for-field, so the fields below can be named
+// rather than poked in as raw dword offsets. gWorld is left at its zero default -- IconVS never
+// reads it -- and gShadingModel/gReflectance/gF90/_objPad are unread by IconPS, same as
+// editor_lines.hlsl leaves them.
+struct ObjectConsts {
+    f32 world[16] = {};
+    f32 baseColor[4] = {};   // .y = depth-tested, .zw = the 3D view's rect size (px)
+    f32 material[4] = {};    // .x = target is sRGB (write linear), .zw = the rect's origin (px)
+    u32 shadingModel = 0;
+    f32 reflectance = 0, f90 = 0, _objPad = 0;
+    f32 emissive[4] = {};    // .xy = the whole (display) target's size (px)
+};
+static_assert(sizeof(ObjectConsts) == rhi::kObjectConstantDwords * sizeof(f32),
+              "must match PerObject's 32-dword layout (shared_prelude.hlsl)");
 
 } // namespace
 
@@ -66,32 +102,31 @@ bool ViewportIconRenderer::init(rhi::IDevice& device) {
 
     rhi::ShaderDesc sd;
     sd.source = rhi::shaderFile("viewport_icon.hlsl").c_str();
-    // gViewProj from the frame block, and averInverseTonemap/srgbToLin from the prelude's own maths
-    // -- see IconPS's comment on why that round trip is not optional here.
     sd.prelude = rhi::sharedShaderPrelude();
     sd.entry = "IconVS";
     sd.stage = rhi::ShaderStage::Vertex;
     vs_ = res_->createShader(sd);
-    sd.entry = "IconPS";
-    sd.stage = rhi::ShaderStage::Pixel;
-    ps_ = res_->createShader(sd);
-    if (!vs_ || !ps_) {
-        AVER_ERROR("[ViewportIcons] the viewport icon shaders failed to compile");
+    if (!vs_) {
+        AVER_ERROR("[ViewportIcons] IconVS failed to compile");
         return false;
     }
 
     if (!ensureCapacity(kInitialVertices, kInitialIndices)) return false;
 
-    // Best-effort first build; the real scene target's sample count and formats arrive through
-    // onRenderTargetsChanged before the first real frame. Same two-step as ParticleRenderer::init.
-    buildPipeline(device.sampleCount(), device.backbufferFormat(), device.depthFormat());
+    // Best-effort first build; the real scene depth sample count arrives through
+    // onRenderTargetsChanged before the first real frame, same two-step as ParticleRenderer::init.
+    // IconPS itself is built here, inside ensurePipeline.
+    ensurePipeline(device.sampleCount());
     AVER_INFO("[ViewportIcons] ready");
     return true;
 }
 
 void ViewportIconRenderer::shutdown() {
     if (res_) {
-        for (u32 i = 0; i < kFramesInFlight; ++i) { res_->destroyBuffer(vb_[i]); res_->destroyBuffer(ib_[i]); }
+        for (u32 i = 0; i < kFramesInFlight; ++i) {
+            res_->destroyBuffer(vb_[i]); res_->destroyBuffer(ib_[i]);
+            res_->destroyBindingSet(depthSet_[i]);
+        }
         for (Icon& ic : icons_) {
             res_->destroyBindingSet(ic.set);
             res_->destroyTexture(ic.texture);
@@ -100,10 +135,11 @@ void ViewportIconRenderer::shutdown() {
         res_->destroyShader(vs_);
         res_->destroyShader(ps_);
     }
-    for (u32 i = 0; i < kFramesInFlight; ++i) { vb_[i] = 0; ib_[i] = 0; }
+    for (u32 i = 0; i < kFramesInFlight; ++i) { vb_[i] = 0; ib_[i] = 0; depthSet_[i] = 0; }
     icons_.assign(1, Icon{});
     pso_ = 0;
     vs_ = ps_ = 0;
+    builtDepthSamples_ = 0;
     vbCapacity_ = ibCapacity_ = 0;
     res_ = nullptr;
     dev_ = nullptr;
@@ -196,8 +232,29 @@ bool ViewportIconRenderer::ensureCapacity(usize vertexCount, usize indexCount) {
     return true;
 }
 
-bool ViewportIconRenderer::buildPipeline(u32 sampleCount, rhi::Format color, rhi::Format depth) {
-    if (!res_ || !vs_ || !ps_) return false;
+bool ViewportIconRenderer::ensurePipeline(u32 depthSamples) {
+    if (pso_ && depthSamples == builtDepthSamples_) return true;
+    if (!res_ || !vs_) return false;
+
+    // The depth read's dimensionality is a compile-time choice (Texture2D vs Texture2DMS, matching
+    // editor_lines.hlsl's AVER_EDITOR_LINE_MS) and a binding-set-declared one (SlotKind below), so
+    // IconPS is recompiled here rather than kept as a permanent MS/non-MS pair -- OcclusionCuller's
+    // HZB seed kernel is the precedent (AVER_HZB_MS), and a sample-count change is rare enough that
+    // recompiling on it costs nothing worth avoiding.
+    const bool ms = depthSamples > 1;
+    res_->destroyShader(ps_);
+    rhi::ShaderDesc sd;
+    sd.source = rhi::shaderFile("viewport_icon.hlsl").c_str();
+    sd.prelude = rhi::sharedShaderPrelude();
+    sd.entry = "IconPS";
+    sd.stage = rhi::ShaderStage::Pixel;
+    sd.defines = ms ? "AVER_ICON_DEPTH_MS=1" : nullptr;
+    ps_ = res_->createShader(sd);
+    if (!ps_) {
+        AVER_ERROR("[ViewportIcons] IconPS failed to (re)compile ({} depth sample(s))", depthSamples);
+        return false;
+    }
+
     res_->destroyPipeline(pso_);
     pso_ = 0;
 
@@ -214,45 +271,75 @@ bool ViewportIconRenderer::buildPipeline(u32 sampleCount, rhi::Format color, rhi
     static_assert(offsetof(ViewportIconVertex, uv) == 12, "TEXCOORD0 is declared at byte 12 above");
     static_assert(offsetof(ViewportIconVertex, color) == 20, "COLOR0 is declared at byte 20 above");
 
-    // TESTED, NOT WRITTEN -- the transparentPass contract, and the entire reason this is a render
-    // feature rather than an ImGui overlay. Test gives occlusion by real geometry; write-off keeps
-    // the icon from occluding anything drawn after it.
-    gd.depth.test = true;
+    // NEITHER TESTED NOR WRITTEN, unlike the old transparentPass pipeline: overlayPass has no depth
+    // attachment at all (it draws onto the display target, after the scene and its depth buffer are
+    // both finished with). IconPS does its own occlusion instead, sampling IDevice::sceneDepthTexture
+    // through the table-1 binding below and comparing distances from the eye -- PSEditorLine's own
+    // technique (editor_lines.hlsl), needed there for the identical reason (a render-scaled scene
+    // depth doesn't line up 1:1 with the display target a hardware depth-test would need).
+    gd.depth.test = false;
     gd.depth.write = false;
     // A billboard faces the camera by construction; there is no back face to cull.
     gd.cull = rhi::CullMode::None;
     gd.blend = rhi::BlendMode::PremultipliedAlpha;
 
     gd.renderTargetCount = 1;
-    gd.renderTargets[0] = color;
-    gd.depthFormat = depth;
-    gd.sampleCount = sampleCount;
+    gd.renderTargets[0] = kOverlayTargetFormat;
+    gd.depthFormat = rhi::Format::Unknown;
+    // The OVERLAY target itself is never multisampled (it is the display target); `depthSamples`
+    // above is the SCENE depth's sample count, a completely different axis (what table 1 reads).
+    gd.sampleCount = 1;
 
-    gd.layout.srvCount = 1;
+    gd.layout.srvCount = 1;    // table 0: t0, this icon's own texture (per-icon set, unchanged)
+    gd.layout.srvCount1 = 1;   // table 1: t1, the sampled scene depth (depthSet_ ring, below)
+    gd.layout.slotKindsDeclared = true;
+    gd.layout.srvKinds[0] = rhi::SlotKind::Texture2D;
+    gd.layout.srvKinds1[0] = ms ? rhi::SlotKind::Texture2DMS : rhi::SlotKind::Texture2D;
     gd.layout.samplerCount = 1;
     gd.layout.samplers[0].filter = rhi::Filter::Linear;
     gd.layout.samplers[0].address = rhi::AddressMode::Clamp;
+    // b1 as root constants, DECLARED: undeclared it is a root CBV on D3D12 and overlayPass's
+    // setConstants is refused (same as ActorPreview's object block).
+    gd.layout.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
 
     pso_ = res_->createGraphicsPipeline(gd);
-    pipelineSampleCount_ = sampleCount;
-    pipelineColor_ = color;
-    pipelineDepth_ = depth;
     if (!pso_) {
-        AVER_ERROR("[ViewportIcons] pipeline build failed at {}x MSAA", sampleCount);
+        AVER_ERROR("[ViewportIcons] overlay pipeline build failed ({} depth sample(s))", depthSamples);
         return false;
     }
-    AVER_INFO("[ViewportIcons] pipeline (re)built: {}x MSAA", sampleCount);
+
+    // Table 1's binding sets share the pipeline's MS-ness, so they are rebuilt alongside it --
+    // destroyed and recreated on change rather than kept as a permanent pair, same call as IconPS
+    // above. The SRV itself (the actual depth texture) is written per frame in overlayPass, since the
+    // resource can be recreated by a resize independently of this shape decision.
+    for (u32 i = 0; i < kFramesInFlight; ++i) res_->destroyBindingSet(depthSet_[i]);
+    rhi::BindingSetDesc dd;
+    dd.srvCount = 1;
+    dd.srvKinds[0] = ms ? rhi::SlotKind::Texture2DMS : rhi::SlotKind::Texture2D;
+    dd.srvBaseRegister = 1;
+    for (u32 i = 0; i < kFramesInFlight; ++i) {
+        depthSet_[i] = res_->createBindingSet(dd);
+        if (!depthSet_[i]) {
+            AVER_ERROR("[ViewportIcons] depth binding set {} unavailable", i);
+            return false;
+        }
+    }
+
+    builtDepthSamples_ = depthSamples;
+    AVER_INFO("[ViewportIcons] overlay pipeline (re)built: {} depth sample(s)", depthSamples);
     return true;
 }
 
 void ViewportIconRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                                   u32 width, u32 height) {
-    (void)width; (void)height;
-    if (sampleCount == pipelineSampleCount_ && color == pipelineColor_ && depth == pipelineDepth_) return;
-    buildPipeline(sampleCount, color, depth);
+    // `sampleCount` is the SCENE target's sample count (this call's own contract) -- what decides
+    // Texture2D vs Texture2DMS for the depth read below. `color`/`depth` are the SCENE target's
+    // formats, which never mattered for this pipeline (see kOverlayTargetFormat's own comment).
+    (void)color; (void)depth; (void)width; (void)height;
+    ensurePipeline(sampleCount);
 }
 
-void ViewportIconRenderer::transparentPass(rhi::IRenderContext& ctx) {
+void ViewportIconRenderer::overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) {
     // CLEARED EVEN ON EVERY EARLY RETURN BELOW, which is what makes addIcon safe to call from a
     // frame that never reaches a draw. Leave the queue standing and a run with no pipeline would
     // accumulate one request per icon per frame until it ran out of memory.
@@ -261,7 +348,8 @@ void ViewportIconRenderer::transparentPass(rhi::IRenderContext& ctx) {
         ~ClearOnExit() { q->clear(); }
     } clearer{&pending_};
 
-    if (pending_.empty() || !pso_ || !res_ || !dev_) return;
+    if (pending_.empty() || !res_ || !dev_) return;
+    if (!ensurePipeline(dev_->sampleCount()) || !pso_) return;
 
     f32 viewProj[16], invViewProjRel[16], camPos[3];
     if (!dev_->camera(viewProj, invViewProjRel, camPos)) return;
@@ -294,7 +382,7 @@ void ViewportIconRenderer::transparentPass(rhi::IRenderContext& ctx) {
             // V FLIPPED AGAINST THE CORNER ORDER. The corners run bottom-left, bottom-right,
             // top-right, top-left in WORLD space (up is +Y of the camera basis), while a decoded PNG
             // is stored top row first -- so v=1 belongs to the bottom corners. Get this backwards
-            // and the icon renders upside down, which for a map pin is unmistakable.
+            // and the icon renders upside down, which is unmistakable for any of these.
             const f32 uvs[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
             const f32 tint[4] = {1.0f, 1.0f, 1.0f, r.alpha};
             const u32 packed = packStraight(tint);
@@ -321,12 +409,60 @@ void ViewportIconRenderer::transparentPass(rhi::IRenderContext& ctx) {
     if (!res_->writeBuffer(vb, verts_.data(), verts_.size() * sizeof(ViewportIconVertex))) return;
     if (!res_->writeBuffer(ib, idx_.data(), idx_.size() * sizeof(u32))) return;
 
-    // Viewport, scissor and both scene targets are already bound -- the transparentPass contract --
-    // so only the pipeline and our own buffers are set here.
+    // The scene depth, into THIS frame's own ring slot (see depthSet_'s own comment for why a ring
+    // and not one set rewritten in place) -- the same clearSrv/setSrv split EditorLines::replay uses
+    // for the identical binding.
+    const rhi::TextureHandle sceneDepth = dev_->sceneDepthTexture();
+    if (sceneDepth) res_->setSrv(depthSet_[frame_], 0, sceneDepth);
+    else res_->clearSrv(depthSet_[frame_], 0);
+
+    // overlayPass hands over the whole display target's viewport/scissor (IRenderFeature::
+    // overlayPass's own contract); the icons must be clipped to the 3D VIEW's own rect within it, in
+    // DISPLAY pixels -- sceneViewport() reports SCENE-space pixels, which differ from display pixels
+    // under a render scale (IDevice::renderScale), the identical conversion EditorLines::replay makes
+    // for its own sceneRect argument.
+    f32 rect[4];
+    if (dev_->sceneViewport(rect)) {
+        const f32 scale = dev_->renderScale() > 0.0f ? dev_->renderScale() : 1.0f;
+        rect[0] /= scale; rect[1] /= scale; rect[2] /= scale; rect[3] /= scale;
+    } else {
+        rect[0] = 0.0f; rect[1] = 0.0f; rect[2] = static_cast<f32>(width); rect[3] = static_cast<f32>(height);
+    }
+    // Clamped into the target, the same way EditorLines::replay clamps its own sceneRect argument --
+    // a transient resize can hand either of us a rect that briefly overruns the target it's meant to
+    // sit inside, and a negative-size viewport/scissor is a harder failure than a clipped one.
+    if (rect[0] < 0.0f) rect[0] = 0.0f;
+    if (rect[1] < 0.0f) rect[1] = 0.0f;
+    if (rect[0] > static_cast<f32>(width))  rect[0] = static_cast<f32>(width);
+    if (rect[1] > static_cast<f32>(height)) rect[1] = static_cast<f32>(height);
+    if (rect[2] < 0.0f) rect[2] = 0.0f;
+    if (rect[3] < 0.0f) rect[3] = 0.0f;
+    if (rect[0] + rect[2] > static_cast<f32>(width))  rect[2] = static_cast<f32>(width)  - rect[0];
+    if (rect[1] + rect[3] > static_cast<f32>(height)) rect[3] = static_cast<f32>(height) - rect[1];
+    ctx.setViewport(static_cast<u32>(rect[0]), static_cast<u32>(rect[1]),
+                    static_cast<u32>(rect[2]), static_cast<u32>(rect[3]));
+    ctx.setScissor(static_cast<u32>(rect[0]), static_cast<u32>(rect[1]),
+                   static_cast<u32>(rect[2]), static_cast<u32>(rect[3]));
+
+    // setPipeline PRECEDES setConstants/setBindingSet (IRenderContext::setPipeline's own contract) --
+    // bound first, before either.
     ctx.pushMarker("Aver.ViewportIcons");
     ctx.setPipeline(pso_);
     ctx.setVertexBuffer(vb, sizeof(ViewportIconVertex));
     ctx.setIndexBuffer(ib, rhi::Format::R32Uint);
+    ctx.setBindingSet(depthSet_[frame_], 1);
+
+    // PerObject, filled the way editor_lines.hlsl's replay() fills it for the SAME depth test and
+    // sRGB question (see IconPS): gWorld is left zero -- IconVS never reads it, the corners already
+    // arrive in world space from the CPU billboard above.
+    ObjectConsts oc{};
+    oc.baseColor[1] = sceneDepth ? 1.0f : 0.0f;                          // depth-tested
+    oc.baseColor[2] = rect[2]; oc.baseColor[3] = rect[3];                // the 3D view's rect size
+    oc.material[0] = isSrgbTargetFormat(kOverlayTargetFormat) ? 1.0f : 0.0f;   // target stores sRGB itself
+    oc.material[2] = rect[0]; oc.material[3] = rect[1];                 // the 3D view's rect origin
+    oc.emissive[0] = static_cast<f32>(width); oc.emissive[1] = static_cast<f32>(height);   // whole target size
+    ctx.setConstants(rhi::kObjectConstantRegister, &oc, rhi::kObjectConstantDwords);
+
     for (const DrawCmd& d : draws_) {
         const Icon& ic = icons_[d.icon];
         if (!ic.set) continue;

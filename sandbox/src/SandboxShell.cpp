@@ -2,8 +2,21 @@
 // Split out of SandboxApp.cpp (29,952 lines) on 2026-09-16, method bodies moved verbatim; class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/CpuTiming.hpp"
 
 namespace aver {
+// Restarts what the profiler measures when Play starts and stops (called from startPlay/stopPlay in
+// SandboxPlay.cpp). Outside the ImGui guard below because those two build in every configuration.
+// The device's since-boot GPU average restarts: a pass that only exists in Play is otherwise
+// divided by every edit frame before it (see IDevice::resetGpuTiming), and a device with nothing
+// accumulated treats the call as a no-op. stopPlay skips its restart while a --gpu-timing dump is
+// still pending, so that dump keeps the Play frames. The CPU phase table restarts only when Play
+// starts, so the session that just ended stays readable after Stop.
+void SandboxApp::resetPlayProfile(bool playStarting) {
+    if (prefsDevice_) prefsDevice_->resetGpuTiming();
+    if (playStarting) playProf_.resetPhases();
+}
+
 // GUARDED ON THE EDITOR UI, NOT ON NAVIGATION. Both panels below were written inside this file's
 // AVER_MODULE_SYNAPSE block and neither has anything to do with a navigation grid -- one is a view
 // over GpuTimingReport, the other scans text files for references to an asset. They sat there
@@ -12,10 +25,6 @@ namespace aver {
 // because a declaration compiled out while its definition is not is a C2039 on a member of a class
 // that no longer has one -- which is exactly how `no-ui` and `d3d12-off` broke.
 #if AVER_WITH_IMGUI
-// ---- GPU profiler panel (view over GpuTimingReport, previously only readable via `frametime`) ----
-// A view over data already there -- no new instrumentation, no new cost. Nodes carry INCLUSIVE ms
-// + parent index; exclusive time (own cost minus children's) is derived here rather than stored,
-// so the ABI keeps one number per node.
 // ---- References panel: which files name the asset you asked about ----
 // On-demand scan (previously only reachable from delete/rename confirms -- too late to ask "what
 // uses this?"). A snapshot over text formats only, not an index: misses references built at
@@ -63,11 +72,142 @@ void SandboxApp::buildReferencesPanel() {
     ImGui::End();
 }
 
+// ---- Profiler panel (Window > GPU Profiler) ----
+// Four things, top to bottom: the smoothed frame time and the worst recent frame (PlayProfile, fed
+// from the status bar every UI frame); the CPU phases only Play adds to onUpdate (PlayProfile, fed by
+// begin()/end() brackets in onUpdate, folded only while a Play session runs); the scene walk's CPU
+// tree and Voxi's last acceleration-structure loop; and the per-pass GPU table, a view over
+// GpuTimingReport that the device has always produced and only the console used to read. GPU nodes
+// carry INCLUSIVE ms + parent index; exclusive time (own cost minus children's) is derived here
+// rather than stored, so the ABI keeps one number per node.
+//
+// The GPU table is an average since the last reset (Play start, Play stop, the Reset button), not
+// since boot: boot-long averaging hid every Play-only pass behind the edit frames before it.
 void SandboxApp::buildProfilerPanel(Engine& e) {
     if (!showProfiler_) return;
-    ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 420.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 540.0f * dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("GPU Profiler", &showProfiler_)) { ImGui::End(); return; }
 
+#if AVER_MODULE_FRAMEWORK
+    const bool playing = anyPlayActive();
+#else
+    const bool playing = false;
+#endif
+
+    // ---- header: smoothed frame time, worst recent frame, Reset ----
+    const f64 emaMs = playProf_.frameEmaMs();
+    const f64 worstMs = playProf_.worstFrameMs();
+    ImGui::Text("Frame %.2f ms (%.0f fps)", emaMs, emaMs > 0.0 ? 1000.0 / emaMs : 0.0);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Smoothed over about half a second, so it does not flicker.\n"
+                          "The last frame alone: %.2f ms.", playProf_.lastFrameMs());
+    ImGui::SameLine();
+    ImGui::Text("  worst of last %u: %.1f ms (%.0f fps)", playProf_.windowFrames(), worstMs,
+                worstMs > 0.0 ? 1000.0 / worstMs : 0.0);
+    ImGui::SameLine();
+    ImGui::TextDisabled("| %s", playing ? "Play" : "editing");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset")) {
+        e.device()->resetGpuTiming();
+        playProf_.resetPhases();
+        playProf_.resetFrames();
+    }
+    uiReg_.track("profiler.reset");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Restart the GPU average, the CPU phase table and the frame-time window.\n"
+                          "Play start and Play stop already restart the GPU average.");
+    ImGui::Separator();
+
+    // ---- CPU phases: what Play adds to onUpdate ----
+    if (ImGui::CollapsingHeader("CPU phases (Play)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (playProf_.playFrames() == 0) {
+            ImGui::TextDisabled("Nothing yet: these are timed only while a Play session runs.");
+        } else {
+            ImGui::TextDisabled("%s, %llu frames", playing ? "this Play session" : "last Play session",
+                                static_cast<unsigned long long>(playProf_.playFrames()));
+            if (ImGui::BeginTable("##cpuphases", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
+                ImGui::TableSetupColumn("Phase", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("avg ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
+                ImGui::TableSetupColumn("worst ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
+                ImGui::TableSetupColumn("% frame", ImGuiTableColumnFlags_WidthFixed, 60.0f * dpi_);
+                ImGui::TableHeadersRow();
+                f64 timedMs = 0.0;
+                for (usize i = 0; i < editor::kPlayPhaseCount; ++i) {
+                    const editor::PlayPhase ph = static_cast<editor::PlayPhase>(i);
+                    const f64 ms = playProf_.phaseEmaMs(ph);
+                    const f64 frac = emaMs > 0.0 ? ms / emaMs : 0.0;
+                    timedMs += ms;
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(editor::kPlayPhaseLabel[i]);
+                    ImGui::TableSetColumnIndex(1);
+                    // Same thresholds as the GPU table's exclusive column below.
+                    if (frac > 0.20)      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%.2f", ms);
+                    else if (frac > 0.08) ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.40f, 1.0f), "%.2f", ms);
+                    else                  ImGui::Text("%.2f", ms);
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%.2f", playProf_.phaseWorstMs(ph));
+                    ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", frac * 100.0);
+                }
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextDisabled("Timed total");
+                ImGui::TableSetColumnIndex(1); ImGui::TextDisabled("%.2f", timedMs);
+                ImGui::TableSetColumnIndex(3); ImGui::TextDisabled("%.1f%%", emaMs > 0.0 ? timedMs / emaMs * 100.0 : 0.0);
+                ImGui::EndTable();
+            }
+            ImGui::TextDisabled("Physics steps per frame: avg %.2f, worst %u (catch-up grows as frames slow)",
+                                playProf_.stepsEma(), playProf_.stepsWorst());
+            ImGui::TextDisabled("Average over about half a second; worst over the last %u Play frames. "
+                                "Drawing, ray tracing and the scene walk are below, not in this table.",
+                                editor::PlayProfile::kWindow);
+        }
+    }
+
+    // ---- scene walk (CPU) and Voxi's acceleration-structure loop ----
+    if (ImGui::CollapsingHeader("Scene walk and Voxi (CPU)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const CpuTimingReport w = collectCpuTiming();
+        if (!w.supported) {
+            ImGui::TextDisabled("CPU span timing is not available in this build.");
+        } else if (w.nodes.empty() || w.framesAccumulated == 0) {
+            ImGui::TextDisabled("No scene-walk window has completed yet.");
+        } else {
+            // collectCpuTiming's ms and calls are the WINDOW's totals (framesAccumulated walks), so
+            // dividing gives one walk's worth.
+            const f64 perWalk = 1.0 / static_cast<f64>(w.framesAccumulated);
+            const usize walkIdx = static_cast<usize>(CpuSpan::SceneWalk);
+            const usize overheadIdx = static_cast<usize>(CpuSpan::TimingOverhead);
+            if (ImGui::BeginTable("##cpuwalk", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
+                ImGui::TableSetupColumn("Span", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("ms / walk", ImGuiTableColumnFlags_WidthFixed, 80.0f * dpi_);
+                ImGui::TableSetupColumn("calls / walk", ImGuiTableColumnFlags_WidthFixed, 90.0f * dpi_);
+                ImGui::TableHeadersRow();
+                for (usize i = 0; i < w.nodes.size(); ++i) {
+                    if (i == overheadIdx) continue;   // a footnote below, not a row: see CpuTimingFormat.hpp
+                    const CpuTimingNode& n = w.nodes[i];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    if (i != walkIdx) ImGui::Indent(14.0f * dpi_);
+                    ImGui::TextUnformatted(n.label);
+                    if (i != walkIdx) ImGui::Unindent(14.0f * dpi_);
+                    ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms * perWalk);
+                    ImGui::TableSetColumnIndex(2);
+                    if (i == walkIdx) ImGui::TextDisabled("-");
+                    else              ImGui::Text("%.0f", static_cast<f64>(n.calls) * perWalk);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::TextDisabled("Of which about %.3f ms is this timer itself. Averaged over %u walks.",
+                                w.nodes[overheadIdx].ms * perWalk, w.framesAccumulated);
+        }
+#if AVER_MODULE_VOXI
+        ImGui::Text("Voxi acceleration-structure draw loop: %.2f ms CPU", voxiRenderer_.lastAccelBuildCpuMs());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The per-draw loop of the LAST FULL acceleration-structure build, not a\n"
+                              "per-frame number: a frame whose gate skips or refits leaves it as it was.\n"
+                              "Reads 0 until a build has reached the loop.");
+#endif
+    }
+
+    // ---- GPU passes ----
+    if (!ImGui::CollapsingHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen)) { ImGui::End(); return; }
     const rhi::GpuTimingReport r = e.device()->gpuTiming();
     if (!r.supported) {
         // Two different "no data" cases, reported separately rather than as one empty tree.
@@ -77,7 +217,8 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         return;
     }
     if (r.framesAccumulated == 0 || r.nodes.empty()) {
-        ImGui::TextWrapped("No timings collected yet. Pass --gpu-timing, or run a few frames.");
+        ImGui::TextWrapped("No timings collected since the last reset yet. Run a few frames, or "
+                           "pass --gpu-timing.");
         ImGui::End();
         return;
     }
@@ -94,15 +235,18 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 
     ImGui::Text("%.2f ms over %u frames", total, r.framesAccumulated);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("An AVERAGE since boot, not one sampled frame -- see the device's own\n"
-                          "comment on why. A number here lags a change by a few frames.");
+        ImGui::SetTooltip("An AVERAGE over the frames since the last reset (Play start, Play stop or the\n"
+                          "Reset button), not one sampled frame -- see the device's own comment on why.\n"
+                          "A number here lags a change by a few frames.");
     ImGui::SameLine();
     ImGui::TextDisabled("(marked passes only)");
     ImGui::Separator();
 
+    // ScrollY needs a height: whatever the sections above left, but never a sliver.
     if (ImGui::BeginTable("##passes", 4,
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
-                          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY)) {
+                          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY,
+                          ImVec2(0.0f, std::fmax(ImGui::GetContentRegionAvail().y, 160.0f * dpi_)))) {
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("incl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
         ImGui::TableSetupColumn("excl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
@@ -1116,14 +1260,47 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     if ((go || (submit && valid)) && valid) {
         std::filesystem::create_directories(maps, ec);
 #if AVER_MODULE_SCENE
-        if (saveLevel(target.string())) {
-            levelPath_ = target.string();
+        // A COPY IS A NEW LEVEL, SO IT GETS ITS OWN NAME AND ID. saveLevel starts from levelHeader_
+        // (or legacyMapHeader_) and writes levelName_, so the old order -- save first, rename after
+        // -- put the SOURCE's NAME and its explicit ID into the copy. The name is set BEFORE the save,
+        // and the stored ID zeroed so the writer recomputes it from the new NAME (ID = FNV-1a-64(NAME)).
+        // Saving onto a level of the same name keeps its ID untouched. A failed save puts both back:
+        // the open level is still the old one.
+        const bool renamed = stem != levelName_;
+        const std::string prevName = levelName_;
+        const u64 prevId = levelHeader_.contentId, prevLegacyId = legacyMapHeader_.contentId;
+        if (renamed) {
             levelName_ = stem;
+            levelHeader_.contentId = 0;
+            legacyMapHeader_.contentId = 0;
+        }
+        if (saveLevel(target.string())) {
+#if AVER_MODULE_PHYSICS
+            // THE LANES TRAVEL WITH THE LEVEL. The copy's cars read their roads from <name>.oclanes beside
+            // it, and a Save As that left that file behind would send every one of them to the parking
+            // brake. levelPath_ is still the SOURCE here; an unsaved level has no lanes to bring.
+            if (!levelPath_.empty()) {
+                const std::filesystem::path from = game::GameLevel::laneSidecarPath(levelPath_);
+                const std::filesystem::path to = game::GameLevel::laneSidecarPath(target.string());
+                std::error_code lec;
+                if (from != to && std::filesystem::exists(from, lec)) {
+                    std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, lec);
+                    if (lec)
+                        AVER_WARN("[Level] could not copy {} beside the saved copy: {}", from.string(), lec.message());
+                }
+            }
+#endif
+            levelPath_ = target.string();
             cbInvalidate(maps);
             setUpgradeStatus("Saved " + target.filename().string());
             wantSaveLevelAs_ = false;
             ImGui::CloseCurrentPopup();
         } else {
+            if (renamed) {
+                levelName_ = prevName;
+                levelHeader_.contentId = prevId;
+                legacyMapHeader_.contentId = prevLegacyId;
+            }
             saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
         }
 #else
@@ -1448,7 +1625,7 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
 
     const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
     std::string why;
-    if (editor::launchRuntime(project_.manifestPath, levelPath_, &why)) {
+    if (editor::launchRuntime(project_.manifestPath, levelPath_, playStandaloneArgs_, &why)) {
         setUpgradeStatus("Launched " + levelFile + " in Aver Engine Runtime");
         AVER_INFO("[Editor] launched AverEngineRuntime.exe on {}", levelPath_);
     } else {
@@ -1574,6 +1751,203 @@ void SandboxApp::drawUpgradePrompt() {
     ImGui::EndPopup();
 #endif
 }
+
+#if AVER_WITH_IMGUI
+// The centred Play group of the main toolbar, laid out like Unreal 5's. Idle: Play (repeats
+// playMode_) and its options dropdown. During a session: Pause/Resume, Frame Skip (while paused),
+// Eject/Possess (real sessions only) and Stop. The width is summed from this frame's labels, so the
+// group stays centred as it changes shape.
+void SandboxApp::drawPlayToolbar(Engine& e) {
+    const ImGuiViewport* mv = ImGui::GetMainViewport();
+    const f32 wsizeX = mv->WorkSize.x;
+
+#if AVER_MODULE_FRAMEWORK
+    const ImGuiStyle& style = ImGui::GetStyle();
+    auto btnW = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
+
+    const int32_t ps = aver_fw_play_state();
+    const bool paused = ps == AVER_FW_PLAY_PAUSED;
+    // A drone/spectator stand-in is not a play session -- begin_play never ran for either -- so
+    // aver_fw_play_state reports EDITOR throughout. anyPlayActive() folds them in, or Stop would
+    // vanish while one flew and leave no way to stop it from the toolbar.
+    const bool anyPlay = anyPlayActive();
+    // Pause, Frame Skip and Eject need framework state a stand-in does not have.
+    const bool session = playSessionActive();
+    const bool ejected = playEjected();
+
+    const char* modeName = playMode_ == PlayMode::Simulate   ? "Simulate"
+                          : playMode_ == PlayMode::Standalone ? "Standalone" : "Play";
+    const std::string playLabel = std::string(ICON_PLAY " ") + modeName;
+    const char* pauseLabel = paused ? ICON_PLAY " Resume" : ICON_PAUSE " Pause";
+    constexpr const char* kFrameSkipLabel = ICON_SKIP_NEXT " Frame Skip";
+    const char* ejectLabel = ejected ? ICON_GAMEPAD " Possess" : ICON_EJECT " Eject";
+    constexpr const char* kStopLabel = ICON_STOP " Stop";
+    // dropButton(" ") draws a single space plus its 16dpi arrow gutter; it returns only the click.
+    const f32 dropW = btnW(" ") + 16.0f * dpi_;
+
+    f32 grpW = 0.0f;
+    u32 buttons = 0;
+    const auto add = [&](f32 w) { grpW += w; ++buttons; };
+    if (!anyPlay) {
+        add(btnW(playLabel.c_str()));
+        add(dropW);
+    } else {
+        if (session) add(btnW(pauseLabel));
+        if (session && paused) add(btnW(kFrameSkipLabel));
+        if (session) add(btnW(ejectLabel));
+        add(btnW(kStopLabel));
+    }
+    grpW += style.ItemSpacing.x * static_cast<f32>(buttons > 0 ? buttons - 1 : 0);
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsizeX - grpW) * 0.5f));
+
+    if (!anyPlay) {
+        if (ImGui::Button(playLabel.c_str())) launchPlay(e, playMode_);
+        uiReg_.track("toolbar.play");
+        if (ImGui::IsItemHovered()) {
+            // Standalone has no chord of its own: Alt+P and Alt+S each start a specific mode.
+            if (playMode_ == PlayMode::Standalone) {
+                ImGui::SetTooltip("Standalone Game: a separate Aver Engine Runtime on the saved level");
+            } else {
+                const editor::CommandId modeCmd = playMode_ == PlayMode::Simulate
+                                                 ? editor::CommandId::PlaySimulate : editor::CommandId::PlayStart;
+                ImGui::SetTooltip("%s (%s)", playMode_ == PlayMode::Simulate ? "Simulate" : "Play in the viewport",
+                                  editor::chordToString(keybinds_.chordFor(modeCmd)).c_str());
+            }
+        }
+        ImGui::SameLine(0.0f, 0.0f);
+
+        if (dropButton(" ")) ImGui::OpenPopup("playOptions");
+        uiReg_.track("toolbar.play.options");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play options");
+        if (ImGui::BeginPopup("playOptions")) {
+            ImGui::TextDisabled("MODES");
+            // Picking a mode makes it the button's AND starts it, as Unreal's dropdown does.
+            if (ImGui::MenuItem(ICON_PLAY " Selected Viewport",
+                                editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStart)).c_str(),
+                                playMode_ == PlayMode::SelectedViewport))
+                launchPlay(e, PlayMode::SelectedViewport);
+            uiReg_.track("toolbar.play.options.viewport");
+            if (ImGui::MenuItem(ICON_EJECT " Simulate",
+                                editor::chordToString(keybinds_.chordFor(editor::CommandId::PlaySimulate)).c_str(),
+                                playMode_ == PlayMode::Simulate))
+                launchPlay(e, PlayMode::Simulate);
+            uiReg_.track("toolbar.play.options.simulate");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Runs the game without possessing the player: the editor keeps the\n"
+                                  "camera, selection and gizmos. %s possesses.",
+                                  editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject)).c_str());
+            const bool haveLevel = !levelPath_.empty();
+            const bool haveRuntime = !editor::runtimeExecutablePath().empty();
+            // Same conditions File > Launch in Aver Engine Runtime disables on.
+            const bool standaloneOk = project_.valid() && haveLevel && haveRuntime;
+            if (ImGui::MenuItem(ICON_GAMEPAD " Standalone Game", nullptr,
+                                playMode_ == PlayMode::Standalone, standaloneOk))
+                launchPlay(e, PlayMode::Standalone);
+            uiReg_.track("toolbar.play.options.standalone");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", !project_.valid() ? "Open a project first."
+                                  : !haveLevel ? "Save the level first -- Standalone reads it from disk."
+                                  : !haveRuntime ? "AverEngineRuntime.exe was not found beside the editor."
+                                  : "A separate Aver Engine Runtime process on the saved level.");
+
+            ImGui::Separator();
+            ImGui::TextDisabled("SPAWN PLAYER AT");
+            // Radio buttons rather than menu items, so the popup stays open while it is set up.
+            if (ImGui::RadioButton("Current Camera Location", playSpawnAt_ == PlaySpawnAt::CameraLocation))
+                playSpawnAt_ = PlaySpawnAt::CameraLocation;
+            uiReg_.track("toolbar.play.options.spawnCamera");
+            if (ImGui::RadioButton("Default Player Start", playSpawnAt_ == PlaySpawnAt::PlayerStart))
+                playSpawnAt_ = PlaySpawnAt::PlayerStart;
+            uiReg_.track("toolbar.play.options.spawnPlayerStart");
+
+            ImGui::Separator();
+            ImGui::TextDisabled("WITH NO GAMEMODE");
+            if (ImGui::RadioButton("Fly (spectator)", !defaultPawnWalk_)) defaultPawnWalk_ = false;
+            uiReg_.track("toolbar.play.options.pawnFly");
+            if (ImGui::RadioButton("Walk (gravity, stairs, Space jumps)", defaultPawnWalk_)) defaultPawnWalk_ = true;
+            uiReg_.track("toolbar.play.options.pawnWalk");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The engine's default pawn walks as a capsule character, so a level can be "
+                                  "walked without writing a GameMode. A project's own GameMode always wins.");
+
+            ImGui::Separator();
+            ImGui::Checkbox("Game Gets Mouse Control", &playGameGetsMouse_);
+            uiReg_.track("toolbar.play.options.mouseControl");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Capture the mouse the moment Play starts. Off: click the viewport to\n"
+                                  "give it to the game.");
+
+            ImGui::Separator();
+            if (ImGui::MenuItem("Advanced Settings...")) {
+                showEditorPrefs_ = true;
+                scrollPrefsToPlay_ = true;
+            }
+            uiReg_.track("toolbar.play.options.advanced");
+            ImGui::EndPopup();
+        }
+        return;
+    }
+
+    if (session) {
+        if (ImGui::Button(pauseLabel)) aver_fw_set_paused(paused ? 0 : 1);
+        uiReg_.track("toolbar.play.pause");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s (%s)", paused ? "Resume" : "Pause",
+                              editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayPause)).c_str());
+        ImGui::SameLine();
+        if (paused) {
+            if (ImGui::Button(kFrameSkipLabel)) requestPlayFrameStep();
+            uiReg_.track("toolbar.play.frameSkip");
+            if (ImGui::IsItemHovered()) {
+                // Unbound by default, so the chord is named only once someone binds one.
+                const editor::Chord& skipChord = keybinds_.chordFor(editor::CommandId::PlayFrameSkip);
+                if (skipChord.isBound())
+                    ImGui::SetTooltip("Advance one gameplay tick, then pause again (%s)",
+                                      editor::chordToString(skipChord).c_str());
+                else
+                    ImGui::SetTooltip("Advance one gameplay tick, then pause again");
+            }
+            ImGui::SameLine();
+        }
+        if (ImGui::Button(ejectLabel)) togglePlayEject();
+        uiReg_.track("toolbar.play.eject");
+        if (ImGui::IsItemHovered()) {
+            const std::string ejectChord =
+                editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject));
+            // Ejected, the tooltip also names the chord that makes possessing useful after flying
+            // away: without it the view snaps back to wherever the pawn was left. Only when it HAS a
+            // chord, like Frame Skip's above -- a cleared one would read "none first brings...".
+            const editor::Chord& pawnChord = keybinds_.chordFor(editor::CommandId::PlayPawnToCamera);
+            if (ejected && pawnChord.isBound())
+                ImGui::SetTooltip("Possess the player again (%s)\n"
+                                  "%s first brings the pawn to the camera",
+                                  ejectChord.c_str(), editor::chordToString(pawnChord).c_str());
+            else if (ejected)
+                ImGui::SetTooltip("Possess the player again (%s)", ejectChord.c_str());
+            else
+                ImGui::SetTooltip("Detach from the player: the game keeps running and the editor\n"
+                                  "camera, selection and gizmos come back (%s)",
+                                  ejectChord.c_str());
+        }
+        ImGui::SameLine();
+    }
+    if (ImGui::Button(kStopLabel)) stopPlay();
+    uiReg_.track("toolbar.stop");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Stop (%s)",
+                          editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStop)).c_str());
+#else
+    (void)e;
+    const f32 grpW = 200.0f * dpi_;
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsizeX - grpW) * 0.5f));
+    ImGui::BeginDisabled(true);
+    ImGui::Button(ICON_PLAY " Play"); ImGui::SameLine();
+    ImGui::Button(ICON_PAUSE " Pause"); ImGui::SameLine();
+    ImGui::Button(ICON_STOP " Stop");
+    ImGui::EndDisabled();
+#endif
+}
+#endif // AVER_WITH_IMGUI
 
 // Builds the whole editor UI for one frame: menu bar, toolbars, panels, drawers and dialogs.
 void SandboxApp::buildUI(Engine& e) {
@@ -1907,7 +2281,10 @@ void SandboxApp::buildUI(Engine& e) {
             // can still open a level someone else baked navigation for and look at it.
             ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
 #if AVER_MODULE_PHYSICS
-            ImGui::MenuItem("Show Colliders", nullptr, &showColliders_);
+            // A toggle either way forgets what the overlay last drew: it skips unchanged frames
+            // (rebuildColliderOverlay), and anything could have changed while it was off.
+            if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
+                colliderOverlayBuilt_ = false;
             uiReg_.track("view.showColliders");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Every physics body's WORLD-SPACE BOUNDING BOX.\n"
@@ -2018,41 +2395,7 @@ void SandboxApp::buildUI(Engine& e) {
     tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
     uiReg_.track("toolbar.compileCs");
     ImGui::SameLine();
-    // Play controls, centred.
-    {
-        const f32 grpW = 200.0f*dpi_;
-        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsize.x - grpW)*0.5f));
-#if AVER_MODULE_FRAMEWORK
-        const int32_t ps = aver_fw_play_state();
-        const bool playing = ps != AVER_FW_PLAY_EDITOR;
-        // A drone stand-in is not a play session -- begin_play never ran -- so aver_fw_play_state
-        // reports EDITOR throughout. Without folding it in here, Play would stay lit while the
-        // drone flew and Stop would sit greyed out, leaving no way to stop it from the toolbar.
-        const bool anyPlay = playing || dronePlayActive() || spectatorPlayActive();
-        ImGui::BeginDisabled(anyPlay);
-        if (ImGui::Button(ICON_PLAY " Play")) startPlay();
-        uiReg_.track("toolbar.play");
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        // Pause stays tied to a REAL session: there is no framework state to pause for a drone,
-        // and a Pause button that visibly does nothing is worse than one that is clearly off.
-        ImGui::BeginDisabled(!playing);
-        if (ImGui::Button(ps == AVER_FW_PLAY_PAUSED ? ICON_PLAY " Resume" : ICON_PAUSE " Pause"))
-            aver_fw_set_paused(ps != AVER_FW_PLAY_PAUSED ? 1 : 0);
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!anyPlay);
-        if (ImGui::Button(ICON_STOP " Stop")) stopPlay();
-        uiReg_.track("toolbar.stop");
-        ImGui::EndDisabled();
-#else
-        ImGui::BeginDisabled(true);
-        ImGui::Button(ICON_PLAY " Play"); ImGui::SameLine();
-        ImGui::Button(ICON_PAUSE " Pause"); ImGui::SameLine();
-        ImGui::Button(ICON_STOP " Stop");
-        ImGui::EndDisabled();
-#endif
-    }
+    drawPlayToolbar(e);
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
     if (dropButton(ICON_SETTINGS " Settings")) ImGui::OpenPopup("settingsMenu");
     if (ImGui::BeginPopup("settingsMenu")) {
@@ -2210,6 +2553,13 @@ void SandboxApp::buildUI(Engine& e) {
     // width back: Select's whole tool set is already in the viewport toolbar, so a panel repeating
     // them bought nothing and cost 20% of the viewport permanently. The panel exists for modes
     // with genuinely more settings than a toolbar row can hold -- Landscape's brush, Foliage's palette.
+    // A PANEL NOT BUILT THIS FRAME HOLDS NO FOCUS. buildOutlinerPanel/buildDetailsPanel are the only
+    // writers of these two, and neither runs for a closed panel or while an asset tab has the central
+    // area -- so the last value used to stick, and a panel closed with focus kept "focused" for the rest
+    // of the session, opening every focus-gated shortcut (Frame Selected, the edit verbs, Pawn to
+    // Camera) over an asset tab. Their readers run in onUpdate, before this, so they see last frame's.
+    outlinerFocused_ = false;
+    detailsFocused_  = false;
     if (levelVisible_ || !assetEditors_.anyOpen()) {
         if (mode_ != EditorMode::Select) buildModePanel(e);
         buildPanels(e);
@@ -2358,12 +2708,39 @@ void SandboxApp::buildUI(Engine& e) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::Begin("##statusbar", nullptr, kChromeFlags);
     const f32 dt = e.time().dt;
+    // Once a frame, here because this is the one place every UI frame passes. It smooths the FPS
+    // below and feeds the profiler panel's frame header and Play CPU table (phases count only while
+    // Play runs). The raw frame was unreadable in Play, where it flickers between neighbours.
+    // A frame is folded as a Play sample only if the work it measures ran. A framework session ticks
+    // gameplay only while PLAYING, so a paused one (Gameplay, Vehicles and the graph ticks never open)
+    // is skipped, keeping the table readable after Pause; Frame Skip still folds, its bracket ran.
+    // The frame the Play button was pressed in is skipped too: startPlay wiped the accumulators after
+    // onUpdate had run, and an all-zero sample would seed every average at 0. The drone and spectator
+    // (Walk) stand-ins never run the gameplay tick, so for them any phase having run is the test.
+#if AVER_MODULE_FRAMEWORK
+    const bool foldPlayFrame = anyPlayActive() &&
+        (playSessionActive() ? playProf_.ranThisFrame(editor::PlayPhase::Gameplay)
+                             : playProf_.anyRanThisFrame());
+    playProf_.endFrame(dt, foldPlayFrame);
+#else
+    playProf_.endFrame(dt, false);
+#endif
+    const f64 smoothMs = playProf_.frameEmaMs();
     ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
-    ImGui::Text("%s  |  %s  |  %s  |  DPI %.0f%%  |  %.0f FPS (%.2f ms)  |  %zu actors  |  %s",
+    ImGui::Text("%s  |  %s  |  %s  |  DPI %.0f%%  |  ",
                 project_.valid() ? project_.name.c_str() : "No project",
-                rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f,
-                dt>1e-6f?1.f/dt:0.f, dt*1000.f, objects_.size(),
-                selectionLabel().c_str());
+                rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f);
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::Text("%.0f FPS (%.2f ms)", smoothMs > 1e-3 ? 1000.0 / smoothMs : 0.0, smoothMs);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Smoothed over about half a second.\n"
+                          "This frame: %.0f FPS (%.2f ms)\n"
+                          "Worst of the last %u frames: %.1f ms\n"
+                          "Window > GPU Profiler has the CPU and GPU breakdown.",
+                          dt > 1e-6f ? 1.f / dt : 0.f, dt * 1000.f, playProf_.windowFrames(),
+                          playProf_.worstFrameMs());
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::Text("  |  %zu actors  |  %s", objects_.size(), selectionLabel().c_str());
 
     // The upgrade outcome, for a while: twelve seconds is long enough to read after clicking a
     // button and short enough not to become permanent furniture. A FAILURE draws in the error
@@ -2563,9 +2940,36 @@ void SandboxApp::drawOutputLog() {
                           : logLevelFilter_ == 3 ? (int)LogLevel::Error
                           : logLevelFilter_ == 2 ? (int)LogLevel::Warn
                           : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
-        for (const LogLine& ln : logLines_) {
+        // ONLY THE ROWS ON SCREEN ARE SUBMITTED. Up to kMaxLogLines (4000) lines used to be styled
+        // and drawn every frame, filter or no filter, all under logMutex_ -- which every logging
+        // thread queues on. The filter is applied first, to a list of indices (a level compare per
+        // line, nothing to cache or invalidate), and ImGuiListClipper draws just the visible slice
+        // of that list, so the lock is now held for a few dozen rows, not four thousand.
+        // The clipper needs ONE row height, so a line holding a newline (a multi-line shader error,
+        // say) sends the whole list down the old draw-everything path instead: it is exact for any
+        // height, and only costs what it always did while such a line is still in the buffer.
+        std::vector<u32> shown;
+        shown.reserve(logLines_.size());
+        bool multiLine = false;
+        for (usize i = 0; i < logLines_.size(); ++i) {
+            const LogLine& ln = logLines_[i];
             if ((int)ln.level < minLevel) continue;
-            drawLogLine(ln.level, ln.text.c_str());
+            shown.push_back(static_cast<u32>(i));
+            if (!multiLine && ln.text.find('\n') != std::string::npos) multiLine = true;
+        }
+        if (multiLine) {
+            for (const u32 i : shown) drawLogLine(logLines_[i].level, logLines_[i].text.c_str());
+        } else {
+            // The FLOOR of the line height with spacing: what ItemSize advances a text row by (it
+            // truncates the cursor to whole pixels), so clipper and rows agree at any DPI scale.
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(shown.size()),
+                          std::floor(ImGui::GetTextLineHeightWithSpacing()));
+            while (clipper.Step())
+                for (int k = clipper.DisplayStart; k < clipper.DisplayEnd; ++k) {
+                    const LogLine& ln = logLines_[shown[static_cast<usize>(k)]];
+                    drawLogLine(ln.level, ln.text.c_str());
+                }
         }
     }
     if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)

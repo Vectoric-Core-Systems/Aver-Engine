@@ -39,6 +39,11 @@ void SandboxApp::applyProject(Engine& e) {
     LoadingScreen& loading = *projectLoading_;
     loading.stage("Opening project");
 
+#if AVER_MODULE_SCENE
+    // Before project_ changes: the level being left is remembered in ITS project's Saved folder,
+    // and the unloadLevel that follows would file it under the new one.
+    storeLevelView();
+#endif
     project_ = browser_.project();
     editor::setActorEditorContentRoot(project_.contentDir());
 
@@ -129,9 +134,25 @@ void SandboxApp::applyProject(Engine& e) {
         e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
 #if AVER_MODULE_PBR
     loading.stage("Loading materials");
+    // THE BC7 DERIVED-DATA CACHE (modules/assets/TextureCache.hpp), pointed at THIS project before
+    // loadProjectMaterials() resolves a single texture -- uploadTexture consults it on every
+    // resolve from here on, so setting it any later would mean this project's own "Loading
+    // materials" stage missed the cache for its own load. Cleared (not left pointing at whatever
+    // project is going away) when there is nothing valid to point it at, on the same "-1/empty
+    // means unstated, do not silently keep the old value" rule the manifest keys above follow.
+    assets::setTextureCacheDir(project_.valid() ? project_.dir + "\\Saved\\DerivedDataCache\\Textures"
+                                                : std::string());
     releaseProjectMaterials();
     content_.adopt(project_);
-    loadProjectMaterials();
+    // LEVEL-SCOPED RESIDENCY (the default -- see levelScopedMaterialsEnabled()'s own comment):
+    // nothing is loaded here at all. Binding every project .ocmat up front is exactly the behaviour
+    // that made a project holding more than one heavy level (Sponza AND Jungle Ruins under one
+    // Content root, the case this was built against) keep every one of them resident, textures
+    // included, no matter which level was actually open -- 17.2 GB against a 13.1 GB budget. The
+    // level about to load (loadStartMap below) binds what IT needs through GameLevel::load()'s own
+    // materialForSurface()/bindSurfaceMaterial() calls, which is every surface a level ever needed
+    // this eager pass to provide.
+    if (!levelScopedMaterialsEnabled()) loadProjectMaterials();
 #endif
 #if AVER_MODULE_SCENE
     loading.stage("Loading meshes");

@@ -4,6 +4,8 @@
 
 #include "SandboxApp.hpp"
 
+#include <algorithm>
+
 namespace aver {
 #if AVER_WITH_IMGUI
 // Reads every editor preference into the members that back the widgets.
@@ -85,6 +87,11 @@ void SandboxApp::loadEditorPreferences() {
         // and let the save below bump the version. Same CLI/manifest guard as the load above.
         if (!postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
             post_.exposure = 1.0f;
+        // Version 3 (2026-09-28): the compiled-in exposureKey was halved, one stop (owner: "make the
+        // current eye exposure -1.0 the default"). A stored compensation doubles once so the picture
+        // stays as it was: the owner's -1.0 reads +0.0 now. Capped at the panel's +3 EV.
+        if (!postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 3)
+            post_.exposure = std::min(post_.exposure * 2.0f, 8.0f);
     }
 
     // The derived-data cache's write-behind budget, in MEGABYTES on the wire because that is
@@ -186,6 +193,20 @@ void SandboxApp::loadEditorPreferences() {
     }
 #endif  // AVER_MODULE_SR
 
+    // Play toolbar/preferences. An out-of-range stored enum (an older build's editor.ini, or hand
+    // edited) clamps to the compiled-in default rather than reading past the enum's own values.
+    {
+        const i32 storedMode = prefInt("play.mode", static_cast<i32>(playMode_));
+        playMode_ = (storedMode >= 0 && storedMode <= static_cast<i32>(PlayMode::Standalone))
+                  ? static_cast<PlayMode>(storedMode) : PlayMode::SelectedViewport;
+        const i32 storedSpawn = prefInt("play.spawnAt", static_cast<i32>(playSpawnAt_));
+        playSpawnAt_ = (storedSpawn >= 0 && storedSpawn <= static_cast<i32>(PlaySpawnAt::CameraLocation))
+                     ? static_cast<PlaySpawnAt>(storedSpawn) : PlaySpawnAt::PlayerStart;
+    }
+    playGameGetsMouse_  = prefBool  ("play.gameGetsMouse",  playGameGetsMouse_);
+    defaultPawnWalk_    = prefBool  ("play.defaultPawnWalk", defaultPawnWalk_);
+    playStandaloneArgs_ = prefString("play.standaloneArgs", "");
+
     keybinds_.loadFromPrefs();
 }
 
@@ -198,6 +219,61 @@ void SandboxApp::resolvePreferredIdeFromPrefs() {
     prefIdeName_.clear();
 }
 
+
+// Editor Preferences > Play: the toolbar dropdown's own settings (default mode, spawn location,
+// mouse control, Standalone's extra command line), so "Advanced Settings..." lands somewhere that
+// already has them.
+void SandboxApp::buildPlayPrefsSection() {
+    // Same one-shot pattern as scrollPrefsToKeybinds_: lands here, on the header, then clears.
+    if (scrollPrefsToPlay_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToPlay_ = false; }
+    if (!ImGui::CollapsingHeader("Play", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    static const char* kModeNames[] = {"Selected Viewport", "Simulate", "Standalone Game"};
+    const int modeIdx = static_cast<int>(playMode_);
+    if (ImGui::BeginCombo("Default mode", kModeNames[modeIdx])) {
+        for (int i = 0; i < 3; ++i)
+            if (ImGui::Selectable(kModeNames[i], modeIdx == i)) playMode_ = static_cast<PlayMode>(i);
+        ImGui::EndCombo();
+    }
+    uiReg_.track("prefs.play.mode");
+
+    static const char* kSpawnNames[] = {"Default Player Start", "Current Camera Location"};
+    const int spawnIdx = static_cast<int>(playSpawnAt_);
+    if (ImGui::BeginCombo("Spawn player at", kSpawnNames[spawnIdx])) {
+        for (int i = 0; i < 2; ++i)
+            if (ImGui::Selectable(kSpawnNames[i], spawnIdx == i)) playSpawnAt_ = static_cast<PlaySpawnAt>(i);
+        ImGui::EndCombo();
+    }
+    uiReg_.track("prefs.play.spawnAt");
+
+    ImGui::Checkbox("Game gets mouse control", &playGameGetsMouse_);
+    uiReg_.track("prefs.play.gameGetsMouse");
+
+    ImGui::Checkbox("Default pawn walks (no GameMode)", &defaultPawnWalk_);
+    uiReg_.track("prefs.play.defaultPawnWalk");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("With no GameMode, Play possesses the engine's default pawn. On: it walks -- a capsule "
+                          "with gravity, 40 cm stair steps, Space to jump, Shift to run -- so stairs, decks and "
+                          "bridges can be tested by hand. Off: it flies (WASD/QE).");
+
+    editField("Standalone launch arguments", playStandaloneArgs_, 256);
+    uiReg_.track("prefs.play.standaloneArgs");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Appended to AverEngineRuntime.exe's command line, after --project and "
+                          "the level path.");
+
+    // The Pause command's own chord IS the word "Pause" (its bound key's display name), so unlike
+    // its neighbours here it needs no verb after it.
+    ImGui::TextDisabled("%s play, %s simulate, %s eject/possess, %s pawn to camera (ejected), %s, %s stop, "
+                        "%s release mouse",
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStart)).c_str(),
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlaySimulate)).c_str(),
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject)).c_str(),
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayPawnToCamera)).c_str(),
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayPause)).c_str(),
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStop)).c_str(),
+                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayReleaseMouse)).c_str());
+}
 
 // Draws the Editor Preferences window: how this machine's editor behaves.
 void SandboxApp::buildEditorPrefs() {
@@ -426,6 +502,10 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::TextDisabled("The Voxi render module is not in this build, so nothing bakes.");
 #endif
     }
+
+    // Before Keybinds so its own shortcuts line names commands the section right below already
+    // shows in full.
+    buildPlayPrefsSection();
 
     // Scroll lands HERE, on the section it names. It used to fire above the DDC header instead, so
     // --scroll-prefs-to-keybinds put DDC at the top and left Keybinds below the fold -- unnoticed,
@@ -1465,11 +1545,11 @@ void SandboxApp::buildRenderingSettings(int page) {
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Unticked: this project does not state it,\n"
-                                      "and the engine's own default (ACES luminance) applies.");
+                                      "and the engine's own default (ACES fitted) applies.");
                 ImGui::SameLine();
                 ImGui::BeginDisabled(!stated);
                 if (ImGui::Combo("Tone curve", &mode,
-                                 "Per-channel ACES\0ACES fitted\0ACES luminance (default)\0")) {
+                                 "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0")) {
                     project_.postTonemap = mode;
                     post_.tonemap = static_cast<u32>(mode);
                     projectDirty_ = true;
@@ -1479,12 +1559,12 @@ void SandboxApp::buildRenderingSettings(int page) {
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(
                         "Which curve resolves HDR radiance to the display:\n"
-                        "  Per-channel     the original Narkowicz/Hill approximation, and\n"
-                        "                  the DEFAULT: the gentlest toe, so dim bounce\n"
-                        "                  light stays visible instead of crushing to\n"
-                        "                  black. Every recorded gate baseline in\n"
-                        "                  scripts/ was measured through it\n"
-                        "  ACES fitted     the same curve between the ACES matrices\n"
+                        "  Per-channel     the original Narkowicz/Hill approximation: the\n"
+                        "                  gentlest toe, so dim bounce light stays visible\n"
+                        "                  instead of crushing to black\n"
+                        "  ACES fitted     the DEFAULT: the same curve between the ACES\n"
+                        "                  matrices, the space Unreal's filmic curve runs\n"
+                        "                  in; matched a UE5 Lumen Sponza's contrast\n"
                         "  ACES luminance  tonemaps LUMINANCE and puts the original\n"
                         "                  chromaticity back, so hue survives any exposure\n\n"
                         "Measured on PTTest Sponza at exposure 8: fitted holds chroma 1.41\n"
@@ -2211,9 +2291,9 @@ void SandboxApp::saveEditorPreferences() {
         if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
         if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
         setPrefFloat("post.nightVision", post_.nightVision);
-        // Marks the one-time exposure reset above as done, so a session that never touches
-        // Brightness still leaves editor.ini past the version that would force it again.
-        setPrefInt("post.settingsVersion", 2);
+        // Marks the one-time exposure migrations above as done, so a session that never touches
+        // Brightness still leaves editor.ini past the version that would force them again.
+        setPrefInt("post.settingsVersion", 3);
     }
 
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
@@ -2267,6 +2347,12 @@ void SandboxApp::saveEditorPreferences() {
         }
 #endif  // AVER_MODULE_SR
     }
+
+    setPrefInt   ("play.mode",           static_cast<i32>(playMode_));
+    setPrefInt   ("play.spawnAt",        static_cast<i32>(playSpawnAt_));
+    setPrefBool  ("play.gameGetsMouse",  playGameGetsMouse_);
+    setPrefBool  ("play.defaultPawnWalk", defaultPawnWalk_);
+    setPrefString("play.standaloneArgs", playStandaloneArgs_);
 
     // The one line in this function that needs the editor UI: keybinds_ is the chord registry the
     // ImGui layer owns. Everything else is a plain setPref* call, so the guard sits only here.

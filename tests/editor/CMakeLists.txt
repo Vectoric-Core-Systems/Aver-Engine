@@ -82,6 +82,18 @@ target_include_directories(DropPlacementTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox
 target_link_libraries(DropPlacementTest PRIVATE Aver.Core)
 set_target_properties(DropPlacementTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# LevelViewStoreTest -- the per-level "where the camera was left" store's key and file grammar.
+# ViewportPickCapsuleTest -- the Player Start's click test. Both header-only and Core-only, for
+# DropPlacementTest's reason: the rest of each path needs a window and a click.
+add_executable(LevelViewStoreTest src/LevelViewStoreTest.cpp)
+target_include_directories(LevelViewStoreTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(LevelViewStoreTest PRIVATE Aver.Core)
+set_target_properties(LevelViewStoreTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(ViewportPickCapsuleTest src/ViewportPickCapsuleTest.cpp)
+target_include_directories(ViewportPickCapsuleTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ViewportPickCapsuleTest PRIVATE Aver.Core)
+set_target_properties(ViewportPickCapsuleTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LevelListTest -- the level enumeration behind File > Open Level and the Content Browser's level
 # activation. Header-only and Core-only, exactly like EditorEulerTest above, for the same reason: the
 # PICKER needs ImGui and a window, the LIST does not, and the list is where a missed extension or a
@@ -574,3 +586,12 @@ add_executable(AnimEditTest src/AnimEditTest.cpp)
 target_include_directories(AnimEditTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(AnimEditTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimEditTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PlayProfileTest -- sandbox/src/PlayProfile.hpp: the profiler panel's Play-side numbers (phase
+# brackets that add up and survive a missing begin/end, the frame-time smoothing, the worst-of-120
+# window, the resets). Header-only and Core-only, SnapshotUndoTest's exact precedent at the top of this
+# file: every bracket is handed its own timestamps, so there is no clock, no ImGui and no Engine here.
+add_executable(PlayProfileTest src/PlayProfileTest.cpp)
+target_include_directories(PlayProfileTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(PlayProfileTest PRIVATE Aver.Core)
+set_target_properties(PlayProfileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

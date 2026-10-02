@@ -761,7 +761,7 @@ void SandboxApp::onInit(Engine& e)  {
     std::vector<rhi::LineVertex> gl; buildGrid(gl, kEditorGridHalf, kEditorGridCell);
     gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
 
-    // Per-mode gizmos: normal + amber-highlight variant of each axis.
+    // Per-mode gizmos: normal + yellow-highlight variant of each axis.
     for (int a = 0; a < 3; ++a) {
         auto mv=buildMoveAxis(a,kAxisCol[a]);   gzMove_[a]  =e.device()->createLineMesh(mv.data(),(u32)mv.size());
         auto mh=buildMoveAxis(a,kAxisHi);       gzMoveHi_[a]=e.device()->createLineMesh(mh.data(),(u32)mh.size());
@@ -769,6 +769,21 @@ void SandboxApp::onInit(Engine& e)  {
         auto rh=buildRotRing(a,kAxisHi);        gzRotHi_[a] =e.device()->createLineMesh(rh.data(),(u32)rh.size());
         auto sc=buildScaleAxis(a,kAxisCol[a]);  gzScale_[a] =e.device()->createLineMesh(sc.data(),(u32)sc.size());
         auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
+    }
+
+    // The Player Start's capsule and facing arrow, built once (like the gizmo handles just above) and
+    // placed with a world matrix per frame (SandboxRender.cpp). The selected-state capsule is a
+    // second, differently-coloured mesh rather than a per-draw tint -- drawLines has no colour
+    // parameter, same reason gzMove_/gzMoveHi_ are two meshes instead of one recoloured in place.
+    {
+        auto cap = buildCapsuleWire(kPlayerStartCapsuleRadius, kPlayerStartCapsuleHalfHeight, kPlayerStartColor);
+        playerStartCapsule_ = e.device()->createLineMesh(cap.data(), (u32)cap.size());
+        auto capSel = buildCapsuleWire(kPlayerStartCapsuleRadius, kPlayerStartCapsuleHalfHeight,
+                                        kSelectionColor);
+        playerStartCapsuleSel_ = e.device()->createLineMesh(capSel.data(), (u32)capSel.size());
+        auto arrow = buildPlayerStartArrow(kPlayerStartCapsuleHalfHeight, kPlayerStartArrowLength,
+                                            kPlayerStartArrowColor);
+        playerStartArrow_ = e.device()->createLineMesh(arrow.data(), (u32)arrow.size());
     }
 
 #if AVER_MODULE_LANDSCAPE
@@ -843,9 +858,11 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 
 #if AVER_FLUIDS_SIMULATED
-    // 3D-viewport icon renderer: draws in transparentPass (after opaque + deferred sky) but must
-    // exist before level loading creates a Player Start. Failed init isn't fatal -- Player Start
-    // just keeps its cube look; permanent on Vulkan, which has no transparentPass call at all.
+    // 3D-viewport icon renderer: draws in overlayPass (after the camera post chain, before the
+    // editor's own UI) but must exist before level loading creates a Player Start. Failed init isn't
+    // fatal -- Player Start just keeps its cube look. overlayPass IS called on Vulkan (unlike the old
+    // transparentPass, which VulkanDevice never implemented), so this renders there too once
+    // VulkanDevice's resource factory exists.
     viewportIconsReady_ = viewportIcons_.init(*e.device());
     if (viewportIconsReady_) {
         e.device()->addRenderFeature(&viewportIcons_);
@@ -1615,6 +1632,17 @@ void SandboxApp::refreshWindowTitle(Engine& e) {
 
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
+    // Frame Skip's forced unpause, undone on scope exit -- declared at function scope so the
+    // repause still runs however this function returns, not only when control reaches the tick
+    // groups below in the order this comment assumes.
+    struct FrameStepGuard {
+        bool active = false;
+        ~FrameStepGuard() {
+#if AVER_MODULE_FRAMEWORK
+            if (active) aver_fw_set_paused(1);
+#endif
+        }
+    } frameStepGuard;
     // --set NAME VALUE: applied once, at frame 5 not frame 1, since the project's own RENDER.*
     // apply runs during startup and would overwrite anything staged earlier -- a handful of frames
     // costs nothing in a run long enough to measure a temporal artifact. runConsoleLine is the
@@ -1668,6 +1696,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
     voxiRenderer_.setViewDebug(viewModeNeedsRayDriven ? debugView_ : voxi::VoxiRenderer::ViewDebug::None);
     debugViewActiveThisFrame = viewModeNeedsRayDriven;
+    // Wireframe shows only mesh edges (IDevice::setWireframe), so the lit renderer stops working
+    // for it: no shadows, GI, ray tracing or denoising while it is on (VoxiRenderer::setPaused).
+    voxiRenderer_.setPaused(wireframe_);
 #endif
     // --cam-wobble-stop N: wobble runs only below frame N, then the camera holds. Measuring an
     // artifact that appears WHILE moving and decays AFTER stopping needs both in one deterministic
@@ -1980,13 +2011,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.textInput         = oio.WantTextInput;
         ic.uiWantsKeyboard   = oio.WantCaptureKeyboard;
         ic.uiWantsMouse      = oio.WantCaptureMouse;
-        ic.playing           = playSessionActive();
+        // FALSE WHILE EJECTED, both of these: ejecting hands the viewport tools back exactly like
+        // leaving Play, and toolsLive's defaultPawnPlay exception (InputOwnership.cpp) exists to
+        // keep the spectator pawn flyable pre-eject -- once ejected the fly block below drives
+        // camPos_ instead, so the exception must not fire either. playEjected() needs no guard of
+        // its own (it reads false without the framework).
+        ic.playing           = playSessionActive() && !playEjected();
         ic.releasedByUser    = releasedByUser_;
         // Left at its default without the scene, not guarded away: defaultPawnPlay_ is `#if
         // AVER_MODULE_SCENE`, and false is honest for a tree that can't enter Play; InputConditions
         // has the field either way.
 #if AVER_MODULE_SCENE
-        ic.defaultPawnPlay   = defaultPawnPlay_;
+        ic.defaultPawnPlay   = defaultPawnPlay_ && !playEjected();
 #endif
         ic.mouseCaptured     = mouse_.captured();
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
@@ -2096,8 +2132,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         // defaultPawnPlay_ is scene-guarded (see InputConditions above). Without the module the
         // camera flies on the right button alone, as it did before spectator Play existed.
+        // EJECTED DROPS THE EXCEPTION: the spectator pawn stops flying without RMB and the block
+        // below moves camPos_ instead of the pawn, i.e. edit-mode flying, same as any other session.
 #if AVER_MODULE_SCENE
-        if ((flying_ || defaultPawnPlay_) && !io.WantCaptureKeyboard) {
+        if ((flying_ || (defaultPawnPlay_ && !playEjected())) && !io.WantCaptureKeyboard) {
 #else
         if (flying_ && !io.WantCaptureKeyboard) {
 #endif
@@ -2110,9 +2148,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             if (ImGui::IsKeyDown(ImGuiKey_E)) step += up * sp;
             if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= up * sp;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-            // Moves the PAWN, not the camera, while the default pawn is possessed: drivePlayCamera()
-            // rewrites the view from the pawn every frame, so a camPos_ nudge would be overwritten.
-            if (defaultPawnPlay_) {
+            // Moves the PAWN, not the camera, while the default pawn is possessed and not ejected:
+            // drivePlayCamera() rewrites the view from the pawn every frame, so a camPos_ nudge
+            // would be overwritten. Ejected takes the camPos_ branch below like edit mode.
+            if (defaultPawnPlay_ && !playEjected() && walkCapsule_) {
+                driveDefaultPawnWalk(fwd, right);    // the walking default pawn (Play options > Walk)
+            } else if (defaultPawnPlay_ && !playEjected()) {
                 const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
                 if (pn) {
                     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
@@ -2177,9 +2218,17 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // guarded (sun/sky/post rows are selectable without a scene), but none of those has bounds
         // to frame a camera on, so the binding just does nothing there rather than framing a point
         // at the origin.
+        // STANDS DOWN FOR PAWN TO CAMERA: this row never checked Shift (EditorKeybinds.cpp), so in an
+        // ejected session Shift+F would send the pawn to the camera AND fly that camera off to frame
+        // the selection. The other command is asked rather than the Shift key, so it still holds after
+        // either has been rebound -- and asked with held(), not pressed(): this row repeats while F is
+        // down, Pawn to Camera does not, so pressed() would let the second auto-repeat pulse through.
+        // Only while there is a pawn to send: without one, Shift+F frames as it always did.
 #if AVER_MODULE_SCENE
         if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantCaptureKeyboard &&
-            keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
+            keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected() &&
+            !(playEjected() && hasPossessedPawn() &&
+              keybinds_.held(editor::CommandId::PlayPawnToCamera, io))) {
             // selectionBounds, not selectedXform/selectedRadius: those describe only the anchor
             // (what the gizmo draws on), which put most of a spread multi-selection outside the
             // view. This is the union of the whole selection.
@@ -2214,7 +2263,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             // levelHovered_ asks the question actually meant -- is the pointer over the LEVEL
             // window, the same `overUI` idiom the fly camera uses.
             const ImGuiIO& mio = ImGui::GetIO();
-            if (playSessionActive() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
+            // Not while ejected: that click is a viewport selection, and the mouse stays free.
+            if (playSessionActive() && !playEjected() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
                 levelHovered_ && inViewport(mio.MousePos.x, mio.MousePos.y)) {
                 releasedByUser_ = false;
                 // That click is NOT a trigger pull, it means "give the mouse back" -- publishing it
@@ -2223,17 +2273,45 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 eatRecaptureClick_ = true;
             }
         }
-        const bool wantCapture = playSessionActive() && !releasedByUser_;
-        // Alt+P starts Play, same anyPlayActive() precondition the toolbar Play button disables
-        // itself on -- can't layer a second session any more than the button can.
+        const bool wantCapture = playSessionActive() && !releasedByUser_ && !playEjected();
+        // Alt+P/Alt+S start Play, same anyPlayActive() precondition the toolbar Play button
+        // disables itself on -- can't layer a second session any more than the button can.
         if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
             keybinds_.pressed(editor::CommandId::PlayStart, ImGui::GetIO()))
-            startPlay();
-        if (keybinds_.pressed(editor::CommandId::PlayReleaseMouse, ImGui::GetIO()) && playSessionActive())
+            launchPlay(e, PlayMode::SelectedViewport);
+        if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
+            keybinds_.pressed(editor::CommandId::PlaySimulate, ImGui::GetIO()))
+            launchPlay(e, PlayMode::Simulate);
+        if (keybinds_.pressed(editor::CommandId::PlayReleaseMouse, ImGui::GetIO()) && playSessionActive() && !playEjected())
             releasedByUser_ = !releasedByUser_;
+        // F8: possess while ejected, eject while possessed -- one chord, gated on a real session
+        // rather than on scope (KeybindRegistry::pressed() doesn't consult it either way).
+        if (keybinds_.pressed(editor::CommandId::PlayEject, ImGui::GetIO()) && playSessionActive())
+            togglePlayEject();
+        // Shift+F, ejected only: the possessed pawn comes to the editor camera, and F8 possesses it
+        // there. GATED LIKE FRAME SELECTED, with which it shares F: the level viewport (focused or
+        // under the pointer), the Outliner or Details -- not an asset tab, whose own F handling ignores
+        // Shift and would otherwise frame its mesh AND move the running game's pawn -- and not while
+        // ImGui wants the keyboard (a capital F typed into a rename, the console, a modal). F8 needs
+        // none of this: it is not a printable key and no other panel binds it.
+        {
+            const ImGuiIO& pio = ImGui::GetIO();
+            if ((levelFocused_ || levelHovered_ || outlinerFocused_ || detailsFocused_) &&
+                !pio.WantTextInput && !pio.WantCaptureKeyboard && playEjected() &&
+                keybinds_.pressed(editor::CommandId::PlayPawnToCamera, pio) &&
+                // With no pawn and a selection, Frame Selected took this press (its stand-down asks
+                // the same question); only warn about the missing pawn when nothing else answered.
+                (hasPossessedPawn() || !anySelected()))
+                teleportPawnToCamera();
+        }
+        if (keybinds_.pressed(editor::CommandId::PlayPause, ImGui::GetIO()) && playSessionActive())
+            aver_fw_set_paused(aver_fw_play_state() != AVER_FW_PLAY_PAUSED ? 1 : 0);
+        if (keybinds_.pressed(editor::CommandId::PlayFrameSkip, ImGui::GetIO()))
+            requestPlayFrameStep();
         // Escape stops Play-in-Editor (same as Stop). Checked here, not pushInput, so this wins
         // over the game seeing the keypress -- a script's own pause menu can't race the editor for it.
-        // Escape ends a drone stand-in too: Play started it, so Play's exit ends it.
+        // Escape ends a drone stand-in too: Play started it, so Play's exit ends it. Fires while
+        // ejected too: playSessionActive() doesn't care which camera the session is showing.
         if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive() || spectatorPlayActive()))
             stopPlay();
         // F9 screenshots the viewport, in edit mode or during Play. Checked here, not beside
@@ -2303,9 +2381,34 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     maybeWheelSpeedTest();
     maybeRecaptureTest();
     maybeViewmodelTest();
+    // Frame Skip: lift the pause for exactly this frame's tick groups (through tickAi below);
+    // frameStepGuard's destructor puts it back whether or not that reach happens, so a paused
+    // session can never come out of this stuck running.
+    if (playFrameStepPending_ && aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
+        playFrameStepPending_ = false;
+        aver_fw_set_paused(0);
+        frameStepGuard.active = true;
+    }
     // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        game::tickGameplayGroups(t.dt);
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+        // The level's cars: each driver sets its input immediately before the physics step inside
+        // the groups, and each entity is written from its body immediately after them -- before
+        // driveAnimatedBodies and the flush below see the frame. Inside this gate, so Pause and Frame
+        // Skip hold the traffic with everything else. The focus is the view (the pawn's eye while
+        // possessed, the free camera while ejected): cars far from it think less often.
+        playProf_.begin(editor::PlayPhase::Vehicles);
+        vehicles_.prePhysics(t.dt, camPos_);
+        playProf_.end(editor::PlayPhase::Vehicles);
+#endif
+        playProf_.begin(editor::PlayPhase::Gameplay);
+        playProf_.addPhysicsSteps(game::tickGameplayGroups(t.dt));
+        playProf_.end(editor::PlayPhase::Gameplay);
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+        playProf_.begin(editor::PlayPhase::Vehicles);
+        vehicles_.postPhysics(scene::World::instance());
+        playProf_.end(editor::PlayPhase::Vehicles);
+#endif
     }
 #endif
 #if AVER_MODULE_FLUIDS
@@ -2316,7 +2419,22 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
     // Animation clock runs UNCONDITIONALLY, not off the gameplay tick above (which gates on
     // PLAYING) -- hanging it there would freeze every preview outside Play mode.
+#if AVER_MODULE_FRAMEWORK
+    // Object animation follows Play's pause like the gameplay groups above: held while PAUSED, and a
+    // Frame Skip has lifted the pause by this point so it advances exactly one frame. Set every frame
+    // from the play state, so Stop or a level change can never leave it stuck.
+    anim::animSystem().setObjectAnimationPaused(aver_fw_play_state() == AVER_FW_PLAY_PAUSED);
+#endif
+    playProf_.begin(editor::PlayPhase::ObjectAnim);
     anim::animSystem().tick(scene::World::instance(), t.dt);
+    playProf_.end(editor::PlayPhase::ObjectAnim);
+#if AVER_MODULE_PHYSICS
+    // After the tick that moved them: an animated placement's kinematic body follows it (only while
+    // Play has object animation live), which is what carries a character standing on it.
+    playProf_.begin(editor::PlayPhase::DriveBodies);
+    driveAnimatedBodies(t.dt);
+    playProf_.end(editor::PlayPhase::DriveBodies);
+#endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // Same "unconditionally" reasoning as the animation clock above: previews outside Play should
     // still show effects playing. Verification-only: steady_clock brackets only the CPU sim call,
@@ -2330,8 +2448,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // After the tick, before anything draws: update() creates the per-entity skin targets the
     // draw pass asks for and copies this frame's matrices out of AnimSystem before its skinning() invalidates.
+    playProf_.begin(editor::PlayPhase::Skinned);
     if (skinnedScene_)
         skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
+    playProf_.end(editor::PlayPhase::Skinned);
 #if AVER_MODULE_RENDER_SOFTBODY
     // After the physics step and World::flush, before the draw (drawHandle() must exist by then) --
     // same ordering skinnedScene_ above requires, for the same reason.
@@ -2405,8 +2525,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // guard: aver_fw_play_state() comes from framework_abi.h, a graph CLASS is ticked because Play
     // began, and with no framework there's no Play to gate on and no class instances to tick.
 #if AVER_MODULE_FRAMEWORK
+    playProf_.begin(editor::PlayPhase::GraphTicks);
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
         scripts_.tickGraphClassInstances(t.dt);
+    playProf_.end(editor::PlayPhase::GraphTicks);
 #endif
 #endif
     // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
@@ -2430,7 +2552,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         streaming_.tick(camPos_, t.dt, nullptr, tris);
     }
+    playProf_.begin(editor::PlayPhase::WorldFlush);
     scene::World::instance().flush();
+    playProf_.end(editor::PlayPhase::WorldFlush);
 #if AVER_WITH_AUDIO_ABI
     // Reclaims finished voices every frame, Play or not -- the second half of the audio-device
     // gap: aver_audio_collect had the same single caller as aver_audio_init, so a graph-started
@@ -2451,7 +2575,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-    drivePlayCamera();
+    // Ejected: leave camPos_/yaw_/pitch_ exactly where the user flew them (drivePlayCamera would
+    // snap the view back onto the pawn every frame) and clear the owner-hide root so the pawn's
+    // body draws. Re-possessing calls drivePlayCamera() again next frame, snapping the view back.
+    if (playEjected()) firstPersonPawn_ = scene::kInvalidEntity;
+    else                drivePlayCamera();
 #endif
     // G-buffer: pushed every frame so a live dropdown click or --gbuffer-debug takes effect
     // immediately. OR'd together: --gbuffer alone must still write with no view selected, and a
@@ -2737,6 +2865,10 @@ void SandboxApp::onShutdown(Engine& e)  {
         AVER_INFO("[Editor] wrote {} buffered GI cache entr(ies) on shutdown", wrote);
 #endif
     // ---- Capture live state before flushing it ----
+#if AVER_MODULE_SCENE
+    // Closing the editor is a way out of the open level that never reaches unloadLevel.
+    storeLevelView();
+#endif
     // flushEditorPrefs() writes the pref store but doesn't look at the editor -- it only persists
     // what saveEditorPreferences() already pushed in, which only runs from buildEditorPrefs()'s
     // tail and early-returns when Preferences is closed. Several settings bypass it entirely
@@ -2793,6 +2925,11 @@ editor::shutdownAnimEditors();
     e.device()->removeRenderFeature(&gbufferDebugFeature_);
     gbufferDebugFeature_.shutdown();
 #if AVER_MODULE_PHYSICS
+#if AVER_MODULE_SCENE
+    // Closing the window mid-Play never reaches stopPlay: the cars' bodies and constraints come down
+    // here, while the world that owns them still exists, rather than in vehicles_'s destructor after it.
+    vehicles_.end();
+#endif
     aver_phys_shutdown();
 #endif
 #if AVER_WITH_AUDIO_ABI

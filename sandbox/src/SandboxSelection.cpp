@@ -13,9 +13,16 @@ namespace {
 // clears the bit and records the entity in editorHidden_, but the entity rebuilt by Undo-of-delete,
 // Paste or Duplicate is a new handle that list does not name -- so without this, an object H was
 // only hiding would come back hidden for real, and save that way.
+// `objectAnimated` leaves the CAnimator out: an object animation comes back from entityAnim_'s authored
+// values (EditCmd::hadAnim), not from bytes holding whatever time Play had advanced the clock to.
 editor::EntitySnapshot captureAuthored(scene::World& w, scene::Entity e,
-                                       const std::vector<scene::Entity>& editorHidden) {
+                                       const std::vector<scene::Entity>& editorHidden,
+                                       bool objectAnimated = false) {
     editor::EntitySnapshot s = editor::captureEntity(w, e);
+    if (objectAnimated)
+        s.components.erase(std::remove_if(s.components.begin(), s.components.end(),
+                               [](const editor::EntitySnapshot::Comp& c) { return c.type == scene::kComponentAnimator; }),
+                           s.components.end());
     if (std::find(editorHidden.begin(), editorHidden.end(), e) == editorHidden.end()) return s;
     for (editor::EntitySnapshot::Comp& comp : s.components) {
         if (comp.type != scene::kComponentMeshRenderer || comp.bytes.size() != sizeof(scene::CMeshRenderer)) continue;
@@ -42,32 +49,37 @@ editor::EntitySnapshot captureAuthored(scene::World& w, scene::Entity e,
 // "this one thing is now selected". The outliner's own multi paths keep the anchor inside the
 // set, so they stay multi.
 bool SandboxApp::multiStale() const {
-    return !multiSel_.empty() &&
-           std::find(multiSel_.begin(), multiSel_.end(), selEntity_) == multiSel_.end();
+    return !multiSel_.empty() && multiSet_.find(selEntity_) == multiSet_.end();
 }
 
 bool SandboxApp::multiIsSelected(scene::Entity e) const {
     if (multiStale()) return false;
-    return std::find(multiSel_.begin(), multiSel_.end(), e) != multiSel_.end();
+    return multiSet_.find(e) != multiSet_.end();
+}
+
+void SandboxApp::multiRebuildSet() {
+    multiSet_.clear();
+    multiSet_.insert(multiSel_.begin(), multiSel_.end());
 }
 
 // Drops a set the anchor has left. Called once a frame so a stale set cannot come back to life
 // later by the anchor happening to land on one of its members again.
-void SandboxApp::multiSyncToAnchor() { if (multiStale()) multiSel_.clear(); }
+void SandboxApp::multiSyncToAnchor() { if (multiStale()) { multiSel_.clear(); multiSet_.clear(); } }
 
-void SandboxApp::multiClear() { multiSel_.clear(); }
+void SandboxApp::multiClear() { multiSel_.clear(); multiSet_.clear(); }
 
 // Plain click: this one becomes the whole selection.
 void SandboxApp::multiSetSingle(scene::Entity e) {
     multiSel_.assign(1, e);
+    multiRebuildSet();
     sel_ = kSelScene; selEntity_ = e;
 }
 
 // Ctrl+click: add or remove one, and keep the anchor pointing at something that is still selected.
 void SandboxApp::multiToggle(scene::Entity e) {
-    const auto it = std::find(multiSel_.begin(), multiSel_.end(), e);
-    if (it != multiSel_.end()) {
-        multiSel_.erase(it);
+    if (multiSet_.erase(e)) {
+        if (const auto it = std::find(multiSel_.begin(), multiSel_.end(), e); it != multiSel_.end())
+            multiSel_.erase(it);
         if (selEntity_ == e) {
             // The anchor was just deselected. Hand it to whatever is left rather than leaving it
             // pointing at something the user can no longer see highlighted.
@@ -77,6 +89,7 @@ void SandboxApp::multiToggle(scene::Entity e) {
         return;
     }
     multiSel_.push_back(e);
+    multiSet_.insert(e);
     sel_ = kSelScene; selEntity_ = e;
 }
 
@@ -90,8 +103,8 @@ void SandboxApp::multiRange(scene::Entity to) {
     if (a == ord.end() || b == ord.end()) { multiSetSingle(to); return; }
     auto lo = a, hi = b;
     if (lo > hi) std::swap(lo, hi);
-    multiSel_.clear();
-    for (auto i = lo; i <= hi; ++i) multiSel_.push_back(*i);
+    multiSel_.assign(lo, hi + 1);
+    multiRebuildSet();
     // The anchor STAYS where it was, so a second shift-click re-ranges from the same origin
     // instead of walking the anchor along with it -- which is what every file browser does.
     sel_ = kSelScene;
@@ -113,10 +126,16 @@ std::vector<scene::Entity> SandboxApp::selectedEntities() const {
 // than the last, so a following shift-click ranges downward from the top the way a person expects
 // after "select all" -- multiSetSingle + multiToggle would otherwise leave the anchor on whatever
 // happened to be added last.
+//
+// ONE ASSIGN, NOT multiSetSingle PLUS A multiToggle PER ROW: multiToggle searches multiSel_ for the
+// row before adding it, so toggling N rows in was N^2/2 compares -- over a billion for a 51k-row
+// level, a visible freeze on Ctrl+A. Same result: outlinerOrder_ lists each entity once, so every
+// toggle after the first only ever ADDED its row (the anchor it moved along the way is put back on
+// the first row by the last line, exactly as before).
 void SandboxApp::selectAllInOutliner() {
     if (outlinerOrder_.empty()) return;
-    multiSetSingle(outlinerOrder_.front());
-    for (usize i = 1; i < outlinerOrder_.size(); ++i) multiToggle(outlinerOrder_[i]);
+    multiSel_ = outlinerOrder_;
+    multiRebuildSet();
     sel_ = kSelScene; selEntity_ = outlinerOrder_.front();
 }
 
@@ -124,8 +143,9 @@ void SandboxApp::selectAllInOutliner() {
 
 bool SandboxApp::movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
 
-// True while a play session owns the input, so editor interaction must stand down.
-bool SandboxApp::gameHasInput() const { return playSessionActive() && !releasedByUser_; }
+// True while a play session owns the input, so editor interaction must stand down. False while
+// ejected: the editor has the camera, input and tools back, same as a released mouse.
+bool SandboxApp::gameHasInput() const { return playSessionActive() && !releasedByUser_ && !playEjected_; }
 
 // True when the selection is a thing in either world, rather than a sun/sky/post pseudo-entry.
 bool SandboxApp::anySelected() const {
@@ -372,6 +392,95 @@ void SandboxApp::applyVisibilityTo(const EditCmd& c, bool undoing) {
     }
 }
 
+// THE ONE WRITE PATH FOR THE COLLISION FLAG: the Details panel's Collides checkbox and its
+// undo/redo all land here. entityCollide_ is what saveLevel turns into `nocollide`, and
+// rebuildEntityBody reads it too, so off drops the static body and on fits a fresh one from the
+// mesh and current transform, exactly as create does. Children are not touched: each entity
+// carries its own flag, and a body is fitted per entity in world space.
+void SandboxApp::setEntityCollide(scene::Entity e, bool collide) {
+    if (!scene::World::instance().valid(e)) return;
+    entityCollide_[static_cast<u32>(e)] = collide;
+#if AVER_MODULE_PHYSICS
+    rebuildEntityBody(e);
+#endif
+}
+
+// Collision's apply: same shape as applyVisibilityTo, one command per checkbox click.
+void SandboxApp::applyCollideTo(const EditCmd& c, bool undoing) {
+    for (const EditCmd::VisibilityChange& cc : c.collide) {
+        const scene::Entity e = entityForEdit(cc.id);
+        if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) continue;
+        setEntityCollide(e, undoing ? cc.before : cc.after);
+    }
+}
+
+// OBJECT ANIMATION, THE WRITE HALF: entityAnim_ is what saveLevel writes back as the anim/animspeed/
+// animtime/animonce tokens, and the CAnimator is made to match it -- clip id = fnv1a64 of the path (the
+// spelling every content id uses), and the authored time/speed/flags, so a clock Play advanced never
+// survives an edit or a Stop. An empty clip erases both.
+void SandboxApp::writeEntityAnim(scene::Entity e, const EntityAnim& a) {
+    scene::World& w = scene::World::instance();
+    if (!w.valid(e)) return;
+    // A skeletal actor's CAnimator is its skeletal clock, not a transform track.
+    if (w.hasComponent(e, scene::kComponentSkeletalMesh)) {
+        if (!a.clip.empty()) AVER_WARN("[Editor] entity #{}: an object animation cannot be set on a skeletal mesh", (u32)e);
+        return;
+    }
+    const u32 key = static_cast<u32>(e);
+    if (a.clip.empty()) {
+        if (entityAnim_.erase(key)) w.removeComponent(e, scene::kComponentAnimator);
+        return;
+    }
+    entityAnim_[key] = a;
+    auto* an = w.component<scene::CAnimator>(e, scene::kComponentAnimator);
+    if (!an) an = static_cast<scene::CAnimator*>(w.addComponent(e, scene::kComponentAnimator));
+    if (!an) return;
+    an->clip        = fnv1a64(std::string_view(a.clip));
+    an->time        = a.time;
+    an->speed       = a.speed;
+    an->blendWeight = 1.0f;
+    // speed 0 means held, as world::instantiate reads an authored `animspeed 0` (CAnimator reads 0 as 1)
+    an->flags       = (a.once ? scene::kAnimatorOnce : 0u) | (a.speed == 0.0f ? scene::kAnimatorPaused : 0u);
+}
+
+// write + the body: an animated placement's body is kinematic (so a character standing on it is
+// carried), an unanimated one static, and rebuildEntityBody is the one place that decides which. Only a
+// change of kind remakes it -- a speed tweak must not rebuild a triangle-mesh body.
+void SandboxApp::applyEntityAnim(scene::Entity e, const EntityAnim& a) {
+    if (!scene::World::instance().valid(e)) return;
+    const u32 key = static_cast<u32>(e);
+    const bool was = entityAnim_.find(key) != entityAnim_.end();
+    writeEntityAnim(e, a);
+#if AVER_MODULE_PHYSICS
+    const bool now = entityAnim_.find(key) != entityAnim_.end();
+    if (was != now && entityBodies_.find(key) != entityBodies_.end()) rebuildEntityBody(e);
+#else
+    (void)was;
+#endif
+}
+
+// Animation's apply: same shape as applyCollideTo, one command per change in the Details panel.
+void SandboxApp::applyAnimationTo(const EditCmd& c, bool undoing) {
+    for (const EditCmd::AnimChange& ac : c.animation) {
+        const scene::Entity e = entityForEdit(ac.id);
+        if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) continue;
+        applyEntityAnim(e, undoing ? ac.before : ac.after);
+    }
+}
+
+// THE PUBLIC WRITE PATH (the Details panel goes through applyEntityAnim and pushes its own undo entry
+// instead, so undoing back to the saved state still reads clean). An empty clip clears.
+void SandboxApp::setEntityAnim(scene::Entity e, const EntityAnim& a) {
+    if (!scene::World::instance().valid(e)) return;
+    applyEntityAnim(e, a);
+    markLevelUnsaved();
+}
+
+const EntityAnim* SandboxApp::entityAnim(scene::Entity e) const {
+    const auto it = entityAnim_.find(static_cast<u32>(e));
+    return it == entityAnim_.end() ? nullptr : &it->second;
+}
+
 // Removes one component from the selected entity as one undoable command. Mirrors renameEntity's
 // shape: capture the before-state, apply, push. THE BEFORE-STATE IS THE WHOLE COMPONENT, byte-
 // exact (EntitySnapshot::Comp, the same shape captureEntity's own loop produces), because undo has
@@ -547,7 +656,9 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
         c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
         c.after.scale = loc->xf.scale;
     }
-    c.snap = captureAuthored(w, e, editorHidden_);
+    const auto animIt = entityAnim_.find(static_cast<u32>(e));
+    c.snap = captureAuthored(w, e, editorHidden_, animIt != entityAnim_.end());
+    if (animIt != entityAnim_.end()) c.hadAnim = animIt->second;
     if (const scene::Entity par = w.parent(e); par != scene::kInvalidEntity)
         c.parentId = editIdFor(par);
 #if AVER_MODULE_PHYSICS
@@ -558,6 +669,9 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
     // restore below a no-op for those, rather than inventing an entry they never had.
     if (const auto it = entityCollide_.find(static_cast<u32>(e)); it != entityCollide_.end())
         c.hadCollide = it->second;
+    // THE VEHICLE TOKEN is held by level_, not by any component, so a delete that did not carry it would
+    // come back from Ctrl+Z as an ordinary mesh: no car in Play, and no token in the next save.
+    if (const std::string* vehicle = level_.vehiclePresetOf(e)) c.hadVehicle = *vehicle;
     if (const auto it = entitySnapZ_.find(static_cast<u32>(e)); it != entitySnapZ_.end()) {
         c.hadSnapZ = true;
         // entitySnapZ_ is f64 to round-trip the LEVEL FORMAT's own f64 placement z VERBATIM (see
@@ -581,7 +695,8 @@ scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, co
                                const std::string& label, bool hadBody,
                                bool restoreObjectId,
                                scene::Entity parent,
-                               bool collide, bool hasSnapZ, f32 snapZ) {
+                               bool collide, bool hasSnapZ, f32 snapZ,
+                               const EntityAnim* authoredAnim) {
     scene::World& w = scene::World::instance();
     Transform t; t.position = xf.pos; t.rotation = quatFromEulerDeg(xf.rotDeg); t.scale = xf.scale;
     const scene::Entity e = editor::instantiateEntity(w, snap, t, parent, restoreObjectId);
@@ -596,6 +711,8 @@ scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, co
     // absent, but an editor-created entity gaining a map entry would be a difference for no reason.
     if (!collide) entityCollide_[static_cast<u32>(e)] = false;
     if (hasSnapZ) entitySnapZ_[static_cast<u32>(e)] = snapZ;
+    // BEFORE the body below, so a returning animated entity gets its kinematic body first time.
+    if (authoredAnim && !authoredAnim->clip.empty()) writeEntityAnim(e, *authoredAnim);
 #if AVER_MODULE_PHYSICS
     // FITTED FRESH, not replayed from a stored half-extent -- rebuildEntityBody reads `e`'s own
     // mesh bounds and its just-composed world transform, which is what makes this correct for a
@@ -622,9 +739,12 @@ void SandboxApp::recreateFrom(const EditCmd& c) {
     }
 #endif
     const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody,
-                                            true, par, c.hadCollide, c.hadSnapZ, c.snapZ);
+                                            true, par, c.hadCollide, c.hadSnapZ, c.snapZ, &c.hadAnim);
     if (e == scene::kInvalidEntity) return;
     rebindEdit(c.id, e);
+    // A car comes back a car, under its NEW handle -- level_ keys the record by entity. (A copy made with
+    // Copy or Duplicate does not: it is an ordinary mesh, which is what describeEntity records for it.)
+    if (!c.hadVehicle.empty()) level_.setVehiclePreset(e, c.hadVehicle);
 
 #if AVER_MODULE_SCENE
     spawnSubtreeUnder(e, c.subtree, /*restoreIds=*/true);
@@ -661,7 +781,7 @@ void SandboxApp::spawnSubtreeUnder(scene::Entity root, const std::vector<EditCmd
             par = made[static_cast<usize>(n.parent)];
         const scene::Entity ce =
             spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, restoreIds, par,
-                            n.hadCollide, n.hadSnapZ, n.snapZ);
+                            n.hadCollide, n.hadSnapZ, n.snapZ, &n.hadAnim);
         made.push_back(ce);
         if (restoreIds && ce != scene::kInvalidEntity) rebindEdit(n.id, ce);
     }
@@ -794,7 +914,9 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
         }
         if (const auto lb = entityLabels_.find(static_cast<u32>(d)); lb != entityLabels_.end())
             n.label = lb->second;
-        n.snap = captureAuthored(w, d, editorHidden_);
+        const auto animIt = entityAnim_.find(static_cast<u32>(d));
+        n.snap = captureAuthored(w, d, editorHidden_, animIt != entityAnim_.end());
+        if (animIt != entityAnim_.end()) n.hadAnim = animIt->second;
         // Same two non-component flags the root carries; a subtree restored without them has the
         // identical silent-solidify problem one level down.
         if (const auto ci = entityCollide_.find(static_cast<u32>(d)); ci != entityCollide_.end())
@@ -818,24 +940,39 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
 
 #if AVER_MODULE_SCENE
 #if AVER_MODULE_PHYSICS
-// The static body `e`'s mesh and CURRENT world transform describe, replacing whatever body it had
-// before. THE ONE PLACE A BODY IS MADE OR REMADE: create (fresh or via undo/paste/duplicate) and
+// The body `e`'s mesh and CURRENT world transform describe (static, or kinematic for an animated
+// placement), replacing whatever body it had before. THE ONE PLACE A BODY IS MADE OR REMADE: create
+// (fresh or via undo/paste/duplicate) and
 // every transform-commit path below call this rather than keeping their own
 // aver_phys_add_static_box, so a body's shape can never drift from what fitStaticBox says right
 // now -- see aver::world::fitStaticBox for the fit itself, and EditCmd::hadBody's own comment for
 // why no shape is carried alongside that flag any more.
 //
-// THE OLD BODY IS DROPPED UNCONDITIONALLY, a fresh one made only if physics is running and `e` is
-// still live: a command replayed against a since-destroyed handle, or one running before
+// THE OLD BODY IS DROPPED UNCONDITIONALLY, a fresh one made only if `e` collides (entityCollide_),
+// physics is running and `e` is still live: a command replayed against a since-destroyed handle, or one running before
 // aver_phys_init, still has to let go of the stale body rather than leaving entityBodies_ pointing
 // at nothing.
 void SandboxApp::rebuildEntityBody(scene::Entity e) {
+    // The collider overlay caches what it drew (rebuildColliderOverlay); a body dropped or remade
+    // here can leave the body COUNT unchanged, so tell it.
+    ++colliderRev_;
     if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
         aver_phys_remove_body(it->second);
         levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
                            levelBodies_.end());
         entityBodies_.erase(it);
     }
+    // `nocollide` MEANS NO BODY, whoever asks: a duplicate, a paste, an undone delete or a drag
+    // commit of an entity the level (or the Collides checkbox) marked non-colliding must not quietly
+    // gain one. The old body above is dropped first, which is what unchecking Collides relies on.
+    // Absent = the default (collides), the same reading saveLevel makes.
+    if (const auto ci = entityCollide_.find(static_cast<u32>(e)); ci != entityCollide_.end() && !ci->second)
+        return;
+    // A CAR HAS NO STATIC BODY, whatever its Collides box says: Play builds its dynamic chassis
+    // (world::VehicleSystem), and a solid copy of the mesh at the placement would be a second car under
+    // the first -- one the real car's own wheels and chassis collide with. world::instantiate skips it at
+    // load for the same reason; this is the other way one could be made (the Collides toggle, a drag commit).
+    if (level_.vehiclePresetOf(e)) return;
     scene::World& w = scene::World::instance();
     if (!w.valid(e) || !aver_phys_ready()) return;
 
@@ -852,6 +989,8 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
     // InstantiateOptions::localTrianglesFor's own comment): a mesh with a cached collision mesh --
     // every imported mesh with a .ocmesh, never a built-in -- collides with it here too, so dragging
     // or duplicating a NewSponza wall in the editor does not regress it back to one solid box.
+    const bool animated = entityAnim_.find(static_cast<u32>(e)) != entityAnim_.end();
+    bool followsEntity = true;   // false: a body whose origin is not the entity's pivot cannot be driven
     i32 body = 0;
     if (const game::GameContent::CollisionMesh* cm = content_.collisionMeshFor(meshId);
         cm && cm->indices.size() >= 3) {
@@ -867,9 +1006,19 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
         Vec3 lmin{-world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm, -world::kPlaceholderHalfExtentCm};
         Vec3 lmax{ world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm,  world::kPlaceholderHalfExtentCm};
         if (const auto* b = content_.boundsFor(meshId)) { lmin = b->first; lmax = b->second; }
-        body = world::addStaticBoxBody(worldXf, lmin, lmax);
+        // AN ANIMATED PLACEMENT'S BOX IS BUILT AROUND THE PIVOT, as world::instantiate builds it: its
+        // body is driven to the entity's transform, and a box centred elsewhere would jump by the offset.
+        body = animated ? world::addPivotBoxBody(worldXf, lmin, lmax) : 0;
+        if (!body) {
+            body = world::addStaticBoxBody(worldXf, lmin, lmax);
+            if (animated) followsEntity = false;
+        }
     }
     if (!body) return;
+    // AN ANIMATED PLACEMENT'S BODY IS KINEMATIC, again as world::instantiate makes it, so a character
+    // standing on it is carried (driveAnimatedBodies moves it in Play). The handle survives the switch.
+    if (animated && (!followsEntity || !aver_phys_body_set_motion_type(body, AVER_PHYS_MOTION_KINEMATIC)))
+        AVER_WARN("[Editor] entity #{}: its body stays static, so it will not carry anything as it moves", (u32)e);
     aver_phys_set_entity(body, static_cast<i32>(e));
     entityBodies_[static_cast<u32>(e)] = body;
     levelBodies_.push_back(body);
@@ -914,7 +1063,9 @@ void SandboxApp::destroyEntity(scene::Entity e) {
                              levelEntities_.end());
         entityLabels_.erase(static_cast<u32>(d));
         entityCollide_.erase(static_cast<u32>(d));
+        entityAnim_.erase(static_cast<u32>(d));
         entitySnapZ_.erase(static_cast<u32>(d));
+        level_.setVehiclePreset(d, std::string());
         // Deleting the marker must clear the cache, or Add > Player Start keeps refusing to add
         // one on the grounds that the level already has the entity that was just destroyed.
         if (d == playerStart_) playerStart_ = scene::kInvalidEntity;
@@ -930,6 +1081,7 @@ void SandboxApp::destroyEntity(scene::Entity e) {
             levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
                                levelBodies_.end());
             entityBodies_.erase(it);
+            ++colliderRev_;   // see rebuildEntityBody
         }
 #endif
     }
@@ -1032,6 +1184,8 @@ void SandboxApp::undo() {
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameBefore); break;
         case EditCmd::Kind::RemoveComponent: restoreComponent(c.id, c.removedComponent); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
+        case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/true); break;
+        case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
 #endif
         case EditCmd::Kind::CreateObj:   // undo a create: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
@@ -1083,6 +1237,8 @@ void SandboxApp::redo() {
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameAfter); break;
         case EditCmd::Kind::RemoveComponent: removeComponentRaw(c.id, c.removedComponent.type); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
+        case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/false); break;
+        case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
 #endif
         case EditCmd::Kind::CreateObj:   // redo a create: put it back
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())

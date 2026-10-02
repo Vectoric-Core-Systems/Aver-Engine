@@ -338,6 +338,11 @@ void SandboxApp::applyPendingOpen(Engine& eng) {
 // A blank level. The one place that does it, so the guard above and the prompt's Discard
 // button cannot drift apart about what "new" clears.
 void SandboxApp::startNewLevel(Engine& eng) {
+#if AVER_MODULE_FRAMEWORK
+    // A running Play ends first: its snapshot and live object animation belong to the level being
+    // left, so Stop afterwards would restore nothing of the next one and a Save would bake the pose.
+    if (anyPlayActive()) stopPlay();
+#endif
     unloadLevel(eng);
     levelName_ = "untitled";
     // CLEARED, so the next Ctrl+S cannot silently overwrite the level that was open before this
@@ -347,7 +352,32 @@ void SandboxApp::startNewLevel(Engine& eng) {
 
 // The actual open, past every guard. The ONE place that pairs loadLevel with the class-placement
 // spawn it needs -- see the comment inside for why that pairing is not optional.
+//
+// A LOADING SCREEN FOR THIS OPEN, reusing projectLoading_/projectLoadingFrames_ -- applyProject's
+// own member, and the SAME onRender teardown (SandboxRender.cpp's settle check against
+// startupComplete()) rather than a second rule. Opening a level from the Content Browser (or a
+// recovered autosave, or a forwarded open from another instance -- this function's other two
+// callers) used to show nothing at all while loadLevel blocked the window -- exactly the "Not
+// Responding" problem the project loading screen already exists to fix (see LoadingScreen's own
+// comment, SandboxApp.hpp). applyProject's OWN level load does not go through this function (it
+// calls loadStartMap -> loadLevel directly, already inside its own projectLoading_'s span), so
+// there is no case here where a screen this creates replaces one already mid-load.
 void SandboxApp::openLevelDirect(Engine& eng, const std::string& path) {
+#if AVER_MODULE_FRAMEWORK
+    // Same as startNewLevel: Play ends before the level it was started on is torn down.
+    if (anyPlayActive()) stopPlay();
+#endif
+    projectLoading_ = std::make_unique<LoadingScreen>(
+        eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
+#if AVER_MODULE_SCENE
+    // Restart the settle detector -- see applyProject's identical reset for why this must happen
+    // whenever a NEW load starts, not just when a project changes.
+    startupSettleCount_ = -2;
+    startupSettleFrames_ = 0;
+#endif
+    projectLoadingFrames_ = 0;
+    projectLoading_->stage("Opening level");
+
     loadLevel(eng, path);
     // GRAPH-AS-CLASS / any other class placement: loadLevel collects level_.classPlacements() but does
     // not spawn them -- applyProject's "Starting scripts" stage is what normally does that after
@@ -376,8 +406,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
 
     scene::World& world = scene::World::instance();
     // STARTS FROM WHAT THE FILE SAID, not from a default-constructed OcWorldData. Everything the
-    // editor does not model -- ID, BUILD, ALGO, SPAWN, the sun's lux -- rides through untouched;
-    // the lines below overwrite only what the editor genuinely owns. See levelHeader_.
+    // editor does not model -- ID, BUILD, ALGO, SPAWN, the sun's lux, the header notes (credits) --
+    // rides through untouched; the lines below overwrite only what the editor genuinely owns. See
+    // levelHeader_.
     fmt::OcWorldData w = levelHeader_;
     w.name = levelName_.empty() ? std::string("untitled") : levelName_;
     // THE MARKER IS THE TRUTH WHEN THERE IS ONE: saveLevel's banner used to list SPAWN among
@@ -468,6 +499,27 @@ bool SandboxApp::saveLevel(const std::string& path) {
         }
     }
 
+    // The placement transforms of the entities Play is MOVING -- animated ones, and the physics cars --
+    // from Play's own snapshot, taken before anything moved. Empty (and free) at any other time.
+    std::unordered_map<u32, const Transform*> animPlaced;
+    if (playWorldCaptured_) {
+        const bool clipsLive = anim::animSystem().objectAnimationLive();
+        // A CAR'S CLocal IS WHEREVER IT HAS DRIVEN TO, written by VehicleSystem every frame, so a save or an
+        // autosave mid-Play would otherwise put each car at a point on its road instead of where it was
+        // placed -- silently, since the lane file is untouched. The set is the cars the system is actually
+        // moving, which is exactly the entities whose CLocal is not theirs.
+        std::unordered_set<u32> cars;
+#if AVER_MODULE_PHYSICS
+        for (const scene::Entity c : vehicles_.entities()) cars.insert(static_cast<u32>(c));
+#endif
+        if (clipsLive || !cars.empty())
+            for (const PlaySavedTransform& t : playWorldSnapshot_) {
+                const u32 key = static_cast<u32>(t.e);
+                const bool clip = clipsLive && entityAnim_.find(key) != entityAnim_.end();
+                if (clip || cars.count(key) != 0) animPlaced.emplace(key, &t.xf);
+            }
+    }
+
     // A FRESH COUNTER, SEPARATE FROM THE LIVE labelCounts_ -- see the name-vs-default check inside
     // the loop below for why. Ordinals start back at zero here rather than wherever the session's
     // own counter happens to be, because what this loop needs to know is what a FRESH LOAD OF THE
@@ -500,10 +552,15 @@ bool SandboxApp::saveLevel(const std::string& path) {
             p.parent = it == slotOf.end() ? -1 : it->second;
         }
         p.asset = world.name(e);
-        p.x = loc->xf.position.x; p.y = loc->xf.position.y; p.z = loc->xf.position.z;
-        const Vec3 euler = eulerDegFromQuat(loc->xf.rotation);
+        // WHILE PLAY MOVES IT -- a clip, or a car driving -- an entity's CLocal is a moment on its route, not
+        // its placement (an autosave or a save from the MCP can land mid-Play), so it is written from what
+        // Play found.
+        const auto placedIt = animPlaced.find(static_cast<u32>(e));
+        const Transform& xf = placedIt == animPlaced.end() ? loc->xf : *placedIt->second;
+        p.x = xf.position.x; p.y = xf.position.y; p.z = xf.position.z;
+        const Vec3 euler = eulerDegFromQuat(xf.rotation);
         p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
-        p.sx = loc->xf.scale.x; p.sy = loc->xf.scale.y; p.sz = loc->xf.scale.z;
+        p.sx = xf.scale.x; p.sy = xf.scale.y; p.sz = xf.scale.z;
         // THE SURFACE, WHICH USED TO BE DROPPED ON EVERY SAVE: `(void)mr;` sat here and the
         // material line was simply missing. The token itself must never be written -- it's a
         // process-local intern id (docs/CHUNKS.md 5.1) -- so it goes back out as the NAME it was interned under.
@@ -518,6 +575,18 @@ bool SandboxApp::saveLevel(const std::string& path) {
         // currently hiding must still write visible, or Ctrl+H's own claim of being temporary
         // would be false the moment anyone saved with it on. See authoredVisible's own comment.
         p.visible = authoredVisible(e);
+        // THE AUTHORED ANIMATION, from the side map and NEVER from the entity's CAnimator: Play
+        // advances that clock, and reading it here would write a session's progress into the level.
+        if (const auto animIt = entityAnim_.find(static_cast<u32>(e)); animIt != entityAnim_.end()) {
+            p.animClip  = animIt->second.clip;
+            p.animSpeed = animIt->second.speed;
+            p.animTime  = animIt->second.time;
+            p.animOnce  = animIt->second.once;
+        }
+        // THE VEHICLE TOKEN, which has no component either: level_ remembers which entities were placed as
+        // cars (and the editor keeps that current through an undone delete and a placement added over MCP),
+        // and a save that rebuilt the placement without it turned every car into a plain, collider-less mesh.
+        if (const std::string* vehicle = level_.vehiclePresetOf(e)) p.vehiclePreset = *vehicle;
         // A SNAPPED PLACEMENT KEEPS ITS OFFSET, not the resolved world height. See the load site
         // for why writing loc->xf.position.z here bakes the terrain into the level.
         //

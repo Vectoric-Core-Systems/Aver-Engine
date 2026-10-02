@@ -369,7 +369,11 @@ inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
 // and mip-filters the whole 512^3 grid to touch the ~1.3% it changed (30.64->30.25ms; census line and
 // pixel-neutrality check alongside giBoundedDispatch_ in VoxiRenderer.hpp).
 inline bool& consoleGiBoundedDispatchSlot() { static bool v = true; return v; }
-inline bool& consoleGiFreeAccumulatorSlot() { static bool v = false; return v; }
+// Default TRUE (gi-memory): same "this reassert is the editor's real default" note as
+// consoleGiBoundedDispatchSlot() above -- VoxiRenderer.hpp's own member initialiser agrees now, but
+// this is the value the editor actually runs with every frame. Off keeps the injection accumulator
+// (2048 MiB at Epic's 512) allocated for the whole session regardless of how long GI sits idle.
+inline bool& consoleGiFreeAccumulatorSlot() { static bool v = true; return v; }
 
 // optimisation-wave-2's U1 path-debug view (2.10 I; same raw-slot idiom as consoleGiPoisonViewSlot()
 // above): VoxiRenderer::setGiVisPathView is private, no Settings path. Paints F2's resolved path
@@ -750,8 +754,11 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "(gAmbientParams.z bit 64). A still frame is identical either way.",
         legacyBitRead(64u), legacyBitStage(64u)});
     // ---- engine-optimisation-plan measurement dials (M1-M4/W3/W12), same raw-slot/deviceSetters
-    // shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s comment for why). Default
-    // OFF on all three: none changes the rendered image, only what is measured or how work is scheduled.
+    // shape as voxi.giPoisonView above (see consoleGiForceRebuildSlot()'s comment for why). None
+    // changes the rendered image, only what is measured or how work is scheduled -- but not all three
+    // still default OFF: giBoundedDispatch and giFreeAccumulator (gi-memory) each proved safe enough
+    // to ship on, so only giForceRebuild below keeps a measurement-only default. See each one's own
+    // help string for its default and how to turn it off to measure against the alternative.
     t.push_back({"voxi.giForceRebuild", VarType::Bool, false,
         "Measurement only: forces every GI tick to rebuild from scratch, the way the very first tick "
         "after a level load always does. The GI derived-data cache (VoxiRenderer::setGiCacheDir) is "
@@ -779,11 +786,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiBoundedDispatchSlot() = on; });
         }});
     t.push_back({"voxi.giFreeAccumulator", VarType::Bool, false,
-        "Measurement only: frees the GI injection accumulator (roughly 2 GB at 512^3) after 240 "
-        "consecutive quiet GI ticks -- ticks that needed no rebuild -- and recreates it the instant a "
-        "change needs one again, which then runs one tick later than it otherwise would while the "
-        "texture is recreated. Trades that one-tick latency and a recreation cost against holding the "
-        "memory for the entire session regardless of how long the volume sits idle. Default OFF.",
+        "Frees the GI injection accumulator (roughly 2048 MiB at Epic's 512^3, this renderer's single "
+        "largest idle GI allocation) after 240 consecutive quiet GI ticks -- ticks that needed no "
+        "rebuild -- and recreates it the instant a change needs one again, which then runs one tick "
+        "later than it otherwise would while the texture is recreated. Trades that one-tick latency "
+        "and a recreation cost against holding the memory for the entire session regardless of how "
+        "long the volume sits idle. Default ON; turn it off to measure against holding the accumulator "
+        "for the whole session, or if a session that idles and resumes often finds the recreate cost "
+        "not worth the memory back.",
         []{ return vBool(consoleGiFreeAccumulatorSlot()); },
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
@@ -985,7 +995,12 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "MEASURED at 0.42 ms/frame on a static scene otherwise spent recomputing the identical answer. "
         "Same image always; a cached BLAS handle gone stale still forces a real rebuild regardless of "
         "this setting's own key match. A compute-skinned mesh present forces it too when "
-        "voxi.rtRefitAccel is off; when that's on, this instead runs a lighter refit-only pass for it.",
+        "voxi.rtRefitAccel is off; when that's on, this instead runs a lighter refit-only pass for it. "
+        "With voxi.rtRefitAccel on, draws that move (Play's animated props, the pawn) are left out of "
+        "the key and their new transforms are patched into the instance table and the TLAS refit "
+        "(the mover patch lane), so a moving draw no longer forces the full per-draw rebuild; a draw "
+        "starting or stopping moving, or any other change, still does. The Output Log's "
+        "\"RT accel-structure gate\" line counts these as \"mover-patched\".",
         []{ return vBool(Renderer::get().settings().rtSkipUnchangedTlas); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtSkipUnchangedTlas = on; }); }});
     t.push_back({"voxi.rtRefitAccel", VarType::Bool, false,
@@ -1152,7 +1167,7 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
 
     // Not an f32, so it cannot go through stageClamped above -- clamped by hand, same [0,2] shape.
     t.push_back({"post.tonemap", VarType::U32, false,
-        "Which tone curve: 0 = per-channel Narkowicz/Hill (the default: gentlest toe, keeps dim bounce light visible), 1 = ACES matrixed, 2 = ACES on luminance only so hue/saturation survive any exposure (clamped to [0,2])",
+        "Which tone curve: 0 = per-channel Narkowicz/Hill (gentlest toe, keeps dim bounce light visible), 1 = ACES matrixed (the default: Unreal's filmic space, calibrated against a UE5 Lumen Sponza), 2 = ACES on luminance only so hue/saturation survive any exposure (clamped to [0,2])",
         []{ rhi::IDevice* d = consoleDevice(); return vU32(d ? d->postProcess().tonemap : 0u); },
         [](ConsoleBatch& b, VarValue v){
             if (!b.seededPost) { b.post = b.device ? b.device->postProcess() : rhi::PostSettings{}; b.seededPost = true; }

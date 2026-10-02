@@ -132,7 +132,13 @@ float4 PSClusterMain(VSOut i) : SV_TARGET {
     // map was rendered against, not the normal-mapped one. gShadowParams.y (no atlas yet / shadows
     // off) and running out of cascades both degrade shadowFactor() to 1.0 internally -- this call
     // never needs to re-check either.
-    sun.visibility = shadowFactor(vtx.wpos, vtx.N, saturate(dot(vtx.N, sun.direction)));
+    // A subsurface surface lit from behind asks from its light-facing side, as PSMainVoxi does
+    // (averSubsurfaceShadowPush); zero push for every other material.
+    {
+        const float3 sssPush = averSubsurfaceShadowPush(gMaterialFlags, gSubsurfaceRadius, vtx.N, sun.direction);
+        const float3 shN     = any(sssPush != 0.0) ? -vtx.N : vtx.N;
+        sun.visibility = shadowFactor(vtx.wpos + sssPush, shN, saturate(dot(shN, sun.direction)));
+    }
 #else
     // NO SHADOW MAP ON THIS PATH. 1.0 means "fully lit", which is what the old one-liner passed
     // too -- the black foliage was never a shadow problem, it was a missing albedo. True whenever
