@@ -149,6 +149,23 @@ int32_t aver_phys_character_ground_velocity(int32_t ch, float* outXyz) {
     return 1;
 }
 
+// ---- Inherited motion ---------------------------------------------------------------------------------
+// World::characterCarry, which aver_phys_step owns (PhysicsWorld.cpp): read and written here, in Jolt's
+// units and axes there.
+
+int32_t aver_phys_character_inherited_velocity(int32_t ch, float* outXyz) {
+    if (!findCharacter(ch) || !outXyz) return 0;
+    const auto it = g_world->characterCarry.find(ch);
+    writeVec(outXyz, it != g_world->characterCarry.end() ? fromJoltDir(it->second) : Vec3(0.0f, 0.0f, 0.0f));
+    return 1;
+}
+
+int32_t aver_phys_character_set_inherited_velocity(int32_t ch, float x, float y, float z) {
+    if (!findCharacter(ch)) return 0;
+    g_world->characterCarry.insert_or_assign(ch, toJoltDir(Vec3(x, y, z)));
+    return 1;
+}
+
 // ---- Shape (crouching) --------------------------------------------------------------------------
 
 int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, float maxPenetrationCm) {
@@ -192,6 +209,21 @@ int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, fl
     return 1;
 }
 
+int32_t aver_phys_character_shape(int32_t ch, float* outRadius, float* outHeight) {
+    JPH::CharacterVirtual* c = findCharacter(ch);
+    if (!c || !outRadius || !outHeight) return 0;
+    // A capsule is the only shape either creator (aver_phys_character_create, and set_shape above)
+    // ever gives a character, which is what makes the downcast safe; the sub-type is still asked
+    // rather than assumed, so a third creator with another shape reads as a refusal, not as garbage.
+    const JPH::Shape* shape = c->GetShape();
+    if (!shape || shape->GetSubType() != JPH::EShapeSubType::Capsule) return 0;
+    const JPH::CapsuleShape* capsule = static_cast<const JPH::CapsuleShape*>(shape);
+    // The creators' derivation run backwards: the caps go back onto the cylinder's half height.
+    *outRadius = mToCm(capsule->GetRadius());
+    *outHeight = mToCm((capsule->GetHalfHeightOfCylinder() + capsule->GetRadius()) * 2.0f);
+    return 1;
+}
+
 // ---- Mass and push strength -----------------------------------------------------------------------
 
 int32_t aver_phys_character_set_mass(int32_t ch, float massKg) {
@@ -226,6 +258,18 @@ int32_t aver_phys_character_max_strength(int32_t ch, float* outMaxStrengthKgCmS2
     if (!c || !outMaxStrengthKgCmS2) return 0;
     *outMaxStrengthKgCmS2 = mToCm(c->GetMaxStrength());
     return 1;
+}
+
+// ---- Entity to character ------------------------------------------------------------------------------
+
+int32_t aver_phys_character_of_entity(int32_t entity) {
+    // 0 is every unstamped character's user data, so asking for it would name one at random.
+    if (!g_world || entity == 0) return 0;
+    // A walk of the character table, like handleOfBody above: a world holds a handful of characters.
+    // The same truncation aver_phys_raycast reads the stamp back with.
+    for (const auto& [h, c] : g_world->characters)
+        if (static_cast<int32_t>(c->GetUserData()) == entity) return h;
+    return 0;
 }
 
 } // extern "C"

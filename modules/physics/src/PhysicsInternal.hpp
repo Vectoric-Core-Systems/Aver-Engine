@@ -29,6 +29,7 @@
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 
 #include <memory>
 #include <mutex>
@@ -155,6 +156,33 @@ struct ContactEvent { int32_t a = 0, b = 0; Vec3 point, normal; };
 // A body entering or leaving a sensor volume.
 struct OverlapEvent { int32_t sensor = 0, body = 0; int32_t entered = 0; };
 
+// ---- Vehicles -------------------------------------------------------------------------------------
+
+// One wheel as the caller described it, in the engine's units. Kept until aver_phys_vehicle_finish
+// turns the list into Jolt's WheelSettingsWV: Jolt wants every wheel at once, the ABI hands them over
+// one call at a time.
+struct VehicleWheelDesc {
+    Vec3  attachCm;                          // top of the suspension travel, vehicle-origin relative
+    float radiusCm = 0.0f, widthCm = 0.0f;
+    float suspMinCm = 0.0f, suspMaxCm = 0.0f;
+    float suspHz = 0.0f, suspDamping = 0.0f;
+    float maxSteerDeg = 0.0f;
+    float maxBrakeNm = 0.0f, maxHandBrakeNm = 0.0f;
+    bool  driven = false;
+};
+
+// A vehicle: its chassis body and, once finished, the Jolt constraint that drives it. The constraint is
+// also a step listener registered with the system, so it must be removed from both BEFORE the chassis
+// body goes -- PhysicsVehicle.cpp's releaseVehicleOfBody is the one place that does it.
+struct VehicleEntry {
+    int32_t body = 0;                                  // the chassis' ordinary body handle
+    JPH::Ref<JPH::VehicleConstraint> constraint;       // null until aver_phys_vehicle_finish
+    std::vector<VehicleWheelDesc> wheels;              // the builder's list; the constraint owns the real ones
+    float engineMaxTorque = 500.0f;                    // N*m, Jolt's own defaults until set_engine
+    float engineMinRpm = 1000.0f;
+    float engineMaxRpm = 6000.0f;
+};
+
 // ---- The world ------------------------------------------------------------------------------------
 
 // The whole simulation: Jolt's system, the handle tables, and the event queues.
@@ -169,6 +197,17 @@ struct World {
     // Handles are dense int32 starting at 1, because 0 must stay invalid.
     std::unordered_map<int32_t, JPH::BodyID> bodies;
     std::unordered_map<int32_t, JPH::Ref<JPH::CharacterVirtual>> characters;
+    // Vehicles share the one handle counter below, and the chassis is an ordinary entry in `bodies`.
+    // `vehicleOfBody` is the way back from that body, so aver_phys_remove_body can find the vehicle that
+    // must go first without walking the table.
+    std::unordered_map<int32_t, VehicleEntry> vehicles;
+    std::unordered_map<int32_t, int32_t> vehicleOfBody;
+    // What each character's GROUND added to its velocity on the last fixed step, in Jolt's units and
+    // axes: the moving platform, lift or train it rides. aver_phys_step adds it for the update and takes
+    // it back out afterwards, so the velocity a driver reads and writes stays its own. Kept between
+    // steps because a character that leaves a moving ground keeps its horizontal part until it lands.
+    // Gone with the world; erased with its character, and by a teleport.
+    std::unordered_map<int32_t, JPH::Vec3> characterCarry;
     int32_t nextHandle = 1;
 
     std::unordered_map<JPH::BodyID, int32_t> byId;   // reverse of `bodies`
@@ -218,6 +257,19 @@ void writeVec(float* out, const Vec3& v);
 // PhysicsJoints.cpp, called from PhysicsWorld.cpp, so the ordering is stated in one place instead of
 // being a property nobody wrote down.
 void destroyAllJoints();
+
+// Destroys every vehicle's constraint and step listener and empties both vehicle tables, called by
+// aver_phys_shutdown beside destroyAllJoints and for the same reason: a VehicleConstraint points at a
+// chassis body and into the PhysicsSystem, and is registered with it as a step listener. The chassis
+// bodies themselves are ordinary bodies and go with the rest of the body table. Defined in
+// PhysicsVehicle.cpp.
+void destroyAllVehicles();
+
+// If `body` is a vehicle's chassis, removes the vehicle -- constraint and step listener -- and forgets
+// it, leaving the body for the caller to remove. Called by aver_phys_remove_body before it touches the
+// body, so a chassis can never be destroyed while a constraint still points at it. A no-op for any
+// other body. Defined in PhysicsVehicle.cpp.
+void releaseVehicleOfBody(int32_t body);
 
 // Applies the stair-stepping distances a character was given to the settings the step loop passes to
 // ExtendedUpdate, and forgets them all on shutdown. Both defined in PhysicsCharacter.cpp.

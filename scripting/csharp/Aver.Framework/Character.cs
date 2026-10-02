@@ -79,7 +79,7 @@ public class AverCharacter : AverPawn
     /// <summary>The character's head: a child entity at eye height carrying the view pitch.</summary>
     public Entity View => _view;
 
-    /// <summary>The character's facing yaw, degrees.</summary>
+    /// <summary>The character's facing yaw, degrees, in (-180, 180].</summary>
     public float Yaw => _yaw;
 
     /// <summary>The view pitch, degrees, clamped to <see cref="PitchMin"/>..<see cref="PitchMax"/>.</summary>
@@ -117,7 +117,9 @@ public class AverCharacter : AverPawn
     /// <summary>True while standing on ground shallow enough to hold. False when not simulated.</summary>
     public bool IsGrounded => _capsule != 0 && Phys.aver_phys_character_grounded(_capsule) != 0;
 
-    /// <summary>The character's current velocity, cm/s.</summary>
+    /// <summary>The character's own velocity, cm/s, relative to what it stands on. Riding a moving deck
+    /// or a lift, the physics step adds the ground's motion on top and it is not in this value, so a
+    /// passenger standing still on a train reads (and keeps) zero.</summary>
     public Vec3 Velocity
     {
         get
@@ -131,11 +133,17 @@ public class AverCharacter : AverPawn
         /// A SETTER RATHER THAN AN AddForce: this is a CharacterVirtual, not a rigid body, and it is
         /// integrated from a velocity its owner supplies each step. Silently does nothing when the
         /// character is not simulated, exactly as the getter returns zero there, so neither a script
-        /// nor a graph has to test IsSimulated before using it.</summary>
+        /// nor a graph has to test IsSimulated before using it.
+        ///
+        /// OUTRIGHT INCLUDES WHAT THE GROUND LENT IT: a character that jumped off a moving train still
+        /// carries the train's horizontal motion (aver_phys_character_inherited_velocity), which its own
+        /// velocity does not hold, so that is cleared too -- otherwise a dead stop in the air would keep
+        /// drifting at the train's speed. Standing on moving ground, the next step lends it again.</summary>
         set
         {
             if (_capsule == 0) return;
             Phys.aver_phys_character_set_velocity(_capsule, value.X, value.Y, value.Z);
+            Phys.aver_phys_character_set_inherited_velocity(_capsule, 0f, 0f, 0f);
         }
     }
 
@@ -189,16 +197,38 @@ public class AverCharacter : AverPawn
         // READ BACK RATHER THAN TRACKED. A pawn moved by ANY route -- level placement, a Player
         // Start, a graph, a C# spawn -- ends at the same entity transform, so reading it honours all
         // of them without each having to remember to announce itself.
-        if (!_yawSeeded)
+        //
+        // AND NOT ONLY ON THE FIRST DRIVE. A facing given later is taken the same way: the editor's
+        // Pawn to Camera (Shift+F while ejected) turns the pawn to the camera, and like every native
+        // caller it can only write the entity and its view node -- _yaw and _pitch are private, and
+        // ApplyLookRotation below would put the old facing straight back over its. So a rotation this
+        // class did not write is adopted instead of overwritten. One it did write reads back within
+        // float noise, far inside the tolerance, so an undisturbed character never re-seeds.
+        //
+        // aver_fw_set_view STAYS THE FIRST NATIVE CALL: CharacterMoveNodeTests proves a graph reached
+        // this method by the EntryPointNotFoundException that call raises in a process with no engine.
+        Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
+
+        float placedYaw = YawDegreesFromQuat(Self.LocalRotation);
+        if (!_yawSeeded || MathF.Abs(DeltaDegrees(placedYaw, _yaw)) > AdoptToleranceDeg)
         {
             _yawSeeded = true;
-            _yaw = YawDegreesFromQuat(Self.LocalRotation);
+            _yaw = placedYaw;
         }
 
-        Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
         EnsureView();
+        // The pitch lives on the view node (ApplyLookRotation), so that is where a given one is read.
+        // After EnsureView: on the first drive it has only just written _pitch there itself.
+        if (_view.IsAlive)
+        {
+            float placedPitch = -PitchDegreesFromQuat(_view.LocalRotation);
+            if (MathF.Abs(placedPitch - _pitch) > AdoptToleranceDeg)
+                _pitch = MathF.Max(PitchMin, MathF.Min(PitchMax, placedPitch));
+        }
 
-        _yaw += yawDeltaDeg;
+        // Wrapped, so the read-back above stays exact: an unwrapped yaw spun past ~120,000 degrees loses
+        // enough float precision through Rot.ToQuat to miss the tolerance and re-seed on its own.
+        _yaw = DeltaDegrees(_yaw + yawDeltaDeg, 0f);
         _pitch = MathF.Max(PitchMin, MathF.Min(PitchMax, _pitch + pitchDeltaDeg));
         ApplyLookRotation();
 
@@ -231,10 +261,28 @@ public class AverCharacter : AverPawn
         return MathF.Atan2(siny, cosy) * (180f / MathF.PI);
     }
 
+    // How far a read-back facing may sit from the one this class holds before it counts as given from
+    // outside, degrees. A quaternion this class wrote round-trips to within about 1e-4.
+    private const float AdoptToleranceDeg = 0.01f;
+
+    // The rotation about +Y (Right) of a quaternion that turns about +Y alone, in degrees -- the view
+    // node's, which ApplyLookRotation writes as Rot(0, -_pitch, 0), so its NEGATION is the pitch.
+    private static float PitchDegreesFromQuat(Quat q) =>
+        2f * MathF.Atan2(q.Y, q.W) * (180f / MathF.PI);
+
+    // a - b, wrapped into (-180, 180]. Also what keeps _yaw itself in that range (Drive).
+    private static float DeltaDegrees(float a, float b)
+    {
+        float d = (a - b) % 360f;
+        if (d > 180f) d -= 360f;
+        else if (d <= -180f) d += 360f;
+        return d;
+    }
+
     /// <summary>Snaps the facing yaw, degrees.</summary>
     protected void SetYaw(float yawDegrees)
     {
-        _yaw = yawDegrees;
+        _yaw = DeltaDegrees(yawDegrees, 0f);   // the same (-180, 180] Drive keeps it in
         ApplyLookRotation();
     }
 

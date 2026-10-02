@@ -27,7 +27,12 @@ add_library(Aver.Physics SHARED
   # Collision layers, and the _ex forms of the three spatial queries that can filter by them.
   src/PhysicsLayers.cpp
   # The character's own settings: slope, stairs, ground info, and the shape swap that is crouching.
-  src/PhysicsCharacter.cpp)
+  src/PhysicsCharacter.cpp
+  # Wheeled vehicles: Jolt's VehicleConstraint as a builder-style ABI (create the chassis, add wheels,
+  # finish). Its own TU and header for the reason joints and characters are: a flat sheet of entry points
+  # over the handle tables in src/PhysicsInternal.hpp, with the vehicle table and its teardown hooks
+  # (destroyAllVehicles, releaseVehicleOfBody) defined here and called from PhysicsWorld.cpp.
+  src/PhysicsVehicle.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)

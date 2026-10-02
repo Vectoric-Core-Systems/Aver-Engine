@@ -2,7 +2,7 @@
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 //
-// The P/Invoke surface: one extern per aver_phys_* export, across all five native headers. Nothing
+// The P/Invoke surface: one extern per aver_phys_* export, across all six native headers. Nothing
 // here is meant to be called directly by a game script -- Physics/Body/Joint/Shapes/CharacterBody are
 // that surface. This file exists so the parameter list can be checked mechanically against the C
 // headers it mirrors (tests/abi/src/AbiEnumTest.cpp), which is also why every name below is copied
@@ -50,6 +50,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern int aver_phys_body_set_motion_type(int body, int motionType);
     [DllImport(Lib)] internal static extern int aver_phys_body_motion_type(int body);
     [DllImport(Lib)] internal static extern int aver_phys_body_set_rotation(int body, float x, float y, float z, float w);
+    [DllImport(Lib)] internal static extern int aver_phys_body_move_kinematic(int body, float x, float y, float z, float qx, float qy, float qz, float qw, float dt);
     [DllImport(Lib)] internal static extern int aver_phys_body_angular_velocity(int body, float[] outXyz);
     [DllImport(Lib)] internal static extern int aver_phys_body_set_angular_velocity(int body, float wx, float wy, float wz);
     [DllImport(Lib)] internal static extern int aver_phys_body_add_velocity(int body, float vx, float vy, float vz);
@@ -197,9 +198,30 @@ internal static class Native
     [DllImport(Lib)] internal static extern int aver_phys_character_ground_position(int ch, float[] outXyz);
     [DllImport(Lib)] internal static extern int aver_phys_character_ground_body(int ch);
     [DllImport(Lib)] internal static extern int aver_phys_character_ground_velocity(int ch, float[] outXyz);
+    [DllImport(Lib)] internal static extern int aver_phys_character_inherited_velocity(int ch, float[] outXyz);
+    [DllImport(Lib)] internal static extern int aver_phys_character_set_inherited_velocity(int ch, float x, float y, float z);
     [DllImport(Lib)] internal static extern int aver_phys_character_set_shape(int ch, float radius, float height, float maxPenetrationCm);
     [DllImport(Lib)] internal static extern int aver_phys_character_set_mass(int ch, float massKg);
     [DllImport(Lib)] internal static extern int aver_phys_character_mass(int ch, float[] outMassKg);
     [DllImport(Lib)] internal static extern int aver_phys_character_set_max_strength(int ch, float maxStrengthKgCmS2);
     [DllImport(Lib)] internal static extern int aver_phys_character_max_strength(int ch, float[] outMaxStrengthKgCmS2);
+    [DllImport(Lib)] internal static extern int aver_phys_character_shape(int ch, float[] outRadius, float[] outHeight);
+    [DllImport(Lib)] internal static extern int aver_phys_character_of_entity(int entity);
+
+    // ---- Vehicles (physics_vehicle_abi.h) -----------------------------------------------------------------
+
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_create(float hx, float hy, float hz, float groundClearance, float comX, float comY, float comZ, float massKg, float x, float y, float z, float qx, float qy, float qz, float qw);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_add_wheel(int v, float px, float py, float pz, float radius, float width, float suspensionMin, float suspensionMax, float suspensionHz, float suspensionDamping, float maxSteerDeg, float maxBrakeTorque, float maxHandBrakeTorque, int driven);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_set_engine(int v, float maxTorque, float minRpm, float maxRpm);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_finish(int v, float maxPitchRollDeg);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_destroy(int v);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_body(int v);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_set_input(int v, float forward, float right, float brake, float handbrake);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_pose(int v, float[] outXyz, float[] outQuat);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_velocity(int v, float[] outXyz);
+    [DllImport(Lib)] internal static extern float aver_phys_vehicle_forward_speed(int v);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_wheel_count(int v);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_wheel_pose(int v, int i, float[] outXyz, float[] outQuat);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_wheel_contact(int v, int i);
+    [DllImport(Lib)] internal static extern int   aver_phys_vehicle_set_pose(int v, float x, float y, float z, float qx, float qy, float qz, float qw);
 }

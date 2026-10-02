@@ -77,6 +77,19 @@ public readonly struct Body : System.IEquatable<Body>
     public bool SetRotation(Quaternion q) => Native.aver_phys_body_set_rotation(Handle, q.X, q.Y, q.Z, q.W) != 0;
     public bool SetRotation(float x, float y, float z, float w) => Native.aver_phys_body_set_rotation(Handle, x, y, z, w) != 0;
 
+    /// <summary>Drives a KINEMATIC body to <paramref name="position"/> and <paramref name="rotation"/>
+    /// over the next <paramref name="dt"/> seconds. The velocity that gets it there is derived, so
+    /// whatever rests on the body is carried along, which <see cref="SetPosition(Float3)"/> does not do.
+    /// False for a dead handle, a body that is not kinematic, a non-positive <paramref name="dt"/> or a
+    /// non-finite pose. A pose that JUMPED (a reset, a wrapped route) should be set with
+    /// <see cref="SetPosition(Float3)"/> and <see cref="SetRotation(Quaternion)"/> instead: driving it
+    /// there would fling a passenger. THE DERIVED VELOCITY STAYS ON THE BODY and keeps moving it (and
+    /// whoever stands on it) after the last call: to stop a driven body, drive it to the pose it already
+    /// has, or zero its linear and angular velocity -- and zero them after such a teleport too.</summary>
+    public bool MoveKinematic(Float3 position, Quaternion rotation, float dt) =>
+        Native.aver_phys_body_move_kinematic(Handle, position.X, position.Y, position.Z,
+                                             rotation.X, rotation.Y, rotation.Z, rotation.W, dt) != 0;
+
     /// <summary>Sets linear velocity, cm/s. Wakes the body.</summary>
     public bool SetVelocity(Float3 v) => Native.aver_phys_body_set_velocity(Handle, v.X, v.Y, v.Z) != 0;
     public bool SetVelocity(float x, float y, float z) => Native.aver_phys_body_set_velocity(Handle, x, y, z) != 0;

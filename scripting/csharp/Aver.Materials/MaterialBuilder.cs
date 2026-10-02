@@ -37,6 +37,7 @@ public sealed class MaterialBuilder
     private float _transmission;
     private float _subsurfaceWeight;
     private float _subsurfaceRadius;
+    private float[] _subsurfaceColor = { 1f, 1f, 1f };   // MaterialDesc's own default: white, scatter in the surface's own colour
     private float _coatWeight;
     private float _coatRoughness;
     private float _coatF0 = 0.04f;   // the field default, so an unset coat emits nothing
@@ -65,7 +66,8 @@ public sealed class MaterialBuilder
     /// <summary>Project texture coordinates from world space at <see cref="Tiling"/> centimetres per tile.</summary>
     public MaterialBuilder WorldUv(bool on) { _worldUv = on; return this; }
 
-    /// <summary>Base colour multiplier, linear 0..1.</summary>
+    /// <summary>Base colour multiplier, 0..1: rgb sRGB-encoded like a colour picked in the editor (the
+    /// engine decodes it with pow 2.2), alpha linear coverage.</summary>
     public MaterialBuilder BaseColor(float r, float g, float b, float a = 1f)
     { _baseColor = new[] { r, g, b, a }; return this; }
 
@@ -119,6 +121,13 @@ public sealed class MaterialBuilder
     /// up when the sun is behind it. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
     /// </summary>
     public MaterialBuilder SubsurfaceRadius(float v) { _subsurfaceRadius = v; return this; }
+
+    /// <summary>
+    /// sRGB tint of light scattered inside the material, authored like <see cref="BaseColor"/>. White
+    /// (the default) scatters in the surface's own colour; skin wants a deep red, leaves a
+    /// yellow-green, wax an orange. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
+    /// </summary>
+    public MaterialBuilder SubsurfaceColor(float r, float g, float b) { _subsurfaceColor = new[] { r, g, b }; return this; }
 
     /// <summary>
     /// [0,1] clear coat over the base material -- car paint, varnish, a wet stone. 0 is no coat.
@@ -241,6 +250,8 @@ public sealed class MaterialBuilder
         {
             s.Append("PARAM subsurfaceWeight ").Append(Num(_subsurfaceWeight)).Append('\n');
             s.Append("PARAM subsurfaceRadius ").Append(Num(_subsurfaceRadius)).Append('\n');
+            s.Append("PARAM subsurfaceColor ").Append(Num(_subsurfaceColor[0])).Append(' ')
+             .Append(Num(_subsurfaceColor[1])).Append(' ').Append(Num(_subsurfaceColor[2])).Append('\n');
         }
 
         // Gated on the weight, and emitting all three together, exactly as OcMat.cpp's writer does.

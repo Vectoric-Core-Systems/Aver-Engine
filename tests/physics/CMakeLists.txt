@@ -45,6 +45,15 @@ target_link_libraries(CharacterTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(CharacterTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# VehicleTest -- the wheeled-vehicle ABI, by driving a car on a floor. A vehicle built with Jolt's own
+# axis defaults, or with the steering sign the wrong way round, still returns a good handle, so the only
+# honest check is observed motion: settle on four wheels, drive along +X, turn toward +Y on +right, stop
+# on the brake. Links Aver.Physics and Aver.Core only, like CharacterTest above.
+add_executable(VehicleTest src/VehicleTest.cpp)
+target_link_libraries(VehicleTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(VehicleTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LayerTest -- collision layers. Its FIRST job is a negative claim: that a project which never
 # mentions a layer behaves exactly as it did before layers existed, since every body's object layer
 # is now an encoding rather than a constant.

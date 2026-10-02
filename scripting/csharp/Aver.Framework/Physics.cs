@@ -13,7 +13,7 @@
 //
 // THE Phys CLASS BELOW STILL HOLDS A SMALL, DIRECT DllImport SET, and that is not an oversight: it is
 // what Character.cs calls into for the capsule it drives every tick (aver_phys_character_* and
-// aver_phys_set_entity), and Character.cs is outside this change's one file. Duplicating those eight
+// aver_phys_set_entity), and Character.cs is outside this change's one file. Duplicating those nine
 // bindings past Aver.Physics.CharacterBody costs nothing at runtime -- both DllImports resolve to the
 // same native export -- and rewiring Character.cs's call sites belongs to whoever owns that file.
 //
@@ -33,7 +33,7 @@ using AP = Aver.Physics;
 namespace Aver.Framework;
 
 /// <summary>P/Invoke for the handful of calls Character.cs makes directly. See this file's own header
-/// comment for why these eight are not routed through Aver.Physics.CharacterBody instead.</summary>
+/// comment for why these nine are not routed through Aver.Physics.CharacterBody instead.</summary>
 internal static class Phys
 {
     private const string Lib = "Aver.Physics";
@@ -46,6 +46,8 @@ internal static class Phys
     [DllImport(Lib)] internal static extern int aver_phys_character_set_position(int ch, float x, float y, float z);
     [DllImport(Lib)] internal static extern int aver_phys_character_grounded(int ch);
     [DllImport(Lib)] internal static extern int aver_phys_set_entity(int handle, int entity);
+    // The Velocity setter's dead stop also clears what a moving ground lent the character.
+    [DllImport(Lib)] internal static extern int aver_phys_character_set_inherited_velocity(int ch, float x, float y, float z);
 }
 
 /// <summary>Two solid bodies that began touching during the last step.</summary>

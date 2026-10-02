@@ -70,6 +70,14 @@ AVER_PHYS_API int32_t aver_phys_body_set_velocity(int32_t body, float x, float y
 
 // How many bodies are live.
 AVER_PHYS_API int32_t aver_phys_body_count(void);
+// The most bodies the world can hold (fixed when it was created); 0 with no world.
+AVER_PHYS_API int32_t aver_phys_max_bodies(void);
+// Writes up to `cap` live body handles into `out` in ONE pass and returns how many -- the O(n) way to
+// enumerate (a loop over aver_phys_body_at is O(n^2)). Same order-is-unspecified caveat as body_at.
+AVER_PHYS_API int32_t aver_phys_body_handles(int32_t* out, int32_t cap);
+// Rebalances the broad phase after a bulk add (a level load). 1 on success, 0 with no world. Not
+// per frame: it walks every body.
+AVER_PHYS_API int32_t aver_phys_optimize_broadphase(void);
 
 /* WHY THE LAST CALL FAILED. 0 = ok; negative values are aver::AbiError (core/ErrorCodes.hpp):
    -1 bad handle, -2 null pointer, -3 not initialised, -4 out of range, -5 unsupported,
@@ -126,13 +134,24 @@ AVER_PHYS_API int32_t aver_phys_body_aabb(int32_t body, float* outMin, float* ou
 // KINEMATIC IS THE ONE THAT WAS MISSING, and it is what a moving platform, a lift, a swinging door
 // driven by animation and a scripted crane all are: it collides with and pushes dynamic bodies, and
 // nothing -- not gravity, not an impulse, not a collision -- pushes it back. Set its velocity (or
-// teleport it) and it goes there regardless of what is in the way.
+// teleport it) and it goes there regardless of what is in the way; aver_phys_body_move_kinematic
+// drives it to a target pose and carries whatever rests on it.
 #define AVER_PHYS_MOTION_STATIC    0
 #define AVER_PHYS_MOTION_KINEMATIC 1
 #define AVER_PHYS_MOTION_DYNAMIC   2
 
 // Change a body's motion type, activating it if it becomes movable. Returns 0 for a dead handle or an
 // unrecognised type.
+//
+// A STATIC BODY IS BUILT WITHOUT MOTION PROPERTIES and Jolt cannot add them afterwards, so switching
+// one to kinematic or dynamic REBUILDS it: same handle, shape, transform, layer, user data and
+// material, but a new Jolt body underneath (moved to the moving broad-phase half). Returns 0, leaving
+// the body static, if that rebuild is refused (body limit). A joint holds pointers to the body it was
+// made on and would not survive that rebuild, so a static body with a joint attached is REFUSED the
+// same way (0, still static): create it movable, or add the joint after the switch.
+//
+// A shape with no mass -- a triangle mesh, a height field -- can be static or kinematic but not
+// DYNAMIC: asking for dynamic returns 0.
 AVER_PHYS_API int32_t aver_phys_body_set_motion_type(int32_t body, int32_t motionType);
 // A body's motion type, or -1 for a dead handle. -1 rather than 0 because 0 is STATIC, a real answer.
 AVER_PHYS_API int32_t aver_phys_body_motion_type(int32_t body);
@@ -140,6 +159,19 @@ AVER_PHYS_API int32_t aver_phys_body_motion_type(int32_t body);
 // Set a body's orientation, as a quaternion (x, y, z, w) in engine axes. Wakes it, matching
 // aver_phys_body_set_position -- the sibling this completes, which has had no rotational twin.
 AVER_PHYS_API int32_t aver_phys_body_set_rotation(int32_t body, float x, float y, float z, float w);
+
+// Drives a KINEMATIC body to position (x, y, z) and orientation (qx, qy, qz, qw) over the next `dt`
+// seconds: Jolt derives the velocity that gets it there, so whatever rests on the body is carried
+// along, which the two teleporting setters above do not do -- dynamic bodies by friction, characters
+// because aver_phys_step adds the ground's velocity to theirs. Same frame, axes and units as those two.
+// THE DERIVED VELOCITY STAYS ON THE BODY after the call, and Jolt keeps integrating it: a body no longer
+// driven keeps moving, carrying its passengers with it. To stop one, drive it to the pose it already has
+// (which derives zero), or zero both velocities -- and do the same after teleporting a driven body with
+// the setters above.
+// Returns 0 for a dead handle, a body that is not kinematic, a non-positive `dt`, or a non-finite
+// pose.
+AVER_PHYS_API int32_t aver_phys_body_move_kinematic(int32_t body, float x, float y, float z,
+                                                    float qx, float qy, float qz, float qw, float dt);
 
 // Angular velocity, radians per second about each engine axis.
 AVER_PHYS_API int32_t aver_phys_body_angular_velocity(int32_t body, float* outXyz);
@@ -234,12 +266,29 @@ AVER_PHYS_API int32_t aver_phys_character_destroy(int32_t ch);
 
 // Set the velocity the character WANTS, cm/s, engine axes. The vertical component is managed by the
 // simulation unless it is set here.
+//
+// RELATIVE TO WHAT IT STANDS ON. aver_phys_step adds the ground's own velocity (a kinematic deck
+// driven by aver_phys_body_move_kinematic, a lift, a dynamic crate) on top of this while the character
+// stands on it, so a passenger who sets zero stays put on a moving train, and walking is walking along
+// the carriage. On static ground the two frames are the same thing. A character that leaves moving
+// ground keeps its horizontal motion until it lands again (aver_phys_character_inherited_velocity in
+// physics_character_abi.h reads and clears it). NOT carried: a character standing on ANOTHER character,
+// whose broadphase body Jolt moves by teleport and never gives a velocity.
+//
+// THE LIMITS OF RIDING, which are Jolt's recommended recipe's: the character sweeps against the deck
+// where it stood at the start of the step, so at speed it is held about one step's travel (30 cm at
+// 18 m/s on a 60 Hz step) back from a wall at the front of the carriage, and it cannot step up a lip
+// while the deck moves faster than its own step.
 AVER_PHYS_API int32_t aver_phys_character_set_velocity(int32_t ch, float vx, float vy, float vz);
-// Read a character's velocity into a caller-owned float[3].
+// Read a character's velocity into a caller-owned float[3]: its OWN velocity, in the same frame the
+// setter takes, without the ground's motion -- so reading the vertical part back and writing it again,
+// as a driver does every frame, never feeds the ground's velocity back in as the character's own. The
+// world-space velocity is this plus aver_phys_character_inherited_velocity.
 AVER_PHYS_API int32_t aver_phys_character_velocity(int32_t ch, float* outXyz);
 // Read a character's position into a caller-owned float[3].
 AVER_PHYS_API int32_t aver_phys_character_position(int32_t ch, float* outXyz);
-// Teleport a character.
+// Teleport a character. It stops riding whatever it stood on, and finds the ground under the new
+// position at once rather than at the next step.
 AVER_PHYS_API int32_t aver_phys_character_set_position(int32_t ch, float x, float y, float z);
 
 // 1 while standing on ground steep enough to hold.
@@ -268,6 +317,44 @@ AVER_PHYS_API int32_t aver_phys_add_convex_hull(const float* pointsXyz, int32_t 
 AVER_PHYS_API int32_t aver_phys_add_mesh(const float* verticesXyz, int32_t vertexCount,
                                          const int32_t* indices, int32_t indexCount,
                                          float cx, float cy, float cz);
+
+// ---- Shared mesh shapes ----------------------------------------------------------------------------
+// aver_phys_add_mesh (above) bakes a fresh triangle-mesh SHAPE -- its own BVH included -- for every
+// call, which is right for a mesh that backs exactly one body. A level placing the SAME mesh many
+// times (a tile, a tree, a prop) does not want that: N placements should not mean N BVH builds of
+// identical geometry. These three calls split "build the shape" from "put it in the world at a
+// transform", so a caller builds ONCE per unique mesh and reuses the result for every placement.
+//
+// SHAPE HANDLES ARE THEIR OWN SPACE, drawn from a counter this ABI keeps separate from body and
+// character handles. A shape is not a body -- it has no position, is not in any layer, and is not
+// something aver_phys_remove_body or aver_phys_raycast can see -- so handing one to a body-only entry
+// point (or vice versa) would silently resolve to the wrong kind of object if the two shared a space.
+
+// Builds a static triangle-mesh SHAPE with no body: the same LOCAL geometry, winding fix and
+// out-of-range-index handling as aver_phys_add_mesh, but handed back as a shape handle instead of
+// being wrapped in a body immediately. Returns 0 on the same refusals aver_phys_add_mesh already logs
+// (fewer than 3 vertices/indices, every triangle degenerate or out of range, or Jolt itself refused).
+AVER_PHYS_API int32_t aver_phys_create_mesh_shape(const float* verticesXyz, int32_t vertexCount,
+                                                  const int32_t* indices, int32_t indexCount);
+
+// Releases the caller's own claim on a mesh-shape handle. Jolt reference-counts the shape underneath
+// (JPH::Ref), so a shape still wrapped by a live body (through aver_phys_add_mesh_shape_body) stays
+// alive until that body is removed too -- this only forgets the handle in THIS table. Returns 0 for a
+// handle this table does not know.
+AVER_PHYS_API int32_t aver_phys_release_mesh_shape(int32_t shape);
+
+// Adds a static body wrapping `shape` at world position (px,py,pz), rotation (qx,qy,qz,qw), scaled by
+// (sx,sy,sz) -- through Jolt's ScaledShape, so the shared shape's triangles and its ONE BVH are never
+// rebuilt or re-baked for this placement, whatever the scale is. Jolt's MeshShape accepts ANY non-zero
+// scale this way: uniform, non-uniform, or mirrored (an odd number of negative components) -- it
+// resolves the mirror itself from the scale it is queried with, the same way aver_phys_add_mesh's own
+// mesh shape would if wrapped the same way. A zero component is the one scale this cannot represent
+// (Jolt has no meaning for it) and is refused, returning 0; a caller with a placement that can hit
+// that (vanishingly rare -- an authored zero scale) falls back to aver_phys_add_mesh's own baked path.
+// Returns the body handle, or 0 for an unknown shape or a refused scale.
+AVER_PHYS_API int32_t aver_phys_add_mesh_shape_body(int32_t shape, float px, float py, float pz,
+                                                    float qx, float qy, float qz, float qw,
+                                                    float sx, float sy, float sz);
 
 // A static heightfield: `samples` is a row-major sampleCount x sampleCount grid of heights in
 // centimetres, spaced `spacingCm` apart.

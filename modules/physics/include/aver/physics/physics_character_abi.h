@@ -81,13 +81,30 @@ AVER_PHYS_API int32_t aver_phys_character_ground_position(int32_t ch, float* out
 // landscape heightfield, say) as well as for genuinely standing on nothing at all. Not one AND the
 // other: check ground_state to tell "no owner" from "no ground".
 AVER_PHYS_API int32_t aver_phys_character_ground_body(int32_t ch);
-// The ground's own velocity, cm/s, world space -- THIS IS WHAT A MOVING PLATFORM IS. Add it to the
-// character's desired horizontal velocity before the next update and the character rides the platform;
-// leave it out and standing on a lift means being left behind as it rises. Jolt derives this from the
-// platform's angular velocity as well as its linear one (a point on a spinning disc is not just "linear
-// velocity of the disc"), which is why this is a query rather than something a caller could as easily
-// compute from the platform body's own transform.
+// The ground's own velocity, cm/s, world space -- THIS IS WHAT A MOVING PLATFORM IS. aver_phys_step
+// already adds it to the character's velocity while it stands there, so the character rides the
+// platform with nothing for the caller to do: DO NOT add it again to what aver_phys_character_set_velocity
+// is given, or the character moves at twice the platform's speed. This is for reading -- a world-space
+// speed, an animation's foot sliding, whether a lift is moving. Jolt derives it from the platform's
+// angular velocity as well as its linear one (a point on a spinning disc is not just "linear velocity of
+// the disc"), which is why this is a query rather than something a caller could as easily compute from
+// the platform body's own transform.
 AVER_PHYS_API int32_t aver_phys_character_ground_velocity(int32_t ch, float* outXyz);
+
+// ---- Inherited motion ----------------------------------------------------------------------------------
+// What the ground lends a character. aver_phys_step adds its ground's velocity while it stands there, and a
+// character that leaves moving ground keeps that motion's horizontal part until it lands, so a jump on a
+// moving train comes down on the train. aver_phys_character_velocity never includes it: the character's
+// WORLD velocity is that plus this, standing or airborne.
+
+// The velocity the character carries from its ground, cm/s, world space: the ground's while it stands on
+// moving ground, what it kept while airborne after leaving it, zero otherwise. Returns 0 for a dead handle
+// or a null out-pointer.
+AVER_PHYS_API int32_t aver_phys_character_inherited_velocity(int32_t ch, float* outXyz);
+// Replaces it. Zero is a dead stop of the motion a jump off a moving deck carried away, which setting the
+// character's own velocity cannot do. While the character stands on moving ground the next step measures
+// the ground again, so a value set there lasts one step.
+AVER_PHYS_API int32_t aver_phys_character_set_inherited_velocity(int32_t ch, float x, float y, float z);
 
 // ---- Shape (crouching) ------------------------------------------------------------------------------
 
@@ -103,6 +120,12 @@ AVER_PHYS_API int32_t aver_phys_character_ground_velocity(int32_t ch, float* out
 // aver_phys_character_create's own refusal for the same reason.
 AVER_PHYS_API int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height,
                                                      float maxPenetrationCm);
+// The capsule the character has NOW, in the same two numbers aver_phys_character_create and the
+// setter above take: radius and TOTAL height, centimetres. A character's position is its capsule's
+// CENTRE, so half of this height is how far its feet are below the position -- which is what a caller
+// that did not create the character needs before it can stand it somewhere. Returns 0 for a dead
+// handle or a null out-pointer.
+AVER_PHYS_API int32_t aver_phys_character_shape(int32_t ch, float* outRadius, float* outHeight);
 
 // ---- Mass and push strength -------------------------------------------------------------------------
 // A CharacterVirtual is not a rigid body -- nothing ever applies a force TO it -- but it still has an
@@ -120,6 +143,17 @@ AVER_PHYS_API int32_t aver_phys_character_mass(int32_t ch, float* outMassKg);
 // than this to move; left at Jolt's default (equivalent to 100 Newtons) a character can shove anything.
 AVER_PHYS_API int32_t aver_phys_character_set_max_strength(int32_t ch, float maxStrengthKgCmS2);
 AVER_PHYS_API int32_t aver_phys_character_max_strength(int32_t ch, float* outMaxStrengthKgCmS2);
+
+// ---- Entity to character ------------------------------------------------------------------------------
+// aver_phys_set_entity (physics_abi.h) stamps a character with the scene entity it belongs to, and
+// aver_phys_raycast reads that stamp back for whatever a ray hit. This is the same stamp read the other
+// way round, for native code that holds the ENTITY and needs the capsule somebody else created for it
+// -- the editor moving a possessed pawn whose capsule is a managed AverCharacter's private field.
+
+// The handle of the live character stamped with `entity`, or 0 when there is none -- and always 0 for
+// entity 0, which is "unowned", the stamp every character starts with. Should two characters carry the
+// same stamp, which of them is returned is unspecified.
+AVER_PHYS_API int32_t aver_phys_character_of_entity(int32_t entity);
 
 #ifdef __cplusplus
 }

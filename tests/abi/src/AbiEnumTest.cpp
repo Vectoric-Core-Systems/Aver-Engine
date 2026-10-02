@@ -542,15 +542,15 @@ static std::map<std::string, Signature> csSignatures(const std::string& text, co
 
 // ONE C# FILE MAY MIRROR SEVERAL C HEADERS, which is why `headers` is a list.
 //
-// The physics ABI grew from 49 functions to 125 and split into five headers on the C side, while the
+// The physics ABI grew from 49 functions to over 150 and split into six headers on the C side, while the
 // C# side stayed one Native.cs -- a P/Invoke declaration has no natural home other than the assembly
-// it lives in. Pairing them one-to-one would have made the base row see all 125 C# imports (its
-// prefix, aver_phys_, matches every one of them) against only its own header's 74 exports, and report
-// the other 51 as imports of functions that do not exist. They do exist; they are just declared next
-// door. So a row names every header that together makes up the C side of one C# file.
+// it lives in. Pairing them one-to-one would have made the base row see every C# import (its prefix,
+// aver_phys_, matches all of them) against only its own header's exports, and report the rest as
+// imports of functions that do not exist. They do exist; they are just declared next door. So a row
+// names every header that together makes up the C side of one C# file.
 struct Abi {
     const char* label;
-    const char* headers[6];   // NULL-terminated; most rows name exactly one
+    const char* headers[7];   // NULL-terminated; most rows name exactly one
     const char* apiMacro;
     const char* csFile;
     const char* prefix;
@@ -563,6 +563,7 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_shapes_abi.h",
       "modules/physics/include/aver/physics/physics_layers_abi.h",
       "modules/physics/include/aver/physics/physics_character_abi.h",
+      "modules/physics/include/aver/physics/physics_vehicle_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
     {"audio ABI",

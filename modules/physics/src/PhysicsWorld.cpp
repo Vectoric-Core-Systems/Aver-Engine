@@ -125,6 +125,27 @@ EventListener g_listener;
 // Jolt's global registration is process-wide, not per-world, so it is done once and never undone.
 bool g_joltStarted = false;
 
+// ---- Shared mesh shapes -----------------------------------------------------------------------
+// aver_phys_create_mesh_shape's own table: a SEPARATE handle space from World::bodies/nextHandle
+// above, file-local because only the three functions next to aver_phys_add_mesh need to see it.
+// JPH::Ref keeps a shape alive for as long as either this table or a body's own ScaledShape (built
+// from it in aver_phys_add_mesh_shape_body) still points at it -- Jolt's ordinary refcounting, no
+// extra bookkeeping needed here for that half.
+//
+// NOT CLEARED ON aver_phys_shutdown, unlike the body/character tables: a JPH::Shape is bare geometry
+// with no reference to the JPH::PhysicsSystem it happens to get used in, so it does not go stale the
+// way a body handle or a water-volume override (see aver_phys_shutdown's own comment on that leak)
+// would if carried into a freshly created world. A shape handle a caller forgot to release simply
+// outlives the world that last used it, exactly as it would if nothing had been shut down at all.
+std::unordered_map<int32_t, JPH::Ref<JPH::Shape>> g_meshShapes;
+int32_t g_nextMeshShape = 1;
+
+// The shape behind a handle, or nullptr.
+JPH::Shape* meshShapeFor(int32_t h) {
+    const auto it = g_meshShapes.find(h);
+    return it == g_meshShapes.end() ? nullptr : it->second.GetPtr();
+}
+
 } // namespace
 
 // ---- what PhysicsInternal.hpp declares ------------------------------------------------------------
@@ -136,6 +157,19 @@ namespace aver::physics::detail {
 std::unique_ptr<World> g_world;
 
 JPH::BodyInterface& bi() { return g_world->system.GetBodyInterface(); }
+
+// A REFUSED BODY IS REPORTED ONCE PER WORLD, with the ceiling it hit. It used to be one warning per
+// refused body, which on a city-scale level (thousands of colliding placements past the old 4,096
+// ceiling) buried the log in identical lines while saying nothing about why. Re-armed by
+// aver_phys_init, so a later world that overflows says so too.
+bool g_bodyLimitWarned = false;
+
+void warnBodyLimit() {
+    if (g_bodyLimitWarned) return;
+    g_bodyLimitWarned = true;
+    AVER_WARN("[Physics] body limit reached ({} bodies): further bodies are refused and will not collide",
+              g_world ? g_world->system.GetMaxBodies() : 0u);
+}
 
 int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, float massKg,
                 bool sensor, u32 userLayer) {
@@ -156,7 +190,7 @@ int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, flo
     }
     s.mIsSensor = sensor;
     JPH::Body* body = bi().CreateBody(s);
-    if (!body) { AVER_WARN("[Physics] body limit reached"); return 0; }
+    if (!body) { warnBodyLimit(); return 0; }
     bi().AddBody(body->GetID(), dynamic ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
     const int32_t h = g_world->nextHandle++;
     g_world->bodies.emplace(h, body->GetID());
@@ -216,13 +250,23 @@ int32_t aver_phys_init(void) {
     }
 
     g_world = std::make_unique<World>();
+    g_bodyLimitWarned = false;
     // 10 MB scratch for a frame's contacts, and one worker per core bar the main thread and one spare.
     g_world->temp = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
     const int workers = static_cast<int>(std::thread::hardware_concurrency()) - 2;
     g_world->jobs = std::make_unique<JPH::JobSystemThreadPool>(
         JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, workers > 1 ? workers : 1);
 
-    g_world->system.Init(4096, 0, 8192, 2048,
+    // THE CEILINGS, fixed for the world's lifetime: Jolt sizes its body arrays and broad phase here
+    // and refuses bodies past them. 4,096 bodies was a room-sized budget; a city level (NeonDistrict:
+    // thousands of colliding placements, 169 terrain chunks, a box per building) ran into it and lost
+    // over half its collision. 65,536 costs a few MB of bookkeeping. Pairs and contact constraints are
+    // only spent on MOVING bodies touching things, which a static-heavy level has few of.
+    // (PHYSICS.MAXBODIES in a project manifest is still not read -- see GameTick.hpp.)
+    constexpr JPH::uint kMaxBodies = 65536;
+    constexpr JPH::uint kMaxBodyPairs = 65536;
+    constexpr JPH::uint kMaxContactConstraints = 16384;
+    g_world->system.Init(kMaxBodies, 0, kMaxBodyPairs, kMaxContactConstraints,
                          g_world->bpLayers, g_world->objVsBp, g_world->objPair);
     g_world->system.SetContactListener(&g_listener);
     // One g downward on the engine's up axis.
@@ -239,6 +283,10 @@ void aver_phys_shutdown(void) {
     // points into the PhysicsSystem below and at the bodies in it. Destroying the world first would
     // leave PhysicsJoints.cpp's table holding references into wreckage.
     destroyAllJoints();
+    // AND VEHICLES, for the same reason and in the same place: a VehicleConstraint is registered with the
+    // system as a step listener and holds a raw pointer to its chassis, which the loop below is about to
+    // destroy. The chassis bodies themselves are ordinary entries in `bodies` and go with the rest.
+    destroyAllVehicles();
     clearCharacterStairSettings();
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
@@ -298,19 +346,44 @@ int32_t aver_phys_step(float dt) {
         // Characters are integrated before the solver so their swept motion sees this step's world.
         // CharacterVirtual does not integrate gravity itself, so only the vertical component of its
         // velocity is managed here; the horizontal part belongs to whoever is driving it.
+        //
+        // AND THE GROUND'S MOTION IS ADDED HERE, which is what makes a character ride a train. A
+        // CharacterVirtual is not a rigid body: no friction ever reaches it, and Jolt leaves following
+        // the ground to the caller ("velocity = GetGroundVelocity() + horizontal speed as input by
+        // player", CharacterVirtual.h's own recipe for ExtendedUpdate). Without it a kinematic deck
+        // moved by aver_phys_body_move_kinematic slid out from under anyone standing on it, while the
+        // dynamic crates beside them rode along on friction. The ground's velocity -- angular part
+        // included, so a turning carriage swings its passengers round -- goes in for the update only
+        // and comes back out afterwards (`carry`), so the velocity a driver reads and writes between
+        // steps is still its own, relative to what it stands on. Doing it here rather than in each
+        // driver is also what keeps it right when one frame runs several fixed steps.
         for (auto& [h, ch] : g_world->characters) {
             const JPH::Vec3 up = ch->GetUp();
             JPH::Vec3 v = ch->GetLinearVelocity();
             const float vUp = v.Dot(up);
             const bool grounded = ch->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+            // try_emplace with an explicit zero: JPH::Vec3's default constructor leaves it uninitialised.
+            JPH::Vec3& carry = g_world->characterCarry.try_emplace(h, JPH::Vec3::sZero()).first->second;
             if (grounded && vUp <= 0.0f) {
                 // Supported: cancel the downward part instead of letting it accumulate.
                 v -= up * vUp;
+                // The ground as it moves NOW: the kinematic driver set this frame's velocity after the
+                // last update measured it.
+                ch->UpdateGroundVelocity();
+                carry = ch->GetGroundVelocity();
             } else {
-                // Airborne, or moving upward under a jump: fall normally.
+                // Airborne, or leaving the ground under a jump. What the ground was doing at that moment
+                // is momentum now. Its vertical part joins the character's own velocity, once, so
+                // gravity can take it away; the horizontal part stays carried until the next landing,
+                // because drivers rewrite the horizontal velocity every frame and would otherwise drop
+                // someone stepping off a moving train dead in the air behind it.
+                const float carryUp = carry.Dot(up);
+                v += up * carryUp;
+                carry -= up * carryUp;
+                // Fall normally.
                 v += g_world->system.GetGravity() * g_world->fixedStep;
             }
-            ch->SetLinearVelocity(v);
+            ch->SetLinearVelocity(v + carry);
 
             // THE STAIR DISTANCES THE CALLER ASKED FOR, rather than Jolt's defaults. Both are
             // arguments to ExtendedUpdate and not state on the character, so this is the only moment
@@ -324,6 +397,9 @@ int32_t aver_phys_step(float dt) {
                                g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
                                g_world->system.GetDefaultLayerFilter(Layers::MOVING),
                                {}, {}, *g_world->temp);
+            // Back into the driver's frame. ExtendedUpdate may have trimmed the velocity against a
+            // steep slope; whatever it left, minus what the ground lent it, is the character's own.
+            ch->SetLinearVelocity(ch->GetLinearVelocity() - carry);
         }
         // BUOYANCY, BEFORE Update AND INSIDE THE FIXED LOOP. Both halves matter.
         //
@@ -391,6 +467,10 @@ int32_t aver_phys_remove_body(int32_t body) {
     // today, but a stale entry would still make evaluate() call findBody on a dead handle every
     // substep forever -- a slow leak of work rather than a crash, which is the kind that survives.
     phys::water::waterVolumes().clear(body);
+    // A VEHICLE'S CHASSIS GOES WITH ITS VEHICLE, not before it: the constraint and its step listener hold
+    // a raw pointer to this body, so they come out first. The vehicle handle is dead afterwards -- see
+    // physics_vehicle_abi.h. A no-op for any body that is not a chassis.
+    releaseVehicleOfBody(body);
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
     bi().RemoveBody(*id);
@@ -486,6 +566,33 @@ int32_t aver_phys_body_set_velocity(int32_t body, float x, float y, float z) {
 // How many bodies are live.
 int32_t aver_phys_body_count(void) { return g_world ? static_cast<int32_t>(g_world->bodies.size()) : 0; }
 
+// Every live body handle, in one pass over the map -- the O(n) way to enumerate. aver_phys_body_at(i)
+// has to walk the map to its i-th entry on every call, so looping it over [0, count) is O(n^2).
+int32_t aver_phys_body_handles(int32_t* out, int32_t cap) {
+    if (!g_world || !out || cap <= 0) return 0;
+    int32_t n = 0;
+    for (const auto& [h, id] : g_world->bodies) {
+        (void)id;
+        if (n >= cap) break;
+        out[n++] = h;
+    }
+    return n;
+}
+
+int32_t aver_phys_max_bodies(void) {
+    return g_world ? static_cast<int32_t>(g_world->system.GetMaxBodies()) : 0;
+}
+
+// Rebuilds the broad phase's trees for the bodies it now holds. Bodies added one at a time (a level
+// load adds one static body per colliding placement) leave the trees unbalanced until this runs, and
+// every ray, overlap and character query pays for that. Costly: once after a bulk add, not per frame.
+int32_t aver_phys_optimize_broadphase(void) {
+    if (!g_world) { aver::setAbiError(aver::AbiError::NotInitialised); return 0; }
+    g_world->system.OptimizeBroadPhase();
+    aver::setAbiError(aver::AbiError::Ok);
+    return 1;
+}
+
 // The calling thread's last recorded reason. See the header for why this is a separate channel and
 // not a changed return value.
 int32_t aver_phys_last_error(void) { return static_cast<int32_t>(aver::lastAbiError()); }
@@ -530,6 +637,7 @@ int32_t aver_phys_character_create(float radius, float height, float x, float y,
 int32_t aver_phys_character_destroy(int32_t ch) {
     if (!g_world || !g_world->characters.count(ch)) return 0;
     g_world->characters.erase(ch);
+    g_world->characterCarry.erase(ch);
     return 1;
 }
 
@@ -558,10 +666,20 @@ int32_t aver_phys_character_position(int32_t ch, float* outXyz) {
 }
 
 // Teleports a character.
+//
+// AND IT STOPS RIDING. Until the next update the character would still believe it stands on whatever
+// it stood on before, and aver_phys_step would carry it with that ground's velocity -- measured at
+// the NEW position, where a turning platform's rotation about a centre now far away comes out as a
+// launch. RefreshContacts (Jolt's own answer for "after a character has teleported") finds the
+// ground under the new position with the same filters the step uses, and the carried motion goes.
 int32_t aver_phys_character_set_position(int32_t ch, float x, float y, float z) {
     JPH::CharacterVirtual* c = findCharacter(ch);
     if (!c) return 0;
     c->SetPosition(toJolt(Vec3(x, y, z)));
+    c->RefreshContacts(g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
+                       g_world->system.GetDefaultLayerFilter(Layers::MOVING),
+                       {}, {}, *g_world->temp);
+    g_world->characterCarry.erase(ch);
     return 1;
 }
 
@@ -604,8 +722,11 @@ int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, floa
     JPH::RayCastResult hit;
     if (!g_world->system.GetNarrowPhaseQuery().CastRay(ray, hit)) return 0;
 
+    // byId is the reverse of `bodies` (addBody fills both), so this is one lookup -- it used to be a
+    // walk of every body per ray, which on a city level (thousands of bodies) made each nav-bake or
+    // script raycast pay for the whole level.
     int32_t handle = 0;
-    for (const auto& [h, id] : g_world->bodies) if (id == hit.mBodyID) { handle = h; break; }
+    if (const auto it = g_world->byId.find(hit.mBodyID); it != g_world->byId.end()) handle = it->second;
     if (handle == 0) {
         // Not a body this module created through addBody() -- the only other broadphase-visible
         // thing is a character's own inner body (see aver_phys_character_create). g_world->bodies
@@ -688,6 +809,100 @@ int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
     if (res.HasError()) { AVER_WARN("[Physics] mesh: {}", res.GetError().c_str()); return 0; }
     // Static only: a mesh has no interior, so nothing can resolve a penetration against it.
     return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
+}
+
+// ---- Shared mesh shapes -----------------------------------------------------------------------------
+
+// Builds the SAME triangle-mesh shape aver_phys_add_mesh builds internally -- identical vertex
+// conversion, identical winding fix, identical out-of-range-index skip -- but hands it back as a
+// handle from g_meshShapes' own counter instead of wrapping it in a body. See physics_abi.h's own
+// comment on why that counter is not World::nextHandle.
+int32_t aver_phys_create_mesh_shape(const float* verts, int32_t vertexCount,
+                                    const int32_t* indices, int32_t indexCount) {
+    if (!g_world || !verts || !indices || vertexCount < 3 || indexCount < 3) return 0;
+
+    JPH::VertexList vlist;
+    vlist.reserve(static_cast<size_t>(vertexCount));
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        const JPH::Vec3 v = toJolt(Vec3(verts[i*3+0], verts[i*3+1], verts[i*3+2]));
+        vlist.push_back(JPH::Float3(v.GetX(), v.GetY(), v.GetZ()));
+    }
+
+    JPH::IndexedTriangleList tris;
+    tris.reserve(static_cast<size_t>(indexCount / 3));
+    for (int32_t i = 0; i + 2 < indexCount; i += 3) {
+        const JPH::uint32 a = static_cast<JPH::uint32>(indices[i]);
+        const JPH::uint32 b = static_cast<JPH::uint32>(indices[i+1]);
+        const JPH::uint32 c = static_cast<JPH::uint32>(indices[i+2]);
+        if (a >= static_cast<JPH::uint32>(vertexCount) ||
+            b >= static_cast<JPH::uint32>(vertexCount) ||
+            c >= static_cast<JPH::uint32>(vertexCount)) {
+            AVER_WARN("[Physics] mesh shape: index out of range, triangle skipped");
+            continue;
+        }
+        // Same mirror as aver_phys_add_mesh: the axis map has determinant -1.
+        tris.push_back(JPH::IndexedTriangle(a, c, b));
+    }
+    if (tris.empty()) { AVER_WARN("[Physics] mesh shape: no usable triangles"); return 0; }
+
+    JPH::MeshShapeSettings s(vlist, tris);
+    s.SetEmbedded();
+    auto res = s.Create();
+    if (res.HasError()) { AVER_WARN("[Physics] mesh shape: {}", res.GetError().c_str()); return 0; }
+
+    const int32_t h = g_nextMeshShape++;
+    g_meshShapes.emplace(h, res.Get());
+    return h;
+}
+
+int32_t aver_phys_release_mesh_shape(int32_t shape) {
+    return g_meshShapes.erase(shape) ? 1 : 0;
+}
+
+// Adds a static body wrapping `shape`, scaled through Jolt's Shape::ScaleShape rather than rebaked
+// geometry. See physics_abi.h's own comment on what scales this accepts.
+//
+// THE SCALE CONVERSION, DERIVED, because getting it wrong is a mesh that collides at the wrong size
+// with nothing reporting it. Convert.hpp's toJolt/toJoltUnit convert a POSITION or DIRECTION by a
+// basis matrix B (aver (x,y,z) -> jolt (y,z,-x), det(B) = -1) applied to the vector itself -- but a
+// SCALE is not a vector, it is the diagonal of a linear map D = diag(sx,sy,sz) that acts on engine-
+// space vectors, and what crosses into Jolt's basis is the CONJUGATE B*D*B^-1, not B*D. For a signed
+// permutation B (every row and column has exactly one entry, +-1) that conjugate is diagonal again --
+// (B*D*B^T)[i,i] = B[i,k]^2 * D[k,k] for the one k where row i of B is non-zero -- and B[i,k]^2 is
+// always 1 whichever sign B[i,k] carries. So EVERY SIGN SURVIVES UNCHANGED (a mirror stays a mirror)
+// and only the ORDER of the three components changes, by exactly the same permutation toJoltUnit
+// already applies to a direction: jolt.x <- engine.y, jolt.y <- engine.z, jolt.z <- engine.x. No
+// component is negated here -- unlike a direction, whose z also flips sign -- because that sign came
+// from det(B) alone, and det(B) does not appear in a similarity transform's diagonal.
+//
+// Jolt itself resolves the mirror case (an odd number of negative scale components) from the scale it
+// is queried with -- ScaleHelpers::IsInsideOut, read inside MeshShape's own query code -- so nothing
+// here needs to re-flip triangle winding the way scaleMeshForBody (LevelInstance.cpp) does for its
+// baked path; that correction is Jolt's job once the scale itself is right.
+int32_t aver_phys_add_mesh_shape_body(int32_t shape, float px, float py, float pz,
+                                      float qx, float qy, float qz, float qw,
+                                      float sx, float sy, float sz) {
+    if (!g_world) return 0;
+    JPH::Shape* base = meshShapeFor(shape);
+    if (!base) return 0;
+
+    // Shape::ScaleShape also covers the near-unit case (hands back `base` itself, no wrapper) and the
+    // zero-scale refusal (a clean ShapeResult error, not an assert) -- both for free.
+    const JPH::Shape::ShapeResult scaled = base->ScaleShape(JPH::Vec3(sy, sz, sx));
+    if (scaled.HasError()) {
+        AVER_WARN("[Physics] mesh shape body: {}", scaled.GetError().c_str());
+        return 0;
+    }
+
+    JPH::BodyCreationSettings s(scaled.Get(), toJolt(Vec3(px, py, pz)), toJolt(Quat(qx, qy, qz, qw)),
+                               JPH::EMotionType::Static, Layers::encode(0, false));
+    JPH::Body* jbody = bi().CreateBody(s);
+    if (!jbody) { warnBodyLimit(); return 0; }
+    bi().AddBody(jbody->GetID(), JPH::EActivation::DontActivate);
+    const int32_t h = g_world->nextHandle++;
+    g_world->bodies.emplace(h, jbody->GetID());
+    g_world->byId.emplace(jbody->GetID(), h);
+    return h;
 }
 
 // Adds a static heightfield from a row-major sampleCount x sampleCount grid. Returns its handle, or 0.

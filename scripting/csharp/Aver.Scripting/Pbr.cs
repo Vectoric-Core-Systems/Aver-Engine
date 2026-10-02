@@ -99,6 +99,8 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_coat_f0(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_radius(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_radius(int m, float v);
+    [DllImport(Lib)] private static extern int aver_pbr_get_subsurface_color(int m, float[] out3);
+    [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_color(int m, float r, float g, float b);
 
     [DllImport(Lib)] private static extern int aver_pbr_get_alpha_mode(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_alpha_mode(int m, int mode);
@@ -341,6 +343,22 @@ public static class Pbr
         {
             get => aver_pbr_get_subsurface_radius(Handle);
             set => aver_pbr_set_subsurface_radius(Handle, value);
+        }
+
+        /// <summary>
+        /// sRGB tint the scattered light takes INSIDE the material, authored like
+        /// <see cref="BaseColorFactor"/> and multiplied onto the diffuse albedo for the subsurface
+        /// terms. White (the default) scatters in the surface's own colour; skin wants a deep red,
+        /// leaves a yellow-green, wax an orange. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
+        /// </summary>
+        public (float R, float G, float B) SubsurfaceColor
+        {
+            get
+            {
+                var v = new float[3];
+                return aver_pbr_get_subsurface_color(Handle, v) != 0 ? (v[0], v[1], v[2]) : (0, 0, 0);
+            }
+            set => aver_pbr_set_subsurface_color(Handle, value.R, value.G, value.B);
         }
 
         public PbrAlphaMode AlphaMode

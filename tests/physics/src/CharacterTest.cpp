@@ -182,6 +182,17 @@ static void testShapeSwapAndItsFailure() {
     check(aver_phys_character_set_shape(ch, 30.0f, 40.0f, 5.0f) == 0,
           "a shape too short for its own radius is refused, like character_create's own guard");
 
+    // The getter reads the capsule the character HAS, so after the two refusals above it must still
+    // say crouched -- a getter that echoed the last numbers asked for would say 40 here.
+    float r = 0.0f, h = 0.0f;
+    check(aver_phys_character_shape(ch, &r, &h) == 1 && near(r, 30.0f, 0.01f) && near(h, 90.0f, 0.01f),
+          "the shape reads back as the crouched capsule both refusals left in place, radius " +
+          f2s(r) + " height " + f2s(h));
+    const int32_t fresh = aver_phys_character_create(34.0f, 180.0f, 900.0f, 0.0f, 90.0f);
+    check(aver_phys_character_shape(fresh, &r, &h) == 1 && near(r, 34.0f, 0.01f) && near(h, 180.0f, 0.01f),
+          "and a new character reads back the radius and TOTAL height it was created with, radius " +
+          f2s(r) + " height " + f2s(h));
+
     aver_phys_shutdown();
 }
 
@@ -196,7 +207,157 @@ static void testDeadHandles() {
     check(aver_phys_character_set_shape(dead, 30.0f, 180.0f, 5.0f) == 0, "and a shape swap");
     check(aver_phys_character_ground_normal(ch, nullptr) == 0, "a null out-pointer is refused");
     check(aver_phys_character_max_slope_angle(ch, nullptr) == 0, "on every getter");
+    check(aver_phys_character_shape(dead, tmp, tmp + 1) == 0, "a dead handle has no shape to read");
+    check(aver_phys_character_inherited_velocity(dead, tmp) == 0 &&
+          aver_phys_character_set_inherited_velocity(dead, 1.0f, 0.0f, 0.0f) == 0,
+          "and no inherited velocity to read or set");
+    check(aver_phys_character_inherited_velocity(ch, nullptr) == 0, "which refuses a null out-pointer too");
+    check(aver_phys_character_shape(ch, nullptr, tmp) == 0 && aver_phys_character_shape(ch, tmp, nullptr) == 0,
+          "and the shape getter refuses either null out-pointer");
     aver_phys_shutdown();
+}
+
+// A CharacterVirtual is not a rigid body, so no friction ever reaches it: riding a moving deck is the
+// ground's velocity, added by aver_phys_step. This is the check the owner made by hand -- stand on the
+// train, does it take you along -- plus the three ways that addition could go wrong: leaking into the
+// velocity a driver reads back and writes again every frame, dropping a jumper behind the deck, and
+// surviving a teleport.
+static void testRidesAMovingDeck() {
+    AVER_INFO("=== a character standing on a moving deck is carried with it ===");
+    aver_phys_init();
+    aver_phys_add_static_box(0, 0, -50.0f, 8000.0f, 8000.0f, 50.0f);   // still ground, top at z = 0
+    // A 6 m square deck with its top at z = 200, made kinematic the way an animated collider is.
+    const int32_t deck = aver_phys_add_dynamic_box(0.0f, 0.0f, 190.0f, 300.0f, 300.0f, 10.0f, 1000.0f);
+    check(aver_phys_body_set_motion_type(deck, AVER_PHYS_MOTION_KINEMATIC) == 1, "the deck is kinematic");
+    const int32_t rider = aver_phys_character_create(30.0f, 180.0f, 0.0f, 0.0f, 291.0f);
+    const int32_t bystander = aver_phys_character_create(30.0f, 180.0f, 0.0f, 1500.0f, 91.0f);
+
+    // A driver with no input, as driveDefaultPawnWalk and Character.Drive are: zero horizontal velocity,
+    // the vertical part read back and written again.
+    auto standStill = [](int32_t ch) {
+        float v[3] = {0, 0, 0};
+        aver_phys_character_velocity(ch, v);
+        aver_phys_character_set_velocity(ch, 0.0f, 0.0f, v[2]);
+    };
+    float deck0[3] = {0, 0, 0};
+    aver_phys_body_position(deck, deck0);
+    float deckX = deck0[0];
+    // One frame: the deck driven 4 m/s along +X, both characters standing still, one fixed step.
+    auto frame = [&]() {
+        deckX += 400.0f * kDt;
+        aver_phys_body_move_kinematic(deck, deckX, deck0[1], deck0[2], 0.0f, 0.0f, 0.0f, 1.0f, kDt);
+        standStill(rider);
+        standStill(bystander);
+        aver_phys_step(kDt);
+    };
+
+    for (int i = 0; i < 60; ++i) {
+        standStill(rider);
+        standStill(bystander);
+        aver_phys_step(kDt);
+    }
+    check(aver_phys_character_grounded(rider) == 1, "the rider has settled on the still deck");
+
+    float rider0[3] = {0, 0, 0}, by0[3] = {0, 0, 0};
+    aver_phys_character_position(rider, rider0);
+    aver_phys_character_position(bystander, by0);
+    for (int i = 0; i < 120; ++i) frame();
+    float deck1[3] = {0, 0, 0}, rider1[3] = {0, 0, 0}, by1[3] = {0, 0, 0}, rv[3] = {9, 9, 9};
+    aver_phys_body_position(deck, deck1);
+    aver_phys_character_position(rider, rider1);
+    aver_phys_character_position(bystander, by1);
+    const f32 deckMoved = deck1[0] - deck0[0], riderMoved = rider1[0] - rider0[0];
+    check(deckMoved > 700.0f, "the deck moved " + f2s(deckMoved) + " cm in two seconds");
+    check(near(riderMoved, deckMoved, 15.0f),
+          "and the rider standing on it moved WITH it, " + f2s(riderMoved) + " cm -- without the ground's "
+          "velocity it stays where it was and the deck slides out from under it");
+    check(rider1[2] > 280.0f, "still standing on the deck rather than fallen off it, z = " + f2s(rider1[2]));
+    check(aver_phys_character_velocity(rider, rv) == 1 && std::fabs(rv[0]) < 1.0f && std::fabs(rv[1]) < 1.0f,
+          "while the velocity a driver reads back stays its OWN, (" + f2s(rv[0]) + ", " + f2s(rv[1]) +
+          ") -- read back and written again each frame, a carried velocity would compound");
+    check(near(by1[0], by0[0], 1.0f) && near(by1[1], by0[1], 1.0f),
+          "and a character on the still ground beside it did not move");
+    float inh[3] = {0, 0, 0};
+    check(aver_phys_character_inherited_velocity(rider, inh) == 1 && near(inh[0], 400.0f, 20.0f) &&
+          near(inh[1], 0.0f, 1.0f),
+          "what it inherits from the deck reads as the deck's own velocity, x = " + f2s(inh[0]) +
+          " -- own + inherited is the world velocity");
+
+    // A jump on a moving deck lands back where it left: the deck's motion is momentum in the air.
+    // The jump goes in through the same frame as everything else: standStill reads the 465 back and
+    // keeps it, exactly as a driver keeps the vertical velocity it did not set.
+    const f32 offset0 = rider1[0] - deck1[0];
+    aver_phys_character_set_velocity(rider, 0.0f, 0.0f, 465.0f);
+    frame();
+    bool leftGround = false;
+    for (int i = 0; i < 90; ++i) {
+        if (aver_phys_character_grounded(rider) == 0) leftGround = true;
+        frame();
+    }
+    float deck2[3] = {0, 0, 0}, rider2[3] = {0, 0, 0};
+    aver_phys_body_position(deck, deck2);
+    aver_phys_character_position(rider, rider2);
+    const f32 offset1 = rider2[0] - deck2[0];
+    check(leftGround, "the jump left the deck");
+    check(rider2[2] > 280.0f && near(offset1, offset0, 20.0f),
+          "and landed back on it at the same spot, " + f2s(offset1 - offset0) + " cm from where it took off "
+          "-- dropping the deck's speed at take-off would land it about 4 m behind, off the end");
+
+    // Teleported onto still ground, it stops riding: no carried speed, no launch.
+    aver_phys_character_set_position(rider, 0.0f, -1500.0f, 91.0f);
+    for (int i = 0; i < 60; ++i) frame();
+    float rider3[3] = {0, 0, 0};
+    aver_phys_character_position(rider, rider3);
+    check(near(rider3[0], 0.0f, 5.0f) && near(rider3[1], -1500.0f, 5.0f),
+          "teleported off the deck onto still ground, it stays put at (" + f2s(rider3[0]) + ", " +
+          f2s(rider3[1]) + ")");
+    float inh3[3] = {9, 9, 9};
+    check(aver_phys_character_inherited_velocity(rider, inh3) == 1 && near(inh3[0], 0.0f, 0.5f) &&
+          near(inh3[1], 0.0f, 0.5f), "and inherits nothing from still ground");
+
+    // The setter: what it is given reads back, and on ground the next step measures the ground again.
+    check(aver_phys_character_set_inherited_velocity(rider, 0.0f, 250.0f, 0.0f) == 1, "inherited velocity is settable");
+    aver_phys_character_inherited_velocity(rider, inh3);
+    check(near(inh3[1], 250.0f, 0.01f), "and reads back as set, y = " + f2s(inh3[1]));
+    frame();
+    aver_phys_character_inherited_velocity(rider, inh3);
+    check(near(inh3[1], 0.0f, 0.5f), "standing on still ground, one step later it is the ground's again: y = " + f2s(inh3[1]));
+    aver_phys_shutdown();
+}
+
+// aver_phys_character_of_entity is aver_phys_set_entity read backwards. What the editor does with the
+// answer is teleport that capsule, so the last check here is that the handle it got moves the right one.
+static void testEntityToCharacter() {
+    AVER_INFO("=== an entity finds the character stamped with it ===");
+    const int32_t a = worldWithCharacterOnFloor();
+    const int32_t b = aver_phys_character_create(30.0f, 180.0f, 500.0f, 0.0f, 90.0f);
+    const int32_t crate = aver_phys_add_dynamic_box(0.0f, 500.0f, 50.0f, 50.0f, 50.0f, 50.0f, 10.0f);
+
+    check(aver_phys_character_of_entity(41) == 0, "nothing is stamped yet, so entity 41 has no character");
+    check(aver_phys_character_of_entity(0) == 0,
+          "and entity 0 never names one, though every unstamped character carries exactly that stamp");
+
+    aver_phys_set_entity(a, 41);
+    aver_phys_set_entity(b, 42);
+    aver_phys_set_entity(crate, 43);
+    check(aver_phys_character_of_entity(41) == a, "entity 41 finds the first character");
+    check(aver_phys_character_of_entity(42) == b, "and entity 42 the second, not whichever came first");
+    check(aver_phys_character_of_entity(43) == 0, "a BODY stamped with an entity is not a character");
+
+    aver_phys_character_set_position(aver_phys_character_of_entity(42), 500.0f, 800.0f, 90.0f);
+    float pa[3] = {0, 0, 0}, pb[3] = {0, 0, 0};
+    aver_phys_character_position(a, pa);
+    aver_phys_character_position(b, pb);
+    check(near(pb[1], 800.0f, 1.0f) && near(pa[1], 0.0f, 1.0f),
+          "teleporting through the looked-up handle moves that character and leaves the other, y = " +
+          f2s(pb[1]) + " and " + f2s(pa[1]));
+
+    aver_phys_set_entity(a, 0);
+    check(aver_phys_character_of_entity(41) == 0, "clearing the stamp un-finds it");
+    aver_phys_character_destroy(b);
+    check(aver_phys_character_of_entity(42) == 0, "and so does destroying the character");
+    aver_phys_shutdown();
+    check(aver_phys_character_of_entity(42) == 0, "with no world at all the answer is still 0");
 }
 
 int main() {
@@ -209,6 +370,8 @@ int main() {
     testGroundInformation();
     testShapeSwapAndItsFailure();
     testDeadHandles();
+    testRidesAMovingDeck();
+    testEntityToCharacter();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

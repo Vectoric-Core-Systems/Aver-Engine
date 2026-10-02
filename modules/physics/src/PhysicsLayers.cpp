@@ -59,9 +59,10 @@ private:
 
 // The body handle behind a Jolt id, searching characters too -- a character's inner body is created
 // and owned by Jolt, so it is never in g_world->bodies. Lifted from aver_phys_raycast, which needs
-// the same answer for the same reason.
+// the same answer for the same reason. byId (the reverse of `bodies`) answers the common case in one
+// lookup; walking every body per hit made each layered query pay for the whole level.
 int32_t handleForBodyId(const JPH::BodyID& id) {
-    for (const auto& [h, bid] : g_world->bodies) if (bid == id) return h;
+    if (const auto it = g_world->byId.find(id); it != g_world->byId.end()) return it->second;
     for (const auto& [h, ch] : g_world->characters)
         if (!ch->GetInnerBodyID().IsInvalid() && ch->GetInnerBodyID() == id) return h;
     return 0;

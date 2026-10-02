@@ -37,8 +37,9 @@ public readonly struct CharacterBody : IEquatable<CharacterBody>
 
     // ---- Placement and velocity -----------------------------------------------------------------------
 
-    /// <summary>The velocity the character WANTS, cm/s. The simulation manages the vertical component
-    /// unless this sets it.</summary>
+    /// <summary>The velocity the character WANTS, cm/s, relative to what it stands on: the physics step
+    /// adds the ground's own motion (a moving deck, a lift) on top while it stands there, so zero means
+    /// "stay put on the train". The simulation manages the vertical component unless this sets it.</summary>
     public Float3 Velocity
     {
         get { var v = new float[3]; return Native.aver_phys_character_velocity(Handle, v) != 0 ? new Float3(v[0], v[1], v[2]) : Float3.Zero; }
@@ -116,12 +117,23 @@ public readonly struct CharacterBody : IEquatable<CharacterBody>
     /// heightfield) as well as for standing on nothing at all. Check <see cref="GroundState"/> to tell
     /// those two apart.</summary>
     public Body GroundBody => new(Native.aver_phys_character_ground_body(Handle));
-    /// <summary>The ground's own velocity, cm/s, world space -- THIS IS WHAT A MOVING PLATFORM IS. Add
-    /// it to the character's desired horizontal velocity before the next update to ride the platform;
-    /// leave it out and standing on a lift means being left behind as it rises.</summary>
+    /// <summary>The ground's own velocity, cm/s, world space -- THIS IS WHAT A MOVING PLATFORM IS. The
+    /// physics step already adds it while the character stands there, so the character rides the
+    /// platform by itself: do NOT add it to the velocity you set as well, or it moves at twice the
+    /// platform's speed. For reading -- a world-space speed, whether a lift is moving.</summary>
     public Float3 GroundVelocity
     {
         get { var v = new float[3]; return Native.aver_phys_character_ground_velocity(Handle, v) != 0 ? new Float3(v[0], v[1], v[2]) : Float3.Zero; }
+    }
+    /// <summary>The motion the character carries from its ground, cm/s, world space: the ground's while it
+    /// stands on moving ground, and the horizontal part of it kept in the air after leaving, so a jump on a
+    /// moving train lands on the train. <see cref="Velocity"/> + this is the world-space velocity. Set it to
+    /// zero for a dead stop in the air, which <see cref="SetVelocity"/> alone cannot do; on moving ground the
+    /// next step measures the ground again.</summary>
+    public Float3 InheritedVelocity
+    {
+        get { var v = new float[3]; return Native.aver_phys_character_inherited_velocity(Handle, v) != 0 ? new Float3(v[0], v[1], v[2]) : Float3.Zero; }
+        set { Native.aver_phys_character_set_inherited_velocity(Handle, value.X, value.Y, value.Z); }
     }
 
     // ---- Shape (crouching) ------------------------------------------------------------------------------
