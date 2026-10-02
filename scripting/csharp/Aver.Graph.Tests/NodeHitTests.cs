@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
 // NODE-HIT RECORDING: every exec node reporting that it ran, so the editor can highlight live
 // control flow. Visual scripting had no way to see which branch was taken -- you could print a value

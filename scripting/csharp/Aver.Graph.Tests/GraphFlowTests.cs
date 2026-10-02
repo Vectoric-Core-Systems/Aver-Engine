@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Tests for the exec/flow addition to Aver.Graph: branch, sequence, while, forEach, and event entry
 // points (ENTRY/CompileEntryPoint). See GraphCompiler.cs's own "PUSH VS PULL" comment for the design
 // these tests are proving, and OcGraphParser.cs's "flow / exec nodes" section for the pin shapes.

@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Test suite for Aver.Graph: parsing and compilation.
 // Comment explains WHY: this slice proves the property that a graph loaded from text,
 // compiled to IL, and invoked returns the same value as hand-written C#.

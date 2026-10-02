@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
 // The seam a Vulkan-native in-window UI toolkit plugs into -- the exact counterpart of
 // modules/rhi.d3d12/include/aver/rhi/d3d12/UiBackend.hpp, and built because that header called for

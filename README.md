@@ -1,6 +1,6 @@
 # Aver Engine
 
-A custom, **modular** 3D game engine licensed under the **GNU LGPL v3** (see [License](#license)) and built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), exclusively — no NVIDIA RTX SDK remains in the tree; ray-traced GI is in-house ReSTIR GI and denoising is AMD FidelityFX Denoiser. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
+A custom, **modular** 3D game engine licensed under the **GNU LGPL v2.1** (see [License](#license)) and built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), exclusively — no NVIDIA RTX SDK remains in the tree; ray-traced GI is in-house ReSTIR GI and denoising is AMD FidelityFX Denoiser. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
 
 - **Polyglot:** C++ (core, RHI, renderer, physics), C (one seam per module, not one seam for everything), C# on .NET 10 (scripting, gameplay, materials, HUD). **There is no Rust in this tree.** `tools/README.md` still advertises a Rust asset pipeline that was never written, and `abi/README.md` records why the single flat `Aver.ABI` those files describe is not coming either.
 - **Render backends:** DirectX 12 is the one you should use. `modules/rhi.d3d11` is a stub that returns a null device. **`modules/rhi.vulkan` is no longer a stub** — it creates a real device and swapchain, compiles the shared HLSL to SPIR-V through a vendored SPIR-V-capable DXC, and **presents a frame** (this line used to say it did not; that was fixed in commit `b8b7257`). `AVER_RHI_VULKAN` is **ON by default** (`CMakeLists.txt:58`) — it is still down to 10 validation errors, not zero, so the default build links a backend that is not yet clean. Its own source names what is left. All three sit behind one RHI abstraction.
@@ -163,18 +163,29 @@ A new project is scaffolded with a `Scripts.csproj` referencing four of those �
 
 ## License
 
-Aver Engine is free software, licensed under the **GNU Lesser General Public License, version 3**
-(`LGPL-3.0-only`). Copyright (c) 2026 Hydrogen-Isotope; developed by Vectoric-Core-Systems.
-
-- [`LICENSE.md`](LICENSE.md) — the project's licence notice and the table of third-party components.
-- [`COPYING.LESSER`](COPYING.LESSER) — the LGPL v3 text. [`COPYING`](COPYING) — the GPL v3 text it extends.
+Aver Engine is free software, licensed under the **GNU Lesser General Public License, version 2.1**
+(`LGPL-2.1-only`); the full text is in [`LICENSE`](LICENSE). Copyright (c) 2026 Hydrogen-Isotope;
+developed by Vectoric-Core-Systems.
 
 What that means in practice: a game or application built on Aver may be commercial and closed, and
 its own code, scripts and content stay under whatever terms you choose. Changes to the engine itself
-that you distribute must be published under the LGPL v3, and a shipped build must carry the engine's
-licence, point to its source, and let the player swap in a modified build of the engine's libraries.
-`scripts/stage-payload.ps1` and `scripts/stage-game.ps1` write both licence texts into every
-package's `THIRD-PARTY-NOTICES.txt`.
+that you distribute must be published under the LGPL v2.1, and a shipped build must carry the
+engine's licence, give access to its source, and let the player relink against a modified build of
+the engine's libraries. `scripts/stage-payload.ps1` and `scripts/stage-game.ps1` write the licence
+text into every package's `THIRD-PARTY-NOTICES.txt`.
 
-Vendored third-party code (`third_party/`, `modules/physics.jolt/Jolt`) keeps its own licence — MIT,
-Apache-2.0, public domain or NCSA — and its own copyright notices; `LICENSE.md` lists each one.
+Vendored third-party code keeps its own licence and copyright notices, and is not covered by the
+LGPL:
+
+| Path | Component | Licence |
+|---|---|---|
+| `third_party/imgui` | Dear ImGui | MIT |
+| `third_party/stb` | stb single-file libraries | Public domain / MIT |
+| `third_party/meshoptimizer` | meshoptimizer | MIT |
+| `third_party/fonts` | Roboto, Material Icons | Apache-2.0 |
+| `third_party/vulkan-headers` | Vulkan-Headers (Khronos) | Apache-2.0 |
+| `third_party/fidelityfx-fsr` | AMD FidelityFX FSR 1 | MIT |
+| `third_party/fidelityfx-denoiser` | AMD FidelityFX Denoiser | MIT |
+| `modules/physics.jolt/Jolt` | Jolt Physics | MIT |
+| `third_party/dxc-spirv` | DirectX Shader Compiler (`dxcompiler.dll`) | MIT + LLVM Release Licence (NCSA) |
+| `third_party/nuget` | .NET Compiler Platform (Roslyn) | MIT |

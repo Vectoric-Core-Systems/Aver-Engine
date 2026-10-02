@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Additional PCG primitives: surfaces, splines and filtering.
 //
 // Every one is a pure function of its arguments and shares Rand's stateless splitmix32, so they

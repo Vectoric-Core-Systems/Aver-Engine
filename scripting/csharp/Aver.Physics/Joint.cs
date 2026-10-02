@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
 // Joints: two bodies and a rule about how they may move relative to each other. See
 // physics_joints_abi.h's own file comment for why every point and axis is WORLD-SPACE at the moment

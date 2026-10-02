@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Tests for graph-local persistent variables (VAR / GetVar / SetVar / GraphVarStore) -- the addition
 // that closes "a compiled graph is a pure function of its PARAMs; nothing survives between ticks". See
 // GraphVariable's own comment (Graph.cs), GraphVarStore's own comment, and GraphCompiler.cs's

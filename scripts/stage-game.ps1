@@ -521,14 +521,13 @@ $notices = [System.Text.StringBuilder]::new()
 [void]$notices.AppendLine("$gameName - third-party notices")
 [void]$notices.AppendLine('')
 [void]$notices.AppendLine('This game includes the following third-party components. Aver Engine is licensed')
-[void]$notices.AppendLine('under the GNU Lesser General Public License, version 3 (LGPL-3.0-only); its source is')
+[void]$notices.AppendLine('under the GNU Lesser General Public License, version 2.1 (LGPL-2.1-only); its source is')
 [void]$notices.AppendLine('at https://github.com/Vectoric-Core-Systems/Aver-Source.')
 [void]$notices.AppendLine('')
 $components = @(
-    # The engine, unconditionally: every game ships its binaries, and the LGPL obliges both licence
-    # texts -- the LGPL and the GPL it extends -- to travel with them.
-    @{ Name = 'Aver Engine'; Licence = 'LGPL-3.0-only'; File = 'COPYING.LESSER'; When = { $true } }
-    @{ Name = 'Aver Engine (the GNU GPL v3, which the LGPL extends)'; Licence = 'GPL-3.0'; File = 'COPYING'; When = { $true } }
+    # The engine, unconditionally: every game ships its binaries, and the LGPL obliges its text to
+    # travel with them.
+    @{ Name = 'Aver Engine'; Licence = 'LGPL-2.1-only'; File = 'LICENSE'; When = { $true } }
     @{ Name = 'Jolt Physics'; Licence = 'MIT'; File = 'modules\physics.jolt\LICENSE'; When = { $options['AVER_MODULE_PHYSICS'] } }
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt'; When = { $true } }
     @{ Name = 'AMD FidelityFX Denoiser'; Licence = 'MIT'; File = 'third_party\fidelityfx-denoiser\LICENSE.txt'; When = { $options['AVER_MODULE_VOXI'] } }

@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
 // A rigid body: placement, the forces/impulses that push it, the material it is made of, and
 // sleeping. See physics_abi.h's own "Body dynamics" section comment for the units every force,

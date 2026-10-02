@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Hosts one compiled graph against one entity, ticked once per frame: loads a graph from disk,
 // compiles it once, keeps the delegate, and feeds it a live time value every frame -- the seam
 // between "the compiler works" (GraphCompiler) and "a graph moves something in the scene".

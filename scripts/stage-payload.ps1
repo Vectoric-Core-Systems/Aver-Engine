@@ -346,17 +346,16 @@ if ($wantCrt.Count -eq 0) {
 $notices = [System.Text.StringBuilder]::new()
 [void]$notices.AppendLine("Aver Engine $version - licence and third-party notices")
 [void]$notices.AppendLine('')
-[void]$notices.AppendLine('Aver Engine is licensed under the GNU Lesser General Public License, version 3')
-[void]$notices.AppendLine('(LGPL-3.0-only); its source is at https://github.com/Vectoric-Core-Systems/Aver-Source.')
+[void]$notices.AppendLine('Aver Engine is licensed under the GNU Lesser General Public License, version 2.1')
+[void]$notices.AppendLine('(LGPL-2.1-only); its source is at https://github.com/Vectoric-Core-Systems/Aver-Source.')
 [void]$notices.AppendLine('This build also includes the following third-party components. All licences are')
 [void]$notices.AppendLine('reproduced in full below.')
 [void]$notices.AppendLine('')
 
 $components = @(
-    # Aver Engine itself, first: LGPL-3.0-only (LICENSE.md). The LGPL obliges every copy of the
-    # engine's binaries to travel with both licence texts -- the LGPL and the GPL it extends.
-    @{ Name = 'Aver Engine';           Licence = 'LGPL-3.0-only';   File = 'COPYING.LESSER' }
-    @{ Name = 'Aver Engine (the GNU GPL v3, which the LGPL extends)'; Licence = 'GPL-3.0'; File = 'COPYING' }
+    # Aver Engine itself, first: LGPL-2.1-only (LICENSE). The LGPL obliges every copy of the
+    # engine's binaries to travel with its text.
+    @{ Name = 'Aver Engine';           Licence = 'LGPL-2.1-only';   File = 'LICENSE' }
     @{ Name = 'Roboto (fonts)';        Licence = 'Apache-2.0';      File = 'third_party\fonts\LICENSE' }
     # Material Icons is Apache-2.0 like Roboto and shares that same LICENSE file, but it is listed
     # as its own component deliberately: NOTICE has to name what is redistributed, and two fonts

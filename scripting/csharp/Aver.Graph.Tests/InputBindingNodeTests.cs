@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Tests for the graph-side half of Unreal Enhanced Input-style rebinding: the `action=` attribute now
 // optional on InputAction/InputActionPressed/InputActionReleased, required on the two new nodes that
 // have no pin fallback (RebindAction, GetActionKey), and the four exec nodes that save/load/reset a

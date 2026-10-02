@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Tests for GetForward -- CharacterMove's read-side counterpart, and the node that makes a graph-only
 // first-person template possible at all. See GraphInterop.LookDirectionForGraph for why the engine
 // needed a node here rather than graph-side trigonometry, GraphCompiler.cs's

@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Tests for GetFieldVec3/SetFieldVec3 -- closing GetField/SetField's own FieldKindF32 gap for reading
 // and writing a Vec3-kind scene field (position, scale, colour, ...). See
 // GraphCompiler.cs's RequireVec3Field/EmitGetFieldVec3/EmitSetFieldVec3/EmitExecSetFieldVec3/

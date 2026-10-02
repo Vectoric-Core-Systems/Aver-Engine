@@ -1,6 +1,6 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
-// SPDX-License-Identifier: LGPL-3.0-only. See LICENSE.md at the repository root.
+// SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Tests for InputKeyPressed / InputKeyReleased -- the EDGE of a key, where InputKey gives the STATE.
 //
 // WHY A SEPARATE NODE AND NOT A FLAG ON InputKey. `down` is true every frame a key is held, which is
