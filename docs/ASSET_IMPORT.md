@@ -16,7 +16,7 @@ third-party library, and none of the supported formats requires one.
 | Up axis | +Y (glTF, OBJ, USD default) or +Z (USD, if declared) | **+Z** |
 | Forward | −Z | **+X** |
 | Units | metres, or whatever the author chose | **centimetres** |
-| Texture origin | bottom-left | **top-left** |
+| Texture origin | bottom-left (OBJ, USD); top-left (glTF) | **top-left** |
 | Matrices | — | row-major, **row-vector** (`v * M`) |
 
 The position transform is the same one in all three importers, deliberately:
@@ -28,7 +28,10 @@ engine.z =  source.y
 ```
 
 then scaled to centimetres. **Triangle winding reverses** with it, because the basis change has
-determinant −1. `V` flips (`v -> 1 - v`) because the texture origin moves.
+determinant −1 — and in glTF reverses once more under a node that mirrors its mesh (a negative
+determinant, e.g. a scale of −1), whose normals also take the node basis' inverse-transpose rather
+than the basis itself. **`V` flips (`v -> 1 - v`) for OBJ and USD only**, whose texture origin is
+bottom-left; glTF's UVs are already top-left origin, so they cross unchanged.
 
 Sharing one convention means a model exported to two formats lands in the same place, and means
 there is one piece of arithmetic in this codebase to get wrong instead of three.
@@ -45,7 +48,8 @@ described below, which OBJ and glTF never need to.
 
 ## glTF 2.0 / GLB — `GltfImport.hpp`
 
-The oldest importer and the most complete: meshes, skeletons, skins and animation clips. `.glb` and
+The oldest importer and the most complete: meshes, skeletons, skins, skeletal animation clips and object
+animation clips. `.glb` and
 `.gltf` are told apart by the GLB magic, not the extension. Buffers may be external files or base64
 data URIs.
 
@@ -75,6 +79,78 @@ otherwise correct rig. A duplicate name is renamed with a numeric suffix and not
 
 To add one: in Blender, `Add > Empty`, then parent it to a bone in Pose mode (`Ctrl-P > Bone`), name
 it, and export. It arrives as a socket you can see and adjust in the engine's skeleton editor.
+
+### One mesh, several nodes
+
+Blender writes linked duplicates (`Alt+D`) and collection instances as one glTF mesh named by
+several nodes. Each node becomes a placement; nodes that differ only by **translation** share one
+imported mesh, and a node that **rotates or scales** it differently gets its own copy (`<name>_2`,
+`<name>_3`…), because rotation and scale are baked into the vertices. Before 2026-09-29 every node
+appended another copy into the same mesh, so each placement drew all of them.
+
+### Object animation: a car on a route, a fan
+
+Animation of a node that is **not a joint** is object motion, imported as an **object clip**: an ordinary
+`.ocanim` flagged `kOcAnimObject | kOcAnimLoop`, with an empty `skeletonRef` and one track on bone 0
+(translation + rotation, scale only if it moves). Before this, those channels were dropped, and a file
+with no skin dropped every animation. Joint channels are unchanged: skeletal clips, `skeletons[0]` only.
+
+One clip per glTF animation and **moving** node, named after the node — or `<animation>_<node>` when that
+node moves in more than one glTF animation. A node moves when it has channels of its own, **or** when it
+is a plain mesh node with none that sits *under* one that does: a static child rides on its animated
+parent (a wheel on a car, a prop on a turntable), so it gets a clip of its own, with every ancestor
+composed. A child whose world never changes (the ancestor's channels hold one value) gets none.
+`GltfImportResult` carries `objectAnimations`, `objectAnimationNames` and `objectAnimationPlacement`
+(the index of the node's mesh placement, or `-1` for a node with no mesh, such as an empty used as a
+**route driver**). A node that carries a skinned mesh is skipped and noted, whether it has channels of its
+own or only a moving ancestor: glTF ignores its own transform.
+
+**Duration.** Every clip lasts its glTF animation's full length (the latest key of any of its channels),
+not the node's own last key. A track that ends early holds its last pose (the sampler clamps past the
+final key), so all the clips of one animation wrap together instead of looping out of phase.
+
+**Zero scale.** A scale keyed to zero (or one axis flattened to zero) is written as a zero scale key, so a
+node that shrinks to nothing stays shrunk. The rotation of a fully collapsed key cannot be recovered from
+the matrix, so it borrows the neighbouring key's. Playback divides by the *start* pose, which a collapsed
+one does not have, so a clip whose first key has a zero-scale axis is noted: start it (`animtime`) at a
+time it is not collapsed.
+
+**The rule.** The importer bakes a mesh node's rest rotation*scale `Q0` into that node's mesh copy and
+exports only the rest translation as the placement. The clip stores `A(t) = W(t) * Q0^-1` in function
+order (`Q0^-1` first, then `W`; the row-vector matrix is `Q0^-1 * W`), where `W(t)` is the node's world
+transform with every ancestor composed, animated or not, and `Q0` is exactly what was baked into that
+copy (identity for an empty). Playback uses only relative motion, `F(t) = B * A(t0)^-1 * A(t)` with `B`
+the placement (`docs/formats/FORMAT_SPECS.md` §9.6), so a mesh at its imported placement, played from
+`t0 = 0`, reproduces the authored motion — and a library mesh placed at any pose of a route driver's clip
+follows that route with the right heading. Values go through the importer's own axis and unit
+conversion, the same one node transforms and placements use.
+
+**Sampling.** The node's world transform is sampled at the union of the key times of the node's and its
+ancestors' channels, so differing per-channel timelines and animated parents are handled and a LINEAR
+curve is exact at its keys. Where the product is not linear between those keys — an ancestor that
+rotates or scales, or a CUBICSPLINE curve — each span is also sampled at 30 Hz. A STEP curve holds: a
+track made only of STEP channels is a Step track, and a STEP channel mixed with interpolated ones gets a
+sample just before each jump. A transform that cannot be a translation/rotation/scale triple (shear from
+a non-uniformly scaled parent) is noted and the rest recovered.
+
+`AverAssetC` writes each object clip as `<base>_<name>.ocanim` beside the skeletal clips, and puts the
+`anim <clip>` token on the scene level's placement of a moving mesh node (see the `.ocworld` `anim`
+tokens, `docs/formats/FORMAT_SPECS.md` §11), so an imported animated scene plays as authored. A
+placement plays ONE clip: when a node moves in several glTF animations the FIRST one is attached, the
+others are still written, and the tool logs which were not attached. Clip file names are de-duplicated
+case-insensitively (Windows treats `Car.ocanim` and `car.ocanim` as one file). The placement is the
+node's rest transform (its own TRS in the file), so author that equal to the first key; a clip whose
+first key differs still plays, but starts from the rest pose rather than the first key.
+
+### Base colour factor
+
+glTF's `baseColorFactor` is **linear**; an `.ocmat` holds it **sRGB-encoded** (the pack step decodes
+it with `pow(x, 2.2)`). The import cook encodes a linear factor on the way in
+(`ImportedMaterial::baseColorFactorLinear`, set by glTF and USD), so an untextured 0.5 grey renders
+at 0.5, not 0.22. Only the factor is affected — textures were always decoded correctly. OBJ's `Kd`
+is **treated as sRGB** and crosses unconverted: `.mtl` names no colour space, and that is an
+assumption (Blender's exporter is believed to write its linear base colour there). Materials
+imported before this change keep the old, darker encoding until they are re-imported.
 
 ---
 
@@ -117,9 +193,13 @@ A file with no faces **fails** rather than returning an empty mesh.
 
 ---
 
-## USD — `UsdImport.hpp`
+## USD — `UsdImport.hpp`, `UsdCrate.hpp`
 
-**The ASCII (USDA) encoding only, parsed natively.**
+**Both encodings (USDA text and USDC binary), parsed natively.** Two entry points:
+
+- `importUsd` reads **one text layer**, exactly as written.
+- `importUsdStage` reads **a whole stage** from its root layer — sublayers, binary layers,
+  references, inherits and `PointInstancer`s (below). `AverAssetC convert` uses this one.
 
 Pixar's OpenUSD is Apache-2.0, so the licence is not the objection; the size is. It pulls TBB and a
 hundred-megabyte build for what this engine wants from a `.usd` file, which is triangles, normals,
@@ -129,15 +209,123 @@ UVs and a transform.
 
 `.usd` is legally either ASCII or binary, so trusting the name gets it wrong roughly half the time.
 
-| Magic | Encoding | Result |
-|---|---|---|
-| `#usda` | USDA | **imported** |
-| `PXR-USDC` | USDC binary crate | refused, naming it, suggesting `usdcat -o out.usda in.usdc` |
-| `PK\x03\x04` | USDZ zip | refused, naming it, explaining it is a zip to extract |
+| Magic | Encoding | `importUsd` | `importUsdStage` |
+|---|---|---|---|
+| `#usda` | USDA | **imported** | **imported** |
+| `PXR-USDC` | USDC binary crate (0.4.0+) | refused, naming it | **imported** (`UsdCrate`) |
+| `PK\x03\x04` | USDZ zip | refused, naming it, explaining it is a zip to extract | same |
+
+### Whole stages — `importUsdStage`
+
+- **The layer stack**: the root's `subLayers`, strongest first. Binary layers are merged **by prim
+  path** (children are the union, a field's value is the strongest opinion) — how a scene split into
+  per-element files comes out whole. Text layers each contribute what they define.
+- **References, payloads, inherits** resolve to the geometry they bring, recursively; a reference's
+  asset path is relative to the layer that authored it.
+- **Every layer in the root's units and up axis**, which is how USD composes a stage.
+- **`PointInstancer`s**: each prototype is built **once**, as one mesh (its root transform baked in,
+  USD's IncludeProtoXform), and each kept instance becomes a placement with its own rotation and scale.
+  A prototype's typical instance scale is moved into the mesh so it is a sensible size on its own.
+- **The instance budget** (`UsdImportOptions::maxInstances`, `maxInstanceTriangles`): a scattered stage
+  can declare millions of instances. Kept instances are real ones at their real transforms; the budget
+  is shared by sqrt(count) × drawn size, the triangle cap halves the costliest prototype and hands its
+  share to cheaper ones, and a `focus` (the stage's first camera, or a point) keeps full density within
+  `focusRadius` and thins as (radius / distance)³ beyond. Prototypes with at most `keepAllBelow`
+  instances are kept whole. `0` means **no limit** on either budget, on the command line and in
+  `UsdImportOptions` alike.
+- **Thinning by what can be seen** (`UsdImportOptions::focusBySize`, on in `AverAssetC`'s foliage
+  mode): each prototype keeps full density out to max(`focusRadius`, K × its drawn radius), thinning as
+  (reach / distance)³ beyond, with K bisected so the kept count fills `maxInstances`. A 12 m tree stays
+  dense 1.2–1.6 km out while 15 cm moss thins past the focus radius; one falloff for every prototype had
+  kept 0.2% of Jungle Ruins' forests and left a quarter of the budget unspent (a prototype's keep
+  saturates at 1, the falloff did not). The triangle cap is not applied in this mode.
+- **Translucency maps** UsdPreviewSurface cannot name are found on disk beside the base colour
+  (`<stem>_Translucency.*` / `_Transmission.*`, case-insensitive; Intel's Blender materials feed them into
+  Transmission) and reduced to the material's `subsurfaceWeight` -- their mean over the texels the
+  cutout keeps. The map itself is not written.
+- **One file, one image**: texture paths are normalised before comparison (layers in different folders
+  name a shared atlas by different relative paths), and byte-identical images share one file.
+- **Kept instances become instanced FOLIAGE by default, not entities** — see
+  [Instanced foliage](#instanced-foliage--foliage--ocinst) below for what that means and why.
+- **Cameras** come back as viewpoints (`UsdImportResult::cameras`); `AverAssetC` writes the first as the
+  level's `CAMERA` record.
+- **The sun** (`UsdImportResult::sun`): a `DistantLight` is one outright; a `DomeLight` whose Radiance
+  `.hdr` holds a distinct sun (peak over 20× the sky's mean) gives its brightest texels' direction —
+  longitude `(u − 0.5)·360°` from the dome's +Z toward +X, pole turned onto the stage's up axis per
+  `poleAxis`, then the light's transform. That orientation was checked against Intel's Jungle Ruins
+  Karma renders (the mirrored reading lights the opposite pyramid faces). `AverAssetC` writes it as
+  the level's `SUN` direction; colour and brightness stay the physical sky's.
+- **`excludePrims`** (`--exclude /root/A,/root/B`) leaves prims and everything under them out — for
+  sources that stack two versions of one surface, like Jungle Ruins' cinematic terrain tiles laid
+  over four of its backdrop tiles.
+- **A connected `roughness`/`metallic` takes the texture whole** (factor 1), not the unconnected
+  defaults 0.5/0 — those halved every textured material's roughness before 2026-09-28.
+- **Identical corners are welded** (`weldIdenticalVertices`, both entry points): the build makes one
+  vertex per face corner, then merges corners whose position, normal and UV are bit-identical, so a
+  smooth, continuously mapped surface shares its vertices while creases and UV seams keep theirs.
+- **`honourSharpFace`** (default on): a mesh whose authored normals are flat per face while Blender's
+  `primvars:sharp_face` calls those faces smooth gets smooth normals rebuilt — angle-weighted, by
+  position (so a mesh split into per-quad islands still smooths across them), limited to faces within
+  60° so real creases survive. Jungle Ruins' terrain arrives exactly that way and otherwise renders as
+  a mosaic of triangles; any mesh without the contradiction keeps its authored normals.
+- **`meshGroups`** names the folder of each mesh's source layer; `AverAssetC` writes a multi-folder
+  stage into matching subfolders instead of one flat directory.
+
+`AverAssetC convert <root.usda> --out-dir … --content-dir …` takes `--instances-as foliage|entities`
+(`foliage`), `--max-instances` (4000000 in `foliage` mode, 12000 in `entities` mode), `--max-instance-tris`
+(0 — unlimited — in `foliage` mode, 150000000 in `entities` mode), `--focus camera|none|<x>,<y>`
+(camera), `--focus-radius <cm>` (10000), `--keep-all-below <n>` (2000) and `--exclude <prim>[,<prim>…]`.
 
 **The refusals are the point of the design.** A silent empty import looks identical to a model that
 legitimately has no geometry, and it sends the user to look at the renderer. Every failure path here
 returns `false` with a message that says what the file actually is.
+
+### Instanced foliage — `FOLIAGE` / `.ocinst`
+
+**Every kept `PointInstancer` instance is written as instanced foliage by default**, not as a `PLACE`/
+`PLACEG` entity. This is what makes the instance budget above affordable at all: a scattered stage can
+declare millions of instances (Intel's Jungle Ruins: 8.7 million), and a level built out of one
+`scene::Entity` per instance is CPU-bound long before the budget gets anywhere near that count.
+Instanced foliage costs none of that — it lives **outside** the entity/draw system entirely.
+
+**What foliage is, precisely**: static, **ray-traced only** (one TLAS instance per row; not drawn in
+raster mode yet, and never in `VoxiRenderer::draws_`), **no collision**, and **not individually
+selectable** — there is no entity per blade of grass to select, move or delete on its own. A level
+names its baked instance table with a `FOLIAGE <content-relative path>` record
+(`fmt::OcWorldData::foliageFiles`, `modules/formats/include/aver/formats/OcWorld.hpp`), and the path
+names a binary `.ocinst` file — `modules/formats/include/aver/formats/OcInstances.hpp` — an `AVR1`
+container (the same one `.ocmesh`/`.ocland`/`.ocfoliage` use) holding a header, a string table of
+prototype asset paths, a group table (one `{asset, flags, first, count}` run per prototype mesh) and
+one bulk chunk of `12 f32` per instance: the engine's own row-vector world matrix
+(`v * M`, translation in the last row) with its trailing `(0, 0, 0, 1)` column dropped —
+`t[r*3 + c] = M[r][c]` for `r` in `0..3`, `c` in `0..2`. `AverAssetC` writes `<Maps>/<level>.ocinst`
+next to the `.ocworld` it belongs to (same stem, so a de-duplicated `Foo_2.ocworld` gets
+`Foo_2.ocinst`, never a table silently misnamed after a level import that did **not** overwrite an
+existing one).
+
+**The transform is bit-for-bit what the identical prim would have gotten as an ordinary entity.**
+`AverAssetC` builds it through the exact same two functions `aver::world::instantiate`
+(`modules/world/src/LevelInstance.cpp`) uses for a `PLACE`/`PLACEG` line — `world::eulerDegFromQuat`
+then `world::quatFromEulerDeg` (`LevelTransform.hpp`), followed by `Transform::toMatrix()`
+(`aver/core/Math.hpp`) — rather than building a matrix from the instance's quaternion directly. That
+round trip through degrees is not perfectly lossless at gimbal lock (see `eulerDegFromQuat`'s own
+comment), so skipping it would leave a near-vertical instance at a visibly different orientation than
+the same prim gets as an entity; going through it reproduces the discrepancy identically instead of
+avoiding it inconsistently.
+
+**`--instances-as entities`** restores the pre-`.ocinst` behaviour verbatim: every kept instance goes
+back to being an ordinary `PLACE`/`PLACEG` line with `nocollide`, and the instance budget defaults
+revert to the old entity-sized numbers (12000 / 150000000 triangles) since each one now costs a real
+draw. In `foliage` mode the triangle cap is **unlimited by default** (`0`) because instancing shares
+one BLAS per prototype — the per-instance triangle cost that motivated capping entities does not apply
+— and the instance count defaults to 4,000,000, hard-capped at 8,000,000
+(`aver::voxi::VoxiRenderer::kMaxFoliageInstances`) since a table past that many rows only wastes
+convert time and disk: the runtime's own `VoxiRenderer::setFoliage` truncates anything beyond it, with
+its own warning, the moment the level loads.
+
+Loading a `FOLIAGE` record into `voxi::VoxiRenderer`'s ray-traced instance buffers is
+`aver::game::loadLevelFoliage` (`Runtime/include/aver/game/GameFoliage.hpp`), run by both hosts the
+same way any other level record is.
 
 ### Stage metadata is read and honoured
 
@@ -161,10 +349,12 @@ so a `matrix4d` copies across without a transpose.
 
 ### Not supported, and reported
 
-references and payloads · variant sets · `PointInstancer` · `Material` / `Shader` prims ·
-time-sampled attributes · subdivision (the control cage imports **unsubdivided**, and says so, because
-a faceted result otherwise reads as a broken model) · non-uniform scale on normals (applied without
-an inverse-transpose, so shading on that prim is approximate)
+`importUsd`: references, payloads, sublayers and `PointInstancer`s (use `importUsdStage`).
+Both: variant sets · specializes · relocates · UsdLux lights · time-sampled attributes (the default is
+used) · shading models other than `UsdPreviewSurface` · subdivision (the control cage imports
+**unsubdivided**, and says so, because a faceted result otherwise reads as a broken model) ·
+non-uniform scale on normals (applied without an inverse-transpose, so shading on that prim is
+approximate)
 
 A stage that parses but composes no `UsdGeomMesh` **fails** with exactly that message.
 
@@ -253,8 +443,7 @@ That rules out:
 
 To bring in a model you have the rights to:
 
-1. Export or convert to **glTF/GLB**, **OBJ**, or **USDA**. (Blender exports all three; `usdcat`
-   converts USDC to USDA.)
+1. Export or convert to **glTF/GLB**, **OBJ**, or **USD** (text or binary). Blender exports all three.
 2. Import it — the editor's importer writes `Content/Meshes/<name>.ocmesh`.
 3. Put the source file under a `Source/` directory. `docs/PACKAGING.md` drops every `**/Source/`
    when staging a game, so editable source does not ship.

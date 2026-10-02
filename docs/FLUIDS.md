@@ -241,13 +241,14 @@ superseded wherever the two disagree.
   which surface, or how disturbed it is, is actually on screen.
 - **Neither surface reaches shadows, the RT TLAS, or GI voxelisation** — both draw outside
   `IDevice::drawMesh` (§6).
-- **The analytic ocean's own animation clock is frozen.** `WaterRenderer::tick(dtSeconds)` exists and
-  is never called anywhere in `sandbox/src/SandboxApp.cpp` (confirmed by grep against both `waterRenderer_`
-  call sites in this tree); the Gerstner grid's per-vertex phase never advances, so the surface is
-  visually static regardless of how long it has been on screen. The simulated volume does not share
-  this bug — its own clock (`FluidScene::update`'s `elapsedSeconds` parameter) is the composition
-  root's ordinary `Timestep::total`, which is threaded through every other system's tick the same
-  frame and does advance.
+- **The analytic ocean's wave clock advances through `GameWater::update`.** `WaterRenderer::tick(dtSeconds)`
+  is called from `game::GameWater::update` (`Runtime/src/GameWater.cpp`) whenever the analytic surface
+  is attached, and both hosts call `water_.update(...)` once per frame (`Runtime/src/GameApp.cpp`,
+  `sandbox/src/SandboxApp.cpp`), so the Gerstner grid's per-vertex phase moves in the editor and in a
+  running game. The clock is `WaterRenderer`'s own, summed from each frame's `dt` (clamped to `[0, 1]`
+  per call, see `WaterRenderer::tick`), not the composition root's `Timestep::total`. The simulated
+  volume keeps its own separate clock (`FluidScene::update`'s `elapsedSeconds` parameter, the
+  composition root's ordinary `Timestep::total`).
 - **`FluidScene` — the solver join itself — has no dedicated test.** Everything under §1's "Checked
   by" column that touches it is either pure arithmetic (`FluidVolume`, tested with no device) or the
   physics-only damping calibration; nothing exercises `FluidScene::spawn`/`update`/`transparentPass`

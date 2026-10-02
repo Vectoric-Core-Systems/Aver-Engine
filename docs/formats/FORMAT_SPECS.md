@@ -34,6 +34,8 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.ocworld` | Native scene/world | **text** (cooked → `WRLD` chunk) | none / `AVR1` | **Superset of `.ocmap`** — scene graph, streaming, lighting, terrain, prefab instances, class-instance placement | **NEW** |
 | `.ocpak` | Cooked package | **binary** | `AVR1`/`PAK ` | Bundle of cooked assets for shipping (DDC output) | **NEW** |
 | `.ocparticle` | Particle effect | **text** | none | Emitter shape/rate, lifetime, direction+spread, speed, gravity, damping, size- and colour-over-life, blend mode, GI opt-in | **NEW** |
+| `.ocinst` | Baked instanced foliage | **binary** | `AVR1`/`INST` | Flat, grouped world-transform table a level's `FOLIAGE` record names; static, ray-traced only, no collision, not selectable | **NEW** |
+| `.oclanes` | Traffic lanes | **text** | none | A level's directed lane polylines and the lanes each flows into, read from `<level>.oclanes` beside the `.ocworld`; what the level's `vehicle` placements drive along | **NEW** |
 
 Rationale for text vs binary: **graphs and small authoring data stay text** (materials, prefabs, worlds, the legacy family) — diffable, hand-editable, mergeable in VCS, matching OC ergonomics. **Bulk geometry/pixel/track data is binary** (mesh, texture, skeletal, animation) — mmap-able, GPU-uploadable, compact. Text formats have a *cooked* binary projection (a chunk inside `.ocpak`) for shipping; the text form remains the source of truth.
 
@@ -454,7 +456,7 @@ Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: *
 | 0x00 | 4 | f32 | `Duration` (seconds) |
 | 0x04 | 4 | u32 | `TrackCount` |
 | 0x08 | 1 | u8 | `Storage` | 0=keyframed (full fidelity), 1=baked-uniform (resampled, runtime-cheap) |
-| 0x09 | 1 | u8 | `Flags` | bit0 `Loop`, bit1 `AdditiveBase`, bit2 `RootMotion` |
+| 0x09 | 1 | u8 | `Flags` | bit0 `Loop`, bit1 `AdditiveBase`, bit2 `RootMotion`, bit3 `Object` (§9.6) |
 | 0x0A | 2 | u16 | `SampleRate` | for `Storage=1` (e.g. 30/60), else 0 |
 | 0x0C | 4 | StringRef | `SkeletonRef` | target skeleton name/guid hint |
 | 0x10 | … | TrackDesc[TrackCount] | 24 B each |
@@ -540,6 +542,41 @@ draggable tangent handles, same shape as the graph editor's node canvas.
 
 ### 9.5 `TRKS` key layout
 Per track, for each present channel, a sub-array. **Keyframed** (`Storage=0`): each key = `f32 Time` + value(s): T/S = 3×f32, R = 4×f32 quat; for `CUBICSPLINE`, each key = `Time` + `inTangent` + `value` + `outTangent` (glTF cubic spec preserved). **Baked-uniform** (`Storage=1`): no per-key time; `KeyCount = round(Duration*SampleRate)+1` samples at `frame/SampleRate`, values only (this is the runtime-fast form, equivalent to the current `.ocbeam` ANIM but with chosen rate). Quaternions renormalized on read; slerp for LINEAR, hold for STEP, Hermite for CUBICSPLINE. A cooker can emit both: keep the keyframed source, bake a uniform variant into `.ocpak` for shipping.
+
+### 9.6 Object clips (`Flags` bit3 `Object`)
+
+A clip with bit3 set **moves a placed mesh instead of posing a skeleton**: a car on a route, a boat on a
+river, a fan, a train on a beam. `SkeletonRef` is empty and there is **one track, on `BoneIndex` 0**,
+carrying translation + rotation keys (and scale only if it animates). Values are the object's transform
+`A(t)` in **engine space** (centimetres, Z up, the basis and quaternion convention of `scene::CLocal`), in
+some fixed frame. Nothing else in the container changes: the same `AHDR`/`TRKS` layout, the same
+interpolation modes, and notifies and curves are still allowed. `OcAnimation::valid()` requires an object
+clip to be exactly one bone-0 track.
+
+**Playback rule.** Only *relative* motion is used, so the fixed frame never matters:
+
+    F(t) = B * A(t0)^-1 * A(t)        applied to a mesh point p as  B(A(t0)^-1(A(t)(p)))
+
+`B` is the entity's own authored local transform (its placement) and `t0` the animator's start time
+(`CAnimator.time` when playback begins). In words: the placement is where the object is at `t0`, and the
+clip moves it from there. A car placed at the route pose for `t0` follows the route exactly; a fan placed
+anywhere spins about its own pivot. In this engine's row-vector `Mat4` the matrix is `A(t) * A(t0)^-1 * B`
+(the first-applied factor leftmost), composed with full TRS and decomposed back into a `Transform`.
+Time advances as it does for any clip (`dt * speed`, `once` clamps at the end, otherwise it wraps).
+
+Object animation runs only while a session is playing; the editor outside Play leaves every object at
+its placement. A level attaches a clip to a placement with the `anim` tokens (§11).
+
+**glTF import** writes one such clip per glTF animation and moving non-joint node (`Loop | Object`), with
+`A(t) = W(t) * Q0^-1` in the sense of the rule above (function order: `Q0^-1` first, then `W`; row-vector
+matrix `Q0^-1 * W`), where `W(t)` is the node's world transform with every ancestor composed and `Q0` is the
+rest rotation*scale the importer baked into the node's mesh copy (identity for an empty). A node moves when
+it has channels of its own or is an unskinned mesh node under one that does (a static child rides on its
+animated parent; one whose world never changes gets no clip). `Duration` is the glTF animation's full length
+(the latest key of any channel), the same for every clip of that animation, so a track that ends early
+holds its last pose and the clips wrap together. A scale keyed to zero is stored as a zero scale key (the
+sampler and `OcAnimation::valid()` accept it); playback divides by `A(t0)`, so a clip should not start at a
+zero-scale axis. See `docs/ASSET_IMPORT.md`.
 
 ---
 
@@ -786,6 +823,17 @@ TERRAIN heightfield {guid:0x…} extent 800000 800000
 
 Notes: `PLACE` (asset-name + transform, `.ocmap` style) and `PLACEG` (GUID + non-uniform scale) coexist; `DEFORM` unchanged (soft-body barriers). `LAYER`/`NODE`/`CELL`/`STREAM` give hierarchical + streamable worlds without the monolithic-level bloat. `GEOREF`/`TERRAIN` are the georeferenced-world hook the recon flagged as the likely dormant-Cesium role (`arch §6/§8`) — specified but engine-optional. Cooked `.ocworld` → `WRLD` chunk (flattened instance/cell/light tables) + a BLAKE3 Merkle `ROOT` computed over placements and referenced asset content hashes (the recon-intended real ROOT), and a `mapContentId` for the net map-parity gate (`net §4`).
 
+**Header comments (`OcWorldData::notes`).** The full-line `#` comments that sit before the first
+record after the header line (credits, licence and attribution lines, authoring notes), and any
+`NOTE <text>` line wherever it appears, are read into `notes` (one entry per line, without the leading
+`# `), and `writeOcworld` re-emits each as a `# <text>` line straight after `OCWORLD 1`. The editor keeps
+them in the level header it holds from open to save, so a Ctrl+S no longer erases a hand-written credit
+block. A `NOTE` line is the form for a note that must not depend on its position (a plain comment is
+only kept before the first record); it comes back out as a `#` comment. The writer's own `# Written by
+the Aver Engine editor…` banner is not a note and is never kept. Inline comments on a record line and
+comments after the first record are still dropped on save, and a level with no header comments writes
+exactly what it did before.
+
 **The `class` keyword-argument** on `PLACE`/`PLACEG` (`modules/formats/src/OcWorld.cpp`: parsed at
 the trailing-token loop, written only when non-empty, same "no override is the default" rule
 `GAMEMODE` follows) turns a placement into a **class instance** instead of an ordinary mesh: `class
@@ -798,6 +846,56 @@ inert), and what the instance looks like is entirely up to the named class's own
 `OnStart`/`OnTick`. See [`VISUAL_SCRIPTING.md` §6](../VISUAL_SCRIPTING.md) for the full load-time
 pipeline (parse → skip the raw entity → collect → spawn once scripting is ready) and for a real,
 running two-instance example.
+
+**The `anim` tokens** (`OcWorldPlacement::animClip`/`animSpeed`/`animTime`/`animOnce`) attach an
+**object clip** (§9.6) to a placement, so the mesh moves while the level plays. All are keyword tokens
+parsed before the material fallback, like `class` and `name`, and written back only when set:
+
+| Token | Meaning | Default (not written) |
+|---|---|---|
+| `anim <clip>` | content-relative path of the `.ocanim`, forward slashes, **with** the extension — the spelling a mesh path uses, so the id is `fnv1a64(path)` like every content id; percent-encoded like `name` (whitespace, `%`, quotes, control bytes, and `#` and `;`, which the reader would otherwise take for a comment and a line terminator) | none |
+| `animspeed <f>` | playback speed multiplier; `0` holds the clip at `animtime` | `1` |
+| `animtime <f>` | start time `t0` in seconds | `0` |
+| `animonce` | bare token: play once and hold the last pose | loop |
+
+`animspeed`, `animtime` and `animonce` are written only alongside an `anim` clip. The placement's own
+transform is where the object sits at `animtime`; the clip moves it relative to that. A placement that
+collides gets a kinematic body instead of a static one so a character standing on it is carried. A
+level with no `anim` token reads and writes exactly as before; an older reader that meets one takes the
+word `anim` as the placement's material (if it had none), as it does for `class`.
+
+```
+PLACE  Meshes/car.ocmesh  1200 400 0  0 0 0  1  M_Paint  anim Anims/Route_Car.ocanim animspeed 2
+PLACE  Meshes/fan.ocmesh  5000 0 300  0 0 0  1  anim Anims/Fan_Spin.ocanim animtime 0.5 animonce
+```
+
+**The `vehicle` token** (`OcWorldPlacement::vehiclePreset`) makes a placement a **driven vehicle**: when
+play starts, `world::VehicleSystem` builds the placement's mesh into a physics vehicle of that preset and
+drives it along the lanes of the level's `.oclanes` (§11c). A keyword-plus-argument token parsed before
+the material fallback, like `class`, `name` and `anim`, percent-encoded like `name`, and written back only
+when set:
+
+| Token | Meaning | Default (not written) |
+|---|---|---|
+| `vehicle <preset>` | the physical recipe: `car`, `van`, `truck`, `bus` or `sports` (mass, wheel size, engine). The mesh's own bounds size the chassis and place the wheels | none |
+
+A placement should carry `vehicle` **or** `anim`, not both, and the parser enforces neither that nor the
+preset name — an unknown preset reads and writes back unchanged, and what to do with one is the vehicle
+system's to decide: `GameLevel::beginVehicles` builds an unknown preset as `car` and logs it, and skips a
+placement that also carries an `anim` (the clip would overwrite the physics pose every frame, so it stays
+animated and is not driven). A vehicle placement should be written `nocollide`: its physics body is the
+vehicle's own chassis, not a static collider, and `world::instantiate` builds no static body for a
+placement with a `vehicle` token whether or not it says so. The level generator that is to write these
+placements is expected to write one of the two and `nocollide`; nothing in the format requires it. The
+editor writes the token back on a save, and a save made while Play is driving the cars writes each car's
+PLACED pose, not where it has driven to. A level with no `vehicle` token reads and writes exactly as
+before; an older reader that meets one takes the word `vehicle` as the placement's material (if it had
+none), as it does for `class` and `anim`.
+
+```
+PLACE  Meshes/Cars/sedan.ocmesh  1200 400 0  0 0 0  1  M_Paint  nocollide vehicle car
+PLACE  Meshes/Cars/bus.ocmesh    5000 400 0  90 0 0  1  nocollide vehicle bus
+```
 
 **`WATER`/`WAVE`** (`modules/formats/{include,src}/aver/formats/OcWorld.{hpp,cpp}`: `equalsCI(key,
 "WATER"/"WAVE")` in the same trailing-token loop `class` above is parsed by) author a level's own body
@@ -826,6 +924,16 @@ format does not stop it — but `SandboxApp::applyLevelWater` draws only the fir
 warning about the rest, a consumer limit rather than a parser one. See
 [`FLUIDS.md`](../FLUIDS.md) for the full authoring story, including
 the second, graph-side path (`COMP ... Fluid`) that converges on the identical solver call.
+
+**`FOLIAGE <path>`** (`modules/formats/{include,src}/aver/formats/OcWorld.{hpp,cpp}`:
+`OcWorldData::foliageFiles`, a `std::vector<std::string>`) names one baked `.ocinst` instance table —
+§11b below — content-relative, one token, the identical "no escaping" convention `PLACE`'s own asset
+column, `LANDSCAPE`'s `section` and `SCATTER`'s `mesh` already use. A level may carry several; each is
+independent. Unlike every other record in this section, nothing here is authored by typing — an
+importer (`AverAssetC`, by default for a USD `PointInstancer`) or a future paint tool writes both the
+`.ocinst` file and the `FOLIAGE` line that names it. The instances it names are static, **ray-traced
+only** (never `VoxiRenderer::draws_`), have no collision and are not individually selectable — see
+§11b for why a flat table outside `placements` is what that requires.
 
 ---
 
@@ -867,6 +975,115 @@ particle until the effect fills the screen.
 
 A parse failure leaves the caller's effect at this format's own defaults, never at the partial state
 of a file that failed halfway.
+
+---
+
+## 11b. `.ocinst` — baked instanced foliage (binary, `AVR1`/`INST`)
+
+`modules/formats/include/aver/formats/OcInstances.hpp`, `src/OcInstances.cpp`. What a level's own
+`FOLIAGE <path>` record (§11) names: a flat, GROUPED table of world transforms, never authored as
+text — it is written by an importer (`AverAssetC`, for a USD `PointInstancer` by default) or a future
+paint tool, at up to `kMaxFoliageInstances` = 8,000,000 rows, which is why it is binary rather than
+following `.ocworld`'s own line-oriented grammar the way every other level-adjacent record in this
+document does. Subtype `'INST'`. Chunks: `IHDR` (required), `ISTR` (the §3.3 string table, for
+prototype asset paths), `IGRP` (required), `IXFM` (`GpuUploadable`).
+
+### 11b.1 `IHDR`
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 4 | u32 | `GroupCount` |
+| 0x04 | 4 | u32 | `InstanceCount` |
+
+### 11b.2 `IGRP` (`GroupCount` × 16-byte entries)
+| Off | Size | Type | Field | Notes |
+|---|---|---|---|---|
+| 0x00 | 4 | StringRef | `AssetRef` | into `ISTR`; the SAME string a `PLACE` line's own asset column carries, so `objectId = fnv1a64(asset)` (`OcWorld.cpp`) matches a mesh placement of the identical prototype |
+| 0x04 | 4 | u32 | `Flags` | bit0 `CastShadow` (`kOcInstanceFlagCastShadow`); every group this tree writes sets it — foliage casting no shadow at all would be a visible regression against the entities it replaces |
+| 0x08 | 4 | u32 | `First` | index of this group's first row in `IXFM` |
+| 0x0C | 4 | u32 | `Count` | this group's row count; `[First, First+Count)` must lie inside `InstanceCount` |
+
+### 11b.3 `IXFM` (`InstanceCount` × 12 `f32`, one flat array — not an array of per-instance records)
+Row-vector (`v * M`) world transforms, centimetres, engine world space, with the matrix's trailing
+`(0, 0, 0, 1)` column already dropped: `t[r*3 + c] = M[r][c]` for `r` in `0..3`, `c` in `0..2` — the
+SAME convention `game::drawWorld` already passes as `&wm.m[0][0]` and `voxi::TlasInstance::world`
+already holds, just without the four trailing zeros/one neither of those ever reads either. ONE FLAT
+CHUNK rather than a per-instance struct because the whole format exists to be read and written in ONE
+bulk `memcpy` — see the header's own comment for why an 8,000,000-row table (384 MB at this point) must
+never cost a per-instance allocation on either side of the round trip.
+
+A reader validates counts (`IGRP`/`IXFM` sizes against `IHDR`'s declared counts), ranges (every
+group's `[First, First+Count)` inside `InstanceCount`, checked by subtraction so a crafted `First`
+near u32's own maximum cannot wrap the comparison — the identical rearrangement §3's own `AVR1` chunk
+bounds checks use, for the identical reason) and that every transform float is finite, refusing a
+truncated or hand-corrupted file rather than handing it to a TLAS build as silent garbage.
+
+**What a `.ocinst` row is NOT**: an entity. Instanced foliage sits outside the whole
+scene/entity/`placements` system this document otherwise describes — no `scene::Entity`, no
+`CMeshRenderer`, no `NAME`/outliner row per instance. It is static, ray-traced only (one TLAS instance
+per row; not drawn in raster mode yet), has no collision and is not individually selectable, exactly as
+§11's own `FOLIAGE` entry states. `Runtime/include/aver/game/GameFoliage.hpp`'s `loadLevelFoliage` is
+what turns a level's `FOLIAGE` records into `voxi::VoxiRenderer::setFoliage`'s prototype/instance
+buffers; this format's own job stops at naming the file and carrying its rows.
+
+---
+
+## 11c. `.oclanes` — traffic lanes (text)
+
+`modules/formats/include/aver/formats/OcLanes.hpp`, `src/OcLanes.cpp`. A level's **sidecar**:
+`<level>.oclanes` sits beside `<level>.ocworld`, same folder, same stem. It carries the directed lane
+polylines the level's `vehicle <preset>` placements (§11) drive along, and which lanes each one flows
+into; `world::VehicleSystem` reads it. Text, for §1's reason and one more: the writer is expected to be a
+level generator's Python script, which can write a text file with nothing but `print`, and at a couple of
+thousand lanes the file is small enough that a binary container's mmap and bulk upload would buy nothing.
+The file is found by name, so it has to move with the level: Save As in the editor copies it beside the
+new level, and a recovered autosave (`<level>.ocworld.autosave`) reads its level's.
+
+```
+OCLANES 1
+# a comment: everything after a # is ignored
+LANE 1 1300 350 0 3  0 0 0  1000 0 0  2000 0 0
+LANE 2 2200 350 1 2  2000 0 0  9000 0 0
+NEXT 1 2
+```
+
+| Record | Fields | Meaning |
+|---|---|---|
+| `OCLANES 1` | version | must be the first record; the only version is `1` |
+| `LANE` | `<id> <speedLimit> <width> <flags> <n> x y z x y z …` | one lane: `id` any `int`, unique in the file; `speedLimit` cm/s and `width` cm, both `> 0`; `flags` a non-negative `int`; `n >= 2` points, each three coordinates, exactly `3n` numbers |
+| `NEXT` | `<id> <successor> <successor> …` | the lanes `id` flows into; zero or more successors, and at most one `NEXT` per lane |
+
+Engine units throughout, in the `.ocworld`'s own space (cm, +X forward, +Y right, +Z up, left-handed), so a
+lane point and a placement position compare directly.
+
+**A lane is directed.** Traffic runs from its first point to its last, and a successor's first point is
+(near) this lane's last point. The file does not enforce that — how near is near is the consumer's
+tolerance to choose — but a generator is expected to write it that way and the vehicle AI relies on it when
+it steps from one lane onto the next. Which side of the road traffic keeps is not a property of the format:
+whatever writes the file offsets each lane from its road's centre line, and the format carries the result.
+
+**`flags`** (`kOcLaneHighway`, `kOcLaneBridge`, `kOcLaneRamp`): bit0 highway, bit1 bridge, bit2 ramp.
+Statements about the road for a consumer to weigh; none changes how the lane is followed.
+
+**`NEXT` may come before or after the lane it names**, and every id it mentions, its own and each
+successor, must be declared by some `LANE` in the file. Resolution waits for the whole file because a
+forward reference is the ordinary case, and a dangling one is refused rather than dropped: a vehicle that
+reaches a lane end and finds a successor id no table holds shows up as one car stopped at one junction,
+a long way from the typo.
+
+**Parsing is tolerant of presentation and strict about content.** CRLF, blank lines and `#` comments
+(whole-line or trailing) are fine. Refused, each with a message that names the line: a missing, repeated
+or unknown-version header, a record this reader does not know (unlike `.ocworld`, §11, which skips
+unknown records — a lane file has one writer and a version line to say when that changes), a `LANE`
+whose `n` is below 2 or does not match the numbers present (checked before anything is allocated, so a
+corrupt count is an error and not a reservation), a number that is not entirely a number (`12x` is not
+`12`) or not finite, a non-positive speed limit or width, a repeated lane id, and a `NEXT` that names an
+undeclared lane, lists an undeclared successor or repeats for a lane that already had one. A failed parse
+leaves the caller's data empty, never half-read. A header with no lanes is legal (a level with no
+traffic); a file with no header, a zero-byte one included, is not.
+
+**The writer is exact.** `writeOcLanes` puts each `LANE` line followed by its `NEXT` line (omitted for a
+dead end) and writes every float as the shortest text that reads back as the same `f32`, so
+`parse(write(d))` equals `d` bit for bit and a second write is byte-identical to the first.
 
 ---
 

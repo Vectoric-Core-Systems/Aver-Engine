@@ -18,6 +18,8 @@
 # The loopback TCP port Sandbox.exe's --mcp opens. This key ONLY changes which port is used when
 # --mcp is given with NO number after it (e.g. "--mcp", not "--mcp 45555") -- it can never open the
 # channel by itself; --mcp is still required. Built only under -DAVER_MODULE_MCP=ON (off by default).
+# The tool server's aver_editor and aver_level tools read this same key to find the running editor,
+# so one line here keeps both sides on the same port (a `port` argument on a call overrides it).
 # Built-in default: 45123
 #editor_bridge.port = 45123
 

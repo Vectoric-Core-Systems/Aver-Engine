@@ -53,9 +53,9 @@ Arrows point to dependencies (A ──▶ B means "A depends on B"). No edge poi
    scene_abi.h  framework_abi.h  physics_abi.h  pbr_abi.h  voxi_abi.h  ui_abi.h
    audio_abi.h  settings_abi.h ── eight DLLs, each with its own export macro; only scene and
                 framework carry a version. (This used to read "seven"; Aver.Settings and its
-                seam are new since.) Physics also spreads across four more headers on the same
+                seam are new since.) Physics also spreads across five more headers on the same
                 DLL — physics_character_abi.h, physics_joints_abi.h, physics_layers_abi.h,
-                physics_shapes_abi.h — which is still one seam, not five.
+                physics_shapes_abi.h, physics_vehicle_abi.h — which is still one seam, not six.
    scripting_abi.h ── the odd one out: STATIC, exports nothing, hands the managed
                  ▲   bridge a function-pointer table instead. See docs/ABI.md
                  │   each seam is implemented by the module below it

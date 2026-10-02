@@ -7,12 +7,15 @@ floating in the 3D scene, over whatever the level happens to look like behind th
 perspective makes them -- so the constraints are different ones:
 
   * TRANSPARENT BACKGROUND, and a shape that is legible as a silhouette. There is no tile to sit on.
-  * A DARK RIM OUTSIDE A LIGHT ONE. The badge has to read against a bright sky AND against dark
-    interior geometry, and a single-colour outline can only do one of those. Two nested strokes,
-    light inside dark, is the standard trick and it is why the outer ring here is near-black.
-  * AN ANCHOR THE SHAPE POINTS AT. The quad is centred on the entity's own origin, so a map-pin
-    silhouette -- wide head, tapering to a tip at the bottom -- says "the thing is HERE, at the tip"
-    rather than "somewhere in this circle".
+  * A SINGLE DARK OUTLINE around a light body. The badge has to read against a bright sky AND against
+    dark interior geometry; a white-on-anything-light shape would vanish, so the body stays light
+    (Unreal's own actor-icon convention) and a dark rim carries the silhouette against a bright
+    background. Built by dilating the body's own alpha mask (see OUTLINE_PX below), so it always
+    traces the actual silhouette -- arms, flag and all -- rather than a shape drawn by hand.
+  * NO SIGNAGE ABOUT FACING. The quad is a CAMERA-FACING billboard (ViewportIconRenderer.cpp), so
+    anything on its face that implied a direction would point wherever the viewer stands, not where
+    the spawn actually faces -- see figure()'s own comment. The flag is decorative, the way Unreal's
+    APlayerStart reads as "a spawn point standing here", not a compass.
 
 Machine-drawn, and branding/ASSETS.md lists it as such: that file is strict that anything shipped be
 traceable to its author and that anything drawn by a script be obvious rather than discovered later.
@@ -23,8 +26,7 @@ way make-asset-icons.py gets its edges.
     python scripts/make-editor-icons.py
 """
 import os
-import math
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_PLAYER_START = os.path.join(_ROOT, "branding", "player-start-icon.png")
@@ -32,100 +34,83 @@ OUT_PLAYER_START = os.path.join(_ROOT, "branding", "player-start-icon.png")
 SIZE = 256                       # square; the renderer scales it to a world-space half-size
 SS = 4                           # supersample factor
 
-# Teal, deliberately: it collides with nothing else already on screen in a viewport. The gizmo owns
-# red/green/blue, the selection outline owns orange, the grid is grey. A spawn marker that shared a
-# hue with any of those would be one more thing to disambiguate mid-drag.
-TEAL_TOP = (45, 212, 191, 255)
-TEAL_BOT = (13, 116, 138, 255)
-RIM_DARK = (10, 22, 26, 255)     # outer rim -- carries the shape against a bright sky
-RIM_LIGHT = (233, 254, 252, 255) # inner rim -- carries it against dark geometry
-WHITE = (255, 255, 255, 255)
+BODY = (245, 247, 250, 255)      # light grey/white body -- Unreal's own actor-icon convention
+RIM_DARK = (10, 22, 26, 255)     # outline -- carries the shape against a bright sky
+FLAG = (235, 90, 60, 255)        # a warm accent so the flag reads as "the" landmark on the figure
 
-
-def pin_outline(cx, head_cy, head_r, tip_y, inflate=0.0):
-    """A map pin: a circle head with two tangent lines running down to a point.
-
-    The tangent point is what makes the join smooth instead of a circle with a triangle stuck on it.
-    For a tip at distance d from the centre, the tangent from the tip touches the circle at angle
-    acos(r/d) off the centre-to-tip direction -- so the straight edges leave the circle exactly where
-    its own tangent already points at the tip, and there is no corner.
-    """
-    r = head_r + inflate
-    tip = (cx, tip_y + inflate)
-    d = tip[1] - head_cy
-    if d <= r:
-        raise ValueError("the tip must lie outside the head circle")
-    a = math.acos(r / d)                     # half-angle of the tangent pair, from straight down
-    pts = [tip]
-    # Sweep the circle the long way round, from the right tangent point up over the top to the left
-    # one, so the polygon closes through the head rather than across it.
-    start = math.pi / 2 - a                  # right tangent, measured from +x, y down
-    end = math.pi / 2 + a - 2 * math.pi      # left tangent, going the long way (over the top)
-    steps = 96
-    for i in range(steps + 1):
-        t = start + (end - start) * i / steps
-        pts.append((cx + r * math.cos(t), head_cy + r * math.sin(t)))
-    return pts
-
-
-def vertical_gradient(size, top, bottom, mask):
-    """Fills `mask` with a top-to-bottom lerp of two colours."""
-    grad = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(grad)
-    for y in range(size):
-        t = y / max(size - 1, 1)
-        gd.line([(0, y), (size, y)],
-                fill=tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(4)))
-    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    out.paste(grad, (0, 0), mask)
-    return out
+# Outline thickness, in the FINAL (post-downsample) SIZE-space pixels -- multiplied by SS below to
+# get the supersampled dilation radius, the same convention every other measurement here uses.
+OUTLINE_PX = 6.0
 
 
 def figure(d, cx, cy, scale):
-    """A standing person: head, shoulders, two legs. Drawn in the negative space of the pin head.
+    """A standing person holding a small flag: head, shoulders, two legs, one raised arm and a
+    pennant. Drawn as one silhouette -- every part the same fill colour -- so OUTLINE_PX's mask
+    dilation traces the whole shape at once rather than per limb.
 
-    A FIGURE RATHER THAN AN ARROW, and the reason is worth writing down: this icon is a CAMERA-FACING
-    billboard, so anything directional on its face would point wherever the viewer happens to stand
-    and would be actively misleading about the spawn's yaw. The facing is shown separately, in world
-    space, by the direction line the editor draws through the marker.
+    A FIGURE RATHER THAN AN ARROW ON THE FACE, and the reason is worth writing down: this icon is a
+    CAMERA-FACING billboard, so anything directional drawn on it would point wherever the viewer
+    happens to stand and would be actively misleading about the spawn's yaw. The facing is shown
+    separately, in world space, by the arrow SandboxApp.cpp draws through the marker; the flag here
+    is not that arrow -- it is decoration, the same way a real flagpole reads as "a landmark", not
+    a compass.
     """
     def s(v):
         return v * scale
-    d.ellipse([(cx - s(13)) * SS, (cy - s(40)) * SS, (cx + s(13)) * SS, (cy - s(14)) * SS], fill=WHITE)
+
+    d.ellipse([(cx - s(13)) * SS, (cy - s(40)) * SS, (cx + s(13)) * SS, (cy - s(14)) * SS], fill=BODY)
     # Torso: a rounded trapezoid, wider at the shoulders.
     d.polygon([((cx - s(21)) * SS, (cy - s(6)) * SS), ((cx + s(21)) * SS, (cy - s(6)) * SS),
                ((cx + s(14)) * SS, (cy + s(20)) * SS), ((cx - s(14)) * SS, (cy + s(20)) * SS)],
-              fill=WHITE)
+              fill=BODY)
     d.rounded_rectangle([((cx - s(21)) * SS, (cy - s(10)) * SS), ((cx + s(21)) * SS, (cy + s(4)) * SS)],
-                        radius=int(s(7) * SS), fill=WHITE)
+                        radius=int(s(7) * SS), fill=BODY)
     # Legs.
     for sign in (-1, 1):
-        d.polygon([((cx + sign * s(3)) * SS, (cy + s(14)) * SS),
+        d.polygon([((cx + sign * s(6)) * SS, (cy + s(14)) * SS),
                    ((cx + sign * s(16)) * SS, (cy + s(14)) * SS),
                    ((cx + sign * s(13)) * SS, (cy + s(44)) * SS),
-                   ((cx + sign * s(2)) * SS, (cy + s(44)) * SS)], fill=WHITE)
+                   ((cx + sign * s(5)) * SS, (cy + s(44)) * SS)], fill=BODY)
+    # Raised arm: a short capsule from the shoulder up and outward to the hand that holds the pole.
+    shoulder = (cx + s(19), cy - s(4))
+    hand = (cx + s(34), cy - s(34))
+    d.line([(shoulder[0] * SS, shoulder[1] * SS), (hand[0] * SS, hand[1] * SS)],
+           fill=BODY, width=int(s(9) * SS))
+    d.ellipse([(hand[0] - s(5)) * SS, (hand[1] - s(5)) * SS,
+               (hand[0] + s(5)) * SS, (hand[1] + s(5)) * SS], fill=BODY)
+    return hand
 
 
 def make_player_start():
     n = SIZE * SS
-    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+    scale = 2.0
+    cx, cy = 128.0, 122.0
 
-    cx, head_cy, head_r, tip_y = 128.0, 104.0, 74.0, 240.0
+    # The body silhouette, on its own layer -- the source for both the outline (its dilated alpha
+    # mask, below) and the final light fill composited on top of it.
+    body = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(body)
+    hand = figure(bd, cx, cy, scale)
 
-    def poly(inflate):
-        return [(x * SS, y * SS) for x, y in pin_outline(cx, head_cy, head_r, tip_y, inflate)]
+    # The flag: a pole rising from the hand, and a pennant at its top. Its own fill colour, not
+    # BODY's, but still part of the silhouette the outline traces -- drawn on the same layer.
+    pole_top = (hand[0], hand[1] - 34.0 * scale * 0.5)
+    bd.line([(hand[0] * SS, hand[1] * SS), (pole_top[0] * SS, pole_top[1] * SS)],
+            fill=BODY, width=int(3.0 * scale * SS))
+    bd.polygon([(pole_top[0] * SS, pole_top[1] * SS),
+                (pole_top[0] * SS, (pole_top[1] + 16.0 * scale) * SS),
+                ((pole_top[0] + 26.0 * scale) * SS, (pole_top[1] + 8.0 * scale) * SS)],
+               fill=FLAG)
 
-    # Three nested silhouettes, outermost first: dark rim, light rim, then the gradient body.
-    d.polygon(poly(9.0), fill=RIM_DARK)
-    d.polygon(poly(4.0), fill=RIM_LIGHT)
+    # Outline: dilate the body layer's own alpha mask by OUTLINE_PX (in supersampled pixels), then
+    # flood that dilated mask with RIM_DARK. MaxFilter needs an odd kernel size (2*radius + 1).
+    radius = max(1, int(round(OUTLINE_PX * SS)))
+    kernel = radius * 2 + 1
+    dilated = body.split()[3].filter(ImageFilter.MaxFilter(kernel))
+    outline = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    outline.paste(RIM_DARK, (0, 0), dilated)
 
-    mask = Image.new("L", (n, n), 0)
-    ImageDraw.Draw(mask).polygon(poly(0.0), fill=255)
-    img = Image.alpha_composite(img, vertical_gradient(n, TEAL_TOP, TEAL_BOT, mask))
-
-    figure(ImageDraw.Draw(img), cx, head_cy + 2.0, 1.0)
-
+    img = Image.alpha_composite(outline, body)
     out = img.resize((SIZE, SIZE), Image.LANCZOS)
     out.save(OUT_PLAYER_START)
     return out

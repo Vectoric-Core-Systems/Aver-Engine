@@ -25,14 +25,14 @@ their wording, only what they mean for a material.
 | --- | --- | --- |
 | The `DOMAIN material` record | `modules/formats/{include,src}/aver/formats/OcGraph.cpp` | round-trip + domain tests, both readers |
 | `GRAPHREF` on a `.ocmat` | `modules/formats/{include,src}/aver/formats/OcMat.*` | `MaterialTest` |
-| The graph → HLSL compiler | `modules/render.pbr/src/MaterialGraphHlsl.cpp` | `MaterialGraphTest` — 82 `check()` calls (grep-counted; the file previously claimed 105, then 59 — the count moved again as coat pins and the imported-material-graph case were added after the 59 count was taken), including 24 node types each compiled through real DXC individually via `kNewNodeCases` and the remaining node types exercised together in one combined `M_Everything` graph, not one-per-type |
+| The graph → HLSL compiler | `modules/render.pbr/src/MaterialGraphHlsl.cpp` | `MaterialGraphTest` — including 26 node types each compiled through real DXC individually via `kNewNodeCases` (plus one extra `Panner` case with `time` wired) and the remaining node types exercised together in one combined `M_Everything` graph, not one-per-type |
 | The process-wide registry | `modules/render.pbr/src/MaterialGraphRegistry.cpp` | `MaterialGraphRegistryTest` |
 | The `AverAuthored`/`averBuildSurface` split | `modules/render.pbr/src/PbrShaders.cpp` | the stock path's own oracle gates (unchanged by construction — see §6) |
 | `GRAPHREF` → `graphId` resolution | `sandbox/src/SandboxApp.cpp` (`resolveMaterialGraph`, `materialForSurface`) | end-to-end fixture, `test-content/MaterialGraph` |
 | The editor's sphere preview | `sandbox/src/GraphEditor.cpp` (`drawMaterialViewport`) | — |
 | Creating one | Content Browser → new `.ocgraph`, then hand-write (or editor-set) `DOMAIN material` | — |
 
-Fifty-six node types across nine categories (§7), one compiled shader for every graph in the
+Fifty-eight node types across nine categories (§7), one compiled shader for every graph in the
 process (§5), and a sphere in the graph editor that shows exactly what that shader will draw (§8).
 
 ---
@@ -47,13 +47,14 @@ compute anything: a `roughnessFactor` is a number, not an expression, and there 
 "roughness gets rougher near the ground" without either baking that into a texture or writing C++.
 
 A material graph computes. It reads what the renderer already knows about the pixel being shaded —
-its UV, its world position and normal, the view direction, the camera and object positions — and
+its UV, its world position and normal, the view direction, the camera and object positions, the
+engine clock (`Time`) — and
 whatever textures the material's own `.ocmat` already declares, and produces some or all of the same
 fields a `PARAM` block would have set directly: `BaseColor`, `Metallic`, `Roughness`, `Normal`,
-`Emissive`, `Occlusion`, `Opacity`, `AlphaCutoff`, `SubsurfaceWeight`, `SubsurfaceRadius`, `Ior`,
-`Transmission`, `AttenuationColor`, `AttenuationDistance`, `CoatWeight`, `CoatRoughness`, `CoatF0` —
-seventeen today (`kOutputFields`, `modules/render.pbr/src/MaterialGraphHlsl.cpp`), up from the eight
-this page originally described.
+`Emissive`, `Occlusion`, `Opacity`, `AlphaCutoff`, `SubsurfaceWeight`, `SubsurfaceRadius`,
+`SubsurfaceColor`, `Ior`, `Transmission`, `AttenuationColor`, `AttenuationDistance`, `CoatWeight`,
+`CoatRoughness`, `CoatF0` — eighteen today (`kOutputFields`,
+`modules/render.pbr/src/MaterialGraphHlsl.cpp`), up from the eight this page originally described.
 
 **The relationship is additive, not a replacement.** `GRAPHREF` names a graph on a `.ocmat` that
 still has its own complete `PARAM` block and its own maps. Only the `MaterialOutput` inputs the
@@ -73,6 +74,23 @@ anything meant to read as a light source: a sunlit white wall sits around 1, a l
 actually bloom and light the room it is in wants something on the order of 10–20, and the Material
 Editor's `Emissive` control goes to 32. `Emissive` alone is the factor, times the map when there is
 one, *is* the outgoing radiance — nothing more.
+
+**`subsurfaceWeight`/`subsurfaceRadius`/`subsurfaceColor` make a thin or fleshy surface read as lit
+from within, not merely rough or shiny.** `subsurfaceWeight` (`PARAM subsurfaceWeight` in `.ocmat`) is
+the `[0,1]` strength of three terms computed per pixel with no extra pass and no extra ray
+(`material_prelude.hlsl`'s `averDirectTerms`/`averSubsurfaceAmbient`): a **wrap** that lets light
+reach past the terminator, tinted by `subsurfaceColor`; a **transmission** term for light arriving on
+the surface's *far* side and diffusing through — a leaf, curtain or ear glowing with the sun behind
+it — whose shadow is deliberately asked from the *light-facing* side, pushed `subsurfaceRadius`'s
+depth through the surface, so a sheet thinner than that depth transmits and a body thicker than it (a
+head, a statue) does not; and an **ambient transmission** share of the same through-light from the sky
+and bounce, so thin foliage in shade reads lighter than an opaque leaf would. `subsurfaceRadius`
+`[0,1]` doubles as that scatter depth (0.25–5 cm) and as the width of the forward-scatter lobe seen
+looking toward the light through the surface. `subsurfaceColor` (`PARAM subsurfaceColor`, sRGB,
+authored like `baseColorFactor`) is the colour light takes travelling through the material — white
+(the default) keeps the old behaviour, scattering in the surface's own colour; skin wants a deep red,
+leaves a yellow-green, wax an orange. **Not a BSSRDF:** no screen-space blur and no lateral transport
+across the surface — what this buys is what reads as translucency, nothing more.
 
 **`lightIntensity` is the separate knob this section used to say did not exist.** `Emissive` is what
 a surface looks like; `lightIntensity` (`pbr::MaterialDesc::lightIntensity`, `PARAM lightIntensity`
@@ -214,10 +232,11 @@ the result. Node-graph materials split that in two:
 
 - **`AverAuthored`** — exactly what a material authors, and nothing else: `baseColor`, `opacity`,
   `metallic`, `roughness`, `normalTS`, `emissive`, `occlusion`, `alphaCutoff`, `subsurfaceWeight`,
-  `subsurfaceRadius`, `ior`, `transmission`, `attenuationColor`, `attenuationDistance`, `coatWeight`,
-  `coatRoughness`, `coatF0` (`modules/render.pbr/shaders/material_prelude.hlsl`). Seventeen fields
-  today — eight originally, before subsurface, the dielectric pair, volume attenuation and the coat
-  triple each added their own — matching `MaterialOutput`'s seventeen input pins one for one.
+  `subsurfaceRadius`, `subsurfaceColor`, `ior`, `transmission`, `attenuationColor`,
+  `attenuationDistance`, `coatWeight`, `coatRoughness`, `coatF0`
+  (`modules/render.pbr/shaders/material_prelude.hlsl`). Eighteen fields today — eight originally,
+  before subsurface, the dielectric pair, volume attenuation and the coat triple each added their
+  own — matching `MaterialOutput`'s eighteen input pins one for one.
 - **`averStockAuthored(uv, geoN)`** — fills an `AverAuthored` the way every material always has: the
   five maps, blended by slope, times the `PARAM` factors.
 - **`averBuildSurface(v, l, a, uv)`** — derives everything else a surface needs from an
@@ -226,14 +245,14 @@ the result. Node-graph materials split that in two:
   any one material's, and a graph never gets to restate it.
 
 A generated `averEvalMaterial` starts from `a = averStockAuthored(uv, v.N)` — so a graph inherits
-this material's own maps and factors as the baseline — then, for each of the seventeen
+this material's own maps and factors as the baseline — then, for each of the eighteen
 `MaterialOutput` inputs, overwrites `a.<field>` **only if that input is driven**, and finally hands
 `a` to `averBuildSurface` exactly as the stock path does. A graph that sets nothing but `BaseColor`
 still gets the right `F0`, the right energy split and the right alpha clip, because it never
 restates a line of the BRDF — it only ever changes what it explicitly touches.
 
 **"Driven" means linked, or a literal typed onto the pin — not merely present.**
-`MaterialOutput`'s seventeen pins carry **no default value** in the palette, on purpose: a `PARAM` block
+`MaterialOutput`'s eighteen pins carry **no default value** in the palette, on purpose: a `PARAM` block
 already has a value for every one of these fields, so a graph's `MaterialOutput` needs a way to say
 "leave this one alone" that is not "zero." A pin left both unlinked and untyped is exactly that; a
 non-empty literal (or a wire) is unambiguously something an author wrote. A graph whose
@@ -277,7 +296,7 @@ The editor enforces exactly this and no more (`materialPinTypeMatch` in `GraphEd
 gameplay graph keeps exact-match wiring, unchanged, because `PinType` there has no vector types at
 all.
 
-### By category (56 node types, 9 categories)
+### By category (58 node types, 9 categories)
 
 | Category | Nodes |
 | --- | --- |
@@ -285,10 +304,10 @@ all.
 | **Input** (6) | `UV`, `WorldPosition`, `WorldNormal`, `ViewDirection`, `CameraPosition`, `ObjectPosition` — what the renderer already knows about this pixel or this instance, read-only, no wiring needed. `ObjectPosition` reads row 3 of the instance transform, useful for anything that should vary per-instance (a phase offset, a per-object tint) that a graph has no other way to reach. |
 | **Math** (27) | `Add` `Subtract` `Multiply` `Divide` `Min` `Max` `Power` `Modulo` `Lerp` `Clamp` `Smoothstep` `Step` `Remap` `Saturate` `Abs` `Frac` `Floor` `Ceil` `Sign` `Sqrt` `Exp` `Log` `Sin` `Cos` `Tan` `Normalize` `OneMinus` — generic over width per the rules above. `Remap` is emitted as arithmetic rather than a call (HLSL has no intrinsic for it); every other name maps straight to the matching HLSL intrinsic. |
 | **Vector** (11) | `Dot` `Length` `Distance` `Cross` `Reflect` `BlendNormals` (reductions and geometry ops — `Dot`/`Length`/`Distance` always return a scalar regardless of input width) plus `MakeFloat2/3/4`, `Split` (the inverse: one statement per output component actually read, so an unread `.z` emits nothing) and `Swizzle`. |
-| **UV** (2) | `TilingOffset`, `Rotator` — both read the surface's own UV when their `uv` input is left unwired (see "the one exception" below). |
+| **UV** (3) | `TilingOffset`, `Panner`, `Rotator` — all read the surface's own UV when their `uv` input is left unwired (see "the one exception" below). `Panner` is `uv + speed * time` (Unreal's node of that name): `speed` is a `float2` defaulting to `(0, 0)`, and an unwired `time` reads `Time`'s wrapped seconds, so setting `speed` alone scrolls the UV. Wire a `Time.raw`, or any other value, into `time` to replace the clock. |
 | **Procedural** (2) | `Noise` (quintic-smoothed value noise), `Checker` — same unwired-UV convention as above. |
 | **Texture** (1) | `SampleTexture` — the one sampling node. |
-| **Utility** (2) | `Fresnel`, `If` (a branchless select — `lerp`+`step` under the hood, not HLSL's `?:`, because the condition compares scalars while the arms may be any matching width). |
+| **Utility** (3) | `Fresnel`, `If` (a branchless select — `lerp`+`step` under the hood, not HLSL's `?:`, because the condition compares scalars while the arms may be any matching width), and `Time`. |
 | **Output** (1) | `MaterialOutput` — the one sink; see §6 for its partial-driving contract. |
 
 **`SampleTexture` fetches once, however many of its outputs a graph reads.** It exposes three output
@@ -304,10 +323,23 @@ error naming the node and listing the eight legal values.
 time; a mask reading a component the input does not have, or containing a character that is
 neither a coordinate nor a colour letter, is refused by name.
 
-**The one exception to "an unwired pin means zero":** `TilingOffset`, `Rotator`, `Noise` and
-`Checker` all take a `uv` input, and when it is left unwired they read the surface's own UV instead
-of `(0, 0)`. An unwired texture-space node reading a literal zero would sample one texel and look
-like a broken texture rather than the obvious default every material editor gives it.
+**`Time` is the engine clock, and it has three outputs.** `time` is seconds wrapped at an hour — the
+one to use for `Sin`, scrolling and pulsing, because `sin()` of an ever-growing float loses its
+period. `raw` is the unwrapped monotonic seconds, for the rare graph that accepts the precision
+decay. `delta` is the last frame's length. All three read the engine's per-frame block (`b0`), which
+`Engine::frameStep` feeds the clock into once per frame (`IDevice::setFrameTime`), so every graph
+evaluated in a frame sees the same instant. There is deliberately no `scale` input: an unwired one would multiply the clock by
+zero and freeze the animation with no error anywhere, so put a `Multiply` beside the node instead.
+A `Panner` scrolls at `speed` UV units per second, and its wrapped clock makes it hop once an hour
+unless `speed * 3600` is a whole number of tiles.
+
+**The one exception to "an unwired pin means zero":** `TilingOffset`, `Panner`, `Rotator`, `Noise`
+and `Checker` all take a `uv` input, and when it is left unwired they read the surface's own UV
+instead of `(0, 0)`. An unwired texture-space node reading a literal zero would sample one texel and
+look like a broken texture rather than the obvious default every material editor gives it.
+`Panner`'s `time` is the one other such pin: unwired, it reads `Time`'s wrapped seconds, because a
+zero would multiply `speed` away. A number typed onto either pin is not read; wire a `ConstFloat`
+for a fixed value.
 
 ---
 
@@ -403,9 +435,8 @@ this material's own values for all five. **Falsified, not just observed:** comme
 differs.
 
 This pair is what `MaterialGraphTest` and `MaterialGraphRegistryTest` check mechanically — the
-former by compiling node types through real DXC (82 `check()` calls total in the file — see §1's
-correction; not 105, nor the 59 once counted there either), the latter by asserting ids are never
-recycled across a `clear()`, since an id may still be sitting in an uploaded constant block.
+former by compiling node types through real DXC, the latter by asserting ids are never recycled
+across a `clear()`, since an id may still be sitting in an uploaded constant block.
 
 ---
 
@@ -415,15 +446,15 @@ Stated plainly, the way an honest limitation should be, rather than left for a r
 
 - **No vertex or displacement graphs.** Every value a material graph reads about geometry —
   `WorldPosition`, `WorldNormal`, `ViewDirection` — is already-computed *per-pixel* vertex output;
-  nothing a graph produces feeds back into the vertex stage. `MaterialOutput`'s seventeen inputs are
+  nothing a graph produces feeds back into the vertex stage. `MaterialOutput`'s eighteen inputs are
   all pixel-stage surface properties (§6); none of them is a vertex offset, and nothing in the
   compiler touches a vertex shader at all.
 - **No per-graph dynamic constant buffer, and no exposed instance parameters.** `gMaterialGraphId`
   is four bytes that used to be padding inside the material's existing `AverMaterial` block (§5) —
   a graph gets no cbuffer of its own. There is no mechanism for a graph to declare a new authored
   numeric knob with its own per-material storage (the way, say, an Unreal material-instance
-  parameter would); a graph's only inputs are the fixed renderer-provided values (§7 Input category),
-  this material's own existing textures, and literals baked directly into the graph's own generated
+  parameter would); a graph's only inputs are the fixed renderer-provided values (§7 Input category,
+  plus the `Time` clock), this material's own existing textures, and literals baked directly into the graph's own generated
   HLSL text. Two materials sharing one `GRAPHREF` are pixel-for-pixel identical in what the graph
   contributes; they can only differ through their own separate `PARAM`/map values for fields the
   graph leaves undriven.
@@ -432,21 +463,18 @@ Stated plainly, the way an honest limitation should be, rather than left for a r
   graph through the Vulkan backend. Nothing about the emitted HLSL text is Vulkan-*specific*, but
   "should probably work" is not the same claim as "verified," and this page makes only the second
   kind.
-- **`Time` exists now; this page used to say it did not.** Commit `1aa21ab` ("A material graph can
-  move...") gave `PerFrameCB` (`b0`) a clock (`Time` wrapped hourly, `Time.raw` monotonic, `Time.delta`
-  since the last frame) specifically so a graph could stop being a pure function of position. It is
-  emitted (`ciEquals(ty, "Time")` in `MaterialGraphHlsl.cpp`) and load-bearing enough to have re-render
-  a fixture at maxdiff 1 — but it is **not** in §7's node vocabulary table, has no palette entry in the
-  graph editor, and `MaterialGraphTest` never names it: today the only way to use it is to hand-author
-  the `.ocgraph` text, the way `WaveNormal` (added the same day, for the water surface's own ripple set
-  — `position`/`height`/`focus`) also must be. Both exist in the compiler and neither is reachable from
-  the editor's Add Node menu.
+- **`WaveNormal` has no palette entry.** It is emitted (`ciEquals(ty, "WaveNormal")` in
+  `MaterialGraphHlsl.cpp`, for the water surface's own ripple set — `position`/`height`/`focus`) and
+  `MaterialGraphTest` never names it, so the only way to use it is to hand-author the `.ocgraph` text.
+  `Time` and `Panner` (§7) are in the palette and the test.
+- **Graphs do not run on ray-driven hits, so `Time` and `Panner` animate nothing there.** A graph is
+  evaluated by `averEvalMaterial`, which the raster passes call. The ray-driven path builds its hit
+  surface by hand from the bindless material table and never reads `graphId`; `MaterialGraphHlsl.cpp`
+  emits an `averApplyMaterialGraphRt` for it, but nothing in the tree calls it yet. A graph-shaded
+  surface shades as its stock `.ocmat` on that path, whatever the graph animates.
 - **No `VertexColor` node.** `VSOut` still carries no vertex colour, so it remains what it always
   was: a palette entry whose only possible outcome would be a compile error naming a symbol that does
   not exist.
-- **`Panner` still does not exist**, even though the reason this page used to give — "it needs a time
-  input, and there is no time input" — no longer holds now that `Time` does. It was simply never added
-  once `Time` landed; nothing in the tree suggests it is coming.
 - **Every graph in the process shares one compiled shader** (§5) — there is no per-graph shader
   variant, no per-graph optimisation pass, and no way for one graph's compile to diverge from what
   every other registered graph's `case` arm looks like. This is a deliberate trade (§5), not an

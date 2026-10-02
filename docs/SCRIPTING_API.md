@@ -221,7 +221,7 @@ A first/third-person walking character.
 | `public float JumpSpeed` | Upward speed a jump starts with, cm/s (default 465 — about 110 cm of height). |
 | `public bool IsSimulated` | True when backed by the physics world rather than translating directly. |
 | `public bool IsGrounded` | True while standing on ground shallow enough to hold. |
-| `public Vec3 Velocity` | Current velocity, cm/s. The vertical component is the simulation's. |
+| `public Vec3 Velocity` | The character's own velocity, cm/s, relative to the ground it stands on: a moving deck's or lift's motion is added by the physics step and is NOT in this value, so a passenger standing still on a train reads zero. The vertical component is the simulation's. Setting it is a dead stop that also clears the motion a jump off moving ground carried away (`aver_phys_character_inherited_velocity`); world-space velocity is this plus that. |
 | `public bool Jump()` | Jump if grounded; returns false when airborne rather than swallowing it. |
 | `public void Teleport(Vec3 feet)` | Move the character *and* its capsule. Setting the transform alone leaves the capsule behind. |
 | `protected void DriveWithInput(float dt)` | One frame of WASD-walk + mouse-turn control; call from `OnTick` while possessed. Reads the settled result of the last step, then writes this frame's intent. |
