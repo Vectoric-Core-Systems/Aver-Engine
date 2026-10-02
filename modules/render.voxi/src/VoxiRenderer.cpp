@@ -6,7 +6,6 @@
                                      // so no AVER_MODULE_VOXI guard needed, same as Log.hpp/Math.hpp.
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
-#include "aver/voxi/CameraFactor.hpp"   // beginShadowHistory's NRD block: recovers worldToView/viewToClip
 #include "aver/pbr/MaterialGraphRegistry.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
@@ -172,7 +171,7 @@ void giSamplers(rhi::PipelineLayout& l) {
 // blended-pass backdrop (the opaque scene copied before translucency replays, so glass can tint per
 // channel instead of through one blend alpha); t11 sky-occlusion history; t12/t13 ReSTIR GI
 // surface history split across two textures (rhi::Format has no 4-channel 32-bit float); t14
-// NRD-denoised AO; t15 NRD-denoised ReSTIR GI radiance; t16 half-res ReSTIR visibility history (see
+// denoised AO; t15 denoised ReSTIR GI radiance; t16 half-res ReSTIR visibility history (see
 // giVisHistWanted()); t17 air sky-visibility volume, fixed 32^3 independent of voxelResolution,
 // sampled by voxiAirVisibility() (voxi.hlsl) to attenuate fog in-scatter, 1x1x1 placeholder when
 // voxi.fogOcclusion is off or the real texture isn't created yet (shader treats GetDimensions()<=1
@@ -182,18 +181,6 @@ void giSamplers(rhi::PipelineLayout& l) {
 // RtInstance per prototype part) and the TLAS static prefix's own instance descs (gRtFoliageDescs), a
 // one-element placeholder each while there is no foliage.
 constexpr u32 kVoxiSrvCount = kGiSrvCount + 13;
-
-// The denoiser index Voxi asks NRD to run. create() is handed exactly one kind
-// (ReblurDiffuseOcclusion), so this is 0 -- named rather than a bare literal at the call site,
-// since the two must agree and nothing else would say so.
-constexpr u32 kNrdAoDenoiser[] = {0u};
-// Both denoisers, in create()'s own order: 0 occlusion, 1 diffuse radiance. Run as a pair only when
-// ReSTIR GI is active -- the radiance signal doesn't exist otherwise, and denoising a blank input
-// is the one way to get a confident wrong image.
-constexpr u32 kNrdAoAndGiDenoisers[] = {0u, 1u};
-// Diffuse radiance denoiser alone: sky occlusion isn't traced at Low, but ReSTIR GI can still run,
-// so a project can want GI denoising with no occlusion signal.
-constexpr u32 kNrdGiDenoiser[] = {1u};
 
 // Extra UAV slots, same widening reasoning as kVoxiSrvCount above (kind/reason per slot in
 // giTableKinds() below): u4/u5 sky-occlusion history + hit distance; u6 ReSTIR GI reservoir buffer
@@ -246,17 +233,16 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // is its own switch (Settings::giMode), independent of which ray-tracing tier is active.
     srv[12] = rhi::SlotKind::Texture2D;             // t12 GI-restir surface POSITION history (read)
     srv[13] = rhi::SlotKind::Texture2D;             // t13 GI-restir surface NORMAL history (read)
-    // t14: NRD-denoised sky occlusion -- the only SRV here routinely absent (optional at 3 levels:
-    // no NRD in the build, a backend refusing NRD's register spaces (Vulkan), or no G-buffer to
-    // feed it). Shader tests GetDimensions() rather than a cbuffer flag, same trick
+    // t14: denoised sky occlusion -- the only SRV here routinely absent (no G-buffer to feed the
+    // denoiser, the denoiser off, or its shaders unavailable). Shader tests GetDimensions() rather than a cbuffer flag, same trick
     // averBlendBackdropValid uses for t10 (see aver-voxi-cbuffer-three-mirrors): a null-filled
     // Texture2D reports zero dimensions, a signal the descriptor already carries for free, costing
     // no fourth mirror of the constant block.
-    srv[14] = rhi::SlotKind::Texture2D;             // t14 NRD-denoised sky occlusion (read)
-    // t15/u9: ReSTIR GI radiance, out to NRD and back. u9 written by giRestirIndirect (rgb =
-    // indirect diffuse, a = normalised hit distance); t15 is the same signal one frame later
-    // through REBLUR_DIFFUSE. Absent unless ReSTIR GI and NRD are both running.
-    srv[15] = rhi::SlotKind::Texture2D;             // t15 NRD-denoised ReSTIR GI radiance (read)
+    srv[14] = rhi::SlotKind::Texture2D;             // t14 denoised sky occlusion (read)
+    // t15/u9: ReSTIR GI radiance, out to the denoiser and back. u9 written by giRestirIndirect (rgb =
+    // linear indirect diffuse); t15 is the same signal one frame later, denoised. Absent unless
+    // ReSTIR GI and the denoiser are both running.
+    srv[15] = rhi::SlotKind::Texture2D;             // t15 denoised ReSTIR GI radiance (read)
     // t16/u10: half-res ReSTIR VISIBILITY history pair (giVisHist_) -- bound only while
     // giVisHistWanted() (giRestirVisibility == HalfResolution); same GetDimensions() test as t14/t15.
     srv[16] = rhi::SlotKind::Texture2D;             // t16 ReSTIR visibility half-res history (read)
@@ -533,12 +519,11 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 void VoxiRenderer::shutdown() {
     reportFrameTime("run total");
     // BEFORE the `if (!res_)` bail below, because the denoiser owns device resources of its own
-    // (pipelines, two texture pools, a descriptor table per dispatch) and is the one object here
-    // that would leak them on the path where this renderer never had a factory to begin with.
-    nrd_.destroy();
-    nrdActive_ = false;
-    nrdOutput_ = 0;
-    nrdGiOutput_ = 0;
+    // (pipelines, history textures, binding sets) and is the one object here that would leak them
+    // on the path where this renderer never had a factory to begin with.
+    denoiser_.destroy();
+    denoiseAoOutput_ = 0;
+    denoiseGiOutput_ = 0;
     materials_.shutdown();
     if (!res_) { dev_ = nullptr; return; }
     for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
@@ -791,17 +776,17 @@ void VoxiRenderer::setSettings(const Settings& s) {
     }
     setGiUpdateInterval(s.giUpdateInterval);
 
-    // A genuine visibility-mode change resets GI reservoir history, NRD history and the half-res
+    // A genuine visibility-mode change resets GI reservoir history, denoiser history and the half-res
     // visibility history together -- all three carry a stale answer once visMode changes (2.8's
     // precedence rule; same reasoning as setLightingLegacyBits' R0/R2/R3 branch below). Gated on
-    // giRestirWanted(): nothing live to invalidate otherwise. Not resetGiHistory()/resetNrdHistory()
+    // giRestirWanted(): nothing live to invalidate otherwise. Not resetGiHistory()/resetDenoiserHistory()
     // themselves, which are named console commands with their own log line -- this is a
     // setSettings-driven edge, so it logs its own.
     if (giRestirVisibility_ != wasVis && giRestirWanted()) {
         giHistValid_ = false;
         giVisHistValid_ = false;
-        nrd_.forceHistoryReset();
-        AVER_INFO("[Voxi] ReSTIR visibility rays: {} -> {} (GI/NRD/visibility history reset)",
+        denoiser_.forceHistoryReset();
+        AVER_INFO("[Voxi] ReSTIR visibility rays: {} -> {} (GI/denoiser/visibility history reset)",
                   wasVis, giRestirVisibility_);
     }
 
@@ -827,14 +812,6 @@ void VoxiRenderer::setSettings(const Settings& s) {
     if (airVisWanted() != wasAirVisWanted)
         if (!ensureAirVis())
             AVER_ERROR("[Voxi] air sky-visibility volume could not follow a voxi.fogOcclusion change");
-
-    // REBLUR history/prepass tuning as LIVE dials: re-issuing setReblurTuning every setSettings call
-    // (not just once at NRD creation) is what makes a console-set
-    // voxi.reblur{DiffusePrepassBlurRadius,MaxAccumulatedFrameNum,MaxStabilizedFrameNum} take effect
-    // next frame without tearing NRD's accumulated history down. Guarded on nrd_.valid() only to
-    // skip the redundant call before NRD exists -- applyReblurTuning()/setReblurTuning() would no-op
-    // harmlessly either way.
-    if (nrd_.valid()) applyReblurTuning();
 }
 
 // Places the GI volume: centre in world units, half-edge extent.
@@ -858,7 +835,7 @@ void VoxiRenderer::setGiPoisonView(bool on) { giPoisonView_ = on; }
 void VoxiRenderer::setGiVisPathView(bool on) { giVisPathView_ = on; }
 
 // See the header for what M5 prices. Guarded on an actual change (SandboxApp reasserts this from the
-// console/--blended-gi slot every frame) -- unlike setNrdLegacyCamera/setLightingLegacyBits below,
+// console/--blended-gi slot every frame) -- unlike setLightingLegacyBits below,
 // this carries no history-reset cost, so a plain reassign-and-log is enough.
 void VoxiRenderer::setBlendedGiCone(bool on) {
     if (on == blendedGiCone_) return;
@@ -867,44 +844,29 @@ void VoxiRenderer::setBlendedGiCone(bool on) {
               on ? "voxel cone gather" : "ReSTIR (default)");
 }
 
-// See the header for what this switch reinstates and why. Guarded on an actual change because
-// SandboxApp reasserts this from the console slot every frame -- without the guard, every frame
-// would force an NRD history reset and no denoiser history would ever accumulate.
-void VoxiRenderer::setNrdLegacyCamera(bool on) {
-    if (on == nrdLegacyCamera_) return;
-    nrdLegacyCamera_ = on;
-    // The two encodings' previous cameras differ in shape (legacy = last frame's combined viewProj;
-    // fixed = a factorised pair) -- reprojecting against the OTHER encoding's camera would silently
-    // blend the two rather than compare them, so history and the previous-camera latch reset together.
-    nrd_.forceHistoryReset();
-    nrdPrevCameraValid_ = false;
-    nrdPrev2CameraValid_ = false;
-    AVER_INFO("[NRD] camera encoding switched to {} by console command (voxi.nrdLegacyCamera); "
-              "history reset on the next frame so the two encodings are never blended together.",
-              on ? "the OLD, WRONG pre-fix encoding (comparison only)" : "the fixed encoding");
-}
-
 // See the header for the bit table and the contrast-fix plan's CONTRACT section 2 for where each bit
-// is read in the shaders. Guarded on an actual change, same reason as setNrdLegacyCamera above.
+// is read in the shaders. Guarded on an actual change because SandboxApp reasserts this from the
+// console slot every frame -- without the guard, every frame would reset history.
 void VoxiRenderer::setLightingLegacyBits(u32 bits) {
     if (bits == lightingLegacyBits_) return;
     const u32 changed = bits ^ lightingLegacyBits_;
     lightingLegacyBits_ = bits;
     AVER_INFO("[Voxi] lighting legacy bits: ring={} doubleCount={} hitSky={} reuseVis={} cones={} "
-              "blendedHistory={} nrdReadback={} (console)",
+              "blendedHistory={} denoisedReadback={} (console)",
               (bits & 1u) ? 1 : 0, (bits & 2u) ? 1 : 0, (bits & 4u) ? 1 : 0, (bits & 8u) ? 1 : 0,
               (bits & 16u) ? 1 : 0, (bits & 32u) ? 1 : 0, (bits & 64u) ? 1 : 0);
-    // Bit 64 (legacyNrdReadback) needs no reset: changes only where the shader reads NRD's output.
+    // Bit 64 (legacyDenoisedReadback) needs no reset: changes only where the shader reads the
+    // denoiser's output.
     // R0/R2/R3 (bits 1,4,8): ReSTIR samples/adds/reuses differently under these, so history
     // accumulated on one side of the flip is stale (same reasoning as resetGiHistory's own comment).
-    if (changed & (1u | 4u | 8u)) { resetGiHistory(); resetNrdHistory(); }
+    if (changed & (1u | 4u | 8u)) { resetGiHistory(); resetDenoiserHistory(); }
     // R0 (bit 1) also reshapes the sky-occlusion ray (voxi_rt.hlsli); its AO history tracks
     // separately from the GI reservoir's.
     if (changed & 1u) resetAoHistory();
     // Bit 32 (W6/M5): whether a blended fragment writes shadow/reflection/AO histories at all
     // (PSMainVoxi's gAverHistoryWrite gate) -- unlike bits 1/4/8 this changes what those histories
-    // THEMSELVES hold, not just the GI reservoir/NRD, so RT history rides along too.
-    if (changed & 32u) { resetGiHistory(); resetNrdHistory(); resetRtHistory(); }
+    // THEMSELVES hold, not just the GI reservoir/denoiser, so RT history rides along too.
+    if (changed & 32u) { resetGiHistory(); resetDenoiserHistory(); resetRtHistory(); }
 }
 
 // See the header's own comment for the shape every one of these five shares: flip an existing
@@ -944,10 +906,10 @@ void VoxiRenderer::resetAoHistory() {
               "new plumbing).");
 }
 
-void VoxiRenderer::resetNrdHistory(bool quiet) {
-    nrd_.forceHistoryReset();
-    if (!quiet) AVER_INFO("[NRD] history reset by console command (resetnrdhistory); REBLUR restarts its own "
-              "internal temporal accumulation from this frame.");
+void VoxiRenderer::resetDenoiserHistory(bool quiet) {
+    denoiser_.forceHistoryReset();
+    if (!quiet) AVER_INFO("[Denoise] history reset by console command (resetdenoiserhistory); both "
+              "signals restart their temporal accumulation from this frame.");
 }
 
 // Sets the occlusion rays per pixel, clamped rather than refused: a caller asking for 0 wants the
@@ -1538,8 +1500,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // gate and voxelizePass, from the SETTING -- never from giRestirParams[0], which also reads 0 on
     // a debug-view or empty-TLAS frame and would rebake the volume on every such flip.
     // .w is 0 here; recordStagedRayDriven sets it to the staged passes' row pitch for their own
-    // uploads only, and on a half-rate GI frame leaves the packed-NRD-input flag (bit 17, parity in
-    // bit 16) for the rest of the frame. (Both briefly carried dials during the moving-camera ReSTIR GI fade bisection;
+    // uploads only, and on a half-rate GI frame leaves the half-rate flag (bit 17, parity in bit 16)
+    // for the rest of the frame. (Both briefly carried dials during the moving-camera ReSTIR GI fade bisection;
     // those literals are back in voxi_restir.hlsli.)
     cb_.viewParams[2] = giRestirWanted() ? 1.0f : 0.0f;
     cb_.viewParams[3] = 0.0f;
@@ -1586,8 +1548,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // siblings (acceleration structures, cascades, GI-only shadow box, voxelise, mip filter). This
     // scope's own exclusive time is endShadowHistory() (no marker of its own, pure CPU bookkeeping)
     // plus whatever else runs unmarked (manageInjectionAccumulator, gate logic) -- beginShadowHistory()
-    // opens its own child span ("Voxi shadow history"), and the nrd_.record() call inside it opens a
-    // grandchild of that ("Voxi NRD denoise"). Opened here, not at the top, because everything above
+    // opens its own child span ("Voxi shadow history"), and the denoiser_.record() call inside it
+    // opens a grandchild of that ("Voxi denoise"). Opened here, not at the top, because everything above
     // is CPU-only bookkeeping.
     rhi::ScopedGpuStat voxiGpuStat(ctx, "Voxi GI update");
     // W12: recreate/free the injection accumulator before anything else in this scope binds
@@ -5088,7 +5050,7 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
 // via rtReflectionTemporal/gRdReflTex) is ASSUMED disjoint from the other three on that same contract,
 // not independently reverified here: this file only schedules the dispatch, and the shader side states
 // rtReflectionTemporal/rtReflection/rtReprojectReflection touch no other group member's UAVs. All four
-// read only the fenced visibility record, last frame's own histories, and this frame's NRD outputs
+// read only the fenced visibility record, last frame's own histories, and this frame's denoiser outputs
 // (from prePass). A GPU timestamp between two dispatches can drain the pipe to take the
 // reading, serialising work that would otherwise overlap -- why all four sit inside ONE ScopedGpuStat
 // ("Voxi RD lighting stages") instead of each opening its own span the way CSRdVisibility and Stage B
@@ -5229,30 +5191,32 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // can't disagree. rdStagedActive() already refused this frame if the condition holds but
         // rdGiCsPso_ is 0, so reaching here true means the pipeline exists.
         const bool giDispatch = cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
-        // Half-rate ReSTIR GI via NRD's checkerboard, gated on three things beyond giDispatch: the
-        // setting actually asking for it (rayDrivenStages == 2; rdStagedWanted() treats 1 and 2 alike,
-        // so this is the one place that still tells them apart), the checkerboard variant having
-        // compiled (optional on top of an already-optional pipeline), and this frame's NRD readback
-        // being live (nrdGiRanThisFrame_) -- tracing only half the pixels is safe only when REBLUR has
-        // something real to reconstruct the other half from.
+        // Half-rate ReSTIR GI on a checkerboard, gated on three things beyond giDispatch: the setting
+        // actually asking for it (rayDrivenStages == 2; rdStagedWanted() treats 1 and 2 alike, so
+        // this is the one place that still tells them apart), the checkerboard variant having
+        // compiled (optional on top of an already-optional pipeline), and this frame's denoised
+        // readback being live (denoiseGiRanThisFrame_) -- tracing only half the pixels is safe only
+        // when the denoiser reconstructs the other half (aver_denoise.hlsl's dnsrLoadInput).
         const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
-                          nrdGiRanThisFrame_;
+                          denoiseGiRanThisFrame_;
         // Recorded unconditionally -- false whenever giDispatch itself is false, since giCb already
-        // implies it -- and consumed at the top of NEXT frame's beginShadowHistory to tell
-        // that frame's NRD dispatch whether the GI input it's about to denoise was checkerboarded.
+        // implies it -- and consumed at the top of NEXT frame's beginShadowHistory to tell that
+        // frame's denoiser dispatch whether the GI input it's about to read was traced at half rate,
+        // and with which parity.
         giCbWrittenThisFrame_ = giCb;
+        giCbParityWritten_    = denoiseFrame_ & 1u;
         // One-shot logs, mutually exclusive (giCb requires rayDrivenStages == 2, the "why not" branch
         // only fires when rayDrivenStages == 2 and giCb is false).
         if (giCb && !rdGiCbRunLogged_) {
             rdGiCbRunLogged_ = true;
-            AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces NRD's checkerboard half each "
-                      "frame, REBLUR reconstructs the rest");
+            AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces one checkerboard half each "
+                      "frame, the denoiser reconstructs the rest");
         } else if (settings_.rayDrivenStages == 2u && !giCb && !rdGiCbFallbackLogged_) {
             rdGiCbFallbackLogged_ = true;
             const char* why =
                 !giDispatch ? "ReSTIR GI is not the diffuse estimator this frame"
-                : !nrdGiRanThisFrame_ ? "the NRD GI denoiser did not run this frame (denoiser off, or "
-                                        "NRD unavailable)"
+                : !denoiseGiRanThisFrame_ ? "the GI denoiser did not run this frame (denoiser off, or "
+                                            "unavailable)"
                                       : "the checkerboard CSRdGi variant did not compile";
             AVER_INFO("[Voxi] voxi.rayDrivenStages 2 requested half-rate ReSTIR GI, but {}; behaving as "
                       "rayDrivenStages 1 for the GI stage (said once)", why);
@@ -5319,7 +5283,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
                 // columns of 8x8 groups, each thread handling one traced-half pixel (see
                 // CSRdGiTrace's x = xBase + ((xBase ^ y ^ parity) & 1u) decode).
                 g1x = ((dispatchW + 1u) / 2u + 7u) / 8u;
-                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | ((nrdFrame_ & 1u) << 16));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16));
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
                 cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
             } else {
@@ -5376,13 +5340,13 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
                 // CSRdSkyOcc/CSRdRefl/Stage B below never see bit 16 -- the plain pitch is restored
                 // immediately below.
                 //
-                // parity = nrdFrame_ & 1u: beginShadowHistory's fs.frameIndex = nrdFrame_++ earlier
-                // this frame already post-incremented it once, so the current value IS the frameIndex
-                // next frame's NRD dispatch will use to denoise this write -- by construction.
+                // parity = giCbParityWritten_, latched above from denoiseFrame_ (which alternates every
+                // frame) and handed to next frame's denoiser dispatch with this write -- the two
+                // agree by construction.
                 //
                 // Pitch always fits the low 16 bits: it's the render target's width, and D3D12 caps a
                 // Texture2D at 16384 texels a side (the staged path is D3D12-only).
-                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | ((nrdFrame_ & 1u) << 16));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16));
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
                 cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
             } else {
@@ -5495,12 +5459,13 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.drawFullscreen();
     }
     // setConstantBuffer copied the pitch at each call above, so it's spent. What stays, on a frame
-    // CSRdGi wrote NRD's input checkerboarded, is bit 17 plus the parity in bit 16, for the REST of
-    // this frame: scene draws after this one (PSMainVoxi's blended replay) read cb_ through
-    // sceneConstants(), and giRestirIndirect's NRD-input write uses it to follow the packed layout
-    // instead of landing on another pixel's texel. prePass zeroes it next frame.
+    // CSRdGi traced GI at half rate, is bit 17 plus the parity in bit 16, for the REST of this frame:
+    // scene draws after this one (PSMainVoxi's blended replay) read cb_ through sceneConstants(), and
+    // giRestirIndirect's denoiser-input write uses it to write only the traced half, so the
+    // denoiser's reconstruction never mixes a blended replay's value into a skipped pixel. prePass
+    // zeroes it next frame.
     cb_.viewParams[3] = giCbWrittenThisFrame_
-                      ? static_cast<f32>((1u << 17) | ((nrdFrame_ & 1u) << 16))
+                      ? static_cast<f32>((1u << 17) | (giCbParityWritten_ << 16))
                       : 0.0f;
     // Local lights: cameraMedium z/w deliberately NOT reset here -- the blended replay lights its
     // panes with the same lamps, so its ReSTIR GI must drop a lamp's emission exactly as the opaque
@@ -5729,67 +5694,19 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
 
     }
 
-    // ---- NRD is created for either signal, not only for sky occlusion ----
-    // Used to sit INSIDE aoHistoryWanted(), so NRD itself -- all twenty pipelines, the whole thing --
-    // was never constructed unless sky-occlusion rays were on. aoHistoryWanted() is
-    // `rayTracingWanted() && settings_.giSkyOcclusionRays > 0`, and giSkyOcclusionRays is tier-derived
-    // (recomputed only on a tier CHANGE), so opening a project whose recorded tier already equals the
-    // current one skipped the derivation, left the field at its struct default of 0, and NRD silently
-    // absent all session -- exactly what the user saw as the denoiser working only sometimes.
-    // MEASURED: four runs denoised nothing while the log said NRD was ready, four more with
-    // --gi-sky-occlusion-rays 1 denoised every frame, same binary. ReSTIR GI runs at any tier; sky
-    // occlusion is Medium+ (giSkyOcclusionRaysForQuality) -- tying the first to the second was never
-    // a decision.
+    // ---- The denoiser is created for either signal, not only for sky occlusion ----
+    // aoHistoryWanted() is `rayTracingWanted() && settings_.giSkyOcclusionRays > 0`, and
+    // giSkyOcclusionRays is tier-derived (recomputed only on a tier CHANGE), so tying the denoiser to
+    // it once left it absent all session for a project whose recorded tier already equalled the
+    // current one. ReSTIR GI runs at any tier; sky occlusion is Medium+.
     if (aoHistoryWanted() || giRestirWanted()) {
-        // ---- and the denoiser that consumes it, created ONCE beside the signal it filters ----
-        // create() decides whether NRD can run at all -- no NRD in the build, or a backend whose
-        // descriptor model refuses NRD's register spaces -- and logs which at INFO; false is not an
-        // error, Voxi falls back to its hand-written filter. Pools are NOT allocated here; resize()
-        // does that per frame from the hit-distance target's dimensions, so the denoiser follows a
-        // render-target change without a second place needing to know about it.
-        if (!nrd_.valid()) {
-            // Both denoisers always created, selected per frame by the index list, so creating the
-            // diffuse-radiance one costs only its pipeline/pool share while ReSTIR GI is off. Lazy
-            // creation would tear down NRD's temporal history every time giMode is toggled, which is
-            // precisely the moment somebody is looking at the image.
-            const render::nrd::DenoiserKind kinds[] = {render::nrd::DenoiserKind::ReblurDiffuseOcclusion,
-                                                       render::nrd::DenoiserKind::ReblurDiffuse};
-            nrdActive_ = nrd_.create(*dev_, kinds, 2);
-            // Not bare defaults: applyReblurTuning() reads settings_ (already current -- setSettings
-            // assigns it before ensureShadowHistory can ever be reached), so creation-time tuning
-            // reflects whatever reblur* dials were requested before NRD existed at all. setSettings()
-            // below re-issues this same call every frame thereafter, which is what makes a later
-            // console change live without recreating the instance. Index 1 is ReblurDiffuse, index 0
-            // ReblurDiffuseOcclusion, both tuned there -- leaving index 0 on NRD's defaults "because
-            // unit-free" was wrong (refuted in applyReblurTuning's comment).
-            if (nrdActive_) applyReblurTuning();
-            // The encoding check is the one silent failure mode left: NRD's shaders are built for a
-            // specific normal/roughness packing (AverNRD.cmake), and averPackNormalRoughness
-            // implements its own -- if they disagree the denoiser still runs and produces a
-            // plausible, wrong image. Compares the two numbers rather than asserting one in prose --
-            // a prose description is exactly what stood here before, naming the encoding NRD reported
-            // and then asserting in English what the G-buffer wrote, a statement that could drift the
-            // moment the packer changed, and did: that is how this bug survived a whole session.
-            // Reported once rather than per frame, because a warning nobody can act on every frame is
-            // noise.
-            constexpr u32 kEngineNormalEncoding    = 2;   // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM
-            constexpr u32 kEngineRoughnessEncoding = 1;   // NRD_ROUGHNESS_ENCODING_LINEAR
-            u32 nEnc = 0, rEnc = 0;
-            if (nrdActive_ && !nrdWarnedEncoding_ && render::nrd::Denoiser::encodings(nEnc, rEnc)) {
-                if (nEnc != kEngineNormalEncoding || rEnc != kEngineRoughnessEncoding) {
-                    AVER_WARN("[NRD] ENCODING MISMATCH: NRD was built for normal encoding {} / "
-                              "roughness encoding {}, but averPackNormalRoughness (voxi.hlsl) writes "
-                              "normal encoding {} / roughness encoding {} -- REBLUR will decode a "
-                              "garbage normal and a view-angle-dependent roughness. Fix "
-                              "averPackNormalRoughness or cmake/AverNRD.cmake so the two agree.",
-                              nEnc, rEnc, kEngineNormalEncoding, kEngineRoughnessEncoding);
-                } else {
-                    AVER_INFO("[NRD] denoising sky occlusion; normal/roughness encoding {}/{} "
-                              "matches averPackNormalRoughness (voxi.hlsl)", nEnc, rEnc);
-                }
-                nrdWarnedEncoding_ = true;
-            }
-        }
+        // Created ONCE beside the signals it filters. create() compiles its six pipelines and logs a
+        // failure at WARN; false is not fatal, Voxi falls back to its hand-written filter. Its
+        // targets are NOT allocated here; resize() does that per frame from the signal's dimensions,
+        // so the denoiser follows a render-target change without a second place needing to know.
+        // Both signals always exist in it, selected per frame, so toggling giMode never tears down
+        // the other signal's history.
+        if (!denoiser_.valid()) denoiser_.create(*dev_);
     }
 
     // ---- ReSTIR GI: the previous-surface pair(s) and the reservoir buffer, together ----
@@ -5810,12 +5727,12 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         if (!giSurfNrmHist_[0] || !giSurfNrmHist_[1]) return false;
         d.initialState = rhi::ResourceState::ShaderResource;   // restored for anything added below
 
-        // The radiance NRD's REBLUR_DIFFUSE filters. RGBA16F: rgb is HDR radiance, a a normalised
-        // distance -- 8-bit would band the indirect light, 32-bit doubles bandwidth for nothing.
+        // The radiance the denoiser filters. RGBA16F: rgb is linear HDR radiance (a unused) -- 8-bit
+        // would band the indirect light, 32-bit doubles bandwidth for nothing.
         // Single, not a pair: a raw per-frame measurement handed to a filter with its own history.
         d.format = rhi::Format::RGBA16F;
         d.initialState = rhi::ResourceState::UnorderedAccess;
-        d.debugName = "Voxi ReSTIR GI radiance (to NRD)";
+        d.debugName = "Voxi ReSTIR GI radiance (to the denoiser)";
         giRadiance_ = res_->createTexture(d);
         if (!giRadiance_) return false;
         d.initialState = rhi::ResourceState::ShaderResource;
@@ -6252,97 +6169,18 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     return true;
 }
 
-// See the header comment on applyReblurTuning for when this runs (NRD creation, then every
-// setSettings()) and why it's safe (nrd::SetDenoiserSettings, NRD.h, is legal at any cadence).
-// hitDistA/B/C/enableAntiFirefly stay at ReblurTuning{}'s defaults: fixed metres/centimetres
-// unit-conversion constants (see ReblurTuning's own comment), not reblur* console dials.
-void VoxiRenderer::applyReblurTuning() {
-    render::nrd::Denoiser::ReblurTuning t{};
-    t.diffusePrepassBlurRadius = settings_.reblurDiffusePrepassBlurRadius;
-    t.maxAccumulatedFrameNum   = settings_.reblurMaxAccumulatedFrameNum;
-    t.maxStabilizedFrameNum    = settings_.reblurMaxStabilizedFrameNum;
-    t.enableAntiFirefly             = settings_.reblurAntiFirefly;
-    t.fireflySuppressorMinRelativeScale = settings_.reblurFireflySuppressorScale;
-    t.antilagLuminanceSigmaScale    = settings_.reblurAntilagSigmaScale;
-    t.antilagLuminanceSensitivity   = settings_.reblurAntilagSensitivity;
-    t.minHitDistanceWeight          = settings_.reblurMinHitDistanceWeight;
-    t.fastHistoryClampingSigmaScale = settings_.reblurFastHistoryClampSigma;
-    t.maxFastAccumulatedFrameNum    = settings_.reblurMaxFastAccumulatedFrameNum;
-    t.historyFixFrameNum            = settings_.reblurHistoryFixFrameNum;
-    // THE SUN IS MOVING (nrdSunClampApplied_): cap the history depth -- see Settings::
-    // reblurSunMovingFrameNum. The stabilized and fast depths follow it down so NRD still gets
-    // historyFix < fast <= main, the same ordering Settings' own clamp keeps.
-    if (nrdSunClampApplied_ && settings_.reblurSunMovingFrameNum < t.maxAccumulatedFrameNum) {
-        t.maxAccumulatedFrameNum     = settings_.reblurSunMovingFrameNum;
-        t.maxStabilizedFrameNum      = std::min(t.maxStabilizedFrameNum, t.maxAccumulatedFrameNum);
-        t.maxFastAccumulatedFrameNum = std::min(t.maxFastAccumulatedFrameNum, t.maxAccumulatedFrameNum);
-        t.historyFixFrameNum = t.maxFastAccumulatedFrameNum == 0u ? 0u
-            : std::min(t.historyFixFrameNum, t.maxFastAccumulatedFrameNum - 1u);
-    }
-    t.minBlurRadius                 = settings_.reblurMinBlurRadius;
-    t.maxBlurRadius                 = settings_.reblurMaxBlurRadius;
-    // ---- Index 0 (ReblurDiffuseOcclusion) is tuned too; "already unit-free" was wrong ----
-    // NRD de-normalises hit distance as (A + |viewZ|*B)*lerp(C,1,smc) in EVERY mode -- REBLUR's
-    // spatial filter, hit-distance reconstruction, temporal accumulation and history-fix passes all
-    // call this unconditionally, no NRD_MODE_OCCLUSION exemption -- but our signal is normalised by
-    // a flat constant instead (voxi_rt.hlsli's aoTMax = gVoxelParams.z = giMaxDistance; R16Unorm,
-    // [0,1] can only hold a fraction, not a real length). Fix: B=0, C=1, A=giMaxDistance, per
-    // render.nrd/README.md's own words ("hitDistParams = {giMaxDistance, 0, 1}" makes NRD's
-    // normalisation the identity against this encoding). Read from settings_ (live dial).
-    // MEASURED: gNrdAo was 0.63 deep shadow / 0.01 open sunlit (1.0=230.8) -- "fully occluded"
-    // everywhere. With this fix, ACCEPTED by NRD (no rejection warning), it renders 0.00 across the
-    // board; shaded frame unchanged to 2 decimals (3.61 MAD vs path-traced ref, 0.98 parity vs
-    // ray-driven, either way). So the units are now right, but that's NOT why output was zero --
-    // something else in the path is broken (input not reaching it, or wrong output slot -- this
-    // module's history; see the NRD contract notes; NOT YET FOUND). Do not read this as an
-    // improvement or let it suggest the AO denoiser works: raster measures 3.77 with gNrdAo, 4.23
-    // without -- it currently just contributes "fully occluded", flattering dark interiors by
-    // accident and wrong in open ones. Other fields stay at NRD's defaults; `t`'s accumulation knobs
-    // are deliberately not copied across (separate decision/measurement).
-    render::nrd::Denoiser::ReblurTuning ao{};
-    ao.hitDistA = settings_.giMaxDistance;
-    ao.hitDistB = 0.0f;
-    ao.hitDistC = 1.0f;
-    if (!nrd_.setReblurTuning(kNrdAoDenoiser[0], ao) && !nrdWarnedReblurRetune_) {
-        nrdWarnedReblurRetune_ = true;
-        AVER_WARN("[NRD] REBLUR_DIFFUSE_OCCLUSION hit-distance tuning was rejected by NRD; the "
-                  "occlusion denoiser keeps defaults whose scale does not match this engine's "
-                  "fraction-of-giMaxDistance encoding (said once)");
-    }
-    // MILESTONE 4: half-rate ReSTIR GI's checkerboard switch, ReblurDiffuse (index 1) ONLY -- never
-    // `ao`/index 0: the occlusion denoiser is never fed checkerboarded input (rtSkyOcclusionTemporal
-    // writes gRdAoTex at full rate always; only CSRdGi's gRdGiTex gets the half-rate treatment), so
-    // forcing NRD to reinterpret its input as checkerboarded packing would misread a full-resolution
-    // texture as half of one.
-    // One-frame lag, by construction, not an oversight: denoises LAST frame's CSRdGi write, so the
-    // mode applied must be whatever LAST frame's write actually used (nrdGiCbApplied_, from
-    // nrdGiInputCheckerboard_ -- see that latch's own comment). fs.frameIndex this same call is
-    // nrdFrame_'s value from BEFORE this dispatch's own increment, i.e. the exact value
-    // recordStagedRayDriven read for its own parity when it made that write -- so frameIndex and
-    // checkerboardMode agree on which write they both describe.
-    // No forceHistoryReset() on a toggle: REBLUR's permanent-pool history is the same full-resolution
-    // signal in either mode -- checkerboardMode only changes how this call's noisy input is read
-    // (packed 2:1 into the left half, or read at full resolution), not what REBLUR accumulates or
-    // hands back. A mode flip is exactly as safe as any other frame-to-frame tuning change already
-    // applied here without a reset.
-    t.checkerboardMode = nrdGiCbApplied_;
-    // Index 1 is ReblurDiffuse.
-    if (!nrd_.setReblurTuning(1u, t) && !nrdWarnedReblurRetune_) {
-        nrdWarnedReblurRetune_ = true;
-        AVER_WARN("[NRD] REBLUR_DIFFUSE tuning was rejected by NRD; it keeps whatever the last "
-                  "successful call set instead of the requested voxi.reblur* values (said once)");
-    }
-}
-
 // See VoxiRenderer.hpp for the ping-pong rationale.
 void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // MILESTONE 4: latched before anything else, including the early return below.
-    // recordStagedRayDriven set giCbWrittenThisFrame_ for LAST frame's dispatch, which the NRD
-    // dispatch below denoises -- must be read before this frame's own later call overwrites it.
-    nrdGiInputCheckerboard_ = giCbWrittenThisFrame_;
+    // recordStagedRayDriven set giCbWrittenThisFrame_/giCbParityWritten_ for LAST frame's dispatch,
+    // which the denoiser dispatch below reads -- must be read before this frame's own later call
+    // overwrites them. denoiseFrame_ advances every frame so the parity alternates.
+    denoiseGiInputHalfRate_  = giCbWrittenThisFrame_;
+    denoiseGiHalfRateParity_ = giCbParityWritten_;
     giCbWrittenThisFrame_ = false;
+    ++denoiseFrame_;
     // M1: child span under "Voxi GI update" (prePass), covering the six history-texture barriers/
-    // rebinds below plus (nested under its own "Voxi NRD denoise" marker further down) the NRD
+    // rebinds below plus (nested under its own "Voxi denoise" marker further down) the denoiser
     // dispatch. RAII, so the early return closes it like any exit.
     rhi::ScopedGpuStat historyStat(ctx, "Voxi shadow history");
     // All default to 0/false here, before the early return: a frame that binds nothing must say so,
@@ -6378,9 +6216,8 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // frame (empty TLAS, debug raymarch) -- so the next active frame reprojected against a frozen
         // camera as if only one frame had passed. This branch is the only place a skip is detected
         // (once per frame). Clearing here costs one noisy frame, the same as a resize/reset already
-        // pays, instead of a silently wrong reprojection; nrdPrevCameraValid_ too (frozen across the
-        // same gap -- its own resetHistory follows from !rtHistValid_ below, but that alone doesn't
-        // cover this flag).
+        // pays, instead of a silently wrong reprojection. The denoiser's histories go too: this return
+        // skips its dispatch, and the next frame must not reproject across the gap.
         // Not resetGiHistory()/resetRtHistory() (those log an AVER_INFO line and would spam every
         // skipped frame): a structural invariant, not a user action. Never taken in this project's
         // steady state (rtActive_ stays true, history stays allocated, debugViewActive() false).
@@ -6390,9 +6227,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // exactly like giSurfPosHist_/giSurfNrmHist_, and the giSurf block that would clear this
         // doesn't run on a skipped frame either.
         giVisHistValid_ = false;
-        nrdPrevCameraValid_ = false;
-        nrdPrev2CameraValid_ = false;
-        nrdAoRanLastFrame_ = false;   // this return skips the per-frame update at the function's end
+        denoiser_.forceHistoryReset();
         return;
     }
 
@@ -6469,10 +6304,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // move still carries the old sun.
         // MEASURED (PTTest NewSponza, fixed camera and exposure, arcade wall, radiance x1000): sun
         // 71.7->47.2 degrees left 12.2 three frames later vs a settled 1.8, taking 40-150 frames to
-        // let go, same with NRD off at any REBLUR history depth -- never the denoiser's lag. Voiding
+        // let go, same with the denoiser off at any history depth -- never the denoiser's lag. Voiding
         // this frame's history restarts each pixel from a fresh candidate under the new sun: at reuse
-        // history 1, 9.7/2.6/1.7 at +3/+17/+42 frames (was 12.2/8.7/3.8). NRD's own history is kept
-        // short instead while the sun moves (reblurSunMovingFrameNum).
+        // history 1, 9.7/2.6/1.7 at +3/+17/+42 frames (was 12.2/8.7/3.8). The denoiser's own history
+        // is kept short instead while the sun moves (denoiserSunMovingSamples).
         // A jump, not every change (rtHistSunJumped): voiding on any change made a slider drag a run
         // of no-history frames -- white speckle noise all over the arcade (what the owner saw). The
         // 24.5-degree measurement above still voids.
@@ -6481,7 +6316,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         // giRestirParams[3] (poison-view flag; repurposed "spare" rather than a new field -- see
         // setGiPoisonView and giRestirIndirect's POISON DEBUG VIEW block, voxi_restir.hlsli) is now
         // published unconditionally near the top of this function -- see that site's F5 comment.
-        // u9, the radiance this frame hands NRD. Bound with the rest of the ReSTIR slots because
+        // u9, the radiance this frame hands the denoiser. Bound with the rest of the ReSTIR slots because
         // gGiRestirParams.x above is exactly the flag the shader's write is guarded on.
         if (giRadiance_) res_->setUav(bindings_, 9, giRadiance_, 0);
 
@@ -6515,40 +6350,38 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         }
     }
 
-    // ---- NVIDIA NRD, denoising LAST FRAME's sky-occlusion hit distance into t14 ----
-    // Last frame's is the only ordering possible: rtAoHitDist_ (u5) hasn't been written yet when
-    // beginShadowHistory records, so this filters the previous frame's measurement -- the same
-    // one-frame lag every temporal filter here already has (e.g. the u4/t11 pair). Every input but
-    // hit distance is the G-buffer's (four extra render targets), off by default; nothing here turns
-    // it on. Absent, this falls back to the filter Voxi has always shipped.
-    nrdOutput_ = 0;
-    nrdGiOutput_ = 0;
-    // MILESTONE 4: reset alongside nrdGiOutput_ for the same reason -- a frame that skips the NRD
-    // dispatch below must not leave recordStagedRayDriven believing the readback is still live. Set
-    // true only where nrdGiOutput_ is actually assigned below from a successful nrd_.record(), never
-    // inferred from nrdGiOutput_'s own truthiness (see that assignment's comment).
-    // Past the shadowHistoryActive() early return, so an inactive frame leaves all three at the last
-    // active frame's values -- harmless, since recordStagedRayDriven only runs when
-    // rdStagedActive() required shadowHistoryActive() this same frame.
-    nrdGiRanThisFrame_ = false;
+    // ---- THE DENOISER (Aver.Render.Denoise: AMD FidelityFX Denoiser), over LAST FRAME's signals ----
+    // Last frame's is the only ordering possible: rtAoHitDist_ (u5) and giRadiance_ (u9) haven't been
+    // written yet when beginShadowHistory records, so this filters the previous frame's measurement --
+    // the same one-frame lag every temporal filter here already has (e.g. the u4/t11 pair). Every
+    // input but the signal is the G-buffer's (four extra render targets), off by default; nothing here
+    // turns it on. Absent, this falls back to the filter Voxi has always shipped.
+    denoiseAoOutput_ = 0;
+    denoiseGiOutput_ = 0;
+    // MILESTONE 4: reset alongside denoiseGiOutput_ -- a frame that skips the dispatch below must not
+    // leave recordStagedRayDriven believing the reconstruction is still live. Set true only where the
+    // radiance denoiser actually ran below.
+    denoiseGiRanThisFrame_ = false;
+    bool denoiseRecorded = false;
     // gBufferEnabled() is not "the G-buffer has anything in it": D3D12 requires every render target
     // in one OMSetRenderTargets call to share a sample count, and the G-buffer's three are always
     // single-sample, so under MSAA the backend clears them without writing (warned once). Feeding a
     // denoiser cleared normals/viewZ/motion vectors doesn't fail -- it produces a confident, uniformly
     // wrong image, the worst outcome here. Skipping is the honest answer, said once, not every frame.
     const bool gbufWritten = dev_ && dev_->gBufferEnabled() && dev_->sampleCount() == 1;
-    if (dev_ && dev_->gBufferEnabled() && dev_->sampleCount() != 1 && !nrdWarnedMsaa_) {
-        AVER_WARN("[NRD] denoising is OFF: the G-buffer is enabled but MSAA is {}x, so the backend "
-                  "clears its targets without writing them and every NRD input would be blank. Set "
-                  "MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
-        nrdWarnedMsaa_ = true;
+    if (dev_ && dev_->gBufferEnabled() && dev_->sampleCount() != 1 && !denoiseWarnedMsaa_) {
+        AVER_WARN("[Denoise] denoising is OFF: the G-buffer is enabled but MSAA is {}x, so the backend "
+                  "clears its targets without writing them and every denoiser input would be blank. "
+                  "Set MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
+        denoiseWarnedMsaa_ = true;
     }
-    // Either signal is enough (requiring the occlusion one used to silently disable GI denoising for
-    // a whole session). Feeding NRD a blank input is the most expensive way to be wrong here.
-    // ---- The occlusion denoiser is skipped when nothing will read its output ----
-    // Output (t14, gNrdAo) is read in one place: rtSkyOcclusionTemporal, behind `nrdAoUsable &&
-    // gAverHistoryWrite`. Under ray-driven primary visibility every route there is closed:
-    //   - PSRayDriven passes nrdAoUsable = false (voxi.hlsl's ray-driven call site; df4122cc).
+    // Either signal is enough. Feeding the denoiser a blank input is the most expensive way to be
+    // wrong here.
+    // ---- The occlusion signal is skipped when nothing will read its output ----
+    // Output (t14, gDenoisedAo) is read in one place: rtSkyOcclusionTemporal, behind
+    // `denoisedAoUsable && gAverHistoryWrite`. Under ray-driven primary visibility every route there
+    // is closed:
+    //   - PSRayDriven passes denoisedAoUsable = false (voxi.hlsl's ray-driven call site; df4122cc).
     //   - No opaque draw reaches PSMainVoxi (suppressesScene() under rayDrivenActive(); D3D12Device/
     //     VulkanDevice::drawMesh return right after submitDraw when any feature suppresses the scene).
     //   - Glass reaches it via the blended replay (D3D12 only), but gAverHistoryWrite is false there
@@ -6556,42 +6389,42 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     //   - NOT closed: GameWater's unauthored-water fallback (GameWater.cpp, opaque material, blended
     //     draw) still reads t14, now reading its own accumulated occlusion instead -- a pixel change
     //     (needs simulated fluids + a water volume with no .ocmat; found by adversarial review).
-    // So that mode dispatched REBLUR_DIFFUSE_OCCLUSION every frame for no reader (measured "Voxi NRD
-    // denoise 2.18ms" for both denoisers together, ray-driven PTTest; saving not separately measured
-    // -- read the same span with --gpu-timing). Pixel-neutral except the GameWater case above; raster
-    // is unchanged, since rayDrivenActive() here is the same predicate scenePass uses later to pick
-    // the ray-driven pass, so the two can't disagree. The one deliberate behavioural change is at a
-    // mode switch (history reset below, nrdAoRanLastFrame_).
-    const bool nrdGiSignal = giRadiance_ && giRestirWanted();
-    // Legacy bit 32 (voxi.legacyBlendedHistoryWrite) re-opens the blended-fragment read of gNrdAo
-    // (gAverHistoryWrite = !blendedFragment || bit 32), so the denoiser must keep running for that to
-    // mean what it did. Toggling the bit flips this signal; the rejoin reset below covers that edge.
-    const bool nrdAoSignal = rtAoHitDist_ != 0 &&
-                             (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
-    if (nrd_.valid() && gbufWritten && (nrdAoSignal || nrdGiSignal)) {
-        render::nrd::Recorder::Inputs in;
+    // Raster is unchanged, since rayDrivenActive() here is the same predicate scenePass uses later to
+    // pick the ray-driven pass, so the two can't disagree.
+    const bool denoiseGiSignal = giRadiance_ && giRestirWanted();
+    // Legacy bit 32 (voxi.legacyBlendedHistoryWrite) re-opens the blended-fragment read of
+    // gDenoisedAo (gAverHistoryWrite = !blendedFragment || bit 32), so the occlusion signal must keep
+    // running for that to mean what it did. A signal that sat out a frame restarts its own history in
+    // the denoiser, so toggling the bit needs nothing more here.
+    const bool denoiseAoSignal = rtAoHitDist_ != 0 &&
+                                 (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
+    if (denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal)) {
+        render::denoise::Denoiser::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
         in.normalRoughness = dev_->gBufferNormalRoughnessTexture();
-        in.diffuseHitDist  = rtAoHitDist_;
-        in.diffuseRadianceHitDist = giRadiance_;
+        in.gbufferState    = rhi::ResourceState::RenderTarget;
+        // Both signals rest in UnorderedAccess (ensureShadowHistory creates them there and nothing
+        // in Voxi moves them); the denoiser transitions them for its own reads and puts them back.
+        in.occlusion   = denoiseAoSignal ? rtAoHitDist_ : 0;
+        in.radiance    = denoiseGiSignal ? giRadiance_ : 0;
+        in.signalState = rhi::ResourceState::UnorderedAccess;
         // Sized from whichever signal is there. Both are allocated at render resolution so they agree
-        // when both exist; asking the occlusion target's dimensions when only radiance was allocated
-        // is how "GI denoising without sky occlusion" would resolve to 0x0 and skip anyway.
+        // when both exist.
         rhi::TextureDesc sizeDesc{};
         const rhi::TextureHandle sizeFrom = rtAoHitDist_ ? rtAoHitDist_ : giRadiance_;
         const bool haveSize = res_->textureInfo(sizeFrom, sizeDesc);
         const u32 tw = haveSize ? sizeDesc.width : 0u, th = haveSize ? sizeDesc.height : 0u;
 
-        // ---- 3.4 b: the NRD rect vs resource guard ----
+        // ---- 3.4 b: the denoiser rect vs resource guard ----
         // Correct by construction on every ordinary frame (3.4 a): onRenderTargetsChanged reallocates
         // every Voxi target, G-buffer included, at AverSR's reduced size, so tw/th and the G-buffer
         // agree without hitting the mismatch branch below. Guards the one-frame case where that
         // breaks: a render-scale change landing between frames (the "park, apply at beginFrame"
-        // pattern 3.3 D/C2-13 uses), or a resize the device hasn't caught up with. NRD has no story
-        // for a mismatched rect (undefined, not merely wrong), so this checks all three G-buffer
-        // inputs rather than trusting tw/th alone -- the same precedent the backdrop's own size check
-        // set after its absence once removed the device (D3D12Device.cpp's sceneColorBackdropTexture).
+        // pattern 3.3 D/C2-13 uses), or a resize the device hasn't caught up with. The denoiser reads
+        // every input at the same pixel, so it checks all three G-buffer inputs rather than trusting
+        // tw/th alone -- the same precedent the backdrop's own size check set after its absence once
+        // removed the device (D3D12Device.cpp's sceneColorBackdropTexture).
         rhi::TextureDesc gzDesc{}, gmvDesc{}, gnrDesc{};
         const bool haveGbufSizes = in.viewZ && in.motionVectors && in.normalRoughness &&
                                    res_->textureInfo(in.viewZ, gzDesc) &&
@@ -6601,236 +6434,59 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                                 gzDesc.width == tw && gzDesc.height == th &&
                                 gmvDesc.width == tw && gmvDesc.height == th &&
                                 gnrDesc.width == tw && gnrDesc.height == th;
-        // Warned once per mismatch EPISODE, not once ever -- unlike nrdWarnedMsaa_/nrdWarnedEncoding_,
-        // this is expected to clear itself (next reallocation catches up), and a later unrelated
-        // episode should still be reported. Cleared the moment sizes agree again.
+        // Warned once per mismatch EPISODE, not once ever -- unlike denoiseWarnedMsaa_, this is
+        // expected to clear itself (next reallocation catches up), and a later unrelated episode
+        // should still be reported. Cleared the moment sizes agree again.
         if (haveSize && haveGbufSizes && !gbufSizeOk) {
-            nrd_.forceHistoryReset();
-            if (!nrdWarnedInputSizeMismatch_) {
-                nrdWarnedInputSizeMismatch_ = true;
-                AVER_WARN("[NRD] input size mismatch ({}x{} signal vs {}x{} G-buffer); skipping this "
+            if (!denoiseWarnedInputSizeMismatch_) {
+                denoiseWarnedInputSizeMismatch_ = true;
+                AVER_WARN("[Denoise] input size mismatch ({}x{} signal vs {}x{} G-buffer); skipping this "
                           "frame", tw, th, gzDesc.width, gzDesc.height);
             }
         } else if (gbufSizeOk) {
-            nrdWarnedInputSizeMismatch_ = false;
+            denoiseWarnedInputSizeMismatch_ = false;
         }
-        if (gbufSizeOk && tw && th && nrd_.resize(tw, th)) {
-            render::nrd::FrameSettings fs{};
-            fs.resourceWidth = fs.rectWidth  = tw;
-            fs.resourceHeight = fs.rectHeight = th;
-            // NRD's own default (NRDSettings.h), NOT giMaxDistance: that is how far a GI ray reaches,
-            // not how far from the camera a surface may be denoised. REBLUR writes no output texel
-            // whose viewZ is past this range and the texture is never cleared, so at 40 m (PTTest's
-            // RENDER.GIDISTANCE 4000) every farther surface read back whatever that texel held when a
-            // nearer surface last covered it -- stale GI frozen on screen over distant buildings, a
-            // burn-in in any street longer than 40 m. Sky (viewZ 1e7) stays outside it. Mirrored as
-            // AVER_NRD_DENOISING_RANGE in voxi_restir.hlsli -- change both together.
-            constexpr f32 kNrdDenoisingRangeCm = 500000.0f;
-            fs.denoisingRange  = kNrdDenoisingRangeCm;
-
-            // ---- The fourth silent NRD contract bug (after the hit-distance unit, the normal/
-            // roughness packing, and the motionVectorScale unit below): worldToView/viewToClip were
-            // never separate, and NRD does not treat them as interchangeable with their product ----
-            // The old comment here claimed "NRD composes the two to reconstruct position, so the
-            // product it actually uses is unchanged" -- FALSE, checked against vendored source:
-            // third_party/nrd/Source/InstanceImpl.cpp:384 runs DecomposeProjection on viewToClip ALONE
-            // to recover the frustum and left/right-handed verdict, then :386-397 conditionally negates
-            // row 2 of BOTH matrices on that verdict. With identity standing in for worldToView, the
-            // verdict was driven by the camera's rotation baked into the combined viewProj, never by
-            // anything that could change it -- so REBLUR_TemporalAccumulation.cs.hlsl:88-89/:144-163's
-            // reprojection, the plane-distance disocclusion test and the parallax term were evaluated
-            // against wrong positions, worst while the camera moves.
-            // Fix: read THIS frame's camera fresh (dev_->camera(), not curViewProj_, written by
-            // fitCascades() -- called from shadowPass() after this function returns -- so it holds
-            // LAST frame's camera on every steady frame; bug (a), with the identity encoding as bug
-            // (b)), then factorise it with CameraFactor into the separate worldToView/viewToClip NRD
-            // reads.
-            // voxi.nrdLegacyCamera (default OFF) reinstates the old encoding for an A/B comparison.
-            f32 camVp[16] = {}, camEye[3] = {};
-            // No inverse needed: CameraFactor factors camVp itself, and nothing here unprojects.
-            const bool haveCamera = dev_ && dev_->camera(camVp, nullptr, camEye);
-            bool cameraReady = false;
-            if (nrdLegacyCamera_) {
-                // Exactly today's pre-fix encoding, both halves: identity worldToView, and
-                // curViewProj_/prevViewProj_ (last frame's camera on every steady frame) for
-                // viewToClip -- reproducing bug (a) alongside bug (b) is the point of a faithful
-                // comparison, not an oversight.
-                fs.worldToView[0]     = fs.worldToView[5]     = fs.worldToView[10]     = fs.worldToView[15]     = 1.0f;
-                fs.worldToViewPrev[0] = fs.worldToViewPrev[5] = fs.worldToViewPrev[10] = fs.worldToViewPrev[15] = 1.0f;
-                std::memcpy(fs.viewToClip,     curViewProj_,  sizeof(fs.viewToClip));
-                std::memcpy(fs.viewToClipPrev, prevViewProj_, sizeof(fs.viewToClipPrev));
-                cameraReady = true;
-            } else if (f32 curW2V[16], curV2C[16];
-                       haveCamera && CameraFactor::factor(camVp, curW2V, curV2C)) {
-                // NRD keeps its own previous camera, latched below, deliberately separate from
-                // curViewProj_/prevViewProj_ (the COMBINED matrix other consumers want) -- reusing
-                // them would pair a factorised CURRENT camera with a combined PREVIOUS one.
-                // ---- And the current camera is last frame's, because the inputs are ----
-                // This dispatch runs before this frame's scene pass, so viewZ/motion/normals/radiance
-                // were all written by LAST frame's pixel shader, whose velocity is last-frame-minus-
-                // frame-before -- the camera pair is (last frame, frame before), not (this, last).
-                // Handing NRD this frame's camera (an earlier audit's "fix", which misread this as a
-                // staleness bug) puts its reconstruction one frame ahead of the data it judges.
-                // MEASURED, and it didn't matter: REBLUR finds history via motion vectors (right
-                // either way); consistent pairing moved GI motion grain slightly up (2.444->2.504)
-                // with no structural difference, so nrdCameraMatchesInputs defaults OFF, kept as a
-                // dial. The one real one-frame ghost is fixed in the shader's readback (voxi_restir.hlsli).
-                const bool matchInputs = settings_.nrdCameraMatchesInputs;
-                const bool hadPrevCamera  = nrdPrevCameraValid_;
-                const bool hadPrev2Camera = nrdPrevCameraValid_ && nrdPrev2CameraValid_;
-                if (matchInputs && hadPrevCamera) {
-                    std::memcpy(fs.worldToView, nrdPrevWorldToView_, sizeof(fs.worldToView));
-                    std::memcpy(fs.viewToClip,  nrdPrevViewToClip_,  sizeof(fs.viewToClip));
-                } else {
-                    std::memcpy(fs.worldToView, curW2V, sizeof(fs.worldToView));
-                    std::memcpy(fs.viewToClip,  curV2C, sizeof(fs.viewToClip));
-                }
-                const bool havePrev = matchInputs ? hadPrev2Camera : hadPrevCamera;
-                if (havePrev) {
-                    std::memcpy(fs.worldToViewPrev, matchInputs ? nrdPrev2WorldToView_ : nrdPrevWorldToView_,
-                                sizeof(fs.worldToViewPrev));
-                    std::memcpy(fs.viewToClipPrev,  matchInputs ? nrdPrev2ViewToClip_  : nrdPrevViewToClip_,
-                                sizeof(fs.viewToClipPrev));
-                } else {
-                    // No valid previous camera yet -- the first frame(s) NRD runs, or the first active
-                    // frame after a skipped-frame branch invalidated the latch above. Passing the
-                    // current camera for both halves makes the reprojection a no-op (zero parallax,
-                    // zero motion) instead of reading an uninitialised array; fs.resetHistory below
-                    // discards stale history regardless.
-                    std::memcpy(fs.worldToViewPrev, fs.worldToView, sizeof(fs.worldToViewPrev));
-                    std::memcpy(fs.viewToClipPrev,  fs.viewToClip,  sizeof(fs.viewToClipPrev));
-                }
-                // Shifted, then latched: the frame before becomes two frames ago.
-                if (hadPrevCamera) {
-                    std::memcpy(nrdPrev2WorldToView_, nrdPrevWorldToView_, sizeof(nrdPrev2WorldToView_));
-                    std::memcpy(nrdPrev2ViewToClip_,  nrdPrevViewToClip_,  sizeof(nrdPrev2ViewToClip_));
-                }
-                nrdPrev2CameraValid_ = hadPrevCamera;
-                std::memcpy(nrdPrevWorldToView_, curW2V, sizeof(nrdPrevWorldToView_));
-                std::memcpy(nrdPrevViewToClip_,  curV2C, sizeof(nrdPrevViewToClip_));
-                nrdPrevCameraValid_ = true;
-                // A mode switch restarts the history: the two pairings describe it as one frame apart,
-                // and blending across the switch would reproject by the wrong delta.
-                fs.resetHistory = !havePrev || matchInputs != nrdCameraMatchedLast_;
-                nrdCameraMatchedLast_ = matchInputs;
-                cameraReady = true;
-            }
-
-            if (!cameraReady) {
-                // Factorisation failed, or no camera, and the legacy switch is off. Never fall
-                // through to the old identity encoding silently -- the exact bug this rewrite
-                // removes. Skip the dispatch instead (nrdOutput_/nrdGiOutput_ stay 0, the shader's own
-                // GetDimensions() test reads slots 14/15 as "not denoised"); forceHistoryReset() makes
-                // the next frame reset, not reproject through the gap. Logged once: a condition that
-                // can't self-heal is just noise otherwise.
-                if (!nrdWarnedCameraFactor_) {
-                    AVER_WARN("[NRD] this frame's camera did not factorise into a worldToView/"
-                              "viewToClip pair NRD can trust ({}); skipping the NRD dispatch this "
-                              "frame rather than handing it a wrong or stale camera encoding. Neither "
-                              "an orthographic nor a mirrored camera is something this engine's own "
-                              "call sites (SandboxApp.cpp, GameApp.cpp) produce, so this firing in "
-                              "practice means camera construction changed somewhere and this is the "
-                              "first symptom of it.",
-                              haveCamera ? "CameraFactor::factor rejected it" : "dev_->camera() had none to give");
-                    nrdWarnedCameraFactor_ = true;
-                }
-                nrd_.forceHistoryReset();
-                nrdPrevCameraValid_ = false;
-                nrdPrev2CameraValid_ = false;
-            } else {
-                fs.frameIndex = nrdFrame_++;
-                // ---- The scale carries a sign AND a unit conversion; the unit was missing ----
-                // Sign: G-buffer velocity (averGBufferVelocity) is destination minus source, NRD
-                // reprojects by adding the vector to find where a pixel came from -- opposite
-                // conventions, hence negative.
-                // Unit: NRD consumes `pixelUv + mv.xy` in normalised [0,1] UV, but our velocity is in
-                // PIXELS -- scaling by -1 alone handed NRD a one-pixel movement as a one-UV jump (the
-                // entire screen). That was the "white impression of the geometry burned into the
-                // screen" bug: reprojections landed nowhere near their pixel, so stale geometry
-                // accumulated instead of decaying (degraded sky-occlusion identically, not a ReSTIR
-                // defect). Divide by the RECT, not the resource, since that's smaller under dynamic
-                // resolution. Third unit bug of this kind here (after hit-distance reading metres as
-                // centimetres, and normal/roughness reading one layout as another) -- when a vendored
-                // library takes a number, find the consumer.
-                fs.motionVectorScale[0] = fs.rectWidth  ? -1.0f / static_cast<f32>(fs.rectWidth)  : -1.0f;
-                fs.motionVectorScale[1] = fs.rectHeight ? -1.0f / static_cast<f32>(fs.rectHeight) : -1.0f;
-                fs.motionVectorScale[2] =  0.0f;   // the engine's velocity carries no Z
-                fs.resetHistory = fs.resetHistory || nrd_.historyIsStale() || !rtHistValid_;
-                // ReSTIR GI's radiance only exists when it's the estimator, so the diffuse denoiser
-                // runs only then -- feeding NRD blank input filters it confidently, the most
-                // expensive way to be wrong here.
-                //
-                // ---- REBLUR_DIFFUSE is selected now; what used to kill the adapter was this seam ----
-                // The recorder resolved OUT_DIFF_HITDIST/OUT_DIFF_RADIANCE_HITDIST via
-                // ResourceDesc::indexInPool, which NRD only sets for pool types -- for IN_*/OUT_* it
-                // stays 0, so both outputs aliased permanent pool texture 0 (a REBLUR PREV_VIEWZ
-                // history, R32_SFLOAT). The occlusion denoiser survived this because its output is
-                // RWTexture2D<float> (a one-channel write faulted on nothing); REBLUR_DIFFUSE's is
-                // RWTexture2D<float4>, and binding four components to a one-component UAV ->
-                // DEVICE_REMOVED. The bisection was reporting float vs float4, not 15 dispatches vs 34.
-                // An earlier guess in this comment was wrong (giRadiance_'s resource state, named as
-                // the next thing to check) -- not implicated; no PIX capture was needed, only NRD's
-                // own integration source.
-                // Fix: Recorder's outDiffHitDistTex_/outDiffRadHitDistTex_ (see Denoiser::ReblurTuning
-                // for the hit-distance constants this signal also needed).
-                const bool giSignal = nrdGiSignal;
-                const bool aoSignal = nrdAoSignal;
-                // The occlusion denoiser rejoining after a gap gets a fresh history -- its pool still
-                // holds pre-gap content, and REBLUR would reproject it with only one frame's camera
-                // delta (ghosting). FrameSettings is shared, so the radiance denoiser restarts too, but
-                // only for that one mode-switch frame that already changes the whole image.
-                if (aoSignal && !nrdAoRanLastFrame_) fs.resetHistory = true;
-                const u32* which  = (giSignal && aoSignal) ? kNrdAoAndGiDenoisers
-                                  : giSignal               ? kNrdGiDenoiser
-                                                           : kNrdAoDenoiser;
-                const u32  whichN = (giSignal && aoSignal) ? 2u : 1u;
-                // M1: nested under "Voxi shadow history" -- the recorder's dispatches get their own
-                // timing bracket instead of folding into the barrier cost.
-                // MILESTONE 4: whether REBLUR should read gRdGiTex's checkerboard packing. Needs
-                // giSignal and nrdGiInputCheckerboard_ (latched at top of function, from LAST frame's
-                // write, which is what this dispatch reads). Applied only on change (nrdGiCbApplied_
-                // caches the last value) so a steady frame doesn't re-call setReblurTuning().
-                const u8 wantCb = (giSignal && nrdGiInputCheckerboard_) ? 1u : 0u;
-                // Sun-moving history clamp (Settings::reblurSunMovingFrameNum): on for the frames the
-                // sun moves and one after, since this dispatch reads last frame's GI write.
-                if (rtHistSunMoved()) nrdSunMovingHold_ = 2u;
-                else if (nrdSunMovingHold_ > 0u) --nrdSunMovingHold_;
-                const bool sunClamp = nrdSunMovingHold_ > 0u;
-                if (wantCb != nrdGiCbApplied_ || sunClamp != nrdSunClampApplied_) {
-                    nrdGiCbApplied_ = wantCb;
-                    nrdSunClampApplied_ = sunClamp;
-                    applyReblurTuning();
-                }
-                {
-                    rhi::ScopedGpuStat nrdStat(ctx, "Voxi NRD denoise");
-                    if (nrd_.record(ctx, fs, in, which, whichN)) {
-                        // Only when the occlusion denoiser actually ran this frame: otherwise the pool
-                        // texture holds a stale result, breaking the "bound as nothing means not
-                        // denoised" contract below.
-                        nrdOutput_   = aoSignal ? nrd_.outputDiffuseHitDistance() : 0;
-                        nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
-                        // MILESTONE 4: true only when the diffuse denoiser that just ran is the one
-                        // recordStagedRayDriven (later this same frame, from scenePass) can trust for
-                        // half-rate GI -- giSignal, not nrdGiOutput_'s own truthiness. nrdGiOutput_ is
-                        // assigned above regardless of giSignal (`which` may have named only the
-                        // occlusion denoiser), so it can name whatever REBLUR's own permanent pool last
-                        // held for a diffuse denoiser that didn't run this call -- nrdGiRanThisFrame_ is
-                        // what tells the live case apart from that.
-                        nrdGiRanThisFrame_ = giSignal;
-                    }
-                }
+        if (gbufSizeOk && tw && th && denoiser_.resize(tw, th)) {
+            render::denoise::Denoiser::Frame frame;
+            frame.runOcclusion = denoiseAoSignal;
+            frame.runRadiance  = denoiseGiSignal;
+            frame.resetHistory = !rtHistValid_;
+            // MILESTONE 4: whether LAST frame's CSRdGi write -- the one this dispatch reads -- traced
+            // only half the pixels, and with which parity (both latched at the top of this function).
+            frame.radianceHalfRate       = denoiseGiSignal && denoiseGiInputHalfRate_;
+            frame.radianceHalfRateParity = denoiseGiHalfRateParity_;
+            // Sun-moving history clamp (Settings::denoiserSunMovingSamples): on for the frames the sun
+            // moves and one after, since this dispatch reads last frame's write.
+            if (rtHistSunMoved()) denoiseSunMovingHold_ = 2u;
+            else if (denoiseSunMovingHold_ > 0u) --denoiseSunMovingHold_;
+            render::denoise::Denoiser::Tuning tuning;
+            tuning.maxSamples        = settings_.denoiserMaxSamples;
+            tuning.historyClipWeight = settings_.denoiserHistoryClipWeight;
+            if (denoiseSunMovingHold_ > 0u)
+                tuning.maxSamples = std::min(tuning.maxSamples, settings_.denoiserSunMovingSamples);
+            denoiser_.setTuning(tuning);
+            // M1: nested under "Voxi shadow history" -- the denoiser's dispatches get their own timing
+            // bracket instead of folding into the barrier cost.
+            rhi::ScopedGpuStat denoiseStat(ctx, "Voxi denoise");
+            if (denoiser_.record(ctx, frame, in)) {
+                denoiseRecorded = true;
+                denoiseAoOutput_ = denoiser_.output(render::denoise::Signal::Occlusion);
+                denoiseGiOutput_ = denoiser_.output(render::denoise::Signal::Radiance);
+                // MILESTONE 4: recordStagedRayDriven (later this same frame) traces half the pixels
+                // only while this is true -- the reconstruction it relies on runs in this denoiser.
+                denoiseGiRanThisFrame_ = denoiseGiOutput_ != 0;
             }
         }
     }
+    // A frame the denoiser did not record breaks every signal's history: the next frame that runs
+    // must restart rather than reproject across the gap.
+    if (!denoiseRecorded) denoiser_.forceHistoryReset();
     // Bound every frame, including as nothing: clearSrv makes the shader's GetDimensions test mean
     // "not denoised THIS frame", not "never denoised" (else a stale texture would look live).
-    // nrdAoRanLastFrame_ updates every frame too, even when the NRD block above was gated off, so its
-    // rejoin test always compares against the frame immediately before.
-    nrdAoRanLastFrame_ = nrdOutput_ != 0;
-    if (nrdOutput_) res_->setSrv(bindings_, 14, nrdOutput_);
-    else            res_->clearSrv(bindings_, 14);
-    if (nrdGiOutput_) res_->setSrv(bindings_, 15, nrdGiOutput_);
-    else              res_->clearSrv(bindings_, 15);
+    if (denoiseAoOutput_) res_->setSrv(bindings_, 14, denoiseAoOutput_);
+    else                  res_->clearSrv(bindings_, 14);
+    if (denoiseGiOutput_) res_->setSrv(bindings_, 15, denoiseGiOutput_);
+    else                  res_->clearSrv(bindings_, 15);
 
     // Read fresh every frame, not cached: the scene viewport can change (editor panel resize) without
     // a full onRenderTargetsChanged notification. A failure here only disables blending this frame.
@@ -7128,12 +6784,13 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrep
     if (blended) {
         // BLENDED DRAWS NEVER WRITE THE G-BUFFER: always a one-target pipeline, which leaves slots 1-3
         // (velocity, viewZ, normal/roughness) exactly as the opaque surface behind wrote them. A pane
-        // owns no NRD signal (W6/M5: no history, no NRD radiance), so the geometry NRD pairs with the
-        // radiance at that pixel must stay the opaque surface's. The G-buffer twins these used to pick
-        // wrote the pane's own -- and D3D12 applied RenderTarget[0]'s premultiplied blend to every
-        // target, so the pane's normal (w = 0) was ADDED to the opaque one: REBLUR reprojected the
-        // room behind a window with the glass's motion and depth, so its glow smeared, stuck to the
-        // pane and trailed for its 30-frame history, and denoising at window pixels fell apart.
+        // owns no denoised signal (W6/M5: no history, no denoiser radiance), so the geometry the
+        // denoiser pairs with the radiance at that pixel must stay the opaque surface's. The G-buffer
+        // twins these used to pick wrote the pane's own -- and D3D12 applied RenderTarget[0]'s
+        // premultiplied blend to every target, so the pane's normal (w = 0) was ADDED to the opaque
+        // one: the denoiser (NVIDIA NRD at the time) reprojected the room behind a window with the
+        // glass's motion and depth, so its glow smeared, stuck to the pane and trailed for its
+        // 30-frame history, and denoising at window pixels fell apart.
         // The textured variant first -- not for mesh-shader draws (no textured mesh-shader twin).
         if (rtActive_ && sceneRtBlendedTexPso_ && !meshShaders) return sceneRtBlendedTexPso_;
         if (rtActive_) return meshShaders && sceneMsRtBlendedPso_ ? sceneMsRtBlendedPso_ : sceneRtBlendedPso_;

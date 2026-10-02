@@ -10,7 +10,7 @@
 // adapter averRtSampleSlot(Graph)/averRtUvGrad/averRtSurfaceUV/averRtPerturbNormal); the cutout-aware
 // RayQuery helpers every ray here (and in voxi_restir.hlsli) calls through: averRtCandidateOpaque,
 // averRtProceedSolid; the RT history textures (gRtShadowHist/Out t6/u2, gAoHist/Out t11/u4,
-// gAoHitDistOut u5, gNrdAo t14, gGiRadianceOut/gNrdGi u9/t15, gRtReflHist/Out t7/u3, gGBufNormalHist
+// gAoHitDistOut u5, gDenoisedAo t14, gGiRadianceOut/gDenoisedGi u9/t15, gRtReflHist/Out t7/u3, gGBufNormalHist
 // t10 under AVER_GBUFFER_HISTORY); the LD samplers rtHash/rtRadicalInverse2/rtDiscSample; the
 // estimators rtShadow, lamp struct RdLocalLight + rdLocalIrradiance/rdLocalShadow,
 // AverAmbientTraced/rtAmbientTraced/rtSkyOcclusion, rtReprojectTexel/History/Ao,
@@ -518,34 +518,30 @@ RWTexture2D<float2> gAoHistOut : register(u4);
 // Deliberately NOT normalised to any denoiser's curve -- a consumer wanting world units multiplies by
 // giMaxDistance. DISTANCE MATTERS BECAUSE OCCLUSION ALONE CAN'T: "30% occluded" can't distinguish a
 // wide distant opening from a tight crevice, so a filter can't size its spread radius without it.
-// NVIDIA NRD calls this IN_DIFF_HITDIST; REBLUR_DIFFUSE_OCCLUSION won't run without it (see
-// modules/render.nrd/README.md).
+// It is the signal the denoiser (Aver.Render.Denoise) filters for sky occlusion.
 // Guarded by gRtDenoiseParams.w (same flag/condition as u4/t11, VoxiRenderer::aoHistoryWanted).
 // Low/Medium never trace this ray, so the slot is genuinely absent there and must not be touched --
 // writing a null UAV is undefined, not merely wasted.
 RWTexture2D<float>  gAoHitDistOut : register(u5);
 
-// t14: the same signal, one frame later, after NVIDIA NRD has filtered it. Declared here rather than
+// t14: the same signal, one frame later, after the denoiser has filtered it. Declared here rather than
 // beside its t12/t13 register neighbours (~700 lines down with ReSTIR): HLSL has no forward
 // declarations and rtSkyOcclusionTemporal, the only reader, comes before them -- and here is beside
 // the u5 it filters, same quantity/encoding (see AverAmbientTraced::hitDist).
-// ROUTINELY ABSENT -- readers must test for it. Needs NRD in the build, D3D12 (Vulkan refuses NRD's
-// space-1 layout) and the G-buffer (off by default). VoxiRenderer clears this slot on any undenoised
+// ROUTINELY ABSENT -- readers must test for it. Needs the denoiser on and the G-buffer (off by
+// default, and D3D12 only). VoxiRenderer clears this slot on any undenoised
 // frame, so GetDimensions()==0 means "not denoised this frame", not "never" -- a frozen last-good
 // image would be the worse failure.
-Texture2D<float>    gNrdAo        : register(t14);
+Texture2D<float>    gDenoisedAo   : register(t14);
 
-// u9/t15: the ReSTIR GI radiance on its way to NRD's REBLUR_DIFFUSE, and on its way back.
-// rgb = giRestirIndirect's indirect diffuse radiance for this pixel; a = the candidate ray's distance,
-// normalised by the SAME giMaxDistance the sky-occlusion hit distance uses (one hitDistParams
-// describes both signals). NRD packs/unpacks the pair itself.
-// OWN TEXTURE, NOT SHARED WITH OCCLUSION: different denoisers with separate histories (scalar
-// REBLUR_DIFFUSE_OCCLUSION vs colour REBLUR_DIFFUSE) -- sharing a texture would share a history, and
-// the two signals decorrelate.
-// BOTH ABSENT UNLESS ReSTIR GI IS ON *AND* NRD IS RUNNING; readers test via zero dimensions like
+// u9/t15: the ReSTIR GI radiance on its way to the denoiser, and on its way back.
+// rgb = giRestirIndirect's linear indirect diffuse radiance for this pixel; a unused.
+// OWN TEXTURE, NOT SHARED WITH OCCLUSION: separate denoiser histories (one-channel occlusion vs
+// colour radiance) -- sharing a texture would share a history, and the two signals decorrelate.
+// BOTH ABSENT UNLESS ReSTIR GI IS ON *AND* THE DENOISER IS RUNNING; readers test via zero dimensions like
 // t14's. Writing is guarded on gGiRestirParams.x (says whether ReSTIR slots are bound this frame).
 RWTexture2D<float4> gGiRadianceOut : register(u9);
-Texture2D<float4>   gNrdGi         : register(t15);
+Texture2D<float4>   gDenoisedGi    : register(t15);
 
 // Ray-traced reflection history: same ping-pong as the shadow history above, its own pair of
 // textures. rgb = shaded colour, a = linear hit depth, OR NEGATIVE meaning the ray missed.
@@ -1409,17 +1405,18 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 // `coneAo`: the cone gather's own occlusion -- smooth, deterministic, ALREADY COMPUTED at every tier
 // (at Epic it was computed then thrown away -- coneTracedIndirect's own `rdAo` comment says so). Free
 // as a prior.
-// `nrdAoUsable`: whether this pass's OWN inputs produced gNrdAo -- the zero-dimensions test below only
+// `denoisedAoUsable`: whether this pass's OWN inputs produced gDenoisedAo -- the zero-dimensions test below only
 // tells "allocated" vs "absent", not "produced from this frame's inputs".
 //
 // MEASURED 2026-09-22, PTTest NewSponza, deep shadow (reference <8 luminance, 71% of viewport):
 // ray-driven primary visibility read 12.68 vs raster's 7.87 vs path-traced truth 1.58 -- washed-out
 // darks, reported by the owner as "raster looks more realistic, the darkness is truly dark".
 // Bisecting every term in both paths found the whole of it here: the FRESH trace agreed between
-// paths (median 0.00, correctly occluded); only after NRD's override did ray-driven diverge to
+// paths (median 0.00, correctly occluded); only after the denoiser's override (NRD at the time) did
+// ray-driven diverge to
 // ~0.83 open while raster stayed ~0.
 //
-// WHY: gNrdAo (REBLUR_DIFFUSE_OCCLUSION) reprojects using motion vectors/depth/normals the RASTER
+// WHY: gDenoisedAo reprojects using motion vectors/depth/normals the RASTER
 // path writes. Ray-driven primary visibility runs with the G-buffer off (VoxiRenderer selects
 // rayDrivenTexPso_ precisely then), so those inputs aren't this frame's, and the denoised answer
 // isn't about this frame's geometry -- but the texture stays bound and non-zero-dimensioned, so the
@@ -1429,14 +1426,14 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 // DEPENDS on this denoised answer) while helping ray-driven (12.68->8.98, MAD 12.59->9.83, closer to
 // truth than raster; high-freq energy 1.486->1.172 vs raster's 1.035).
 //
-// BETTER FIX, NOT TAKEN: give ray-driven correct NRD inputs (motion vectors/depth for a ray-traced
-// primary hit) so the denoiser earns its place there too -- VoxiRenderer/NRD wiring work, not a
+// BETTER FIX, NOT TAKEN: give ray-driven correct denoiser inputs (motion vectors/depth for a
+// ray-traced primary hit) so the denoiser earns its place there too -- VoxiRenderer wiring work, not a
 // shader change. When it lands, flip this parameter back to true.
 //
 // `coneAoIsGather`: whether `coneAo` was actually measured (coneTracedIndirect ran); under ReSTIR GI
 // or with GI off the caller's `ao` is still its 1.0 init.
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo,
-                             bool coneAoIsGather, bool nrdAoUsable) {
+                             bool coneAoIsGather, bool denoisedAoUsable) {
     // gRtDenoiseParams.w, NOT gRtHistParams.x: the shadow/reflection pairs exist at every RT tier, but
     // this AO history pair is allocated only while a sky occlusion ray is wanted (VoxiRenderer::
     // aoHistoryWanted; touching a null UAV is undefined). rays>0 here means a TRANSITIONAL frame (just
@@ -1484,7 +1481,7 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     }
 
     // `tracedNow` GATES THE HIT-DISTANCE WRITE below. gAoHitDistOut (u5) is not ping-ponged -- only
-    // NRD's external accumulation reads it back -- so a skipped pixel leaves it UNWRITTEN, at most one
+    // the denoiser's external accumulation reads it back -- so a skipped pixel leaves it UNWRITTEN, at most one
     // frame stale under this checkerboard (a skipping tile traced last frame, will trace next); gAoHist
     // carries (openness, depth), not hit distance, so there's no reprojected value to write instead.
     float fresh;
@@ -1554,28 +1551,28 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
         const float weight = lerp(0.97, 0.5, t);
         vis = lerp(fresh, histV, weight);   // history exists, so the traced sample is the UPDATE
     }
-    // ---- NRD's ANSWER WINS WHEN THERE IS ONE, REPLACING the blend above rather than filtering it ----
+    // ---- THE DENOISER'S ANSWER WINS WHEN THERE IS ONE, REPLACING the blend above ----
     //
-    // gNrdAo (REBLUR_DIFFUSE_OCCLUSION on last frame's hit distance) shares AverAmbientTraced::hitDist's
+    // gDenoisedAo (last frame's hit distance, filtered as-is) shares AverAmbientTraced::hitDist's
     // units exactly (fraction of TMax, 1="nothing in the way"), so no remap.
     //
     // REPLACES THE EMA, DOESN'T FEED IT: handing a denoised value into the 0.97 blend would feed a
-    // filter its own output and double-count NRD's own temporal accumulation.
+    // filter its own output and double-count the denoiser's own temporal accumulation.
     //
     // ZERO-DIMENSIONS TEST is the bound-or-not signal (same one averBlendBackdropValid uses): absent
-    // on Vulkan, without NRD, or without the G-buffer -- t14 can't be assumed present.
-    uint nrdW = 0, nrdH = 0;
-    gNrdAo.GetDimensions(nrdW, nrdH);
+    // without the denoiser or the G-buffer -- t14 can't be assumed present.
+    uint dnW = 0, dnH = 0;
+    gDenoisedAo.GetDimensions(dnW, dnH);
     // W6/M5: `gAverHistoryWrite &&` leads this test so a blended-replay fragment (glass/water pane,
     // PSMainVoxi) doesn't read back the OPAQUE surface's own denoised answer -- the mis-attribution
     // this task's C9 finding named ("a pane handed the denoised GI/AO of the surface behind it").
     // Skipping leaves `vis` at this fragment's own fresh/history blend; the pane's write below is
     // gated the same way. See voxi.hlsl's gAverHistoryWrite/averDrawIsTranslucent, and
-    // voxi_restir.hlsli's identical gate on gGiRadianceOut's NRD GI readback.
-    if (nrdAoUsable && gAverHistoryWrite && nrdW > 0u && nrdH > 0u) {
+    // voxi_restir.hlsli's identical gate on its denoised GI readback.
+    if (denoisedAoUsable && gAverHistoryWrite && dnW > 0u && dnH > 0u) {
         // Still written to history below: next frame's reprojection reads it, and the pass falls
-        // back to it the moment NRD stops running (e.g. G-buffer switched off).
-        vis = saturate(gNrdAo.Load(int3(pixel, 0)).r);
+        // back to it the moment the denoiser stops running (e.g. G-buffer switched off).
+        vis = saturate(gDenoisedAo.Load(int3(pixel, 0)).r);
     }
 
     // ACCUMULATED, not fresh (writing fresh would restart the average every frame, same trap the

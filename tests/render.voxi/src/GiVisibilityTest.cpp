@@ -443,17 +443,17 @@ int main() {
               "`reuse.numSamples = 0u` appears textually AFTER the motion-discount lerp, never "
               "before it");
 
-        // Exactly 4 gAverHistoryWrite WRITE gates (store, surface history, NRD input, the new
-        // visibility write) plus the NRD readback's TWO gates: the reprojected read b6a64126 added
-        // (gAverHistoryWrite && nrdInRange && nrdReproject ...) and the decode it falls back to
-        // (gAverHistoryWrite && nrdInRange && gw > 0u) -- both keep a blended fragment from reading the
-        // opaque surface's denoised answer.
+        // Exactly 4 gAverHistoryWrite WRITE gates (store, surface history, denoiser input, the new
+        // visibility write) plus the denoised readback's TWO gates: the reprojected read b6a64126 added
+        // (gAverHistoryWrite && denoisedReproject ...) and the decode it falls back to
+        // (gAverHistoryWrite && gw > 0u) -- both keep a blended fragment from reading the opaque
+        // surface's denoised answer.
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
-        const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && nrdInRange && gw > 0u");
-        const int reprojectGates = countOccurrences(t, "if (gAverHistoryWrite && nrdInRange && nrdReproject");
+        const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && gw > 0u");
+        const int reprojectGates = countOccurrences(t, "if (gAverHistoryWrite && denoisedReproject");
         check(totalGates == 6 && readbackGates == 1 && reprojectGates == 1,
               "voxi_restir.hlsli has exactly 4 gAverHistoryWrite write gates (store/surface-history/"
-              "NRD-input/visibility-write) plus the NRD readback's two gates (reprojected read, decode) -- " +
+              "denoiser-input/visibility-write) plus the denoised readback's two gates (reprojected read, decode) -- " +
               std::to_string(totalGates) + " total `if (gAverHistoryWrite` occurrences, " +
               std::to_string(readbackGates) + " decode + " + std::to_string(reprojectGates) +
               " reprojected-read gate(s)");
@@ -473,13 +473,13 @@ int main() {
         check(has(t, "averShadowLum"), "F2's traced-path luminance still uses this file's own "
                                         "averShadowLum reduction, not a second formula");
 
-        // No NRD readback gate here any more: df4122cc ("Ray-driven stops reading a denoised occlusion
-        // it did not produce") removed voxi_rt.hlsli's gAverHistoryWrite && nrdW > 0u read.
+        // No unconditional denoised-occlusion readback gate here any more: df4122cc ("Ray-driven stops
+        // reading a denoised occlusion it did not produce") put denoisedAoUsable in front of it.
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
-        const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && nrdW > 0u");
+        const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && dnW > 0u");
         check(totalGates == 4 && readbackGates == 0,
               "voxi_rt.hlsli has exactly 4 gAverHistoryWrite write gates (AO history/AO hit-distance/"
-              "RT-shadow tiled/RT-shadow untiled) and no NRD readback gate (df4122cc) -- " +
+              "RT-shadow tiled/RT-shadow untiled) and no unconditional denoised readback gate (df4122cc) -- " +
               std::to_string(totalGates) + " total, " + std::to_string(readbackGates) + " readback");
     }
 
@@ -498,7 +498,7 @@ int main() {
 
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
         check(totalGates == 2, "voxi.hlsl has exactly 2 gAverHistoryWrite write gates (both "
-                                "rtReflectionTemporal branches), no NRD-style readback of its own -- "
+                                "rtReflectionTemporal branches), no denoiser-style readback of its own -- "
                                 "got " + std::to_string(totalGates));
 
         // PSRayDriven's own sky-miss surface-history sentinel and AO hit-distance writes are NOT

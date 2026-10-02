@@ -220,31 +220,12 @@ void Renderer::setSettings(const Settings& s) {
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
     // Mirrors VoxiRenderer::kMaxGiUpdateInterval for the same reason as rtPixelsPerRayTile above.
     n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
-    // REBLUR history/prepass dials -- ranges are NRD's OWN (third_party/nrd/Include/NRDSettings.h's
-    // ReblurSettings), not guessed: maxAccumulatedFrameNum and maxStabilizedFrameNum are each
-    // documented there as "[0; REBLUR_MAX_HISTORY_FRAME_NUM]" (63); a maxStabilizedFrameNum at or
-    // above maxAccumulatedFrameNum is NRD's own business to clamp down further (its header says so
-    // explicitly), not this engine's -- which is exactly the relationship today's defaults (63, 30)
-    // already have, unchanged here. diffusePrepassBlurRadius's own doc gives only a lower bound ("0 =
-    // disabled"); 100 is a defensive ceiling this engine adds so a manifest typo cannot select an
-    // unbounded pixel radius, not a value NRD itself states.
-    n.reblurMaxAccumulatedFrameNum = std::clamp(n.reblurMaxAccumulatedFrameNum, 0u, 63u);
-    n.reblurMaxStabilizedFrameNum  = std::clamp(n.reblurMaxStabilizedFrameNum, 0u, 63u);
-    n.reblurDiffusePrepassBlurRadius = std::clamp(n.reblurDiffusePrepassBlurRadius, 0.0f, 100.0f);
-    // The residual-noise dials, NRD's documented ranges. The two antilag scales only need to stay
-    // positive; 100 is a defensive ceiling, not an NRD figure. The frame counts keep NRD's own
-    // ordering (historyFix < fast <= main) so a dial set alone cannot hand NRD an illegal triple.
-    n.reblurAntilagSigmaScale     = std::clamp(n.reblurAntilagSigmaScale, 0.01f, 100.0f);
-    n.reblurAntilagSensitivity    = std::clamp(n.reblurAntilagSensitivity, 0.01f, 100.0f);
-    n.reblurMinHitDistanceWeight  = std::clamp(n.reblurMinHitDistanceWeight, 0.001f, 0.2f);
-    n.reblurFastHistoryClampSigma = std::clamp(n.reblurFastHistoryClampSigma, 1.0f, 3.0f);
-    n.reblurMaxFastAccumulatedFrameNum =
-        std::min(n.reblurMaxFastAccumulatedFrameNum, n.reblurMaxAccumulatedFrameNum);
-    n.reblurHistoryFixFrameNum = n.reblurMaxFastAccumulatedFrameNum == 0u ? 0u
-        : std::min(n.reblurHistoryFixFrameNum, n.reblurMaxFastAccumulatedFrameNum - 1u);
-    n.reblurSunMovingFrameNum = std::min(n.reblurSunMovingFrameNum, 63u);
-    n.reblurMinBlurRadius = std::clamp(n.reblurMinBlurRadius, 0.0f, 100.0f);
-    n.reblurMaxBlurRadius = std::clamp(n.reblurMaxBlurRadius, n.reblurMinBlurRadius, 100.0f);
+    // The denoiser's dials. A zero history length would divide by zero inside FidelityFX's
+    // accumulation; 255 is a defensive ceiling (a history that long no longer follows anything).
+    // The clip weight must stay positive: zero would clip the history to a point.
+    n.denoiserMaxSamples        = std::clamp(n.denoiserMaxSamples, 1u, 255u);
+    n.denoiserHistoryClipWeight = std::clamp(n.denoiserHistoryClipWeight, 0.01f, 4.0f);
+    n.denoiserSunMovingSamples  = std::clamp(n.denoiserSunMovingSamples, 1u, 255u);
 
     // A GARBAGE VALUE, NOT A HARDWARE ONE: mirrors n.rtRenderMode's own range clamp a few lines above
     // rather than replacing it -- 2 is the top of the enum RayTraced names, so anything past it is a
@@ -365,9 +346,9 @@ bool Renderer::consumeAoHistoryResetRequest() {
     aoHistoryResetRequested_ = false;
     return d;
 }
-bool Renderer::consumeNrdHistoryResetRequest() {
-    const bool d = nrdHistoryResetRequested_;
-    nrdHistoryResetRequested_ = false;
+bool Renderer::consumeDenoiserHistoryResetRequest() {
+    const bool d = denoiserHistoryResetRequested_;
+    denoiserHistoryResetRequested_ = false;
     return d;
 }
 

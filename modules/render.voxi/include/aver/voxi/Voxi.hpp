@@ -47,11 +47,12 @@ struct DeviceInfo {
     u32 shaderModel = 50;      // 60 = SM 6.0, 65 = SM 6.5
     u32 meshShaderTier = 0;    // 0 = none, 1 = Tier 1
     bool dxcAvailable = false; // DXIL compiler present
-    // D3D12 + NVIDIA denoiser library available on this backend (see RenderSettingsResolver.hpp's
-    // DisableReason::RequiresNrd). Computed by the host at the same two call sites that check
-    // `backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available()`; this struct only
-    // carries the answer so it stays free of any RHI dependency.
-    bool nrdSupported = false;
+    // The denoiser can run on this backend (see RenderSettingsResolver.hpp's
+    // DisableReason::RequiresDenoiserBackend): it reads the G-buffer, which only D3D12 provides.
+    // Computed by the host as `backend() == rhi::Backend::D3D12` at the same two call sites
+    // (SandboxApp.cpp, GameApp.cpp); this struct only carries the answer so it stays free of any RHI
+    // dependency.
+    bool denoiserSupported = false;
 };
 
 // The renderer quality settings, as requested. Clamped to the device by Renderer::setSettings.
@@ -156,7 +157,7 @@ struct Settings {
     // GI radiance ceiling before tonemap; mirrored to the shader as AVER_VOX_MAXRAD (voxi.hlsl /
     // voxi_gi.hlsli) via FrameConstants::viewParams.y. 16.0 is not headroom -- acesTonemap
     // (rhi/shaders/color.hlsli) is already flat white by x=4-5, so anything pinned here paints solid
-    // white. Shared by the raw ReSTIR GI estimate, its NRD-denoised readback and the cone-gather
+    // white. Shared by the raw ReSTIR GI estimate, its denoised readback and the cone-gather
     // estimator. DEFAULT MUST STAY 16.0: every image this renderer has produced was already clamped
     // there as a compile-time #define; change only via a project or voxi.giRadianceCeiling.
     // Lowering it can fix a poisoned-but-finite white patch, but also dims a legitimate bright bounce
@@ -294,7 +295,7 @@ struct Settings {
 
     // ---- BISECTING THE SAME FADE FROM THE OTHER SIDE: SPLIT REUSE APART, THEN TIGHTEN IT ----
     // OPEN: ReSTIR GI reads brighter while moving, settling darker over ~1s after stopping. Ruled
-    // out: auto-exposure, NRD, sky-occlusion rays, the F2 voxel bounce, voxel rebuild rate, Half vs
+    // out: auto-exposure, the denoiser (NRD then), sky-occlusion rays, the F2 voxel bounce, voxel rebuild rate, Half vs
     // Full visibility, the spatial-reuse motion discount (3dbc9a42, reverted 8daed7f1), reservoir age
     // and the moving-camera history cap (both measured WORSE). What removes the fade: giRestirMaxHistory
     // 0, and voxi.debugResetHistoryEveryFrame 1 (c08c76d2), which clears the reservoir history every
@@ -333,75 +334,44 @@ struct Settings {
     // re-forms the chain from single-sample reservoirs whose RIS weight has huge variance, which is
     // what flashes. WHAT 0 COSTS: nothing detectable -- settled brightness unchanged (0.0893 vs
     // 0.0892), grain/flicker at rest identical (0.00597/0.00057 vs 0.00594/0.00056), mid-motion
-    // slightly better, moving image sits at settled brightness instead of 5% above it: NRD already
-    // supplies the smoothing this reuse was meant to provide. 1 restores the old behaviour for A/B.
+    // slightly better, moving image sits at settled brightness instead of 5% above it: the denoiser
+    // (NRD when measured) already supplies the smoothing this reuse was meant to provide. 1 restores the old behaviour for A/B.
     // Console: voxi.giRestirMaxHistory. Packed at bits 18-22.
     u32 giRestirMaxHistory = 0;
 
-    // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
-    // Off by default: ON is a real cost the user chooses, not one a denoiser helps itself to. NRD
+    // ---- THE DENOISER OVER THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
+    // AMD FidelityFX Denoiser (MIT) through Aver.Render.Denoise -- see modules/render.denoise.
+    // Off by default: ON is a real cost the user chooses, not one a denoiser helps itself to. It
     // needs the thin G-buffer written (velocity, view Z, normal/roughness -- three more targets,
     // ~54 MB at 1080p) that nothing else in this engine turns on; this field is that agreement.
     // Requires MSAA 1 -- D3D12's rule: every target in one OMSetRenderTargets call shares a sample
     // count, and the G-buffer's three are always single-sample, so above 1x they clear without
-    // writing and every NRD input is blank. A denoiser fed blank inputs doesn't fail -- it returns a
-    // confident, uniformly wrong image -- so VoxiRenderer skips the pass and warns once at WARN; MSAA
-    // 8x makes this a no-op (the UI says so next to the checkbox).
-    // D3D12 only; see modules/render.nrd for why (NRD wants register space 1, Vulkan refuses it).
+    // writing and every denoiser input is blank. A denoiser fed blank inputs doesn't fail -- it
+    // returns a confident, uniformly wrong image -- so VoxiRenderer skips the pass and warns once at
+    // WARN; MSAA 8x makes this a no-op (the UI says so next to the checkbox).
+    // D3D12 only, because the G-buffer it reads is.
     bool denoiser = false;
 
-    // ---- REBLUR history/prepass tuning -- LIVE dials over render.nrd::Denoiser::ReblurTuning ----
-    // hitDistA/B/C and enableAntiFirefly are excluded (unit-conversion constants the engine owns, not
-    // a look to hand-tune); these expose REBLUR_DIFFUSE's history depth and pre-pass blur for sweeping
-    // without a rebuild. VoxiRenderer re-applies them every setSettings() call (already once a frame)
-    // via nrd::SetDenoiserSettings (NRD.h: needs calling "at least once per denoiser, not necessarily
-    // on each frame", so this takes effect next frame without tearing down NRD's accumulated history).
-    // Defaults are today's hardcoded ReblurTuning{} values. Ranges are NRD's own (NRDSettings.h's
-    // ReblurSettings).
-    float reblurDiffusePrepassBlurRadius = 30.0f;
-    // [0; REBLUR_MAX_HISTORY_FRAME_NUM=63]. History depth in frames, not dispatch count -- latency/
-    // noise, not a pass toggle (see ReblurTuning's own comment).
-    u32   reblurMaxAccumulatedFrameNum = 30;
-    // [0; 63] ("0 disables the stabilization pass"; a value >= maxAccumulatedFrameNum is clamped down
-    // to it BY NRD ITSELF). 63/30 is such a pair, left as NRD's own defaults.
-    u32   reblurMaxStabilizedFrameNum = 63;
-    // Residual-noise dials -- see render.nrd::Denoiser::ReblurTuning; defaults are NRD's own,
-    // REBLUR_DIFFUSE (index 1) only.
-    bool  reblurAntiFirefly = true;   // NRD's own default; see ReblurTuning::enableAntiFirefly
-    float reblurFireflySuppressorScale = 2.0f;   // see ReblurTuning::fireflySuppressorMinRelativeScale
-    float reblurAntilagSigmaScale = 2.0f;
-    float reblurAntilagSensitivity = 3.0f;
-    float reblurMinHitDistanceWeight = 0.1f;
-    float reblurFastHistoryClampSigma = 2.0f;
-    u32   reblurMaxFastAccumulatedFrameNum = 6;
-    u32   reblurHistoryFixFrameNum = 3;
-    // Caps REBLUR_DIFFUSE's history depth (and its stabilized/fast depths) on every frame the sun
-    // moves and the one after -- at full history (30 + stabilization) ReSTIR GI kept the old sun's
-    // bounce light for ~1s after a drag stopped. MEASURED on NewSponza (40-deg azimuth drag @1deg/
-    // frame vs settled): mean +3.6 on 14.6 one frame after, +1.9@11, +1.1@26, +0.5@61; denoiser off
-    // +0.25/+0.07, voxel cone GI none -- the lag was NRD's history alone. Restarts history short
-    // under the new sun (regrows by one/frame) rather than discarding it, so the drag stays denoised
-    // just less smoothly. 63+ (>= reblurMaxAccumulatedFrameNum) turns it off. Console:
-    // voxi.reblurSunMovingFrameNum.
-    u32   reblurSunMovingFrameNum = 4;
-    float reblurMinBlurRadius = 1.0f;
-    // 10, not NRD's 30 -- the one dial here that measured a win. REBLUR spreads a fresh history over
-    // this radius with a sparse kernel; after motion that sparse pattern is the grain. PTTest gallery,
-    // frame after a 30-deg sweep vs settled, final image: 1-px grain 0.761 -> 0.645, p99 7.04 -> 5.47;
-    // NRD's GI alone 2.444 -> 1.965. Still frame MAD 0.34, no brightness shift, still-GI noise +1.5%.
-    // 7 bought slightly more in motion at +7% rest cost; 15 bought half as much.
-    float reblurMaxBlurRadius = 10.0f;
-    // WHICH CAMERA NRD IS TOLD ITS INPUTS WERE RENDERED WITH. NRD runs in beginShadowHistory, before
-    // this frame's scene pass, so every input it reads was written by LAST frame's pixel shader.
-    // true hands it last frame's camera as current and the one before as previous -- the pair those
-    // inputs were actually made with; false (DEFAULT) is the shipped wiring: this frame's camera, one
-    // frame ahead of its own data.
-    // DEFAULT FALSE: the consistent pairing bought nothing measurable. PTTest gallery, NRD's GI alone
-    // after a 30-deg sweep: 1-px grain 2.444 -> 2.504, mid-sweep 4.47% -> 4.61%, unstructured speckle
-    // with no ghost either way -- REBLUR reprojects by motion vectors (right under both) and uses the
-    // matrices only for plane/parallax tests. Kept as a dial: the analysis is sound, and a difference
-    // may still show on translation-heavy motion, which this was not measured on.
-    bool  nrdCameraMatchesInputs = false;
+    // ---- The denoiser's live dials (render::denoise::Denoiser::Tuning) ----
+    // Applied every frame the denoiser records, so a console change takes effect next frame with no
+    // teardown and no history loss.
+    // History length: the cap on each pixel's accumulated sample count. Longer is smoother and
+    // slower to follow a change. [1, 255]; 32 is FidelityFX's own reference value. Console:
+    // voxi.denoiserMaxSamples.
+    u32   denoiserMaxSamples = 32;
+    // How tightly the reprojected history is clipped to this frame's neighbourhood statistics before
+    // it is blended in: smaller rejects stale history sooner (less ghosting, more noise), larger keeps
+    // more of it. (0, 4]; 0.5 is FidelityFX's own reference value. Console:
+    // voxi.denoiserHistoryClipWeight.
+    float denoiserHistoryClipWeight = 0.5f;
+    // Caps the history length on every frame the sun moves and the one after. Under NRD at full
+    // history ReSTIR GI kept the old sun's bounce light for ~1s after a drag stopped (MEASURED on
+    // NewSponza, 40-deg azimuth drag @1deg/frame vs settled: mean +3.6 on 14.6 one frame after,
+    // +1.1@26 frames, denoiser off +0.25), so the history restarts short under the new sun and regrows
+    // by one sample a frame -- the drag stays denoised, just less smoothly. A value >=
+    // denoiserMaxSamples turns it off. Not re-measured with this denoiser. Console:
+    // voxi.denoiserSunMovingSamples.
+    u32   denoiserSunMovingSamples = 4;
 
     // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 = off (unfiltered per-pixel
     // rays); N>0 averages a (2N+1)^2 neighbourhood of the shadow history, weighted by depth agreement
@@ -476,10 +446,10 @@ struct Settings {
     // compile, resources are absent, a non-textured PSO is in use, or the backend isn't D3D12, so an
     // opted-in project never silently renders nothing.
     // 2 = STAGED + HALF-RATE GI (milestone 4): same staged path as 1, but ReSTIR GI traces only HALF
-    // the pixels/frame (NRD's checkerboard) and REBLUR reconstructs the untraced half -- trades GI
+    // the pixels/frame (a checkerboard) and the denoiser reconstructs the untraced half -- trades GI
     // quality/latency for speed. Only differs from 1 while giMode==1 AND denoiser is actually
-    // denoising (voxel cone gather has no GI stage to checkerboard; without NRD nothing fills the
-    // untraced half), so 2 behaves as 1 in either case (logged once). Same restriction/fallback as 1.
+    // denoising (voxel cone gather has no GI stage to checkerboard; without the denoiser nothing
+    // fills the untraced half), so 2 behaves as 1 in either case (logged once). Same restriction/fallback as 1.
     // DEFAULT 2 since 2026-09-27 (was 0). MEASURED on NewSponza (RX 7800 XT, 3532x1987 capture,
     // whole-frame GPU ms): gallery single 23.5 / staged 14.1 / half-rate 12.7; court 28.4 / 15.6 /
     // 14.2. Image: staged vs single MAD 0.16-0.17 (same image); half-rate vs staged at fixed exposure
@@ -729,13 +699,13 @@ public:
     void requestGiHistoryReset()  { giHistoryResetRequested_ = true; }
     void requestRtHistoryReset()  { rtHistoryResetRequested_ = true; }
     void requestAoHistoryReset()  { aoHistoryResetRequested_ = true; }
-    void requestNrdHistoryReset() { nrdHistoryResetRequested_ = true; }
+    void requestDenoiserHistoryReset() { denoiserHistoryResetRequested_ = true; }
     // Each returns true once after its matching request*Reset() call, then clears itself -- same
     // one-shot contract as consumeMsaaDirty().
     bool consumeGiHistoryResetRequest();
     bool consumeRtHistoryResetRequest();
     bool consumeAoHistoryResetRequest();
-    bool consumeNrdHistoryResetRequest();
+    bool consumeDenoiserHistoryResetRequest();
 
     // Returns a feature's display name.
     static const char* featureName(Feature f);
@@ -779,7 +749,7 @@ private:
     bool giHistoryResetRequested_  = false;
     bool rtHistoryResetRequested_  = false;
     bool aoHistoryResetRequested_  = false;
-    bool nrdHistoryResetRequested_ = false;
+    bool denoiserHistoryResetRequested_ = false;
     u32 refusalLogged_ = 0;   // one bit per Feature: its refusal has already been logged
 };
 

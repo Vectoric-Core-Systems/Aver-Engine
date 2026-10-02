@@ -39,12 +39,12 @@ target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)
 # WRITES a file format (.cache, an AVR1 container), which is a real dependency rather than an
 # incidental one and belongs stated here. It is the same shape as the Aver.Render.PBR.Materials
 # entry above -- a library this renderer genuinely uses, not a backend leaking across the boundary.
-# Aver.Render.NRD is the NVIDIA denoiser seam. It is ALWAYS linkable -- the target exists whether
-# or not NRD itself is in the build (see its own CMakeLists) -- so this edge needs no guard, and
-# whether denoising actually runs stays a RUNTIME question answered by Recorder::create().
+# Aver.Render.Denoise is the denoiser (AMD FidelityFX Denoiser plus this engine's host). Always
+# linkable; whether it runs this frame is a RUNTIME question answered by Denoiser::create() and the
+# renderer's own gating.
 target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi
                                                        Aver.Render.PBR.Materials Aver.Formats
-                                                       Aver.Render.NRD)
+                                                       Aver.Render.Denoise)
 
 set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")
 

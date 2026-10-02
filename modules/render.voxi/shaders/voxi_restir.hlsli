@@ -13,7 +13,7 @@
 // adapter averRtProceedSolid/averRtSampleSlot/averRtSurfaceUV/averRtUvGrad -- giTraceInitialCandidate
 // traces gScene and shades through it); rtHash/rtDiscSample (candidate-direction sampling);
 // rdLocalCarriesEmitters (voxi_rt.hlsli, AVER_RD_LAMPS); the VoxiFrame cbuffer fields this file
-// reads (gGiRestirParams, gRtHistParams, gVoxelParams, gViewProj, gPrevViewProj) and gNrdGi (t15);
+// reads (gGiRestirParams, gRtHistParams, gVoxelParams, gViewProj, gPrevViewProj) and gDenoisedGi (t15);
 // and the #if AVER_RT guard opened earlier in voxi.hlsl must still be open here -- this file has
 // no #if AVER_RT of its own, it's plain text spliced into an already-open conditional.
 //
@@ -25,8 +25,8 @@
 // giRestirIndirect. Getting an order wrong fails at RUNTIME (shaders compile when the engine
 // starts), and since every entry point shares this translation unit it takes all of them down.
 
-// Staged ray-driven milestone 4 (Settings::rayDrivenStages == 2): half-rate ReSTIR GI, traced in
-// NRD's own checkerboard so REBLUR (GI denoiser index 1) reconstructs the skipped half. Own macro
+// Staged ray-driven milestone 4 (Settings::rayDrivenStages == 2): half-rate ReSTIR GI, traced on a
+// checkerboard so the denoiser (Aver.Render.Denoise) reconstructs the skipped half. Own macro
 // rather than an ambient `#ifdef` per use site, so every compile that never sets it (PSMainVoxi,
 // PSRayDriven, every other CS stage) takes the untouched branch at each checkerboard site below.
 // See CSRdGi (voxi.hlsl) for the one compile that defines this to 1.
@@ -72,19 +72,6 @@
 // and amplifying quantisation noise into a spike.
 #define AVER_GI_VOX_MIN_OCC 0.05
 
-// REBLUR hit-distance normalisation constants, MIRRORING aver::render::nrd::Denoiser::ReblurTuning
-// (modules/render.nrd/include/aver/render/nrd/NrdDenoiser.hpp), which actually configures the
-// denoiser -- REBLUR normalises a hit distance by (A + |viewZ|*B) * lerp(C, 1, smc)
-// (NRD.hlsli's _REBLUR_GetHitDistanceNormalization/REBLUR_FrontEnd_GetNormHitDist) and requires the
-// producer to divide by the same thing. A is a length in engine units (300cm = NRD's default 3m);
-// B/C are unit-free. Restated rather than included (NRD headers are confined to modules/render.nrd
-// by vendoring terms) -- change both declarations together.
-#define AVER_NRD_HITDIST_A 300.0
-#define AVER_NRD_HITDIST_B 0.1
-// REBLUR's denoisingRange in cm, MIRRORING kNrdDenoisingRangeCm (VoxiRenderer.cpp, where the NRD
-// FrameSettings are filled): REBLUR writes no output texel whose viewZ is past it, so a surface that
-// far keeps its raw estimate instead of reading back a texel NRD never wrote. Change both together.
-#define AVER_NRD_DENOISING_RANGE 500000.0
 
 // ---- the reservoir buffer: both ping-pong slices in one buffer ----
 // Row-major per slice, slice-major across the two: element = slice * (w*h) + y * w + x, with w x h
@@ -837,7 +824,8 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
 // `static`, not a parameter, like gGiPoisonPdfHit above: giRestirIndirect's signature is shared
 // with PSMainVoxi/PSRayDriven's non-checkerboard call sites and must not change. CSRdGi (voxi.hlsl,
 // the only definer of AVER_GI_CHECKERBOARD) sets this per invocation before calling
-// giRestirIndirect: is this pixel the half NRD expects fresh data for, or the half REBLUR reconstructs?
+// giRestirIndirect: is this pixel the half traced fresh this frame, or the half the denoiser
+// reconstructs?
 static bool gGiCbSkip = false;
 #endif
 
@@ -904,7 +892,7 @@ GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
     // THE HALF-RES HISTORY LOSES HALF ITS SUB-PIXEL POSITIONS, NOT HALF ITS REFRESH RATE: with a
     // fixed offset between the checkerboard and kGiVisPhase's own 4-frame cycle, the same two phases
     // always land on skipped pixels, so each block refreshes from one fixed diagonal pair (which
-    // shifts whenever NRD skips a frame) instead of all four positions -- still covers both rows and
+    // shifts whenever the denoiser skips a frame) instead of all four positions -- still covers both rows and
     // both columns, so left as is; exempting the phase pixel from the skip would restore all four at
     // +1/8 more candidate rays.
     if (gGiCbSkip) {
@@ -1165,14 +1153,15 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // of where this surface was expected last frame.
         reuse.depthThreshold  = 0.1;
         reuse.normalThreshold = 0.5;
-        // ---- 0 BY DEFAULT: A YOUNG HISTORY OVERSHOOTS, AND ITS DEPTH BOUGHT NOTHING NRD DID NOT ----
+        // ---- 0 BY DEFAULT: A YOUNG HISTORY OVERSHOOTS, AND ITS DEPTH BOUGHT NOTHING THE DENOISER DID NOT ----
         // Summing M across fresh/temporal/spatial streams with only a per-tap cap lets a lineage a few
         // frames old claim more independent samples than it holds. MEASURED on PTTest's NewSponza
         // (fixed camera/exposure): at 8 the image fell from 82 to 68.5 (tonemapped mean) over ~300
         // frames after level load; resolving each pixel from its fresh candidate alone removed the
         // fall (71.9 -> 71.3). The same overshoot follows every GI history reset (including a sun
         // change, see VoxiRenderer::beginShadowHistory) as a short bright bump before settling. At 1
-        // the overshoot shrank with the same settled value and no measurable noise cost after NRD;
+        // the overshoot shrank with the same settled value and no measurable noise cost after the
+        // denoiser (NRD at the time);
         // at 0 it is gone (Settings::giRestirMaxHistory, Voxi.hpp, has the full numbers).
         // voxi.giRestirMaxHistory, default 0; raising it turns reuse back on.
         reuse.maxHistory = maxHistory;
@@ -1250,7 +1239,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // high-contrast light path
     // (glimpsing the sun through a gap) at this camera angle. Not a bug to clamp away -- that would
     // discard real light transport a single candidate can't smoothly resolve alone, which is exactly
-    // what spatio-temporal reuse and this engine's REBLUR integration already do (the
+    // what spatio-temporal reuse and this engine's denoiser already do (the
     // denoiser-on band above). A fourth unmeasured backstop would repeat the pattern this task stops.
 
     // ---- W6/M5: NO LONGER A KNOWN LIMITATION -- GATED ON gAverHistoryWrite, ON BY DEFAULT ----
@@ -1315,16 +1304,16 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         gGiSurfNrmHistOut[pixelPos] = float2(wpos.z, asfloat(packedN == 0u ? 1u : packedN));
     }
 
-    // Hoisted to function scope so the poison-view combination at the end (after the NRD block) can
-    // still read them.
+    // Hoisted to function scope so the poison-view combination at the end (after the denoiser block)
+    // can still read them.
     bool giPoisonEstHit = false;
-    bool giPoisonNrdHit = false;
+    bool giPoisonDenoisedHit = false;
     // Not a non-finite guard catching corruption, but AVER_VOX_MAXRAD's ceiling clamp engaging on a
     // FINITE value (see the POISON DEBUG VIEW comment below, and Settings::giRadianceCeiling for why
-    // hitting it paints solid white downstream). giPoisonNrdCeilHit is set in the NRD block further
-    // down, read at the same combination site.
+    // hitting it paints solid white downstream). giPoisonDenoisedCeilHit is set in the denoiser block
+    // further down, read at the same combination site.
     bool giPoisonEstCeilHit = false;
-    bool giPoisonNrdCeilHit = false;
+    bool giPoisonDenoisedCeilHit = false;
 
     float3 outDiffuse = 0.0;
     if (giIsValidReservoir(result)) {
@@ -1440,186 +1429,128 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
                                      : min(estNonNeg, AVER_VOX_MAXRAD);
     }
 
-    // ---- hand this frame's estimate to NRD, and take back last frame's ----
+    // ---- hand this frame's estimate to the denoiser, and take back last frame's ----
     // The write is the RAW per-pixel estimate, never the denoised value read below -- feeding a
     // filter its own output is the IIR trap the sky-occlusion history write documents; it would
-    // also fight REBLUR's own temporal accumulation, the entire job of the permanent pool NRD keeps
-    // for this signal.
-    // Both channels are encoded to REBLUR's contract here, and neither half fails loudly if skipped
-    // (NRD's pack/unpack helpers are things the producer/consumer call; no NRD pass applies them for
-    // you) -- which is why this was wrong in two independent ways until
-    // REBLUR_FrontEnd_PackRadianceAndNormHitDist was actually read:
-    // ALPHA: normalised by REBLUR's own divisor, NOT by giMaxDistance. Used to divide by giMaxDistance
-    // (4000cm), assuming one hitDistParams could describe both this signal and sky-occlusion -- it
-    // can't: REBLUR reconstructs a real distance by multiplying back (A + |viewZ|*B) * lerp(C,1,smc),
-    // and sizes its blur kernel, disocclusion test and variance estimate off that distance, so a
-    // 40m divisor against a true ~4m made every bounce read as point-blank, undenoisable regardless
-    // of anti-firefly settings. roughness=1 (purely diffuse) makes NRD's smc curve 1.0, so
-    // lerp(C,1,smc) collapses to 1 and C drops out here (still set on the C++ side).
-    // RGB: YCoCg, not linear RGB -- REBLUR_Config.hlsli's REBLUR_USE_YCOCG 1 means the front-end pack
-    // converts unconditionally, so linear RGB here is a confidently wrong colour, not a format error.
-    // The inverse is applied where gNrdGi is read below; the two are a matched pair.
-    // ACTIVE PIXELS WRITE NRD'S INPUT PACKED; SKIPPED PIXELS DON'T WRITE AT ALL -- half-rate GI's
-    // contract with REBLUR (this file's AVER_GI_CHECKERBOARD header comment) is that the
-    // checkerboard's other half is only reconstructed by the denoiser. giNrdInPos changes because
-    // NRD's checkerboard packs IN_DIFF_RADIANCE_HITDIST into the LEFT HALF of the input, one texel
-    // per horizontal pixel PAIR (NRDSettings.h, CheckerboardMode), so the traced half of every
-    // (2k, 2k+1) pair writes the SAME texel -- the `!gGiCbSkip` gate above is what keeps that write
-    // from racing (only one active). With the macro at 0 and bit 17 clear (every frame but a
-    // checkerboarded one), this is the plain `if (gGiRestirParams.x > 0.5)` it replaced, writing at
-    // pixelPos.
-    bool  giNrdInWrite = gGiRestirParams.x > 0.5;
-    uint2 giNrdInPos   = pixelPos;
+    // also fight the denoiser's own temporal accumulation, the entire job of the history it keeps
+    // for this signal. Linear RGB (a unused): Aver.Render.Denoise filters the value as it is.
+    // HALF-RATE FRAMES WRITE ONLY THE TRACED HALF -- the denoiser reconstructs every skipped pixel
+    // from its four traced neighbours (aver_denoise.hlsl's dnsrLoadInput), so a skipped pixel must
+    // not be written with anything that could look fresh. The checkerboard compile skips its
+    // gGiCbSkip pixels; every other writer follows the half-rate flag VoxiRenderer::
+    // recordStagedRayDriven leaves in bit 17 of gViewParams.w for the rest of the frame (parity in
+    // bit 16) -- PSMainVoxi's blended replay of an opaque draw included (gAverHistoryWrite stays true
+    // for it), which then writes only where the traced half would have. Zero on every other frame
+    // (prePass resets the field), where every pixel writes.
+    bool giDenoiseInWrite = gGiRestirParams.x > 0.5;
 #if AVER_GI_CHECKERBOARD
-    giNrdInWrite = giNrdInWrite && !gGiCbSkip;   // NRD reads only the traced half
-    giNrdInPos.x >>= 1;                          // NRD's packed left-half layout
+    giDenoiseInWrite = giDenoiseInWrite && !gGiCbSkip;
 #else
-    // Every other writer follows the packing on a frame CSRdGi packed: VoxiRenderer::
-    // recordStagedRayDriven leaves bit 17 of gViewParams.w set for the rest of the frame (parity in
-    // bit 16) after a checkerboard dispatch. PSMainVoxi's blended replay of an opaque draw matters
-    // here (gAverHistoryWrite stays true for it): unpacked, its write would land on an unrelated
-    // pixel's packed texel at twice its x; packed, it replaces its own pair's input exactly as its
-    // own pixel's at full rate. Zero on every other frame (prePass resets the field).
-    const uint giNrdPackWord = (uint)gViewParams.w;
-    if ((giNrdPackWord & 0x20000u) != 0u) {
-        giNrdInWrite = giNrdInWrite && ((pixelPos.x ^ pixelPos.y ^ (giNrdPackWord >> 16)) & 1u) == 0u;
-        giNrdInPos.x >>= 1;
-    }
+    const uint giHalfRateWord = (uint)gViewParams.w;
+    if ((giHalfRateWord & 0x20000u) != 0u)
+        giDenoiseInWrite = giDenoiseInWrite && ((pixelPos.x ^ pixelPos.y ^ (giHalfRateWord >> 16)) & 1u) == 0u;
 #endif
-    if (giNrdInWrite) {
-        const float hitDistNorm = AVER_NRD_HITDIST_A + abs(curLinearDepth) * AVER_NRD_HITDIST_B;
-        const float hitT = giIsValidReservoir(result)
-                         ? saturate(length(result.position - wpos) / max(hitDistNorm, 1e-4))
-                         : 1.0;   // nothing found: "the ray went the whole way", as the sky ray encodes it
-        // _NRD_LinearToYCoCg, transcribed (NRD headers are confined to modules/render.nrd). Y is the
-        // luminance REBLUR accumulates; Co/Cg are signed, hence RGBA16F rather than a UNORM format.
-        const float3 ycocg = float3(dot(outDiffuse, float3( 0.25, 0.5,  0.25)),
-                                    dot(outDiffuse, float3( 0.5,  0.0, -0.5 )),
-                                    dot(outDiffuse, float3(-0.25, 0.5, -0.25)));
-        // W6/M5: gated on gAverHistoryWrite, ON BY DEFAULT -- this is the NRD INPUT, not merely a
-        // history texture, and the most visible half of C9's finding: an unguarded write here handed
-        // NRD's permanent accumulation pool the PANE's GI estimate for a pixel the opaque surface
-        // behind it also claims, with REBLUR then denoising across both indistinguishably.
-        // legacyBlendedHistoryWrite (gAmbientParams.z bit 32) restores the old unconditional write,
-        // byte-identical, for A/B.
-        if (gAverHistoryWrite) gGiRadianceOut[giNrdInPos] = float4(ycocg, hitT);
+    // W6/M5: gated on gAverHistoryWrite, ON BY DEFAULT -- this is the denoiser INPUT, not merely a
+    // history texture, and the most visible half of C9's finding: an unguarded write here handed the
+    // denoiser's accumulation the PANE's GI estimate for a pixel the opaque surface behind it also
+    // claims, then denoised across both indistinguishably. legacyBlendedHistoryWrite (gAmbientParams.z
+    // bit 32) restores the old unconditional write, byte-identical, for A/B.
+    if (giDenoiseInWrite) {
+        if (gAverHistoryWrite) gGiRadianceOut[pixelPos] = float4(outDiffuse, 0.0);
     }
 
     // Last frame's denoised answer replaces this frame's raw one -- one frame of lag, which every
     // temporal consumer here already carries (the pass runs in beginShadowHistory, before the pixel
-    // shader that produces the input has run) and NRD is built to be fed. Zero dimensions means the
-    // pass didn't run this frame (no NRD in the build, backend refused register spaces, no G-buffer,
-    // MSAA above 1x), and the raw ReSTIR estimate stands, noisy but correct.
+    // shader that produces the input has run). Zero dimensions means the pass didn't run this frame
+    // (denoiser off or unavailable, no G-buffer, MSAA above 1x), and the raw ReSTIR estimate stands,
+    // noisy but correct.
     uint gw = 0, gh = 0;
-    gNrdGi.GetDimensions(gw, gh);
+    gDenoisedGi.GetDimensions(gw, gh);
     // W6/M5: `gAverHistoryWrite &&` leads this test, sibling to the write's own gate above -- a
     // blended-replay fragment must not read back the opaque surface's denoised answer as its own.
     // Skipping leaves `outDiffuse` at the raw estimate above, this fragment's own -- and since the
     // write above is gated the same way, a blended fragment neither reads nor writes the opaque
-    // surface's NRD state.
+    // surface's denoiser state.
     // ---- READ WHERE THIS SURFACE WAS LAST FRAME, NOT AT THIS FRAME'S PIXEL ----
-    // gNrdGi is laid out on LAST frame's pixel grid. Loading at this frame's pixelPos is right only
-    // while the camera is still; in motion it handed each pixel whatever GI last frame drew there.
-    // Every other temporal consumer in this file reprojects
-    // (rtReprojectHistory, rtReprojectAo); this one did not.
-    // MEASURED, flying 30cm/frame down PTTest's gallery against a settled frame at the same pose:
-    // the old read's error is STRUCTURED (a bright GI leak down a door frame, bands along a beam),
-    // this read's is not (fine-scale diff 0.84 vs 0.28 codes, below one display level either way,
-    // cause not isolated; mean 0.77 codes darker vs 0.53 brighter; still frame identical, MAD 0.01).
+    // gDenoisedGi is laid out on LAST frame's pixel grid. Loading at this frame's pixelPos is right
+    // only while the camera is still; in motion it handed each pixel whatever GI last frame drew
+    // there. Every other temporal consumer in this file reprojects (rtReprojectHistory,
+    // rtReprojectAo).
+    // MEASURED (with NRD as the denoiser), flying 30cm/frame down PTTest's gallery against a settled
+    // frame at the same pose: the unreprojected read's error is STRUCTURED (a bright GI leak down a
+    // door frame, bands along a beam), this read's is not (fine-scale diff 0.84 vs 0.28 codes; still
+    // frame identical, MAD 0.01).
     // Same recipe as the temporal resampling above (gPrevViewProj, gSceneViewport), validated
     // against the surface ReSTIR kept for last frame (giLoadPrevSurface): a texel counts only if
     // last frame's surface there lies on this pixel's tangent plane and faces the same way.
     // NO TAP MATCHES = a genuine disocclusion (the strip a turn reveals, the wall behind a passed
-    // column): NRD never saw this surface. Such a pixel keeps the OLD unreprojected read (smooth,
-    // but a neighbour's) -- never worse than before; the raw estimate was tried and is far worse
-    // (paints the revealed strip black with sparse bright dots at one sample).
-    // Legacy bit 64 (voxi.legacyNrdReadback) skips the reprojection entirely, the pre-fix read, A/B.
+    // column): the denoiser never saw this surface. Such a pixel keeps the unreprojected read
+    // (smooth, but a neighbour's) -- the raw estimate was tried and is far worse (paints the revealed
+    // strip black with sparse bright dots at one sample).
+    // Legacy bit 64 (voxi.legacyDenoisedReadback) skips the reprojection entirely, the pre-fix read,
+    // A/B.
     // BILINEAR: four taps around the reprojected point, kept only if their surface matches,
-    // renormalised (TAA-style). A nearest-texel 3x3 search measured the same (0.845 vs 0.841);
-    // bilinear kept as the principled resample. At rest the taps collapse onto this pixel's centre:
-    // measured identical still frames, MAD 0.01 ray-driven and 0.06 raster (run-to-run noise).
-    const bool nrdReproject = gGiRestirParams.y > 0.5 &&   // a previous frame exists to reproject into
-                              ((uint)gAmbientParams.z & 64u) == 0u;
-    // Only a surface inside REBLUR's range has an output texel NRD wrote -- see AVER_NRD_DENOISING_RANGE.
-    const bool nrdInRange = curLinearDepth < AVER_NRD_DENOISING_RANGE;
-    float3 nrdYcocg = 0.0;
-    float  nrdWsum  = 0.0;
-    // gAverHistoryWrite: a blended fragment never reads NRD back (the gate below), so it skips the
-    // four surface-history lookups too.
-    if (gAverHistoryWrite && nrdInRange && nrdReproject && gw > 0u && gh > 0u) {
-        const float4 nrdPrevClip = mul(float4(wpos, 1.0), gPrevViewProj);
-        if (nrdPrevClip.w > 1e-4) {
-            const float3 nrdPrevNdc = nrdPrevClip.xyz / nrdPrevClip.w;
-            const float2 nrdPrevPx = gSceneViewport.xy +
-                float2(nrdPrevNdc.x * 0.5 + 0.5, 0.5 - nrdPrevNdc.y * 0.5) * gSceneViewport.zw;
-            const float2 nrdF    = nrdPrevPx - 0.5;   // texel CENTRES sit at +0.5
-            const int2   nrdBase = int2(floor(nrdF));
-            const float2 nrdFrac = nrdF - float2(nrdBase);
-            const float  nrdPlaneTol = max(curLinearDepth, 1.0) * 0.02 + 1.0;   // cm
+    // renormalised (TAA-style). At rest the taps collapse onto this pixel's centre.
+    const bool denoisedReproject = gGiRestirParams.y > 0.5 &&   // a previous frame exists to reproject into
+                                   ((uint)gAmbientParams.z & 64u) == 0u;
+    float3 denoisedSum  = 0.0;
+    float  denoisedWsum = 0.0;
+    // gAverHistoryWrite: a blended fragment never reads the denoiser back (the gate below), so it
+    // skips the four surface-history lookups too.
+    if (gAverHistoryWrite && denoisedReproject && gw > 0u && gh > 0u) {
+        const float4 dnPrevClip = mul(float4(wpos, 1.0), gPrevViewProj);
+        if (dnPrevClip.w > 1e-4) {
+            const float3 dnPrevNdc = dnPrevClip.xyz / dnPrevClip.w;
+            const float2 dnPrevPx = gSceneViewport.xy +
+                float2(dnPrevNdc.x * 0.5 + 0.5, 0.5 - dnPrevNdc.y * 0.5) * gSceneViewport.zw;
+            const float2 dnF    = dnPrevPx - 0.5;   // texel CENTRES sit at +0.5
+            const int2   dnBase = int2(floor(dnF));
+            const float2 dnFrac = dnF - float2(dnBase);
+            const float  dnPlaneTol = max(curLinearDepth, 1.0) * 0.02 + 1.0;   // cm
             [unroll] for (uint k = 0u; k < 4u; ++k) {
                 const int2  off = int2(k & 1u, k >> 1u);
-                const float w   = (off.x != 0 ? nrdFrac.x : 1.0 - nrdFrac.x) *
-                                  (off.y != 0 ? nrdFrac.y : 1.0 - nrdFrac.y);
+                const float w   = (off.x != 0 ? dnFrac.x : 1.0 - dnFrac.x) *
+                                  (off.y != 0 ? dnFrac.y : 1.0 - dnFrac.y);
                 if (w <= 0.0) continue;
-                const int2 tap = nrdBase + off;
+                const int2 tap = dnBase + off;
                 const GiSurface prevSurf = giLoadPrevSurface(tap);   // bounds-checked
                 if (!prevSurf.valid) continue;
-                if (abs(dot(prevSurf.worldPos - wpos, N)) > nrdPlaneTol) continue;
+                if (abs(dot(prevSurf.worldPos - wpos, N)) > dnPlaneTol) continue;
                 if (dot(prevSurf.normal, N) < 0.9) continue;
-                nrdYcocg += gNrdGi.Load(int3(tap, 0)).rgb * w;
-                nrdWsum  += w;
+                denoisedSum  += gDenoisedGi.Load(int3(tap, 0)).rgb * w;
+                denoisedWsum += w;
             }
         }
     }
-    if (gAverHistoryWrite && nrdInRange && gw > 0u && gh > 0u) {
-        // _NRD_YCoCgToLinear, the matching half of the write above. REBLUR hands back what it
-        // filtered, in the basis it filtered it in; NRD's own back-end unpack is this same transform
-        // followed by a per-channel max against zero -- which this does NOT copy, see the gamut step
-        // below. LINEAR, so blending the four taps in YCoCg and decoding once equals decoding each.
-        const float3 y = nrdWsum > 1e-3 ? nrdYcocg / nrdWsum
-                                        : gNrdGi.Load(int3(pixelPos, 0)).rgb;   // disocclusion / legacy
-        const float  t = y.x - y.z;
-        const float3 decoded = float3(t + y.y, y.x + y.z, t - y.y);
-        // ---- THE SAME GUARD THE RAW ESTIMATOR ABOVE ALREADY HAS, NOW APPLIED HERE TOO ----
-        // Before this, decoding NRD's output only floored the negative-chroma round-trip case,
-        // trusting a THIRD-PARTY filter's output to be finite/bounded -- the exact trust outDiffuse's
-        // own raw estimator refuses to extend to its own inputs. REBLUR's temporal accumulation and
-        // variance-driven history clamp are third-party maths this file doesn't control, so a stray
-        // NaN/Inf/huge value here must be caught at the point it's consumed (this file's own house
-        // rule; see aver-negative-radiance-reads-bright). acesTonemap floors negative/NaN input at
-        // zero (ded8784a, 2026-08-31, predating this guard), so this renders as confident BLACK now,
-        // not the WHITE an older version of this comment claimed (describing pre-fix behaviour).
-        //
-        // THIS CODEPATH ONLY WENT LIVE RECENTLY: NRD was never created for a project whose ray-
-        // tracing tier hadn't just changed (98b2b9a9 "NRD was never created unless SKY OCCLUSION was
-        // on"), so `gw/gh` used to always read 0x0 here and this branch was dead code -- every prior
-        // fix to this function (cosR floor, Jacobian symmetry, corpse-reservoir guard) was measured
-        // against the RAW path alone, never this. Closing
-        // the asymmetry is cheap insurance now that the branch is reachable for real: zero cost when
-        // `decoded` is what it always is (finite, small), and it turns a would-be white-out into the
-        // same "zero is the honest answer for a broken sample" the raw path already chose, rather
-        // than a screen-filling flash with nothing in the log to explain it.
-        giPoisonNrdHit = any(isnan(decoded)) || any(isinf(decoded));
-        // ---- OUT OF GAMUT GOES TOWARD GREY AT THE SAME LUMINANCE, NOT CHANNEL BY CHANNEL ----
-        // REBLUR filters Y and chroma separately, so a hard-clamped pixel (firefly, thin lamp frame
-        // with no similar neighbours) can come back with luma pulled down and chroma kept -- a YCoCg
-        // triple no RGB colour has. With Cg dominant that decodes to R and B below zero, G above, and
-        // flooring each channel at zero (as this used to) turned it into PURE GREEN, capped by the
-        // ceiling below at (0,16,0): the bright green dots with a bloom halo the owner saw scattered
-        // around lamps/arches. Pulling toward grey by the smallest amount that brings every channel
-        // >= 0 keeps the filtered luminance and invents no hue; Y <= 0 reads black.
-        const float  lumaY  = max(y.x, 0.0);
-        const float  lowest = min(decoded.r, min(decoded.g, decoded.b));
+    if (gAverHistoryWrite && gw > 0u && gh > 0u) {
+        const float3 denoised = denoisedWsum > 1e-3 ? denoisedSum / denoisedWsum
+                                                    : gDenoisedGi.Load(int3(pixelPos, 0)).rgb;   // disocclusion / legacy
+        // ---- THE SAME GUARD THE RAW ESTIMATOR ABOVE ALREADY HAS, APPLIED HERE TOO ----
+        // A third-party filter's output is not trusted to be finite/bounded -- the same trust
+        // outDiffuse's own raw estimator refuses to extend to its own inputs. The denoiser's temporal
+        // accumulation and history clipping are maths this file doesn't control, so a stray
+        // NaN/Inf/huge value is caught at the point it's consumed (this file's own house rule; see
+        // aver-negative-radiance-reads-bright). acesTonemap floors negative/NaN input at zero, so a
+        // broken sample renders as confident BLACK -- the same "zero is the honest answer for a
+        // broken sample" the raw path already chose, rather than a flash with nothing in the log.
+        giPoisonDenoisedHit = any(isnan(denoised)) || any(isinf(denoised));
+        // ---- BELOW ZERO GOES TOWARD GREY AT THE SAME LUMINANCE, NOT CHANNEL BY CHANNEL ----
+        // The history clip's box can reach below zero, so a pixel can come back with a channel
+        // slightly negative. Flooring each channel would shift hue toward whichever survived;
+        // pulling toward grey by the smallest amount that brings every channel >= 0 keeps the
+        // filtered luminance and invents no hue. Luminance <= 0 reads black.
+        const float  luma   = max(averShadowLum(denoised), 0.0);
+        const float  lowest = min(denoised.r, min(denoised.g, denoised.b));
         const float3 inGamut = lowest < 0.0
-                             ? lumaY + (decoded - lumaY) * (lumaY / max(lumaY - lowest, 1e-6))
-                             : decoded;
-        // NRD-side twin of giPoisonEstCeilHit: a finite REBLUR readback above the ceiling paints
-        // solid white once tonemapped, invisible to the isnan/isinf guard above. Skipped when
-        // giPoisonNrdHit fired. Scaled down as a whole, not per channel -- same reason as the gamut
-        // step: a per-channel min would shift hue toward whichever channels were under the ceiling.
+                             ? luma + (denoised - luma) * (luma / max(luma - lowest, 1e-6))
+                             : denoised;
+        // Denoiser-side twin of giPoisonEstCeilHit: a finite readback above the ceiling paints solid
+        // white once tonemapped, invisible to the isnan/isinf guard above. Skipped when
+        // giPoisonDenoisedHit fired. Scaled down as a whole, not per channel -- same reason as the
+        // gamut step: a per-channel min would shift hue toward whichever channels were under it.
         const float peak = max(inGamut.r, max(inGamut.g, inGamut.b));
-        giPoisonNrdCeilHit = !giPoisonNrdHit && peak > AVER_VOX_MAXRAD;
-        outDiffuse = giPoisonNrdHit
+        giPoisonDenoisedCeilHit = !giPoisonDenoisedHit && peak > AVER_VOX_MAXRAD;
+        outDiffuse = giPoisonDenoisedHit
                    ? float3(0.0, 0.0, 0.0)
                    : inGamut * min(1.0, AVER_VOX_MAXRAD / max(peak, 1e-6));
     }
@@ -1633,7 +1564,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // perfectly FINITE value merely large enough to saturate AVER_VOX_MAXRAD and acesTonemap -- the
     // white-patch symptom this task diagnoses, not a bug here. Deliberately never white (that's the
     // symptom, not the diagnosis) and checked last: a non-finite guard always outranks a mere ceiling
-    // hit, because corruption is more urgent to see (and giPoisonEstCeilHit/giPoisonNrdCeilHit are
+    // hit, because corruption is more urgent to see (and giPoisonEstCeilHit/giPoisonDenoisedCeilHit are
     // already false whenever their non-finite sibling fired, so the two families never actually
     // compete). Order below matters only for the rare pixel where more than one fires; each is
     // otherwise independent.
@@ -1648,13 +1579,14 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     //                        computed a non-finite importance weight this frame.
     //   ORANGE  (1,0.5,0) -- final-estimate guard (giPoisonEstHit): this pixel's finalised
     //                        W*radiance was non-finite.
-    //   BLUE    (0,0,1)   -- NRD-readback guard (giPoisonNrdHit): REBLUR handed back a non-finite
-    //                        value on the denoised read-back path.
+    //   BLUE    (0,0,1)   -- denoiser-readback guard (giPoisonDenoisedHit): the denoiser handed back a
+    //                        non-finite value on the denoised read-back path.
     //   RED     (1,0,0)   -- raw estimate hit the radiance CEILING (giPoisonEstCeilHit): finite, but
     //                        AVER_VOX_MAXRAD clamped it, which paints solid white once tonemapped --
     //                        diagnoses a white patch's cause, not just its symptom.
-    //   GREEN   (0,1,0)   -- NRD-denoised readback hit the same ceiling (giPoisonNrdCeilHit): REBLUR's
-    //                        accumulation can push an already-hot value higher before this pixel sees it.
+    //   GREEN   (0,1,0)   -- denoised readback hit the same ceiling (giPoisonDenoisedCeilHit): the
+    //                        denoiser's accumulation can push an already-hot value higher before this
+    //                        pixel sees it.
     //
     //   AN EIGHTH COLOUR LIVES OUTSIDE THIS FUNCTION (B1/F5): voxi.hlsl's PSMainVoxi/PSRayDriven paint
     //   VIOLET (0.55,0,1) over the ray-traced SPECULAR indirect term's ceiling hit, gated by the same
@@ -1668,9 +1600,9 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         if (nonFiniteCandidate)   return float3(0.0, 1.0, 1.0);
         if (gGiPoisonPdfHit)      return float3(1.0, 1.0, 0.0);
         if (giPoisonEstHit)       return float3(1.0, 0.5, 0.0);
-        if (giPoisonNrdHit)       return float3(0.0, 0.0, 1.0);
+        if (giPoisonDenoisedHit)     return float3(0.0, 0.0, 1.0);
         if (giPoisonEstCeilHit)   return float3(1.0, 0.0, 0.0);
-        if (giPoisonNrdCeilHit)   return float3(0.0, 1.0, 0.0);
+        if (giPoisonDenoisedCeilHit) return float3(0.0, 1.0, 0.0);
     }
 
     // ---- U1's PATH DEBUG VIEW (voxi.giVisPathView, gAmbientParams.w bit 64; 2.10 I) ----
@@ -1680,7 +1612,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // Paints F2's path; F3 follows the same path except under legacy bit 8 (gAmbientParams.z & 8u),
     // which this view does not separately colour -- F2/F3 share one path number except where the
     // decode block at this function's top singles one out, and F2 is by far the more expensive ray.
-    // Like the poison view, replaces indirect diffuse AFTER the NRD write above, so it never enters
+    // Like the poison view, replaces indirect diffuse AFTER the denoiser-input write above, so it never enters
     // history or feeds back into next frame's reprojection -- a debug paint that corrupted the signal
     // it exists to diagnose would defeat the point.
     if (gGiRestirParams.w <= 0.5 && ((uint)gAmbientParams.w & 64u) != 0u) {

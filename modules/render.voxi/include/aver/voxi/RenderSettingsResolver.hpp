@@ -45,10 +45,10 @@ enum class DisableReason : u8 {
     RequiresPathTracingHardware, // Feature::PathTracing's device gate (mirrors RayTracing's, plus
                                  // compute shaders)
     RequiresMeshShaderHardware,  // Feature::MeshShaders' device gate
-    RequiresNrd,                 // DeviceInfo::nrdSupported is false: not D3D12, or NRD not built in
-    NothingToDenoise,            // hardware and tiers are fine, but nothing is producing a signal NRD
-                                 // could filter (VoxiRenderer's NRD-instance create gate)
-    RequiresMsaaOne,              // SOFT: NRD needs single-sample targets. Warns; does not grey.
+    RequiresDenoiserBackend,     // DeviceInfo::denoiserSupported is false: not D3D12 (no G-buffer)
+    NothingToDenoise,            // hardware and tiers are fine, but nothing is producing a signal the
+                                 // denoiser could filter (VoxiRenderer's denoiser create gate)
+    RequiresMsaaOne,              // SOFT: the denoiser needs single-sample targets. Warns; does not grey.
     NotImplemented,               // the engine itself has not built this yet, on any device
     RequiresRestirGi,             // U1: giRestirVisibility only applies once giMode itself resolves
                                    // to ReSTIR -- Resolution::giRestirVisibility's own gate
@@ -127,12 +127,12 @@ inline const char* disableReasonText(DisableReason r) {
             return "Needs the same ray-tracing hardware Ray Tracing does, plus compute shaders.";
         case DisableReason::RequiresMeshShaderHardware:
             return "Needs mesh-shader Tier 1, shader model 6.5 and a DXIL compiler.";
-        case DisableReason::RequiresNrd:
-            return "Needs the D3D12 backend with NVIDIA's denoiser library built in.";
+        case DisableReason::RequiresDenoiserBackend:
+            return "Needs the D3D12 backend, the only one with the G-buffer the denoiser reads.";
         case DisableReason::NothingToDenoise:
             return "Nothing is producing a signal for the denoiser to filter yet.";
         case DisableReason::RequiresMsaaOne:
-            return "NRD needs single-sample render targets; it skips itself above 1x MSAA.";
+            return "The denoiser needs single-sample render targets; it skips itself above 1x MSAA.";
         case DisableReason::NotImplemented:
             return "This engine does not implement it yet, on any device.";
         case DisableReason::RequiresRestirGi:
@@ -303,10 +303,10 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     r.refractionMode.effective =
         (s.refractionMode >= 2u && rtGate != DisableReason::None) ? 1u : s.refractionMode;
 
-    // ---- denoiser: RT hardware, RT tier not Off, nrdSupported, something to denoise, MSAA 1 (soft) --
+    // ---- denoiser: RT hardware, RT tier not Off, denoiserSupported, something to denoise, MSAA 1 (soft) --
     DisableReason denoiseReason = rtGate;
-    if (denoiseReason == DisableReason::None && !d.nrdSupported)
-        denoiseReason = DisableReason::RequiresNrd;
+    if (denoiseReason == DisableReason::None && !d.denoiserSupported)
+        denoiseReason = DisableReason::RequiresDenoiserBackend;
     if (denoiseReason == DisableReason::None && r.giMode.effective == 0 && s.giSkyOcclusionRays == 0)
         denoiseReason = DisableReason::NothingToDenoise;
     if (denoiseReason == DisableReason::None && static_cast<u32>(s.msaa) != 1u)
@@ -384,7 +384,7 @@ inline u32 manifestContradictions(const Settings& effective, const DeviceInfo& d
 // reason refuse() has already told the log about, rather than saying the same device limitation twice
 // from two different call sites (Renderer::refusalLogged(f) is the skip check; see its own comment,
 // Voxi.hpp). Returns false for a reason nothing already logs (RequiresRayTracingEnabled,
-// RequiresGlobalIllumination, NothingToDenoise, RequiresNrd, RequiresMsaaOne, RequiresRestirGi, and the
+// RequiresGlobalIllumination, NothingToDenoise, RequiresDenoiserBackend, RequiresMsaaOne, RequiresRestirGi, and the
 // synthetic ptSubControls reuse of RequiresPathTracingHardware never reaches here because callers only
 // feed this the four hardware reasons and NotImplemented) -- those get reported fresh by the caller
 // instead.

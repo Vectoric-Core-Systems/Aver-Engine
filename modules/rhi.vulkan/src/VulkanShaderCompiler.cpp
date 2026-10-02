@@ -219,6 +219,17 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
     const std::wstring wTarget(target.begin(), target.end());
     std::vector<std::wstring> wDefines;
     for (const std::string& d : splitDefines(defines)) wDefines.emplace_back(d.begin(), d.end());
+    // AVER_HLSL_2018: the same consumed flag the D3D12 compiler honours (see D3D12Device.cpp) --
+    // HLSL 2018 for one shader whose vendored source predates 2021. Both backends must agree on it.
+    bool hlsl2018 = false;
+    for (usize i = 0; i < wDefines.size();) {
+        if (wDefines[i] == L"AVER_HLSL_2018") {
+            hlsl2018 = true;
+            wDefines.erase(wDefines.begin() + static_cast<isize>(i));
+        } else {
+            ++i;
+        }
+    }
 
     // -Zpr and -HV 2021 are NOT optional garnish: they are exactly what the D3D12 path passes, and
     // a matrix-order or language-version difference between the two backends compiling the SAME
@@ -235,7 +246,7 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         L"-E", wEntry.c_str(),
         L"-T", wTarget.c_str(),
         L"-Zpr",
-        L"-HV", L"2021",
+        L"-HV", hlsl2018 ? L"2018" : L"2021",
         L"-spirv",
         // Vulkan 1.3: dynamic rendering, buffer device address, mesh shaders -- everything this
         // backend's VulkanDevice already requires of the device.

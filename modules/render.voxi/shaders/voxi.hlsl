@@ -117,7 +117,7 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //   bit 16 (R6) cone gather directions are cosine-weighted twice, i.e. cos^2 (voxi_cone.hlsli,
     //          voxi_gi.hlsli).
     //   bit 32 (W6) a blended fragment (glass/water) writes its own history again -- reservoir, surface
-    //          history, NRD GI input, RT shadow/AO/reflection history -- instead of leaving the opaque
+    //          history, denoiser GI input, RT shadow/AO/reflection history -- instead of leaving the opaque
     //          surface's alone (voxi_restir.hlsli, voxi_rt.hlsli, rtReflectionTemporal below).
     //          voxi.legacyBlendedHistoryWrite; --lighting-legacy 32.
     //
@@ -360,7 +360,7 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 // unchanged. At 0 (default): no new resource/pipeline, AVER_RD_SPLIT=0 is byte-identical to before.
 //
 // VALUE 2 (milestone 4) adds: CSRdGi compiled again with AVER_GI_CHECKERBOARD=1, tracing ReSTIR GI's
-// candidate for half the pixels/frame in NRD's checkerboard pattern, REBLUR reconstructing the rest (see
+// candidate for half the pixels/frame on a checkerboard, the denoiser reconstructing the rest (see
 // that compile's header and voxi_restir.hlsli's AVER_GI_CHECKERBOARD). Every other stage is unchanged.
 //
 // u11/u12: next free UAV slots after gGiVisHistOut's u10 (kVoxiUavCount 11->13, VoxiRenderer.cpp).
@@ -765,8 +765,9 @@ void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
 // (milestone 4+) flag bits above it: bit 16 = CSRdGi's half-rate-GI checkerboard parity
 // (AVER_GI_CHECKERBOARD, voxi_restir.hlsli), set only for that dispatch's own upload and restored to plain
 // pitch right after (recordStagedRayDriven) -- every OTHER decode must mask flag bits away. After the
-// staged passes, on a frame CSRdGi packed NRD's input, the field holds bit 17 (+ that parity) and no pitch
-// -- giRestirIndirect's non-checkerboard NRD-input write reads it to follow the packing. Declared here so
+// staged passes, on a frame CSRdGi traced GI at half rate, the field holds bit 17 (+ that parity) and no
+// pitch -- giRestirIndirect's non-checkerboard denoiser-input write reads it to write only the traced
+// half. Declared here so
 // it's in scope before every stage that decodes a pitch.
 uint rdRowPitch() { return (uint)gViewParams.w & 0xFFFFu; }
 
@@ -1642,12 +1643,8 @@ float voxiAirVisibility(float3 wpos) {
 //                                rhi::UpscalerNeeds::MotionVectors' documented convention.
 //   SV_TARGET2 viewZ:           R32F. VIEW-SPACE LINEAR depth (clip.w), NOT the post-projective
 //                                [0,1] SV_Position.z/SV_DEPTH a hardware depth buffer stores.
-//   SV_TARGET3 normalRoughness: RGB10A2, packed to NRD's OWN encoding (NRD_NORMAL_ENCODING_
-//                                R10G10B10A2_UNORM, third_party/nrd/Shaders/NRDConfig.hlsli), NOT a
-//                                plain n*0.5+0.5-with-roughness-in-w scheme -- see
-//                                averPackNormalRoughness below for the layout and why. w =
-//                                materialID/3 in NRD's convention; this engine has no material-ID
-//                                concept yet, so it is always 0, NOT roughness.
+//   SV_TARGET3 normalRoughness: RGB10A2. xy = octahedral world normal, z = roughness, w = 0 --
+//                                see averPackNormalRoughness below for the layout.
 #if AVER_GBUFFER
 struct GBufferOut {
     float4 col              : SV_TARGET0;   // exactly PSMainVoxi's own colour -- unchanged by this define
@@ -1660,36 +1657,18 @@ struct GBufferOut {
 // PSMainVoxi and PSRayDriven (both its sky-hit and sky-miss branches) so the encode is written once,
 // not risking divergence.
 //
-// NRD'S NORMAL_ENCODING_R10G10B10A2_UNORM LAYOUT, transcribed byte-exact from
-// _NRD_EncodeNormalRoughness101010 (third_party/nrd/Shaders/NRD.hlsli) -- NOT the naive
-// N*0.5+0.5-with-roughness-in-w scheme this used to compute (NRD's #else layout for encodings 0/3,
-// wrong for this format). Confined-vendoring keeps NRD's headers out of this module, so the maths is
-// transcribed here (same pattern as the YCoCg pair in voxi_restir.hlsli); the decode is transcribed
-// again in sandbox/shaders/gbuffer_debug.hlsl and a third time (a CPU-side round-trip test, no GPU
-// needed since it's pure arithmetic) in tests/render.nrd/src/NrdNormalRoughnessEncodingTest.cpp.
-//
-// THE LAYOUT: an improved-octahedral encode folds N into x/y (L1-normalize, then a fold that always
-// lands both channels in [0,1]: r.x = 0.5 + 0.5*(n.x+n.y) and |n.x+n.y| <= 1 after L1-normalize). z
-// carries roughness's MAGNITUDE with the SIGN OF n.z riding on z's own sign -- why roughness is
-// clamped away from exactly 0: a zero magnitude has no sign to carry, and the decoder recovers it
-// from `t < 0`.
+// THE LAYOUT: an octahedral normal (Cigolle et al. 2014, "A Survey of Efficient Representations for
+// Independent Unit Vectors") in x/y -- L1-normalise, fold the lower hemisphere over the diagonals,
+// then map [-1,1] to [0,1] -- and roughness in z, alone. 10 bits per axis keeps the normal's angular
+// error near a tenth of a degree, far below anything the denoiser's edge-stopping or the debug view
+// can see. w is spare (always 0).
+// The decode is written out again in modules/render.denoise/shaders/aver_denoise.hlsl
+// (dnsrDecodeNormal) and sandbox/shaders/gbuffer_debug.hlsl; change the three together.
 float4 averPackNormalRoughness(float3 N, float roughness) {
     N /= abs(N.x) + abs(N.y) + abs(N.z);
-
-    float3 r;
-    r.y = N.y * 0.5 + 0.5;
-    r.x = N.x * 0.5 + r.y;
-    r.y -= N.x * 0.5;
-
-    // Can't be exactly 0, or it erases n.z's sign bit (NRD's own comment on the line this transcribes) --
-    // why a caller passing an unclamped/zero roughness still gets a decodable normal back.
-    roughness = max(saturate(roughness), 1.5 / 512.0);
-    const float s = N.z < 0.0 ? -roughness : roughness;
-    r.z = s * 0.5 + 0.5;
-
-    // w: NRD's materialID/3 slot. No material-ID concept here, so always 0 (see G-buffer header above
-    // and RHI.hpp's gBufferNormalRoughnessTexture -- not roughness).
-    return float4(r, 0.0);
+    float2 p = N.xy;
+    if (N.z < 0.0) p = (1.0 - abs(N.yx)) * float2(N.x >= 0.0 ? 1.0 : -1.0, N.y >= 0.0 ? 1.0 : -1.0);
+    return float4(p * 0.5 + 0.5, saturate(roughness), 0.0);
 }
 
 // Screen-space motion for the velocity channel: `wpos` reprojected through THIS frame's camera minus
@@ -1767,9 +1746,9 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
         || (c.r == 0.0 && c.g == 1.0 && c.b == 1.0)    // cyan: candidate-radiance clamp guard
         || (c.r == 1.0 && c.g == 1.0 && c.b == 0.0)    // yellow: target-pdf guard
         || (c.r == 1.0 && c.g == 0.5 && c.b == 0.0)    // orange: final-estimate guard
-        || (c.r == 0.0 && c.g == 0.0 && c.b == 1.0)    // blue: NRD-readback non-finite guard
+        || (c.r == 0.0 && c.g == 0.0 && c.b == 1.0)    // blue: denoiser-readback non-finite guard
         || (c.r == 1.0 && c.g == 0.0 && c.b == 0.0)    // red: raw estimate hit the ceiling
-        || (c.r == 0.0 && c.g == 1.0 && c.b == 0.0);   // green: NRD-denoised readback hit the ceiling
+        || (c.r == 0.0 && c.g == 1.0 && c.b == 0.0);   // green: denoised readback hit the ceiling
 }
 
 // The Voxi lit pixel shader. Voxi supplies light transport only â€” sun visibility, sky, bounce â€”
@@ -1797,7 +1776,7 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
 // and also improves: 14.06 -> 12.93.
 //
 // THE DEPTH PREPASS: an earlier "why not use it instead" was measured on a BROKEN prepass
-// (--depth-prepass regressed MAD 6.43 -> 21.66, parity -> 20.82, bit-identical NRD on/off -- nothing was
+// (--depth-prepass regressed MAD 6.43 -> 21.66, parity -> 20.82, bit-identical denoiser on/off -- nothing was
 // shading). Cause: with the device on mesh shaders (RENDER.MESHSHADERS 1), prepassed draws got the
 // ORDINARY Less/depth-write pipeline, rejecting the prepass's equal depth and discarding the colour pass
 // (47x cheaper for it). Fixed in D3D12Device/VulkanDevice::drawMesh (a prepassed draw now takes the
@@ -1950,7 +1929,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
                           QuadReadAcrossDiagonal(rdReuseBit)) != 0u;
     // A PANE LIT ON ITS OWN (a blended fragment that cannot reuse the staged lighting -- window glass in
     // front of a room or a street gap) gets the voxel-cone gather's smooth GI and occlusion, not traced
-    // ones. It writes no history and reads no NRD, and its own history reads are depth-rejected against
+    // ones. It writes no history and reads no denoiser output, and its own history reads are depth-rejected against
     // the opaque surface behind it, so rtSkyOcclusionTemporal returned ONE binary cosine ray re-aimed
     // every frame and giRestirIndirect one raw candidate (RESTIRHISTORY 0). Through
     // averSpecularOcclusion that binary AO is exactly 0 or 1 at glass roughness, so a pane's whole
@@ -2107,7 +2086,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // because HLSL compiles at RUNTIME here.
 #if AVER_RT
     ind4.occlusion    = gAmbientParams.x > 0.5
-                      // true: this pass writes the G-buffer REBLUR_DIFFUSE_OCCLUSION reprojects
+                      // true: this pass writes the G-buffer the occlusion denoiser reprojects
                       // against (see rtSkyOcclusionTemporal's header; the ray-driven twin passes false).
                       //
                       // M6: Stage O's own answer, when reusing staged lighting AND CSRdSkyOcc ran for
@@ -2907,7 +2886,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
     // LOCAL LIGHTS (lamps): every lamp in range through the sun's own BRDF (rdLocalLightsShade), diffuse
     // and specular, times the lamps' accumulated shadow-ray visibility. Inside `radiance` only, so it
-    // stays out of the NRD/AO/ind terms below, and Unlit (vmode 1), which replaces `radiance`
+    // stays out of the denoiser/AO/ind terms below, and Unlit (vmode 1), which replaces `radiance`
     // wholesale, drops it with the rest of the lighting. The count is a constant-buffer value, so each
     // branch is uniform and costs nothing with no lamps.
 #if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
@@ -3189,7 +3168,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
                         : rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo,
                                                  rdAoGathered, false))
 #else
-                     // false: this pass runs with the G-buffer OFF, so gNrdAo was reprojected against
+                     // false: this pass runs with the G-buffer OFF, so gDenoisedAo was reprojected against
                      // motion vectors/depth this pass never wrote. Reading it anyway was the whole of
                      // the washed-out ray-driven shadows: it overrode a correctly traced "fully
                      // occluded" with ~0.83 "open", and full sky ambient then landed on every interior
@@ -3328,7 +3307,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         o.col.rgb = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
     // vmode 2-5 (ViewDebug's ray-hit/triangle views): replace the final colour LAST, after both
     // overrides above, so selecting one always shows exactly that debug encoding. Every other output
-    // below (G-buffer MRTs, depth, history writes) is untouched: NRD/history still see valid geometry,
+    // below (G-buffer MRTs, depth, history writes) is untouched: the denoiser/history still see valid geometry,
     // only what's on screen changes (see viewDebugColor's header).
     if (vmode == 6u)
         o.col.rgb = aoView.xxx;
@@ -3753,7 +3732,7 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 // MILESTONE 2. Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord (the
 // same reconstruction Stage S and Stage B use), and runs the SAME giRestirIndirect call PSRayDriven's
 // single pass makes when ReSTIR GI is active -- same pixel-centre, so the reservoir/surface-history
-// buffers (gGiReservoirs/gGiSurfPosHist/gGiSurfNrmHist, u6/u7/u8, NRD GI pair u9/t15, half-res
+// buffers (gGiReservoirs/gGiSurfPosHist/gGiSurfNrmHist, u6/u7/u8, denoiser GI pair u9/t15, half-res
 // visibility u10/t16) mean the same thing either way.
 //
 // ONLY MEANINGFULLY DISPATCHED WHEN ReSTIR GI IS THE CHOSEN ESTIMATOR (VoxiRenderer::
@@ -3768,8 +3747,8 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 // inventing a fourth.
 //
 // MILESTONE 4 (voxi.rayDrivenStages == 2): this stage alone is ALSO compiled with
-// AVER_GI_CHECKERBOARD=1 -- half-rate ReSTIR GI, tracing a fresh candidate only for the pixel half
-// NRD's REBLUR expects fresh data from this frame, leaving REBLUR to reconstruct the other half. The
+// AVER_GI_CHECKERBOARD=1 -- half-rate ReSTIR GI, tracing a fresh candidate only for one checkerboard
+// half this frame, leaving the denoiser to reconstruct the other half. The
 // skip is decided here (gGiCbSkip); everything it changes lives inside giRestirIndirect
 // (voxi_restir.hlsli).
 [numthreads(8, 8, 1)]
@@ -3783,13 +3762,11 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
 
 #if AVER_GI_CHECKERBOARD
     // HALF-RATE GI'S OWN PARITY, NOT THE ROW PITCH -- read bit 16 of the raw cbuffer field directly
-    // (rdRowPitch() already masked it away). CONTRACT: NRD's REBLUR (checkerboardMode BLACK) has data
-    // where Sequence::CheckerBoard(pixelPos, frameIndex) == (x ^ y ^ frameIndex) & 1 == 0; `pixel` here
-    // IS pixelPos (this engine's NRD rect is the full render target at origin 0), so tracing exactly
-    // there is the half REBLUR expects fresh data for. `giCbParity` is not this frame's own NRD
-    // frameIndex -- prePass (beginShadowHistory) already denoised LAST frame's write -- it is NEXT
-    // frame's NRD frameIndex (denoising THIS frame's write), packed into bit 16 by VoxiRenderer::
-    // recordStagedRayDriven for this one upload.
+    // (rdRowPitch() already masked it away). CONTRACT: the denoiser treats a pixel as traced where
+    // (x ^ y ^ parity) & 1 == 0 (aver_denoise.hlsl's dnsrLoadInput) and reconstructs the rest; `pixel`
+    // here is the same render-target pixel it reads. `giCbParity` is the parity VoxiRenderer::
+    // recordStagedRayDriven latched for THIS frame's write (giCbParityWritten_) and hands to NEXT
+    // frame's denoiser dispatch with it, packed into bit 16 for this one upload.
     const uint giCbParity = ((uint)gViewParams.w >> 16) & 1u;
     gGiCbSkip = ((pixel.x ^ pixel.y ^ giCbParity) & 1u) != 0u;
 #endif
@@ -3843,7 +3820,7 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
 // MILESTONE 2. Reads CSRdVisibility's record, rebuilds the surface through rdSurfaceFromRecord, and
 // runs the SAME rtSkyOcclusionTemporal call PSRayDriven's single pass makes in the two cases where its
 // own cone gather did not already measure occlusion -- same pixel-centre argument, so the AO history
-// pair (gAoHist/gAoHistOut, t11/u4) and the NRD AO hand-off (gAoHitDistOut, u5) mean the same thing
+// pair (gAoHist/gAoHistOut, t11/u4) and the denoiser's AO hand-off (gAoHitDistOut, u5) mean the same thing
 // whichever path is running.
 //
 // COMPILED AT SM 6.6 (VoxiRenderer), same defines as CSRdShadow: rtSkyOcclusionTemporal's own spatial
@@ -3893,8 +3870,8 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
     // gRdAoTex is itself compiled out and falls back to `ind.occlusion = rdAo`.
 #if AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     // EXACTLY THE ARGUMENTS PSRayDriven'S OWN (non-split) COPY PASSES for this case: coneAo=1.0,
-    // coneAoIsGather=false (rdAo was never gathered on this branch), nrdAoUsable=false (same reason
-    // that call gives -- this pass runs with the G-buffer off, so gNrdAo was reprojected against
+    // coneAoIsGather=false (rdAo was never gathered on this branch), denoisedAoUsable=false (same
+    // reason that call gives -- this pass runs with the G-buffer off, so gDenoisedAo was reprojected against
     // motion vectors and depth this pass never wrote).
     const float occ = rtSkyOcclusionTemporal(s.wpos, s.N, float2(pixel) + 0.5, (uint)gAmbientParams.x,
                                              1.0, false, false);
