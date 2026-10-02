@@ -42,10 +42,7 @@ enum class Format : u8 {
     RG16F,
     // 10-10-10-2 unorm: world-space normal + roughness, 4 bytes/pixel. Encoding lives in
     // IDevice::gBufferNormalRoughnessTexture -- do not restate it here (two descriptions, two
-    // chances to drift, no way to notice). A prior version of this
-    // comment described the wrong layout (roughness in w) and shipped that way for months before
-    // NrdNormalRoughnessEncodingTest caught it; the real layout shares xyz with roughness in z
-    // (signed by n.z's sign), w = material id. NOT RGBA8Unorm: 8 bits/normal component bands
+    // chances to drift, no way to notice). NOT RGBA8Unorm: 8 bits/normal component bands
     // visibly under directional light, which a denoiser/temporal filter can't afford.
     RGB10A2Unorm,
     // Block-compressed, 4x4 texel blocks.
@@ -56,17 +53,15 @@ enum class Format : u8 {
     BC5Unorm,
     BC7Unorm,
     BC7UnormSrgb,
-    // Single-channel 16-bit (uint / unorm), for NVIDIA NRD's internal pools (modules/render.nrd):
-    // REBLUR stores accumulation counters as R16_UINT and normalised hit distances as R16_UNORM;
-    // NrdLinkTest fails by name if the engine can't allocate them. Appended here rather than filed
+    // Single-channel 16-bit (uint / unorm), for denoiser-style pools: accumulation counters as
+    // R16_UINT and normalised hit distances as R16_UNORM. Appended here rather than filed
     // near R8Unorm because appending can't change an existing enumerator's value -- nothing stores
     // a Format as a number today (checked), but a silent shift would be free once something does.
     R16Unorm,
     R16Uint,
-    // R16F: NRD's REBLUR_DIFFUSE permanent pool (texture 9) asks for R16_SFLOAT; without it
-    // createTexture refused and the denoiser fell over, the same gap R16Unorm/R16Uint closed.
+    // R16F: single-channel half float (R16_SFLOAT), the same gap R16Unorm/R16Uint closed.
     R16F,
-    // R8Uint: NRD's REBLUR_DIFFUSE transient pool asks for R8_UINT (found by running it, same as R16F).
+    // R8Uint: single-channel 8-bit unsigned integer (R8_UINT), e.g. small counters or masks.
     R8Uint,
 };
 
@@ -210,12 +205,12 @@ struct ShaderDesc {
     // source/prelude/entry/defines/minShaderModel irrelevant; `stage` is still required so the
     // backend knows which pipeline kind may consume it (neither bytecode form is inspected to find
     // out). Runtime HLSL-via-DXC is the right default otherwise -- it drives `--shader-source`
-    // reload and lets one .hlsl serve both backends -- but can't serve NRD (modules/render.nrd),
-    // which ships 159 precompiled shaders with no source. Bytes are COPIED, not borrowed: caller may
-    // free right after createShader returns (sizes are small, e.g. NRD's REBLUR_DIFFUSE_OCCLUSION set
-    // is 338 KiB); a dangling pointer would surface as PSO corruption or device removal, not a clean
+    // reload and lets one .hlsl serve both backends -- but can't serve a
+    // library that ships precompiled shaders with no source. Bytes are COPIED, not borrowed: caller
+    // may free right after createShader returns (sizes are small, hundreds of KiB for a large
+    // permutation set); a dangling pointer would surface as PSO corruption or device removal, not a clean
     // crash. A backend refuses a mismatched format (e.g. DXIL handed to Vulkan) with an invalid handle
-    // and a log, same as an unreachable shader model; a caller with both formats (NRD ships DXIL and
+    // and a log, same as an unreachable shader model; a caller with both formats (a library shipping DXIL and
     // SPIR-V side by side) picks by asking the device which one it wants.
     const void* bytecode     = nullptr;
     u64         bytecodeSize = 0;
@@ -301,9 +296,9 @@ struct PipelineLayout {
     // Register space for the constant slots and the static samplers; 0 for every pipeline this
     // engine compiles (separate fields only by accident, not design). Exist because HLSL lets a
     // shader put b0/t0 in different spaces, and a shader this engine didn't compile may already
-    // have made that choice: NVIDIA NRD (modules/render.nrd) has SRVs/UAVs in space 0 but its CBV
-    // and two samplers in space 1 -- without these fields a root signature built here can't describe
-    // NRD's shaders. NOT srvSpace/uavSpace: space 1 is already spoken for on the SRV side
+    // have made that choice: a precompiled library may keep SRVs/UAVs in space 0 but its CBV
+    // and samplers in space 1 -- without these fields a root signature built here can't describe
+    // such shaders. NOT srvSpace/uavSpace: space 1 is already spoken for on the SRV side
     // (bindlessTextureCount's ray-path texture table); add a movable SRV/UAV space when something
     // actually needs one. Non-zero moves ALL kMaxConstantSlots slots, not just the ones used -- the
     // unused ones go unbound (garbage if read), same contract slot 0 already has.

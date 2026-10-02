@@ -41,7 +41,7 @@ static void check(bool cond, const std::string& what) {
 static bool near(f32 a, f32 b, f32 eps = 1e-4f) { return std::fabs(a - b) <= eps; }
 
 // A device with every gate this header's fields can ask about satisfied: compute shaders, RT
-// hardware, mesh shaders, every MSAA count, NRD. Most tests below do not care WHICH device gates a
+// hardware, mesh shaders, every MSAA count, denoiser. Most tests below do not care WHICH device gates a
 // field -- they exercise the manifest-apply and capture arithmetic, not the prerequisite table
 // (RenderSettingsResolverTest.cpp, Lane 1, owns that) -- so one fully-capable device covers them.
 static voxi::DeviceInfo fullyCapableDevice() {
@@ -55,7 +55,7 @@ static voxi::DeviceInfo fullyCapableDevice() {
     d.shaderModel = 65;
     d.meshShaderTier = 1;
     d.dxcAvailable = true;
-    d.nrdSupported = true;
+    d.denoiserSupported = true;
     return d;
 }
 
@@ -70,7 +70,7 @@ static voxi::DeviceInfo noRtDevice() {
     d.shaderModel = 60;
     d.meshShaderTier = 0;
     d.dxcAvailable = true;
-    d.nrdSupported = false;
+    d.denoiserSupported = false;
     return d;
 }
 
@@ -100,9 +100,9 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.giMode == b.giMode &&
            a.denoiser == b.denoiser &&
            a.giRestirMaxHistory == b.giRestirMaxHistory &&
-           near(a.reblurDiffusePrepassBlurRadius, b.reblurDiffusePrepassBlurRadius) &&
-           a.reblurMaxAccumulatedFrameNum == b.reblurMaxAccumulatedFrameNum &&
-           a.reblurMaxStabilizedFrameNum == b.reblurMaxStabilizedFrameNum &&
+           a.denoiserMaxSamples == b.denoiserMaxSamples &&
+           near(a.denoiserHistoryClipWeight, b.denoiserHistoryClipWeight) &&
+           a.denoiserSunMovingSamples == b.denoiserSunMovingSamples &&
            a.rtShadowDenoise == b.rtShadowDenoise &&
            a.rtRenderMode == b.rtRenderMode &&
            a.rayDrivenStages == b.rayDrivenStages &&

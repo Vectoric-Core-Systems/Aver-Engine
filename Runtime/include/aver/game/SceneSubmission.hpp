@@ -12,7 +12,7 @@
 // submesh, so a false cull -- itself caused by a separate viewport-mapping bug this plan's F7 fixes --
 // routinely reshaded whole entities as their slot-0 material: lamps and door frames turned into rough
 // metal, glass panes went opaque or vanished, emissive bulbs lost their glow. Feeding the ray-traced
-// GI volume and REBLUR's denoiser history a flip between "N parts, N materials" and "1 draw, slot 0's
+// GI volume and the denoiser's history a flip between "N parts, N materials" and "1 draw, slot 0's
 // material" every time a visibility verdict changed is what produced the white panels this whole
 // investigation started from (see the plan's Link 5 for the denoiser mechanism; UNCONFIRMED which
 // exact step crosses the radiance ceiling, but F1-F4 remove every candidate at once by construction).

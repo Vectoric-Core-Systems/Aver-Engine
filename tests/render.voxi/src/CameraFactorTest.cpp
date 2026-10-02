@@ -1,4 +1,4 @@
-// CameraFactor -- recovering NRD's separate worldToView/viewToClip from the engine's combined
+// CameraFactor -- recovering the separate worldToView/viewToClip from the engine's combined
 // viewProj, checked against real cameras built from the engine's own Mat4::lookAtLH/perspectiveLH.
 //
 // NO GPU, NO RHI: the property under test is pure arithmetic on a 4x4 matrix, exactly the shape of
@@ -8,9 +8,9 @@
 // itself deliberately does not depend on (see its own top comment).
 //
 // WHAT WOULD HAVE CAUGHT THE BUG THIS HEADER FIXES. Before CameraFactor existed,
-// VoxiRenderer::beginShadowHistory handed NRD identity for worldToView and the FULL combined
-// viewProj for viewToClip -- self-consistent as a product, but wrong the moment NRD decomposes
-// viewToClip alone (see that function's own rewritten comment for the mechanism). A test that only
+// VoxiRenderer::beginShadowHistory handed the denoiser identity for worldToView and the FULL combined
+// viewProj for viewToClip -- self-consistent as a product, but wrong the moment a consumer decomposes
+// viewToClip alone. A test that only
 // checked "V * P == vp" could not have told the two encodings apart, because they were never
 // unequal there. Sections 1-2 below check the RECOVERED V and P individually, elementwise, against
 // the exact matrices lookAtLH/perspectiveLH produced -- the thing an identity-worldToView encoding

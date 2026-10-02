@@ -1084,20 +1084,15 @@ public:
     // 0 when gBufferEnabled() is false or unimplemented, matching gBufferVelocityTexture() above.
     virtual TextureHandle gBufferViewZTexture() { return 0; }
 
-    // Scene-resolution normal and roughness, Format::RGB10A2Unorm -- packed to NRD's OWN
-    // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM layout (third_party/nrd/Shaders/NRDConfig.hlsli), NOT a
-    // plain n*0.5+0.5-with-roughness-in-w scheme (that's NRD's #else layout for encodings 0/3, and
-    // wrong here -- an earlier version of this contract documented it, and REBLUR decoded garbage
-    // normals and view-angle-dependent roughness as a result). xyz JOINTLY encode both: an
-    // improved-octahedral fold puts N into x/y, z carries roughness's MAGNITUDE with the SIGN OF
-    // N.z riding on z's own sign (roughness is never exactly 0, so that sign bit always has
-    // something to carry). Encode: averPackNormalRoughness (modules/render.voxi/shaders/voxi.hlsl,
-    // transcribed byte-exact from NRD's _NRD_EncodeNormalRoughness101010); decode:
-    // sandbox/shaders/gbuffer_debug.hlsl. w: materialID/3 in NRD's
-    // convention, always 0 here (no material-ID concept yet), NOT roughness. A raw n*2-1 sample of
-    // xyz is wrong -- needs the full decode (NRD_FrontEnd_UnpackNormalAndRoughness or the pair
-    // above); assuming the OLD contract gives a plausible-looking but per-pixel-wrong vector --
-    // exactly the shape of bug a casual visual check misses, and exactly how this one shipped.
+    // Scene-resolution normal and roughness, Format::RGB10A2Unorm. xy = the world-space normal,
+    // octahedral-encoded (Cigolle et al. 2014: L1-normalise, fold the lower hemisphere with
+    // p = (1-|N.yx|)*signNotZero(N.xy) when N.z<0, then p*0.5+0.5); z = roughness; w = 0 (there is
+    // no material-ID concept yet). Encode: averPackNormalRoughness
+    // (modules/render.voxi/shaders/voxi.hlsl). Decode: f = e.xy*2-1; n = (f, 1-|f.x|-|f.y|);
+    // if (n.z<0) n.xy = (1-abs(n.yx))*signNotZero(n.xy); normalize(n) (see
+    // sandbox/shaders/gbuffer_debug.hlsl and the denoiser's shader). A raw n*2-1 sample of xyz is
+    // wrong -- it gives a plausible-looking but per-pixel-wrong vector, exactly the shape of bug a
+    // casual visual check misses.
     //
     // 0 when gBufferEnabled() is false or unimplemented, matching the two accessors above.
     virtual TextureHandle gBufferNormalRoughnessTexture() { return 0; }

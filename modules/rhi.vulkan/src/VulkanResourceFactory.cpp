@@ -1443,9 +1443,9 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
     // set produce no validation error (no validation-layer binaries on this dev machine -- see
     // VulkanShaderCompiler.cpp) and no crash, just a shader silently reading the wrong memory --
     // this engine has been bitten by that exact shape before.
-    // AND IT WOULD STILL NOT RUN NRD, the only caller that wants this: NRD's SPIR-V (compiled by
-    // ShaderMake with its own -fvk register shifts) has its (set, binding) pairs baked in, needing a
-    // bespoke VkDescriptorSetLayout built from reflected bindings, not a renumbered space. This
+    // AND IT WOULD STILL NOT RUN PRECOMPILED LIBRARIES, the only callers that want this: their
+    // SPIR-V (compiled offline with its own -fvk register shifts) has its (set, binding) pairs baked
+    // in, needing a bespoke VkDescriptorSetLayout built from reflected bindings, not a renumbered space. This
     // refusal costs the Vulkan path nothing it could otherwise have had.
     if (layout.constantSpace != 0 || layout.samplerSpace != 0) {
         AVER_ERROR("[RHI.Vulkan] pipeline layout asks for constants in register space {} and samplers "
@@ -2022,7 +2022,7 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
         s.spirv.resize(static_cast<usize>(d.bytecodeSize / sizeof(u32)));
         std::memcpy(s.spirv.data(), d.bytecode, static_cast<usize>(d.bytecodeSize));
         // The magic number, checked because the alignment test above passes for any 4-byte multiple
-        // and DXIL is one. Getting this wrong is a caller handing the wrong one of NRD's two blobs
+        // and DXIL is one. Getting this wrong is a caller handing the wrong one of a library's two blobs
         // to the wrong backend, which is worth catching by name rather than as a driver error.
         if (s.spirv.empty() || s.spirv[0] != 0x07230203u) {
             AVER_ERROR("[RHI.Vulkan] createShader (precompiled): bytecode does not begin with the "

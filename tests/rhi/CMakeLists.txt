@@ -92,12 +92,12 @@ set_target_properties(ShaderCacheSweepTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 # were emitted in the spaces the bytecode declares. Neither capability could establish that alone,
 # and an assertion written beside the placement code could not establish it at all.
 #
-# It sources its bytecode from NRD rather than a fixture -- see the file's own comment -- so it
-# links Aver.Render.NRD, which exists in every configuration and reports SKIP when NRD is absent.
+# Its bytecode is a fixture: tests/rhi/shaders/precompiled_space1.hlsl, compiled offline to DXIL and
+# embedded as src/PrecompiledShaderFixture.inc, so it links only the RHI.
 # D3D12-only because the Vulkan backend deliberately REFUSES a non-zero register space.
 if(AVER_RHI_D3D12)
   add_executable(PrecompiledShaderTest src/PrecompiledShaderTest.cpp)
-  target_link_libraries(PrecompiledShaderTest PRIVATE Aver.Render.NRD Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  target_link_libraries(PrecompiledShaderTest PRIVATE Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
   # ITS OWN COMPOSITION ROOT, exactly as LineMeshTest and CbufferLayoutPatchTest above are, and for
   # the same reason: Aver.RHI's createDevice() calls detail::createD3D11Device / createVulkanDevice
   # behind AVER_HAS_*, so every consumer must supply EVERY enabled backend even when it only ever

@@ -11,15 +11,13 @@
 //
 // WHY THIS EXISTS. IDevice::camera() and every per-frame consumer in this renderer (curViewProj_,
 // prevViewProj_) only ever carry the TWO matrices already multiplied together -- view * proj, row-
-// major, row-vector (RHI.hpp: "row-major, row-vector viewProj = view*proj"). NVIDIA NRD's own
-// contract (third_party/nrd/Include/NRDSettings.h, CommonSettings::worldToViewMatrix /
-// viewToClipMatrix) wants the two SEPARATELY -- it decomposes viewToClip on its own to recover the
-// projection frustum and to decide the scene's handedness, and it reconstructs every pixel's view-
-// space position from viewToClip alone before rotating by worldToView. Handing it identity for
-// worldToView and the combined viewProj for viewToClip (what this renderer used to do) is silently
-// wrong: see VoxiRenderer::beginShadowHistory's own comment at the NRD camera block for the
-// mechanism and the third_party citations. This header is the fix: given only the combined matrix,
-// it reconstructs the two NRD actually wants, dependency-light (aver/core/Types.hpp only, no Mat4)
+// major, row-vector (RHI.hpp: "row-major, row-vector viewProj = view*proj"). Consumers that
+// reconstruct view-space positions (formerly NVIDIA NRD, now any denoiser or reprojection pass)
+// want the two SEPARATELY -- they decompose viewToClip to recover the projection frustum and the
+// scene's handedness, and rebuild every pixel's view-space position from viewToClip alone before
+// rotating by worldToView. Handing them identity for worldToView and the combined viewProj for
+// viewToClip is silently wrong. This header is the fix: given only the combined matrix, it
+// reconstructs the two such a consumer wants, dependency-light (aver/core/Types.hpp only, no Mat4)
 // so it can be exercised without pulling in the RHI or the renderer.
 //
 // A CLOSED-FORM RECOVERY, NOT A GENERAL DECOMPOSITION. This does not attempt to factor an arbitrary
@@ -57,16 +55,14 @@ public:
     //
     // outWorldToView / outViewToClip: written in the SAME row-major layout as vp itself (so
     // outWorldToView[r*4+c] == V.m[r][c] and likewise for P), which is what lets a caller memcpy
-    // either straight into NRD's FrameSettings::worldToView/viewToClip exactly the way the combined
-    // viewProj already is today (NrdDenoiser.hpp documents those as column-major/column-vector --
-    // see beginShadowHistory's own comment for why a row-major row-vector array and a column-major
-    // column-vector array of the SAME transform are the identical sequence of 16 numbers, which is
-    // also why memcpy-ing the combined viewProj there has always been correct).
+    // either straight into a column-major/column-vector consumer exactly the way the combined viewProj
+    // already is (a row-major row-vector array and a column-major column-vector array of the SAME
+    // transform are the identical sequence of 16 numbers).
     //
     // Returns false, and leaves outWorldToView/outViewToClip UNTOUCHED (not identity, not a best
     // guess -- untouched), when vp does not verifiably have the assumed structure. See factor()'s
     // body for the full list of checks; a caller must treat false as "this frame's camera cannot be
-    // trusted to NRD" and act accordingly (VoxiRenderer's caller skips the NRD dispatch that frame
+    // trusted" and act accordingly (a caller skips the dependent dispatch that frame
     // rather than ever falling through to a stale or synthesised encoding).
     static bool factor(const f32 vp[16], f32 outWorldToView[16], f32 outViewToClip[16]) {
         // ---- 0. every input must be finite. A NaN/Inf anywhere poisons every derived quantity, and

@@ -364,7 +364,7 @@ inline constexpr u32 kAverSrOff = 0, kAverSrQuality = 1, kAverSrBalanced = 2, kA
 // SUSPECT EVIDENCE (aver-aversr-measured.md; optimisation-wave-2 plan section 3.1): PTTest, 2026-08-31,
 // 200 frames -- Quality -4.0 ms/-21.6% edge sharpness; Balanced -4.9/-25.3%; Performance -5.6/-29.4%.
 // Baseline was contaminated by a second renderer running concurrently (plan C13) and predates ReSTIR
-// and NRD (pixel-bound additions Epic carries today), so absolute SAVINGS are expected higher than
+// and the denoiser (pixel-bound additions Epic carries today), so absolute SAVINGS are expected higher than
 // recorded (UNMEASURED; plan section 5.0/5.2 settles it); the DELTAS below lean on this table too and
 // would shift with a corrected baseline.
 //

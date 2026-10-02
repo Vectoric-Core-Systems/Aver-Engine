@@ -128,8 +128,8 @@ function Get-Cached([string] $key) {
 #
 # THIS IS WHY THE MATRIX COULD NOT RUN AT ALL. `& $cmake @args 2>&1` under this script's
 # $ErrorActionPreference of 'Stop' wraps every stderr LINE in an ErrorRecord and throws on the
-# first one -- and CMake's configure prints the NRD submodule's ordinary banner, "NRD: v4.18.0", to
-# stderr. So the whole matrix died on a version string before it had compiled anything, reporting a
+# first one -- and CMake's configure prints ordinary banners (a vendored dependency's version line,
+# say) to stderr. So the whole matrix died on a version string before it had compiled anything, reporting a
 # NativeCommandError that named cmake.exe and looked like a toolchain fault.
 #
 # scripts/verify-game.ps1 already documents this exact trap and routes around it, in its own words:

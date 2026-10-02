@@ -49,7 +49,7 @@ add_executable(GiCacheTest src/GiCacheTest.cpp)
 target_link_libraries(GiCacheTest PRIVATE Aver.Formats Aver.Assets Aver.Core Aver.Platform)
 set_target_properties(GiCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# CameraFactorTest -- recovering NRD's separate worldToView/viewToClip from the combined viewProj
+# CameraFactorTest -- recovering the separate worldToView/viewToClip from the combined viewProj
 # VoxiRenderer already carries everywhere else, checked against real cameras built from
 # Mat4::lookAtLH/perspectiveLH.
 #

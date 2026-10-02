@@ -63,10 +63,6 @@
 // AverSR block below. Also pulls in Voxi.hpp itself via RenderSettingsResolver.hpp -- already included
 // above, so no new dependency, only new names.
 #  include "aver/voxi/Scalability.hpp"
-// Denoiser::available() only, for attachVoxi's nrdSupported check (R1; mirrors SandboxApp.cpp:2508-2514's
-// same expression `backend() == D3D12 && available()`). Aver.Render.NRD is "ALWAYS linkable" (its own
-// CMakeLists' words), so no module guard needed.
-#  include "aver/render/nrd/NrdDenoiser.hpp"
 #endif
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 // DECIDED 4's GI seam glue (particleGiPrepare/particleGiBind below) is the only reason this TU needs
@@ -746,10 +742,9 @@ void GameApp::attachVoxi(Engine& e) {
     di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
     di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
     di.dxcAvailable = caps.dxcAvailable;
-    // R1: same expression as SandboxApp.cpp:2508-2514's own DeviceInfo build (see NrdDenoiser.hpp's
-    // include comment above); derived from the device, not read off caps, so no module guard needed
-    // here. rhi::DeviceCaps itself is untouched.
-    di.nrdSupported = dev->backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available();
+    // The denoiser needs the G-buffer, which only D3D12 has; derived from the device, not read off
+    // caps, so no module guard needed here. rhi::DeviceCaps itself is untouched.
+    di.denoiserSupported = dev->backend() == rhi::Backend::D3D12;
     voxi::Renderer::get().setDeviceInfo(di);
 
     // Seed the manifest's render settings BEFORE init() (N2): createVoxelVolume(settings_.voxelResolution)
@@ -1894,9 +1889,8 @@ void GameApp::pushFrame(Engine& e) {
 #if AVER_MODULE_VOXI
     if (voxiAttached_) {
         voxi::Renderer& vx = voxi::Renderer::get();
-        // N4: without this, DENOISER 1 in a manifest ran with no G-buffer allocated (NRD's own
-        // WARN-once path, gated on nrdWarnedMsaa_, never even got a G-buffer to complain about) and
-        // RENDER.MSAA changes mid-session never reached the device. Mirrors SandboxApp.cpp's
+        // N4: without this, DENOISER 1 in a manifest ran with no G-buffer allocated (the
+        // denoiser never even got a G-buffer to read) and RENDER.MSAA changes mid-session never reached the device. Mirrors SandboxApp.cpp's
         // onUpdate pattern (:3865-3882 there): the G-buffer switch reads resolve()'s
         // denoiserGBufferWanted (see RenderSettingsResolver.hpp), and the MSAA push is the one-shot
         // consumeMsaaDirty() flag.

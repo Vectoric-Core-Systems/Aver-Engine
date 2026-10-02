@@ -81,7 +81,7 @@ void checkForwards(const char* name, u32 (*legacy)(Quality), u32 (*ladderFn)(Qua
 }
 
 // A device that can run every Voxi feature this resolver gates: compute, DXR 1.1 + SM 6.5 + DXC (so
-// Ray Tracing AND Path Tracing are both Ready), mesh-shader Tier 1, and NRD.
+// Ray Tracing AND Path Tracing are both Ready), mesh-shader Tier 1, and denoiser support.
 DeviceInfo fullDevice() {
     DeviceInfo d;
     d.msaaMask = 1u | 2u | 4u | 8u;
@@ -93,7 +93,7 @@ DeviceInfo fullDevice() {
     d.shaderModel = 65;
     d.meshShaderTier = 1;
     d.dxcAvailable = true;
-    d.nrdSupported = true;
+    d.denoiserSupported = true;
     return d;
 }
 
@@ -366,10 +366,11 @@ int main() {
 
         {
             DeviceInfo d = fullDevice();
-            d.nrdSupported = false;
+            d.denoiserSupported = false;
             const Resolution r = resolve(s, d);
-            check(r.denoiser.reason == DisableReason::RequiresNrd, "denoiser.reason is RequiresNrd when the device lacks NRD support");
-            check(!r.denoiserGBufferWanted, "denoiserGBufferWanted is false when NRD itself is unsupported");
+            check(r.denoiser.reason == DisableReason::RequiresDenoiserBackend,
+                  "denoiser.reason is RequiresDenoiserBackend when the device lacks denoiser support");
+            check(!r.denoiserGBufferWanted, "denoiserGBufferWanted is false when the denoiser itself is unsupported");
         }
         {
             Settings s2 = s;
@@ -390,7 +391,7 @@ int main() {
             s4.msaa = Msaa::X4;
             const Resolution r = resolve(s4, fullDevice());
             check(r.denoiser.reason == DisableReason::RequiresMsaaOne, "denoiser.reason is RequiresMsaaOne (soft) at 4x MSAA with a real signal");
-            check(r.denoiser.effective == 0, "denoiser.effective is 0 at 4x MSAA -- NRD really does skip itself there");
+            check(r.denoiser.effective == 0, "denoiser.effective is 0 at 4x MSAA -- the denoiser really does skip itself there");
             check(r.denoiserGBufferWanted, "denoiserGBufferWanted stays true under the soft MSAA reason");
         }
         {
@@ -746,7 +747,7 @@ int main() {
         check(!refusalFeatureFor(DisableReason::RequiresRayTracingEnabled, f),
               "RequiresRayTracingEnabled does not map -- reported fresh by the caller, not via refuse()'s existing log");
         check(!refusalFeatureFor(DisableReason::RequiresGlobalIllumination, f), "RequiresGlobalIllumination does not map");
-        check(!refusalFeatureFor(DisableReason::RequiresNrd, f), "RequiresNrd does not map");
+        check(!refusalFeatureFor(DisableReason::RequiresDenoiserBackend, f), "RequiresDenoiserBackend does not map");
         check(!refusalFeatureFor(DisableReason::NothingToDenoise, f), "NothingToDenoise does not map");
         check(!refusalFeatureFor(DisableReason::RequiresMsaaOne, f), "RequiresMsaaOne does not map (it is the soft reason)");
         check(!refusalFeatureFor(DisableReason::RequiresRestirGi, f),

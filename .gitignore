@@ -42,12 +42,6 @@ Thumbs.db
 # --- Third-party fetched deps (kept out of VCS; pulled by CMake) ---
 /third_party/_deps/
 
-# NRD writes its build-time configuration header back into its own source tree: the ShaderMake run
-# uses third_party/nrd/Shaders as its source directory, so NRDConfig.hlsli has to live there. It is
-# generated from the NRD_* CMake options (see cmake/AverNRD.cmake) and is not upstream content.
-/third_party/nrd/Shaders/NRDConfig.hlsli
-/third_party/nrd/_Shaders/
-
 # C# scripting build output
 scripting/**/bin/
 scripting/**/obj/
@@ -96,6 +90,5 @@ DerivedDataCache/
 # time anybody edited it. Runtime/host/AverEngineRuntime.aps appeared exactly this way.
 *.aps
 # rc.exe's own temporaries, named RCxxxxxx with no extension, left behind under whatever directory
-# it was invoked in -- third_party/nrd/Resources/ collects them because that is where the vendored
-# denoiser's .rc lives. Anchored to nothing because rc.exe chooses the directory, not us.
+# it was invoked in (a vendored library's .rc directory collects them). Anchored to nothing because rc.exe chooses the directory, not us.
 RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*

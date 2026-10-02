@@ -82,7 +82,7 @@ struct ProjectDesc {
     // drawFullscreen, the baseline and fallback), 1 = staged visibility -> shadow
     // -> shade, D3D12 only, falling back to single pass wherever the staged path is unavailable.
     // Milestone 4 adds 2 = staged + half-rate GI: the same staged path, but the ReSTIR GI stage
-    // checkerboards its rays (NRD's pattern) and REBLUR reconstructs the rest -- unlike 1, this
+    // checkerboards its rays and the denoiser reconstructs the rest -- unlike 1, this
     // deliberately changes the image rather than staying a same-image comparison.
     //
     // NOT TIER-DERIVED, THE SAME SHAPE AS RESTIRHISTORY BELOW, NOT RTRENDERMODE JUST ABOVE: this
@@ -103,7 +103,7 @@ struct ProjectDesc {
     // this key existed means by its absence), 1 = ReSTIR GI. -1 keeps the engine's own default, so
     // an older .ocproject is unchanged in meaning as well as in bytes.
     int giMode             = -1; // RENDER.GIMODE           diffuse GI algorithm, [0,1]
-    // RENDER.DENOISER: 0/1, NVIDIA NRD over the sky occlusion and the ReSTIR GI radiance. Needs the
+    // RENDER.DENOISER: 0/1, the AMD FidelityFX-based denoiser over the sky occlusion and the ReSTIR GI radiance. Needs the
     // G-buffer and MSAA 1 -- see Voxi::Settings::denoiser, which owns the explanation.
     int denoiser           = -1; // RENDER.DENOISER         0/1
     // RENDER.RESTIRVISIBILITY: the ReSTIR GI contrast fix's two per-pixel rays (F2 candidate-hit sky,

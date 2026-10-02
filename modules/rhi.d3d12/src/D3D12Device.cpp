@@ -234,13 +234,26 @@ public:
         const std::wstring wTarget(t6.begin(), t6.end());
         std::vector<std::wstring> wDefines;
         for (const std::string& d : defs) wDefines.emplace_back(d.begin(), d.end());
+        // AVER_HLSL_2018, like AVER_ENABLE_16BIT_TYPES below, is a flag consumed here rather than a
+        // real -D: it compiles this one shader as HLSL 2018 instead of 2021. For vendored source
+        // written against 2018 semantics that cannot be edited -- third_party/fidelityfx-denoiser
+        // uses a vector `?:`, which 2021 rejects (aver_denoise.hlsl). Never for engine shaders.
+        bool hlsl2018 = false;
+        for (usize i = 0; i < wDefines.size();) {
+            if (wDefines[i] == L"AVER_HLSL_2018") {
+                hlsl2018 = true;
+                wDefines.erase(wDefines.begin() + static_cast<isize>(i));
+            } else {
+                ++i;
+            }
+        }
 
         DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
         std::vector<LPCWSTR> args = {
             L"-E", wEntry.c_str(),
             L"-T", wTarget.c_str(),
             L"-Zpr",
-            L"-HV", L"2021",
+            L"-HV", hlsl2018 ? L"2018" : L"2021",
             // A quoted `#include "x"` reaches our IDxcIncludeHandler via the including file's own
             // directory; an angled `#include <x>` needs a non-empty -I list or DXC never asks the
             // handler at all (else: `file not found with <angled> include; use "quotes" instead`).
@@ -509,7 +522,7 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         // reach a texture-create or SRV/UAV call instead of refusing to compile.
         case Format::RG16F:          return DXGI_FORMAT_R16G16_FLOAT;
         case Format::RGB10A2Unorm:   return DXGI_FORMAT_R10G10B10A2_UNORM;
-        // NRD's pool formats -- see the enum's own note in RHIResources.hpp.
+        // Single-channel pool formats -- see the enum's own note in RHIResources.hpp.
         case Format::R16Unorm:       return DXGI_FORMAT_R16_UNORM;
         case Format::R16F:           return DXGI_FORMAT_R16_FLOAT;
         case Format::R8Uint:         return DXGI_FORMAT_R8_UINT;
@@ -1791,8 +1804,8 @@ struct RhiBuffer {
 
 // A compiled shader blob and the stage it was compiled for.
 // A shader's bytecode, from one of two places. `blob` is what DXC (or FXC) produced from HLSL text;
-// `bytes` is a COPY of bytecode the caller already had (ShaderDesc::bytecode -- NRD's precompiled
-// permutations are the first). Exactly one is ever populated, and code() is the only thing that
+// `bytes` is a COPY of bytecode the caller already had (ShaderDesc::bytecode -- a precompiled
+// shader library's permutations are the typical case). Exactly one is ever populated, and code() is the only thing that
 // should ask which: every consumer wants a {pointer, length} pair and does not care where it came
 // from. Copying rather than borrowing is ShaderDesc::bytecode's documented contract.
 struct RhiShader {
@@ -4594,8 +4607,8 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     // and give a clear-sky diffuse share of ~16% at 45deg sun elevation -- inside AtmosphereTest's
     // 15-30% gate, matching real clear sky (10-20%).
     // The 8 came from a display-space measurement (tonemapped p50 119->125 with sky 0->1, divided
-    // by the shoulder-clipped MAX pixel -- the same post-tonemap trap that once "measured" NRD
-    // losing 40-80% of GI), which made diffuse sky ~1.5x the sun's horizontal irradiance (~40%
+    // by the shoulder-clipped MAX pixel -- the same post-tonemap trap that once "measured"
+    // the formerly used NVIDIA NRD losing 40-80% of GI), which made diffuse sky ~1.5x the sun's horizontal irradiance (~40%
     // shadows vs physics' 10-20%) while the visible dome and reflections stayed at 1x, so the sky
     // lit the scene 8x brighter than it looked. Removed on the owner's call (2026-09-24); judge any
     // future sky-scale change in linear HDR (--tonemap 0), never on 8-bit.
@@ -7197,7 +7210,7 @@ ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
         }
         // THE CONTAINER FOURCC, checked for the same reason the Vulkan side checks SPIR-V's magic
         // number: the one mistake a caller can actually make here is handing the wrong backend's
-        // blob to the wrong backend, and NRD supplies DXIL and SPIR-V side by side so the two are
+        // blob to the wrong backend, and a precompiled library may supply DXIL and SPIR-V side by side so the two are
         // one field apart. Caught by name here; caught by CreateComputePipelineState as an opaque
         // E_INVALIDARG otherwise. Every DXIL container starts with 'DXBC' -- the fourcc kept its
         // old name across the DXBC-to-DXIL change.
@@ -7353,7 +7366,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         // A BLENDED PIPELINE WRITES TARGET 0 ONLY. With IndependentBlendEnable FALSE, D3D12 applies
         // RenderTarget[0]'s state to every bound target, so a blended draw with the G-buffer's extra
         // targets blended its velocity/viewZ/normal into the opaque surface's (the normal's w = 0 made
-        // that an addition) and NRD denoised the room behind a window with the glass's geometry.
+        // that an addition) and the denoiser denoised the room behind a window with the glass's geometry.
         // Blending those targets has no meaning; mask them. Opaque pipelines keep the shared state.
         if (d.blend != BlendMode::Opaque && d.renderTargetCount > 1) {
             blend.IndependentBlendEnable = TRUE;
@@ -7966,7 +7979,7 @@ void D3D12ResourceFactory::destroyShader(ShaderHandle h) {
     if (!s) return;
     s->blob.Reset();
     // shrink_to_fit, not clear(): clear() alone leaves the capacity allocated, and a precompiled
-    // shader's bytes are the whole point of this branch existing -- NRD's 159 permutations are
+    // shader's bytes are the whole point of this branch existing -- a library's hundreds of permutations are
     // megabytes if none of them is ever really given back.
     s->bytes.clear();
     s->bytes.shrink_to_fit();
@@ -8039,7 +8052,7 @@ void D3D12ResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle 
     // on one isn't a failed call -- D3D12 triggers RemoveDevice with DXGI_ERROR_INVALID_CALL
     // outright, taking the whole adapter down: the upload ring and every later CreateRootSignature
     // fail, and the post chain cannot present. Silent with the debug layer off; with it on, it's
-    // #340 -- found only after being misattributed to NRD dispatch counts, a resource state, and an
+    // #340 -- found only after being misattributed to denoiser dispatch counts, a resource state, and an
     // unbound root CBV in turn. One check here converts the worst diagnostic in the engine into a
     // named texture and a live frame.
     if (!(static_cast<u32>(t->desc.bind) & static_cast<u32>(ResourceBind::UnorderedAccess))) {
