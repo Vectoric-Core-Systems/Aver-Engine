@@ -1,5 +1,5 @@
-# Aver Engine
 
+# Aver Engine
 A custom, **modular** 3D game engine licensed under the **GNU LGPL v2.1** (see [License](#license)) and built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), exclusively — no NVIDIA RTX SDK remains in the tree; ray-traced GI is in-house ReSTIR GI and denoising is AMD FidelityFX Denoiser. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
 
 - **Polyglot:** C++ (core, RHI, renderer, physics), C (one seam per module, not one seam for everything), C# on .NET 10 (scripting, gameplay, materials, HUD). **There is no Rust in this tree.** `tools/README.md` still advertises a Rust asset pipeline that was never written, and `abi/README.md` records why the single flat `Aver.ABI` those files describe is not coming either.
