@@ -36,6 +36,7 @@ namespace aver::voxi { class VoxiRenderer; }
 namespace aver::game {
 
 class GameContent;
+class PlayMobility;
 
 // Draw counters.
 //
@@ -339,6 +340,11 @@ struct DrawWorldOptions {
     // behaviour exactly: a culled or owner-hidden entity is skipped and casts no shadow while it is.
     voxi::VoxiRenderer* voxiRenderer = nullptr;
 
+    // Which entities move during a play session (see PlayMobility.hpp). A movable entity's draws
+    // reach Voxi flagged `movable`, which keeps them out of the GI bake. Null, or an inactive
+    // tracker, flags nothing -- the editor outside Play.
+    PlayMobility* mobility = nullptr;
+
     // Which walk this is. See DrawWorldPass.
     DrawWorldPass pass = DrawWorldPass::Colour;
 
@@ -361,10 +367,14 @@ struct DrawWorldOptions {
 
     // Collapse WalkLookup's four per-entity GameContent probes (meshFor, boundsFor,
     // meshDefaultMaterial, partsFor -- CpuSpan's own comment names all four) to at most one
-    // resolution of each PER DISTINCT MESH ID this call visits, through a small fixed-size,
-    // direct-mapped cache local to this one call (GameRender.cpp's own comment on
-    // MeshLookupCacheSlot has the shape and the reasoning, including why a single "last mesh" slot
-    // was rejected on purpose rather than by omission).
+    // resolution of each PER DISTINCT MESH ID this call visits, through a fixed-size, open-addressed
+    // table that is reused from call to call but logically EMPTY at the start of each one -- nothing
+    // one call learned is visible to the next, which is what "local to this one call" always
+    // meant (GameRender.cpp's own comment on kMeshLookupCacheSlots and WalkCacheLease has the shape
+    // and the reasoning, including why a single "last mesh" slot was rejected on purpose rather
+    // than by omission, and what a re-entrant call gets). A call that cannot claim the table (a
+    // hook that re-entered drawWorld, or a second thread) runs as if this were false and reports
+    // 0 hits and 0 misses.
     //
     // ON BY DEFAULT, AND THAT IS THE POINT OF STAGE 2. All four probes are a `find()` plus a
     // return -- const, no lazy upload, no side effect of any kind (verified by reading

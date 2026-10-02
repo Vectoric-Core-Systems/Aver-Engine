@@ -241,6 +241,11 @@ bool GameWater::respawnLevelVolume() {
 }
 
 void GameWater::update(rhi::IDevice& device, f32 dt) {
+    // The analytic surface's wave clock: WaterRenderer's render hooks never receive a dt, so
+    // without this call its waves stay frozen at t = 0. Outside the simulated-fluid guard because
+    // the analytic surface exists in every fluids build; both hosts reach it from their frame tick.
+    if (waterAttached_) waterRenderer_.tick(dt);
+
 #if AVER_FLUIDS_SIMULATED
     // The one place a fluid volume is ever spawned: applyLevel only latches what a level asked
     // for; this drains it. A volume spawned here still gets its prePass this frame, so its seed
@@ -326,7 +331,7 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
     }
 #endif
 #else
-    (void)device; (void)dt;
+    (void)device;
 #endif
 }
 

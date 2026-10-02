@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -97,6 +98,48 @@ public:
     // `clearGraphRegistry` false leaves the process-wide pbr::materialGraphs() alone, for a host that
     // registers graphs there itself (the editor's material graph editor does).
     void releaseProjectMaterials(bool clearGraphRegistry = true);
+
+    // ---- level-scoped material residency ----
+    //
+    // A PARTIAL releaseProjectMaterials(): destroys every currently-loaded material whose NAME is
+    // not in `keep`, instead of every material this GameContent has ever loaded. This is what makes
+    // an editor that keeps every level's materials resident (SandboxApp's applyProject, historically)
+    // able to hold only the OPEN level's instead -- a project with several heavy imported levels in
+    // one Content folder (the motivating case: Sponza and Jungle Ruins together, 17.2 GB resident
+    // against a 13.1 GB budget because every material in the PROJECT loaded, not just the one level
+    // on screen) otherwise never lets go of a level's textures once another one opens.
+    //
+    // `keep` is every surface NAME the caller has already decided must survive. SandboxApp calls
+    // this from unloadLevel() (every way OUT of a level, including "New Level", passes through
+    // there) with `keep` = whatever an open editor tab or the current selection has pinned resident
+    // (SandboxApp::pinMaterialResident) -- ordinarily empty, so an ordinary level change releases
+    // everything. It does NOT need to gather the NEXT level's surfaces itself: GameLevel::load()
+    // (shared with the runtime) already resolves every surface a level actually draws through
+    // materialForSurface()/bindSurfaceMaterial() as it places entities, so whatever the level about
+    // to open needs is reloaded, fresh, the moment it opens. This function has no idea what a "tab"
+    // or a "selection" is; a caller that needs one protected from release must put its name in
+    // `keep` itself.
+    //
+    // pbr::MaterialLibrary::destroy() is called for the handle behind every name NOT kept (the same
+    // ownership releaseProjectMaterials() already documents: MaterialLibrary owns it, this map only
+    // named it), and the name is forgotten from materialAssets_. THE TEXTURE(S) THAT MATERIAL
+    // SAMPLED ARE NOT FREED HERE -- that is pbr::MaterialSystem's job, on its very next update() call
+    // (see MaterialSystem::update()'s eviction loop and its textureRefs_ for why a texture two
+    // materials share must outlive whichever of them is released first; this function has no view of
+    // the GPU residency that system owns, only of which pbr::MaterialHandle exists).
+    //
+    // ALSO FORGETS ANY surfaceMaterials_ TOKEN LEFT NAMING A HANDLE THIS CALL JUST DESTROYED, so
+    // authoredFor() goes back to reporting "unbound" for it instead of a handle
+    // pbr::MaterialLibrary::valid() will now refuse -- GameRender's resolveDrawLook already falls
+    // back safely for a dead handle (a one-shot warning, then the surface's built-in look or the
+    // flat-gray fallback), but leaving the stale entry behind is exactly what makes that warning fire
+    // on every later draw of a surface this call meant to retire quietly. Safe to call even for a
+    // name the NEXT level still needs: materialForSurface() plus bindSurfaceMaterial() (the same
+    // pair every existing caller of this class already uses) rebinds it, fresh, before it is ever
+    // drawn again.
+    //
+    // Returns how many materials were actually destroyed.
+    usize releaseMaterialsExcept(const std::unordered_set<std::string>& keep);
 #endif
 
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
@@ -215,16 +258,30 @@ public:
     // Bounds as loaded from the .ocmesh, or nullptr. Used by the draw walk to cull.
     const std::pair<Vec3, Vec3>* boundsFor(u64 id) const;
 
-    // A collision-only triangle mesh for `id`, lazily read from its .ocmesh and cached on first ask
-    // (see GameContent.cpp for exactly how the LOD is picked and the mesh compacted). `positions` is
-    // LOCAL space, 3 f32 per vertex; `indices` is 3 per triangle into `positions`, remapped down to
-    // only the vertices this LOD actually references -- NOT LOD 0's full vertex array, which a
-    // coarser level shares but mostly does not touch. `lod` is which stored level this came from (0
-    // is the mesh's finest, i.e. `OcMeshData::indices`); `errorCm` is that level's own geometric
-    // error, in centimetres (0 for LOD 0, by the format's own convention).
+    // A collision-only triangle mesh for `id`, lazily built from its .ocmesh and cached on first ask
+    // (see GameContent.cpp for exactly how). `positions` is LOCAL space, 3 f32 per vertex; `indices`
+    // is 3 per triangle into `positions`, compacted down to only the vertices these triangles actually
+    // reference.
     //
-    // nullptr for a mesh with no .ocmesh at all -- a built-in (registerBuiltins never indexes one)
-    // or an unknown id -- or one whose file failed to load. EITHER answer is cached, so a bad id is
+    // WHAT'S IN IT, in order: (1) every LOD-0 triangle whose material slot is not alpha-masked or
+    // translucent (leaves, glass -- see collisionSlotCollides) -- a mesh with no submesh table at all,
+    // or a slot whose material cannot be resolved, keeps its triangles, the conservative default every
+    // other cache miss in this class already uses; (2) simplified with meshoptimizer to roughly a 2 cm
+    // world error, subject to a triangle ceiling, UNLESS Trifactor's own coarsest-LOD-within-2cm pick
+    // (the old behaviour) is available and came out with fewer triangles, in which case that is kept
+    // instead -- see collisionMeshFor's own comment for the exact rule. `lod`/`errorCm` describe
+    // whichever of the two produced the answer: `lod` is the stored Trifactor level (0 as LOD 0's own
+    // convention already meant) when the Trifactor pick won, or 0 for the meshoptimizer path; `errorCm`
+    // is that path's own geometric error, in centimetres, either way.
+    //
+    // DISK-CACHED under <project>/Saved/DerivedDataCache/Collision -- see collisionCacheHits() -- so a
+    // second load of the same mesh (same path, size and last-write time) skips the filter/simplify
+    // work entirely, not just the .ocmesh read. Cache misses and rebuilds fall back to reading the
+    // source .ocmesh exactly as before this existed.
+    //
+    // nullptr for a mesh with no .ocmesh at all -- a built-in (registerBuiltins never indexes one), an
+    // unknown id, one whose file failed to load, or one whose EVERY material slot is alpha-masked or
+    // translucent (logged once, here, not once per placement). EITHER answer is cached, so a bad id is
     // stat'd/read at most once no matter how many placements name it. A caller getting nullptr keeps
     // colliding that mesh as the fitted box (world::addStaticBoxBody) -- this function never falls
     // back to a box itself, because it has no box to fall back to; the caller does.
@@ -235,6 +292,13 @@ public:
         f32 errorCm = 0.0f;
     };
     const CollisionMesh* collisionMeshFor(u64 id);
+
+    // How many times collisionMeshFor was answered from the disk cache rather than by re-reading and
+    // re-simplifying the source .ocmesh -- for GameLevel.cpp's own collision summary line to report
+    // alongside world::LevelInstance::uniqueMeshShapeCount (see that field's own comment,
+    // LevelInstance.hpp). Counts a HIT ONLY: a miss is indistinguishable here from "never asked",
+    // which the mesh-load summary already reports through its own loaded/failed counts.
+    u32 collisionCacheHits() const { return collisionCacheHits_; }
 
     // Depth proxy map for LOD-based shadow/voxel optimization.
     const std::unordered_map<rhi::MeshHandle, rhi::MeshHandle>& depthProxyMap() const { return depthProxyMap_; }
@@ -296,9 +360,21 @@ private:
     // meshBounds_/meshSlot0Material_ in releaseProjectMeshes: it is keyed by the same mesh ids and a
     // reload can put a different .ocmesh behind one of them.
     std::unordered_map<u64, std::unique_ptr<CollisionMesh>> collisionMeshCache_;
+    // collisionCacheHits(): incremented once per collisionMeshFor call the DISK cache (not this
+    // in-memory table) answered.
+    u32 collisionCacheHits_ = 0;
     MeshLoadedFn meshLoaded_ = nullptr;
     void* meshLoadedUser_ = nullptr;
     bool buildDepthProxies_ = true;
+
+    // True when a material-slot NAME should collide: false only for one that resolves (through
+    // materialForSurface, the same lookup an authored surface always goes through) to an authored
+    // .ocmat whose alphaMode is Mask or Blend -- leaves and glass, which a Banyan tree's leaf cards or
+    // a window pane author as cut-out or translucent precisely so a player is not blocked by them.
+    // True for an empty name, one with no PBR module to resolve it, or one that resolves to nothing:
+    // "cannot be resolved" keeps the triangles, the same conservative default collisionMeshFor already
+    // uses for a mesh it cannot otherwise make sense of.
+    bool collisionSlotCollides(const std::string& slotName);
 
     // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
     // one -- a no-op otherwise. Ported from SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp):

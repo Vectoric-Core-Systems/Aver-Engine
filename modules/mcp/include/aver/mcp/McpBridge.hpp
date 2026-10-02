@@ -29,7 +29,9 @@ struct AbiCall {
     std::string text;          // one string argument, for the entries that take a name or a path
 };
 
-// Where an ABI call's answer is left for the waiting socket thread to collect.
+// Where an ABI call's answer is left for the waiting socket thread to collect. That thread waits at most
+// 60 s, and gives up sooner when the client hangs up (the call, already queued, still runs and its answer
+// is dropped) or the bridge stops.
 struct PendingResult {
     std::mutex mutex;
     std::condition_variable cv;
@@ -62,7 +64,10 @@ public:
 
     // Begins listening on 127.0.0.1:`port`, loopback only. Returns false and logs why on failure.
     bool start(u16 port = 45123);
-    // Closes the socket, releases every waiting caller and joins the worker thread.
+    // Closes the socket, releases every waiting caller and joins the worker thread. Returns promptly even
+    // with an abi call pending: the worker's wait for the main thread re-checks the bridge and the
+    // connection every 100 ms, so the join is not held for the 60 s ABI timeout. Calls still queued are
+    // failed ("shutting down") and dropped, never run later.
     void stop();
     bool listening() const;
     u16  port() const;

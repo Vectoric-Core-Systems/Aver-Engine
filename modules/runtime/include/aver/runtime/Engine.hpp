@@ -36,6 +36,8 @@ public:
     // doing. A no-op once the splash has closed, and in headless or capture runs where there never
     // was one, so a caller never has to ask whether it is safe to call.
     void setLoadingStatus(const std::string& stage);
+    // The same splash's progress bar, 0..1 (negative hides it). Splash::setProgress pumps, throttled.
+    void setLoadingProgress(f32 fraction);
     // Whether a loading splash is CURRENTLY up -- i.e. whether setLoadingStatus above will actually
     // show anything. True only between show() and close() during startup.
     //

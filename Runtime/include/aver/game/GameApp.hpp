@@ -42,6 +42,10 @@
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
 #include "aver/game/MouseCapture.hpp"
+#include "aver/game/PlayMobility.hpp"
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+#  include "aver/world/VehicleSystem.hpp"
+#endif
 
 #include <memory>
 #include <string>
@@ -428,6 +432,18 @@ private:
     // kMeshRendererHiddenFromOwner under the pawn is skipped in the raster pass -- without this a
     // first-person character's own body renders in front of the camera.
     scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
+    // What moves during the session, so Voxi keeps it out of the GI bake (PlayMobility.hpp). Begun in
+    // onInit once the level is up, GameMode or not, and before aver_fw_begin_play spawns anything;
+    // ended in onShutdown just before the level unloads.
+    game::PlayMobility playMobility_;
+#  if AVER_MODULE_PHYSICS
+    // The level's physics cars (world::VehicleSystem). Built in onInit once a play session is PLAYING
+    // (after beginPlayIfGameModeDeclared), driven from tickGameplay around the physics step, ended in
+    // onShutdown before the level unloads. Cars only advance while a session is PLAYING, because that is
+    // when physics steps, so a project that declares no GameMode never builds them: its cars stay
+    // ordinary meshes where they were placed, and in the GI bake.
+    world::VehicleSystem vehicles_;
+#  endif
 #endif
 
     // --- environment ---

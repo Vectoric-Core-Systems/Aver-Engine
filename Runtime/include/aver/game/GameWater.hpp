@@ -75,8 +75,8 @@ public:
 
     // Drains a latched spawn request (from applyLevel) and every graph-authored one
     // (aver_fw_fluid_spawn / aver_fw_fluid_spawn_material), steps the simulated volume, and syncs
-    // the player's buoyancy impulse against it. Call once per frame, AFTER the physics step and
-    // BEFORE World::flush.
+    // the player's buoyancy impulse against it, and advances the analytic surface's wave clock by
+    // `dt`. Call once per frame, AFTER the physics step and BEFORE World::flush.
     void update(rhi::IDevice& device, f32 dt);
 
     // `sky` with its fog swapped for the underwater look while `cameraZCm` is below the rendered

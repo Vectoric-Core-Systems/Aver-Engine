@@ -83,6 +83,16 @@
 #endif
 // GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
 #include "aver/game/GamePawn.hpp"
+#if AVER_MODULE_VOXI
+// installLevelHooks' afterInstantiate loads the level's instanced foliage once placements exist --
+// see the header for the contract three packages implement parts of.
+#  include "aver/game/GameFoliage.hpp"
+#endif
+#if AVER_MODULE_PBR
+// setTextureCacheDir, called from openProject before any material/texture load -- see its own call
+// site below.
+#  include "aver/assets/TextureUpload.hpp"
+#endif
 
 // Gated on _WIN32 alone, not nested in a module guard (unlike SandboxApp.hpp's copy of this comment):
 // onUpdate's capture-decision check below needs it regardless of which modules are linked.
@@ -591,11 +601,21 @@ void GameApp::tickGameplay(f32 dt) {
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
 
 #if AVER_MODULE_PHYSICS
+#if AVER_MODULE_SCENE
+    // The cars' drivers decide this frame's throttle, brake and steering immediately before the step
+    // that uses them, and their entities are written from the bodies immediately after it -- both
+    // inside the gate above, so a paused session freezes traffic with everything else. The focus is
+    // the camera: the cars far from it think less often (VehicleSystem's own LOD).
+    vehicles_.prePhysics(dt, camPos_);
+#endif
     // += the step count, not ++ on a flag: tickGameplayGroups returns how many fixed steps
     // aver_phys_step actually ran (a frame can run several, via the up-to-8-step accumulator, or
     // none). Used to hardcode true, so this counted frames that ticked and logged that count as
     // "physics step(s)".
     physSteps_ += static_cast<u64>(game::tickGameplayGroups(dt));
+#if AVER_MODULE_SCENE
+    vehicles_.postPhysics(scene::World::instance());
+#endif
 #else
     game::tickGameplayGroups(dt);
 #endif
@@ -1046,7 +1066,32 @@ void GameApp::installLevelHooks(Engine& e) {
         // A level with no terrain must clear the last level's.
         landscape_.unload(e.device());
 #  endif
+#  if AVER_MODULE_VOXI
+        // FOLIAGE LIVES OUTSIDE THE ENTITY LIST ENTIRELY (GameFoliage.hpp's own header comment), so
+        // nothing else here touches it -- the next level's afterInstantiate replaces it, but a level
+        // that fails to load anything at all must not leave the previous one's trees standing.
+        if (voxiAttached_) voxiRenderer_.clearFoliage();
+#  endif
         (void)e;
+    };
+    // STAGED PROGRESS (GameLevel::LoadHooks::progress) onto the engine's startup splash: its status
+    // line and its bar.
+    hooks.progress = [&e](const std::string& stage, f32 fraction) {
+        e.setLoadingStatus(stage);
+        e.setLoadingProgress(fraction);
+    };
+    hooks.afterInstantiate = [this](const GameLevel::LoadedLevel& loaded) {
+#  if AVER_MODULE_VOXI
+        // FOLIAGE, AFTER PLACEMENTS -- mirrors sandbox/src/SandboxLevelLoad.cpp's identical call so
+        // both hosts load a level's instanced foliage the same way.
+        if (voxiAttached_) {
+            const FoliageLoadResult fr =
+                loadLevelFoliage(loaded.world, content_, &voxiRenderer_, project_.contentDir());
+            if (!fr.error.empty()) AVER_WARN("[Foliage] {}", fr.error);
+        }
+#  else
+        (void)loaded;
+#  endif
     };
     level_.setLoadHooks(std::move(hooks));
 #  if AVER_MODULE_LANDSCAPE
@@ -1107,6 +1152,12 @@ void GameApp::openProject(Engine& e) {
     AVER_INFO("[Game] project '{}'  content={}  startMap='{}'",
               project_.name, project_.contentDir(),
               project_.startMap.empty() ? "<none>" : project_.startMap);
+#if AVER_MODULE_PBR
+    // BEFORE ANY MATERIAL OR TEXTURE LOAD -- content_.adopt/registerBuiltins/loadProjectMeshes and
+    // level_.loadStartMap below are exactly that, so this has to run first or the cache dir changes
+    // out from under textures this same open already decoded.
+    assets::setTextureCacheDir(project_.dir + "\\Saved\\DerivedDataCache\\Textures");
+#endif
     if (project_.startMap.empty()) {
         AVER_WARN("[Game] the manifest names no STARTMAP, so there is no level to open");
     }
@@ -1519,6 +1570,7 @@ void GameApp::beginPlayIfGameModeDeclared() {
     // 0 is a legal, common answer too: aver_fw_begin_play already treats "no GameInstance class" as
     // "skip that spawn" -- a GameMode with no GameInstance simply had nothing worth putting there.
     const i32 instanceClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);
+    // (PlayMobility already began in onInit, before this call: it does not depend on a GameMode.)
     if (aver_fw_begin_play(instanceClass, modeClass)) {
         AVER_INFO("[Game] play session begun automatically (GameMode class {}) -- a shipped game has no "
                   "editor Play button, so booting it IS beginning play", modeClass);
@@ -2052,7 +2104,29 @@ void GameApp::onInit(Engine& e) {
                   world::formatSceneCensus(world::takeSceneCensus(scene::World::instance())));
     }
 #endif
+#if AVER_MODULE_SCENE
+    // A shipped game has no editing state to keep animated objects out of, so booting the level is
+    // starting them (the editor turns this on at Play instead) -- and it is the moment the mobility
+    // session begins too, GameMode or not: without one, object-animated props were never marked
+    // movable and rebuilt the whole Voxi GI bake every frame. After the level and its class
+    // placements (that is what "level content" means to PlayMobility), BEFORE begin-play spawns the
+    // pawn so that and everything after it starts provisional. Nothing ticks inside onInit, so
+    // nothing moves before the world is complete.
+    playMobility_.begin(scene::World::instance());
+    anim::animSystem().setObjectAnimationLive(true);
+#endif
     beginPlayIfGameModeDeclared();
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS && AVER_MODULE_FRAMEWORK
+    // THE LEVEL'S CARS BECOME REAL HERE, once there is a play session to step them: a physics vehicle per
+    // `vehicle` placement, on the lanes beside the level file. Physics only steps while a session is
+    // PLAYING (tickGameplay), so a project that declares no GameMode never starts one -- and building
+    // the cars anyway would only mark them movable, taking every car out of the GI bake for a motion that
+    // never comes. They are movable from the first frame (a car that drives would otherwise cost the bake
+    // a rebuild on its first move); seedMovable needs playMobility_'s session, begun above, and does not
+    // mind that the pawn has been spawned since.
+    if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING && level_.beginVehicles(vehicles_, content_) > 0)
+        playMobility_.seedMovable(vehicles_.entities());
+#endif
     AVER_INFO("[Game] ready");
 }
 
@@ -2225,6 +2299,16 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     if (scriptsReady_ && scripts_.hudCount() > 0) scripts_.hudDraw(0, t.dt);
 #endif
 #endif
+#if AVER_MODULE_SCENE
+    // Play PAUSED holds object animation and kinematic driving with the rest of the world. Sampled
+    // BEFORE the gameplay tick, the same point tickGameplay gates on, and tested for PAUSED alone --
+    // never "not PLAYING": a project with no GameMode sits in EDITOR for the whole run and its props
+    // must still move. A Frame Skip is the pause lifted for one tick, so it animates that step only.
+    bool objectsHeld = false;
+#if AVER_MODULE_FRAMEWORK
+    objectsHeld = aver_fw_play_state() == AVER_FW_PLAY_PAUSED;
+#endif
+#endif
     tickGameplay(t.dt);
 #if AVER_MODULE_FLUIDS
     // Straight after the physics step, as in the editor: spawns what a level or script asked for,
@@ -2267,7 +2351,13 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // Animation clock ticks UNCONDITIONALLY, not from the gameplay groups above (gated on PLAYING):
     // hanging animation off them would freeze everything animated whenever no session is running.
     // Deliberate asymmetry, copied from the editor.
+    anim::animSystem().setObjectAnimationPaused(objectsHeld);
     anim::animSystem().tick(scene::World::instance(), t.dt);
+    // Animated placements' kinematic bodies follow the poses the tick just wrote, so the next
+    // physics step carries a character standing on one. Nothing was written while held (and the
+    // physics step is not running), so there is nothing to follow.
+    if (!objectsHeld)
+        world::driveKinematicBodies(scene::World::instance(), level_.animatedBodies(), t.dt);
 #if AVER_MODULE_PARTICLES
     // Same unconditional reasoning as the animation clock above.
     particles::particleSystem().tick(scene::World::instance(), t.dt);
@@ -2402,6 +2492,17 @@ void GameApp::onRender(Engine& e) {
         // no-op DrawWorldOptions{} already was before this field existed.
         DrawWorldOptions opts;
         opts.ownerHideRoot = firstPersonPawn_;
+        // The possessed pawn's whole tree is movable from its first frame (the viewmodel hangs off
+        // its camera); everything else is judged by PlayMobility's own rule.
+        {
+            scene::Entity movableRoot = scene::kInvalidEntity;
+#if AVER_MODULE_FRAMEWORK
+            const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+            if (pn > 0) movableRoot = static_cast<scene::Entity>(static_cast<u32>(pn));
+#endif
+            playMobility_.beginFrame(movableRoot);
+            opts.mobility = &playMobility_;
+        }
 #if AVER_MODULE_VOXI
         // Culled and owner-hidden entities still reach Voxi through this, so an off-screen caster
         // keeps its shadow and GI -- the editor's direct route (see drawWorld). Null without Voxi:
@@ -2526,7 +2627,14 @@ void GameApp::onShutdown(Engine& e) {
     // (the editor instead leaves chunk worlds to their destructors, after physics is gone).
     streaming_.disable();
     // Before physics: unloading destroys entities and removes static bodies, and removing one from
-    // a shut-down physics world is the wrong order.
+    // a shut-down physics world is the wrong order. Object animation stops first so nothing moves
+    // as the level comes down, and the mobility session ends with the level it was tracking.
+    anim::animSystem().setObjectAnimationLive(false);
+    playMobility_.end();
+#if AVER_MODULE_PHYSICS
+    // The cars' bodies and suspension constraints go before the level that holds the road under them.
+    vehicles_.end();
+#endif
     level_.unload();
 #endif
 #if AVER_MODULE_FLUIDS

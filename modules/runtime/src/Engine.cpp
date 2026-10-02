@@ -223,6 +223,13 @@ void Engine::setLoadingStatus(const std::string& stage) {
     static_cast<Splash*>(splashForApp_)->pump();
 }
 
+void Engine::setLoadingProgress(f32 fraction) {
+    if (!splashForApp_) return;
+    // No pump() of its own: Splash::setProgress repaints and pumps, throttled -- a level load calls
+    // this every few hundred placements, and an unconditional pump here would defeat the throttle.
+    static_cast<Splash*>(splashForApp_)->setProgress(fraction);
+}
+
 // One frame: sync swapchain to the window size, update, render, present.
 void Engine::frameStep() {
     if (!device_ || !app_ || inFrame_) return; // guard re-entrancy (timer tick vs main loop)

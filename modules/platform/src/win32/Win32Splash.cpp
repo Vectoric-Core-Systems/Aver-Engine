@@ -156,12 +156,35 @@ void Splash::setStatus(const std::string& text) {
     pump();
 }
 
+// See the header for the negative-hides-the-bar contract.
+void Splash::setProgress(f32 fraction) {
+    const f32 clamped = fraction < 0.0f ? -1.0f : (fraction > 1.0f ? 1.0f : fraction);
+    if (progress_ == clamped) return;
+    progress_ = clamped;
+    if (!hwnd_) return;   // remembered; drawn when show() runs
+    repaint();
+    // THROTTLED TO ~30 HZ (33 ms), unlike setStatus's own unconditional pump. A level of any real
+    // size calls this at least every 256 placements (world::InstantiateOptions::progress's own
+    // contract) -- often many times a second on a fast placement loop -- and repaint() already
+    // pushed every one of those frames to the screen (UpdateLayeredWindow bypasses the message loop
+    // entirely), so all a pump() past this rate would buy is draining a queue with nothing new in
+    // it. Always pumps on the FIRST call and once progress is HIDDEN again (clamped < 0), so neither
+    // edge -- the bar first appearing, the bar going away -- is ever late.
+    const u64 now = GetTickCount64();
+    if (clamped >= 0.0f && lastProgressPumpMs_ != 0 && now - lastProgressPumpMs_ < 33) return;
+    lastProgressPumpMs_ = now;
+    pump();
+}
+
 // Re-composites the pristine image plus the status line and pushes it to the layered window.
 void Splash::repaint() {
     if (!hwnd_ || !bits_ || pristine_.empty()) return;
     std::memcpy(bits_, pristine_.data(), pristine_.size());
 
     HDC mem = static_cast<HDC>(memDc_);
+    // Shared by the status text and the progress bar below it, so the two stay aligned to the same
+    // margin -- hoisted out of the text-only block it used to belong to alone.
+    const int pad = std::max(8, width_ / 40);
     if (!status_.empty() && font_) {
         const int n = MultiByteToWideChar(CP_UTF8, 0, status_.c_str(), -1, nullptr, 0);
         std::wstring w(static_cast<usize>(n > 0 ? n - 1 : 0), L'\0');
@@ -169,7 +192,6 @@ void Splash::repaint() {
 
         HGDIOBJ oldFont = SelectObject(mem, static_cast<HFONT>(font_));
         SetBkMode(mem, TRANSPARENT);
-        const int pad = std::max(8, width_ / 40);
         RECT r{ pad, height_ - pad - (height_ / 12), width_ - pad, height_ - pad };
 
         // A one-pixel dark offset behind the text. The splash art is not guaranteed to be dark in
@@ -181,6 +203,30 @@ void Splash::repaint() {
         SetTextColor(mem, RGB(225, 225, 230));
         DrawTextW(mem, w.c_str(), -1, &r, DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(mem, oldFont);
+    }
+
+    // THE PROGRESS BAR, under the status line -- a dim track the width of the text column above,
+    // filled from the left. Lives in the same bottom margin (`pad`) the status text already
+    // reserves below its own row, so a caller that never calls setProgress gets exactly the layout
+    // this splash always had: no bar, no extra margin, nothing to distinguish it from before this
+    // existed. See setProgress's own header comment for the negative-hides-it contract.
+    if (progress_ >= 0.0f) {
+        const int barH = std::max(3, pad / 3);
+        int barY = height_ - pad + (pad - barH) / 2;
+        if (barY + barH > height_ - 1) barY = height_ - 1 - barH;
+        if (barY < 0) barY = 0;
+        const RECT track{ pad, barY, width_ - pad, barY + barH };
+        HBRUSH trackBrush = CreateSolidBrush(RGB(60, 60, 65));
+        FillRect(mem, &track, trackBrush);
+        DeleteObject(trackBrush);
+        RECT fillRc = track;
+        fillRc.right = track.left +
+            static_cast<LONG>(static_cast<f32>(track.right - track.left) * progress_ + 0.5f);
+        if (fillRc.right > fillRc.left) {
+            HBRUSH fillBrush = CreateSolidBrush(RGB(225, 225, 230));
+            FillRect(mem, &fillRc, fillBrush);
+            DeleteObject(fillBrush);
+        }
     }
 
     // The DIB is opaque, so alpha stays 255 everywhere; GDI text drawing leaves the alpha byte

@@ -40,7 +40,45 @@ bool findNumber(const std::string& s, const char* key, i64& out) {
     return true;
 }
 
-// Reads a string value for a flat JSON key. Returns false when the key is absent or unterminated.
+// Reads four hex digits at s[at..at+4). False when any is not a hex digit or the string is too short.
+bool hex4(const std::string& s, usize at, u32& out) {
+    if (at + 4 > s.size()) return false;
+    u32 v = 0;
+    for (usize i = 0; i < 4; ++i) {
+        const char h = s[at + i];
+        u32 d;
+        if (h >= '0' && h <= '9') d = static_cast<u32>(h - '0');
+        else if (h >= 'a' && h <= 'f') d = static_cast<u32>(h - 'a') + 10u;
+        else if (h >= 'A' && h <= 'F') d = static_cast<u32>(h - 'A') + 10u;
+        else return false;
+        v = (v << 4) | d;
+    }
+    out = v;
+    return true;
+}
+
+// Appends one code point as UTF-8.
+void appendUtf8(std::string& out, u32 cp) {
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// Reads a string value for a flat JSON key, undoing every JSON escape. Returns false when the key is
+// absent or the string is unterminated. \n \r \t \b \f and \uXXXX (surrogate pairs included) used to
+// come back as a bare letter, so a multi-line "text" arrived as one run-together line.
 bool findString(const std::string& s, const char* key, std::string& out) {
     const std::string pat = std::string("\"") + key + "\"";
     const usize k = s.find(pat);
@@ -49,10 +87,34 @@ bool findString(const std::string& s, const char* key, std::string& out) {
     if (c == std::string::npos) return false;
     c = s.find('"', c);
     if (c == std::string::npos) return false;
-    const usize start = ++c;
+    ++c;
     std::string v;
     while (c < s.size() && s[c] != '"') {
-        if (s[c] == '\\' && c + 1 < s.size()) ++c;
+        if (s[c] != '\\' || c + 1 >= s.size()) { v.push_back(s[c++]); continue; }
+        ++c;                                      // on the escape letter
+        switch (s[c]) {
+            case 'n': v.push_back('\n'); ++c; continue;
+            case 'r': v.push_back('\r'); ++c; continue;
+            case 't': v.push_back('\t'); ++c; continue;
+            case 'b': v.push_back('\b'); ++c; continue;
+            case 'f': v.push_back('\f'); ++c; continue;
+            case 'u': {
+                u32 cp = 0;
+                if (!hex4(s, c + 1, cp)) break;   // not a valid escape: keep the letter, as before
+                usize next = c + 5;
+                // A high surrogate pairs with the \uXXXX that must follow it.
+                u32 lo = 0;
+                if (cp >= 0xD800 && cp <= 0xDBFF && next + 1 < s.size() && s[next] == '\\' &&
+                    s[next + 1] == 'u' && hex4(s, next + 2, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    next += 6;
+                }
+                appendUtf8(v, cp);
+                c = next;
+                continue;
+            }
+            default: break;                       // \" \\ \/ : the escaped character itself
+        }
         v.push_back(s[c++]);
     }
     if (c >= s.size()) return false;
@@ -110,6 +172,30 @@ int buttonFor(const std::string& s) {
     if (s == "middle") return 2;
     return 0;
 }
+
+// How long an abi request waits for the main thread. A request that times out still runs later, so
+// a short limit reports failure for a call that goes on to succeed (a batch place builds collision).
+constexpr std::chrono::seconds kAbiWait{60};
+
+// The wait above is taken in slices this long, so it can end early when the client hangs up or the bridge
+// is stopping. A notify wakes it at once; the slice only bounds how late those two are noticed.
+constexpr std::chrono::milliseconds kAbiSlice{100};
+
+#if defined(_WIN32)
+// True when the client has closed or reset its end. A zero-timeout select says whether the socket is
+// readable at all; a one-byte MSG_PEEK then tells data (the client pipelined its next line, so it is still
+// there) from an orderly close (0 bytes) or a reset (an error). Consumes nothing.
+bool clientHungUp(SOCKET s) {
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(s, &readable);
+    timeval none{0, 0};
+    if (::select(0, &readable, nullptr, nullptr, &none) <= 0) return false;
+    char byte = 0;
+    const int got = ::recv(s, &byte, 1, MSG_PEEK);
+    return got == 0 || (got == SOCKET_ERROR && ::WSAGetLastError() != WSAEWOULDBLOCK);
+}
+#endif
 
 } // namespace
 
@@ -352,6 +438,7 @@ bool McpBridge::start(u16 port) {
             impl->client.store(client, std::memory_order_release);
             std::string buffer;
             char chunk[1024];
+            bool drop = false;   // the connection is over (hung up, or the bridge is stopping): send nothing more
             while (impl->running.load()) {
                 const int got = ::recv(client, chunk, sizeof chunk, 0);
                 if (got <= 0) break;
@@ -424,12 +511,35 @@ bool McpBridge::start(u16 port) {
                             std::lock_guard<std::mutex> lock(impl->mutex);
                             impl->queue.push_back(c);
                         }
-                        std::unique_lock<std::mutex> wait(c.pending->mutex);
-                        const bool answered = c.pending->cv.wait_for(
-                            wait, std::chrono::seconds(5), [&] { return c.pending->done; });
-                        if (!answered) {
+                        // In short slices rather than one 60 s wait, so it can end for the two reasons
+                        // that are not an answer. The client hung up: the bridge serves one connection,
+                        // and holding it for the rest of the minute served nobody. Or stop() ran: it
+                        // drains the queue once, and a call pushed just after would sit out the whole
+                        // timeout with join() waiting on this thread.
+                        bool answered = false, stopping = false, hungUp = false;
+                        {
+                            std::unique_lock<std::mutex> wait(c.pending->mutex);
+                            const auto deadline = std::chrono::steady_clock::now() + kAbiWait;
+                            for (;;) {
+                                if (c.pending->done) { answered = true; break; }
+                                stopping = !impl->running.load() ||
+                                           impl->client.load(std::memory_order_acquire) != client;
+                                if (stopping) break;
+                                hungUp = clientHungUp(client);
+                                if (hungUp || std::chrono::steady_clock::now() >= deadline) break;
+                                c.pending->cv.wait_for(wait, kAbiSlice);
+                            }
+                        }
+                        if (stopping || hungUp) {
+                            // The call is already queued and still runs; its answer has nowhere to go.
+                            if (hungUp)
+                                AVER_WARN("[Mcp] the client hung up while abi {}::{} was pending; the call "
+                                          "still runs, and its answer is dropped", c.abi.module, c.abi.fn);
+                            drop = true;
+                        } else if (!answered) {
                             reply = "{\"id\":" + std::to_string(c.id) +
-                                    ",\"ok\":false,\"error\":\"timed out after 5s -- the editor did not "
+                                    ",\"ok\":false,\"error\":\"timed out after " +
+                                    std::to_string(kAbiWait.count()) + "s -- the editor did not "
                                     "pump; is it running and not shutting down?\"}\n";
                         } else if (c.pending->ok) {
                             reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":true,\"result\":\"" +
@@ -449,8 +559,13 @@ bool McpBridge::start(u16 port) {
                         reply = "{\"id\":" + std::to_string(c.id) + ",\"ok\":false,\"error\":\"" +
                                 why + "\"}\n";
                     }
+                    // stop() closes whatever socket it finds in `client`; past that the handle value may
+                    // already belong to someone else, so nothing more is sent on it.
+                    if (!drop && impl->client.load(std::memory_order_acquire) != client) drop = true;
+                    if (drop) break;
                     ::send(client, reply.c_str(), static_cast<int>(reply.size()), 0);
                 }
+                if (drop) break;
             }
             // Taken back before closing, so stop() cannot close the same socket a second time.
             if (impl->client.exchange(INVALID_SOCKET, std::memory_order_acq_rel) != INVALID_SOCKET)
@@ -478,8 +593,11 @@ void McpBridge::stop() {
         const SOCKET c = impl_->client.exchange(INVALID_SOCKET, std::memory_order_acq_rel);
         if (c != INVALID_SOCKET) ::closesocket(c);
     }
-    // Waiting ABI callers are released before the join, or they would sit out the full timeout.
-    {
+    // Fails every queued call and empties the queue. Run twice: before the join, so waiting callers are
+    // released at once, and after it, because the worker can push one more call between the first drain and
+    // its own exit (it re-checks `running` only every slice) -- left queued it would run against a
+    // channel that has been stopped, or after a later start().
+    const auto drainQueue = [this] {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         for (Command& q : impl_->queue) {
             if (!q.pending) continue;
@@ -492,8 +610,13 @@ void McpBridge::stop() {
             q.pending->cv.notify_all();
         }
         impl_->queue.clear();
-    }
+        impl_->cursor = 0;
+    };
+    drainQueue();
+    // The join is now bounded by one wait slice, not the 60 s ABI timeout: the worker's wait re-checks
+    // `running` and the connection every kAbiSlice.
     if (impl_->worker.joinable()) impl_->worker.join();
+    drainQueue();
     if (impl_->wsaUp) { WSACleanup(); impl_->wsaUp = false; }
     AVER_INFO("[Mcp] control channel stopped");
 }

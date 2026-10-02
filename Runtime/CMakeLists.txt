@@ -37,12 +37,14 @@ aver_add_module(Aver.Runtime.Game.Core
   SOURCES
     src/GameContent.cpp
     src/GameLevel.cpp
+    src/GameFoliage.cpp
     src/GameLandscape.cpp
     src/GameRender.cpp
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/GameWater.cpp
     src/MouseCapture.cpp
+    src/PlayMobility.cpp
   DEPS
     Aver.RHI
     Aver.Platform
@@ -89,6 +91,30 @@ if(TARGET Aver.Render.Voxi)
 endif()
 if(TARGET Aver.Scene)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Scene)
+endif()
+# meshoptimizer (MIT): collisionMeshFor's simplification step (GameContent.cpp), which is scene-gated
+# in the source (`#if AVER_MODULE_SCENE`) because collision triangles are a scene concept -- so the
+# link is gated on the same target rather than being unconditional, and a tree built with
+# AVER_MODULE_SCENE=OFF never needs third_party/meshoptimizer vendored at all.
+#
+# THE SAME VENDORED TARGET modules/trifactor/CMakeLists.txt already builds as `meshoptimizer` -- see
+# that file's own comment for why this repo vendors rather than fetches it. `if(NOT TARGET
+# meshoptimizer)` is what lets both modules add that identical vendored subdirectory without either
+# one failing on a second add_subdirectory of the same path, whichever configures first.
+if(TARGET Aver.Scene)
+  if(NOT TARGET meshoptimizer)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/meshoptimizer/CMakeLists.txt)
+      add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/meshoptimizer ${CMAKE_BINARY_DIR}/third_party/meshoptimizer)
+    else()
+      message(FATAL_ERROR
+        "Aver.Runtime.Game.Core's collision build (GameContent.cpp collisionMeshFor) needs "
+        "meshoptimizer (MIT, https://github.com/zeux/meshoptimizer) vendored at "
+        "third_party/meshoptimizer, and it is not there. Vendor it (its own CMakeLists.txt exposing a "
+        "`meshoptimizer` target is enough) and reconfigure.")
+    endif()
+  endif()
+  # PRIVATE: meshopt types never cross GameContent.hpp, so nothing above this library needs to see them.
+  target_link_libraries(Aver.Runtime.Game.Core PRIVATE meshoptimizer)
 endif()
 if(TARGET Aver.Anim.Scene)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Anim.Scene)

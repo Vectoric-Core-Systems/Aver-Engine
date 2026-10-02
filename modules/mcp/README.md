@@ -61,6 +61,29 @@ Unknown commands are **refused with a reason**, never ignored — a client that 
 be told, not left waiting for a button that was never pressed. Malformed lines are answered immediately
 from the socket thread rather than queued, since there is nothing for the main thread to do with them.
 
+**Strings are real JSON strings.** A `text` (or `path`, `key`, `module`, `fn`) may hold `\n`, `\r`, `\t`,
+`\"`, `\\`, `\/` and `\uXXXX` (surrogate pairs included), and comes out the other side as the characters
+they name. Until 2026-09-29 only `\"` and `\\` were undone and every other escape arrived as its bare
+letter, so a multi-line `text` reached an ABI as one run-together line. A key is found at its **first
+occurrence** in the line, so a client puts free-form content (`text`) last, after the keys the reader
+looks up by name; a `"` inside a string is always escaped, so it cannot spell a key.
+
+**Replies** are one line each: `{"id":N,"ok":true,"result":"..."}` or `{"id":N,"ok":false,"error":"..."}`.
+`result` and `error` are JSON-escaped strings, so an ABI that answers with a JSON document (the `level`
+ABI does) is a string inside the reply, and a client parses twice. An `abi` request is waited on until
+the main thread has run it, or 60 s: a request that times out **still runs** later, so it is worth
+asking again whether it took effect rather than sending it twice. (The wait was 5 s, which a call that
+does real work on the main thread — a batch `place` builds collision — could outlast.)
+
+**The wait is taken in 100 ms slices**, so it can end early for the two reasons that are not an answer.
+If the client **hangs up** while a call is pending, the connection is dropped at once and the next client
+is accepted: the bridge serves one connection, and it used to stay held for the rest of the 60 s. The call
+is already queued, so it **still runs** and its answer has nowhere to go. A client must therefore keep its
+end open until the reply arrives; closing only its write side (a half-close, as a one-shot `nc` does) reads
+as hanging up. And when `stop()` runs, the wait ends within a slice instead of holding `join()` for the
+timeout, and any call still queued is failed with "the editor is shutting down" and discarded rather than
+left to run after a restart.
+
 `tests/mcp` covers the parser with no socket at all: `parseCommand` is exposed precisely so the part
 where bugs live can be checked without binding a port. 67 assertions (was 44; the ABI-registry section
 grew), including all ten refusal cases and the fact that a constructed-but-unstarted bridge is inert.
@@ -78,9 +101,9 @@ it:
 ```
 
 **Corrected:** the modules actually registered by `SandboxApp::registerMcpAbis()` today are `editor`,
-`physics`, `world` and `graph` — not `framework` or `scene` as an earlier version of this example
-showed, and neither of those two names is registered by anything in the tree. `physics` itself exposes
-only `bodyCount` and `ready`; there is no `raycast` entry point over this channel. Ask
+`physics`, `world`, `graph` and `level` — not `framework` or `scene` as an earlier version of this
+example showed, and neither of those two names is registered by anything in the tree. `physics` itself
+exposes only `bodyCount` and `ready`; there is no `raycast` entry point over this channel. Ask
 `{"cmd":"modules"}` (see below) rather than trusting a list in a doc, since the set is exactly the
 registry and drifts as modules are added.
 
@@ -113,11 +136,116 @@ and holding the mutex across it would stall the socket thread for as long as the
 **The sandbox does pump it.** Both of this section's former gaps are closed. `SandboxApp` takes a
 `--mcp [port]` flag, calls `mcp_.start(port)`, and pumps one event per frame from `onUpdate` whenever
 `mcp_.listening()` (`SandboxApp.cpp:2831`, drifted from `3108`) — the click-forcing path this module exists for actually
-runs today, not just in `tests/mcp`. `registerMcpAbis()` registers `editor`, `physics`, `world` and
-`graph` (see the corrected protocol section above); `framework` and `scene` are not among them, so a
-client should not assume every module in the engine has an ABI seam exposed here yet — only the four
-above do.
+runs today, not just in `tests/mcp`. `registerMcpAbis()` registers `editor`, `physics`, `world`,
+`graph` and `level` (see the corrected protocol section above); `framework` and `scene` are not among
+them, so a client should not assume every module in the engine has an ABI seam exposed here yet — only
+the five above do.
 
 `{"cmd":"modules"}` also exists now: `McpBridge::modules()` (`McpBridge.cpp:292`) is reachable over the
 wire (`McpBridge.cpp:133, :409`), so a client can ask what this build's registry currently holds instead
 of trusting a list in this file.
+
+## The `level` ABI
+
+Registered by `SandboxApp::registerMcpAbis()`, implemented in `sandbox/src/SandboxMcp.cpp`
+(`mcpLevelAbi` and its helpers). It exists so a level can be **assembled** over the channel — placed,
+moved, animated, removed, saved — without hand-editing a `.ocworld`. `tools/mcp/aver_mcp.py`'s
+`aver_level` tool is the friendly client; this section is what it speaks.
+
+**Every op goes through the editor's own code**, so what a script does is what a click does: it is
+undoable where the UI's is, marks the level dirty, and saves through `saveLevel`. Nothing here keeps a
+second copy of "how a level entity is made".
+
+Ids are the numeric `scene::Entity`. Positions are centimetres, Z up; rotations are degrees, `[yaw,
+pitch, roll]`; transforms are **world space** (the gizmo's and the Details panel's). Every reply is a
+JSON document in the reply's `result` string.
+
+```
+{"cmd":"abi","module":"level","fn":"place","text":"PLACE Meshes/cube.ocmesh 0 0 0  0 0 0  100\nPLACE ..."}
+{"cmd":"abi","module":"level","fn":"set_transform","args":[42, 0,0,50, 90,0,0]}
+```
+
+| fn | `args` | `text` | reply | editor path it reuses |
+|---|---|---|---|---|
+| `open` | `[discard?]` | level path | `{queued, path}` | `requestOpenLevel` → the pending-open drain (`applyPendingOpen`) |
+| `info` | | | `{level, name, entities, dirty, format, playing, loading, pendingOpen, pendingOpenPrompt, content, playerStart, camera, selection}` | |
+| `list` | `[max?]` (500) | substring of asset or label, case-insensitive | `{total, returned, entities:[{id, asset, label, pos, rot, scale, material, collide, visible, parent, anim}]}` | `levelEntities_`, `worldTransformOf`, `authoredVisible`, `entityAnim` |
+| `place` | | `.ocworld` PLACE/PLACEG/CHILD lines, `\n`-separated | `{ids, placed, requested, parsed, ignored, ignoredLines, animated, undoEntries}` | `parseOcworld`, `world::instantiate`, then `onLevelInstantiated`'s bookkeeping; `describeEntity` + `pushEdit(Create)` |
+| `set_transform` | `[id, x,y,z, yaw,pitch,roll (, sx,sy,sz)]` | | `{id, pos, rot, scale}` | `beginTransformEdit` / `setSelectedXform` / `endTransformEdit` (the gizmo) |
+| `set_material` | `[id]` | material (an `.ocmat` stem) | `{id, material}` | `assignMaterialToken` (the Details picker) |
+| `set_collide` | `[id, 0\|1]` | | `{id, collide, changed}` | `setEntityCollide` + `Kind::Collision` |
+| `set_visible` | `[id, 0\|1]` | | `{id, visible, changed}` | `setAuthoredVisible` + `Kind::Visibility` |
+| `set_anim` | `[id (, speed (, time (, once)))]` | clip (`""` clears) | `{id, anim, changed}` | `applyEntityAnim` + `Kind::Animation` |
+| `remove` | `[id, ...]` | | `{removed, requested}` | the selection, then `deleteSelection` |
+| `select` | `[id, ...]` (none clears) | `noframe` to leave the camera | `{selected, framed}` | `multiSetSingle`/`multiToggle`, then F's framing |
+| `save` | | none: Save. A bare name or a path: Save As | `{path, saved, savedAs, name?}` | `saveLevel`; Save As repeats `drawSaveLevelAsPrompt`'s steps |
+| `player_start` | `[x, y, z, yaw]` | | `{id, pos, yaw, created}` | `makePlayerStart` + `Kind::Create`, or the transform edit above |
+
+**`place`** wraps the lines in the smallest document the level parser accepts (`OCWORLD 1`), so every
+token it reads means what it means in a file: scale (`PLACE` uniform, `PLACEG` per axis), a material
+name, `nocollide`, `hidden`, `snap`, `name <percent-encoded>`, and the `anim <clip.ocanim> animspeed
+<f> animtime <f> animonce` tokens; `BEGIN`/`END` with `CHILD` lines parents. `ids` has one entry per
+placement in order, `0` where the world refused it. The placement's asset must already be a loaded
+mesh: one whose file is under the project's Content directory but was imported after the project's
+meshes loaded is picked up (the reload a Content Browser drop does); anything else is refused by name
+before any entity is made. An `anim` clip is checked **the way the runtime will resolve it**: through the
+content index (id = `fnv1a64` of the clip's spelling) and `AnimSystem::clip()`, which must hand back an
+**object** clip (`kOcAnimObject`); anything else is refused. (It used to check the file on disk, so a clip
+the index had never seen was accepted and then never played.) A clip written after the project opened is
+not in the index, since nothing rescans short of reopening the project, so that one file is indexed on
+the spot, and only when the clip is spelled exactly as the file is named under Content, case included,
+because the runtime finds a clip by that exact path. A clip *re-imported over an existing one* is served
+from `AnimSystem`'s cache until the project is reopened: it has no per-clip invalidation.
+
+**`place` counts three things**, because they are not the same: `requested` is the record lines the text
+held (BEGIN/END, blanks and `#` comments do not count), `parsed` the placements the level parser read from
+them, `placed` the entities made. The parser skips a record it does not know without a word, so a
+misspelt `PLCAE` (or a pasted `SUN` line) comes back in `ignoredLines` (`[{line, text}]`, the first 8,
+line numbers counting the text the ABI received) with the total in `ignored`, and is logged as a warning.
+The lines that were placements still land: the reply reports the ignored ones, it does not refuse them.
+`aver_level` adds a `warning` string.
+
+**`open` only queues.** The editor drains a pending open on its own frame, past its unsaved-changes
+check, so the reply is `{queued: true}` and a client waits by asking `info` until `pendingOpen` is empty,
+`loading` is false and `level` is the file it asked for. `open` over unsaved edits is refused unless
+`args[0]` is non-zero, because the prompt the editor would show cannot be answered from here.
+
+**Refusals**, each with its reason in `error` and no change made: an unknown `fn`; a non-finite
+argument; while the editor is playing (`info` and `list` still answer); with no level open; while an
+`open` is pending or the level is still loading; an id that is not a live entity of the open level
+(streamed scatter, class instances and the drone are not written by a save, so editing one would
+silently vanish); `place` naming an unloaded asset, an invalid clip, or a `class` (a save pairs a class
+instance with the level file's own class record, which a placement made here would lack).
+
+Also refused, each with its reason:
+
+- **A NaN, infinite or out-of-range number inside `place` text.** The parser reads `nan` and `inf` as
+  numbers and the finite-argument rule above sees only `args`, so a position, rotation, scale, `animspeed`
+  or `animtime` that is not finite, or past what a 32-bit float holds (every consumer narrows to `f32`,
+  where it turns infinite), would reach physics, the renderer and the saved file. Nothing is placed.
+  `set_anim`'s speed and time must fit a 32-bit float for the same reason.
+- **An animation on a legacy `.ocmap` level** (`place` with `anim`, `set_anim` with a clip): the legacy save
+  has no record for one, so it would play in the session and be gone from the file. Clearing one is fine.
+- **`set_transform` (and `player_start` moving an existing marker) while a drag is in flight** in the
+  editor: a gizmo drag, a Details-panel field drag or a held nudge. The ABI borrows the gizmo's edit state
+  (`beginTransformEdit`/`endTransformEdit`), and doing that mid-drag overwrote the person's before-state
+  and closed their gesture, so their own undo entry was lost. Retry once they let go.
+- **`set_transform` on a `snap` placement.** A save writes a snapped placement's *authored offset above
+  the ground* back verbatim (the gizmo lives with the same rule), so a move reported here would be silently
+  undone in the file, and undo does not carry the offset. Remove it and `place` it again with the offset you
+  want.
+- **The Player Start marker for anything but `set_transform`, `select`, `remove` and `player_start`.** It
+  is not a placement, so `set_material`, `set_visible`, `set_collide` and `set_anim` would write state no
+  save reads. (`set_transform` moves it and, like `player_start`, also sets its heading, which the editor
+  keeps apart from the entity's rotation and outside its undo entry.)
+
+**What is not undoable, and what is not one entry:** `set_material` is not undoable, as the Details
+picker is not. `place` and `remove` make one undo entry per entity (the undo stack has no compound
+command) and the editor keeps 128, so a larger batch can only be undone in part; `place` builds the
+snapshot for the last 128 only. The Player Start's heading is kept apart from its entity by the editor
+and is not part of its undo entry.
+
+**Two places repeat editor code instead of calling it**, because the original is private or inside an
+ImGui modal, and both name their source in a comment so they can be folded back: `place` rebuilds the
+`world::InstantiateOptions` that `game::GameLevel::load` builds (its hooks are private), and Save As
+repeats `drawSaveLevelAsPrompt`'s name/ID handling (SandboxShell.cpp).

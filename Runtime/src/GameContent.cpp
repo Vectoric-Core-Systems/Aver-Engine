@@ -4,7 +4,11 @@
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <system_error>
 
 // UNCONDITIONAL, deliberately. AssetType/assetTypeFromPath live in modules/assets -- a leaf with no
@@ -30,6 +34,10 @@
 #  if AVER_MODULE_TRIFACTOR
 #    include "aver/trifactor/ClusterAdapt.hpp"
 #  endif
+// collisionMeshFor's simplification step. Angle-bracket, no directory prefix: the vendored target's
+// own CMakeLists.txt (third_party/meshoptimizer) exposes its include dir that way, and
+// modules/trifactor/src/ClusterBuilder.cpp already includes it identically.
+#  include <meshoptimizer.h>
 #endif
 
 #if AVER_MODULE_PARTICLES
@@ -667,10 +675,264 @@ const std::pair<Vec3, Vec3>* GameContent::boundsFor(u64 id) const {
     return it == meshBounds_.end() ? nullptr : &it->second;
 }
 
+namespace {
+
+// ---- collisionMeshFor's building blocks ------------------------------------------------------------
+
+// Compacts `srcIndexCount` indices (3 per triangle, into a `srcVertexCount`-vertex array at
+// `srcPositions`) down to only the vertices they actually reference, dropping any triangle that is
+// out of range or degenerate (no area, nothing to collide with) -- the same remap this function
+// replaces used to do inline, now shared by every candidate collisionMeshFor builds. False (leaving
+// `outPositions`/`outIndices` whatever they already held) when nothing survived.
+bool compactTriangles(const f32* srcPositions, u32 srcVertexCount,
+                      const u32* srcIndices, usize srcIndexCount,
+                      std::vector<f32>& outPositions, std::vector<u32>& outIndices) {
+    outPositions.clear();
+    outIndices.clear();
+    std::unordered_map<u32, u32> remap;
+    remap.reserve(srcIndexCount);
+    outIndices.reserve(srcIndexCount);
+    for (usize k = 0; k + 2 < srcIndexCount; k += 3) {
+        const u32 ia = srcIndices[k], ib = srcIndices[k + 1], ic = srcIndices[k + 2];
+        if (ia >= srcVertexCount || ib >= srcVertexCount || ic >= srcVertexCount) continue;
+        if (ia == ib || ib == ic || ia == ic) continue;
+        for (const u32 orig : {ia, ib, ic}) {
+            const auto [it, inserted] = remap.try_emplace(orig, static_cast<u32>(outPositions.size() / 3));
+            if (inserted) {
+                outPositions.push_back(srcPositions[usize(orig) * 3 + 0]);
+                outPositions.push_back(srcPositions[usize(orig) * 3 + 1]);
+                outPositions.push_back(srcPositions[usize(orig) * 3 + 2]);
+            }
+            outIndices.push_back(it->second);
+        }
+    }
+    return outIndices.size() >= 3;
+}
+
+// A vertex position's exact bit pattern, for welding by position rather than by original vertex
+// index. Two vertices this compares equal are the SAME point even if a UV seam or a hard-normal edge
+// gave them separate slots in the source mesh -- collision cares about neither.
+struct WeldKey {
+    u32 xb, yb, zb;
+    bool operator==(const WeldKey& o) const { return xb == o.xb && yb == o.yb && zb == o.zb; }
+};
+struct WeldKeyHash {
+    usize operator()(const WeldKey& k) const {
+        u64 h = kFnv1a64OffsetBasis;
+        h = (h ^ k.xb) * kFnv1a64Prime;
+        h = (h ^ k.yb) * kFnv1a64Prime;
+        h = (h ^ k.zb) * kFnv1a64Prime;
+        return static_cast<usize>(h);
+    }
+};
+
+// Welds `positions`/`indices` (already compacted -- see compactTriangles) by EXACT position.
+// meshopt_simplify treats a topological border (an edge with only one triangle) as something to
+// preserve rather than collapse, and every duplicate a UV seam or a hard-normal split leaves behind is
+// one more edge it reads as a border that is not actually one -- welding first is what lets the
+// simplifier see the mesh's real, mostly-closed topology instead of a surface of tiny false seams.
+void weldByPosition(const std::vector<f32>& positions, const std::vector<u32>& indices,
+                    std::vector<f32>& outPositions, std::vector<u32>& outIndices) {
+    const usize vertexCount = positions.size() / 3;
+    std::unordered_map<WeldKey, u32, WeldKeyHash> weld;
+    weld.reserve(vertexCount);
+    std::vector<u32> remap(vertexCount);
+    for (usize v = 0; v < vertexCount; ++v) {
+        // +0.0f, not the stored bits, when a coordinate is exactly zero: IEEE 754 gives +0 and -0
+        // different bit patterns for a value this comparison must treat as one.
+        f32 x = positions[v * 3 + 0], y = positions[v * 3 + 1], z = positions[v * 3 + 2];
+        if (x == 0.0f) x = 0.0f;
+        if (y == 0.0f) y = 0.0f;
+        if (z == 0.0f) z = 0.0f;
+        WeldKey key;
+        std::memcpy(&key.xb, &x, sizeof(u32));
+        std::memcpy(&key.yb, &y, sizeof(u32));
+        std::memcpy(&key.zb, &z, sizeof(u32));
+        const auto [it, inserted] = weld.try_emplace(key, static_cast<u32>(outPositions.size() / 3));
+        if (inserted) { outPositions.push_back(x); outPositions.push_back(y); outPositions.push_back(z); }
+        remap[v] = it->second;
+    }
+    outIndices.resize(indices.size());
+    for (usize k = 0; k < indices.size(); ++k) outIndices[k] = remap[indices[k]];
+}
+
+// Simplifies welded `positions`/`indices` toward a ~2 cm world error, never past a triangle ceiling --
+// growing the error past 2 cm, and logging that it did, only for the mesh that cannot reach the
+// ceiling within it. Returned indices still number into `positions` (meshopt's own contract, so the
+// caller compacts again to drop what stopped being referenced).
+std::vector<u32> simplifyCollisionMesh(const std::vector<f32>& positions, const std::vector<u32>& indices,
+                                       const std::string& meshPathForLog, f32& outErrorCm) {
+    // ERRORABSOLUTE, not meshopt_simplifyScale's relative-to-extent conversion: this option (present
+    // in the vendored meshoptimizer -- third_party/meshoptimizer/src/meshoptimizer.h) takes and
+    // returns the error in the SAME units as `positions`, which are already this engine's own
+    // centimetres, so "2 cm" needs no extent-dependent conversion at all.
+    constexpr f32 kTargetErrorCm = 2.0f;
+    constexpr usize kTriangleCeiling = 65536;
+    // LOCKBORDER: a mesh's own genuine open edges, and the ones material-slot filtering just cut,
+    // both read as topological borders to the simplifier -- collision fidelity at either matters more
+    // than a few extra triangles there.
+    constexpr unsigned kOptions =
+        static_cast<unsigned>(meshopt_SimplifyLockBorder) | static_cast<unsigned>(meshopt_SimplifyErrorAbsolute);
+
+    const usize targetIndexCount = std::min(indices.size(), kTriangleCeiling * 3);
+    std::vector<u32> dest(indices.size());   // worst case per meshopt_simplify's own contract
+    f32 resultError = 0.0f;
+    usize resultCount = meshopt_simplify(dest.data(), indices.data(), indices.size(), positions.data(),
+                                         positions.size() / 3, 3 * sizeof(f32), targetIndexCount,
+                                         kTargetErrorCm, kOptions, &resultError);
+
+    if (resultCount / 3 > kTriangleCeiling) {
+        // 2 cm was not enough to reach the ceiling without exceeding it. The ceiling is the HARD
+        // limit here (BVH and runtime cost both scale with it), so the error is allowed to grow as
+        // far as it has to -- topology permitting -- rather than the other way around.
+        resultCount = meshopt_simplify(dest.data(), indices.data(), indices.size(), positions.data(),
+                                       positions.size() / 3, 3 * sizeof(f32), targetIndexCount,
+                                       std::numeric_limits<f32>::max(), kOptions, &resultError);
+        AVER_WARN("[Collision] {}: {} triangles would not fit the {}-triangle ceiling within {:.1f} cm "
+                  "error; used {:.1f} cm instead", meshPathForLog, indices.size() / 3, kTriangleCeiling,
+                  kTargetErrorCm, resultError);
+    }
+
+    dest.resize(resultCount);
+    outErrorCm = resultError;
+    return dest;
+}
+
+// ---- the disk cache: <project>/Saved/DerivedDataCache/Collision/<hash>.occol -------------------------
+// DERIVED DATA, not authored, matching aver::fmt::GiCache's own DerivedDataCache/GI contract: the
+// whole directory can be deleted at any time for the cost of one rebuild per mesh. A small hand-rolled
+// record rather than an AVR1 container -- there is exactly one caller and one record shape, so a
+// chunk table would buy nothing here.
+//
+// BUMP kCollisionCacheVersion whenever collisionMeshFor's FILTER RULE, SIMPLIFICATION TARGET or this
+// FILE'S OWN LAYOUT changes. The key below is the source mesh's (path, size, last-write time) alone,
+// which says nothing about what THIS BUILD would compute from it -- without the version, a rule change
+// would keep serving a previous rule's output forever for a mesh file that never itself changed.
+constexpr u32 kCollisionCacheMagic   = 0x4C4F4341u;   // arbitrary marker; not a real AVR1 fourCC
+constexpr u32 kCollisionCacheVersion = 1;
+
+std::string collisionCacheDir(const std::string& projectDir) {
+    return projectDir.empty() ? std::string() : projectDir + "\\Saved\\DerivedDataCache\\Collision";
+}
+
+// "<hash>.occol", named the same way aver::fmt::giCacheFileName names its own entries: an FNV-1a hash
+// of everything the key covers, so two different keys (a different mesh, or the same mesh re-saved
+// with a different size or timestamp) practically never collide on one file.
+std::string collisionCachePathFor(const std::string& projectDir, const std::string& meshPath,
+                                  u64 fileSize, i64 mtimeTicks) {
+    const std::string dir = collisionCacheDir(projectDir);
+    if (dir.empty()) return std::string();
+    const std::string key = meshPath + "|" + std::to_string(fileSize) + "|" +
+                            std::to_string(mtimeTicks) + "|" + std::to_string(kCollisionCacheVersion);
+    const u64 h = fnv1a64(std::string_view(key));
+    char name[24];
+    std::snprintf(name, sizeof(name), "%016llx.occol", static_cast<unsigned long long>(h));
+    return dir + "\\" + name;
+}
+
+// Reads and VALIDATES a cache entry against the source mesh's CURRENT path/size/mtime -- not merely
+// against what its filename implies, in case of a hash collision or a hand-edited file. Any failure
+// (missing file, short read, a mismatched field) returns false and leaves `out` however far the read
+// got; the caller's only response to false is "build it from the .ocmesh instead", so nothing here
+// needs to be recoverable.
+bool readCollisionCacheFile(const std::string& cachePath, const std::string& meshPath, u64 fileSize,
+                            i64 mtimeTicks, GameContent::CollisionMesh& out) {
+    std::ifstream in(cachePath, std::ios::binary);
+    if (!in) return false;
+    const auto get = [&in](void* p, usize n) { in.read(static_cast<char*>(p), static_cast<std::streamsize>(n)); return static_cast<bool>(in); };
+
+    u32 magic = 0, version = 0;
+    if (!get(&magic, sizeof(magic)) || magic != kCollisionCacheMagic) return false;
+    if (!get(&version, sizeof(version)) || version != kCollisionCacheVersion) return false;
+
+    u64 pathLen = 0;
+    if (!get(&pathLen, sizeof(pathLen)) || pathLen == 0 || pathLen > (1ull << 20)) return false;
+    std::string storedPath(static_cast<usize>(pathLen), '\0');
+    if (!get(storedPath.data(), static_cast<usize>(pathLen)) || storedPath != meshPath) return false;
+
+    u64 storedSize = 0;
+    i64 storedMtime = 0;
+    if (!get(&storedSize, sizeof(storedSize)) || storedSize != fileSize) return false;
+    if (!get(&storedMtime, sizeof(storedMtime)) || storedMtime != mtimeTicks) return false;
+
+    u32 vertexCount = 0, indexCount = 0;
+    if (!get(&vertexCount, sizeof(vertexCount)) || !get(&indexCount, sizeof(indexCount))) return false;
+    // A CORRUPT COUNT IS NOT A HUGE ALLOCATION. Well above anything a real collision mesh needs --
+    // NewSponza's coarsest level, the heaviest this cache has measured, is ~182k triangles -- so a
+    // torn or hand-edited file fails the read instead of asking for gigabytes.
+    constexpr u32 kMaxReasonableVertices = 64u * 1024u * 1024u;
+    if (vertexCount == 0 || vertexCount > kMaxReasonableVertices ||
+        indexCount < 3 || indexCount > kMaxReasonableVertices * 3u) return false;
+
+    out.positions.resize(usize(vertexCount) * 3);
+    if (!get(out.positions.data(), out.positions.size() * sizeof(f32))) return false;
+    out.indices.resize(indexCount);
+    if (!get(out.indices.data(), out.indices.size() * sizeof(u32))) return false;
+    if (!get(&out.lod, sizeof(out.lod)) || !get(&out.errorCm, sizeof(out.errorCm))) return false;
+    return true;
+}
+
+// Writes a cache entry ATOMICALLY: the whole record goes to "<cachePath>.tmp" first, and only a
+// successful rename publishes it at `cachePath` -- so a reader never sees a partially-written file,
+// and a writer that crashes or is killed mid-write leaves the OLD entry (or none) in place rather than
+// a corrupt one. `why` is set on any failure; the caller's only response is to log it and move on,
+// since the triangles it was about to cache are already built and usable this run either way.
+bool writeCollisionCacheFile(const std::string& cachePath, const std::string& meshPath, u64 fileSize,
+                             i64 mtimeTicks, const GameContent::CollisionMesh& mesh, std::string* why) {
+    std::error_code ec;
+    const std::filesystem::path parent = std::filesystem::path(cachePath).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+
+    const std::string tmpPath = cachePath + ".tmp";
+    {
+        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!out) { if (why) *why = "could not open " + tmpPath; return false; }
+        const auto put = [&out](const void* p, usize n) { out.write(static_cast<const char*>(p), static_cast<std::streamsize>(n)); };
+        put(&kCollisionCacheMagic, sizeof(kCollisionCacheMagic));
+        put(&kCollisionCacheVersion, sizeof(kCollisionCacheVersion));
+        const u64 pathLen = meshPath.size();
+        put(&pathLen, sizeof(pathLen));
+        put(meshPath.data(), meshPath.size());
+        put(&fileSize, sizeof(fileSize));
+        put(&mtimeTicks, sizeof(mtimeTicks));
+        const u32 vertexCount = static_cast<u32>(mesh.positions.size() / 3);
+        const u32 indexCount = static_cast<u32>(mesh.indices.size());
+        put(&vertexCount, sizeof(vertexCount));
+        put(&indexCount, sizeof(indexCount));
+        put(mesh.positions.data(), mesh.positions.size() * sizeof(f32));
+        put(mesh.indices.data(), mesh.indices.size() * sizeof(u32));
+        put(&mesh.lod, sizeof(mesh.lod));
+        put(&mesh.errorCm, sizeof(mesh.errorCm));
+        if (!out) { if (why) *why = "write failed for " + tmpPath; return false; }
+    }
+    std::filesystem::rename(tmpPath, cachePath, ec);
+    if (ec) { if (why) *why = "could not publish " + cachePath + ": " + ec.message(); return false; }
+    return true;
+}
+
+} // namespace
+
+#if AVER_MODULE_PBR
+// True when a material-slot NAME should collide -- see GameContent.hpp's own comment on this method.
+bool GameContent::collisionSlotCollides(const std::string& slotName) {
+    if (slotName.empty()) return true;
+    const pbr::MaterialHandle mh = materialForSurface(slotName);
+    if (!mh) return true;   // no authored .ocmat for this slot: cannot resolve, keep the triangles
+    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(mh);
+    if (!d) return true;
+    return d->alphaMode != pbr::AlphaMode::Mask && d->alphaMode != pbr::AlphaMode::Blend;
+}
+#else
+// NO PBR MODULE, NO MATERIAL TO RESOLVE: every slot collides, the same "cannot be resolved" default
+// this method documents for the PBR build too.
+bool GameContent::collisionSlotCollides(const std::string&) { return true; }
+#endif
+
 // Concave architecture needs its triangles: NewSponza's per-material merged meshes (walls, arches,
 // ...) each span the whole building, so world::addStaticBoxBody's one box per mesh fills the
 // courtyard and buries anyone standing in it. This is the lazily-built source those triangles come
-// from -- see GameContent.hpp's own comment on the shape of the answer and what null means.
+// from -- see GameContent.hpp's own comment on the shape of the answer and what null means, and on
+// the filter/simplify/cache pipeline this function now runs to build it.
 const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
     if (const auto it = collisionMeshCache_.find(id); it != collisionMeshCache_.end())
         return it->second.get();
@@ -683,69 +945,155 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
     const std::string path = pathFor(id);
     if (path.empty()) return nullptr;   // a built-in (never indexed) or an id nothing recognises
 
+    // ---- the disk cache, tried from the source file's STAT ALONE -- a hit reads no .ocmesh at all ---
+    // ONE error_code FOR BOTH STAT CALLS, deliberately: last_write_time is skipped once file_size has
+    // already failed (nothing to stat), and either failure leaves `statEc` truthy afterward, which is
+    // all `canCache` below needs to know.
+    std::error_code statEc;
+    const u64 srcSize = static_cast<u64>(std::filesystem::file_size(path, statEc));
+    const i64 srcMtime = statEc ? 0 : static_cast<i64>(
+        std::filesystem::last_write_time(path, statEc).time_since_epoch().count());
+    const bool canCache = !statEc && !project_.dir.empty();
+    const std::string cachePath = canCache ? collisionCachePathFor(project_.dir, path, srcSize, srcMtime)
+                                           : std::string();
+    if (!cachePath.empty()) {
+        auto cached = std::make_unique<CollisionMesh>();
+        if (readCollisionCacheFile(cachePath, path, srcSize, srcMtime, *cached)) {
+            ++collisionCacheHits_;
+            AVER_INFO("[Collision] {}: {} tris from the disk cache", path, cached->indices.size() / 3);
+            slot = std::move(cached);
+            return slot.get();
+        }
+    }
+
     fmt::OcMeshData md;
     std::string why;
     if (!fmt::loadOcMesh(path, md, &why)) {
         AVER_WARN("[Collision] {}", why);
         return nullptr;
     }
+    const u32 vertexCount = md.vertexCount();
+    if (vertexCount == 0 || md.indices.size() < 3) return nullptr;
 
-    // THE COARSEST LOD WITHIN kCollisionMaxErrorCm, same search shape as loadProjectMeshes' depth-
-    // proxy pick just above (monotonic non-decreasing error, level 0 always qualifies at 0.0f) --
-    // but a different threshold and a different reason: a depth pass only needs a correct
-    // silhouette, while collision needs a shape a player cannot obviously clip through, so the
-    // budget here is centimetres a human can feel, not a shadow-map texel.
-    //
-    // GATED ON TRIFACTOR, like the depth-proxy pick: coarserLods is data the FILE carries regardless
-    // of which module baked it, but reading its error back out in world units goes through
-    // aver::trifactor::levelWorldErrorCm (OcMeshLod::screenErrorThreshold is worldErrorCm *
-    // kReferenceProjScale -- that function is the one divide back to centimetres). Without Trifactor
-    // linked, `pick` stays 0 -- LOD 0, always exact, just heavier -- which is the same fallback a
-    // mesh with no coarser level at all already gets.
-    u32 pick = 0;
-    f32 pickErrorCm = 0.0f;
+    // ---- 1. drop cut-out/translucent material slots, from LOD 0's own submesh ranges ---------------
+    // OcMeshSubmesh's indexStart/indexCount/materialSlot exist for LOD 0 only (OcMesh.hpp), so this is
+    // the ONE place in the ladder that can tell a leaf card's triangles from a trunk's at all.
+    bool anyDropped = false;
+    std::vector<u32> keptIndices;
+    if (md.submeshes.empty()) {
+        keptIndices = md.indices;   // no submesh table: nothing to tell slots apart by, keep all
+    } else {
+        keptIndices.reserve(md.indices.size());
+        u32 droppedSlots = 0;
+        for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
+            if (sm.indexCount == 0) continue;
+            const usize end = usize(sm.indexStart) + sm.indexCount;
+            if (end > md.indices.size()) continue;   // malformed range; nothing safe to take from it
+            const std::string slotName =
+                sm.materialSlot < md.materialSlots.size() ? md.materialSlots[sm.materialSlot] : std::string();
+            if (!collisionSlotCollides(slotName)) { anyDropped = true; ++droppedSlots; continue; }
+            keptIndices.insert(keptIndices.end(),
+                               md.indices.begin() + static_cast<std::ptrdiff_t>(sm.indexStart),
+                               md.indices.begin() + static_cast<std::ptrdiff_t>(end));
+        }
+        if (anyDropped)
+            AVER_INFO("[Collision] {}: {} of {} material slot(s) are alpha-masked or translucent; "
+                      "excluded from collision", path, droppedSlots, md.submeshes.size());
+    }
+    if (keptIndices.empty()) {
+        // LOGGED ONCE, HERE -- not once per placement: collisionMeshFor is only ever reached once per
+        // mesh id (the cache above answers every further ask), which is what makes this safe to log
+        // unconditionally rather than needing a seen-once guard of its own.
+        AVER_WARN("[Collision] {}: every material slot is alpha-masked or translucent; no collision "
+                  "geometry", path);
+        return nullptr;
+    }
+
+    // ---- 2. compact the filtered set: only the vertices it references, no out-of-range/degenerate --
+    std::vector<f32> filteredPositions;
+    std::vector<u32> filteredIndices;
+    if (!compactTriangles(md.positions.data(), vertexCount, keptIndices.data(), keptIndices.size(),
+                          filteredPositions, filteredIndices))
+        return nullptr;   // every kept triangle was degenerate or out of range
+
+    // ---- 3. weld by position, then meshoptimizer down toward ~2 cm ----------------------------------
+    std::vector<f32> weldedPositions;
+    std::vector<u32> weldedIndices;
+    weldByPosition(filteredPositions, filteredIndices, weldedPositions, weldedIndices);
+
+    f32 meshoptErrorCm = 0.0f;
+    const std::vector<u32> simplified =
+        simplifyCollisionMesh(weldedPositions, weldedIndices, path, meshoptErrorCm);
+    std::vector<f32> meshoptPositions;
+    std::vector<u32> meshoptIndices;
+    const bool meshoptOk = compactTriangles(weldedPositions.data(),
+                                            static_cast<u32>(weldedPositions.size() / 3),
+                                            simplified.data(), simplified.size(),
+                                            meshoptPositions, meshoptIndices);
+
+    // ---- 4. Trifactor's own coarsest-LOD-within-2cm pick, ONLY when nothing was filtered ------------
+    // A coarser LOD's own indices carry no submesh table to filter step 1's exclusion through -- using
+    // one after triangles were actually dropped could silently bring the excluded geometry back.
+    // Identical to this function's pre-existing behaviour when nothing was filtered.
+    u32 trifactorLod = 0;
+    f32 trifactorErrorCm = 0.0f;
+    std::vector<f32> trifactorPositions;
+    std::vector<u32> trifactorIndices;
+    bool haveTrifactor = false;
 #if AVER_MODULE_TRIFACTOR
-    constexpr f32 kCollisionMaxErrorCm = 2.0f;
-    for (u32 lvl = 1; lvl < md.lodCount(); ++lvl) {
-        const f32 err = trifactor::levelWorldErrorCm(md, lvl);
-        if (err <= kCollisionMaxErrorCm) { pick = lvl; pickErrorCm = err; }
+    if (!anyDropped) {
+        constexpr f32 kCollisionMaxErrorCm = 2.0f;
+        for (u32 lvl = 1; lvl < md.lodCount(); ++lvl) {
+            const f32 err = trifactor::levelWorldErrorCm(md, lvl);
+            if (err <= kCollisionMaxErrorCm) { trifactorLod = lvl; trifactorErrorCm = err; }
+        }
+        const std::vector<u32>& lodSrc =
+            trifactorLod == 0 ? md.indices : md.coarserLods[trifactorLod - 1].indices;
+        haveTrifactor = compactTriangles(md.positions.data(), vertexCount, lodSrc.data(), lodSrc.size(),
+                                         trifactorPositions, trifactorIndices);
     }
 #endif
 
-    const std::vector<u32>& srcIndices = pick == 0 ? md.indices : md.coarserLods[pick - 1].indices;
-    const u32 vertexCount = md.vertexCount();
-    if (srcIndices.size() < 3 || vertexCount == 0) return nullptr;
-
-    // COMPACTED to only the vertices this LOD's triangles reference: a coarser level shares LOD 0's
-    // whole `positions` array (OcMeshData::coarserLods' own comment) rather than owning a smaller
-    // one, and NewSponza's coarsest levels touch a small fraction of it -- physics has no use for
-    // carrying the rest of a 3.75M-vertex building along for a 182k-triangle collision proxy.
+    // ---- 5. ONE CLEAR RULE: fewer triangles wins. A tie, or a meshoptimizer candidate this mesh
+    // could not produce at all, keeps the Trifactor pick -- it cost nothing further once computed
+    // (no simplification math, and it is what this function already did before this change) ----------
     auto mesh = std::make_unique<CollisionMesh>();
-    mesh->lod = pick;
-    mesh->errorCm = pickErrorCm;
-    std::unordered_map<u32, u32> remap;
-    remap.reserve(srcIndices.size());
-    mesh->indices.reserve(srcIndices.size());
-    for (usize k = 0; k + 2 < srcIndices.size(); k += 3) {
-        const u32 ia = srcIndices[k], ib = srcIndices[k + 1], ic = srcIndices[k + 2];
-        if (ia >= vertexCount || ib >= vertexCount || ic >= vertexCount) continue;   // out of range
-        if (ia == ib || ib == ic || ia == ic) continue;   // degenerate: no area, nothing to collide with
-        for (const u32 orig : {ia, ib, ic}) {
-            const auto [it2, inserted] =
-                remap.try_emplace(orig, static_cast<u32>(mesh->positions.size() / 3));
-            if (inserted) {
-                mesh->positions.push_back(md.positions[usize(orig) * 3 + 0]);
-                mesh->positions.push_back(md.positions[usize(orig) * 3 + 1]);
-                mesh->positions.push_back(md.positions[usize(orig) * 3 + 2]);
-            }
-            mesh->indices.push_back(it2->second);
-        }
+    const bool useTrifactor =
+        haveTrifactor && (!meshoptOk || trifactorIndices.size() <= meshoptIndices.size());
+    const char* wonBy = "meshoptimizer";
+    if (useTrifactor) {
+        mesh->positions = std::move(trifactorPositions);
+        mesh->indices = std::move(trifactorIndices);
+        mesh->lod = trifactorLod;
+        mesh->errorCm = trifactorErrorCm;
+        wonBy = "Trifactor LOD";
+    } else if (meshoptOk) {
+        mesh->positions = std::move(meshoptPositions);
+        mesh->indices = std::move(meshoptIndices);
+        mesh->lod = 0;
+        mesh->errorCm = meshoptErrorCm;
+    } else {
+        // Neither simplifier left anything: meshoptimizer collapsed the whole filtered mesh away (a
+        // sliver too small for even a 2 cm budget to preserve) and there was no Trifactor pick to
+        // fall back on. The filtered set itself, before simplification, is the last honest answer --
+        // every triangle this mesh's collision was ever going to keep.
+        mesh->positions = std::move(filteredPositions);
+        mesh->indices = std::move(filteredIndices);
+        mesh->lod = 0;
+        mesh->errorCm = 0.0f;
+        wonBy = "unsimplified";
     }
-    if (mesh->indices.size() < 3) return nullptr;   // every triangle was degenerate or out of range
+    if (mesh->indices.size() < 3) return nullptr;
 
-    const usize tris0 = md.indices.size() / 3;
-    AVER_INFO("[Collision] {}: LOD {}, {} tris (from {} at LOD 0), {:.1f} cm error", path, pick,
-              mesh->indices.size() / 3, tris0, pickErrorCm);
+    AVER_INFO("[Collision] {}: {} ({} tris from {} at LOD 0, {:.1f} cm error)", path, wonBy,
+              mesh->indices.size() / 3, md.indices.size() / 3, mesh->errorCm);
+
+    if (!cachePath.empty()) {
+        std::string saveWhy;
+        if (!writeCollisionCacheFile(cachePath, path, srcSize, srcMtime, *mesh, &saveWhy))
+            AVER_WARN("[Collision] {}: could not write the disk cache: {}", path, saveWhy);
+    }
+
     slot = std::move(mesh);
     return slot.get();
 }
@@ -831,6 +1179,9 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     pbr::MaterialSystem::ResolvedTexture out;
     out.handle = h;
     for (int c = 0; c < 3; ++c) out.averageLinear[c] = info.averageLinear[c];
+    // Feeds MaterialSystem's level-change eviction log ("MiB freed") only -- see
+    // ResolvedTexture::bytes's own comment.
+    out.bytes = info.bytes;
     return out;
 }
 
@@ -916,6 +1267,29 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
 #if AVER_MODULE_SCENE
     surfaceMaterials_.clear();
 #endif
+}
+
+// See this method's own header comment for the full contract; this is releaseProjectMaterials()
+// narrowed to "every name but these".
+usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>& keep) {
+    usize released = 0;
+    for (auto it = materialAssets_.begin(); it != materialAssets_.end();) {
+        if (keep.count(it->first)) { ++it; continue; }
+        if (it->second) { pbr::MaterialLibrary::get().destroy(it->second); ++released; }
+        it = materialAssets_.erase(it);
+    }
+#if AVER_MODULE_SCENE
+    // Self-healing cleanup, not required for correctness (authoredFor()'s reader already treats a
+    // dead handle as unbound) -- see this method's own header comment for why a stale entry is worth
+    // dropping anyway rather than leaving it to warn on the next draw.
+    if (released) {
+        for (auto it = surfaceMaterials_.begin(); it != surfaceMaterials_.end();) {
+            if (it->second && !pbr::MaterialLibrary::get().valid(it->second)) it = surfaceMaterials_.erase(it);
+            else ++it;
+        }
+    }
+#endif
+    return released;
 }
 
 #endif // AVER_MODULE_PBR

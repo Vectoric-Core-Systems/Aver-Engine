@@ -15,6 +15,10 @@
 #  include "aver/formats/OcMap.hpp"
 #  include "aver/world/LevelInstance.hpp"
 #endif
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+#  include "aver/formats/OcLanes.hpp"
+#  include "aver/world/VehicleSystem.hpp"
+#endif
 
 namespace aver::game {
 
@@ -54,6 +58,16 @@ public:
         std::function<bool(f64 worldXCm, f64 worldYCm, f64& outGroundZCm)> groundHeightAt;
         // At the end of unload(), for whatever beforePlacements created.
         std::function<void()> afterUnload;
+        // STAGED LOADING PROGRESS: called with a stage name and a fraction in [0, 1] covering load()'s
+        // OWN three steps -- parsing the file, beforePlacements (environment/terrain), and instantiating
+        // placements (this last one driven by world::InstantiateOptions::progress, forwarded straight
+        // through) -- 0 at the very start, 1 once instantiate() has placed everything. load() knows
+        // nothing about what either host does in afterInstantiate (foliage, spawning class placements,
+        // its own "finishing" tail), so the fraction never claims to cover that; the host rescales this
+        // into whatever band its own loading screen reserves for "loading the level" (see
+        // sandbox/src/SandboxLevelLoad.cpp / Runtime/src/GameApp.cpp for the two hosts' own bands).
+        // Optional, and cheap to leave unset: a host with no loading screen pays nothing extra.
+        std::function<void(const std::string& stage, f32 fraction)> progress;
         // At the end of a load that succeeded, with everything it built -- for a host that keeps
         // its own record per placed entity (the editor's labels, undo and save bookkeeping).
         // Called for a legacy .ocmap too, whose original records come in `legacy`.
@@ -90,6 +104,45 @@ public:
 #endif
 
     usize entityCount() const { return levelEntities_.size(); }
+    // The animated placements load() made kinematic bodies for: what the host hands to
+    // world::driveKinematicBodies each frame after the animation tick. Empty without physics.
+    const std::vector<world::AnimatedBody>& animatedBodies() const { return animatedBodies_; }
+    // THE LEVEL'S VEHICLE PLACEMENTS: every placement that carried a `vehicle <preset>` token, by entity,
+    // WHETHER OR NOT it can become a car right now -- the record is what a save writes the token back
+    // from, and a placement whose mesh has no bounds today (or a build with no physics module at all)
+    // must not lose its token for it. Collected by load(), emptied by unload(); nothing here is
+    // simulated until a host calls beginVehicles. Like a CRigidBody, a car is data at load and becomes
+    // real when play starts, so a level that is only being looked at never has one settling on its
+    // suspension.
+    //
+    // The preset `e` was placed with, or null for an entity that is not a vehicle placement. The editor
+    // keeps this current for what it makes after the load (setVehiclePreset), so a copy it pastes is an
+    // ordinary mesh but a delete that is undone is still a car.
+    const std::string* vehiclePresetOf(scene::Entity e) const;
+    // Records that `e` is a vehicle placement of `preset`, replacing an earlier record for it; an empty
+    // preset forgets it. load() fills the list from the file itself: this is for the editor, which
+    // creates or recreates entities after the load (an undone delete, a placement added over MCP) and
+    // must not lose the token when it saves.
+    void setVehiclePreset(scene::Entity e, const std::string& preset);
+#if AVER_MODULE_PHYSICS
+    // The lane graph from the level's <name>.oclanes sidecar, or null when there is none (or no
+    // vehicle placement to use one). A level with cars and no lanes is legal: they park.
+    const fmt::OcLanesData* lanes() const { return hasLanes_ ? &lanes_ : nullptr; }
+    // Where a level's lane sidecar lives: <level>.oclanes beside the file, under its stem. A recovered
+    // autosave (`<level>.autosave`, which the editor opens by that path) names its LEVEL'S lanes, not a
+    // file of its own. Public so the editor's Save As can copy the sidecar along with the level.
+    static std::string laneSidecarPath(const std::string& levelPath);
+    // PLAY START, for both hosts: builds one physics car per vehicle placement that can become one, at
+    // its entity's CURRENT world transform, on this level's lanes, with a seed derived from the level's
+    // name so the same level drives the same way every run. A placement is skipped (and counted in one
+    // log line) when its entity is gone (the editor may have deleted it since the load), when its mesh
+    // has no known bounds -- read from the entity's mesh NOW, so a Change Mesh is honoured -- when it is
+    // not at scale 1, or when it also carries an object animation, whose clip would overwrite the
+    // physics pose every frame. Returns how many cars exist afterwards (0 when there are none, or
+    // physics is not up). The host ends them with vehicles.end() and seeds vehicles.entities() into
+    // PlayMobility.
+    usize beginVehicles(world::VehicleSystem& vehicles, const GameContent& content) const;
+#endif
     const std::string& name() const { return levelName_; }
     const std::string& path() const { return levelPath_; }
     bool hasFog() const { return env_.hasFog; }
@@ -151,6 +204,8 @@ public:
 private:
 #if AVER_MODULE_SCENE
     std::vector<scene::Entity> levelEntities_;
+    // See animatedBodies(). Cleared by unload() before the bodies go.
+    std::vector<world::AnimatedBody> animatedBodies_;
     std::string levelPath_;
     std::string levelName_;
     // The sun, sky, fog and clouds this level declared, copied whole. See env() above.
@@ -169,8 +224,19 @@ private:
 
     LoadHooks hooks_;
 
+    // See vehiclePresetOf(). In FILE ORDER, which seeds each car's random stream, so the same level drives
+    // the same way every run.
+    struct VehiclePlacement {
+        scene::Entity entity = scene::kInvalidEntity;
+        std::string preset;
+    };
+    std::vector<VehiclePlacement> vehiclePlacements_;
+
 #  if AVER_MODULE_PHYSICS
     std::vector<int32_t> levelBodies_;
+    // See lanes().
+    fmt::OcLanesData lanes_;
+    bool hasLanes_ = false;
 #  endif
 
     // GRAPH-AS-CLASS / any other class placement: entities spawned (aver_fw_spawn) by

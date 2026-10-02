@@ -31,6 +31,15 @@ public:
     // text describes -- a message that only appears after the work finishes is worse than none.
     void setStatus(const std::string& text);
 
+    // Draws (or hides) a thin progress bar under the status line. `fraction` is clamped to [0, 1];
+    // NEGATIVE HIDES THE BAR, the same "no value" convention setStatus's empty string already gets
+    // for text -- a caller that never calls this shows no bar at all, so a plain status-only splash
+    // (startup, an indeterminate wait) looks exactly as it always has.
+    //
+    // Same "safe before show(), no-op after close()" contract as setStatus, and the same synchronous
+    // repaint -- a bar that only moves once the work it describes has finished is worse than none.
+    void setProgress(f32 fraction);
+
     // Drains the splash window's queued messages.
     void pump();
 
@@ -47,6 +56,10 @@ private:
     void* font_ = nullptr;   // HFONT, sized for the display's DPI
     void* bits_ = nullptr;   // the DIB's pixels, owned by the bitmap
     u64 shownAtMs_ = 0;
+    // setProgress's own pump() throttle -- see that method for why repaint() runs on every call
+    // regardless (it reaches the screen with no message loop involved) while pump() itself is
+    // capped at ~30 Hz. 0 means "never pumped for a progress update yet".
+    u64 lastProgressPumpMs_ = 0;
 
     int width_ = 0, height_ = 0;   // after DPI scaling
     int posX_ = 0, posY_ = 0;      // top-left, in virtual-screen coordinates
@@ -54,6 +67,9 @@ private:
     // painting over it. Without this the corner accretes overlapping strings.
     std::vector<u8> pristine_;
     std::string status_;
+    // See setProgress. Negative = no bar drawn -- the state show() and every ctor leave this in, so
+    // a splash nobody calls setProgress on paints exactly as it did before this field existed.
+    f32 progress_ = -1.0f;
 };
 
 } // namespace aver

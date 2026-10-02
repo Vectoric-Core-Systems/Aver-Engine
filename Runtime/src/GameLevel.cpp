@@ -4,9 +4,11 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <system_error>
+#include <unordered_set>
 
 #if AVER_MODULE_SCENE
 #  include "aver/formats/OcWorld.hpp"
@@ -72,6 +74,24 @@ bool loadLegacyOcmap(const std::string& path, fmt::OcMapData& m, fmt::OcWorldDat
     return true;
 }
 
+#if AVER_MODULE_PHYSICS
+// <level>.oclanes: the lane graph the level's cars follow, beside the level file and under its stem. False
+// for no file (the ordinary case for a level with no traffic) and for one that does not parse, which is
+// told apart because the second is somebody's mistake and the first is not.
+bool loadLaneSidecar(const std::string& levelPath, fmt::OcLanesData& out) {
+    const std::filesystem::path p = GameLevel::laneSidecarPath(levelPath);
+    std::error_code ec;
+    if (!std::filesystem::exists(p, ec)) return false;
+    std::string why;
+    if (!fmt::loadOcLanes(p.string(), out, &why)) {
+        AVER_WARN("[Level] {} did not load ({}) -- the level's vehicles park", p.string(), why);
+        out = fmt::OcLanesData{};
+        return false;
+    }
+    return true;
+}
+#endif
+
 } // namespace
 
 void GameLevel::load(const std::string& path, GameContent& content) {
@@ -91,10 +111,16 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     if (legacy) {
         if (!loadLegacyOcmap(path, legacyMap, w, &why)) { AVER_WARN("[Level] {}", why); return; }
     } else if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+    // STAGE 1 OF 3 (see LoadHooks::progress): the file is parsed.
+    if (hooks_.progress) hooks_.progress("Parsing level", 0.05f);
 
     // TERRAIN (AND WATER) FIRST, THEN THE THINGS THAT STAND ON IT, the editor's loadLevel order: a
     // `snap` placement asks the ground how high it is. See LoadHooks.
     if (!legacy && hooks_.beforePlacements) hooks_.beforePlacements(path, w);
+    // STAGE 2 OF 3: environment and terrain, whatever beforePlacements just did (a legacy .ocmap has
+    // none of this -- see LoadHooks::beforePlacements' own comment -- so the fraction still advances,
+    // just with nothing having actually run).
+    if (hooks_.progress) hooks_.progress("Loading environment", 0.15f);
 
     // The placement loop is aver::world::instantiate now, shared with the editor. What is left here
     // is the part that is genuinely the GAME's: which material cache to bind into, and what to keep.
@@ -134,12 +160,92 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         const pbr::MaterialHandle h = content.materialForSurface(surface);
         if (h) content.bindSurfaceMaterial(token, h);
     };
-#endif
 
+    // A MESH'S OWN SLOT MATERIALS, BOUND HERE TOO -- not only a placement's OVERRIDE (opt.bindMaterial
+    // just above, called only for a placement that actually names one). Without this, an entity whose
+    // CMeshRenderer.material ends up 0 draws under content.meshDefaultMaterial(mesh)'s token (or, for a
+    // multi-part mesh, one of content.partsFor(mesh)'s), and nothing had ever called
+    // materialForSurface()/bindSurfaceMaterial() for THAT token unless some unrelated placement,
+    // foliage instance or landscape happened to name the identical surface first -- GameRender's
+    // resolveDrawLook then found content.authoredFor(token) empty and silently fell through to the
+    // flat gray fallback for a mesh whose own .ocmesh names a real, authored material. A LATENT defect
+    // in both hosts (the editor's own copy used to paper over it by loading every project material up
+    // front, which is exactly the eager load level-scoped residency replaces), so it is fixed here
+    // rather than only for the editor.
+    //
+    // Once per UNIQUE mesh this level places, not per placement: loadProjectMeshes() already built
+    // meshSlot0Material_/meshParts_ for every project mesh before any level loads, so each iteration
+    // here is a lookup plus a cache-checked materialForSurface() call, not a second parse of anything.
+    // All LODs of a mesh share one materialSlots table (Trifactor's ladder never renames a slot), so
+    // binding the base mesh id's slots covers every LOD that stands in for it too.
+    std::unordered_set<u64> meshMaterialsBound;
+    for (const fmt::OcWorldPlacement& p : w.placements) {
+        const u64 meshId = fnv1a64(std::string_view(p.asset));
+        if (!meshMaterialsBound.insert(meshId).second) continue;   // an earlier placement already did this mesh
+        const i32 slot0Token = content.meshDefaultMaterial(meshId);
+        if (slot0Token) {
+            const std::string& name = content.meshSlot0Name(meshId);
+            if (!name.empty()) {
+                const pbr::MaterialHandle h = content.materialForSurface(name);
+                if (h) content.bindSurfaceMaterial(slot0Token, h);
+            }
+        }
+        if (const std::vector<GameContent::MeshPart>* parts = content.partsFor(meshId)) {
+            for (const GameContent::MeshPart& part : *parts) {
+                if (!part.material) continue;
+                const char* partName = aver_scene_material_name(part.material);
+                if (!partName || !*partName) continue;
+                const pbr::MaterialHandle h = content.materialForSurface(partName);
+                if (h) content.bindSurfaceMaterial(part.material, h);
+            }
+        }
+    }
+#endif
+    // STAGE 3 OF 3: placements, 15%..75% of load()'s own span -- world::InstantiateOptions::progress
+    // is called at least every 256 placements and once at the end (its own contract), so a level of
+    // any size still moves the bar smoothly rather than jumping straight from 15% to 75%.
+    if (hooks_.progress) {
+        opt.progress = [this](usize done, usize total) {
+            const f32 frac = total > 0 ? static_cast<f32>(done) / static_cast<f32>(total) : 1.0f;
+            hooks_.progress("Placing objects", 0.15f + frac * 0.60f);
+        };
+    }
+
+#if AVER_MODULE_PHYSICS
+    const u32 collisionCacheHitsBefore = content.collisionCacheHits();   // the counter is per process
+#endif
     const world::LevelInstance inst = world::instantiate(w, opt);
+    // load()'s OWN span ends here regardless of what opt.progress reported -- a level with zero
+    // placements never calls it at all, and this is what still lands the fraction on 75% for one.
+    if (hooks_.progress) hooks_.progress("Placing objects", 0.75f);
     levelEntities_ = inst.entities;
+    animatedBodies_ = inst.animatedBodies;
 #if AVER_MODULE_PHYSICS
     levelBodies_ = inst.bodies;
+#endif
+    // THE CARS, RECORDED NOT BUILT: they become physics vehicles when play starts (beginVehicles), after
+    // the editor's transform snapshot, and whether one CAN be built (bounds, scale) is decided then, from
+    // the entity as it is by that time. The record is every placement that carries the token, so a save
+    // writes it back whatever play makes of it -- with or without a physics module to drive it.
+    vehiclePlacements_.clear();
+    for (usize k = 0; k < inst.entities.size(); ++k) {
+        const std::string& preset = w.placements[inst.placementIndex[k]].vehiclePreset;
+        if (!preset.empty()) vehiclePlacements_.push_back(VehiclePlacement{inst.entities[k], preset});
+    }
+#if AVER_MODULE_PHYSICS
+    // The lane file is only read when there is a car to use it, so a level without traffic never looks
+    // for one.
+    hasLanes_ = false;
+    lanes_ = fmt::OcLanesData{};
+    if (!vehiclePlacements_.empty()) {
+        hasLanes_ = loadLaneSidecar(path, lanes_);
+        if (hasLanes_)
+            AVER_INFO("[Level] {} vehicle placement(s), {} lane(s) from the level's .oclanes",
+                      vehiclePlacements_.size(), lanes_.lanes.size());
+        else
+            AVER_INFO("[Level] {} vehicle placement(s) and no .oclanes beside the level: they will park",
+                      vehiclePlacements_.size());
+    }
 #endif
 
 #if AVER_MODULE_FRAMEWORK
@@ -300,7 +406,8 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 #if AVER_MODULE_PHYSICS
     // One static body per COLLIDING placement, so this is checkable against the map file itself:
-    // it must equal the count of PLACE lines without `nocollide`. Reported even when zero, because
+    // it must equal the count of PLACE lines without `nocollide` (and without `vehicle`: a car's body
+    // is built by play, not by the load). Reported even when zero, because
     // zero bodies with colliding placements means physics was not ready at load time -- the exact
     // ordering bug initPhysics-before-openProject exists to prevent.
     //
@@ -308,10 +415,19 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // whether NewSponza's courtyard is a solid box or its walls -- inst.meshBodyCount/boxBodyCount/
     // meshTriangleCount/bodyCreationSeconds all come straight off world::instantiate's own loop (see
     // LevelInstance.hpp's own comment on why they are collected there and not re-derived here).
+    // SHARED SHAPES AND THE DISK CACHE: a mesh body is a scaled reference to one shape per unique mesh
+    // (inst.uniqueMeshShapeCount of them), whose triangles came from the .occol cache when
+    // collisionCacheHits counts them -- the two numbers that say whether a slow load was building BVHs.
     AVER_INFO("[Level] {} static physics body(ies) from {} placement(s): {} triangle mesh(es) "
-              "({} triangles total), {} box(es), {:.2f} ms to create",
+              "({} triangles total, {} shared shape(s), {} from the collision cache), {} box(es), "
+              "{:.2f} ms to create",
               levelBodies_.size(), w.placements.size(), inst.meshBodyCount, inst.meshTriangleCount,
-              inst.boxBodyCount, inst.bodyCreationSeconds * 1000.0);
+              inst.uniqueMeshShapeCount, content.collisionCacheHits() - collisionCacheHitsBefore,
+              inst.boxBodyCount,
+              inst.bodyCreationSeconds * 1000.0);
+    if (!animatedBodies_.empty())
+        AVER_INFO("[Level] {} of those bodies are kinematic, following their placement's animation",
+                  animatedBodies_.size());
 #endif
     if (hooks_.afterInstantiate)
         hooks_.afterInstantiate(LoadedLevel{path, w, inst, legacy ? &legacyMap : nullptr});
@@ -383,6 +499,103 @@ void GameLevel::spawnClassPlacements() {
 }
 #endif
 
+const std::string* GameLevel::vehiclePresetOf(scene::Entity e) const {
+    for (const VehiclePlacement& vp : vehiclePlacements_)
+        if (vp.entity == e) return &vp.preset;
+    return nullptr;
+}
+
+void GameLevel::setVehiclePreset(scene::Entity e, const std::string& preset) {
+    const auto it = std::find_if(vehiclePlacements_.begin(), vehiclePlacements_.end(),
+                                 [e](const VehiclePlacement& vp) { return vp.entity == e; });
+    if (preset.empty()) {
+        if (it != vehiclePlacements_.end()) vehiclePlacements_.erase(it);
+    } else if (it != vehiclePlacements_.end()) {
+        it->preset = preset;
+    } else {
+#if AVER_MODULE_PHYSICS
+        // THE FIRST CAR A LEVEL GETS AFTER ITS LOAD (one placed over MCP into a level that had none) is the
+        // first reason to look for its lane file, which load() reads only for a level that already had cars.
+        if (vehiclePlacements_.empty() && !hasLanes_ && !levelPath_.empty())
+            hasLanes_ = loadLaneSidecar(levelPath_, lanes_);
+#endif
+        vehiclePlacements_.push_back(VehiclePlacement{e, preset});
+    }
+}
+
+#if AVER_MODULE_PHYSICS
+std::string GameLevel::laneSidecarPath(const std::string& levelPath) {
+    std::filesystem::path p(levelPath);
+    // A RECOVERED AUTOSAVE is `<level>.autosave`, and the editor opens it by that path: replacing its
+    // extension alone would look for `<level>.ocworld.oclanes` and find no lanes.
+    if (p.extension() == ".autosave") p.replace_extension();
+    p.replace_extension(".oclanes");
+    return p.string();
+}
+
+usize GameLevel::beginVehicles(world::VehicleSystem& vehicles, const GameContent& content) const {
+    // A system left over from a play session that never reached its end must not keep its cars beside
+    // the new ones; end() on a system that was never begun does nothing.
+    vehicles.end();
+    if (vehiclePlacements_.empty() || !aver_phys_ready()) return 0;
+    scene::World& w = scene::World::instance();
+
+    // WHETHER A PLACEMENT CAN BE A CAR IS DECIDED HERE, from the entity as it is now, not from what the
+    // file said at load: the editor can delete one, swap its mesh or scale it between the two. Each
+    // reason it cannot is counted into ONE line, because a generator writes hundreds of these and a line
+    // apiece would bury the one that matters.
+    std::vector<world::VehicleSpawn> live;
+    live.reserve(vehiclePlacements_.size());
+    u32 noBounds = 0, scaled = 0, animated = 0;
+    std::string firstNoBounds;
+    for (const VehiclePlacement& vp : vehiclePlacements_) {
+        if (!w.valid(vp.entity)) continue;   // deleted since the load
+        // THE MESH THE ENTITY HAS NOW, which is also the table the placement's own collision box is
+        // fitted from. A mesh the content set never loaded has no bounds to size a chassis from.
+        const auto* mr = w.component<scene::CMeshRenderer>(vp.entity, scene::kComponentMeshRenderer);
+        const std::pair<Vec3, Vec3>* b = mr ? content.boundsFor(mr->mesh) : nullptr;
+        if (!b) {
+            if (!noBounds) firstNoBounds = w.name(vp.entity);
+            ++noBounds;
+            continue;
+        }
+        // A car is built from its bounds at scale 1: the preset's wheel and suspension sizes are absolute,
+        // so a scaled mesh would drive on wheels out of proportion with its body.
+        const Vec3 scale = transformFromMatrix(w.worldMatrix(vp.entity)).scale;
+        if (std::fabs(scale.x - 1.0f) > 1e-3f || std::fabs(scale.y - 1.0f) > 1e-3f ||
+            std::fabs(scale.z - 1.0f) > 1e-3f) {
+            ++scaled;
+            continue;
+        }
+        // AN OBJECT CLIP AND A PHYSICS CAR ON ONE ENTITY FIGHT OVER ITS TRANSFORM (the clip's write lands
+        // after the car's every frame), so the car would drive invisibly beside the animated mesh.
+        if (w.hasComponent(vp.entity, scene::kComponentAnimator)) {
+            ++animated;
+            continue;
+        }
+        live.push_back(world::VehicleSpawn{vp.entity, vp.preset, b->first, b->second});
+    }
+    // None of these gets a collider either: a vehicle placement is never given a static one at load.
+    if (noBounds)
+        AVER_WARN("[Level] {} vehicle placement(s) name a mesh with no known bounds (first: '{}') -- they "
+                  "stay where they are placed, WITHOUT collision", noBounds, firstNoBounds);
+    if (scaled)
+        AVER_WARN("[Level] {} vehicle placement(s) are not at scale 1 -- a physics vehicle is not scaled, so "
+                  "they stay where they are placed, WITHOUT collision", scaled);
+    if (animated)
+        AVER_WARN("[Level] {} vehicle placement(s) also carry an object animation, which would overwrite the "
+                  "physics pose every frame -- they stay animated and are not driven", animated);
+    if (live.empty()) return 0;
+    // FROM THE LEVEL'S NAME, so a level drives the same way every run (its cars choose the same turns)
+    // and two levels do not drive in step.
+    const u64 h = fnv1a64(std::string_view(levelName_));
+    vehicles.begin(w, live, lanes(), static_cast<u32>(h ^ (h >> 32)));
+    AVER_INFO("[Level] {} physics vehicle(s) built from {} placement(s), on {} lane(s)",
+              vehicles.count(), live.size(), hasLanes_ ? lanes_.lanes.size() : usize{0});
+    return vehicles.count();
+}
+#endif
+
 const GameLevel::PcgField* GameLevel::pcgField(const std::string& name) const {
     for (const PcgField& f : pcgFields_) if (f.name == name) return &f;
     return nullptr;
@@ -410,12 +623,16 @@ void GameLevel::unload() {
     classPlacements_.clear();   // in case unload() runs before spawnClassPlacements() ever did
 #endif
     scene::World& world = scene::World::instance();
+    animatedBodies_.clear();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
     levelEntities_.clear();
 #if AVER_MODULE_PHYSICS
     for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
     levelBodies_.clear();
+    lanes_ = fmt::OcLanesData{};
+    hasLanes_ = false;
 #endif
+    vehiclePlacements_.clear();
     env_ = fmt::OcWorldEnv{};
     hasBounds_ = false;
     spawn_ = SpawnPoint{};
