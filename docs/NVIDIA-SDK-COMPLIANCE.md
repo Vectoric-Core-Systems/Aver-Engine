@@ -3,6 +3,10 @@
 **Last audited: 2026-09-25.** Against commit `aca451dd` plus the working tree at that date (first
 audit 2026-09-21, `a05275e2`).
 
+**Updated on the change that removed RTXDI and RTXGI.** NRD is now the only NVIDIA SDK vendored. The
+earlier audit text about RTXDI and RTXGI (SHaRC) is gone because those SDKs are no longer in the
+tree; the dates above refer to the audit of what remains.
+
 This document records which NVIDIA SDKs this engine contains, which of them actually ship, what
 NVIDIA's licence requires of us for each, and — separately and plainly — **whether we currently do
 it**. It exists so the answer to "are we compliant?" is a file you can re-read rather than an
@@ -23,27 +27,24 @@ distributed product. Both are recorded because the source repository is itself d
 | SDK | Path | Built? | Ships in editor? | Ships in packaged game? | How |
 |---|---|---|---|---|---|
 | **NRD** (Real-Time Denoisers) | `third_party/nrd` | Yes — `AVER_WITH_NRD` defaults ON | Yes | Yes | Compiled, statically linked into `Aver.Render.NRD` → `Aver.Render.Voxi.Renderer` → both `Sandbox.exe` and `AverEngineRuntime.exe` |
-| **RTXDI** (ReSTIR DI/GI) | `third_party/rtxdi` | Its C++ is **never** built | Yes | Yes | **As verbatim HLSL source.** `modules/render.voxi/CMakeLists.txt:84` `file(COPY)`s `Include/Rtxdi` whole into `bin/shaders/Rtxdi`, which the package layout ships as `shaders\**` |
-| **RTXGI** (SHaRC) | `third_party/rtxgi` | No | Yes | Yes | **As verbatim HLSL headers.** `modules/render.voxi/CMakeLists.txt` copies SHaRC's four headers into `bin/shaders/Sharc`, which ships as `shaders\**`. No shader includes them yet. See §5 |
 | **MathLib** | `third_party/mathlib` | Header-only, via NRD | Yes | Yes | NRD's dependency |
 | **ShaderMake** | `third_party/shadermake` | Build-time tool | No | No | Compiles NRD's shaders during the build |
 
-**RTXDI is the strongest case for attribution, not NRD.** NRD ships as compiled object code;
-RTXDI ships as *human-readable NVIDIA source text sitting on disk* in every build and every package.
-Anyone who opens `bin/shaders/Rtxdi/GI/Reservoir.hlsli` is reading NVIDIA's source.
+**RTXDI and RTXGI were removed on this change.** `third_party/rtxdi` and `third_party/rtxgi` are
+deleted. ReSTIR GI is now Aver's own clean-room code (`modules/render.voxi/shaders/voxi_reservoir.hlsli`
+and `voxi_restir.hlsli`), written from the published papers (Talbot 2005, Bitterli 2020, Ouyang 2021,
+Lin 2022) and not derived from RTXDI source. **No NVIDIA HLSL source ships in `bin/shaders` any more.**
+`modules/render.voxi/CMakeLists.txt` deletes stale `bin/shaders/Rtxdi` and `bin/shaders/Sharc`
+directories left in old build trees, so a rebuilt tree cannot carry the old copies forward.
 
-**What each is actually used for.** NRD denoises the ray-traced global-illumination signal
-(`Voxi NRD denoise` in the per-pass GPU breakdown). RTXDI *is* the ReSTIR GI estimator selected by
-`--gi-mode 1` — `modules/render.voxi/shaders/voxi_restir.hlsli` includes `Rtxdi/GI/Reservoir.hlsli`
-and `Rtxdi/GI/SpatioTemporalResampling.hlsli` and calls into them. This is not an optional garnish;
-it is one of the engine's two indirect-diffuse paths.
+**What NRD is used for.** NRD denoises the ray-traced global-illumination signal
+(`Voxi NRD denoise` in the per-pass GPU breakdown). It ships as compiled object code only.
 
 ---
 
 ## 2. The obligations, and where we stand
 
-Licence texts live at `third_party/nrd/LICENSE.txt`, `third_party/rtxdi/LICENSE.txt` and
-`third_party/rtxgi/License.md`. NRD's and RTXDI's are the same "NVIDIA RTX SDKs License" with an
+The licence text lives at `third_party/nrd/LICENSE.txt`. It is the "NVIDIA RTX SDKs License" with an
 "NVIDIA RTX SUPPLEMENT" appended; the supplement governs where the two conflict.
 
 ### 2.1 The source notice — **MET (source distribution only)**
@@ -69,8 +70,8 @@ different SDKs. Getting this wrong once already cost an afternoon's worth of the
 > — `third_party/nrd/LICENSE.txt:313-318`
 
 That is the clause naming splash screens and about boxes, and **it does not apply to this product**,
-because neither the DLSS SDK nor the NGX SDK is included (§2.6). The clause that governs NRD and
-RTXDI is the next one:
+because neither the DLSS SDK nor the NGX SDK is included (§2.6). The clause that governs NRD is
+the next one:
 
 > **(c)** "NVIDIA Trademark Placement in Applications with a licensed SDK, other than the DLSS SDK
 > or NGX SDK. For applications that incorporates and/or makes use of a licensed SDK, other than the
@@ -103,7 +104,7 @@ one that names about boxes — governs only DLSS/NGX applications. No change is 
 > "An application must have material additional functionality, beyond the included portions of the
 > SDK." — `third_party/nrd/LICENSE.txt:38-39`
 
-Aver Engine is a game engine; the SDKs are two components of its renderer.
+Aver Engine is a game engine; NRD is one component of its renderer.
 
 ### 2.4 Onward distribution terms — **MET for the source licence**
 
@@ -151,7 +152,7 @@ NRD's shaders, and none of it is redistributed.
 
 **Until 2026-09-25, no packaged build shipped an NVIDIA notice.** `scripts/stage-payload.ps1` and
 `scripts/stage-game.ps1` both built a `THIRD-PARTY-NOTICES.txt`, and neither mentioned NVIDIA, NRD,
-RTXDI, MathLib or ShaderMake. `LICENSE.md` covers the **source repository** and does not travel with
+MathLib or ShaderMake. `LICENSE.md` covers the **source repository** and does not travel with
 a built game.
 
 **Closed by `scripts/NvidiaNotices.ps1`**, which both staging scripts dot-source. Its
@@ -167,15 +168,13 @@ a built game.
 
 - **NRD and MathLib** are listed when `AVER_WITH_NRD` and `AVER_MODULE_VOXI` are both ON in
   `CMakeCache.txt`. NRD is compiled into the renderer, and MathLib is compiled in with it.
-- **RTXDI** is listed when a `Rtxdi` directory exists anywhere in the staged tree.
-- **SHaRC** is listed when a `Sharc` directory exists anywhere in the staged tree.
 
-These are source text, so the evidence is the staged tree itself. A missing licence file is a hard
-`Fail`, as it is for every other entry in the stagers' `$components` lists.
+`NvidiaNotices.ps1` lists NRD only. A missing licence file is a hard `Fail`, as it is for every
+other entry in the stagers' `$components` lists.
 
 **Verified 2026-09-25** by calling the helper directly against `build-release/bin`, with no staging
-run. It listed all four components and wrote the notice, the attribution and the four licences
-(81,763 characters). All three scripts parse cleanly.
+run. At that date it also listed RTXDI and SHaRC, which have since been removed; the NRD
+and MathLib entries are unchanged. All three scripts parse cleanly.
 
 ### 3.1 Packaging is STILL BLOCKED — lifting it is the owner's call
 
@@ -197,8 +196,8 @@ any work. That covers the editor's **File ▸ Package Project…** too, since it
 `stage-game.ps1` rather than staging anything itself.
 
 `stage-payload.ps1` is gated as well as `stage-game.ps1`, and deliberately: it stages the ENGINE for
-a developer rather than a GAME for a player, but it redistributes the same compiled NRD and the same
-verbatim RTXDI source, so the same obligation attaches to it.
+a developer rather than a GAME for a player, but it redistributes the same compiled NRD, so the same
+obligation attaches to it.
 
 **`-IAcceptNvidiaRedistribution` lifts the block** without editing either script, and prints a loud
 line into the log when used so a package built that way is identifiable afterwards. It exists
@@ -218,7 +217,8 @@ python scripts/module-guard-audit.py            # unrelated, but the same "check
 grep -c Add-AverNvidiaNotices scripts/stage-payload.ps1 scripts/stage-game.ps1   # expect 1 each (§3)
 # NOT a check: the About box is deliberately NOT an attribution surface -- see §2.2.
 grep -c NVIDIA LICENSE.md                                           # expect > 0 (currently satisfied)
-grep -rl "Sharc/" --include=*.hlsl --include=*.hlsli modules        # expect empty while §5's algorithm is unwired
+grep -rn "include.*\(Rtxdi\|Sharc\)/" --include=*.hlsl --include=*.hlsli modules   # expect empty (§1, §5)
+ls bin/shaders/Rtxdi bin/shaders/Sharc 2>&1                          # expect "No such file" (CMake removes them)
 ```
 
 To see the NVIDIA section a package would carry, call the helper directly (no staging needed):
@@ -236,76 +236,21 @@ pwsh ./scripts/stage-game.ps1 -Project <any.ocproject> -Out <tmp>   # expect: PA
 ```
 
 **When the vendored SDKs are updated, re-read the licence texts rather than assuming they are
-unchanged.** The RTXDI and NRD copies already differ in formatting and in which SDKs their preamble
-enumerates, which means NVIDIA does revise these documents between drops.
+unchanged.** NVIDIA has revised these licence documents between SDK drops in the past (formatting and which
+SDKs the preamble enumerates), so a new NRD drop may carry different terms.
 
 ---
 
-## 5. RTXGI: SHaRC's headers ship, the algorithm is not wired
+## 5. Patents and provenance of the in-house ReSTIR GI
 
-**Corrected 2026-09-25.** This section used to say nothing referenced RTXGI and that it created no
-distribution obligation. §5.1's own work made that false on the day it was written: SHaRC's four
-headers are copied into `bin/shaders/Sharc`, and `shaders\**` ships in every payload and package.
-**NVIDIA source text is therefore redistributed even though no shader includes it yet.** The
-obligations in §2 now apply to RTXGI as they do to RTXDI. `scripts/NvidiaNotices.ps1` lists SHaRC
-whenever the staged tree contains that directory (§3).
+This is a neutral record of facts, not legal advice.
 
-Two facts worth keeping here so they are not rediscovered:
-
-- **RTXGI 2.x is not the DDGI probe SDK.** NVIDIA dropped probe-based irradiance caching; 2.x is
-  SHaRC (a world-space hashed radiance cache) plus NRC (a neural radiance cache). Looking for DDGI
-  in it is a dead end.
-- **NRC cannot run on this development machine.** It trains a network per frame on Tensor Cores and
-  requires NVIDIA Turing or later. Only SHaRC is a candidate here, and that is a hardware limit
-  rather than a licensing one.
-
-**Wiring SHaRC changes nothing further here.** It already ships and is already listed, and the
-obligations above already apply to it.
-
-### 5.1 What has been done toward wiring it (2026-09-21)
-
-The *compatibility* half is in; the algorithm is not. The split is deliberate: everything below can
-be verified today, and the part left out cannot.
-
-**Done:**
-
-- **SHaRC's four headers deploy**, structure-preserving, into `bin/shaders/Sharc/`
-  (`modules/render.voxi/CMakeLists.txt`). All four are `.h`, which `aver_deploy_shaders` cannot see
-  — it globs `*.hlsl`/`*.hlsli` and flattens — so the naive route deploys nothing and fails at
-  RUNTIME, since HLSL compiles at runtime here. Under their own directory, because `<exe>/shaders`
-  is a case-insensitive flat namespace that has already silently swallowed one file.
-- **`DeviceCaps::shaderInt64Atomics`**, asked of the device rather than inferred.
-- **A per-compile opt-in to 16-bit types**: passing the define `AVER_ENABLE_16BIT_TYPES` adds
-  `-enable-16bit-types` for that compile alone. `SharcPackedData` uses `float16_t4` and cannot
-  compile without it — but enabling it globally would change what `half` MEANS in 93 existing uses
-  across water, the material prelude and the path tracer's denoiser, from widened fp32 to genuine
-  fp16. A renderer-wide numerical change with no compile error to announce it.
-
-**Measured on the development machine (AMD Radeon RX 7800 XT):**
-
-| | |
-|---|---|
-| Device shader model | **6.6** |
-| Engine compiles shaders at | **6.5** |
-| `64-bit shader atomics` | **yes** |
-
-**Those first two rows disagree, and SHaRC reads the wrong one.** Its
-`SHARC_ENABLE_64_BIT_ATOMICS` auto-detect keys off the DXC shader TARGET macros
-(`SharcCommon.h:96-113`): at SM 6.5 it resolves to 0, meaning "no native atomics, use the software
-spin-lock", which needs a fourth buffer — 16 MiB at the suggested 2²² cache size — that this
-hardware does not need. **Set the define explicitly from `caps.shaderInt64Atomics`; do not let the
-SDK guess.**
-
-**Not done, and not attempted:** the SHaRC Update pass. It is structurally a multi-bounce
-path-tracer inner loop (`SHARC_PROPAGATION_DEPTH`, default 4) with no precedent in this codebase —
-much closer in shape to `modules/render.pt`'s `PtSceneView` than to Voxi's single-candidate-ray
-ReSTIR scheme. That is new algorithmic work plus GPU-hours of parameter tuning, not a wiring
-exercise, and SHaRC's own guide devotes a section to the tuning.
-
-**Two SDK facts worth keeping, both of which would cost an implementer time:**
-
-- **`SHARC_QUERY` does not exist.** `Integration.md` calls it required; it appears zero times in all
-  four headers. It is a host permutation-naming convention, not a macro branch.
-- **`Integration.md` is stale against the vendored v1.6.5.** `SHARC_SAMPLE_NUM_BIT_NUM`,
-  `SHARC_SAMPLE_NUM_MULTIPLIER`, `SHARC_RADIANCE_SCALE` and two debug functions it documents are all
-  gone; `GetVoxelSize()` is really `HashGridGetVoxelSize()`. Trust the headers, not the guide.
+- ReSTIR GI in `modules/render.voxi/shaders/voxi_reservoir.hlsli` and `voxi_restir.hlsli` is Aver's
+  own code, written from the papers: Talbot 2005 (RIS), Bitterli 2020 (ReSTIR), Ouyang 2021 (ReSTIR
+  GI), Lin 2022 (GRIS), Jarzynski and Olano 2020 (PCG hash) and Cigolle 2014 (octahedral normals).
+  It is not derived from RTXDI source, and no RTXDI or RTXGI file remains in the tree.
+- NVIDIA holds US 11,315,310 (ReSTIR plus a GI data structure) and US 12,299,801 (ReGIR). Aver's
+  code adds no per-cell or world-space stochastic light reservoirs (no ReGIR-style grid); reservoirs
+  are per pixel only.
+- Removing the NVIDIA source does not itself resolve any patent question. Whether the in-house
+  method falls within any claim has not been assessed here.

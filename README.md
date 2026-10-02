@@ -1,6 +1,6 @@
 # Aver Engine
 
-A custom, **modular** 3D game engine built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), **with one named exception**: NVIDIA's NRD/RTXDI/RTXGI SDKs are vendored under `third_party/` under the NVIDIA RTX SDKs licence, a decision taken deliberately in commit `d91ce76e` rather than by drift. This line said "exclusively" until 2026-09-20; the closing line of this file has acknowledged the NVIDIA code for longer than the opening one did. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
+A custom, **modular** 3D game engine built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), **with one named exception**: NVIDIA's NRD SDK is vendored under `third_party/` under the NVIDIA RTX SDKs licence, a decision taken deliberately in commit `d91ce76e` rather than by drift. This line said "exclusively" until 2026-09-20; the closing line of this file has acknowledged the NVIDIA code for longer than the opening one did. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
 
 - **Polyglot:** C++ (core, RHI, renderer, physics), C (one seam per module, not one seam for everything), C# on .NET 10 (scripting, gameplay, materials, HUD). **There is no Rust in this tree.** `tools/README.md` still advertises a Rust asset pipeline that was never written, and `abi/README.md` records why the single flat `Aver.ABI` those files describe is not coming either.
 - **Render backends:** DirectX 12 is the one you should use. `modules/rhi.d3d11` is a stub that returns a null device. **`modules/rhi.vulkan` is no longer a stub** — it creates a real device and swapchain, compiles the shared HLSL to SPIR-V through a vendored SPIR-V-capable DXC, and **presents a frame** (this line used to say it did not; that was fixed in commit `b8b7257`). `AVER_RHI_VULKAN` is **ON by default** (`CMakeLists.txt:58`) — it is still down to 10 validation errors, not zero, so the default build links a backend that is not yet clean. Its own source names what is left. All three sit behind one RHI abstraction.
@@ -78,9 +78,9 @@ tools/            eight built C++ tools (AverAssetC the asset cook, AverCrashRep
                   generator, and mcp/ — see docs/ARCHITECTURE.md for what each one is for
 docs/             the C seams, format specs, editor and project specs, recon of the existing engine
 cmake/            AvModule.cmake (aver_add_module)
-third_party/      14 vendored trees: dxc-spirv, fidelityfx-denoiser, fidelityfx-fsr, fonts, imgui,
-                  mathlib, meshoptimizer, nrd, nuget, rtxdi, rtxgi, shadermake, stb, vulkan-headers.
-                  nrd/rtxdi/rtxgi are NVIDIA's, under the NVIDIA RTX SDKs licence — the named
+third_party/      12 vendored trees: dxc-spirv, fidelityfx-denoiser, fidelityfx-fsr, fonts, imgui,
+                  mathlib, meshoptimizer, nrd, nuget, shadermake, stb, vulkan-headers.
+                  nrd is NVIDIA's, under the NVIDIA RTX SDKs licence — the named
                   exception to the permissive rule at the top of this file. Jolt is NOT here: it is
                   vendored under modules/physics.jolt/, because it is the rigid-body backend and is
                   named like every other backend (rhi.d3d12, audio.wasapi, formats.roslyn)

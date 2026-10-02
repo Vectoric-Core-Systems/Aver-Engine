@@ -63,7 +63,7 @@ $ErrorActionPreference = 'Stop'
 # THAT WORK IS DONE -- closed 2026-09-25, docs/NVIDIA-SDK-COMPLIANCE.md section 3.
 # scripts/NvidiaNotices.ps1, dot-sourced below, appends the source notice, the clause 6.1(c)
 # attribution list and every shipped component's licence to THIRD-PARTY-NOTICES.txt: NRD and MathLib
-# whenever compiled in, RTXDI and SHaRC whenever their shader directories are staged.
+# whenever compiled in.
 #
 # THE BLOCK STAYS UP ANYWAY. Closing the notices gap did not remove it -- lifting the block is a
 # separate decision the compliance doc leaves to the owner (section 3.1), not a side effect of the
@@ -76,8 +76,8 @@ if (-not $IAcceptNvidiaRedistribution) {
     Write-Host ""
     Write-Host "PAYLOAD STAGING BLOCKED -- pending owner sign-off to lift NVIDIA redistribution clearance." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  A staged engine payload redistributes NVIDIA SDK code (NRD, compiled in; RTXDI and"
-    Write-Host "  SHaRC, as verbatim HLSL source under shaders\). THIRD-PARTY-NOTICES.txt already"
+    Write-Host "  A staged engine payload redistributes NVIDIA SDK code (NRD, compiled in; MathLib"
+    Write-Host "  comes with it). THIRD-PARTY-NOTICES.txt already"
     Write-Host "  carries its notice, attribution and licences -- see docs/NVIDIA-SDK-COMPLIANCE.md section 3.1."
     Write-Host ""
     Write-Host "  This is a deliberate block while the engine is in beta, not a failure."
@@ -410,7 +410,7 @@ foreach ($c in $components) {
     [void]$notices.AppendLine((Get-Content -LiteralPath $p -Raw).TrimEnd())
     [void]$notices.AppendLine('')
 }
-# NRD (compiled in), RTXDI and SHaRC (HLSL source under shaders\), MathLib -- whichever this tree
+# NRD and MathLib (compiled in) -- whichever this tree
 # actually carries, with the NVIDIA notice and attribution ahead of their licences. See
 # NvidiaNotices.ps1 and docs/NVIDIA-SDK-COMPLIANCE.md.
 Add-AverNvidiaNotices -Notices $notices -Root $root -StagedDir $outFull -Options $options

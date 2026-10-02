@@ -70,7 +70,7 @@ Ray tracing APIs themselves — **DXR** (Direct3D 12) and **VK_KHR_ray_tracing**
 | NVIDIA DLSS (2/3) | Proprietary SDK, hardware-locked, license terms | FSR 2/3 (MIT) |
 | Intel XeSS (XMX path) | Proprietary weights on the fast path | FSR 2/3 (MIT); XeSS DP4a only if ever relicensed |
 | Epic **TSR** / Nanite / Lumen (as code) | UE EULA, proprietary | In-house TAA/TAAU + FSR; meshlet GPU-driven; DDGI/Brixelizer GI |
-| NVIDIA RTXGI SDK (as code) | SDK license | Implement DDGI from the *published paper*; or Brixelizer GI (MIT) |
+| NVIDIA RTX GI SDK code (for DDGI) | SDK license; not used, nothing of it is vendored | Implement DDGI from the *published paper*; or Brixelizer GI (MIT) |
 | Simplygon (auto-LOD) | Commercial | meshoptimizer simplify (MIT) |
 | Umbra (occlusion) | Commercial | GPU Hi-Z occlusion culling (in-house) |
 | Wwise/FMOD | Commercial (audio, out of scope) | (engine already plans procedural audio) |

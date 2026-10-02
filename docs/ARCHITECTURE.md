@@ -573,12 +573,11 @@ of independent features, each driving `Aver.RHI` directly with no render graph b
   authoring surface is **C#** rather than a runtime graph API — `[AverMaterial]` and
   `MaterialBuilder` under `scripting/csharp/Aver.Materials`, compiled to `.ocmat` by `avermatc`. The
   recon's headless-crash lesson still holds: nothing recompiles a shader to change a material.
-- **Third-party actually vendored: fourteen trees under `third_party/`, plus Jolt, which is not
+- **Third-party actually vendored: twelve trees under `third_party/`, plus Jolt, which is not
   under it.** This bullet said "**four** things" and named "no meshoptimizer, no FSR" as proof the
   engine wrote rather than collected; both claims were false by 2026-09-20 and are corrected here.
   `ls third_party/` returns: `dxc-spirv`, `fidelityfx-denoiser`, `fidelityfx-fsr`, `fonts`, `imgui`,
-  `mathlib`, `meshoptimizer`, `nrd`, `nuget`, `rtxdi`, `rtxgi`, `shadermake`, `stb`,
-  `vulkan-headers`. **Jolt Physics (MIT) is vendored at `modules/physics.jolt/`**, because it is the
+  `mathlib`, `meshoptimizer`, `nrd`, `nuget`, `shadermake`, `stb`, `vulkan-headers`. **Jolt Physics (MIT) is vendored at `modules/physics.jolt/`**, because it is the
   rigid-body backend behind `Aver.Physics` and is named like every other backend here (`rhi.d3d12`,
   `audio.wasapi`, `formats.roslyn`). The directory says what it is in the module graph; the README in
   it keeps the provenance — version, upstream archive, SHA-256, licence, and what upstream was left
@@ -587,10 +586,10 @@ of independent features, each driving `Aver.RHI` directly with no render graph b
 
   **The licence constraint is no longer "intact" in the unqualified sense this bullet used to
   claim.** `third_party/nrd/LICENSE.txt` opens "NVIDIA RTX SDKs LICENSE", which is not
-  MIT/BSD/zlib/Apache-2.0/public-domain, and `rtxdi`/`rtxgi` come from the same source. That is a
+  MIT/BSD/zlib/Apache-2.0/public-domain. That is a
   **named exception**, taken deliberately in commit `d91ce76e` ("Vendor NVIDIA NRD 4.18.0, as a named
   exception to the permissive-licence rule"), not a drift. The rule as it actually stands: no GPL, no
-  Unreal, no proprietary tech **except NVIDIA's RTX denoising/sampling SDKs, under their own
+  Unreal, no proprietary tech **except NVIDIA's RTX denoising SDK (NRD), under its own
   licence**. `README.md`'s closing line has acknowledged the NVIDIA code for longer than its opening
   line did.
 
@@ -651,11 +650,10 @@ Aver Engine/
                                  #   line used to enumerate 8 of them, which was a strict subset.
   scripting/csharp/              # Aver.Scripting(+.Bridge) Aver.Scene Aver.Framework
                                  #   Aver.UI Aver.Materials Aver.MaterialCompiler + samples
-  third_party/                   # 14 trees: dxc-spirv/ fidelityfx-denoiser/ fidelityfx-fsr/
-                                 #   fonts/ imgui/ mathlib/ meshoptimizer/ nrd/ nuget/ rtxdi/
-                                 #   rtxgi/ shadermake/ stb/ vulkan-headers/. nrd, rtxdi and rtxgi
-                                 #   are NVIDIA's, under the NVIDIA RTX SDKs licence -- the named
-                                 #   exception to the permissive rule; see §8 above.
+  third_party/                   # 12 trees: dxc-spirv/ fidelityfx-denoiser/ fidelityfx-fsr/
+                                 #   fonts/ imgui/ mathlib/ meshoptimizer/ nrd/ nuget/
+                                 #   shadermake/ stb/ vulkan-headers/. nrd is NVIDIA's, under the
+                                 #   NVIDIA RTX SDKs licence -- the named exception to the permissive rule; see §8 above.
                                  #   Jolt is NOT here: it is the physics backend, at
                                  #   modules/physics.jolt/
   branding/                      # splash, logo, icon sheets staged beside the exe

@@ -70,8 +70,6 @@ are NOT covered by the grant above. Each carries its own licence text in its dir
                                 (redistributed binary: dxcompiler.dll)  (Univ. of Illinois/NCSA)
   third_party/nuget             .NET Compiler Platform (Roslyn)         MIT
   third_party/nrd               NVIDIA Real-Time Denoisers (NRD)    NVIDIA RTX SDKs Licence
-  third_party/rtxdi             NVIDIA RTXDI (ReSTIR DI/GI)         NVIDIA RTX SDKs Licence
-  third_party/rtxgi             NVIDIA RTXGI (SHaRC)                NVIDIA RTX SDKs Licence
   third_party/mathlib           NVIDIA MathLib                      MIT
   third_party/shadermake        NVIDIA ShaderMake                   MIT
 
@@ -90,23 +88,14 @@ SDK code:
   * NRD (NVIDIA Real-Time Denoisers) is compiled and statically linked into both the editor and
     the packaged-game runtime. It denoises the ray-traced global-illumination signal.
 
-  * RTXDI's shader source is distributed VERBATIM. Its HLSL is copied whole into the shaders
-    directory of every build and every package, and the engine's own shaders include it -- the
-    ReSTIR GI estimator is RTXDI's. This is NVIDIA source code shipped as readable text, not
-    merely linked as a compiled artefact, which is the plainest possible case for the notice above.
-
   * MathLib and ShaderMake are NVIDIA-authored and MIT-licensed. Their own copyright and permission
     notices are reproduced in their directories and travel with them.
-
-  * RTXGI's SHaRC headers are distributed VERBATIM: they are copied into the shaders directory of
-    every build and every package, although no engine shader includes them yet. RTXGI is not
-    built or linked. The terms below apply to it as they do to RTXDI.
 
 Packaged builds carry this same notice, the list of NVIDIA SDKs they use, and each SDK's licence in
 full, in THIRD-PARTY-NOTICES.txt (written by scripts/NvidiaNotices.ps1).
 
 WHAT NVIDIA REQUIRES. The full text governs and is reproduced unmodified in each directory
-(third_party/nrd/LICENSE.txt, third_party/rtxdi/LICENSE.txt, third_party/rtxgi/License.md). The
+(third_party/nrd/LICENSE.txt). The
 obligations that bear on anyone distributing this software are:
 
   1. The notice at the head of this section must be included in modifications and derivative works

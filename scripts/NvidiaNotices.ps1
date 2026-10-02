@@ -6,18 +6,17 @@
 #
 # WHAT IS OWED, per shipped component (quoted in full in the compliance doc):
 #   * "This software contains source code provided by NVIDIA Corporation." -- the RTX SDKs Licence's
-#     notice for distributed source. RTXDI and SHaRC ship as verbatim HLSL under shaders\.
+#     notice for distributed source.
 #   * Clause 6.1(c) attribution. With no credit screen, it goes "prominently in end user
 #     documentation" -- and for a packaged build, this file IS that documentation.
 #   * MIT copyright and permission notices for MathLib, which NRD compiles in.
 #
 # DERIVED FROM WHAT SHIPS, NOT FROM WHAT IS VENDORED: a notice for a component that is absent is as
 # wrong as a missing one. NRD is compiled into the renderer, so it follows the build flags that put
-# it there. RTXDI and SHaRC are source text, so they follow the staged tree itself -- a shaders
-# directory named for them either reached the package or it did not.
+# it there.
 #
 # ShaderMake is deliberately absent: it runs at build time to compile NRD's shaders and none of it
-# is redistributed. RTXGI's NRC is absent too -- it is not vendored at all (Tensor Cores only).
+# is redistributed.
 #
 # Calls the caller's own Fail on a missing licence file, like both stagers' $components loops.
 
@@ -31,16 +30,6 @@ function Get-AverNvidiaComponents([string] $StagedDir, [hashtable] $Options) {
                         File = 'third_party\nrd\LICENSE.txt'; How = 'compiled into the renderer' })
         $shipped.Add(@{ Name = 'NVIDIA MathLib'; Licence = 'MIT'
                         File = 'third_party\mathlib\LICENSE.txt'; How = 'compiled into the renderer as part of NRD' })
-    }
-    $dirs = @(Get-ChildItem -LiteralPath $StagedDir -Recurse -Directory -ErrorAction SilentlyContinue |
-              ForEach-Object { $_.Name.ToLowerInvariant() })
-    if ($dirs -contains 'rtxdi') {
-        $shipped.Add(@{ Name = 'NVIDIA RTXDI (ReSTIR GI)'; Licence = 'NVIDIA RTX SDKs Licence'
-                        File = 'third_party\rtxdi\LICENSE.txt'; How = 'HLSL source, shaders\Rtxdi' })
-    }
-    if ($dirs -contains 'sharc') {
-        $shipped.Add(@{ Name = 'NVIDIA RTXGI (SHaRC)'; Licence = 'NVIDIA RTX SDKs Licence'
-                        File = 'third_party\rtxgi\License.md'; How = 'HLSL headers, shaders\Sharc' })
     }
     return ,$shipped
 }
