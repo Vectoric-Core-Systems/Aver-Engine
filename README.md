@@ -1,6 +1,6 @@
 # Aver Engine
 
-A custom, **modular** 3D game engine built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), exclusively. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
+A custom, **modular** 3D game engine licensed under the **GNU LGPL v3** (see [License](#license)) and built on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain), exclusively — no NVIDIA RTX SDK remains in the tree; ray-traced GI is in-house ReSTIR GI and denoising is AMD FidelityFX Denoiser. It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
 
 - **Polyglot:** C++ (core, RHI, renderer, physics), C (one seam per module, not one seam for everything), C# on .NET 10 (scripting, gameplay, materials, HUD). **There is no Rust in this tree.** `tools/README.md` still advertises a Rust asset pipeline that was never written, and `abi/README.md` records why the single flat `Aver.ABI` those files describe is not coming either.
 - **Render backends:** DirectX 12 is the one you should use. `modules/rhi.d3d11` is a stub that returns a null device. **`modules/rhi.vulkan` is no longer a stub** — it creates a real device and swapchain, compiles the shared HLSL to SPIR-V through a vendored SPIR-V-capable DXC, and **presents a frame** (this line used to say it did not; that was fixed in commit `b8b7257`). `AVER_RHI_VULKAN` is **ON by default** (`CMakeLists.txt:58`) — it is still down to 10 validation errors, not zero, so the default build links a backend that is not yet clean. Its own source names what is left. All three sit behind one RHI abstraction.
@@ -72,7 +72,7 @@ sandbox/          Sandbox.exe — the editor. Calls the Runtime/ library; does n
 Runtime/          AverEngineRuntime.exe — the standalone runtime host, plus the library BOTH
                   hosts share: Aver.Runtime.Game and Aver.Runtime.Game.Core
 scripting/csharp/ the C# side: what a project references, the CLR bridge, avermatc
-tests/            headless test executables, one directory per area — 34 of them
+tests/            headless test executables, one directory per area — 33 of them
 tools/            eight built C++ tools (AverAssetC the asset cook, AverCrashReporter, ActorSweep,
                   MakeFoliage, MakeRig, MakeSamples, RelodTool, DumpClusterPs), a Python texture
                   generator, and mcp/ — see docs/ARCHITECTURE.md for what each one is for
@@ -100,9 +100,9 @@ never started or had since been built elsewhere under another name, and `docs/AR
 carried a more accurate account of all five. A directory that exists only to describe work that does
 not exist is a second copy of the truth, and it was the copy nobody was updating.
 
-HLSL lives in **files**, at `modules/<module>/shaders/*.hlsl` and `sandbox/shaders/*.hlsl` — **22
-`.hlsl` plus 6 `.hlsli` includes**, with 17 more vendored inside Jolt — compiled at run time by DXC and staged beside the executable as
-`bin/shaders/`. (The count read 25 until 2026-09-20 and did not name the `.hlsli` files.) This paragraph
+HLSL lives in **files**, at `modules/<module>/shaders/*.hlsl` and `sandbox/shaders/*.hlsl` — **24
+`.hlsl` plus 7 `.hlsli` includes**, with 17 more vendored inside Jolt — compiled at run time by DXC and staged beside the executable as
+`bin/shaders/`. (The count read 25 until 2026-09-20 and did not name the `.hlsli` files, and 22 + 6 until 2026-10-02.) This paragraph
 previously said HLSL "is embedded in C++ next to the code that compiles it", naming
 `modules/rhi/src/RHIShaders.cpp`, `PbrShaders.hpp` and `UiShaders.hpp`. Those three files still exist
 and contain **no HLSL at all** — the shader bodies moved out to files and the sentence did not follow
@@ -123,6 +123,7 @@ them. Game content lives outside the engine entirely — see [docs/PROJECTS.md](
 | `render.pbr` | `Aver.Render.PBR`, `.Materials` | The material system and its C seam; the surface BRDF and the GPU binding half. |
 | `render.softbody` | `Aver.Render.SoftBody` | Draws a mesh whose vertices come from a simulated soft body: reads the particles back from Jolt through `Aver.Physics`, packs them into the renderer's interleaved vertex format (recomputing normals, converting world space back to mesh-local) and substitutes the `MeshHandle` at the draw, the same seam GPU skinning uses. Needs both the scene and physics; force-disabled without either. |
 | `render.voxi` | `Aver.Render.Voxi`, `.Renderer` | Render-feature settings + C seam (Core-only) and the GI / shadow / RayQuery feature that drives the RHI. |
+| `render.denoise` | `Aver.Render.Denoise` | The spatio-temporal denoiser for Voxi's ReSTIR GI radiance and sky occlusion: AMD FidelityFX Denoiser's reflection pipeline (MIT, `third_party/fidelityfx-denoiser`) driven as a diffuse denoiser, plus the pipelines, history textures and state transitions around it. Replaced NVIDIA NRD. See its README. |
 | `render.ui` | `Aver.Render.UI` | Turns a `UiDrawList` into draw calls in the overlay pass, after the camera post chain, so a HUD is not tonemapped with the world. |
 | `render.actorpreview` | `Aver.Render.ActorPreview` | The actor editor's 3D preview: its own colour+depth target, pipeline, mesh registry, and a camera published at `b4` so it never collides with the shared prelude's blocks. |
 | `scene` | `Aver.Scene` | Entities, packed component pools, hierarchy, fields addressed by name, and a C seam readable end to end without meeting the word *actor*. |
@@ -159,3 +160,21 @@ them. It still does not list those two entry point by entry point; their headers
 A material is authored as a C# class: `avermatc` (`Aver.MaterialCompiler`, staged to `bin/Tools/`) reflects the built assembly and emits `.ocmat`. So `Content/Materials/*.cs` is the source and `Binaries/Materials/*.ocmat` is the build output, and the editor looks in `Binaries` **first** — a project that has not adopted C# materials falls through to a hand-authored `.ocmat` and still works. **Tools ▸ Compile Scripts** builds both halves; **Tools ▸ Reload Scripts** swaps the result into the running editor without a restart. Hot reload does not carry state: a behaviour's fields start again from their initialisers.
 
 A new project is scaffolded with a `Scripts.csproj` referencing four of those — `Aver.Scripting`, `Aver.Framework` (which carries `Aver.Scene` behind it), `Aver.UI` and `Aver.Materials` — plus `Content/{Maps,Meshes,Materials,Textures,Sounds,Scripts}` and a starter `M_Default` material. Opening an older project offers an upgrade, and that upgrade **merges** the `.csproj` rather than regenerating it, so hand-added references and settings survive. Both are reachable without the UI: `Sandbox.exe --new-project <location> <name>` and `--upgrade-project <path.ocproject>`.
+
+## License
+
+Aver Engine is free software, licensed under the **GNU Lesser General Public License, version 3**
+(`LGPL-3.0-only`). Copyright (c) 2026 Hydrogen-Isotope; developed by Vectoric-Core-Systems.
+
+- [`LICENSE.md`](LICENSE.md) — the project's licence notice and the table of third-party components.
+- [`COPYING.LESSER`](COPYING.LESSER) — the LGPL v3 text. [`COPYING`](COPYING) — the GPL v3 text it extends.
+
+What that means in practice: a game or application built on Aver may be commercial and closed, and
+its own code, scripts and content stay under whatever terms you choose. Changes to the engine itself
+that you distribute must be published under the LGPL v3, and a shipped build must carry the engine's
+licence, point to its source, and let the player swap in a modified build of the engine's libraries.
+`scripts/stage-payload.ps1` and `scripts/stage-game.ps1` write both licence texts into every
+package's `THIRD-PARTY-NOTICES.txt`.
+
+Vendored third-party code (`third_party/`, `modules/physics.jolt/Jolt`) keeps its own licence — MIT,
+Apache-2.0, public domain or NCSA — and its own copyright notices; `LICENSE.md` lists each one.
