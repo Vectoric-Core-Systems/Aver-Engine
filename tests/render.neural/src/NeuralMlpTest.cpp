@@ -141,6 +141,15 @@ void gradientCheck(Activation hidden, Activation output, Loss loss) {
     Rng rng(0x1234u + static_cast<u32>(hidden) * 17u + static_cast<u32>(output));
     std::vector<f32> w = ref.weights();
     for (f32& x : w) x = 0.5f * x + rng.range(-0.2f, 0.2f);
+    // A ReLU hidden layer can come out mostly dead for an unlucky draw (measured: hidden relu + output
+    // sigmoid at this seed left fewer than a quarter of the gradients nonzero, with 0 outliers among
+    // them), which says nothing about backward(). Lift the hidden biases so the units sit on the
+    // active side of the kink; the check is about the maths, not about initialisation luck.
+    if (hidden == Activation::ReLU) {
+        const MlpLayout lay = MlpLayout::make(d);
+        for (u32 l = 0; l + 1 < lay.layers; ++l)   // hidden layers only; the output layer is not ReLU
+            for (u32 j = 0; j < lay.outDim[l]; ++j) w[lay.bOffset[l] + j] += 0.5f;
+    }
     ref.setWeights(w);
 
     const f32 in[3] = {rng.range(-0.8f, 0.8f), rng.range(-0.8f, 0.8f), rng.range(-0.8f, 0.8f)};
@@ -183,7 +192,8 @@ void gradientCheck(Activation hidden, Activation output, Loss loss) {
     check(outliers <= budget && nonzero > ref.weightCount() / 4,
           std::string("backward matches finite differences: hidden ") + actName(hidden) + ", output " +
               actName(output) + ", " + (loss == Loss::L2 ? "L2" : "relative L2") + " (" +
-              std::to_string(outliers) + " outliers of " + std::to_string(ref.weightCount()) + ")");
+              std::to_string(outliers) + " outliers, " + std::to_string(nonzero) + " nonzero, of " +
+              std::to_string(ref.weightCount()) + ")");
 }
 
 void testGradients() {
