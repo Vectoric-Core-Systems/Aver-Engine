@@ -1712,6 +1712,24 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         camPos_ += camForward() * camTranslateSpeed_;
     }
+    // --cam-wander AMP SPEED: see setCamWander's own comment. Yaw, pitch and position each follow a sum
+    // of sines at mutually irrational frequencies about where the camera started, so the path never
+    // repeats and its acceleration keeps changing -- the motion NeuraFI's trajectory network trains on.
+    if (camWanderAmp_ > 0.0f && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
+        if (!camWanderBased_) {
+            camWanderBasePos_ = camPos_; camWanderBaseYaw_ = yaw_; camWanderBasePitch_ = pitch_;
+            camWanderBased_ = true;
+        }
+        const f32 s = static_cast<f32>(t.frame - 1) * camWanderSpeed_;
+        const f32 a = camWanderAmp_;
+        yaw_ = camWanderBaseYaw_ + a * 0.4363f *   // +-25 degrees at AMP 1
+               (std::sin(0.0131f * s) + 0.6f * std::sin(0.0317f * s + 1.1f) + 0.3f * std::sin(0.0719f * s + 2.3f)) / 1.9f;
+        pitch_ = camWanderBasePitch_ + a * 0.1396f *   // +-8 degrees
+                 (std::sin(0.0173f * s + 0.5f) + 0.5f * std::sin(0.0437f * s + 1.3f)) / 1.5f;
+        camPos_ = camWanderBasePos_ + Vec3{a * 300.0f * std::sin(0.0091f * s + 0.2f),    // +-3 m across
+                                           a * 300.0f * std::sin(0.0113f * s + 1.9f),
+                                           a * 60.0f * std::sin(0.0213f * s + 0.7f)};    // +-0.6 m up/down (Z up)
+    }
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     // --no-occlusion-cull: see setOcclusionCullForceOff's own comment for why it can't be a
     // one-shot CLI setter -- applyProjectVoxiSettings rewrites

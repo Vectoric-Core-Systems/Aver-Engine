@@ -542,6 +542,16 @@ void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
 // Composes with --cam-wobble: wobble touches yaw_, this touches camPos_.
 void SandboxApp::setCamTranslate(f32 speedCmPerFrame) { camTranslateSpeed_ = speedCmPerFrame; }
 
+// --cam-wander AMP SPEED: a smooth, NON-REPEATING drift about the start -- yaw +-25 deg, pitch +-8 deg,
+// position +-3 m across and +-0.6 m up, each times AMP -- with SPEED scaling time (1 = the base pace,
+// 3 = three times as fast). Unlike --cam-wobble's single sine, the acceleration never settles into one
+// pattern, which is what a trajectory network needs to train on (docs/rendering/NEURAFI.md §3.5).
+// Frame-counter driven like the others, so a run is repeatable; --cam-wobble-stop N stops it too.
+void SandboxApp::setCamWander(f32 amp, f32 speed) {
+    camWanderAmp_ = amp > 0.0f ? amp : 0.0f;
+    camWanderSpeed_ = speed > 0.0f ? speed : 1.0f;
+}
+
 void SandboxApp::setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
     camOverride_ = true;
     camPosOverride_ = pos;

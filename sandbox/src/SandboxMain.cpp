@@ -88,6 +88,7 @@ Application* createApplication(int argc, char** argv) {
     int resizeCycleArg = 0;
     int frameInterpArg = -1;   // --frame-interp 0|1|2; -1 = not given (project / Editor Preference decide)
     bool vsyncOn = false;   // --vsync
+    f32 camWanderAmp = 0.0f, camWanderSpeed = 1.0f;   // --cam-wander AMP SPEED
     int frameInterpTrajectory = -1;  // --frame-interp-trajectory: 0 linear, 1 quadratic, 2 neural; -1 = not given
     bool frameInterpTrain = false;   // --frame-interp-train
     int pieCamArg = 0;
@@ -805,6 +806,10 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--cam-wobble") && i+2<argc) {
             camWobbleDeg=(f32)std::atof(argv[++i]); camWobblePeriod=std::atoi(argv[++i]);
         }
+        // --cam-wander AMP SPEED: see setCamWander -- a non-repeating drift for training NeuraFI.
+        else if (!std::strcmp(argv[i],"--cam-wander") && i+2<argc) {
+            camWanderAmp=(f32)std::atof(argv[++i]); camWanderSpeed=(f32)std::atof(argv[++i]);
+        }
         // The sun occlusion rays per pixel, so the cost of ray-traced shadows can be MEASURED
         // instead of asserted: the sequence is nested, so 1, 2, 4, 8 is one converging series.
         else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
@@ -1342,6 +1347,7 @@ Application* createApplication(int argc, char** argv) {
     if (camWobbleStopArg > 0) app->setCamWobbleStop(camWobbleStopArg);
     if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
+    if (camWanderAmp > 0.0f) app->setCamWander(camWanderAmp, camWanderSpeed);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
 #if AVER_MODULE_SR

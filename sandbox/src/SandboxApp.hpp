@@ -1683,6 +1683,7 @@ public:
     void setMeshHeapDefault(bool on);
     void setLodShareVertices(bool on);
     void setCamTranslate(f32 speedCmPerFrame);
+    void setCamWander(f32 amp, f32 speed);        // --cam-wander AMP SPEED
     void setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg);
     void setScriptsDir(std::string d);            // --scripts <dir>
     void setSpawnTest(std::string cls);      // --spawn-test <ClassName>
@@ -3971,6 +3972,11 @@ private:
     std::vector<std::pair<std::string, std::string>> consoleSets_;
     bool consoleSetsApplied_=false;
     f32  camTranslateSpeed_=0.0f;    // --cam-translate SPEED: forward-flight, cm/frame, 0 = no motion
+    f32  camWanderAmp_=0.0f;         // --cam-wander AMP SPEED: non-repeating drift, 0 = off
+    f32  camWanderSpeed_=1.0f;
+    bool camWanderBased_=false;
+    Vec3 camWanderBasePos_{};
+    f32  camWanderBaseYaw_=0.0f, camWanderBasePitch_=0.0f;
     // --mesh-heap default|upload (W4): false (default) = static mesh vertex/index buffers on the
     // Upload heap, today's behaviour on every backend; true moves them to the Default heap (see
     // rhi::IDevice::setStaticMeshHeapDefault). Applies to createMesh calls made after it's set, so

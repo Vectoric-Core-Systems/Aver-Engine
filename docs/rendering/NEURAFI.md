@@ -203,8 +203,28 @@ a fixed 2×2 at 3532×1987 put 1.75M records through the network for 3.98 ms; ad
 - Costs at 1766×994: interpolation 0.92–1.40 ms with network inference; training +0.52 ms while on; the
   live check 0.01 ms.
 
-**Shipped weights.** The engine ships the network trained above (15,018 lifetime steps over seven
-wobbles on Sponza day and night) as `modules/render.neurafi/data/neurafi_v2.avnn`, deployed to
+**Refinement on realistic motion** (`--cam-wander AMP SPEED`: yaw, pitch and position drifting on
+non-repeating sums of sines, so translation parallax and changing acceleration are both present). Six
+sessions, Sponza day and night, 15k → 30k lifetime steps; smoothed errors at session end:
+
+| Wander | Quadratic | Network | Gate |
+|---|---|---|---|
+| 1.0 at 1× (slow) | 0.007 | 0.008 | quadratic (tie) |
+| 0.6 at 2.5× | 0.048 | 0.043 | network, on and off |
+| 1.5 at 0.5× (big, slow) | 0.005 | 0.007 | quadratic |
+| 1.0 at 4× (fast) | 0.251 | **0.193** | network |
+| 0.4 at 6× (small, jittery) | 0.372 | **0.245** | network |
+| 1.2 at 1.5× (medium) | 0.054 | 0.071 | quadratic |
+| **held out**, training off: 0.8 at 3× | 0.076 | **0.071** | network after the first judgement |
+
+So the network helps most where motion turns quickly (25–35%), ties where the quadratic is already
+near-exact, and loses on some medium-pace paths — where the gate keeps the quadratic. **The limit is its
+inputs:** motion vectors alone cannot tell rotation from translation parallax, which depends on depth.
+The next step for a real gain is a v3 record adding real-frame view depth (relative to the neighbours)
+and screen position — allowed by R6, which forbids only in-between-time inputs — retrained from the start.
+
+**Shipped weights.** The engine ships the network trained above (30,036 lifetime steps: seven wobbles,
+then the six wander sessions, on Sponza day and night) as `modules/render.neurafi/data/neurafi_v2.avnn`, deployed to
 `bin/data` and listed in both packaging allowlists (`data/**`). Its sidecar holds only the step count:
 no verdict ships, so every user's live gate judges it on their own motion first. *Measured* as a fresh
 user (no user file): loaded from `bin/data`, quadratic stood in, judged after three checks, switched in
