@@ -317,6 +317,19 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   the clock. There is no frame-time estimator, no GPU or UI timing in the schedule, no pacer thread
   deciding when to present.
 - **Frame cap** at half the refresh rate (the real-frame rate the cadence needs).
+- **The present thread (2026-10-03, the shape FSR3's swapchain uses).** The render thread never calls
+  Present. Each frame draws into a ring of 4 present images (`renderTargets_`) and hands each finished one
+  to the present thread. That thread waits on the GPU until the image is drawn (`readyFence_`), copies it
+  into the swapchain on its own high-priority present queue (the swapchain is created on that queue), and
+  presents it. The fixed-clock wait lives there too. The render queue waits, GPU-side, only when it is
+  about to overwrite an image the present thread has not copied yet (`doneFence_`). The render thread
+  blocks only when 4 requests are already waiting, which is back-pressure from the display. Before: in a
+  composed window, the real Present waited for the generated image to be shown, so CPU and GPU took turns.
+  *Measured:* Sponza at 0.67 ran 67 ms frames, against 24 ms with interpolation off. After, at 0.5: Sponza
+  and NeonDistrict hit the target exactly. At target 60: 29.5 real + 29.5 generated. At target 120 with
+  vsync off: Sponza 60 + 60 (67 real without interpolation), NeonDistrict 44.5 + 44.5 (59 without; it is
+  at the VRAM limit). In a composed window the display still shows at most its refresh rate.
+  Debug layer: 0 errors.
 - **The fixed target (2026-10-03).** One setting, "Frames shown per second" (`IDevice::setFrameInterpClock`,
   default the refresh rate). Real frames run at half the target, each followed by a generated frame
   halfway. With vsync, every present (generated and real) uses sync interval round(refresh / target),
