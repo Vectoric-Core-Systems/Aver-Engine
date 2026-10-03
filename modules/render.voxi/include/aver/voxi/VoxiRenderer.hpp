@@ -1053,11 +1053,10 @@ private:
     // RADIANCE CACHE state (stage 1). Created on the first frame Cached is wanted and destroyed when it stops being.
     NeuRaC rc_;
     bool neuracLive_ = false;
-    u64 tlasBlasGeneration_ = 0;
-    u64 tlasBuiltBlasGeneration_ = 0;
-    std::vector<u32> voxDrawZ_;
-    u32 neuracView_ = 0;
-    // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21.
+    u32 neuracView_ = 0;   // setNeuRaCView: mode in bits 0-2, grid bit 3 (packed into gAmbientParams.w << 8)
+    // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21; a different
+    // value from beginFrame means the buffers changed and bindings_ must be rewritten (before the
+    // first bind of the frame -- Vulkan ringed sets forbid writing a bound set).
     u32 rcBoundGeneration_ = 0;
     // True while t22/u20/u21 hold real cache buffers.
     bool rcSlotsBound_ = false;

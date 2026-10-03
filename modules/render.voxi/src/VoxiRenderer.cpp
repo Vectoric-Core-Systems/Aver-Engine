@@ -247,14 +247,6 @@ const char* voxiShaderPrelude() {
     return s.c_str();
 }
 
-// GI injection runs in z slabs so the accumulator holds res / slabs layers (docs/rendering/VRAM.md).
-constexpr u32 kGiInjectionSlabs = 2;
-u32 giInjectionSlabs(u32 res) { return res >= 4u * kGiInjectionSlabs ? kGiInjectionSlabs : 1u; }
-// Four uints per voxel (r, g, b, fragment count).
-u64 giInjectionAccumulatorBytes(u32 res) {
-    return static_cast<u64>(res) * res * (res / giInjectionSlabs(res)) * 16ull;
-}
-
 // Writes the tail of the per-draw block: shading model, then its default parameters.
 void writeShadingConstants(f32* block) {
     const u32 model = 0;   // AVER_MODEL_STANDARD
@@ -792,8 +784,8 @@ void VoxiRenderer::reportVramUsage() {
     }
     // Accumulator: freed when not in use.
     const u64 accumBytes = voxelAccumTex_
-        ? giInjectionAccumulatorBytes(voxelResBuilt_) : 0;
-    // Readback + upload buffers.
+        ? static_cast<u64>(voxelResBuilt_) * voxelResBuilt_ * voxelResBuilt_ * 16ull : 0;
+    // Readback + upload, sized identically by giCacheEnsureBuffers; 0 once giCacheFreeBuffers has run.
     const u64 giCacheBytes = giCacheReadback_ ? giCacheBufBytes_ * 2ull : 0;
     // Staged ray-driven: four RGBA16F targets + three StructuredBuffers.
     const u64 rdTexBytes = rdSunVisTex_ ? static_cast<u64>(rdStagedW_) * rdStagedH_ * 8ull * 4ull : 0;
@@ -1281,8 +1273,9 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
             giAccumWanted_ = false;
             giQuietTicks_ = 0;
             giAccumRecreateFailedLogged_ = false;
-            giAccumRecreateBackoffNext_ = 0;
-            const f64 mib = static_cast<f64>(giInjectionAccumulatorBytes(voxelResBuilt_)) / (1024.0 * 1024.0);
+            giAccumRecreateBackoffNext_ = 0;   // the next failure, if any, starts cold again
+            const f64 mib = static_cast<f64>(static_cast<u64>(voxelResBuilt_) * voxelResBuilt_ *
+                                             voxelResBuilt_ * 16ull) / (1024.0 * 1024.0);
             AVER_INFO("[Voxi] injection accumulator recreated ({:.0f} MiB); the rebuild that needed "
                       "it runs on the next tick", mib);
         } else {
@@ -1314,8 +1307,21 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
             res_->setUav(bindings_, 1, voxelAccumPlaceholder_, 0);
             res_->setUav(clearBindings_, 1, voxelAccumPlaceholder_, 0);
             res_->setUav(resolveBindings_, 1, voxelAccumPlaceholder_, 0);
-            const f64 mib = static_cast<f64>(giInjectionAccumulatorBytes(voxelResBuilt_)) / (1024.0 * 1024.0);
-            // destroyTexture retires the resource behind the current fence value; reclamation is fence-deferred.
+            const f64 mib = static_cast<f64>(static_cast<u64>(voxelResBuilt_) * voxelResBuilt_ *
+                                             voxelResBuilt_ * 16ull) / (1024.0 * 1024.0);
+            // FENCE-DEFERRED, NOT IMMEDIATE, ON BOTH BACKENDS -- and said as "queued", not "released",
+            // for exactly that reason. destroyTexture retires the resource behind the fence value
+            // in flight right now; both D3D12ResourceFactory::collect() and its Vulkan twin only walk
+            // that retired list and Release()/vkDestroyImage the ones whose fence has already passed,
+            // and neither runs on a timer -- each is a side effect of some OTHER create*/destroy* call
+            // on the SAME factory. In an otherwise idle scene (which is exactly when W12 fires: 240
+            // quiet GI ticks) nothing may call the factory again for a while, so this retired texture
+            // can sit un-reclaimed past the frames a process-VRAM reading was taken over -- a real gap,
+            // not a rounding artefact of the reading. A fix belongs in the backends (not this module):
+            // an unconditional collect() once per frame, e.g. beside D3D12Device::beginFrame's existing
+            // collectGpuTiming()/collectExposureReadout() calls and the Vulkan equivalent, so a retired
+            // resource is reclaimed within kFrameCount frames of retiring regardless of what else the
+            // factory is asked to do that frame.
             res_->destroyTexture(voxelAccumTex_);
             voxelAccumTex_ = 0;
             AVER_INFO("[Voxi] injection accumulator freed after {} quiet GI tick(s): {:.0f} MiB "
@@ -1332,11 +1338,29 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtAccelListKeyValid_ = false;
     if (!rtSupported_ || settings_.rayTracing == Quality::Off || (drawsPrev_.empty() && foliageInstances_ == 0)) return;
 
-    // The unchanged gate (Settings::rtSkipUnchangedTlas): if matched, tlas_/rtInstanceData_/SRVs are correct.
-    // Movable draw transforms are handled by patchRtMovers(). Full rebuild on BLAS compaction.
-    const u64 blasGen = res_->blasGeneration();
-    if (settings_.rtSkipUnchangedTlas && blasGen == tlasBlasGeneration_ && rtAccelSnapshotUnchanged()) {
-        // SETTLING: rows whose prev differs from current describe last frame's motion; settle them now.
+    // ---- The unchanged gate (Settings::rtSkipUnchangedTlas) ----
+    // See rtAccelSnapshotUnchanged() for what "unchanged" checks. A match means tlas_,
+    // rtInstanceData_ and every SRV bound to them (slots 2/3/4/5/9, set the last time the per-draw
+    // loop actually ran -- slot 5 aside, which a mover patch re-binds) are still correct (the TRANSFORMS of movable draws aside: the key leaves
+    // them out and the mover patch lane below brings them up to date), so the whole body below (the
+    // per-draw loop, the material and geometry tables) is skipped -- except what's NOT a function of
+    // drawsPrev_ and is read every
+    // frame regardless: rtActive_, cb_.shadowParams[2], cb_.rtParams (updateRtParamsPerFrame(),
+    // factored out for this reuse), cb_.rtParams[3] from rtGeometryReady_ rather than a fresh
+    // buildGeometryTable() call, and -- when Settings::rtRefitAccel is on and rtDynamicMeshes_ is
+    // non-empty -- the dynamic BLASes/tlas_/their rtVerts_ slices, refreshed in place by
+    // refitDynamicAccelStructures() rather than left alone.
+    if (settings_.rtSkipUnchangedTlas && rtAccelSnapshotUnchanged()) {
+        // SETTLING (rtPrevPending_, VoxiRenderer.hpp): rows whose previous transform still differs from
+        // their current one describe LAST frame's motion. If the object moves again this frame the patch
+        // below writes a fresh prev; if it does not, prev must become equal to current NOW, or the GPU
+        // keeps reporting that old motion for as long as the table goes un-uploaded. Done before the
+        // patch so the patch only ever has to think about this frame's movers.
+        //
+        // Harmless if the patch is then Refused: the full build that follows carries forward from each
+        // row's objectToWorld (what was drawn), never from its prevObjectToWorld, so a row settled here
+        // loses nothing -- the full build recomputes every prev from scratch, and rebuilds
+        // rtPrevPending_ with it. The settled CPU rows are simply never uploaded.
         bool settled = false;
         for (const u32 row : rtPrevPending_) {
             if (row >= rtInstanceData_.size()) continue;
@@ -1381,7 +1405,6 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         }
     }
     if (settings_.rtSkipUnchangedTlas) ++rtAccelRebuilt_;
-    tlasBlasGeneration_ = blasGen;
 
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
     tlasTranslucentThisBuild_ = 0;
@@ -1868,11 +1891,7 @@ void VoxiRenderer::refitOrRebuildDynamicBlas(rhi::IRenderContext& ctx, rhi::Blas
 // Shared by full-build and refit-only paths, so both use one rebuild schedule.
 bool VoxiRenderer::refitOrRebuildTlas(rhi::IRenderContext& ctx) {
     const u32 count = static_cast<u32>(tlasInstScratch_.size());
-    // A refit may not change instance BLAS address, so moved BLAS forces full build.
-    const u64 blasGen = res_->blasGeneration();
-    const bool tryRefit = settings_.rtRefitAccel && tlasRefitStreak_ < kTlasRefitsPerRebuild &&
-                          blasGen == tlasBuiltBlasGeneration_;
-    tlasBuiltBlasGeneration_ = blasGen;
+    const bool tryRefit = settings_.rtRefitAccel && tlasRefitStreak_ < kTlasRefitsPerRebuild;
     const bool refitted = tryRefit && ctx.refitTlas(tlas_, tlasInstScratch_.data(), count);
     if (refitted) { ++tlasRefitStreak_; ++rtTlasRefits_; }
     else {
@@ -3636,13 +3655,9 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // ---- W3 pre-pass: which part of the grid THIS rebuild's injection can possibly touch ----
     VoxelBox drawsBox{};
     bool anyUnbounded = false;
-    // Each draw's voxel z range [lo, hi), so a slab only rasterises the draws that reach it.
-    voxDrawZ_.assign(drawsPrev_.size() * 2, 0u);
     {
         const f32 origin[3] = {center_[0] - extent_, center_[1] - extent_, center_[2] - extent_};
-        for (usize di = 0; di < drawsPrev_.size(); ++di) {
-            const Draw& d = drawsPrev_[di];
-            voxDrawZ_[di * 2 + 1] = res;
+        for (const Draw& d : drawsPrev_) {
             if (d.translucent) continue;
             if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
             if (!giVoxelisedDraw(d)) continue;
@@ -3668,10 +3683,8 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
             }
             // Pad 2 voxels: conservative raster (vox.conservativeRaster below) can light a voxel a
             // triangle only grazes, just outside the triangle's own tight AABB.
-            const VoxelBox db = voxelBoxFromWorldAabb(wmin, wmax, origin, extent_ * 2.0f, res, 2u);
-            voxDrawZ_[di * 2] = db.lo[2];
-            voxDrawZ_[di * 2 + 1] = db.empty() ? 0u : db.hi[2];
-            drawsBox = unionBox(drawsBox, db);
+            drawsBox = unionBox(drawsBox, voxelBoxFromWorldAabb(wmin, wmax, origin, extent_ * 2.0f,
+                                                                res, 2u));
         }
     }
 
@@ -3689,83 +3702,76 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
                                 : alignOutward(unionBox(drawsBox, giBoxPrevDraws_), 4u, res);
     giDispatchBox0_ = box0;   // filterMips derives each mip level's own box from this
 
-    // Mesh-shader voxelise whenever the device built it (same PSVoxel); GSVoxel otherwise.
+    ctx.setPipeline(clearPso_);
+    ctx.setBindingSet(clearBindings_);
+    {
+        const GiDispatchConstants k = dispatchConstants(box0, 0);
+        ctx.setConstants(3, &k, kGiDispatchConstantDwords);
+        u32 g[3];
+        dispatchGroups(box0, 4u, g);
+        if (g[0] && g[1] && g[2]) ctx.dispatch(g[0], g[1], g[2]);
+    }
+    ctx.uavBarrierTexture(voxelAccumTex_);   // injection must see the cleared accumulator
+
+    // Prefers the mesh-shader voxelise pipeline whenever the device built one, independent of
+    // settings_.meshShaders (a wider switch that also moves the main scene's lit draws onto their
+    // own mesh-shader pipeline, off by default as a real behaviour change). Voxelisation has no such
+    // wrinkle: same `vox` desc, same PSVoxel pixel shader either way, MSVoxel running the identical
+    // dominant-axis projection VSVoxel+GSVoxel do (see MSVoxel's comment for the normal-transform bug
+    // this depended on fixing first). createPipelines() already validates voxelMsPso_ regardless of
+    // the setting, so `voxelMsPso_ != 0` alone means the device proved it can do this; GSVoxel is the
+    // fallback for no mesh-shader tier.
     const bool useMs = voxelMsPso_ != 0;
-    // CULLED AGAINST THE VOLUME (giVoxelisedDraw): on a streamed scene most resident draws are outside.
+    ctx.setPipeline(useMs ? voxelMsPso_ : voxelPso_);
+    ctx.setBindingSet(bindings_);
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    ctx.setRenderTargets(nullptr, 0, 0);   // no targets at all: the pixel shader writes only the UAV
+    ctx.setViewport(0, 0, res, res);
+    ctx.setScissor(0, 0, res, res);
+
+    // CULLED AGAINST THE VOLUME, which this pass did not do at all until now -- it rasterised every
+    // draw in drawsPrev_ including ones streaming had brought in kilometres away; those never
+    // survived (the pixel shader's UAV write lands outside the 128^3 grid and is dropped) but paid
+    // the full vertex/raster cost first. On a streamed scene the volume covers a small fraction of
+    // what's resident, so this cull is most of the pass. The test is giVoxelisedDraw's.
     u32 voxelSubmitted = 0, voxelCulled = 0, voxelSkinned = 0, voxelMovable = 0;
 
-    // Z SLABS: the accumulator holds res / giInjectionSlabs(res) layers, so each slab clears, injects the
-    // draws that reach it, and resolves. See docs/rendering/VRAM.md.
-    const u32 slabs = giInjectionSlabs(res);
-    const u32 slabDepth = res / slabs;
-    bool censused = false;
-    for (u32 s = 0; s < slabs; ++s) {
-        const u32 z0 = s * slabDepth, z1 = z0 + slabDepth;
-        VoxelBox sb = box0;
-        sb.lo[2] = std::max(sb.lo[2], z0);
-        sb.hi[2] = std::min(sb.hi[2], z1);
-        if (sb.empty()) continue;
-        GiDispatchConstants slabK = dispatchConstants(sb, 0);
-        slabK.slabZ = z0;
-        u32 slabG[3];
-        dispatchGroups(sb, 4u, slabG);
-
-        ctx.setPipeline(clearPso_);
-        ctx.setBindingSet(clearBindings_);
-        ctx.setConstants(3, &slabK, kGiDispatchConstantDwords);
-        if (slabG[0] && slabG[1] && slabG[2]) ctx.dispatch(slabG[0], slabG[1], slabG[2]);
-        ctx.uavBarrierTexture(voxelAccumTex_);   // injection must see the cleared accumulator
-
-        ctx.setPipeline(useMs ? voxelMsPso_ : voxelPso_);
-        ctx.setBindingSet(bindings_);
-        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-        ctx.setRenderTargets(nullptr, 0, 0);   // no targets at all: the pixel shader writes only the UAV
-        ctx.setViewport(0, 0, res, res);
-        ctx.setScissor(0, 0, res, res);
-
-        for (usize di = 0; di < drawsPrev_.size(); ++di) {
-            const Draw& d = drawsPrev_[di];
-            const bool census = !censused;
-            // Translucent draws excluded (depth-only pass) -- see shadowPass's note on the same skip.
-            if (d.translucent) continue;
-            // Compute-skinned draws excluded: giDrawsKey hashes transform, not dynamic vertices.
-            if (dev_ && dev_->meshVertexBuffer(d.mesh)) { if (census) ++voxelSkinned; continue; }
-            // Counted apart from the bounds cull for the same reason skinned is: absence, not a cull.
-            if (d.movable) { if (census) ++voxelMovable; continue; }
-            // The bounds half of giVoxelisedDraw, kept inline only for the census counters below -- the
-            // predicate is the definition and must not drift from it.
-            if (!giVoxelisedDraw(d)) { if (census) ++voxelCulled; continue; }
-            if (census) ++voxelSubmitted;
-            if (voxDrawZ_[di * 2] >= z1 || voxDrawZ_[di * 2 + 1] <= z0) continue;
-            f32 consts[rhi::kObjectConstantDwords];
-            std::memcpy(consts, d.world, 16 * sizeof(f32));
-            std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
-            // gMaterial.w carries the slab's first z layer to PSVoxel.
-            consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = static_cast<f32>(z0);
-            writeShadingConstants(consts);
-            ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
-            // The material captured at submit time, so the injection shades the same surface the lit
-            // pass does.
-            if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
-            else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
-                                             &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
-            if (useMs) ctx.dispatchMeshFor(d.depthMesh);
-            else       ctx.drawMesh(d.depthMesh);
-        }
-        censused = true;
-
-        // Reduce this slab's atomic sums into the filterable RGBA16F volume. Back to a shader resource
-        // after, because the next slab's injection samples the volume.
-        ctx.uavBarrierTexture(voxelAccumTex_);
-        ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
-        ctx.setPipeline(resolvePso_);
-        ctx.setBindingSet(resolveBindings_);
-        ctx.setConstants(3, &slabK, kGiDispatchConstantDwords);
-        if (slabG[0] && slabG[1] && slabG[2]) ctx.dispatch(slabG[0], slabG[1], slabG[2]);
-        ctx.textureBarrier(voxelTex_, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+    for (const Draw& d : drawsPrev_) {
+        // Translucent draws excluded (depth-only pass) -- see shadowPass's note on the same skip.
+        if (d.translucent) continue;
+        // A COMPUTE-SKINNED MESH IS EXCLUDED, DELIBERATELY -- a trade, not a fix. giDrawsKey hashes
+        // mesh/transform/material, never the vertex buffer a skinning dispatch rewrites every frame,
+        // so once a character's TRANSFORM settles the gate reports "unchanged" and its indirect-light
+        // contribution freezes at whatever pose the last rebuild saw. Measured on a real rig: 2
+        // rebuilt / 62 skipped of 64 ticks straight through a pose transition.
+        // The BLAS cache fixes the same defect per-mesh by rebuilding every frame -- NOT available
+        // here, since voxelisation is one volume: treating a skinned draw as always-changed would
+        // force a full revoxelisation whenever any character is on screen (measured: the ~96% of GI
+        // rebuilds this gate normally avoids, on top of the 17.3 ms GI already costs while skipping
+        // them). So the interim state is absence, not a silent freeze:
+        // a skinned character bounces no indirect light (matches PtSceneView::submitDraw). Real fix
+        // is partial revoxelisation, which voxelizePass doesn't support today.
+        if (dev_ && dev_->meshVertexBuffer(d.mesh)) { ++voxelSkinned; continue; }
+        // Counted apart from the bounds cull for the same reason skinned is: absence, not a cull.
+        if (d.movable) { ++voxelMovable; continue; }
+        // The bounds half of giVoxelisedDraw, kept inline only for the census counters below -- the
+        // predicate is the definition and must not drift from it.
+        if (!giVoxelisedDraw(d)) { ++voxelCulled; continue; }
+        ++voxelSubmitted;
+        f32 consts[rhi::kObjectConstantDwords];
+        std::memcpy(consts, d.world, 16 * sizeof(f32));
+        std::memcpy(consts + 16, d.color, 4 * sizeof(f32));
+        consts[20] = d.metallic; consts[21] = d.roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+        writeShadingConstants(consts);
+        ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+        // The material captured at submit time, so the injection shades the same surface the lit
+        // pass does.
+        if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
+        else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
+                                         &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
+        if (useMs) ctx.dispatchMeshFor(d.depthMesh);
+        else       ctx.drawMesh(d.depthMesh);
     }
-    // filterMips starts from the volume in UnorderedAccess.
-    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
 
     if ((voxelCullLogs_ & (voxelCullLogs_ + 1)) == 0) {
         const u32 considered = voxelSubmitted + voxelCulled;
@@ -3780,7 +3786,23 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     }
     ++voxelCullLogs_;
 
-    // Records this rebuild's draws box for the next union (not box0, which includes previous).
+    // Reduce the atomic sums into the filterable RGBA16F volume.
+    ctx.uavBarrierTexture(voxelAccumTex_);
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
+    ctx.setPipeline(resolvePso_);
+    ctx.setBindingSet(resolveBindings_);
+    {
+        const GiDispatchConstants k = dispatchConstants(box0, 0);
+        ctx.setConstants(3, &k, kGiDispatchConstantDwords);
+        u32 g[3];
+        dispatchGroups(box0, 4u, g);
+        if (g[0] && g[1] && g[2]) ctx.dispatch(g[0], g[1], g[2]);
+    }
+
+    // Records this rebuild's OWN draws box (not box0, which also folds in the previous one) for the
+    // next union -- the chain must span exactly one previous rebuild, not accumulate indefinitely.
+    // giBoxPrevValid_ false whenever anyUnbounded fired: an untrustworthy box now must not be trusted
+    // as "last rebuild's box" next time either.
     giBoxPrevDraws_ = drawsBox;
     giBoxPrevValid_ = !anyUnbounded;
     giBoxRes_ = res;
@@ -5361,12 +5383,13 @@ bool VoxiRenderer::createShadowResources() {
 
 // Creates the radiance volume, injection accumulator, and binding sets.
 bool VoxiRenderer::createInjectionAccumulator(u32 resolution) {
-    // Four uints per voxel (r, g, b, fragment count) interleaved along x: R32_UINT only typed format guaranteed UAV atomics.
+    // Four uints per voxel (r, g, b, fragment count) interleaved along x: R32_UINT is the only typed
+    // format D3D12 guarantees UAV atomics on.
     rhi::TextureDesc ad;
     ad.dim    = rhi::TextureDim::Tex3D;
     ad.width  = resolution * 4;
     ad.height = resolution;
-    ad.depth  = resolution / giInjectionSlabs(resolution);
+    ad.depth  = resolution;
     ad.mips   = 1;
     ad.format = rhi::Format::R32Uint;
     ad.bind   = rhi::ResourceBind::UnorderedAccess;
@@ -5407,7 +5430,8 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
             radianceVoxels += dm * dm * dm;
         }
         const f64 radianceMiB = static_cast<f64>(radianceVoxels * 8ull) / (1024.0 * 1024.0);
-        const f64 accumMiB = static_cast<f64>(giInjectionAccumulatorBytes(resolution)) / (1024.0 * 1024.0);
+        const f64 accumMiB = static_cast<f64>(static_cast<u64>(resolution) * resolution * resolution *
+                                              16ull) / (1024.0 * 1024.0);
         AVER_INFO("[Voxi] GI volume memory (computed from the texture descriptions, not queried): "
                   "radiance {:.0f} MiB, injection accumulator {:.0f} MiB", radianceMiB, accumMiB);
     }

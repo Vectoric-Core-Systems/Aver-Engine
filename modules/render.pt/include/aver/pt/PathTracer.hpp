@@ -268,7 +268,6 @@ private:
     struct MeshRow {
         rhi::MeshHandle mesh = 0;
         u32 firstVertex = 0, firstIndex = 0, vertexCount = 0, indexCount = 0;
-        bool copiesVertices = true;   // false: another row already copied this shared vertex buffer
     };
     std::vector<MeshRow> meshRows_;          // one per DISTINCT mesh in the snapshot
     std::vector<u32>     surfaceRow_;        // surface -> index into meshRows_/blas_
@@ -292,8 +291,6 @@ private:
     // Set by prepare() when it reused the table above, read by buildScenes() to skip the copy pass
     // AND its two barriers.
     bool geometryReused_ = false;
-    u64 tlasBlasGeneration_ = 0;   // res_->blasGeneration() the TLASes were built against
-    bool buildTlases(rhi::IRenderContext& ctx);
 
     rhi::BufferHandle verts_ = 0, indices_ = 0, instanceBuf_ = 0;
     u32  totalVerts_ = 0, totalIndices_ = 0;

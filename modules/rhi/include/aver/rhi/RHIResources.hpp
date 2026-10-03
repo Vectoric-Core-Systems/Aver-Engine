@@ -456,8 +456,6 @@ public:
 
     // Resident bytes behind an acceleration structure, or 0 for dead handle.
     virtual u64 blasMemoryBytes(BlasHandle h) const { (void)h; return 0; }
-    // Advances whenever a backend moves built BLASes.
-    virtual u64 blasGeneration() const { return 0; }
     virtual u64 tlasMemoryBytes(TlasHandle h) const { (void)h; return 0; }
 
     // Destruction is deferred by contract.

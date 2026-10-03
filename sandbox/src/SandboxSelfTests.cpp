@@ -438,7 +438,8 @@ void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>>
 // --mesh-heap default|upload: select mesh heap mode.
 void SandboxApp::setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
 
-// --lod-share-vertices 0|1: share vertices across LOD ladder.
+// --lod-share-vertices 0|1 (W11): read inside loadProjectMeshes' LOD-ladder loop. false (DEFAULT)
+// is today's behaviour -- every LOD level gets its own independent vertex buffer.
 void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
 
 // --cam-translate SPEED: fly camera forward (world-cm/frame); frame-counter driven, repeatable.

@@ -395,8 +395,8 @@ int main() {
                                                            "16-byte slot ends at 16), matching gBoxHi@16");
         check(offsetof(GiDispatchConstants, srcMip) == 0, "srcMip sits at byte offset 0, matching "
                                                            "gSrcMip@0");
-        check(offsetof(GiDispatchConstants, slabZ) == 28, "slabZ sits at byte offset 28, matching "
-                                                           "gSlabZ@28");
+        check(offsetof(GiDispatchConstants, pad) == 28, "pad sits at byte offset 28, matching "
+                                                         "_boxPad@28");
     }
 
     // ---- 9. SOURCE ASSERTIONS: voxi.hlsl still declares the exact C-4 cbuffer and guard line ----

@@ -307,8 +307,11 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
             meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
             meshSlot0Name_[id] = md.materialSlots[0];
         }
-        // Per-submesh split; see MeshPart and buildMeshParts.
-        buildMeshParts(device, id, h, md, verts, rel);
+        // THE PER-SUBMESH SPLIT. .ocmesh has always carried a submeshes table alongside
+        // materialSlots, and until now nothing here read it either: a mesh naming several materials
+        // (bark and leaves, say) drew as one mesh in slot 0's material end to end. See MeshPart's own
+        // comment (GameContent.hpp) and buildMeshParts' (below) for the shape this mirrors.
+        buildMeshParts(device, id, md, verts, rel);
         projectMeshIds_.push_back(id);
         if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
 
@@ -324,11 +327,10 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
             const u32 tris0 = trifactor::levelTriangleCount(md, 0);
             if (pick > 0 && trifactor::levelTriangleCount(md, pick) < tris0) {
                 const fmt::OcMeshLod& lod = md.coarserLods[pick - 1];
-                // Try to share LOD 0's vertex buffer; fall back to a copy if refused.
-                rhi::MeshHandle ph = device.createMeshSharingVertices(h, lod.indices.data(),
-                                                                     (u32)lod.indices.size());
-                if (!ph) ph = device.createMesh(verts.data(), (u32)verts.size(),
-                                                lod.indices.data(), (u32)lod.indices.size());
+                // LOD 0's OWN vertex array: a coarser level owns its index buffer but shares the one
+                // VTXS block (see OcMeshData::coarserLods), which is why `verts` is correct here.
+                const rhi::MeshHandle ph = device.createMesh(verts.data(), (u32)verts.size(),
+                                                             lod.indices.data(), (u32)lod.indices.size());
                 if (ph) {
                     depthProxyMap_[h] = ph;
                     AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, {:.1f}cm error)",
@@ -351,9 +353,17 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
                   failed ? (", " + std::to_string(failed) + " failed") : "");
 }
 
-// Splits a mesh with multiple materials into one MeshHandle per slot.
-// Each part shares the whole mesh's vertex buffer. Parts take the whole mesh's bounds.
-void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle whole, const fmt::OcMeshData& md,
+// Splits a mesh that names more than one material into one MeshHandle per slot. Ported from
+// SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp) -- see that function's own comment for
+// why splitting at load time, rather than drawing per-submesh RANGES, is what makes this tractable at
+// all (the ray path's BLAS carries one materialIndex per instance, so a range draw would still shade
+// flat in the renderer that is actually on screen).
+//
+// COMPACTED PER PART, not sharing the parent's vertex array. createMesh COPIES what it is given, so
+// handing every part of a multi-material mesh the WHOLE vertex buffer would upload that buffer once
+// per part. The remap also gives each part honest bounds, which a future per-part culler would want
+// anyway.
+void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
                                   const std::vector<rhi::MeshVertex>& verts, const std::string& rel) {
     if (md.submeshes.size() <= 1) return;   // common case: nothing to split
 
@@ -373,27 +383,24 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle w
             AVER_WARN("[Mesh] '{}' submesh '{}' runs past the index buffer; skipped", rel, sm.name);
             continue;
         }
+        remap.clear(); pv.clear(); pi.clear();
+        pi.reserve(sm.indexCount);
         bool bad = false;
-        for (usize k = sm.indexStart; k < end && !bad; ++k) bad = md.indices[k] >= verts.size();
-        if (bad) {
+        for (usize k = sm.indexStart; k < end; ++k) {
+            const u32 vi = md.indices[k];
+            if (vi >= verts.size()) { bad = true; break; }
+            const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(pv.size()));
+            if (inserted) pv.push_back(verts[vi]);
+            pi.push_back(it2->second);
+        }
+        if (bad || pv.empty()) {
             AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
             continue;
         }
 
         MeshPart part;
-        // Index-only: shares whole mesh's vertex buffer. Falls back to compacted copy if refused.
-        part.mesh = device.createMeshSharingVertices(whole, md.indices.data() + sm.indexStart, sm.indexCount);
-        if (!part.mesh) {
-            remap.clear(); pv.clear(); pi.clear();
-            pi.reserve(sm.indexCount);
-            for (usize k = sm.indexStart; k < end; ++k) {
-                const auto [it2, inserted] = remap.try_emplace(md.indices[k], static_cast<u32>(pv.size()));
-                if (inserted) pv.push_back(verts[md.indices[k]]);
-                pi.push_back(it2->second);
-            }
-            part.mesh = device.createMesh(pv.data(), static_cast<u32>(pv.size()),
-                                           pi.data(), static_cast<u32>(pi.size()));
-        }
+        part.mesh = device.createMesh(pv.data(), static_cast<u32>(pv.size()),
+                                       pi.data(), static_cast<u32>(pi.size()));
         if (!part.mesh) {
             AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", sm.name, rel);
             continue;

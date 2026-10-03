@@ -1068,9 +1068,14 @@ float giShadowFactor(float3 wpos, float3 N, float ndl) {
     return s / 9.0;
 }
 
-// Per-dispatch constants for CSClear/CSResolve/CSMip (b3: b0/b1 taken by graphics root signature).
-// 32 B layout: gSrcMip@0, gBoxLo@4, gBoxHi@16, gSlabZ@28. Mirrors aver::voxi::GiDispatchConstants.
-cbuffer MipCB : register(b3) { uint gSrcMip; uint3 gBoxLo; uint3 gBoxHi; uint gSlabZ; };
+// Per-dispatch constants for CSClear/CSResolve/CSMip (b3: b0/b1 taken by the graphics root signature).
+// 32 B: gSrcMip@0, gBoxLo@4 (12B), gBoxHi@16 (12B), _boxPad@28 -- mirrored byte-for-byte by
+// aver::voxi::GiDispatchConstants (GiDispatchBounds.hpp, static_asserts its size against this layout so
+// the two cannot drift apart silently).
+// gSrcMip is CSMip's source-level index, unused by CSClear/CSResolve (always mip 0). gBoxLo/gBoxHi is a
+// half-open voxel-space box in the DESTINATION mip's coordinate space, uploaded by VoxiRenderer per
+// dispatch. See aver-voxi-cbuffer-three-mirrors.md and the W3 spec for why its own cbuffer, not VoxiFrame.
+cbuffer MipCB : register(b3) { uint gSrcMip; uint3 gBoxLo; uint3 gBoxHi; uint _boxPad; };
 
 #include "voxi_cone.hlsli"
 
@@ -2838,12 +2843,7 @@ void PSVoxel(VoxOut i) {
 
     // insideVolume() inclusive of 1.0; conservative raster produces uvw == 1.0 exactly.
     uint3 c = min(uint3(uvw * gVoxelParams.x), (uint)gVoxelParams.x - 1);
-    // Accumulator holds one z slab starting at gMaterial.w.
-    uint accW, accH, accD;
-    gVoxelAccum.GetDimensions(accW, accH, accD);
-    const uint slabZ = (uint)gMaterial.w;
-    if (c.z < slabZ || c.z >= slabZ + accD) return;
-    uint3 a = uint3(c.x * 4, c.y, c.z - slabZ);
+    uint3 a = uint3(c.x * 4, c.y, c.z);
     uint prev;
     InterlockedAdd(gVoxelAccum[a],                (uint)(radiance.r * AVER_VOX_FIXED), prev);
     InterlockedAdd(gVoxelAccum[a + uint3(1,0,0)], (uint)(radiance.g * AVER_VOX_FIXED), prev);
@@ -2858,7 +2858,7 @@ void PSVoxel(VoxOut i) {
 [numthreads(4,4,4)]
 void CSClear(uint3 id : SV_DispatchThreadID) {
     uint3 v = id + gBoxLo; if (any(v >= gBoxHi)) return;
-    uint3 a = uint3(v.x * 4, v.y, v.z - gSlabZ);
+    uint3 a = uint3(v.x * 4, v.y, v.z);
     [unroll] for (uint k = 0; k < 4; ++k) gVoxelAccum[a + uint3(k,0,0)] = 0;
 }
 
@@ -2866,7 +2866,7 @@ void CSClear(uint3 id : SV_DispatchThreadID) {
 [numthreads(4,4,4)]
 void CSResolve(uint3 id : SV_DispatchThreadID) {
     uint3 v = id + gBoxLo; if (any(v >= gBoxHi)) return;
-    uint3 a = uint3(v.x * 4, v.y, v.z - gSlabZ);
+    uint3 a = uint3(v.x * 4, v.y, v.z);
     uint n = gVoxelAccum[a + uint3(3,0,0)];
     if (n == 0) { gVoxelUAV[v] = 0.0; return; }
     float3 s = float3(gVoxelAccum[a], gVoxelAccum[a + uint3(1,0,0)], gVoxelAccum[a + uint3(2,0,0)]);
