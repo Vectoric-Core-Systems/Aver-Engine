@@ -2874,6 +2874,51 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::EndPopup();
         }
     }
+    // VRAM AGAINST THE BUDGET. Over budget, Windows moves part of the GPU's working set into system
+    // memory, and whatever lands there is read across PCIe: MEASURED in NeonDistrict, the denoiser went
+    // from 0.63 to 3.40 ms when frame interpolation's buffers pushed the scene ~150 MB further over.
+    // That reads as a mystery slowdown unless something says so -- hence this. Polled twice a second
+    // (videoMemory() asks the driver), grey under 90% of the budget, amber above, red over.
+    {
+        vramPollS_ -= dt;
+        if (vramPollS_ <= 0.0f) {
+            vramPollS_ = 0.5f;
+            vram_ = e.device()->videoMemory();
+        }
+        if (vram_.supported && vram_.localBudgetBytes > 0) {
+            const f64 usedGb = static_cast<f64>(vram_.localUsageBytes) / (1024.0 * 1024.0 * 1024.0);
+            const f64 budgetGb = static_cast<f64>(vram_.localBudgetBytes) / (1024.0 * 1024.0 * 1024.0);
+            const f64 frac = static_cast<f64>(vram_.localUsageBytes) / static_cast<f64>(vram_.localBudgetBytes);
+            const bool over = frac > 1.0;
+            if (over != vramOverLogged_) {
+                if (over)
+                    AVER_WARN("[Editor] GPU memory over budget: {:.1f} of {:.1f} GB -- the system is paging GPU "
+                              "memory to RAM and frame rate will suffer", usedGb, budgetGb);
+                else
+                    AVER_INFO("[Editor] GPU memory back under budget: {:.1f} of {:.1f} GB", usedGb, budgetGb);
+                vramOverLogged_ = over;
+            }
+            const ImVec4 col = over ? ImVec4(0.95f, 0.35f, 0.30f, 1.0f)
+                             : frac > 0.9 ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
+                                          : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            ImGui::SameLine(0.0f, 0.0f);
+            // Short on purpose: the right-hand button cluster starts close by, and red already says "over".
+            ImGui::TextColored(col, over ? "  |  VRAM! %.1f/%.1f GB" : "  |  VRAM %.1f/%.1f GB", usedGb, budgetGb);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s"
+                                  "GPU memory this editor uses, against the budget Windows gives it (the card's\n"
+                                  "memory minus what other programs and the desktop hold).\n\n"
+                                  "Over budget, Windows moves part of it to system RAM and the GPU then reads\n"
+                                  "that across PCIe -- frame rate drops, often unevenly.\n\n"
+                                  "To get back under: lower the render scale (Editor Preferences > Display),\n"
+                                  "lower the GI volume resolution (Project Settings > Rendering), turn frame\n"
+                                  "interpolation off, or close GPU-heavy programs (browsers, video).\n\n"
+                                  "Also in system memory now: %.1f GB.",
+                                  over ? "OVER BUDGET.\n\n" : "",
+                                  static_cast<f64>(vram_.nonLocalUsageBytes) / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::Text("  |  %zu actors  |  %s", objects_.size(), selectionLabel().c_str());
 

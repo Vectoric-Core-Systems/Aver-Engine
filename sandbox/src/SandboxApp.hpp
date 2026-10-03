@@ -3774,6 +3774,11 @@ private:
     // that the device has always produced and only the console used to read, above which sit
     // playProf_'s frame time and Play CPU phases.
     bool showProfiler_=false;
+    // The status bar's VRAM readout (SandboxShell.cpp): the last videoMemory() answer, polled twice a
+    // second, and whether the over-budget warning has been logged for the current crossing.
+    rhi::VideoMemoryInfo vram_{};
+    f32  vramPollS_ = 0.0f;
+    bool vramOverLogged_ = false;
     // Window > Neural Visualiser. The choices live here (not in the prefs) and are applied every frame
     // by onUpdate: neurafiViz_'s source/opacity, NeuraFI::setVisualisation, the device's
     // generated-only view, and VoxiRenderer::setNeuRaCView. Closing the window does not turn them off --
